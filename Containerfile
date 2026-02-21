@@ -30,6 +30,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 # Cache dependency compilation: copy manifests first, then source
 COPY Cargo.toml Cargo.lock ./
 COPY crates/tcfs-core/Cargo.toml      crates/tcfs-core/
+COPY crates/tcfs-crypto/Cargo.toml    crates/tcfs-crypto/
 COPY crates/tcfs-secrets/Cargo.toml   crates/tcfs-secrets/
 COPY crates/tcfs-storage/Cargo.toml   crates/tcfs-storage/
 COPY crates/tcfs-chunks/Cargo.toml    crates/tcfs-chunks/
@@ -41,7 +42,7 @@ COPY crates/tcfs-cli/Cargo.toml       crates/tcfs-cli/
 COPY crates/tcfs-tui/Cargo.toml       crates/tcfs-tui/
 
 # Create stub lib/main files so cargo can compute the dependency graph
-RUN for d in tcfs-core tcfs-secrets tcfs-storage tcfs-chunks tcfs-sync tcfs-fuse tcfs-cloudfilter tcfs-tui; do \
+RUN for d in tcfs-core tcfs-crypto tcfs-secrets tcfs-storage tcfs-chunks tcfs-sync tcfs-fuse tcfs-cloudfilter tcfs-tui; do \
       mkdir -p crates/$d/src && echo "// stub" > crates/$d/src/lib.rs; \
     done && \
     mkdir -p crates/tcfsd/src crates/tcfs-cli/src && \
