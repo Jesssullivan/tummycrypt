@@ -1,0 +1,15 @@
+[Unit]
+Description=SeaweedFS Volume Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/weed volume -dir={{hdd_mnt_1}} -mserver={{ms_ip1}}:9333,{{ms_ip2}}:9333,{{ms_ip3}}:9333 -dir={{hdd_mnt_1}} -ip={{ansible_host}} -port=8081
+WorkingDirectory=/usr/local/bin/	
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

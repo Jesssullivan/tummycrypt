@@ -1,0 +1,64 @@
+[package]
+name = "tcfs-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs command-line interface"
+
+[[bin]]
+name = "tcfs"
+path = "src/main.rs"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+tcfs-secrets = { path = "../tcfs-secrets" }
+tcfs-storage = { path = "../tcfs-storage" }
+tcfs-sync = { path = "../tcfs-sync" }
+tcfs-chunks = { path = "../tcfs-chunks" }
+tcfs-fuse = { path = "../tcfs-fuse" }
+tcfs-crypto = { path = "../tcfs-crypto" }
+secrecy = { workspace = true }
+rand = { workspace = true }
+blake3 = { workspace = true }
+fuse3 = { workspace = true, optional = true }
+opendal = { workspace = true }
+clap = { workspace = true }
+indicatif = { workspace = true }
+tonic = { workspace = true }
+tokio-stream = { workspace = true }
+tower = { workspace = true }
+hyper-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+rpassword = { workspace = true }
+
+[features]
+default = ["fuse"]
+# FUSE mount/unmount support (Linux, macOS with macFUSE/FUSE-T)
+fuse = ["dep:fuse3", "tcfs-fuse/fuse"]
+
+[package.metadata.deb]
+maintainer = "TummyCrypt Contributors <jess@sulliwood.org>"
+copyright = "2026 TummyCrypt Contributors"
+license-file = ["../../LICENSE-MIT", "0"]
+extended-description = """\
+tcfs is the TummyCrypt CLI — push, pull, sync, mount, and unsync files \
+with SeaweedFS-backed encrypted storage."""
+section = "utils"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/tcfs", "usr/bin/tcfs", "755"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/tcfs", dest = "/usr/bin/tcfs", mode = "755" },
+]

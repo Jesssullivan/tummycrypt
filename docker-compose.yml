@@ -1,0 +1,239 @@
+# docker-compose.yml
+# tummycrypt/tcfs local development stack
+# Services: SeaweedFS cluster + NATS JetStream + Prometheus + Grafana
+
+services:
+  # ── SeaweedFS ────────────────────────────────────────────────────────────────
+
+  seaweed-master-1:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweed-master-1
+    ports:
+      - "9333:9333"
+      - "19333:19333"
+    command: >
+      master
+      -ip=seaweed-master-1
+      -ip.bind=0.0.0.0
+      -peers=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
+      -volumeSizeLimitMB=10000
+      -garbageThreshold=0.3
+    volumes:
+      - master_data_1:/data
+      - ./certs:/certs:ro
+    networks:
+      - tcfs-net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9333/cluster/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  seaweed-master-2:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweed-master-2
+    ports:
+      - "9334:9333"
+      - "19334:19333"
+    command: >
+      master
+      -ip=seaweed-master-2
+      -ip.bind=0.0.0.0
+      -peers=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
+      -volumeSizeLimitMB=10000
+      -garbageThreshold=0.3
+    volumes:
+      - master_data_2:/data
+      - ./certs:/certs:ro
+    networks:
+      - tcfs-net
+    depends_on:
+      - seaweed-master-1
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9333/cluster/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  seaweed-master-3:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweed-master-3
+    ports:
+      - "9335:9333"
+      - "19335:19333"
+    command: >
+      master
+      -ip=seaweed-master-3
+      -ip.bind=0.0.0.0
+      -peers=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
+      -volumeSizeLimitMB=10000
+      -garbageThreshold=0.3
+    volumes:
+      - master_data_3:/data
+      - ./certs:/certs:ro
+    networks:
+      - tcfs-net
+    depends_on:
+      - seaweed-master-1
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9333/cluster/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  seaweed-volume:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweed-volume
+    ports:
+      - "8080:8080"
+      - "18080:18080"
+    command: >
+      volume
+      -mserver=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
+      -port=8080
+      -dir=/data
+      -dataCenter=dc1
+      -rack=dc1-rack1
+      -max=0
+      -ip=seaweed-volume
+      -ip.bind=0.0.0.0
+    volumes:
+      - volume_data:/data
+      - ./certs:/certs:ro
+    networks:
+      - tcfs-net
+    depends_on:
+      - seaweed-master-1
+      - seaweed-master-2
+      - seaweed-master-3
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  seaweed-filer:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweed-filer
+    ports:
+      - "8888:8888"
+      - "18888:18888"
+      - "8333:8333"
+    command: >
+      filer
+      -master=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
+      -ip=seaweed-filer
+      -ip.bind=0.0.0.0
+      -s3
+      -s3.config=/etc/seaweedfs/s3.json
+    volumes:
+      - filer_data:/data
+      - ./config/filer.toml:/etc/seaweedfs/filer.toml:ro
+      - ./config/s3.json:/etc/seaweedfs/s3.json:ro
+      - ./certs:/certs:ro
+    networks:
+      - tcfs-net
+    depends_on:
+      - seaweed-volume
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8888/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── NATS JetStream ───────────────────────────────────────────────────────────
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: tcfs-nats
+    ports:
+      - "4222:4222"    # Client connections
+      - "8222:8222"    # HTTP monitoring
+      - "6222:6222"    # Cluster routing (unused in single-node)
+    command: >
+      --name tcfs-nats
+      --jetstream
+      --store_dir /data
+      --http_port 8222
+      --max_payload 8MB
+    volumes:
+      - nats_data:/data
+    networks:
+      - tcfs-net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: tcfs-prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/etc/prometheus/console_libraries
+      - --web.console.templates=/etc/prometheus/consoles
+      - --web.enable-lifecycle
+    volumes:
+      - prometheus_data:/prometheus
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - tcfs-net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: tcfs-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - tcfs-net
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  master_data_1:
+  master_data_2:
+  master_data_3:
+  volume_data:
+  filer_data:
+  nats_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  tcfs-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24
+          gateway: 10.0.0.1

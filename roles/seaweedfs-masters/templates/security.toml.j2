@@ -1,0 +1,24 @@
+[jwt.signing]
+key = "appubears"
+
+[jwt.filer_signing]
+key = "appubears"
+
+[grpc]
+ca = "/etc/seaweedfs/SeaweedFS_CA.crt"
+
+[grpc.volume]
+cert = "/etc/seaweedfs/volume01.crt"
+key  = "/etc/seaweedfs/volume01.key"
+
+[grpc.master]
+cert = "/etc/seaweedfs/master01.crt"
+key  = "/etc/seaweedfs/master01.key"
+
+[grpc.filer]
+cert = "/etc/seaweedfs/filer01.crt"
+key  = "/etc/seaweedfs/filer01.key"
+
+[grpc.client]
+cert = "/etc/seaweedfs/client01.crt"
+key  = "/etc/seaweedfs/client01.key"

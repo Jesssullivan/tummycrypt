@@ -1,0 +1,36 @@
+# values-dev.yaml — development / local-cluster overlay
+# Usage:
+#   helm upgrade --install tcfs . -f values.yaml -f values-dev.yaml
+
+global:
+  namespace: tcfs-dev
+
+  # Local or port-forwarded SeaweedFS
+  seaweedfsEndpoint: "http://localhost:8333"
+
+  # Local or port-forwarded NATS
+  natsUrl: "nats://localhost:4222"
+
+  imageTag: "dev"
+
+  # Single replica for local development
+  replicaCount: 1
+
+  # Minimal resource footprint
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Disable optional infrastructure in dev
+nats:
+  enabled: false
+
+keda:
+  enabled: false
+
+kube-prometheus-stack:
+  enabled: false

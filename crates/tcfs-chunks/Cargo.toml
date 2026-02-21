@@ -1,0 +1,22 @@
+[package]
+name = "tcfs-chunks"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs content-addressed chunking, hashing, and compression"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+blake3 = { workspace = true }
+fastcdc = { workspace = true }
+zstd = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

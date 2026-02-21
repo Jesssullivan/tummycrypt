@@ -1,0 +1,29 @@
+---
+
+- name: install rclone 
+  shell: |
+    apt install -y unzip 
+    curl https://rclone.org/install.sh | bash
+  become: yes
+  ignore_errors: true
+
+- name: make rclone config directory
+  shell: |
+     mkdir -p ~/.config/systemd/user
+     mkdir -p ~/.config/rclone/
+
+- name: copy rclone file
+  template:
+    src: rclone.conf.j2
+    dest: "~/.config/rclone/rclone.conf"
+    
+- name: copy TummyMount 
+  template:
+    src: TummyMount.service
+    dest: "~/.config/systemd/user/TummyMount.service"
+    
+- name: make rclone config directory
+  shell: |
+    systemctl --user daemon-reload
+    systemctl --user enable TummyMount.service
+

@@ -1,0 +1,217 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  annotations:
+    harvesterhci.io/vmRunStrategy: RerunOnFailure
+    harvesterhci.io/volumeClaimTemplates: >-
+      [{"metadata":{"name":"appu-ed-disk-0-zqfl7","annotations":{"harvesterhci.io/imageId":"default/image-mg2vb"}},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"40Gi"}},"volumeMode":"Block","storageClassName":"longhorn-image-mg2vb"}}]
+    kubevirt.io/latest-observed-api-version: v1
+    kubevirt.io/storage-observed-api-version: v1
+    network.harvesterhci.io/ips: '[]'
+  creationTimestamp: '2024-12-30T22:24:51Z'
+  finalizers:
+    - kubevirt.io/virtualMachineControllerFinalize
+    - wrangler.cattle.io/VMController.CleanupPVCAndSnapshot
+  generation: 2
+  labels:
+    harvesterhci.io/creator: harvester
+    harvesterhci.io/os: linux
+  managedFields:
+    - apiVersion: kubevirt.io/v1
+      fieldsType: FieldsV1
+      fieldsV1:
+        f:metadata:
+          f:annotations:
+            f:kubevirt.io/latest-observed-api-version: {}
+            f:kubevirt.io/storage-observed-api-version: {}
+          f:finalizers:
+            .: {}
+            v:"kubevirt.io/virtualMachineControllerFinalize": {}
+      manager: virt-controller
+      operation: Update
+      time: '2024-12-30T22:24:52Z'
+    - apiVersion: kubevirt.io/v1
+      fieldsType: FieldsV1
+      fieldsV1:
+        f:metadata:
+          f:annotations:
+            .: {}
+            f:harvesterhci.io/vmRunStrategy: {}
+            f:harvesterhci.io/volumeClaimTemplates: {}
+            f:network.harvesterhci.io/ips: {}
+          f:finalizers:
+            v:"wrangler.cattle.io/VMController.CleanupPVCAndSnapshot": {}
+          f:labels:
+            .: {}
+            f:harvesterhci.io/creator: {}
+            f:harvesterhci.io/os: {}
+        f:spec:
+          .: {}
+          f:runStrategy: {}
+          f:template:
+            .: {}
+            f:metadata:
+              .: {}
+              f:annotations:
+                .: {}
+                f:harvesterhci.io/sshNames: {}
+              f:labels:
+                .: {}
+                f:harvesterhci.io/vmName: {}
+            f:spec:
+              .: {}
+              f:accessCredentials: {}
+              f:affinity: {}
+              f:domain:
+                .: {}
+                f:cpu:
+                  .: {}
+                  f:cores: {}
+                  f:sockets: {}
+                  f:threads: {}
+                f:devices:
+                  .: {}
+                  f:disks: {}
+                  f:hostDevices: {}
+                  f:inputs: {}
+                  f:interfaces: {}
+                f:features:
+                  .: {}
+                  f:acpi:
+                    .: {}
+                    f:enabled: {}
+                f:machine:
+                  .: {}
+                  f:type: {}
+                f:resources:
+                  .: {}
+                  f:limits:
+                    .: {}
+                    f:cpu: {}
+                    f:memory: {}
+              f:evictionStrategy: {}
+              f:hostname: {}
+              f:networks: {}
+              f:terminationGracePeriodSeconds: {}
+              f:volumes: {}
+      manager: harvester
+      operation: Update
+      time: '2024-12-30T22:25:09Z'
+    - apiVersion: kubevirt.io/v1
+      fieldsType: FieldsV1
+      fieldsV1:
+        f:status:
+          .: {}
+          f:conditions: {}
+          f:created: {}
+          f:desiredGeneration: {}
+          f:observedGeneration: {}
+          f:printableStatus: {}
+          f:ready: {}
+          f:runStrategy: {}
+          f:volumeSnapshotStatuses: {}
+      manager: virt-controller
+      operation: Update
+      subresource: status
+      time: '2024-12-30T22:25:33Z'
+  name: appu-ed
+  namespace: default
+  resourceVersion: '6695106'
+  uid: b3ac932e-c1d1-4b48-baef-aa5c0c137209
+spec:
+  runStrategy: RerunOnFailure
+  template:
+    metadata:
+      annotations:
+        harvesterhci.io/sshNames: '[]'
+      creationTimestamp: null
+      labels:
+        harvesterhci.io/vmName: appu-ed
+    spec:
+      affinity: {}
+      architecture: amd64
+      domain:
+        cpu:
+          cores: 2
+          sockets: 1
+          threads: 1
+        devices:
+          disks:
+            - bootOrder: 1
+              disk:
+                bus: virtio
+              name: disk-0
+            - disk:
+                bus: virtio
+              name: cloudinitdisk
+          inputs:
+            - bus: usb
+              name: tablet
+              type: tablet
+          interfaces:
+            - macAddress: 92:8f:a8:74:b1:6c
+              masquerade: {}
+              model: virtio
+              name: default
+        features:
+          acpi:
+            enabled: true
+        machine:
+          type: q35
+        memory:
+          guest: 4Gi
+        resources:
+          limits:
+            cpu: '2'
+            memory: 4Gi
+          requests:
+            cpu: 125m
+            memory: 2730Mi
+      evictionStrategy: LiveMigrateIfPossible
+      hostname: appu-ed
+      networks:
+        - name: default
+          pod: {}
+      terminationGracePeriodSeconds: 120
+      volumes:
+        - name: disk-0
+          persistentVolumeClaim:
+            claimName: appu-ed-disk-0-zqfl7
+        - cloudInitNoCloud:
+            networkDataSecretRef:
+              name: appu-ed-lu0i9
+            secretRef:
+              name: appu-ed-lu0i9
+          name: cloudinitdisk
+status:
+  conditions:
+    - lastProbeTime: null
+      lastTransitionTime: '2024-12-30T22:25:06Z'
+      status: 'True'
+      type: Ready
+    - lastProbeTime: null
+      lastTransitionTime: null
+      status: 'True'
+      type: LiveMigratable
+    - lastProbeTime: null
+      lastTransitionTime: '2024-12-30T22:25:09Z'
+      message: a non-live-updatable field was changed in the template spec
+      status: 'True'
+      type: RestartRequired
+    - lastProbeTime: '2024-12-30T22:25:33Z'
+      lastTransitionTime: null
+      status: 'True'
+      type: AgentConnected
+  created: true
+  desiredGeneration: 2
+  observedGeneration: 2
+  printableStatus: Running
+  ready: true
+  runStrategy: RerunOnFailure
+  volumeSnapshotStatuses:
+    - enabled: false
+      name: disk-0
+      reason: 2 matching VolumeSnapshotClasses for longhorn-image-mg2vb
+    - enabled: false
+      name: cloudinitdisk
+      reason: Snapshot is not supported for this volumeSource type [cloudinitdisk]

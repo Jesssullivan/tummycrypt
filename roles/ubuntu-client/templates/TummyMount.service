@@ -1,0 +1,18 @@
+[Unit]
+Description=Tummy S3 crypt auto mount service
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'exec /usr/bin/rclone --log-level=DEBUG --vfs-cache-mode=full mount tummyblocks_crypt: /home/{{uname}}/tummycrypt'
+ExecStop=/bin/sh -c 'exec /usr/bin/fusermount -uz /home/{{uname}}/tummycrypt'
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

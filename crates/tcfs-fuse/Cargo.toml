@@ -1,0 +1,34 @@
+[package]
+name = "tcfs-fuse"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs FUSE filesystem driver (Linux + macOS)"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+tcfs-storage = { path = "../tcfs-storage" }
+opendal = { workspace = true }
+# fuse3 is only compiled when the fuse feature is enabled
+fuse3 = { workspace = true, optional = true }
+libc = { version = "0.2", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tonic = { workspace = true }
+
+[features]
+default = []
+# Enable with: cargo build --features tcfs-fuse/fuse
+fuse = ["dep:fuse3", "fuse3/unprivileged", "dep:libc", "dep:bytes", "dep:futures-util"]
+macos-fuse = ["fuse"]
+erofs = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

@@ -1,0 +1,121 @@
+# Nix CI with Attic binary cache push
+#
+# Builds all tcfs packages with Nix and pushes results to the
+# tinyland Attic binary cache. Consuming machines can then
+# `nix profile install` or `nix build` with near-instant cache hits.
+#
+# Required secrets:
+#   ATTIC_TOKEN — obtained from `attic login tinyland <server> <token>`
+
+name: Nix CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+env:
+  ATTIC_SERVER: https://nix-cache.fuzzy-dev.tinyland.dev
+  ATTIC_CACHE: main
+
+jobs:
+  flake-check:
+    name: Flake Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
+            extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+
+      - name: Nix flake check
+        run: nix flake check
+
+  build-linux-x86_64:
+    name: Build Linux x86_64
+    runs-on: ubuntu-latest
+    needs: flake-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
+            extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+
+      - name: Configure Attic
+        run: |
+          nix profile install nixpkgs#attic-client
+          if [ -n "${{ secrets.ATTIC_TOKEN }}" ]; then
+            attic login tinyland ${{ env.ATTIC_SERVER }} ${{ secrets.ATTIC_TOKEN }}
+            attic use ${{ env.ATTIC_CACHE }} || echo "::warning::Failed to configure Attic substituter"
+            echo "ATTIC_CONFIGURED=true" >> $GITHUB_ENV
+          else
+            echo "::warning::ATTIC_TOKEN not set, skipping cache push"
+            echo "ATTIC_CONFIGURED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Build tcfsd
+        run: nix build .#tcfsd
+
+      - name: Build tcfs-cli
+        run: nix build .#tcfs-cli
+
+      - name: Build tcfs-tui
+        run: nix build .#tcfs-tui
+
+      - name: Push to Attic
+        if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
+        run: |
+          for pkg in tcfsd tcfs-cli tcfs-tui; do
+            nix build .#${pkg} -o result-${pkg}
+            attic push ${{ env.ATTIC_CACHE }} result-${pkg} || echo "::warning::Failed to push ${pkg} to Attic"
+          done
+
+  build-macos-aarch64:
+    name: Build macOS aarch64
+    runs-on: macos-14
+    needs: flake-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
+            extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+
+      - name: Configure Attic
+        run: |
+          nix profile install nixpkgs#attic-client
+          if [ -n "${{ secrets.ATTIC_TOKEN }}" ]; then
+            attic login tinyland ${{ env.ATTIC_SERVER }} ${{ secrets.ATTIC_TOKEN }}
+            attic use ${{ env.ATTIC_CACHE }} || echo "::warning::Failed to configure Attic substituter"
+            echo "ATTIC_CONFIGURED=true" >> $GITHUB_ENV
+          else
+            echo "::warning::ATTIC_TOKEN not set, skipping cache push"
+            echo "ATTIC_CONFIGURED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Build tcfs-cli (no FUSE on macOS)
+        run: nix build .#tcfs-cli
+
+      - name: Build tcfs-tui
+        run: nix build .#tcfs-tui
+
+      - name: Push to Attic
+        if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
+        run: |
+          for pkg in tcfs-cli tcfs-tui; do
+            nix build .#${pkg} -o result-${pkg}
+            attic push ${{ env.ATTIC_CACHE }} result-${pkg} || echo "::warning::Failed to push ${pkg} to Attic"
+          done

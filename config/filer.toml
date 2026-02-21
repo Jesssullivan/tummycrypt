@@ -1,0 +1,50 @@
+# config/filer.toml
+# SeaweedFS filer configuration
+
+# LevelDB2 for metadata storage
+[leveldb2]
+enabled = true
+dir = "/data/filerldb"
+
+# Alternative: MySQL for production
+# [mysql]
+# enabled = false
+# hostname = "mysql"
+# port = 3306
+# database = "seaweedfs"
+# username = "root"
+# password = "password"
+# connection_max_idle = 2
+# connection_max_open = 100
+
+# Alternative: Redis for production
+# [redis2]
+# enabled = false
+# address = "redis:6379"
+# password = ""
+# database = 0
+
+# Filer options
+[filer]
+# Maximum file size for direct upload (0 = unlimited)
+max_file_size = 0
+
+# WebDAV support
+[webdav]
+enabled = true
+
+# Security settings
+[security]
+# JWT signing key (set on first start)
+# signing_key = "your-secret-key"
+
+# Read permissions
+# read = "admin:admin"
+
+# Write permissions
+# write = "admin:admin"
+
+# Replication settings
+[replication]
+enabled = false
+# replication = "001,010"  # Replicate to other filers

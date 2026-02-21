@@ -1,0 +1,16 @@
+apiVersion: v2
+name: tcfs-backend
+description: tcfs sync-worker Deployment for Kubernetes (NATS JetStream consumer, KEDA-scalable)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - tcfs
+  - tummycrypt
+  - sync
+  - seaweedfs
+home: https://github.com/tinyland-inc/tummycrypt
+sources:
+  - https://github.com/tinyland-inc/tummycrypt
+maintainers:
+  - name: TummyCrypt Contributors

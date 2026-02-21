@@ -1,0 +1,41 @@
+apiVersion: v2
+name: tcfs-stack
+description: Umbrella Helm chart for the tcfs (tummycrypt) stack
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - tcfs
+  - tummycrypt
+  - fuse
+  - seaweedfs
+  - s3
+  - sync
+
+home: https://github.com/tinyland-inc/tummycrypt
+sources:
+  - https://github.com/tinyland-inc/tummycrypt
+
+maintainers:
+  - name: jsullivan2
+
+dependencies:
+  - name: tcfs-backend
+    version: "0.1.0"
+    repository: "file://../tcfs-backend"
+
+  - name: nats
+    version: "1.2.*"
+    repository: "https://nats-io.github.io/k8s/helm/charts/"
+    condition: nats.enabled
+
+  - name: keda
+    version: "2.16.*"
+    repository: "https://kedacore.github.io/charts"
+    condition: keda.enabled
+
+  - name: kube-prometheus-stack
+    version: "68.*"
+    repository: "https://prometheus-community.github.io/helm-charts"
+    condition: kube-prometheus-stack.enabled

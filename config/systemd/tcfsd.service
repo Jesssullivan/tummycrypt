@@ -1,0 +1,40 @@
+[Unit]
+Description=TummyCrypt filesystem daemon (tcfsd)
+Documentation=https://github.com/tinyland-inc/tummycrypt/docs/ARCHITECTURE.md
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/tcfsd --config /etc/tcfs/config.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+
+# Credentials: age identity for SOPS decryption
+# Requires: age-identity file encrypted with TPM or another age key
+# LoadCredentialEncrypted=age-identity:/etc/tcfs/age-identity.txt.enc
+
+# Security hardening
+DynamicUser=no
+User=tcfs
+Group=tcfs
+PrivateTmp=yes
+PrivateDevices=no
+DeviceAllow=/dev/fuse rw
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=/var/lib/tcfsd /var/cache/tcfsd /run/tcfsd
+RuntimeDirectory=tcfsd
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+SecureBits=no-setuid-fixup no-setuid-fixup-locked
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tcfsd
+
+[Install]
+WantedBy=multi-user.target

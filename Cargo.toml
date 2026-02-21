@@ -1,0 +1,130 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tcfs-core",
+    "crates/tcfs-secrets",
+    "crates/tcfs-storage",
+    "crates/tcfs-chunks",
+    "crates/tcfs-crypto",
+    "crates/tcfs-sync",
+    "crates/tcfs-fuse",
+    "crates/tcfs-cloudfilter",
+    "crates/tcfsd",
+    "crates/tcfs-cli",
+    "crates/tcfs-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["TummyCrypt Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tinyland-inc/tummycrypt"
+rust-version = "1.93"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+# gRPC
+tonic = { version = "0.14" }
+# tonic 0.14: prost codec runtime + build tool (replaces tonic-build + prost-build)
+tonic-prost = { version = "0.14" }
+tonic-prost-build = { version = "0.14" }
+prost = { version = "0.14" }
+
+# Storage abstraction
+opendal = { version = "0.55", features = ["services-s3"] }
+
+# FUSE (optional, Phase 3)
+fuse3 = { version = "0.8", features = ["tokio-runtime", "unprivileged"] }
+
+# Cryptography / secrets
+age = { version = "0.11", features = ["armor"] }
+keepass = { version = "0.8" }
+zeroize = { version = "1", features = ["derive"] }
+secrecy = { version = "0.10", features = ["serde"] }
+rpassword = { version = "7" }
+
+# E2E encryption (Phase 2 sprint)
+chacha20poly1305 = { version = "0.10" }
+argon2 = { version = "0.5" }
+aes-siv = { version = "0.7" }
+hkdf = { version = "0.12" }
+sha2 = { version = "0.10" }
+rand = { version = "0.8" }
+bip39 = { version = "2" }
+keyring = { version = "3" }
+
+# SOPS decryption deps
+serde_yml = { version = "0.0" }
+aes-gcm = { version = "0.10" }
+base64 = { version = "0.22" }
+
+# Hashing and chunking
+blake3 = { version = "1" }
+fastcdc = { version = "3" }
+zstd = { version = "0.13" }
+
+# Local state (optional, Phase 2)
+rocksdb = { version = "0.24" }
+
+# Messaging
+async-nats = { version = "0.46" }
+futures = { version = "0.3" }
+bytes = { version = "1" }
+
+# System integration
+service-manager = { version = "0.11" }
+notify = { version = "8" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+toml = { version = "0.8" }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# TUI
+ratatui = { version = "0.30" }
+crossterm = { version = "0.29" }
+
+# Progress display
+indicatif = { version = "0.18" }
+
+# HTTP server (for metrics endpoint) + gRPC transport
+axum = { version = "0.8" }
+hyper = { version = "1" }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Error handling
+thiserror = { version = "1" }
+anyhow = { version = "1" }
+
+# Logging / tracing
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Metrics
+prometheus-client = { version = "0.24" }
+
+# Parallelism
+rayon = { version = "1" }
+
+# Testing
+proptest = { version = "1" }
+tempfile = { version = "3" }
+tokio-test = { version = "0.4" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true

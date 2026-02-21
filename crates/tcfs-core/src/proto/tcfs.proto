@@ -1,0 +1,122 @@
+syntax = "proto3";
+package tcfs;
+
+// TcfsDaemon: local control plane served by tcfsd over Unix socket
+service TcfsDaemon {
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Mount(MountRequest) returns (MountResponse);
+  rpc Unmount(UnmountRequest) returns (UnmountResponse);
+  rpc Push(stream PushChunk) returns (stream PushProgress);
+  rpc Pull(PullRequest) returns (stream PullProgress);
+  // Called by FUSE driver on open() of a .tc stub
+  rpc Hydrate(HydrateRequest) returns (stream HydrateProgress);
+  rpc Unsync(UnsyncRequest) returns (UnsyncResponse);
+  rpc SyncStatus(SyncStatusRequest) returns (SyncStatusResponse);
+  rpc Watch(WatchRequest) returns (stream WatchEvent);
+  rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
+}
+
+message Empty {}
+
+message StatusRequest {}
+message StatusResponse {
+  string version = 1;
+  string storage_endpoint = 2;
+  bool storage_ok = 3;
+  bool nats_ok = 4;
+  int32 active_mounts = 5;
+  int64 uptime_secs = 6;
+}
+
+message MountRequest {
+  string remote = 1;
+  string mountpoint = 2;
+  bool read_only = 3;
+  repeated string options = 4;
+}
+message MountResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message UnmountRequest {
+  string mountpoint = 1;
+}
+message UnmountResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message PushChunk {
+  string path = 1;
+  bytes data = 2;
+  uint64 offset = 3;
+  bool last = 4;
+}
+message PushProgress {
+  uint64 bytes_sent = 1;
+  uint64 total_bytes = 2;
+  string chunk_hash = 3;
+  bool done = 4;
+  string error = 5;
+}
+
+message PullRequest {
+  string remote_path = 1;
+  string local_path = 2;
+}
+message PullProgress {
+  uint64 bytes_received = 1;
+  uint64 total_bytes = 2;
+  bool done = 3;
+  string error = 4;
+}
+
+message HydrateRequest {
+  string stub_path = 1;
+  bool partial_ok = 2;
+}
+message HydrateProgress {
+  uint64 bytes_received = 1;
+  uint64 total_bytes = 2;
+  string local_path = 3;
+  bool done = 4;
+  string error = 5;
+}
+
+message UnsyncRequest {
+  string path = 1;
+  bool force = 2;
+}
+message UnsyncResponse {
+  bool success = 1;
+  string stub_path = 2;
+  string error = 3;
+}
+
+message SyncStatusRequest {
+  string path = 1;
+}
+message SyncStatusResponse {
+  string path = 1;
+  string state = 2;
+  string blake3 = 3;
+  uint64 size = 4;
+  int64 last_synced = 5;
+}
+
+message WatchRequest {
+  repeated string paths = 1;
+}
+message WatchEvent {
+  string path = 1;
+  string event_type = 2;
+  int64 timestamp = 3;
+}
+
+message CredentialStatusResponse {
+  bool loaded = 1;
+  string source = 2;
+  int64 loaded_at = 3;
+  bool needs_reload = 4;
+}

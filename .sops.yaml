@@ -1,0 +1,20 @@
+---
+# SOPS encryption rules for tummycrypt
+# Run scripts/sops-init.sh to generate age keys and bootstrap this config
+# After init, replace age1wc2s9pfju7haufdw0at0pm2cxx9rs9qmj80nf0nzy82w0fr0gp3skzfgds with your actual public key
+
+creation_rules:
+  # Per-user S3 credentials
+  - path_regex: ^credentials/seaweedfs-users/.*\.yaml$
+    encrypted_regex: ^(access_key_id|secret_access_key|session_token|password)$
+    age: >-
+      age1wc2s9pfju7haufdw0at0pm2cxx9rs9qmj80nf0nzy82w0fr0gp3skzfgds
+
+  # Admin/shared credentials (JWT, rclone passwords, S3 admin)
+  - path_regex: ^credentials/.*\.yaml$
+    encrypted_regex: ^(access_key_id|secret_access_key|jwt_signing_key|password|token|rclone_password.*)$
+    age: age1wc2s9pfju7haufdw0at0pm2cxx9rs9qmj80nf0nzy82w0fr0gp3skzfgds
+
+  # Tofu environment tfvars
+  - path_regex: ^infra/tofu/environments/.*/terraform\.tfvars\.enc\.yaml$
+    age: age1wc2s9pfju7haufdw0at0pm2cxx9rs9qmj80nf0nzy82w0fr0gp3skzfgds

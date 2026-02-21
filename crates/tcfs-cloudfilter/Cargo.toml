@@ -1,0 +1,33 @@
+[package]
+name = "tcfs-cloudfilter"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs Windows Cloud Files API (CFAPI) provider for native Explorer integration"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+tcfs-storage = { path = "../tcfs-storage" }
+tcfs-chunks = { path = "../tcfs-chunks" }
+opendal = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Windows Cloud Files API — only compiled on Windows
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Storage_CloudFilters",
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Security",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

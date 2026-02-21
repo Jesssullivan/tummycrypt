@@ -1,0 +1,25 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "tcfs-backend.fullname" . }}-scaler
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "tcfs-backend.fullname" . }}-worker
+  minReplicaCount: {{ .Values.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.autoscaling.maxReplicas }}
+  cooldownPeriod:  {{ .Values.autoscaling.cooldownPeriod }}
+  pollingInterval: 15
+  triggers:
+    - type: nats-jetstream
+      metadata:
+        natsServerMonitoringEndpoint: {{ .Values.autoscaling.natsMonitoringUrl }}
+        account: "$G"
+        stream: SYNC_TASKS
+        consumer: sync-workers
+        lagThreshold: {{ .Values.autoscaling.lagThreshold | quote }}
+        activationLagThreshold: "1"
+{{- end }}

@@ -1,0 +1,673 @@
+# Release pipeline for tummycrypt/tcfs
+#
+# Triggered by git tag push (v*.*.*) or manual dispatch.
+# Builds cross-platform binaries, .deb/.rpm packages, container images,
+# creates GitHub Release with installers, and deploys to Civo K8s.
+#
+# Targets:
+#   - Linux x86_64 (with FUSE)
+#   - Linux aarch64 (with FUSE)
+#   - macOS x86_64 (no FUSE, CLI-only — mount disabled)
+#   - macOS aarch64 (no FUSE, CLI-only — mount disabled)
+#   - Container image (k8s-worker mode)
+#
+# Produces:
+#   - Binary tarballs (.tar.gz) per platform
+#   - .deb package (x86_64 + aarch64)
+#   - .rpm package (x86_64 + aarch64)
+#   - Shell installer script (curl | sh)
+#   - Homebrew formula
+#   - Container image (GHCR, multi-arch)
+#   - SHA256SUMS.txt
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.0)"
+        required: true
+        default: "latest"
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/tcfsd
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write  # needed for Cosign keyless signing (OIDC)
+
+jobs:
+  # ── Plan release ──────────────────────────────────────────────────────────
+
+  plan:
+    name: Plan release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          VERSION="${TAG#v}"  # strip leading v
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building release: ${TAG} (version ${VERSION})"
+
+  # ── Build client binaries ─────────────────────────────────────────────────
+
+  build-binaries:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 — full FUSE support
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: ""
+            cross: false
+            fuse: true
+            deb: true
+            rpm: true
+
+          # Linux aarch64 — full FUSE support (cross-compiled)
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            features: ""
+            cross: true
+            fuse: true
+            deb: true
+            rpm: false  # cross-compiled RPM is complex
+
+          # macOS x86_64 — no FUSE, CLI + unsync only
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            features: "--no-default-features"
+            cross: false
+            fuse: false
+            deb: false
+            rpm: false
+
+          # macOS aarch64 — no FUSE, CLI + unsync only
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            features: "--no-default-features"
+            cross: false
+            fuse: false
+            deb: false
+            rpm: false
+
+          # Windows x86_64 — no FUSE, CLI + unsync + cloudfilter skeleton
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: "--no-default-features"
+            cross: false
+            fuse: false
+            deb: false
+            rpm: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            pkg-config \
+            libssl-dev \
+            libfuse3-dev
+
+      - name: Install macOS build deps
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf
+
+      - name: Install Windows build deps
+        if: runner.os == 'Windows'
+        run: |
+          choco install protoc -y
+
+      # ── Build tcfs CLI ────────────────────────────────────────────────────
+
+      - name: Build tcfs CLI
+        run: |
+          cargo build --release \
+            --target ${{ matrix.target }} \
+            ${{ matrix.features }} \
+            -p tcfs-cli
+
+      # ── Build tcfsd daemon (client mode) ──────────────────────────────────
+
+      - name: Build tcfsd daemon
+        if: runner.os != 'Windows'
+        run: |
+          cargo build --release \
+            --target ${{ matrix.target }} \
+            -p tcfsd
+
+      # ── Build tcfs-tui ────────────────────────────────────────────────────
+
+      - name: Build tcfs-tui
+        run: |
+          cargo build --release \
+            --target ${{ matrix.target }} \
+            -p tcfs-tui
+
+      # ── Package archive ──────────────────────────────────────────────────
+
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          DIST="tcfs-${{ needs.plan.outputs.version }}-${{ matrix.name }}"
+          mkdir -p "${DIST}"
+          cp target/${{ matrix.target }}/release/tcfs   "${DIST}/"
+          cp target/${{ matrix.target }}/release/tcfsd  "${DIST}/" 2>/dev/null || true
+          cp target/${{ matrix.target }}/release/tcfs-tui "${DIST}/"
+          cp README.md LICENSE* "${DIST}/" 2>/dev/null || true
+          tar czf "${DIST}.tar.gz" "${DIST}"
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dist = "tcfs-${{ needs.plan.outputs.version }}-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/tcfs.exe" "$dist/"
+          Copy-Item "target/${{ matrix.target }}/release/tcfs-tui.exe" "$dist/"
+          Copy-Item "README.md" "$dist/" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip"
+
+      # ── Build .deb package ────────────────────────────────────────────────
+
+      - name: Build .deb package
+        if: matrix.deb
+        run: |
+          cargo install cargo-deb --locked 2>/dev/null || true
+          DEB_ARCH="amd64"
+          if [[ "${{ matrix.target }}" == "aarch64"* ]]; then DEB_ARCH="arm64"; fi
+
+          # Build deb from tcfsd (includes systemd service)
+          cargo deb -p tcfsd \
+            --target ${{ matrix.target }} \
+            --no-build \
+            --output "tcfsd-${{ needs.plan.outputs.version }}-${DEB_ARCH}.deb" \
+            || echo "::warning::cargo-deb failed, skipping .deb"
+
+          # Build deb from tcfs-cli
+          cargo deb -p tcfs-cli \
+            --target ${{ matrix.target }} \
+            --no-build \
+            --output "tcfs-${{ needs.plan.outputs.version }}-${DEB_ARCH}.deb" \
+            || echo "::warning::cargo-deb failed for tcfs-cli, skipping .deb"
+
+      # ── Build .rpm package ────────────────────────────────────────────────
+
+      - name: Build .rpm package
+        if: matrix.rpm
+        run: |
+          cargo install cargo-generate-rpm --locked 2>/dev/null || true
+          cargo generate-rpm -p crates/tcfsd \
+            --target ${{ matrix.target }} \
+            --output "tcfsd-${{ needs.plan.outputs.version }}-x86_64.rpm" \
+            || echo "::warning::cargo-generate-rpm failed, skipping .rpm"
+
+      # ── Upload artifacts ──────────────────────────────────────────────────
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            *.tar.gz
+            *.zip
+            *.deb
+            *.rpm
+          retention-days: 7
+
+  # ── Build container image (k8s-worker) ────────────────────────────────────
+
+  build-image:
+    name: Build container image
+    runs-on: ubuntu-latest
+    needs: plan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.title=tcfsd
+            org.opencontainers.image.description=TummyCrypt filesystem daemon (k8s-worker mode)
+            org.opencontainers.image.version=${{ needs.plan.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign container image with Cosign (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          # Sign each tag with keyless (OIDC-based) signing
+          for TAG in \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.tag }}" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.version }}" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"; do
+            cosign sign --yes "${TAG}"
+          done
+
+  # ── Nix build + Attic cache push ─────────────────────────────────────────
+
+  nix-build:
+    name: Nix Build + Attic Push
+    runs-on: ubuntu-latest
+    needs: plan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
+            extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+
+      - name: Configure Attic
+        run: |
+          nix profile install nixpkgs#attic-client
+          if [ -n "${{ secrets.ATTIC_TOKEN }}" ]; then
+            attic login tinyland https://nix-cache.fuzzy-dev.tinyland.dev ${{ secrets.ATTIC_TOKEN }}
+            attic use main || echo "::warning::Failed to configure Attic substituter"
+            echo "ATTIC_CONFIGURED=true" >> $GITHUB_ENV
+          else
+            echo "::warning::ATTIC_TOKEN not set, skipping Attic push"
+            echo "ATTIC_CONFIGURED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Build all Nix packages
+        run: |
+          for pkg in tcfsd tcfs-cli tcfs-tui; do
+            echo "Building ${pkg}..."
+            nix build .#${pkg} -o result-${pkg}
+          done
+
+      - name: Push to Attic cache
+        if: env.ATTIC_CONFIGURED == 'true'
+        run: |
+          for pkg in tcfsd tcfs-cli tcfs-tui; do
+            attic push main result-${pkg} || echo "::warning::Failed to push ${pkg}"
+          done
+
+  # ── Generate installer scripts ────────────────────────────────────────────
+
+  generate-installers:
+    name: Generate installer scripts
+    runs-on: ubuntu-latest
+    needs: plan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate shell installer
+        run: |
+          cat > install.sh << 'INSTALLER'
+          #!/bin/sh
+          # tcfs installer — downloads the latest release for your platform
+          set -eu
+
+          REPO="__REPO__"
+          TAG="__TAG__"
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          OS="$(uname -s)"
+          ARCH="$(uname -m)"
+
+          case "${OS}-${ARCH}" in
+            Linux-x86_64)   PLATFORM="linux-x86_64" ;;
+            Linux-aarch64)  PLATFORM="linux-aarch64" ;;
+            Darwin-x86_64)  PLATFORM="macos-x86_64" ;;
+            Darwin-arm64)   PLATFORM="macos-aarch64" ;;
+            *) echo "Unsupported platform: ${OS}-${ARCH}" >&2; exit 1 ;;
+          esac
+
+          VERSION="${TAG#v}"
+          TARBALL="tcfs-${VERSION}-${PLATFORM}.tar.gz"
+          URL="${BASE_URL}/${TARBALL}"
+
+          INSTALL_DIR="${TCFS_INSTALL_DIR:-/usr/local/bin}"
+
+          echo "Downloading tcfs ${TAG} for ${PLATFORM}..."
+          TMPDIR="$(mktemp -d)"
+          trap 'rm -rf "${TMPDIR}"' EXIT
+
+          curl -fSL "${URL}" -o "${TMPDIR}/${TARBALL}"
+          tar xzf "${TMPDIR}/${TARBALL}" -C "${TMPDIR}"
+
+          echo "Installing to ${INSTALL_DIR}..."
+          if [ -w "${INSTALL_DIR}" ]; then
+            cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs" "${INSTALL_DIR}/"
+            cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfsd" "${INSTALL_DIR}/"
+            cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs-tui" "${INSTALL_DIR}/"
+          else
+            sudo cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs" "${INSTALL_DIR}/"
+            sudo cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfsd" "${INSTALL_DIR}/"
+            sudo cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs-tui" "${INSTALL_DIR}/"
+          fi
+
+          chmod +x "${INSTALL_DIR}/tcfs" "${INSTALL_DIR}/tcfsd" "${INSTALL_DIR}/tcfs-tui"
+
+          echo ""
+          echo "tcfs ${TAG} installed successfully!"
+          echo "  tcfs   → ${INSTALL_DIR}/tcfs"
+          echo "  tcfsd  → ${INSTALL_DIR}/tcfsd"
+          echo "  tcfs-tui → ${INSTALL_DIR}/tcfs-tui"
+          echo ""
+          echo "Run 'tcfs status' to get started."
+          INSTALLER
+
+          sed -i "s|__REPO__|${{ github.repository }}|g" install.sh
+          sed -i "s|__TAG__|${{ needs.plan.outputs.tag }}|g" install.sh
+          chmod +x install.sh
+
+      - name: Generate PowerShell installer
+        run: |
+          cat > install.ps1 << 'PSINSTALLER'
+          # tcfs installer for Windows (PowerShell)
+          $ErrorActionPreference = "Stop"
+
+          $repo = "__REPO__"
+          $tag = "__TAG__"
+          $version = $tag.TrimStart("v")
+          $platform = "windows-x86_64"
+          $tarball = "tcfs-${version}-${platform}.zip"
+          $url = "https://github.com/${repo}/releases/download/${tag}/${tarball}"
+
+          $installDir = if ($env:TCFS_INSTALL_DIR) { $env:TCFS_INSTALL_DIR } else { "$env:LOCALAPPDATA\tcfs\bin" }
+
+          Write-Host "Downloading tcfs ${tag} for Windows..."
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+          $tmpFile = [System.IO.Path]::GetTempFileName() + ".zip"
+          Invoke-WebRequest -Uri $url -OutFile $tmpFile
+
+          $tmpDir = [System.IO.Path]::GetTempFileName() + "_extract"
+          Expand-Archive -Path $tmpFile -DestinationPath $tmpDir -Force
+
+          Copy-Item "${tmpDir}\tcfs-${version}-${platform}\tcfs.exe" "${installDir}\tcfs.exe" -Force
+          Copy-Item "${tmpDir}\tcfs-${version}-${platform}\tcfsd.exe" "${installDir}\tcfsd.exe" -Force
+          Copy-Item "${tmpDir}\tcfs-${version}-${platform}\tcfs-tui.exe" "${installDir}\tcfs-tui.exe" -Force
+
+          Remove-Item -Recurse -Force $tmpFile, $tmpDir
+
+          # Add to PATH if not already there
+          $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+          if ($userPath -notlike "*${installDir}*") {
+            [Environment]::SetEnvironmentVariable("PATH", "${installDir};${userPath}", "User")
+            Write-Host "Added ${installDir} to PATH"
+          }
+
+          Write-Host ""
+          Write-Host "tcfs ${tag} installed successfully!"
+          Write-Host "  Restart your shell, then run: tcfs status"
+          PSINSTALLER
+
+          sed -i "s|__REPO__|${{ github.repository }}|g" install.ps1
+          sed -i "s|__TAG__|${{ needs.plan.outputs.tag }}|g" install.ps1
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-installers
+          path: |
+            install.sh
+            install.ps1
+          retention-days: 7
+
+  # ── Create GitHub Release ─────────────────────────────────────────────────
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [plan, build-binaries, build-image, generate-installers]
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Flatten artifacts and generate checksums
+        run: |
+          mkdir -p release
+          find dist/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.sh" -o -name "*.ps1" \) \
+            -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: tcfs ${{ needs.plan.outputs.tag }}
+          generate_release_notes: true
+          files: release/*
+          body: |
+            ## tcfs ${{ needs.plan.outputs.tag }}
+
+            ### Quick Install
+
+            **Linux / macOS:**
+            ```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/install.sh | sh
+            ```
+
+            **Homebrew:**
+            ```bash
+            brew install tinyland-inc/tap/tcfs
+            ```
+
+            **Container image:**
+            ```bash
+            podman pull ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.tag }}
+            ```
+
+            **Debian/Ubuntu:**
+            ```bash
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfs-${{ needs.plan.outputs.version }}-amd64.deb
+            sudo dpkg -i tcfs-${{ needs.plan.outputs.version }}-amd64.deb
+            ```
+
+            **RPM (Fedora/RHEL/Rocky):**
+            ```bash
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfsd-${{ needs.plan.outputs.version }}-x86_64.rpm
+            sudo rpm -i tcfsd-${{ needs.plan.outputs.version }}-x86_64.rpm
+            ```
+
+            ### Verify checksums
+            ```bash
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            ### Binaries included
+            | Binary | Purpose |
+            |--------|---------|
+            | `tcfs` | CLI: push, pull, sync-status, mount, unsync |
+            | `tcfsd` | Daemon: gRPC socket, FUSE, Prometheus metrics |
+            | `tcfs-tui` | Terminal UI for interactive management |
+
+  # ── Update Homebrew tap formula ──────────────────────────────────────────
+
+  update-homebrew:
+    name: Update Homebrew formula
+    runs-on: ubuntu-latest
+    needs: [plan, create-release]
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release checksums
+        run: |
+          curl -fSL \
+            "https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/SHA256SUMS.txt" \
+            -o SHA256SUMS.txt
+
+      - name: Generate versioned Homebrew formula
+        run: |
+          VERSION="${{ needs.plan.outputs.version }}"
+
+          # Extract SHA256 hashes for each platform tarball
+          SHA_DARWIN_ARM64=$(grep "tcfs-${VERSION}-macos-aarch64.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+          SHA_DARWIN_X86_64=$(grep "tcfs-${VERSION}-macos-x86_64.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+          SHA_LINUX_X86_64=$(grep "tcfs-${VERSION}-linux-x86_64.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+          SHA_LINUX_ARM64=$(grep "tcfs-${VERSION}-linux-aarch64.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+
+          # Replace placeholders in the template
+          cp dist/homebrew-tcfs.rb tcfs.rb
+          sed -i "s/__VERSION__/${VERSION}/g" tcfs.rb
+          sed -i "s/__SHA256_DARWIN_ARM64__/${SHA_DARWIN_ARM64}/g" tcfs.rb
+          sed -i "s/__SHA256_DARWIN_X86_64__/${SHA_DARWIN_X86_64}/g" tcfs.rb
+          sed -i "s/__SHA256_LINUX_X86_64__/${SHA_LINUX_X86_64}/g" tcfs.rb
+          sed -i "s/__SHA256_LINUX_ARM64__/${SHA_LINUX_ARM64}/g" tcfs.rb
+
+          echo "Generated formula for v${VERSION}:"
+          cat tcfs.rb
+
+      - name: Push formula to homebrew-tap branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create or update the homebrew-tap branch
+          git fetch origin homebrew-tap 2>/dev/null || true
+          git checkout -B homebrew-tap origin/homebrew-tap 2>/dev/null || git checkout --orphan homebrew-tap
+
+          # Clean working tree for the tap branch
+          git rm -rf . 2>/dev/null || true
+
+          # Set up the Homebrew tap directory structure
+          mkdir -p Formula
+          cp tcfs.rb Formula/tcfs.rb
+
+          cat > README.md << 'EOF'
+          # tinyland-inc/homebrew-tap
+
+          Homebrew formulae for [TummyCrypt/tcfs](https://github.com/${{ github.repository }}).
+
+          ## Usage
+
+          ```bash
+          brew tap tinyland-inc/tap https://github.com/${{ github.repository }} --branch homebrew-tap
+          brew install tcfs
+          ```
+          EOF
+
+          git add Formula/tcfs.rb README.md
+          git commit -m "Update tcfs formula to ${{ needs.plan.outputs.tag }}"
+          git push origin homebrew-tap --force
+
+  # ── Deploy to Civo K8s ──────────────────────────────────────────────────
+
+  deploy-civo:
+    name: Deploy to Civo K8s
+    runs-on: ubuntu-latest
+    needs: [plan, build-image]
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: civo-production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl + Helm
+        uses: azure/setup-kubectl@v4
+      - uses: azure/setup-helm@v4
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.CIVO_KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy via Helm
+        run: |
+          helm upgrade --install tcfs-backend \
+            ./infra/k8s/charts/tcfs-backend \
+            --namespace tcfs \
+            --create-namespace \
+            --set image.tag=${{ needs.plan.outputs.tag }} \
+            --set config.natsUrl=nats://nats.tcfs.svc.cluster.local:4222 \
+            --set config.s3Endpoint=http://dees-appu-bearts:8333 \
+            --set config.s3Bucket=tcfs \
+            --wait \
+            --timeout=5m
+
+      - name: Verify rollout
+        run: |
+          kubectl rollout status deployment/tcfs-backend-tcfs-backend-worker \
+            -n tcfs --timeout=5m
+          kubectl get pods -n tcfs -l app.kubernetes.io/name=tcfs-backend

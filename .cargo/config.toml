@@ -1,0 +1,13 @@
+# Cargo workspace configuration
+#
+# NOTE: mold linker is available in the Nix devShell (nix develop).
+# Outside Nix, the default system linker is used.
+# To enable mold manually: export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+
+# Cross-compilation targets (via cargo cross or nix)
+[target.x86_64-apple-darwin]
+[target.aarch64-apple-darwin]
+
+[env]
+# Ensure RocksDB uses bundled version by default (overridden if system lib found)
+ROCKSDB_LIB_DIR = { value = "", force = false }

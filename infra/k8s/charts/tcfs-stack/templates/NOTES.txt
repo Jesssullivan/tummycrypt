@@ -1,0 +1,39 @@
+===========================================================
+  tcfs-stack has been installed in namespace: {{ .Values.global.namespace }}
+===========================================================
+
+1. Verify all pods are running:
+
+     kubectl get pods -n {{ .Values.global.namespace }}
+
+2. Check the tcfs-backend deployment:
+
+     kubectl rollout status deployment/tcfs-backend -n {{ .Values.global.namespace }}
+
+3. Verify the SeaweedFS secret exists:
+
+     kubectl get secret {{ .Values.seaweedfs.secretName }} -n {{ .Values.global.namespace }}
+
+{{- if .Values.nats.enabled }}
+
+4. Check NATS connectivity:
+
+     kubectl run nats-test --rm -it --restart=Never \
+       --image=natsio/nats-box:latest \
+       -n {{ .Values.global.namespace }} \
+       -- nats pub test "hello from tcfs"
+{{- end }}
+
+{{- if index .Values "kube-prometheus-stack" "enabled" }}
+
+5. Access Prometheus:
+
+     kubectl port-forward svc/tcfs-kube-prometheus-sta-prometheus 9090:9090 -n {{ .Values.global.namespace }}
+     open http://localhost:9090
+{{- end }}
+
+6. View tcfsd logs:
+
+     kubectl logs -l app.kubernetes.io/name=tcfs-backend -n {{ .Values.global.namespace }} -f
+
+For more information visit: https://github.com/tinyland-inc/tummycrypt

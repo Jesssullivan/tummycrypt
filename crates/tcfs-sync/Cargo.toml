@@ -1,0 +1,38 @@
+[package]
+name = "tcfs-sync"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs sync engine: state machine, workers, conflict resolution"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+tcfs-chunks = { path = "../tcfs-chunks" }
+tcfs-storage = { path = "../tcfs-storage" }
+opendal = { workspace = true }
+# rocksdb and async-nats are optional until Phase 4 implementation
+rocksdb = { workspace = true, optional = true }
+async-nats = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+notify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+rayon = { workspace = true }
+
+[features]
+default = []
+# NATS JetStream messaging only (no RocksDB) — used by tcfsd k8s-worker
+nats = ["dep:async-nats", "dep:futures", "dep:bytes"]
+# Full feature set including RocksDB persistent state
+full = ["dep:rocksdb", "nats"]
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

@@ -1,0 +1,64 @@
+# tcfs-backend Helm chart values
+# Override with: helm install tcfs-backend ./infra/k8s/charts/tcfs-backend -f my-values.yaml
+
+image:
+  repository: ghcr.io/tummycrypt/tcfsd
+  tag: latest
+  pullPolicy: Always
+
+replicaCount: 1
+
+nameOverride: ""
+fullnameOverride: ""
+
+# tcfsd daemon configuration
+config:
+  natsUrl: "nats://nats.tcfs.svc.cluster.local:4222"
+  s3Endpoint: "http://seaweedfs-s3.tcfs.svc.cluster.local:8333"
+  s3Region: "us-east-1"
+  s3Bucket: "tcfs"
+  logLevel: "info"
+  logFormat: "json"
+  workerConcurrency: 4
+
+# Credentials secret (must contain access_key_id and secret_access_key)
+credentialsSecret: seaweedfs-admin
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+
+# KEDA ScaledObject configuration
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 100
+  lagThreshold: 100
+  cooldownPeriod: 300
+  # natsMonitoringUrl must be set if autoscaling is enabled
+  natsMonitoringUrl: "http://nats.tcfs.svc.cluster.local:8222"
+
+metrics:
+  enabled: true
+  port: 9100
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: "50%"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

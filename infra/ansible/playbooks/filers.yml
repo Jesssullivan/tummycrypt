@@ -1,0 +1,4 @@
+---
+- hosts: filers
+  roles:
+  - role: seaweedfs-filer

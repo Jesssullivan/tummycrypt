@@ -1,0 +1,178 @@
+# Taskfile.yaml
+# tummycrypt/tcfs build system
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # ── Rust workspace ──────────────────────────────────────────────────────────
+
+  build:
+    desc: Build all Rust crates (debug)
+    cmds:
+      - cargo build --workspace
+
+  build:release:
+    desc: Build all Rust crates (release)
+    cmds:
+      - cargo build --workspace --release
+
+  test:
+    desc: Run all tests
+    cmds:
+      - cargo test --workspace
+
+  lint:
+    desc: Run clippy (deny warnings) + rustfmt check
+    cmds:
+      - cargo clippy --workspace -- -D warnings
+      - cargo fmt --all -- --check
+
+  fmt:
+    desc: Auto-format all Rust code
+    cmds:
+      - cargo fmt --all
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - cargo clean
+
+  deny:
+    desc: Check licenses and advisories (cargo-deny)
+    cmds:
+      - cargo deny check
+
+  audit:
+    desc: Check for security advisories (cargo-audit)
+    cmds:
+      - cargo audit
+
+  # ── Local dev stack ─────────────────────────────────────────────────────────
+
+  dev:
+    desc: Start local dev stack (SeaweedFS + NATS + Prometheus + Grafana)
+    deps:
+      - generate-certs
+    cmds:
+      - docker-compose up -d
+      - echo ""
+      - echo "Local dev stack started:"
+      - echo "  SeaweedFS master-1:  http://localhost:9333"
+      - echo "  SeaweedFS master-2:  http://localhost:9334"
+      - echo "  SeaweedFS master-3:  http://localhost:9335"
+      - echo "  SeaweedFS volume:    http://localhost:8080"
+      - echo "  SeaweedFS filer:     http://localhost:8888"
+      - echo "  SeaweedFS S3:        http://localhost:8333"
+      - echo "  NATS:                nats://localhost:4222"
+      - echo "  NATS monitoring:     http://localhost:8222"
+      - echo "  Prometheus:          http://localhost:9090"
+      - echo "  Grafana:             http://localhost:3000 (admin/admin)"
+      - echo ""
+      - echo "Logs: docker-compose logs -f"
+
+  dev:stop:
+    desc: Stop local dev stack
+    cmds:
+      - docker-compose down
+
+  dev:restart:
+    desc: Restart local dev stack
+    cmds:
+      - task: dev:stop
+      - task: dev
+
+  dev:logs:
+    desc: Tail local dev stack logs
+    cmds:
+      - docker-compose logs -f
+
+  dev:status:
+    desc: Show local dev stack status
+    cmds:
+      - docker-compose ps
+
+  # ── Certificates ─────────────────────────────────────────────────────────────
+
+  generate-certs:
+    desc: Generate SeaweedFS TLS certificates
+    cmds:
+      - bash scripts/generate-certs.sh
+
+  # ── SOPS / Credentials ───────────────────────────────────────────────────────
+
+  sops:init:
+    desc: Bootstrap SOPS+age keys (run once on setup)
+    cmds:
+      - bash scripts/sops-init.sh
+
+  sops:migrate:
+    desc: Migrate plaintext credentials from Ansible inventory to SOPS
+    cmds:
+      - bash scripts/migrate-credentials.sh
+
+  sops:encrypt:
+    desc: "Encrypt a file with SOPS: task sops:encrypt FILE=credentials/foo.yaml"
+    vars:
+      FILE: '{{.FILE}}'
+    cmds:
+      - sops --encrypt --in-place {{.FILE}}
+
+  sops:decrypt:
+    desc: "Decrypt a SOPS file to stdout: task sops:decrypt FILE=credentials/foo.yaml"
+    vars:
+      FILE: '{{.FILE}}'
+    cmds:
+      - sops --decrypt {{.FILE}}
+
+  # ── Infrastructure ───────────────────────────────────────────────────────────
+
+  infra:plan:
+    desc: "OpenTofu plan: task infra:plan ENV=civo"
+    vars:
+      ENV: '{{.ENV | default "local"}}'
+    cmds:
+      - cd infra/tofu/environments/{{.ENV}} && tofu plan
+
+  infra:apply:
+    desc: "OpenTofu apply: task infra:apply ENV=civo"
+    vars:
+      ENV: '{{.ENV | default "local"}}'
+    cmds:
+      - cd infra/tofu/environments/{{.ENV}} && tofu apply
+
+  infra:destroy:
+    desc: "OpenTofu destroy (DESTRUCTIVE): task infra:destroy ENV=local"
+    vars:
+      ENV: '{{.ENV | default "local"}}'
+    prompt: "This will DESTROY infrastructure in '{{.ENV}}'. Continue?"
+    cmds:
+      - cd infra/tofu/environments/{{.ENV}} && tofu destroy
+
+  # ── Cross-compilation ─────────────────────────────────────────────────────────
+
+  cross:build:
+    desc: Cross-compile all targets (requires cargo cross)
+    cmds:
+      - bash scripts/cross-compile.sh
+
+  # ── Convenience ──────────────────────────────────────────────────────────────
+
+  check:
+    desc: Run all checks (build + lint + test + deny)
+    cmds:
+      - task: build
+      - task: lint
+      - task: test
+      - task: deny

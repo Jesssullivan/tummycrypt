@@ -1,0 +1,71 @@
+---
+#- name: ensure filer is fully stopped
+#  systemd:
+#    name: sw-filer
+#    state: stopped
+#    enabled: true
+#  become: yes
+- name: ensure wget is installed and environment is prepped
+  shell: |
+      setenforce permissive
+      dnf -y install wget
+      mkdir -p /etc/seaweedfs/
+      mkdir -p /etc/swmaster/
+      chown {{uname}} /home/{{uname}}
+  become: true 
+- name: update firewall stuff
+  shell: |
+      firewall-cmd --permanent --add-port={8333/tcp,1888/tcp,8888/tcp,19333/tcp,9333/tcp,80/tcp,443/tcp,18080/tcp,8080/tcp,7333/tcp} 
+      firewall-cmd --reload             
+  become: true                   
+- name: copy over certs
+  copy:
+    src: certs.tar.gz
+    dest: /etc/seaweedfs/
+  become: true
+- name: unpack certs
+  shell: |
+     wget "{{ weed_release_url }}"
+     tar xzf certs.tar.gz
+  args:
+     chdir: /etc/seaweedfs/
+  become: true     
+- name: download and unpack weed
+  shell: |
+     wget "{{ weed_release_url }}"
+     tar -xf linux_amd64_full.tar.gz
+     mv weed /usr/local/bin/weed
+  args:
+     chdir: /tmp
+  become: true
+- name: cleanup
+  shell: |
+     rm -rf /tmp/linux_amd64_ful*
+  become: yes
+- name: copy s3 config
+  template:
+    src: config.json.j2
+    dest: "/etc/seaweedfs/config.json"
+    mode: 0644
+  become: yes 
+- name: copy filer toml
+  template:
+    src: filer.toml.j2
+    dest: "/etc/seaweedfs/filer.toml"
+  become: yes 
+- name: establish service
+  template:
+    src: sw-filer.service.j2
+    dest: "/usr/lib/systemd/system/sw-filer.service"
+    mode: 0644
+  become: yes
+- name: force systemd to reread configs
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  become: true
+- name: Ensure sw-filer is running
+  systemd:
+    name: sw-filer
+    state: started
+    enabled: true
+  become: yes

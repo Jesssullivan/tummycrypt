@@ -1,0 +1,19 @@
+[package]
+name = "tcfs-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs OpenDAL storage abstraction + SeaweedFS specifics"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+opendal = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

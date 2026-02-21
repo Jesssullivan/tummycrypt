@@ -1,0 +1,74 @@
+# -- Global values shared across all sub-charts
+global:
+  # -- Kubernetes namespace for tcfs resources
+  namespace: tcfs
+
+  # -- SeaweedFS S3-compatible endpoint
+  seaweedfsEndpoint: "http://dees-appu-bearts:8333"
+
+  # -- NATS server URL
+  natsUrl: "nats://nats:4222"
+
+  # -- Default container image tag
+  imageTag: "latest"
+
+  # -- Default replica count for tcfs workloads
+  replicaCount: 2
+
+  # -- Default resource requests applied to tcfs pods
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# -- SeaweedFS S3 credentials (populate via --set or sealed-secrets)
+seaweedfs:
+  # -- S3 access key ID
+  accessKeyId: ""
+  # -- S3 secret access key
+  secretAccessKey: ""
+  # -- Name of the Kubernetes Secret for SeaweedFS credentials
+  secretName: tcfs-seaweedfs-secret
+
+# -- Create the target namespace if it does not exist
+createNamespace: true
+
+# -------------------------------------------------------
+# tcfs-backend (local sub-chart, always installed)
+# -------------------------------------------------------
+tcfs-backend: {}
+
+# -------------------------------------------------------
+# NATS (optional dependency)
+# -------------------------------------------------------
+nats:
+  enabled: true
+  config:
+    cluster:
+      enabled: false
+    jetstream:
+      enabled: true
+      memStorage:
+        size: 256Mi
+      fileStorage:
+        size: 1Gi
+
+# -------------------------------------------------------
+# KEDA (optional dependency)
+# -------------------------------------------------------
+keda:
+  enabled: true
+
+# -------------------------------------------------------
+# kube-prometheus-stack (optional dependency)
+# -------------------------------------------------------
+kube-prometheus-stack:
+  enabled: false
+  prometheus:
+    prometheusSpec:
+      serviceMonitorSelectorNilUsesHelmValues: false
+  grafana:
+    enabled: false

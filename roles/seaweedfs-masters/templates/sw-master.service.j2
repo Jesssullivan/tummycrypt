@@ -1,0 +1,16 @@
+[Unit]
+Description=SeaweedFS Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+ExecStart=/usr/local/bin/weed server -dir=/etc/swdata -s3 -master.peers={{ ip1 }}:9333,{{ ip2 }}:9333,{{ ip3 }}:9333 -ip={{ ansible_host }}
+WorkingDirectory=/usr/local/bin/	
+SyslogIdentifier=sw-master
+
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+{
+  "identities": [
+    {
+      "name": "admin",
+      "credentials": [
+        {
+          "accessKey": "admin",
+          "secretKey": "admin"
+        }
+      ],
+      "actions": [
+        "Read",
+        "Write",
+        "List",
+        "Delete",
+        "Admin"
+      ]
+    },
+    {
+      "name": "readonly",
+      "credentials": [
+        {
+          "accessKey": "readonly",
+          "secretKey": "readonly"
+        }
+      ],
+      "actions": [
+        "Read",
+        "List"
+      ]
+    },
+    {
+      "name": "jess",
+      "credentials": [
+        {
+          "accessKey": "jess",
+          "secretKey": "jess-secret-key"
+        }
+      ],
+      "actions": [
+        "Read",
+        "Write",
+        "List",
+        "Delete"
+      ]
+    }
+  ]
+}

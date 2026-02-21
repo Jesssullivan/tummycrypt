@@ -1,0 +1,51 @@
+# tcfs.example.toml
+# Full annotated configuration reference for tcfsd
+# Copy to /etc/tcfs/config.toml or ~/.config/tcfs/config.toml and customize.
+# Environment variables override file settings (prefix: TCFS_).
+
+[daemon]
+# Unix domain socket for gRPC (CLI <-> daemon communication)
+socket = "/run/tcfsd/tcfsd.sock"
+# Optional: TCP listen for remote access (e.g. "0.0.0.0:7777")
+# listen = "127.0.0.1:7777"
+# Prometheus metrics endpoint
+metrics_addr = "127.0.0.1:9100"
+log_level = "info"       # trace, debug, info, warn, error
+log_format = "json"      # json, text
+
+[storage]
+# SeaweedFS S3 gateway endpoint
+endpoint = "http://dees-appu-bearts:8333"
+region = "us-east-1"
+bucket = "tcfs"
+# Path to SOPS-encrypted credential file (loaded at startup)
+credentials_file = "/etc/tcfs/credentials.yaml"
+# Alternatively: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars
+
+[secrets]
+# Age identity file for SOPS decryption
+# Defaults to: $CREDENTIALS_DIRECTORY/age-identity → $SOPS_AGE_KEY_FILE → $SOPS_AGE_KEY → ~/.config/sops/age/keys.txt
+# age_identity = "/etc/tcfs/age-identity.txt"
+# Optional KDBX database for credential lookup (RemoteJuggler integration)
+# kdbx_path = "/home/user/.passwords.kdbx"
+# SOPS credentials directory (defaults to credentials/ in repo)
+# sops_dir = "/etc/tcfs/credentials"
+
+[sync]
+# NATS JetStream endpoint
+nats_url = "nats://localhost:4222"
+# RocksDB local state cache (tracks file hashes + sync state)
+state_db = "/var/lib/tcfsd/state.db"
+# Sync worker threads (0 = auto-detect CPU count)
+workers = 0
+# Retry limit for failed tasks before moving to DLQ
+max_retries = 3
+
+[fuse]
+# Negative dentry cache TTL in seconds (important for git performance)
+# Set higher (120+) for large repos with many untracked files
+negative_cache_ttl_secs = 30
+# Disk cache for partially-downloaded files (sparse files)
+cache_dir = "/var/cache/tcfsd"
+# Maximum disk cache size in MB (evict LRU when exceeded)
+cache_max_mb = 10240

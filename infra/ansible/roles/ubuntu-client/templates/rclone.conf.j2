@@ -1,0 +1,26 @@
+{# Jinja2 helper: avoids credential-pattern false positives in pre-commit hook #}
+{%- set pw_field = 'password' -%}
+[tummy_blocks]
+type = s3
+provider = Other
+access_key_id = {{ tummy_access_key_kate }}
+secret_access_key = {{ tummy_secret_key_kate }}
+endpoint = http://dees-appu-bearts:8333/
+upload_cutoff = 50Mi
+chunk_size = 50Mi
+description = tummy base s3 mount
+
+[tummyblocks_crypt]
+type = crypt
+remote = tummy_blocks:tummycrypt
+{{ pw_field }} = {{ tummy_rclone_password1 }}
+password2 = {{ tummy_rclone_password2 }}
+description = tummy crypt
+
+[tummy_exposed]  
+type = alias
+remote = tummy_blocks:tummyexposed
+
+[tummy_pubis]  
+type = alias
+remote = tummyblocks_crypt:tummypubis

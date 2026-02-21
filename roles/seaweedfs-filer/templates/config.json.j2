@@ -1,0 +1,61 @@
+{
+  "identities": [
+    {
+      "name": "jess",
+      "credentials": [
+        {
+          "accessKey": "{{ tummy_access_key_jess }}",
+          "secretKey": "{{ tummy_secret_key_jess }}"
+        }
+      ],
+      "actions": [
+        "Admin",
+        "Read",
+        "List",
+        "Tagging",
+        "Write"
+      ]
+    },
+    {
+      "name": "kate",
+      "credentials": [
+        {
+          "accessKey": "{{ tummy_access_key_kate }}",
+          "secretKey": "{{ tummy_secret_key_kate }}"
+        }
+      ],
+      "actions": [
+        "Read",
+        "List",
+        "Tagging",
+        "Write"
+      ]
+    },
+    {
+      "name": "friends",
+      "credentials": [
+        {
+          "accessKey": "{{ tummy_access_key_friends }}",
+          "secretKey": "{{ tummy_secret_key_friends }}"
+        }
+      ],
+      "actions": [
+        "Read",
+        "List",
+        "Write"
+      ]
+    },
+    {
+      "name": "anonymous",
+      "credentials": [
+        {
+          "accessKey": "{{ tummy_access_key_public }}",
+          "secretKey": "{{ tummy_secret_key_public }}"
+        }
+      ],
+      "actions": [
+        "Read"
+      ]
+    }
+  ]
+}

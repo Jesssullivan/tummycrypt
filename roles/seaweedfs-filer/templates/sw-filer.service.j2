@@ -1,0 +1,14 @@
+[Unit]
+Description=SeaweedFS Filer
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/weed filer -ip=192.168.101.146 -master={{ms_ip1}}:9333,{{ms_ip2}}:9333,{{ms_ip3}}:9333 -s3 -s3.config=/etc/seaweedfs/config.json -s3.port=8333
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

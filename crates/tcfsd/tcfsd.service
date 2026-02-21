@@ -1,0 +1,31 @@
+[Unit]
+Description=TummyCrypt filesystem daemon (tcfsd)
+Documentation=https://github.com/tinyland-inc/tummycrypt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/tcfsd --config /etc/tcfs/config.toml
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+DynamicUser=yes
+PrivateTmp=yes
+PrivateDevices=no
+DeviceAllow=/dev/fuse rw
+ProtectSystem=strict
+ProtectHome=no
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+ReadWritePaths=/var/lib/tcfsd
+
+# State
+StateDirectory=tcfsd
+RuntimeDirectory=tcfsd
+ConfigurationDirectory=tcfs
+
+[Install]
+WantedBy=multi-user.target

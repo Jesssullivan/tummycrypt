@@ -1,0 +1,4 @@
+# PLACEHOLDER - encrypt with SOPS after running scripts/sops-init.sh
+# kubeconfig_path: ~/.kube/config
+# namespace: tcfs
+# image_tag: latest
