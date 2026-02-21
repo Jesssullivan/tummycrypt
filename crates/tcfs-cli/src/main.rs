@@ -15,9 +15,13 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+#[cfg(unix)]
 use tonic::transport::{Channel, Endpoint, Uri};
+#[cfg(unix)]
 use tower::service_fn;
 
+#[cfg(unix)]
 use tcfs_core::proto::{tcfs_daemon_client::TcfsDaemonClient, Empty, StatusRequest};
 
 // ── CLI structure ──────────────────────────────────────────────────────────────
@@ -230,7 +234,10 @@ async fn main() -> Result<()> {
     let config = load_config(&cli.config).await?;
 
     match cli.command {
+        #[cfg(unix)]
         Commands::Status => cmd_status(&config).await,
+        #[cfg(not(unix))]
+        Commands::Status => anyhow::bail!("status command requires Unix daemon socket (not available on Windows)"),
         Commands::Config {
             action: ConfigAction::Show,
         } => cmd_config_show(&config, &cli.config),
@@ -354,7 +361,9 @@ fn build_operator_from_env(config: &tcfs_core::config::TcfsConfig) -> Result<ope
 fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     if let Some(rest) = s.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
         PathBuf::from(format!("{}/{}", home, rest))
     } else {
         path.to_path_buf()
@@ -620,6 +629,7 @@ fn cmd_sync_status(
 
 // ── `tcfs status` ─────────────────────────────────────────────────────────────
 
+#[cfg(unix)]
 async fn cmd_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     let socket = &config.daemon.socket;
 
@@ -726,7 +736,9 @@ struct VersionCacheEntry {
 }
 
 fn dirs_cache_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     PathBuf::from(home).join(".cache").join("tcfs")
 }
 
@@ -807,6 +819,7 @@ fn print_update_notice(current: &str, latest: &str) {
 
 // ── gRPC connection ───────────────────────────────────────────────────────────
 
+#[cfg(unix)]
 async fn connect_daemon(socket_path: &Path) -> Result<TcfsDaemonClient<Channel>> {
     let path = socket_path.to_path_buf();
 
