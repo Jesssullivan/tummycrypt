@@ -48,9 +48,8 @@
           fuse3
           rocksdb
         ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-          # macOS: use apple_sdk_12_3 (apple_sdk_11_0 alias removed in nixpkgs-unstable)
-          darwin.apple_sdk_12_3.frameworks.Security
-          darwin.apple_sdk_12_3.frameworks.SystemConfiguration
+          darwin.apple_sdk.frameworks.Security
+          darwin.apple_sdk.frameworks.SystemConfiguration
         ];
 
         # Source filter: include .proto files alongside standard Cargo sources
