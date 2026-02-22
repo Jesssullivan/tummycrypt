@@ -107,8 +107,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
     // ── Push: client-streaming upload ─────────────────────────────────────
 
-    type PushStream =
-        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<PushProgress, tonic::Status>> + Send>>;
+    type PushStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<PushProgress, tonic::Status>> + Send>,
+    >;
 
     async fn push(
         &self,
@@ -117,9 +118,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
         use tokio_stream::StreamExt;
 
         let op = self.operator.lock().await;
-        let op = op.as_ref().ok_or_else(|| {
-            tonic::Status::unavailable("no storage operator — check credentials")
-        })?;
+        let op = op
+            .as_ref()
+            .ok_or_else(|| tonic::Status::unavailable("no storage operator — check credentials"))?;
         let op = op.clone();
 
         let state_cache = self.state_cache.clone();
@@ -140,22 +141,21 @@ impl TcfsDaemon for TcfsDaemonImpl {
         }
 
         if path.is_empty() {
-            return Err(tonic::Status::invalid_argument("no path provided in push stream"));
+            return Err(tonic::Status::invalid_argument(
+                "no path provided in push stream",
+            ));
         }
 
         // Write to a temp file and upload via sync engine
-        let tmp_dir = tempfile::tempdir().map_err(|e| {
-            tonic::Status::internal(format!("tempdir: {e}"))
-        })?;
+        let tmp_dir =
+            tempfile::tempdir().map_err(|e| tonic::Status::internal(format!("tempdir: {e}")))?;
         let local_path = tmp_dir.path().join(&path);
         if let Some(parent) = local_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                tonic::Status::internal(format!("mkdir: {e}"))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| tonic::Status::internal(format!("mkdir: {e}")))?;
         }
-        std::fs::write(&local_path, &data).map_err(|e| {
-            tonic::Status::internal(format!("write temp: {e}"))
-        })?;
+        std::fs::write(&local_path, &data)
+            .map_err(|e| tonic::Status::internal(format!("write temp: {e}")))?;
 
         let total_bytes = data.len() as u64;
 
@@ -173,7 +173,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     done: true,
                     error: String::new(),
                 };
-                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(progress)))))
+                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
+                    progress,
+                )))))
             }
             Err(e) => {
                 let progress = PushProgress {
@@ -183,15 +185,18 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     done: true,
                     error: format!("{e}"),
                 };
-                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(progress)))))
+                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
+                    progress,
+                )))))
             }
         }
     }
 
     // ── Pull: server-streaming download ───────────────────────────────────
 
-    type PullStream =
-        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<PullProgress, tonic::Status>> + Send>>;
+    type PullStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<PullProgress, tonic::Status>> + Send>,
+    >;
 
     async fn pull(
         &self,
@@ -200,9 +205,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let req = request.into_inner();
 
         let op = self.operator.lock().await;
-        let op = op.as_ref().ok_or_else(|| {
-            tonic::Status::unavailable("no storage operator — check credentials")
-        })?;
+        let op = op
+            .as_ref()
+            .ok_or_else(|| tonic::Status::unavailable("no storage operator — check credentials"))?;
         let op = op.clone();
 
         let prefix = self.config.storage.bucket.clone();
@@ -220,7 +225,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     done: true,
                     error: String::new(),
                 };
-                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(progress)))))
+                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
+                    progress,
+                )))))
             }
             Err(e) => {
                 let progress = PullProgress {
@@ -229,15 +236,18 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     done: true,
                     error: format!("{e}"),
                 };
-                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(progress)))))
+                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
+                    progress,
+                )))))
             }
         }
     }
 
     // ── Hydrate ───────────────────────────────────────────────────────────
 
-    type HydrateStream =
-        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<HydrateProgress, tonic::Status>> + Send>>;
+    type HydrateStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<HydrateProgress, tonic::Status>> + Send>,
+    >;
 
     async fn hydrate(
         &self,
@@ -296,8 +306,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
     // ── Watch ─────────────────────────────────────────────────────────────
 
-    type WatchStream =
-        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<WatchEvent, tonic::Status>> + Send>>;
+    type WatchStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<WatchEvent, tonic::Status>> + Send>,
+    >;
 
     async fn watch(
         &self,

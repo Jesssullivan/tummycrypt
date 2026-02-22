@@ -52,12 +52,12 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     };
 
     // Open state cache
-    let state_cache = tcfs_sync::state::StateCache::open(&config.sync.state_db)
-        .unwrap_or_else(|e| {
+    let state_cache =
+        tcfs_sync::state::StateCache::open(&config.sync.state_db).unwrap_or_else(|e| {
             warn!("state cache open failed: {e}  (starting fresh)");
-            tcfs_sync::state::StateCache::open(
-                &std::path::PathBuf::from("/tmp/tcfsd-state.db.json"),
-            )
+            tcfs_sync::state::StateCache::open(&std::path::PathBuf::from(
+                "/tmp/tcfsd-state.db.json",
+            ))
             .expect("fallback state cache")
         });
 
