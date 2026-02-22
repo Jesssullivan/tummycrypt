@@ -25,8 +25,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         .clone()
         .unwrap_or_else(tcfs_secrets::device::default_registry_path);
 
-    let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)
-        .unwrap_or_else(|e| {
+    let mut registry =
+        tcfs_secrets::device::DeviceRegistry::load(&registry_path).unwrap_or_else(|e| {
             warn!("device registry load failed: {e} (starting empty)");
             tcfs_secrets::device::DeviceRegistry::default()
         });

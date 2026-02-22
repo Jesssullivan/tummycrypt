@@ -35,9 +35,7 @@ pub fn git_is_safe(git_dir: &Path) -> GitSafetyCheck {
     for lock in &lock_files {
         let lock_path = git_dir.join(lock);
         if lock_path.exists() {
-            check
-                .blocking
-                .push(format!("lock file exists: {}", lock));
+            check.blocking.push(format!("lock file exists: {}", lock));
         }
     }
 
@@ -64,9 +62,7 @@ pub fn git_is_safe(git_dir: &Path) -> GitSafetyCheck {
         if let Ok(modified) = meta.modified() {
             if let Ok(elapsed) = modified.elapsed() {
                 if elapsed.as_secs() > stale_threshold_secs {
-                    check
-                        .warnings
-                        .push("FETCH_HEAD is stale (>1h old)".into());
+                    check.warnings.push("FETCH_HEAD is stale (>1h old)".into());
                 }
             }
         }

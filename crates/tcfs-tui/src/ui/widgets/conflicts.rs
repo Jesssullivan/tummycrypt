@@ -96,10 +96,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         )]
     };
 
-    let detail_widget = Paragraph::new(detail).block(
-        Block::default()
-            .title(" Details ")
-            .borders(Borders::ALL),
-    );
+    let detail_widget =
+        Paragraph::new(detail).block(Block::default().title(" Details ").borders(Borders::ALL));
     frame.render_widget(detail_widget, chunks[1]);
 }

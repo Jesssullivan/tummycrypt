@@ -100,10 +100,7 @@ impl DeviceRegistry {
             .unwrap_or_default()
             .as_secs();
 
-        let signing_hash = blake3::hash(public_key.as_bytes())
-            .to_hex()
-            .as_str()[..16]
-            .to_string();
+        let signing_hash = blake3::hash(public_key.as_bytes()).to_hex().as_str()[..16].to_string();
 
         self.add(DeviceIdentity {
             name: name.to_string(),
@@ -120,11 +117,11 @@ impl DeviceRegistry {
     }
 
     /// Load device registry from S3 remote storage.
-    pub async fn load_remote(
-        op: &opendal::Operator,
-        meta_prefix: &str,
-    ) -> Result<Self> {
-        let key = format!("{}/tcfs-meta/devices.json", meta_prefix.trim_end_matches('/'));
+    pub async fn load_remote(op: &opendal::Operator, meta_prefix: &str) -> Result<Self> {
+        let key = format!(
+            "{}/tcfs-meta/devices.json",
+            meta_prefix.trim_end_matches('/')
+        );
 
         match op.read(&key).await {
             Ok(data) => {
@@ -138,12 +135,11 @@ impl DeviceRegistry {
     }
 
     /// Sync (upload) device registry to S3 remote storage.
-    pub async fn sync_to_remote(
-        &self,
-        op: &opendal::Operator,
-        meta_prefix: &str,
-    ) -> Result<()> {
-        let key = format!("{}/tcfs-meta/devices.json", meta_prefix.trim_end_matches('/'));
+    pub async fn sync_to_remote(&self, op: &opendal::Operator, meta_prefix: &str) -> Result<()> {
+        let key = format!(
+            "{}/tcfs-meta/devices.json",
+            meta_prefix.trim_end_matches('/')
+        );
         let json = serde_json::to_string_pretty(self).context("serializing device registry")?;
         op.write(&key, json.into_bytes())
             .await
@@ -158,7 +154,10 @@ impl DeviceRegistry {
         name: &str,
         meta_prefix: &str,
     ) -> Result<String> {
-        let public_key = format!("age1-device-{}", &blake3::hash(name.as_bytes()).to_hex().as_str()[..8]);
+        let public_key = format!(
+            "age1-device-{}",
+            &blake3::hash(name.as_bytes()).to_hex().as_str()[..8]
+        );
         let device_id = self.enroll(name, &public_key, None);
         self.sync_to_remote(op, meta_prefix).await?;
         Ok(device_id)

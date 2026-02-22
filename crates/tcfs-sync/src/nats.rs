@@ -345,13 +345,12 @@ mod inner {
                     STREAM_STATE,
                 )
                 .await
-                .map_err(|e| {
-                    anyhow::anyhow!("creating state consumer '{consumer_name}': {e}")
-                })?;
+                .map_err(|e| anyhow::anyhow!("creating state consumer '{consumer_name}': {e}"))?;
 
-            let messages = consumer.messages().await.map_err(|e| {
-                anyhow::anyhow!("opening state consumer message stream: {e}")
-            })?;
+            let messages = consumer
+                .messages()
+                .await
+                .map_err(|e| anyhow::anyhow!("opening state consumer message stream: {e}"))?;
 
             let stream = messages.map(|msg_result| {
                 let msg = msg_result.map_err(|e| anyhow::anyhow!("receiving state msg: {e}"))?;

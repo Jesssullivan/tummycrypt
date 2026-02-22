@@ -109,8 +109,7 @@ fn execute_op(
                 .map(|(_, vc)| vc.clone())
                 .unwrap_or_default();
             vclock.tick(&m.device_id);
-            m.files
-                .insert(path.clone(), (content_hash.clone(), vclock));
+            m.files.insert(path.clone(), (content_hash.clone(), vclock));
             None
         }
 
@@ -257,10 +256,8 @@ fn execute_op(
                                 // Keep local, merge vclock
                                 let mut merged = local_vclock.clone();
                                 merged.merge(&event.vclock);
-                                m.files.insert(
-                                    event.rel_path.clone(),
-                                    (local_hash.clone(), merged),
-                                );
+                                m.files
+                                    .insert(event.rel_path.clone(), (local_hash.clone(), merged));
                             }
                             SyncOutcome::Conflict(_) => {
                                 // For simulation: auto-resolve by taking remote
@@ -661,10 +658,7 @@ fn test_three_machine_basic_sync() {
     );
 
     // Machine 1 should have the same content
-    assert_eq!(
-        machines[1].files.get("readme.md").unwrap().0,
-        "hash_v1"
-    );
+    assert_eq!(machines[1].files.get("readme.md").unwrap().0, "hash_v1");
 
     // Machine 2 processes events and gets the file
     execute_op(
@@ -674,10 +668,7 @@ fn test_three_machine_basic_sync() {
         &SimOp::ProcessEvents { machine: 2 },
     );
 
-    assert_eq!(
-        machines[2].files.get("readme.md").unwrap().0,
-        "hash_v1"
-    );
+    assert_eq!(machines[2].files.get("readme.md").unwrap().0, "hash_v1");
 }
 
 #[test]
@@ -715,10 +706,7 @@ fn test_offline_machine_catches_up() {
             &mut machines,
             &mut remote,
             &mut nats,
-            &SimOp::Push {
-                machine: 0,
-                path,
-            },
+            &SimOp::Push { machine: 0, path },
         );
     }
 

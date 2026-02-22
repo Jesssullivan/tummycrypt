@@ -142,8 +142,7 @@ pub async fn upload_file_with_device(
     if !device_id.is_empty() {
         if let Ok(true) = op.exists(&remote_manifest).await {
             if let Ok(remote_bytes) = op.read(&remote_manifest).await {
-                if let Ok(remote_manifest_obj) =
-                    SyncManifest::from_bytes(&remote_bytes.to_bytes())
+                if let Ok(remote_manifest_obj) = SyncManifest::from_bytes(&remote_bytes.to_bytes())
                 {
                     let local_hash = &file_hash_hex;
                     let remote_hash = &remote_manifest_obj.file_hash;
@@ -216,7 +215,9 @@ pub async fn upload_file_with_device(
 
     // Check if this exact content is already stored (content-addressed dedup)
     // Only check when we haven't already done the remote manifest check above
-    if outcome.is_none() && op.exists(&remote_manifest).await.unwrap_or(false) && device_id.is_empty()
+    if outcome.is_none()
+        && op.exists(&remote_manifest).await.unwrap_or(false)
+        && device_id.is_empty()
     {
         debug!(hash = %file_hash_hex, "dedup: manifest already exists");
         let remote_path = remote_manifest.clone();
@@ -336,8 +337,16 @@ pub async fn download_file(
     remote_prefix: &str,
     progress: Option<&ProgressFn>,
 ) -> Result<DownloadResult> {
-    download_file_with_device(op, remote_manifest, local_path, remote_prefix, progress, "", None)
-        .await
+    download_file_with_device(
+        op,
+        remote_manifest,
+        local_path,
+        remote_prefix,
+        progress,
+        "",
+        None,
+    )
+    .await
 }
 
 /// Download with device identity and vector clock merge.

@@ -41,9 +41,7 @@ pub struct PushInput {
 pub struct ResolveConflictInput {
     #[schemars(description = "Relative path of the conflicting file")]
     pub rel_path: String,
-    #[schemars(
-        description = "Resolution: 'keep_local', 'keep_remote', 'keep_both', or 'defer'"
-    )]
+    #[schemars(description = "Resolution: 'keep_local', 'keep_remote', 'keep_both', or 'defer'")]
     pub resolution: String,
 }
 
@@ -261,9 +259,7 @@ impl TcfsMcp {
         .to_string()
     }
 
-    #[tool(
-        description = "Show all enrolled devices in the fleet and their sync status"
-    )]
+    #[tool(description = "Show all enrolled devices in the fleet and their sync status")]
     async fn device_status(&self) -> String {
         let registry_path = tcfs_secrets::device::default_registry_path();
         match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {

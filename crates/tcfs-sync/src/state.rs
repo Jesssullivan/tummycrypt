@@ -109,9 +109,7 @@ impl StateCache {
         self.entries
             .iter()
             .find(|(_, state)| {
-                state
-                    .remote_path
-                    .ends_with(&format!("/{}", rel_path))
+                state.remote_path.ends_with(&format!("/{}", rel_path))
                     || state.remote_path == rel_path
             })
             .map(|(k, v)| (k.as_str(), v))

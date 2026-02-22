@@ -66,8 +66,7 @@ impl SyncManifest {
 
     /// Serialize manifest to v2 JSON bytes.
     pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        serde_json::to_vec_pretty(self)
-            .map_err(|e| anyhow::anyhow!("serializing manifest: {e}"))
+        serde_json::to_vec_pretty(self).map_err(|e| anyhow::anyhow!("serializing manifest: {e}"))
     }
 
     /// Extract the ordered chunk hashes (compatible with v1 consumer code).

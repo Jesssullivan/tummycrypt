@@ -108,8 +108,7 @@ impl App {
             // Conflicts tab shortcuts
             KeyCode::Char('j') | KeyCode::Down if self.tab == Tab::Conflicts => {
                 if !self.conflicts.is_empty() {
-                    self.conflict_selected =
-                        (self.conflict_selected + 1) % self.conflicts.len();
+                    self.conflict_selected = (self.conflict_selected + 1) % self.conflicts.len();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up if self.tab == Tab::Conflicts => {
