@@ -11,6 +11,7 @@ pub struct TcfsConfig {
     pub sync: SyncConfig,
     pub fuse: FuseConfig,
     pub crypto: CryptoConfig,
+    pub sops: SopsConfig,
     /// Warn if the config file is world-readable (default: true)
     #[serde(default = "default_true")]
     pub config_file_mode_check: bool,
@@ -118,6 +119,37 @@ impl Default for CryptoConfig {
             argon2_parallelism: 4,
             master_key_file: None,
             device_identity: None,
+        }
+    }
+}
+
+/// SOPS secret propagation configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SopsConfig {
+    /// Enable SOPS secret propagation
+    pub enabled: bool,
+    /// Local SOPS-managed directory to watch/sync
+    pub sops_dir: PathBuf,
+    /// S3 prefix for SOPS sync data
+    pub sync_prefix: String,
+    /// Machine identifier (defaults to hostname)
+    pub machine_id: Option<String>,
+    /// Local backup directory for pre-mutation snapshots
+    pub backup_dir: PathBuf,
+    /// Auto-watch for filesystem changes and push
+    pub watch: bool,
+}
+
+impl Default for SopsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sops_dir: PathBuf::from("~/.config/sops/age"),
+            sync_prefix: "sops-sync".into(),
+            machine_id: None,
+            backup_dir: PathBuf::from("~/.local/share/tcfs/sops-backups"),
+            watch: false,
         }
     }
 }

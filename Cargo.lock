@@ -4511,6 +4511,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcfs-sops"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "notify",
+ "serde",
+ "serde_json",
+ "tcfs-core",
+ "tcfs-crypto",
+ "tcfs-storage",
+ "tempfile",
+ "tokio",
+ "tokio-test",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "tcfs-storage"
 version = "0.1.0"
 dependencies = [
@@ -4555,12 +4574,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "hyper-util",
  "ratatui",
  "tcfs-core",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "toml 0.8.23",
  "tonic",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

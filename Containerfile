@@ -37,12 +37,13 @@ COPY crates/tcfs-chunks/Cargo.toml    crates/tcfs-chunks/
 COPY crates/tcfs-sync/Cargo.toml      crates/tcfs-sync/
 COPY crates/tcfs-fuse/Cargo.toml      crates/tcfs-fuse/
 COPY crates/tcfs-cloudfilter/Cargo.toml crates/tcfs-cloudfilter/
+COPY crates/tcfs-sops/Cargo.toml     crates/tcfs-sops/
 COPY crates/tcfsd/Cargo.toml          crates/tcfsd/
 COPY crates/tcfs-cli/Cargo.toml       crates/tcfs-cli/
 COPY crates/tcfs-tui/Cargo.toml       crates/tcfs-tui/
 
 # Create stub lib/main files so cargo can compute the dependency graph
-RUN for d in tcfs-core tcfs-crypto tcfs-secrets tcfs-storage tcfs-chunks tcfs-sync tcfs-fuse tcfs-cloudfilter tcfs-tui; do \
+RUN for d in tcfs-core tcfs-crypto tcfs-secrets tcfs-storage tcfs-chunks tcfs-sync tcfs-fuse tcfs-cloudfilter tcfs-sops tcfs-tui; do \
       mkdir -p crates/$d/src && echo "// stub" > crates/$d/src/lib.rs; \
     done && \
     mkdir -p crates/tcfsd/src crates/tcfs-cli/src && \
