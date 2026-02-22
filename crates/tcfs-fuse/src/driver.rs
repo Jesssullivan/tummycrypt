@@ -165,6 +165,8 @@ mod inner {
                 atime: self.mount_time,
                 mtime: self.mount_time,
                 ctime: self.mount_time,
+                #[cfg(target_os = "macos")]
+                crtime: self.mount_time,
                 kind: FileType::RegularFile,
                 perm: PERM_FILE,
                 nlink: 1,
@@ -172,6 +174,8 @@ mod inner {
                 gid: self.gid,
                 rdev: 0,
                 blksize: 4096,
+                #[cfg(target_os = "macos")]
+                flags: 0,
             }
         }
 
@@ -183,6 +187,8 @@ mod inner {
                 atime: self.mount_time,
                 mtime: self.mount_time,
                 ctime: self.mount_time,
+                #[cfg(target_os = "macos")]
+                crtime: self.mount_time,
                 kind: FileType::Directory,
                 perm: PERM_DIR,
                 nlink: 2,
@@ -190,6 +196,8 @@ mod inner {
                 gid: self.gid,
                 rdev: 0,
                 blksize: 4096,
+                #[cfg(target_os = "macos")]
+                flags: 0,
             }
         }
     }
