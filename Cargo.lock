@@ -4607,6 +4607,7 @@ dependencies = [
  "tcfs-secrets",
  "tcfs-storage",
  "tcfs-sync",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",

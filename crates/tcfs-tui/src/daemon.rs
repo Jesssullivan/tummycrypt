@@ -1,15 +1,17 @@
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use anyhow::Result;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
-use tonic::transport::{Channel, Endpoint, Uri};
-use tower::service_fn;
-use tracing::{debug, warn};
 
-use tcfs_core::proto::{
-    tcfs_daemon_client::TcfsDaemonClient, CredentialStatusResponse, Empty, StatusRequest,
-    StatusResponse,
+use tcfs_core::proto::{CredentialStatusResponse, StatusResponse};
+
+#[cfg(unix)]
+use {
+    anyhow::Result,
+    std::path::Path,
+    std::time::Duration,
+    tcfs_core::proto::{tcfs_daemon_client::TcfsDaemonClient, Empty, StatusRequest},
+    tonic::transport::{Channel, Endpoint, Uri},
+    tower::service_fn,
+    tracing::{debug, warn},
 };
 
 pub enum DaemonUpdate {
@@ -18,6 +20,7 @@ pub enum DaemonUpdate {
     Disconnected(String),
 }
 
+#[cfg(unix)]
 async fn connect(socket_path: &Path) -> Result<TcfsDaemonClient<Channel>> {
     let path = socket_path.to_path_buf();
     let channel = Endpoint::from_static("http://[::]:0")
@@ -33,6 +36,23 @@ async fn connect(socket_path: &Path) -> Result<TcfsDaemonClient<Channel>> {
 }
 
 pub async fn poll_daemon(socket_path: PathBuf, tx: mpsc::Sender<DaemonUpdate>) {
+    #[cfg(not(unix))]
+    {
+        let _ = socket_path;
+        let _ = tx
+            .send(DaemonUpdate::Disconnected(
+                "daemon not supported on this platform".into(),
+            ))
+            .await;
+        return;
+    }
+
+    #[cfg(unix)]
+    poll_daemon_unix(socket_path, tx).await;
+}
+
+#[cfg(unix)]
+async fn poll_daemon_unix(socket_path: PathBuf, tx: mpsc::Sender<DaemonUpdate>) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(10);
 
