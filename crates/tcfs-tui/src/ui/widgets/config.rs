@@ -70,16 +70,20 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         "NATS TLS",
         if c.sync.nats_tls { "Yes" } else { "No" },
     );
-    kv(&mut lines, "State DB", &c.sync.state_db.display().to_string());
+    kv(
+        &mut lines,
+        "State DB",
+        &c.sync.state_db.display().to_string(),
+    );
     kv(&mut lines, "Workers", &c.sync.workers.to_string());
 
     section_header(&mut lines, "FUSE");
-    kv(&mut lines, "Cache Dir", &c.fuse.cache_dir.display().to_string());
     kv(
         &mut lines,
-        "Cache Max MB",
-        &c.fuse.cache_max_mb.to_string(),
+        "Cache Dir",
+        &c.fuse.cache_dir.display().to_string(),
     );
+    kv(&mut lines, "Cache Max MB", &c.fuse.cache_max_mb.to_string());
 
     section_header(&mut lines, "Crypto");
     kv(

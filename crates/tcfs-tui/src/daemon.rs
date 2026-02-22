@@ -48,7 +48,11 @@ pub async fn poll_daemon(socket_path: PathBuf, tx: mpsc::Sender<DaemonUpdate>) {
                     // Poll status
                     match client.status(StatusRequest {}).await {
                         Ok(resp) => {
-                            if tx.send(DaemonUpdate::Status(resp.into_inner())).await.is_err() {
+                            if tx
+                                .send(DaemonUpdate::Status(resp.into_inner()))
+                                .await
+                                .is_err()
+                            {
                                 return; // receiver dropped
                             }
                         }
@@ -63,7 +67,11 @@ pub async fn poll_daemon(socket_path: PathBuf, tx: mpsc::Sender<DaemonUpdate>) {
                     // Poll credential status
                     match client.credential_status(Empty {}).await {
                         Ok(resp) => {
-                            if tx.send(DaemonUpdate::Creds(resp.into_inner())).await.is_err() {
+                            if tx
+                                .send(DaemonUpdate::Creds(resp.into_inner()))
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                         }

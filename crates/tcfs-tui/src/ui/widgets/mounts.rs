@@ -50,11 +50,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = vec![Row::new(vec![
-        "(mount data pending)",
-        "",
-        "",
-    ])];
+    let rows: Vec<Row> = vec![Row::new(vec!["(mount data pending)", "", ""])];
 
     let widths = [
         ratatui::layout::Constraint::Percentage(40),
@@ -62,9 +58,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         ratatui::layout::Constraint::Percentage(20),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block);
+    let table = Table::new(rows, widths).header(header).block(block);
 
     f.render_widget(table, area);
 }

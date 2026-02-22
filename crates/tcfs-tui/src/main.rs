@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -67,8 +69,7 @@ async fn main() -> Result<()> {
     let (config_path, socket_path) = parse_args();
 
     let config: tcfs_core::config::TcfsConfig = if config_path.exists() {
-        let contents =
-            std::fs::read_to_string(&config_path).context("reading config")?;
+        let contents = std::fs::read_to_string(&config_path).context("reading config")?;
         toml::from_str(&contents).unwrap_or_default()
     } else {
         tcfs_core::config::TcfsConfig::default()

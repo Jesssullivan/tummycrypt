@@ -70,17 +70,11 @@ fn draw_status_card(f: &mut Frame, app: &App, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::styled("  Storage:  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        if s.storage_ok { "OK" } else { "FAIL" },
-                        storage_style,
-                    ),
+                    Span::styled(if s.storage_ok { "OK" } else { "FAIL" }, storage_style),
                 ]),
                 Line::from(vec![
                     Span::styled("  NATS:     ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        if s.nats_ok { "OK" } else { "N/A" },
-                        nats_style,
-                    ),
+                    Span::styled(if s.nats_ok { "OK" } else { "N/A" }, nats_style),
                 ]),
                 Line::from(vec![
                     Span::styled("  Mounts:   ", Style::default().fg(Color::DarkGray)),
@@ -154,14 +148,7 @@ fn draw_cred_card(f: &mut Frame, app: &App, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::styled("  Reload: ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        if c.needs_reload {
-                            "NEEDED"
-                        } else {
-                            "No"
-                        },
-                        reload_style,
-                    ),
+                    Span::styled(if c.needs_reload { "NEEDED" } else { "No" }, reload_style),
                 ]),
             ];
             f.render_widget(Paragraph::new(lines).block(block), area);

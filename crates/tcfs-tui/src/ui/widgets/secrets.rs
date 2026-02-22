@@ -26,9 +26,7 @@ fn draw_cred_detail(f: &mut Frame, app: &App, area: Rect) {
             let loaded_style = if c.loaded {
                 Style::default().fg(Color::Green)
             } else {
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             };
 
             let lines = vec![

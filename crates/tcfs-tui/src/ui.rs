@@ -13,7 +13,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // header + tabs
-            Constraint::Min(0),   // body
+            Constraint::Min(0),    // body
             Constraint::Length(1), // footer
         ])
         .split(f.area());
@@ -54,10 +54,7 @@ fn draw_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
 
     let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .title(vec![
+        .block(Block::default().borders(Borders::BOTTOM).title(vec![
                     Span::styled(
                         " tcfs-tui ",
                         Style::default()
@@ -65,8 +62,7 @@ fn draw_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     status_indicator,
-                ]),
-        )
+                ]))
         .select(selected)
         .highlight_style(Style::default().fg(Color::Cyan));
 

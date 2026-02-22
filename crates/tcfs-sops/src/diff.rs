@@ -41,7 +41,10 @@ impl SopsDiff {
         let mut diff = SopsDiff::default();
 
         for local_entry in local {
-            match remote.iter().find(|r| r.relative_path == local_entry.relative_path) {
+            match remote
+                .iter()
+                .find(|r| r.relative_path == local_entry.relative_path)
+            {
                 Some(remote_entry) => {
                     if local_entry.blake3_hash == remote_entry.blake3_hash {
                         diff.unchanged.push(local_entry.clone());
@@ -56,7 +59,10 @@ impl SopsDiff {
         }
 
         for remote_entry in remote {
-            if !local.iter().any(|l| l.relative_path == remote_entry.relative_path) {
+            if !local
+                .iter()
+                .any(|l| l.relative_path == remote_entry.relative_path)
+            {
                 diff.remote_only.push(remote_entry.clone());
             }
         }

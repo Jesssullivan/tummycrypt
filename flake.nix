@@ -48,8 +48,7 @@
           fuse3
           rocksdb
         ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-          darwin.apple_sdk.frameworks.Security
-          darwin.apple_sdk.frameworks.SystemConfiguration
+          apple-sdk
         ];
 
         # Source filter: include .proto files alongside standard Cargo sources

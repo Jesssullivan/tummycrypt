@@ -27,8 +27,13 @@ pub fn backup_file(
             .with_context(|| format!("creating backup dir: {}", parent.display()))?;
     }
 
-    std::fs::copy(source, &backup_path)
-        .with_context(|| format!("backing up {} -> {}", source.display(), backup_path.display()))?;
+    std::fs::copy(source, &backup_path).with_context(|| {
+        format!(
+            "backing up {} -> {}",
+            source.display(),
+            backup_path.display()
+        )
+    })?;
 
     info!(
         source = %source.display(),
@@ -57,8 +62,7 @@ pub fn write_with_backup(
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(target, content)
-        .with_context(|| format!("writing {}", target.display()))?;
+    std::fs::write(target, content).with_context(|| format!("writing {}", target.display()))?;
 
     Ok(())
 }
@@ -70,12 +74,8 @@ mod tests {
     #[test]
     fn test_backup_nonexistent_file() {
         let dir = tempfile::tempdir().unwrap();
-        let result = backup_file(
-            Path::new("/nonexistent/file.yaml"),
-            dir.path(),
-            "file.yaml",
-        )
-        .unwrap();
+        let result =
+            backup_file(Path::new("/nonexistent/file.yaml"), dir.path(), "file.yaml").unwrap();
         assert!(result.is_none());
     }
 

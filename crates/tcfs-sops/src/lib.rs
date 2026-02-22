@@ -64,7 +64,10 @@ impl SopsSync {
         let local_entries = scan_local_dir(&self.config.sops_dir)?;
         for entry in &local_entries {
             // Update or insert
-            if let Some(existing) = manifest.iter_mut().find(|e| e.relative_path == entry.relative_path) {
+            if let Some(existing) = manifest
+                .iter_mut()
+                .find(|e| e.relative_path == entry.relative_path)
+            {
                 existing.blake3_hash = entry.blake3_hash.clone();
                 existing.machine_id = self.config.machine_id.clone();
             } else {
