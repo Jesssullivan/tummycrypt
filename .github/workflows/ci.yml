@@ -68,7 +68,7 @@ jobs:
         run: nix flake check
 
       - name: Build all packages
-        run: nix build .#tcfsd .#tcfs-cli .#tcfs-tui
+        run: nix build .#tcfsd .#tcfs-cli .#tcfs-tui .#tcfs-mcp
 
   deny:
     name: cargo-deny

@@ -200,6 +200,16 @@ jobs:
             --target ${{ matrix.target }} \
             -p tcfs-tui
 
+      # ── Build tcfs-mcp ──────────────────────────────────────────────────
+
+      - name: Build tcfs-mcp
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo build --release \
+            --target ${{ matrix.target }} \
+            -p tcfs-mcp
+
       # ── Package archive ──────────────────────────────────────────────────
 
       - name: Package archive (Unix)
@@ -210,6 +220,7 @@ jobs:
           cp target/${{ matrix.target }}/release/tcfs   "${DIST}/"
           cp target/${{ matrix.target }}/release/tcfsd  "${DIST}/" 2>/dev/null || true
           cp target/${{ matrix.target }}/release/tcfs-tui "${DIST}/"
+          cp target/${{ matrix.target }}/release/tcfs-mcp "${DIST}/" 2>/dev/null || true
           cp README.md LICENSE* "${DIST}/" 2>/dev/null || true
           tar czf "${DIST}.tar.gz" "${DIST}"
 
@@ -355,7 +366,7 @@ jobs:
 
       - name: Build all Nix packages
         run: |
-          for pkg in tcfsd tcfs-cli tcfs-tui; do
+          for pkg in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
             echo "Building ${pkg}..."
             nix build .#${pkg} -o result-${pkg}
           done
@@ -363,7 +374,7 @@ jobs:
       - name: Push to Attic cache
         if: env.ATTIC_CONFIGURED == 'true'
         run: |
-          for pkg in tcfsd tcfs-cli tcfs-tui; do
+          for pkg in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
             attic push main result-${pkg} || echo "::warning::Failed to push ${pkg}"
           done
 
@@ -416,19 +427,23 @@ jobs:
             cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs" "${INSTALL_DIR}/"
             cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfsd" "${INSTALL_DIR}/"
             cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs-tui" "${INSTALL_DIR}/"
+            cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs-mcp" "${INSTALL_DIR}/" 2>/dev/null || true
           else
             sudo cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs" "${INSTALL_DIR}/"
             sudo cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfsd" "${INSTALL_DIR}/"
             sudo cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs-tui" "${INSTALL_DIR}/"
+            sudo cp "${TMPDIR}/tcfs-${VERSION}-${PLATFORM}/tcfs-mcp" "${INSTALL_DIR}/" 2>/dev/null || true
           fi
 
           chmod +x "${INSTALL_DIR}/tcfs" "${INSTALL_DIR}/tcfsd" "${INSTALL_DIR}/tcfs-tui"
+          chmod +x "${INSTALL_DIR}/tcfs-mcp" 2>/dev/null || true
 
           echo ""
           echo "tcfs ${TAG} installed successfully!"
-          echo "  tcfs   → ${INSTALL_DIR}/tcfs"
-          echo "  tcfsd  → ${INSTALL_DIR}/tcfsd"
+          echo "  tcfs     → ${INSTALL_DIR}/tcfs"
+          echo "  tcfsd    → ${INSTALL_DIR}/tcfsd"
           echo "  tcfs-tui → ${INSTALL_DIR}/tcfs-tui"
+          echo "  tcfs-mcp → ${INSTALL_DIR}/tcfs-mcp"
           echo ""
           echo "Run 'tcfs status' to get started."
           INSTALLER
@@ -563,6 +578,7 @@ jobs:
             | `tcfs` | CLI: push, pull, sync-status, mount, unsync |
             | `tcfsd` | Daemon: gRPC socket, FUSE, Prometheus metrics |
             | `tcfs-tui` | Terminal UI for interactive management |
+            | `tcfs-mcp` | MCP server for AI agent integration |
 
   # ── Update Homebrew tap formula ──────────────────────────────────────────
 
