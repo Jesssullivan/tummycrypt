@@ -21,6 +21,7 @@ result-*
 id_rsa
 id_ed25519
 certs/
+certs.tar.gz
 .env
 .env.*
 !.env.example

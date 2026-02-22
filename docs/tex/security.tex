@@ -1,0 +1,233 @@
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\fancyhead[L]{\small\textsc{tcfs}}
+\fancyhead[R]{\small Security Model}
+
+\title{tcfs Security Model}
+\author{tcfs / TummyCrypt}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Threat Model}
+
+\tcfs{} protects user data stored on self-hosted SeaweedFS. The primary threats
+are:
+
+\begin{enumerate}
+  \item \textbf{Storage compromise} --- attacker gains read access to SeaweedFS
+        volumes.
+  \item \textbf{Network interception} --- attacker observes S3/NATS traffic.
+  \item \textbf{Client compromise} --- attacker gains access to an enrolled device.
+  \item \textbf{Credential theft} --- attacker obtains S3 access keys.
+\end{enumerate}
+
+\subsection{What tcfs Protects Against}
+
+\begin{description}
+  \item[At-rest confidentiality] Files are encrypted client-side before upload
+    using XChaCha20-Poly1305. The storage operator never sees plaintext.
+  \item[Credential exposure in memory] S3 secret keys are held in
+    \code{SecretString} (zeroized on drop).
+  \item[Credential exposure on disk] Credentials are stored in SOPS-encrypted
+    YAML, decrypted at runtime with age identities.
+  \item[Password visibility] KDBX passwords are read via \code{rpassword},
+    never passed as CLI arguments (preventing \code{ps} exposure).
+\end{description}
+
+\subsection{What tcfs Does NOT Protect Against}
+
+\begin{description}
+  \item[Key extraction] A root-level attacker with ptrace access can read
+    decrypted keys from process memory.
+  \item[Compromised devices] If a device's age private key is extracted,
+    an attacker can decrypt all files accessible to that device.
+  \item[Denial of service] \tcfs{} does not defend against data deletion or
+    corruption on SeaweedFS.
+\end{description}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Encryption Architecture}
+
+\subsection{Key Hierarchy}
+
+\begin{description}
+  \item[User Master Key] 256-bit, derived via Argon2id from user passphrase.
+    Root of all derived keys.
+  \item[File Encryption Key] Per-file, 256-bit random. Wrapped by master key
+    using XChaCha20-Poly1305. Used for chunk encryption.
+  \item[Manifest Encryption Key] Derived via HKDF-SHA256 from master key.
+    Encrypts file manifests (chunk lists, metadata).
+  \item[Name Encryption Key] Derived via HKDF-SHA256 from master key.
+    AES-SIV deterministic filename encryption.
+\end{description}
+
+\subsection{Chunk Encryption}
+
+Each file chunk is independently encrypted:
+
+\begin{enumerate}
+  \item Plaintext chunk is compressed with zstd (level 3).
+  \item Compressed data is encrypted with XChaCha20-Poly1305:
+    \begin{itemize}
+      \item Key: file encryption key (256-bit)
+      \item Nonce: 192-bit random (no nonce management required)
+      \item AAD: \code{chunk\_index} (8 bytes BE) $\|$ \code{file\_id} (32 bytes)
+    \end{itemize}
+  \item BLAKE3 hash of the ciphertext becomes the CAS key.
+  \item Ciphertext is uploaded to SeaweedFS.
+\end{enumerate}
+
+Chunk format on disk/wire:
+
+\begin{lstlisting}
+[24 bytes: nonce][N bytes: ciphertext][16 bytes: Poly1305 tag]
+\end{lstlisting}
+
+\subsection{Recovery Key}
+
+A BIP-39 24-word mnemonic is generated during \code{tcfs init}. This mnemonic
+can regenerate the master key independently of the passphrase. Users must
+store it offline in a secure location.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Credential Management}
+
+\subsection{Discovery Chain}
+
+Credentials are discovered in order of precedence:
+
+\begin{enumerate}
+  \item \code{\$CREDENTIALS\_DIRECTORY/age-identity} --- systemd
+        \code{LoadCredentialEncrypted}
+  \item \code{\$SOPS\_AGE\_KEY\_FILE} --- path to an age key file
+  \item \code{\$SOPS\_AGE\_KEY} --- literal age key content
+  \item \filepath{\textasciitilde/.config/sops/age/keys.txt} --- default fallback
+\end{enumerate}
+
+\subsection{SOPS-Encrypted Files}
+
+S3 credentials are stored in SOPS-encrypted YAML files. At runtime, \tcfsd{}
+decrypts these files using the discovered age identity, extracting
+\code{access\_key\_id} and \code{secret\_access\_key} for the OpenDAL S3
+operator.
+
+\subsection{Memory Safety}
+
+\begin{itemize}
+  \item \code{secret\_access\_key} stored as \code{secrecy::SecretString}
+        (zeroized on drop).
+  \item Temporary plaintext copies explicitly \code{zeroize()}'d after use.
+  \item Debug formatting redacts secrets:
+        \code{S3Credentials \{ secret\_access\_key: "[REDACTED]" \}}.
+\end{itemize}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Credential Rotation}
+
+\subsection{Automated Rotation}
+
+\tcfsd{} watches the SOPS credential file for changes. When modified:
+
+\begin{enumerate}
+  \item A 500ms debounce coalesces rapid writes (e.g., atomic replace).
+  \item The file is re-decrypted with the configured age identity.
+  \item The shared credential store is atomically swapped.
+  \item Existing S3 connections continue with old credentials until the next
+        request.
+\end{enumerate}
+
+\subsection{Manual Rotation}
+
+\begin{lstlisting}[language=bash]
+# Interactive
+tcfs rotate-credentials
+
+# Non-interactive (reads from environment)
+tcfs rotate-credentials --non-interactive
+\end{lstlisting}
+
+The non-interactive mode reads \code{AWS\_ACCESS\_KEY\_ID} and
+\code{AWS\_SECRET\_ACCESS\_KEY} from the environment.
+
+Each rotation creates a timestamped SOPS-encrypted backup:
+\code{credentials.sops.yaml.bak.<epoch>}.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{TLS Configuration}
+
+\subsection{S3 (SeaweedFS)}
+
+\begin{lstlisting}[language=toml]
+[storage]
+endpoint = "https://seaweedfs.example.com:8333"
+enforce_tls = true
+ca_cert_path = "/etc/tcfs/certs/ca.pem"
+\end{lstlisting}
+
+When \code{enforce\_tls = true}, HTTP endpoints produce an error at startup.
+When \code{false} (default), HTTP endpoints produce a warning.
+
+\subsection{NATS}
+
+\begin{lstlisting}[language=toml]
+[sync]
+nats_url = "tls://nats.example.com:4222"
+nats_tls = true
+nats_ca_cert = "/etc/tcfs/certs/nats-ca.pem"
+\end{lstlisting}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Device Identity}
+
+Each enrolled device has:
+
+\begin{itemize}
+  \item An age X25519 keypair (generated during \code{tcfs init}).
+  \item A device registry entry (\filepath{\textasciitilde/.local/share/tcfs/devices.json}).
+  \item Platform keychain storage for session keys (macOS Keychain,
+        GNOME Keyring, Windows Credential Manager).
+\end{itemize}
+
+\subsection{Revoking a Device}
+
+\begin{lstlisting}[language=bash]
+tcfs device revoke <device-name>
+\end{lstlisting}
+
+Marks the device as revoked in the registry. Future versions will implement
+key re-encryption to exclude revoked devices from new file keys.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Config File Security}
+
+When \code{config\_file\_mode\_check = true} (default), \tcfsd{} warns at
+startup if the configuration file is world-readable.
+
+\begin{lstlisting}[language=bash]
+chmod 600 /etc/tcfs/config.toml
+chmod 600 /etc/tcfs/credentials.sops.yaml
+chown tcfs:tcfs /etc/tcfs/*
+\end{lstlisting}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Reporting Security Issues}
+
+Report security vulnerabilities to: \href{mailto:jess@sulliwood.org}{jess@sulliwood.org}.
+
+\begin{itemize}
+  \item Description of the vulnerability
+  \item Steps to reproduce
+  \item Potential impact
+  \item Suggested fix (if any)
+\end{itemize}
+
+We aim to acknowledge reports within 48 hours and provide a fix within 7 days
+for critical issues.
+
+\end{document}

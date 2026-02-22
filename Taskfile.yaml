@@ -67,20 +67,20 @@ tasks:
       - generate-certs
     cmds:
       - docker-compose up -d
-      - echo ""
-      - echo "Local dev stack started:"
-      - echo "  SeaweedFS master-1:  http://localhost:9333"
-      - echo "  SeaweedFS master-2:  http://localhost:9334"
-      - echo "  SeaweedFS master-3:  http://localhost:9335"
-      - echo "  SeaweedFS volume:    http://localhost:8080"
-      - echo "  SeaweedFS filer:     http://localhost:8888"
-      - echo "  SeaweedFS S3:        http://localhost:8333"
-      - echo "  NATS:                nats://localhost:4222"
-      - echo "  NATS monitoring:     http://localhost:8222"
-      - echo "  Prometheus:          http://localhost:9090"
-      - echo "  Grafana:             http://localhost:3000 (admin/admin)"
-      - echo ""
-      - echo "Logs: docker-compose logs -f"
+      - cmd: 'echo ""'
+      - cmd: 'echo "Local dev stack started:"'
+      - cmd: 'echo "  SeaweedFS master-1:  http://localhost:9333"'
+      - cmd: 'echo "  SeaweedFS master-2:  http://localhost:9334"'
+      - cmd: 'echo "  SeaweedFS master-3:  http://localhost:9335"'
+      - cmd: 'echo "  SeaweedFS volume:    http://localhost:8080"'
+      - cmd: 'echo "  SeaweedFS filer:     http://localhost:8888"'
+      - cmd: 'echo "  SeaweedFS S3:        http://localhost:8333"'
+      - cmd: 'echo "  NATS:                nats://localhost:4222"'
+      - cmd: 'echo "  NATS monitoring:     http://localhost:8222"'
+      - cmd: 'echo "  Prometheus:          http://localhost:9090"'
+      - cmd: 'echo "  Grafana:             http://localhost:3000 (admin/admin)"'
+      - cmd: 'echo ""'
+      - cmd: 'echo "Logs: docker-compose logs -f"'
 
   dev:stop:
     desc: Stop local dev stack
@@ -185,12 +185,12 @@ tasks:
       - lychee --config .lychee.toml "docs/**/*.md" "README.md"
 
   docs:pdf:
-    desc: Build PDF versions of technical design docs
+    desc: Build PDF versions of technical design docs (LaTeX → PDF)
     cmds:
       - mkdir -p dist/docs
-      - pandoc docs/ARCHITECTURE.md -o dist/docs/ARCHITECTURE.pdf --template docs/templates/tcfs.latex --lua-filter docs/filters/mermaid.lua --pdf-engine=tectonic --toc
-      - pandoc docs/PROTOCOL.md -o dist/docs/PROTOCOL.pdf --template docs/templates/tcfs.latex --lua-filter docs/filters/mermaid.lua --pdf-engine=tectonic --toc
-      - pandoc docs/SECURITY.md -o dist/docs/SECURITY.pdf --template docs/templates/tcfs.latex --lua-filter docs/filters/mermaid.lua --pdf-engine=tectonic --toc
+      - cmd: 'cd docs/tex && tectonic architecture.tex -o ../../dist/docs'
+      - cmd: 'cd docs/tex && tectonic protocol.tex -o ../../dist/docs'
+      - cmd: 'cd docs/tex && tectonic security.tex -o ../../dist/docs'
 
   docs:serve:
     desc: Serve docs site locally with Jekyll

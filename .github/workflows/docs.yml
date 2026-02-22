@@ -4,9 +4,9 @@ name: Docs
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "README.md", ".lychee.toml"]
+    paths: ["docs/**", "README.md", ".lychee.toml", "Taskfile.yaml"]
   pull_request:
-    paths: ["docs/**", "README.md", ".lychee.toml"]
+    paths: ["docs/**", "README.md", ".lychee.toml", "Taskfile.yaml"]
   workflow_dispatch:
 
 permissions:
@@ -34,7 +34,6 @@ jobs:
   build-pdf:
     name: Build PDFs
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 

@@ -82,9 +82,18 @@ flowchart TD
 
 ## Documentation
 
-- [Architecture](ARCHITECTURE.md) — detailed system design
-- [Protocol](PROTOCOL.md) — wire format, chunk layout, manifest schema
-- [Security](SECURITY.md) — threat model, encryption details
+### Design Documents (LaTeX → PDF)
+
+Technical design docs are maintained as LaTeX source and built to PDF by CI:
+
+- [Architecture](ARCHITECTURE.md) ([source](tex/architecture.tex)) — system design, crate map, hydration sequence
+- [Protocol](PROTOCOL.md) ([source](tex/protocol.tex)) — wire format, chunk layout, manifest schema
+- [Security](SECURITY.md) ([source](tex/security.tex)) — threat model, encryption architecture
+
+Build locally: `task docs:pdf` (outputs to `dist/docs/`)
+
+### Guides (Markdown)
+
 - [Contributing](CONTRIBUTING.md) — development setup, PR workflow
 - [Benchmarks](BENCHMARKS.md) — performance characteristics
 

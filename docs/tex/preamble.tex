@@ -1,0 +1,82 @@
+% preamble.tex — Shared LaTeX preamble for all tcfs design documents
+% Usage: \input{preamble} at top of each .tex file
+
+% Encoding and fonts
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{textcomp}
+
+% Page geometry
+\usepackage[margin=2.5cm]{geometry}
+
+% Colors and hyperlinks
+\usepackage[dvipsnames]{xcolor}
+\usepackage[colorlinks=true,linkcolor=NavyBlue,urlcolor=NavyBlue,citecolor=NavyBlue]{hyperref}
+
+% Code listings
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!10},
+  xleftmargin=2em,
+  framexleftmargin=1.5em,
+  numbers=none,
+  showstringspaces=false,
+  columns=flexible,
+  literate={←}{$\leftarrow$}1 {→}{$\rightarrow$}1 {⟶}{$\longrightarrow$}1,
+}
+\lstdefinelanguage{json}{
+  string=[s]{"}{"},
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  literate=
+    *{:}{{{\color{NavyBlue}:}}}{1}
+    {,}{{{\color{NavyBlue},}}}{1}
+    {\{}{{{\color{NavyBlue}\{}}}{1}
+    {\}}{{{\color{NavyBlue}\}}}}{1}
+    {[}{{{\color{NavyBlue}[}}}{1}
+    {]}{{{\color{NavyBlue}]}}}{1},
+}
+\lstdefinelanguage{toml}{
+  comment=[l]{\#},
+  string=[b]",
+  morestring=[b]',
+}
+\lstdefinelanguage{protobuf}{
+  morekeywords={service,rpc,returns,message,string,uint32,uint64,int64,bool,bytes,repeated,optional,oneof,enum,map},
+  morecomment=[l]{//},
+  morestring=[b]",
+}
+
+% Tables
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+
+% Graphics
+\usepackage{graphicx}
+\usepackage{float}
+
+% Better lists
+\usepackage{enumitem}
+
+% Header/footer
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Tighter spacing
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% Convenience macros
+\newcommand{\tcfs}{\texttt{tcfs}}
+\newcommand{\tcfsd}{\texttt{tcfsd}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\filepath}[1]{\texttt{#1}}

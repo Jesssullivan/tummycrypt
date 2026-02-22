@@ -1,0 +1,210 @@
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\fancyhead[L]{\small\textsc{tcfs}}
+\fancyhead[R]{\small Architecture}
+
+\title{tcfs Architecture}
+\author{tcfs / TummyCrypt}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Overview}
+
+\tcfs{} (TummyCrypt FileSystem) is a FOSS, self-hosted, S3-first synchronization
+system that replaces proprietary cloud storage clients (odrive, Dropbox, etc.)
+with a FUSE-based mount that transparently hydrates files on demand.
+
+\subsection{Design Goals}
+
+\begin{enumerate}
+  \item \textbf{Self-hosted first} --- all data stays on user-controlled infrastructure (SeaweedFS).
+  \item \textbf{On-demand hydration} --- files appear locally as lightweight stubs;
+        only downloaded when accessed.
+  \item \textbf{End-to-end encryption} --- client-side XChaCha20-Poly1305 encryption
+        before upload; storage operator never sees plaintext.
+  \item \textbf{Content-addressed deduplication} --- FastCDC chunking with BLAKE3
+        hashing eliminates redundant storage.
+  \item \textbf{Cross-platform} --- Linux (FUSE3), macOS (FUSE-T), Windows (Cloud Files API).
+  \item \textbf{Kubernetes-native backend} --- stateless sync workers scaled by KEDA,
+        NATS JetStream for reliable task dispatch.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{System Architecture}
+
+The system is divided into client-side and server-side components connected
+via S3 API and NATS JetStream.
+
+\subsection{Client Side}
+
+The client runs on user machines and consists of:
+
+\begin{description}
+  \item[\tcfsd{} (daemon)] Long-running process exposing a gRPC service over a
+    Unix domain socket. Manages FUSE mounts, credential loading, sync state,
+    and Prometheus metrics. Reports readiness via \code{sd\_notify(READY=1)}.
+  \item[\tcfs{} (CLI)] Command-line interface for push, pull, mount, unmount,
+    sync-status, and unsync operations.
+  \item[\code{tcfs-tui} (TUI)] Interactive terminal dashboard built with
+    ratatui~0.30, connecting to the daemon via gRPC. Four tabs: Dashboard,
+    Config, Mounts, Secrets.
+  \item[\code{tcfs-mcp} (MCP server)] Model Context Protocol server for AI
+    agent integration. Six tools over stdio JSON-RPC transport.
+\end{description}
+
+\subsection{Server Side (Kubernetes)}
+
+\begin{description}
+  \item[SeaweedFS cluster] Distributed blob storage. Three Raft masters for
+    metadata consensus, volume servers on Drobo 5C for data.
+  \item[NATS JetStream] Reliable task queue with two streams:
+    \code{SYNC\_TASKS} and \code{HYDRATION\_EVENTS}.
+  \item[Sync workers] Stateless \tcfsd{} instances running in
+    \code{--mode=worker}. Horizontally scaled by KEDA based on NATS queue depth.
+  \item[Prometheus + Grafana] Observability stack monitoring throughput,
+    queue depth, and FUSE latency.
+\end{description}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Crate Map}
+
+All Rust code lives in \filepath{crates/}. The workspace contains 13 crates:
+
+\begin{longtable}{llp{8cm}}
+  \toprule
+  \textbf{Crate} & \textbf{Type} & \textbf{Purpose} \\
+  \midrule
+  \endhead
+  \code{tcfs-core}        & library & Shared types, config schema, protobuf defs \\
+  \code{tcfs-crypto}      & library & XChaCha20-Poly1305, Argon2id KDF, HKDF, BIP-39 \\
+  \code{tcfs-secrets}     & library & SOPS/age/KDBX credential chain \\
+  \code{tcfs-storage}     & library & OpenDAL abstraction, SeaweedFS native API \\
+  \code{tcfs-chunks}      & library & FastCDC chunking, BLAKE3 hashing, zstd compression \\
+  \code{tcfs-sync}        & library & Sync engine, JSON state cache, NATS consumers \\
+  \code{tcfs-fuse}        & library & Linux FUSE driver (fuse3 crate) \\
+  \code{tcfs-cloudfilter} & library & Windows Cloud Files API (skeleton) \\
+  \code{tcfs-sops}        & library & SOPS+age fleet secret propagation \\
+  \code{tcfsd}            & binary  & Daemon: gRPC, FUSE, metrics, systemd \\
+  \code{tcfs-cli}         & binary  & CLI: push, pull, mount, status, unsync \\
+  \code{tcfs-tui}         & binary  & TUI: ratatui dashboard \\
+  \code{tcfs-mcp}         & binary  & MCP server: 6 tools, stdio transport \\
+  \bottomrule
+\end{longtable}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Stub File Format}
+
+Files not yet downloaded appear as \code{.tc} stubs. The stub is a JSON file
+containing metadata needed to reconstruct the original:
+
+\begin{lstlisting}[language=json]
+{
+  "version": 1,
+  "file_id": "<BLAKE3 hash of original file>",
+  "original_name": "photo.jpg",
+  "original_size": 4194304,
+  "mime_type": "image/jpeg",
+  "modified_at": "2026-02-20T12:00:00Z",
+  "chunk_count": 3,
+  "manifest_key": "chunks/manifests/<file_id>",
+  "remote_prefix": "tcfs/default"
+}
+\end{lstlisting}
+
+Directory stubs use the \code{.tcf} extension and list child entries. See the
+Protocol Specification (docs/tex/protocol.tex) for the full format.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Hydration Sequence}
+
+When a FUSE-mounted \code{.tc} stub is opened:
+
+\begin{enumerate}
+  \item FUSE \code{open()} intercepts the file access request.
+  \item \tcfsd{} fetches the manifest from
+        \filepath{\{prefix\}/manifests/\{file\_hash\}}.
+  \item Chunks are fetched in parallel from
+        \filepath{\{prefix\}/chunks/\{chunk\_hash\}}.
+  \item Each chunk is decompressed (zstd), decrypted (XChaCha20-Poly1305),
+        and verified (BLAKE3).
+  \item Chunks are concatenated in order to reconstruct the original file.
+  \item The \code{.tc} stub is atomically replaced with the hydrated file.
+  \item \code{tcfs unsync <path>} converts it back to a stub.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Credential Chain}
+
+\tcfsd{} discovers age identities in order of precedence:
+
+\begin{enumerate}
+  \item \code{\$CREDENTIALS\_DIRECTORY/age-identity} --- systemd
+        \code{LoadCredentialEncrypted}
+  \item \code{\$SOPS\_AGE\_KEY\_FILE} --- path to an age key file
+  \item \code{\$SOPS\_AGE\_KEY} --- literal age key content
+  \item \filepath{\textasciitilde/.config/sops/age/keys.txt} --- default fallback
+\end{enumerate}
+
+Once loaded, the age identity decrypts SOPS-encrypted credential YAML files,
+providing S3 access keys to the OpenDAL operator. An mtime watcher
+auto-reloads credentials when the file changes on disk.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Phase Roadmap}
+
+\begin{longtable}{clp{9cm}}
+  \toprule
+  \textbf{Phase} & \textbf{Status} & \textbf{Scope} \\
+  \midrule
+  \endhead
+  0 & Complete & Repo foundation, SOPS migration, Rust workspace stubs \\
+  1 & Complete & Core daemon + secrets + gRPC \\
+  2 & Complete & Sync engine + chunking + NATS \\
+  3 & Complete & FUSE driver + \code{.tc} stubs + hydration \\
+  4 & Complete & K8s backend + HPA + full OpenTofu deploy \\
+  5 & Complete & Release pipeline + packaging + docs site \\
+  6 & Complete & macOS FUSE-T + Windows CFAPI skeleton + GitLab mirror \\
+  7 & Pending  & Production hardening + chaos tests \\
+  \bottomrule
+\end{longtable}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Infrastructure}
+
+\subsection{Local Network (Bare-Metal)}
+
+\begin{longtable}{ll}
+  \toprule
+  \textbf{Role} & \textbf{Address} \\
+  \midrule
+  \endhead
+  SeaweedFS master-1         & 192.168.101.249:9333 \\
+  SeaweedFS master-2         & 192.168.101.184:9333 \\
+  SeaweedFS master-3         & 192.168.101.248:9333 \\
+  Volume server (Drobo 5C)   & 192.168.101.171:8080 \\
+  Filer / S3 gateway         & 192.168.101.146:8333 \\
+  \bottomrule
+\end{longtable}
+
+\subsection{Civo Kubernetes}
+
+\begin{longtable}{ll}
+  \toprule
+  \textbf{Property} & \textbf{Value} \\
+  \midrule
+  \endhead
+  Cluster          & bitter-darkness-16657317 \\
+  Namespace        & tcfs \\
+  In-cluster SeaweedFS & seaweedfs.tcfs.svc.cluster.local:8333 \\
+  In-cluster NATS  & nats.tcfs.svc.cluster.local:4222 \\
+  Container image  & ghcr.io/tinyland-inc/tcfsd \\
+  \bottomrule
+\end{longtable}
+
+\end{document}
