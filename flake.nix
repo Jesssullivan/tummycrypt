@@ -96,10 +96,17 @@
           meta.mainProgram = "tcfs-tui";
         });
 
+        tcfs-mcp = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "tcfs-mcp";
+          cargoExtraArgs = "-p tcfs-mcp";
+          meta.mainProgram = "tcfs-mcp";
+        });
+
       in {
         packages = {
           default = tcfsd;
-          inherit tcfsd tcfs-cli tcfs-tui;
+          inherit tcfsd tcfs-cli tcfs-tui tcfs-mcp;
         };
 
         devShells.default = pkgs.mkShell {

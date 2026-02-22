@@ -72,10 +72,13 @@ jobs:
       - name: Build tcfs-tui
         run: nix build .#tcfs-tui
 
+      - name: Build tcfs-mcp
+        run: nix build .#tcfs-mcp
+
       - name: Push to Attic
         if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
         run: |
-          for pkg in tcfsd tcfs-cli tcfs-tui; do
+          for pkg in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
             nix build .#${pkg} -o result-${pkg}
             attic push ${{ env.ATTIC_CACHE }} result-${pkg} || echo "::warning::Failed to push ${pkg} to Attic"
           done
@@ -112,10 +115,13 @@ jobs:
       - name: Build tcfs-tui
         run: nix build .#tcfs-tui
 
+      - name: Build tcfs-mcp
+        run: nix build .#tcfs-mcp
+
       - name: Push to Attic
         if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
         run: |
-          for pkg in tcfs-cli tcfs-tui; do
+          for pkg in tcfs-cli tcfs-tui tcfs-mcp; do
             nix build .#${pkg} -o result-${pkg}
             attic push ${{ env.ATTIC_CACHE }} result-${pkg} || echo "::warning::Failed to push ${pkg} to Attic"
           done
