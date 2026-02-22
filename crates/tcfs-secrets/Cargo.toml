@@ -26,6 +26,9 @@ secrecy = { workspace = true }
 rpassword = { workspace = true }
 keyring = { workspace = true }
 hostname = "0.4"
+uuid = { workspace = true }
+blake3 = { workspace = true }
+opendal = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

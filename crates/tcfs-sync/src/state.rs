@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::conflict::VectorClock;
+
 /// Sync state for a single local file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncState {
@@ -28,6 +30,12 @@ pub struct SyncState {
     pub remote_path: String,
     /// Unix timestamp of last successful sync
     pub last_synced: u64,
+    /// Vector clock at last sync
+    #[serde(default)]
+    pub vclock: VectorClock,
+    /// Device ID that performed this sync
+    #[serde(default)]
+    pub device_id: String,
 }
 
 /// In-memory state cache, persisted to a JSON file
@@ -38,6 +46,10 @@ pub struct StateCache {
     entries: HashMap<String, SyncState>,
     /// Whether there are unsaved changes
     dirty: bool,
+    /// Last NATS JetStream sequence processed (for catch-up on restart)
+    pub last_nats_seq: u64,
+    /// Device ID for this machine
+    pub device_id: String,
 }
 
 impl StateCache {
@@ -57,6 +69,8 @@ impl StateCache {
             db_path: db_path.to_path_buf(),
             entries,
             dirty: false,
+            last_nats_seq: 0,
+            device_id: String::new(),
         })
     }
 
@@ -88,6 +102,17 @@ impl StateCache {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Find a state entry by its remote path suffix (for NATS event lookups).
+    pub fn get_by_rel_path(&self, rel_path: &str) -> Option<(&str, &SyncState)> {
+        self.entries
+            .iter()
+            .find(|(_, state)| {
+                state.remote_path.ends_with(&format!("/{}", rel_path))
+                    || state.remote_path == rel_path
+            })
+            .map(|(k, v)| (k.as_str(), v))
     }
 
     /// Flush dirty changes to disk using an atomic write (write then rename).
@@ -180,6 +205,25 @@ pub fn make_sync_state(
     chunk_count: usize,
     remote_path: String,
 ) -> Result<SyncState> {
+    make_sync_state_full(
+        local_path,
+        hash_hex,
+        chunk_count,
+        remote_path,
+        VectorClock::new(),
+        String::new(),
+    )
+}
+
+/// Create a SyncState with full vector clock and device info.
+pub fn make_sync_state_full(
+    local_path: &Path,
+    hash_hex: String,
+    chunk_count: usize,
+    remote_path: String,
+    vclock: VectorClock,
+    device_id: String,
+) -> Result<SyncState> {
     let meta = std::fs::metadata(local_path)
         .with_context(|| format!("stat for sync state: {}", local_path.display()))?;
 
@@ -202,6 +246,8 @@ pub fn make_sync_state(
         chunk_count,
         remote_path,
         last_synced: now,
+        vclock,
+        device_id,
     })
 }
 
@@ -235,6 +281,8 @@ mod tests {
                 chunk_count: 1,
                 remote_path: "bucket/file.txt".into(),
                 last_synced: 9999,
+                vclock: VectorClock::new(),
+                device_id: String::new(),
             },
         );
         cache.flush().unwrap();
@@ -264,6 +312,8 @@ mod tests {
                 chunk_count: 1,
                 remote_path: "bucket/to_remove.txt".into(),
                 last_synced: 9999,
+                vclock: VectorClock::new(),
+                device_id: String::new(),
             },
         );
         assert_eq!(cache.len(), 1);
@@ -292,6 +342,8 @@ mod tests {
                     chunk_count: 1,
                     remote_path: format!("bucket/file_{i}.txt"),
                     last_synced: 9999,
+                    vclock: VectorClock::new(),
+                    device_id: String::new(),
                 },
             );
         }

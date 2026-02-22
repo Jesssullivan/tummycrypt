@@ -36,6 +36,7 @@ clap = { workspace = true }
 notify = { workspace = true }
 secrecy = { workspace = true }
 tempfile = { workspace = true }
+blake3 = { workspace = true }
 
 [features]
 default = []

@@ -3,11 +3,12 @@
 //! Defines the `SyncTask` message format and provides:
 //! - `NatsClient` — connect, ensure streams exist, publish tasks
 //! - `task_stream()` — pull consumer for worker pods
+//! - `state_consumer()` — per-device durable consumer for STATE_UPDATES
 //!
 //! Streams:
 //!   SYNC_TASKS         — push/pull/unsync work items (HPA-scaled workers consume)
 //!   HYDRATION_EVENTS   — FUSE hydration events (future Phase 3 daemon-side use)
-//!   STATE_UPDATES      — sync state change notifications (future)
+//!   STATE_UPDATES      — sync state change notifications (hierarchical subjects)
 //!
 //! Requires feature `nats` (async-nats optional dep).
 
@@ -23,12 +24,117 @@ mod inner {
     use std::time::Duration;
     use tracing::{debug, error, info, warn};
 
+    use crate::conflict::VectorClock;
+
     // ── Stream / consumer names ───────────────────────────────────────────────
 
     pub const STREAM_SYNC_TASKS: &str = "SYNC_TASKS";
     pub const STREAM_HYDRATION: &str = "HYDRATION_EVENTS";
     pub const STREAM_STATE: &str = "STATE_UPDATES";
     pub const CONSUMER_SYNC_WORKERS: &str = "sync-workers";
+
+    // ── StateEvent ────────────────────────────────────────────────────────────
+
+    /// A state change event published to STATE_UPDATES stream.
+    ///
+    /// Subject hierarchy: `STATE.{device_id}.{event_type}`
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum StateEvent {
+        /// A file was successfully synced (pushed) to remote storage.
+        FileSynced {
+            device_id: String,
+            rel_path: String,
+            blake3: String,
+            size: u64,
+            vclock: VectorClock,
+            manifest_path: String,
+            timestamp: u64,
+        },
+        /// A file was deleted from remote storage.
+        FileDeleted {
+            device_id: String,
+            rel_path: String,
+            vclock: VectorClock,
+            timestamp: u64,
+        },
+        /// A file was renamed in remote storage.
+        FileRenamed {
+            device_id: String,
+            old_path: String,
+            new_path: String,
+            vclock: VectorClock,
+            timestamp: u64,
+        },
+        /// A device has come online and is ready to sync.
+        DeviceOnline {
+            device_id: String,
+            last_seq: u64,
+            timestamp: u64,
+        },
+        /// A device is going offline (graceful shutdown).
+        DeviceOffline {
+            device_id: String,
+            last_seq: u64,
+            timestamp: u64,
+        },
+        /// A conflict was resolved.
+        ConflictResolved {
+            device_id: String,
+            rel_path: String,
+            resolution: String,
+            merged_vclock: VectorClock,
+            timestamp: u64,
+        },
+    }
+
+    impl StateEvent {
+        pub fn device_id(&self) -> &str {
+            match self {
+                StateEvent::FileSynced { device_id, .. } => device_id,
+                StateEvent::FileDeleted { device_id, .. } => device_id,
+                StateEvent::FileRenamed { device_id, .. } => device_id,
+                StateEvent::DeviceOnline { device_id, .. } => device_id,
+                StateEvent::DeviceOffline { device_id, .. } => device_id,
+                StateEvent::ConflictResolved { device_id, .. } => device_id,
+            }
+        }
+
+        pub fn event_type(&self) -> &'static str {
+            match self {
+                StateEvent::FileSynced { .. } => "file_synced",
+                StateEvent::FileDeleted { .. } => "file_deleted",
+                StateEvent::FileRenamed { .. } => "file_renamed",
+                StateEvent::DeviceOnline { .. } => "device_online",
+                StateEvent::DeviceOffline { .. } => "device_offline",
+                StateEvent::ConflictResolved { .. } => "conflict_resolved",
+            }
+        }
+
+        /// Build the NATS subject for this event.
+        pub fn subject(&self) -> String {
+            format!("STATE.{}.{}", self.device_id(), self.event_type())
+        }
+
+        pub fn to_bytes(&self) -> Result<bytes::Bytes> {
+            let json = serde_json::to_vec(self)
+                .map_err(|e| anyhow::anyhow!("serializing StateEvent: {e}"))?;
+            Ok(bytes::Bytes::from(json))
+        }
+
+        pub fn from_bytes(data: &[u8]) -> Result<Self> {
+            serde_json::from_slice(data)
+                .map_err(|e| anyhow::anyhow!("deserializing StateEvent: {e}"))
+        }
+
+        /// Helper to get the current unix timestamp.
+        pub fn now() -> u64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        }
+    }
 
     // ── SyncTask message format ───────────────────────────────────────────────
 
@@ -126,12 +232,15 @@ mod inner {
                 .await
                 .map_err(|e| anyhow::anyhow!("ensuring HYDRATION_EVENTS stream: {e}"))?;
 
+            // STATE_UPDATES: fan-out (Limits retention), hierarchical subjects, 7-day TTL
             self.js
                 .get_or_create_stream(stream::Config {
                     name: STREAM_STATE.to_string(),
-                    subjects: vec![STREAM_STATE.to_string()],
+                    subjects: vec!["STATE.>".to_string()],
                     max_messages: 500_000,
-                    max_age: Duration::from_secs(24 * 3600),
+                    max_age: Duration::from_secs(7 * 24 * 3600),
+                    retention: stream::RetentionPolicy::Limits,
+                    storage: stream::StorageType::File,
                     ..Default::default()
                 })
                 .await
@@ -156,6 +265,24 @@ mod inner {
                 task_id = task.task_id(),
                 task_type = task.type_name(),
                 "task queued"
+            );
+            Ok(())
+        }
+
+        /// Publish a state event to STATE_UPDATES.
+        pub async fn publish_state_event(&self, event: &StateEvent) -> Result<()> {
+            let subject = event.subject();
+            let payload = event.to_bytes()?;
+            self.js
+                .publish(subject, payload)
+                .await
+                .map_err(|e| anyhow::anyhow!("publishing state event: {e}"))?
+                .await
+                .map_err(|e| anyhow::anyhow!("awaiting state event ack: {e}"))?;
+            debug!(
+                device = event.device_id(),
+                event_type = event.event_type(),
+                "state event published"
             );
             Ok(())
         }
@@ -195,6 +322,44 @@ mod inner {
 
             Ok(stream)
         }
+
+        /// Create a per-device durable consumer for STATE_UPDATES.
+        ///
+        /// Consumer name: `state-{device_id}` (durable, survives disconnects).
+        /// Subscribes to all `STATE.>` events, including own device events.
+        pub async fn state_consumer(
+            &self,
+            device_id: &str,
+        ) -> Result<impl futures::Stream<Item = Result<StateEventMessage>>> {
+            let consumer_name = format!("state-{device_id}");
+
+            let consumer: jetstream::consumer::Consumer<pull::Config> = self
+                .js
+                .create_consumer_on_stream(
+                    pull::Config {
+                        durable_name: Some(consumer_name.clone()),
+                        ack_wait: Duration::from_secs(30),
+                        max_deliver: 5,
+                        ..Default::default()
+                    },
+                    STREAM_STATE,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("creating state consumer '{consumer_name}': {e}"))?;
+
+            let messages = consumer
+                .messages()
+                .await
+                .map_err(|e| anyhow::anyhow!("opening state consumer message stream: {e}"))?;
+
+            let stream = messages.map(|msg_result| {
+                let msg = msg_result.map_err(|e| anyhow::anyhow!("receiving state msg: {e}"))?;
+                let event = StateEvent::from_bytes(&msg.payload)?;
+                Ok(StateEventMessage { event, msg })
+            });
+
+            Ok(stream)
+        }
     }
 
     // ── TaskMessage ───────────────────────────────────────────────────────────
@@ -228,6 +393,24 @@ mod inner {
                 .ack_with(jetstream::AckKind::Progress)
                 .await
                 .map_err(|e| anyhow::anyhow!("sending in-progress ack: {e}"))
+        }
+    }
+
+    // ── StateEventMessage ─────────────────────────────────────────────────────
+
+    /// A deserialized state event + the underlying NATS message (for ack).
+    pub struct StateEventMessage {
+        pub event: StateEvent,
+        pub(crate) msg: jetstream::Message,
+    }
+
+    impl StateEventMessage {
+        /// Acknowledge processing of this state event.
+        pub async fn ack(self) -> Result<()> {
+            self.msg
+                .ack()
+                .await
+                .map_err(|e| anyhow::anyhow!("acking state event: {e}"))
         }
     }
 

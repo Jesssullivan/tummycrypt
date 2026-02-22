@@ -12,10 +12,17 @@ pub enum Tab {
     Config,
     Mounts,
     Secrets,
+    Conflicts,
 }
 
 impl Tab {
-    pub const ALL: &[Tab] = &[Tab::Dashboard, Tab::Config, Tab::Mounts, Tab::Secrets];
+    pub const ALL: &[Tab] = &[
+        Tab::Dashboard,
+        Tab::Config,
+        Tab::Mounts,
+        Tab::Secrets,
+        Tab::Conflicts,
+    ];
 
     pub fn title(&self) -> &str {
         match self {
@@ -23,6 +30,7 @@ impl Tab {
             Tab::Config => "Config",
             Tab::Mounts => "Mounts",
             Tab::Secrets => "Secrets",
+            Tab::Conflicts => "Conflicts",
         }
     }
 
@@ -31,18 +39,31 @@ impl Tab {
             Tab::Dashboard => Tab::Config,
             Tab::Config => Tab::Mounts,
             Tab::Mounts => Tab::Secrets,
-            Tab::Secrets => Tab::Dashboard,
+            Tab::Secrets => Tab::Conflicts,
+            Tab::Conflicts => Tab::Dashboard,
         }
     }
 
     pub fn prev(&self) -> Tab {
         match self {
-            Tab::Dashboard => Tab::Secrets,
+            Tab::Dashboard => Tab::Conflicts,
             Tab::Config => Tab::Dashboard,
             Tab::Mounts => Tab::Config,
             Tab::Secrets => Tab::Mounts,
+            Tab::Conflicts => Tab::Secrets,
         }
     }
+}
+
+/// A pending conflict shown in the TUI.
+#[derive(Debug, Clone)]
+pub struct PendingConflict {
+    pub rel_path: String,
+    pub local_device: String,
+    pub remote_device: String,
+    pub local_hash: String,
+    pub remote_hash: String,
+    pub detected_at: u64,
 }
 
 pub struct App {
@@ -54,6 +75,8 @@ pub struct App {
     pub connected: bool,
     pub error: Option<String>,
     pub uptime_history: VecDeque<u64>,
+    pub conflicts: Vec<PendingConflict>,
+    pub conflict_selected: usize,
 }
 
 impl App {
@@ -67,6 +90,8 @@ impl App {
             connected: false,
             error: None,
             uptime_history: VecDeque::with_capacity(HISTORY_LEN),
+            conflicts: Vec::new(),
+            conflict_selected: 0,
         }
     }
 
@@ -79,6 +104,21 @@ impl App {
             KeyCode::Char('2') => self.tab = Tab::Config,
             KeyCode::Char('3') => self.tab = Tab::Mounts,
             KeyCode::Char('4') => self.tab = Tab::Secrets,
+            KeyCode::Char('5') => self.tab = Tab::Conflicts,
+            // Conflicts tab shortcuts
+            KeyCode::Char('j') | KeyCode::Down if self.tab == Tab::Conflicts => {
+                if !self.conflicts.is_empty() {
+                    self.conflict_selected = (self.conflict_selected + 1) % self.conflicts.len();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.tab == Tab::Conflicts => {
+                if !self.conflicts.is_empty() {
+                    self.conflict_selected = self
+                        .conflict_selected
+                        .checked_sub(1)
+                        .unwrap_or(self.conflicts.len() - 1);
+                }
+            }
             _ => {}
         }
     }

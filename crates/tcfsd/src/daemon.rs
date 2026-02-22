@@ -12,6 +12,42 @@ use crate::grpc::TcfsDaemonImpl;
 pub async fn run(config: TcfsConfig) -> Result<()> {
     info!("daemon starting");
 
+    // ── Device identity ──────────────────────────────────────────────────
+    let device_name = config
+        .sync
+        .device_name
+        .clone()
+        .unwrap_or_else(tcfs_secrets::device::default_device_name);
+
+    let registry_path = config
+        .sync
+        .device_identity
+        .clone()
+        .unwrap_or_else(tcfs_secrets::device::default_registry_path);
+
+    let mut registry =
+        tcfs_secrets::device::DeviceRegistry::load(&registry_path).unwrap_or_else(|e| {
+            warn!("device registry load failed: {e} (starting empty)");
+            tcfs_secrets::device::DeviceRegistry::default()
+        });
+
+    // Auto-enroll this device on first run
+    let device_id = if let Some(dev) = registry.find(&device_name) {
+        info!(device = %device_name, id = %dev.device_id, "device identity loaded");
+        dev.device_id.clone()
+    } else {
+        let public_key = format!(
+            "age1-device-{}",
+            &blake3::hash(device_name.as_bytes()).to_hex().as_str()[..8]
+        );
+        let id = registry.enroll(&device_name, &public_key, None);
+        if let Err(e) = registry.save(&registry_path) {
+            warn!("failed to save device registry: {e}");
+        }
+        info!(device = %device_name, id = %id, "device auto-enrolled");
+        id
+    };
+
     // Load credentials
     let cred_store: SharedCredStore = new_cred_store();
     match tcfs_secrets::CredStore::load(&config.secrets, &config.storage).await {
@@ -97,6 +133,14 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     } else {
         None
     };
+
+    // Log device identity for troubleshooting
+    info!(
+        device_name = %device_name,
+        device_id = %device_id,
+        conflict_mode = %config.sync.conflict_mode,
+        "fleet identity ready"
+    );
 
     // Send systemd ready notification
     notify_ready();

@@ -81,6 +81,32 @@ mod hex {
 }
 
 #[cfg(test)]
+mod proptest_suite {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_name_key() -> impl Strategy<Value = [u8; KEY_SIZE]> {
+        proptest::collection::vec(any::<u8>(), KEY_SIZE).prop_map(|v| {
+            let mut arr = [0u8; KEY_SIZE];
+            arr.copy_from_slice(&v);
+            arr
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn name_encrypt_decrypt_roundtrip(
+            key in arb_name_key(),
+            name in "[a-zA-Z0-9._-]{1,255}"
+        ) {
+            let encrypted = encrypt_name(&key, &name).unwrap();
+            let decrypted = decrypt_name(&key, &encrypted).unwrap();
+            prop_assert_eq!(decrypted, name);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
