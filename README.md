@@ -64,15 +64,18 @@ tummycrypt/
 ├── .sops.yaml              # SOPS encryption rules
 ├── crates/                 # Rust workspace members
 │   ├── tcfs-core/          # Shared types, config, proto
+│   ├── tcfs-crypto/        # XChaCha20-Poly1305 encryption
 │   ├── tcfs-secrets/       # SOPS/age/KDBX integration
 │   ├── tcfs-storage/       # OpenDAL + SeaweedFS
 │   ├── tcfs-chunks/        # FastCDC, BLAKE3, zstd
 │   ├── tcfs-sync/          # Sync engine + NATS
 │   ├── tcfs-fuse/          # FUSE driver (Linux)
 │   ├── tcfs-cloudfilter/   # Windows CFAPI (skeleton)
+│   ├── tcfs-sops/          # SOPS+age fleet propagation
 │   ├── tcfsd/              # Daemon binary
 │   ├── tcfs-cli/           # CLI binary (tcfs)
-│   └── tcfs-tui/           # TUI binary
+│   ├── tcfs-tui/           # TUI binary
+│   └── tcfs-mcp/           # MCP server binary
 ├── credentials/            # SOPS-encrypted credentials
 ├── infra/
 │   ├── ansible/            # SeaweedFS Ansible deployment
@@ -85,6 +88,9 @@ tummycrypt/
 └── docs/
     ├── ARCHITECTURE.md     # System design
     ├── PROTOCOL.md         # .tc/.tcf stub file format spec
+    ├── SECURITY.md         # Threat model, encryption details
+    ├── CONTRIBUTING.md     # Development setup, PR workflow
+    ├── BENCHMARKS.md       # Performance characteristics
     └── archive/            # Previous design documents
 ```
 

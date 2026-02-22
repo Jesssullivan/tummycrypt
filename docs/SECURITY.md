@@ -26,33 +26,31 @@ tcfs protects user data stored on self-hosted SeaweedFS. The primary threats are
 
 ### Key Hierarchy
 
-```
-User Master Key (256-bit, derived via Argon2id from passphrase)
-  |
-  +-- File Encryption Key (per-file, 256-bit random)
-  |     Wrapped by master key using XChaCha20-Poly1305
-  |     Used for: chunk encryption
-  |
-  +-- Manifest Encryption Key (derived via HKDF-SHA256 from master key)
-  |     Used for: encrypting file manifests (chunk lists, metadata)
-  |
-  +-- Name Encryption Key (derived via HKDF-SHA256 from master key)
-        Used for: AES-SIV deterministic filename encryption
+```mermaid
+flowchart TD
+    master["User Master Key\n(256-bit, Argon2id from passphrase)"]
+    fek["File Encryption Key\n(per-file, 256-bit random)\nWrapped by master key\nXChaCha20-Poly1305"]
+    mek["Manifest Encryption Key\n(HKDF-SHA256 from master)\nEncrypts file manifests"]
+    nek["Name Encryption Key\n(HKDF-SHA256 from master)\nAES-SIV deterministic\nfilename encryption"]
+    master --> fek
+    master --> mek
+    master --> nek
 ```
 
 ### Chunk Encryption
 
 Each file chunk is independently encrypted:
 
-```
-Plaintext chunk
-  --> zstd compress
-  --> XChaCha20-Poly1305 encrypt
-       Key:   file encryption key (256-bit)
-       Nonce: 192-bit random (no nonce management needed)
-       AAD:   chunk_index (8 bytes BE) || file_id (32 bytes)
-  --> BLAKE3 hash of ciphertext (CAS key)
-  --> Upload to SeaweedFS
+```mermaid
+flowchart LR
+    plain["Plaintext\nchunk"] --> compress["zstd\ncompress"]
+    compress --> encrypt["XChaCha20-Poly1305\nencrypt"]
+    encrypt --> hash["BLAKE3 hash\nof ciphertext\n(CAS key)"]
+    hash --> upload["Upload to\nSeaweedFS"]
+
+    key["File Encryption Key\n(256-bit)"] --> encrypt
+    nonce["192-bit random nonce"] --> encrypt
+    aad["AAD: chunk_index (8B)\n|| file_id (32B)"] --> encrypt
 ```
 
 Chunk format on disk/wire:
@@ -82,7 +80,7 @@ S3 credentials are stored in SOPS-encrypted YAML:
 ```yaml
 access_key_id: ENC[AES256_GCM,data:...,iv:...,tag:...,type:str]
 secret_access_key: ENC[AES256_GCM,data:...,iv:...,tag:...,type:str]
-endpoint: http://dees-appu-bearts:8333
+endpoint: http://seaweedfs.example.com:8333
 region: us-east-1
 sops:
   age:
@@ -155,7 +153,7 @@ These backups remain SOPS-encrypted and can be used to rollback if needed.
 
 ```toml
 [storage]
-endpoint = "https://dees-appu-bearts:8333"
+endpoint = "https://seaweedfs.example.com:8333"
 enforce_tls = true
 ca_cert_path = "/etc/tcfs/certs/ca.pem"  # optional, for self-signed certs
 ```

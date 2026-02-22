@@ -1,0 +1,21 @@
+exclude = [
+  "^https://github.com/tinyland-inc/tummycrypt/compare",
+  "^https://nix-cache.fuzzy-dev.tinyland.dev",
+  "^https://docs.tummycrypt.io",
+  "your-org",
+  "localhost",
+  "127\\.0\\.0\\.1",
+  "192\\.168\\.",
+  "dees-appu-bearts",
+  "seaweedfs.tcfs.svc",
+  "seaweedfs.example.com",
+  "nats.example.com",
+  "filer.example.com",
+  "example.com",
+]
+exclude_path = [
+  "docs/archive/",
+]
+include_fragments = true
+max_concurrency = 8
+timeout = 30

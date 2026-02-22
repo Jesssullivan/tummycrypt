@@ -55,20 +55,23 @@ integration tests (S3 access key, secret key, endpoint, bucket name).
 
 ## Project Structure
 
-The workspace is split into 10 crates under `crates/`:
+The workspace is split into 13 crates under `crates/`:
 
 | Crate | Type | Description |
 |-------|------|-------------|
 | `tcfs-core` | lib | Shared types, config parsing, protobuf definitions |
+| `tcfs-crypto` | lib | XChaCha20-Poly1305 encryption, key derivation, BIP-39 |
 | `tcfs-secrets` | lib | SOPS decryption, age identity, KeePassXC integration |
 | `tcfs-storage` | lib | OpenDAL-based S3/SeaweedFS operator |
 | `tcfs-chunks` | lib | FastCDC chunking, BLAKE3 hashing, zstd compression |
 | `tcfs-sync` | lib | Sync engine, state cache, NATS JetStream |
 | `tcfs-fuse` | lib | Linux FUSE driver (fuse3 crate) |
 | `tcfs-cloudfilter` | lib | Windows Cloud Files API (skeleton) |
+| `tcfs-sops` | lib | SOPS+age fleet secret propagation |
 | `tcfsd` | bin | Daemon: gRPC, FUSE, metrics, systemd notify |
 | `tcfs-cli` | bin | CLI: push, pull, mount, unmount, status |
 | `tcfs-tui` | bin | Interactive terminal UI (ratatui) |
+| `tcfs-mcp` | bin | MCP server for AI agent integration |
 
 ## Development Workflow
 
@@ -113,7 +116,7 @@ cargo run -p tcfs-cli -- mount seaweedfs://localhost:8333/tcfs /tmp/tcfs-mount
 
 ## Pull Request Guidelines
 
-1. **Branch from** `1-build-proxmox-mvp` (current development branch)
+1. **Branch from** `main`
 2. **Run checks locally** before pushing: `task check` (fmt + clippy + test + build)
 3. **Keep PRs focused** - one feature or fix per PR
 4. **Add tests** for new functionality

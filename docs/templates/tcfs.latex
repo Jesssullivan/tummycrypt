@@ -1,0 +1,68 @@
+% tcfs.latex — Pandoc LaTeX template for tcfs technical documentation
+% Usage: pandoc doc.md -o doc.pdf --template docs/templates/tcfs.latex --pdf-engine=tectonic --toc
+\documentclass[11pt,a4paper]{article}
+
+% Encoding and fonts
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{textcomp}
+
+% Page geometry
+\usepackage[margin=2.5cm]{geometry}
+
+% Colors and hyperlinks
+\usepackage[dvipsnames]{xcolor}
+\usepackage[colorlinks=true,linkcolor=NavyBlue,urlcolor=NavyBlue,citecolor=NavyBlue]{hyperref}
+
+% Code listings
+\usepackage{listings}
+\usepackage{fancyvrb}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{commandchars=\\\{\},fontsize=\small}
+
+% Tables
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+
+% Graphics
+\usepackage{graphicx}
+\usepackage{float}
+
+% Better lists
+\usepackage{enumitem}
+
+% Header/footer
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsc{tcfs}}
+\fancyhead[R]{\small $title$}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Title metadata
+\title{$title$}
+\author{$if(author)$$author$$else$tcfs / TummyCrypt$endif$}
+\date{$if(date)$$date$$else$\today$endif$}
+
+% Tighter spacing
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% Pandoc tightlist support
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
+\begin{document}
+
+\maketitle
+
+$if(toc)$
+\tableofcontents
+\newpage
+$endif$
+
+$body$
+
+\end{document}

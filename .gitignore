@@ -176,3 +176,6 @@ dist
 .yarn/install-state.gz
 .pnp.*
 notes/
+
+# Generated docs
+dist/docs/

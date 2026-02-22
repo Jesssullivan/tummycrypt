@@ -176,3 +176,23 @@ tasks:
       - task: lint
       - task: test
       - task: deny
+
+  # ── Documentation ──────────────────────────────────────────────────────────
+
+  docs:links:
+    desc: Check for broken links in documentation
+    cmds:
+      - lychee --config .lychee.toml "docs/**/*.md" "README.md"
+
+  docs:pdf:
+    desc: Build PDF versions of technical design docs
+    cmds:
+      - mkdir -p dist/docs
+      - pandoc docs/ARCHITECTURE.md -o dist/docs/ARCHITECTURE.pdf --template docs/templates/tcfs.latex --lua-filter docs/filters/mermaid.lua --pdf-engine=tectonic --toc
+      - pandoc docs/PROTOCOL.md -o dist/docs/PROTOCOL.pdf --template docs/templates/tcfs.latex --lua-filter docs/filters/mermaid.lua --pdf-engine=tectonic --toc
+      - pandoc docs/SECURITY.md -o dist/docs/SECURITY.pdf --template docs/templates/tcfs.latex --lua-filter docs/filters/mermaid.lua --pdf-engine=tectonic --toc
+
+  docs:serve:
+    desc: Serve docs site locally with Jekyll
+    cmds:
+      - cd docs && bundle exec jekyll serve

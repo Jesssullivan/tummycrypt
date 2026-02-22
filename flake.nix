@@ -135,6 +135,12 @@
             # NATS
             natscli
 
+            # Docs tooling
+            lychee
+            pandoc
+            tectonic
+            mermaid-cli
+
             # Dev tools
             git
             yq-go

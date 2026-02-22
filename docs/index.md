@@ -6,16 +6,32 @@ tcfs is a FUSE-based file sync daemon backed by [SeaweedFS](https://github.com/s
 
 ## Installation
 
-> **Note:** tcfs is in active development. Binary releases will be published once the first stable release is tagged.
+### Binary Releases
 
-### From Source (recommended for now)
+Download the latest release from [GitHub Releases](https://github.com/tinyland-inc/tummycrypt/releases):
+
+```bash
+# Linux (x86_64)
+curl -fsSL https://github.com/tinyland-inc/tummycrypt/releases/latest/download/install.sh | sh
+
+# macOS (Homebrew)
+brew install tinyland-inc/tap/tcfs
+
+# Debian/Ubuntu
+sudo dpkg -i tcfs-*.deb
+
+# RPM (Fedora/RHEL/Rocky)
+sudo rpm -i tcfsd-*.rpm
+```
+
+### From Source
 
 ```bash
 # Requires Rust 1.93+, protoc, libfuse3-dev
 git clone https://github.com/tinyland-inc/tummycrypt.git
 cd tummycrypt
 cargo build --release
-# Binaries: target/release/tcfs, target/release/tcfsd, target/release/tcfs-tui
+# Binaries: target/release/tcfs, target/release/tcfsd, target/release/tcfs-tui, target/release/tcfs-mcp
 ```
 
 ### Nix
@@ -32,13 +48,6 @@ nix develop github:tinyland-inc/tummycrypt
 podman pull ghcr.io/tinyland-inc/tcfsd:latest
 ```
 
-### Future Channels (once releases are published)
-
-- **curl installer**: `curl -fsSL .../install.sh | sh`
-- **Homebrew**: `brew install tinyland-inc/tap/tcfs`
-- **Debian/Ubuntu**: `sudo dpkg -i tcfs-*.deb`
-- **RPM**: `sudo rpm -i tcfsd-*.rpm`
-
 ## How It Works
 
 1. **Push**: Files are split into content-defined chunks (FastCDC), compressed (zstd), encrypted (age), and uploaded to SeaweedFS via S3.
@@ -48,17 +57,18 @@ podman pull ghcr.io/tinyland-inc/tcfsd:latest
 
 ## Architecture
 
-```
-tcfs (CLI)  ───┐
-tcfs-tui    ───┤  gRPC / Unix socket
-               ├──── tcfsd (daemon) ──── FUSE mount
-               │        │
-               │        ├── tcfs-secrets (age/SOPS/KeePassXC)
-               │        ├── tcfs-chunks  (FastCDC + zstd + BLAKE3)
-               │        ├── tcfs-storage (OpenDAL → S3/SeaweedFS)
-               │        └── tcfs-sync    (state cache + NATS JetStream)
-               │
-K8s workers ───┘  (tcfsd --mode=worker, scaled by KEDA)
+```mermaid
+flowchart TD
+    cli["tcfs (CLI)"] -->|gRPC| daemon["tcfsd (daemon)"]
+    tui["tcfs-tui"] -->|gRPC| daemon
+    mcp["tcfs-mcp"] -->|gRPC| daemon
+    daemon --> fuse["FUSE mount"]
+    daemon --> secrets["tcfs-secrets\n(age/SOPS/KeePassXC)"]
+    daemon --> chunks["tcfs-chunks\n(FastCDC + zstd + BLAKE3)"]
+    daemon --> storage["tcfs-storage\n(OpenDAL → S3/SeaweedFS)"]
+    daemon --> sync["tcfs-sync\n(state cache + NATS JetStream)"]
+    daemon --> crypto["tcfs-crypto\n(XChaCha20-Poly1305)"]
+    workers["K8s workers"] -->|"tcfsd --mode=worker\nscaled by KEDA"| sync
 ```
 
 ## Binaries
@@ -68,6 +78,7 @@ K8s workers ───┘  (tcfsd --mode=worker, scaled by KEDA)
 | `tcfs` | CLI: push, pull, sync-status, mount, unmount, unsync |
 | `tcfsd` | Daemon: gRPC socket, FUSE mounts, Prometheus metrics, systemd notify |
 | `tcfs-tui` | Terminal UI for interactive file management |
+| `tcfs-mcp` | MCP server: AI agent integration (6 tools, stdio transport) |
 
 ## Documentation
 
@@ -81,11 +92,11 @@ K8s workers ───┘  (tcfsd --mode=worker, scaled by KEDA)
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux x86_64 | Full | FUSE mount, CLI, daemon, TUI |
-| Linux aarch64 | Full | FUSE mount, CLI, daemon, TUI |
-| macOS (Apple Silicon) | CLI only | FUSE via FUSE-T planned |
-| macOS (Intel) | CLI only | FUSE via FUSE-T planned |
-| Windows | Planned | Cloud Files API (CFAPI) for native Explorer integration |
+| Linux x86_64 | Full | FUSE mount, CLI, daemon, TUI, MCP |
+| Linux aarch64 | Full | FUSE mount, CLI, daemon, TUI, MCP |
+| macOS (Apple Silicon) | CLI + FUSE-T | FUSE via macFUSE/FUSE-T, platform-conditional unmount |
+| macOS (Intel) | CLI + FUSE-T | FUSE via macFUSE/FUSE-T, platform-conditional unmount |
+| Windows x86_64 | CLI + CFAPI skeleton | Cloud Files API for native Explorer integration |
 | NixOS | Full | Flake + NixOS module + Home Manager module |
 
 ## License

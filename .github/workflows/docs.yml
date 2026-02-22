@@ -4,7 +4,9 @@ name: Docs
 on:
   push:
     branches: [main]
-    paths: ["docs/**"]
+    paths: ["docs/**", "README.md", ".lychee.toml"]
+  pull_request:
+    paths: ["docs/**", "README.md", ".lychee.toml"]
   workflow_dispatch:
 
 permissions:
@@ -17,9 +19,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-links:
+    name: Check Links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for broken links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --config .lychee.toml "docs/**/*.md" "README.md"
+          fail: true
+
+  build-pdf:
+    name: Build PDFs
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+
+      - name: Build PDF docs
+        run: nix develop --command task docs:pdf
+
+      - name: Upload PDF artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcfs-docs-pdf
+          path: dist/docs/*.pdf
+
   deploy:
     name: Deploy to GitHub Pages
     runs-on: ubuntu-latest
+    needs: [check-links]
+    if: github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
