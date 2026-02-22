@@ -289,15 +289,13 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
 
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Containerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.tag }}
@@ -579,9 +577,18 @@ jobs:
 
       - name: Download release checksums
         run: |
-          curl -fSL \
-            "https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/SHA256SUMS.txt" \
-            -o SHA256SUMS.txt
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/SHA256SUMS.txt"
+          for attempt in $(seq 1 30); do
+            echo "Attempt $attempt/30: downloading SHA256SUMS.txt..."
+            if curl -fSL "$URL" -o SHA256SUMS.txt; then
+              echo "Downloaded successfully."
+              exit 0
+            fi
+            echo "Not available yet, waiting 10s..."
+            sleep 10
+          done
+          echo "Failed to download SHA256SUMS.txt after 30 attempts" >&2
+          exit 1
 
       - name: Generate versioned Homebrew formula
         run: |
