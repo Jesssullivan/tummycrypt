@@ -56,7 +56,7 @@ module "tcfs_backend" {
   source = "../../modules/tcfs-backend"
 
   namespace  = var.namespace
-  image      = "ghcr.io/tummycrypt/tcfsd:${var.image_tag}"
+  image      = "ghcr.io/tinyland-inc/tcfsd:${var.image_tag}"
   nats_url   = module.nats.nats_url
 
   s3_endpoint    = "http://localhost:8333"

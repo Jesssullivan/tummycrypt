@@ -7,7 +7,7 @@ variable "namespace" {
 variable "image" {
   description = "tcfsd container image (repository:tag)"
   type        = string
-  default     = "ghcr.io/tummycrypt/tcfsd:latest"
+  default     = "ghcr.io/tinyland-inc/tcfsd:latest"
 }
 
 variable "worker_replicas" {

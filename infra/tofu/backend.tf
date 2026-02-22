@@ -7,8 +7,8 @@ terraform {
     key    = "terraform.tfstate"
     region = "us-east-1"
 
-    # SeaweedFS S3 gateway endpoint
-    endpoint = "http://dees-appu-bearts:8333"
+    # SeaweedFS S3 gateway endpoint (in-cluster)
+    endpoint = "http://seaweedfs.tcfs.svc.cluster.local:8333"
 
     skip_credentials_validation = true
     skip_metadata_api_check     = true

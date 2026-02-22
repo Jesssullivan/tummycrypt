@@ -1,8 +1,8 @@
 # Civo Kubernetes environment: bitter-darkness-16657317
 #
 # Deploy the full tcfs stack to Civo K8s.
-# The existing bare-metal SeaweedFS (192.168.101.x) is used for storage;
-# only the sync workers + NATS + observability run in K8s.
+# SeaweedFS and NATS run in-cluster in the tcfs namespace;
+# sync workers + observability also run in K8s.
 #
 # To deploy:
 #   task infra:apply ENV=civo
@@ -59,11 +59,11 @@ module "tcfs_backend" {
   source = "../../modules/tcfs-backend"
 
   namespace  = var.namespace
-  image      = "ghcr.io/tummycrypt/tcfsd:${var.image_tag}"
+  image      = "ghcr.io/tinyland-inc/tcfsd:${var.image_tag}"
   nats_url   = module.nats.nats_url
 
-  # Point workers at the existing bare-metal SeaweedFS
-  s3_endpoint    = "http://dees-appu-bearts:8333"
+  # Point workers at the in-cluster SeaweedFS
+  s3_endpoint    = "http://seaweedfs.tcfs.svc.cluster.local:8333"
   s3_bucket      = "tcfs"
   s3_region      = "us-east-1"
   s3_secret_name = "seaweedfs-admin"

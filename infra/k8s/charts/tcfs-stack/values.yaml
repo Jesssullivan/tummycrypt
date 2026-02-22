@@ -4,7 +4,7 @@ global:
   namespace: tcfs
 
   # -- SeaweedFS S3-compatible endpoint
-  seaweedfsEndpoint: "http://dees-appu-bearts:8333"
+  seaweedfsEndpoint: "http://seaweedfs.tcfs.svc.cluster.local:8333"
 
   # -- NATS server URL
   natsUrl: "nats://nats:4222"

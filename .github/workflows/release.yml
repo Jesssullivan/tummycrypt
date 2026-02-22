@@ -696,7 +696,7 @@ jobs:
             --create-namespace \
             --set image.tag=${{ needs.plan.outputs.tag }} \
             --set config.natsUrl=nats://nats.tcfs.svc.cluster.local:4222 \
-            --set config.s3Endpoint=http://dees-appu-bearts:8333 \
+            --set config.s3Endpoint=http://seaweedfs.tcfs.svc.cluster.local:8333 \
             --set config.s3Bucket=tcfs \
             --wait \
             --timeout=5m

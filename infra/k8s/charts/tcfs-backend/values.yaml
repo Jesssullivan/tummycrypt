@@ -2,7 +2,7 @@
 # Override with: helm install tcfs-backend ./infra/k8s/charts/tcfs-backend -f my-values.yaml
 
 image:
-  repository: ghcr.io/tummycrypt/tcfsd
+  repository: ghcr.io/tinyland-inc/tcfsd
   tag: latest
   pullPolicy: Always
 
@@ -14,7 +14,7 @@ fullnameOverride: ""
 # tcfsd daemon configuration
 config:
   natsUrl: "nats://nats.tcfs.svc.cluster.local:4222"
-  s3Endpoint: "http://seaweedfs-s3.tcfs.svc.cluster.local:8333"
+  s3Endpoint: "http://seaweedfs.tcfs.svc.cluster.local:8333"
   s3Region: "us-east-1"
   s3Bucket: "tcfs"
   logLevel: "info"
