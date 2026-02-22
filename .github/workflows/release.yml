@@ -698,6 +698,8 @@ jobs:
             --set config.natsUrl=nats://nats.tcfs.svc.cluster.local:4222 \
             --set config.s3Endpoint=http://seaweedfs.tcfs.svc.cluster.local:8333 \
             --set config.s3Bucket=tcfs \
+            --set autoscaling.enabled=false \
+            --set metrics.serviceMonitor.enabled=false \
             --wait \
             --timeout=5m
 
