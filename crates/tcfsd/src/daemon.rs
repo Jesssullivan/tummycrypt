@@ -24,7 +24,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         }
     }
 
-    // Verify storage connectivity
+    // Build storage operator and verify connectivity
+    let mut operator: Option<opendal::Operator> = None;
     let storage_ok = if let Some(s3) = cred_store.read().await.as_ref().and_then(|c| c.s3.as_ref())
     {
         let op = tcfs_storage::operator::build_from_core_config(
@@ -35,10 +36,13 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         match tcfs_storage::check_health(&op).await {
             Ok(()) => {
                 info!(endpoint = %config.storage.endpoint, "SeaweedFS: connected");
+                operator = Some(op);
                 true
             }
             Err(e) => {
                 warn!(endpoint = %config.storage.endpoint, "SeaweedFS: {e}");
+                // Still keep the operator for retry
+                operator = Some(op);
                 false
             }
         }
@@ -46,6 +50,16 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         warn!("no S3 credentials — storage connectivity not verified");
         false
     };
+
+    // Open state cache
+    let state_cache =
+        tcfs_sync::state::StateCache::open(&config.sync.state_db).unwrap_or_else(|e| {
+            warn!("state cache open failed: {e}  (starting fresh)");
+            tcfs_sync::state::StateCache::open(&std::path::PathBuf::from(
+                "/tmp/tcfsd-state.db.json",
+            ))
+            .expect("fallback state cache")
+        });
 
     // Start Prometheus metrics endpoint
     let metrics_addr = config.daemon.metrics_addr.clone();
@@ -88,12 +102,20 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     notify_ready();
 
     // Start gRPC server
-    let socket_path = &config.daemon.socket;
-    let impl_ = TcfsDaemonImpl::new(cred_store, storage_ok, config.storage.endpoint.clone());
+    let socket_path = config.daemon.socket.clone();
+    let config = Arc::new(config);
+    let impl_ = TcfsDaemonImpl::new(
+        cred_store,
+        config.clone(),
+        storage_ok,
+        config.storage.endpoint.clone(),
+        state_cache,
+        operator,
+    );
 
     info!(socket = %socket_path.display(), "gRPC: listening");
 
-    crate::grpc::serve(socket_path, impl_).await?;
+    crate::grpc::serve(&socket_path, impl_).await?;
 
     Ok(())
 }

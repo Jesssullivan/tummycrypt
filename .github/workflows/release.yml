@@ -497,7 +497,7 @@ jobs:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: [plan, build-binaries, build-image, generate-installers]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && !cancelled()
 
     steps:
       - name: Download all artifacts
@@ -662,11 +662,17 @@ jobs:
 
       - name: Configure kubeconfig
         run: |
+          if [ -z "${{ secrets.CIVO_KUBECONFIG }}" ]; then
+            echo "::warning::CIVO_KUBECONFIG not set, skipping deployment"
+            echo "SKIP_DEPLOY=true" >> $GITHUB_ENV
+            exit 0
+          fi
           mkdir -p ~/.kube
           echo "${{ secrets.CIVO_KUBECONFIG }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
 
       - name: Deploy via Helm
+        if: env.SKIP_DEPLOY != 'true'
         run: |
           helm upgrade --install tcfs-backend \
             ./infra/k8s/charts/tcfs-backend \
@@ -680,6 +686,7 @@ jobs:
             --timeout=5m
 
       - name: Verify rollout
+        if: env.SKIP_DEPLOY != 'true'
         run: |
           kubectl rollout status deployment/tcfs-backend-tcfs-backend-worker \
             -n tcfs --timeout=5m
