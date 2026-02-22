@@ -9,6 +9,7 @@ members = [
     "crates/tcfs-sync",
     "crates/tcfs-fuse",
     "crates/tcfs-cloudfilter",
+    "crates/tcfs-sops",
     "crates/tcfsd",
     "crates/tcfs-cli",
     "crates/tcfs-tui",
@@ -26,6 +27,7 @@ rust-version = "1.93"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7" }
 
 # gRPC
 tonic = { version = "0.14" }

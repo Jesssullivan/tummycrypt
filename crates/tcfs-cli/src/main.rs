@@ -237,7 +237,9 @@ async fn main() -> Result<()> {
         #[cfg(unix)]
         Commands::Status => cmd_status(&config).await,
         #[cfg(not(unix))]
-        Commands::Status => anyhow::bail!("status command requires Unix daemon socket (not available on Windows)"),
+        Commands::Status => {
+            anyhow::bail!("status command requires Unix daemon socket (not available on Windows)")
+        }
         Commands::Config {
             action: ConfigAction::Show,
         } => cmd_config_show(&config, &cli.config),

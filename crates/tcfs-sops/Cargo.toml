@@ -1,0 +1,25 @@
+[package]
+name = "tcfs-sops"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SOPS+age secret propagation for tcfs"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+tcfs-storage = { path = "../tcfs-storage" }
+tcfs-crypto = { path = "../tcfs-crypto" }
+
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+notify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
