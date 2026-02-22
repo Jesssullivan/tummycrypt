@@ -4354,7 +4354,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-chunks"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4371,7 +4371,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4404,7 +4404,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-cloudfilter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "opendal",
@@ -4423,7 +4423,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "prost",
@@ -4440,7 +4440,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-siv",
  "anyhow",
@@ -4464,7 +4464,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-fuse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4485,7 +4485,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-secrets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "age",
@@ -4512,7 +4512,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-sops"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4531,7 +4531,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "opendal",
@@ -4545,7 +4545,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -4570,7 +4570,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -4589,7 +4589,7 @@ dependencies = [
 
 [[package]]
 name = "tcfsd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-nats",

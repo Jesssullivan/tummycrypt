@@ -16,8 +16,11 @@ result-*
 # Secrets (NEVER commit plaintext)
 *.key
 *.pem
+*.csr
+*.crl
 id_rsa
 id_ed25519
+certs/
 .env
 .env.*
 !.env.example
