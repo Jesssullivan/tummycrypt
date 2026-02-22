@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 tcfs-core = { path = "../tcfs-core" }
+tcfs-secrets = { path = "../tcfs-secrets" }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 tonic = { workspace = true }

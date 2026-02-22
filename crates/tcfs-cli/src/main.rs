@@ -175,6 +175,12 @@ enum Commands {
 
 #[derive(Subcommand, Debug)]
 enum DeviceAction {
+    /// Enroll this device in the sync fleet
+    Enroll {
+        /// Device name (default: hostname)
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// List enrolled devices
     List,
     /// Revoke a device by name
@@ -182,6 +188,8 @@ enum DeviceAction {
         /// Device name to revoke
         name: String,
     },
+    /// Show this device's identity and status
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -297,8 +305,10 @@ async fn main() -> Result<()> {
             password,
         } => cmd_init(&config, device_name, non_interactive, password).await,
         Commands::Device { action } => match action {
+            DeviceAction::Enroll { name } => cmd_device_enroll(name),
             DeviceAction::List => cmd_device_list(),
             DeviceAction::Revoke { name } => cmd_device_revoke(&name),
+            DeviceAction::Status => cmd_device_status(),
         },
         Commands::Auth { action } => match action {
             AuthAction::Unlock => cmd_auth_unlock(),
@@ -1181,18 +1191,9 @@ async fn cmd_init(
     let _wrapped = tcfs_crypto::wrap_key(&master_key, &file_key)?;
 
     // Register device
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
-    registry.add(tcfs_secrets::device::DeviceIdentity {
-        name: device_name.clone(),
-        public_key: format!("age1-device-{}", &blake3_short(&device_name)),
-        enrolled_at: now,
-        revoked: false,
-    });
+    let public_key = format!("age1-device-{}", &blake3_short(&device_name));
+    let device_id = registry.enroll(&device_name, &public_key, None);
     registry.save(&registry_path)?;
 
     println!();
@@ -1205,6 +1206,7 @@ async fn cmd_init(
     }
     println!();
     println!("Device name:     {}", device_name);
+    println!("Device ID:       {}", device_id);
     println!("Registry:        {}", registry_path.display());
     println!();
     println!("Next steps:");
@@ -1241,9 +1243,14 @@ fn cmd_device_list() -> Result<()> {
     println!("Enrolled devices ({}):", registry.devices.len());
     for device in &registry.devices {
         let status = if device.revoked { "REVOKED" } else { "active" };
+        let id_short = if device.device_id.len() > 8 {
+            &device.device_id[..8]
+        } else {
+            &device.device_id
+        };
         println!(
-            "  {} [{}] — enrolled {} — {}",
-            device.name, status, device.enrolled_at, device.public_key
+            "  {} [{}] id={} — enrolled {} — {}",
+            device.name, status, id_short, device.enrolled_at, device.public_key
         );
     }
 
@@ -1261,6 +1268,66 @@ fn cmd_device_revoke(name: &str) -> Result<()> {
         println!("Revoked device: {}", name);
     } else {
         anyhow::bail!("Device '{}' not found", name);
+    }
+
+    Ok(())
+}
+
+// ── `tcfs device enroll` ──────────────────────────────────────────────────────
+
+fn cmd_device_enroll(name: Option<String>) -> Result<()> {
+    let device_name = name.unwrap_or_else(tcfs_secrets::device::default_device_name);
+    let registry_path = tcfs_secrets::device::default_registry_path();
+    let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
+
+    if registry.find(&device_name).is_some() {
+        anyhow::bail!(
+            "Device '{}' is already enrolled. Use 'tcfs device list' to see devices.",
+            device_name
+        );
+    }
+
+    let public_key = format!(
+        "age1-device-{}",
+        &blake3::hash(device_name.as_bytes()).to_hex().as_str()[..8]
+    );
+    let device_id = registry.enroll(&device_name, &public_key, None);
+    registry.save(&registry_path)?;
+
+    println!("Device enrolled:");
+    println!("  name:      {}", device_name);
+    println!("  device_id: {}", device_id);
+    println!("  registry:  {}", registry_path.display());
+    println!();
+    println!("Next: configure sync in tcfs.toml and run 'tcfs push'");
+
+    Ok(())
+}
+
+// ── `tcfs device status` ─────────────────────────────────────────────────────
+
+fn cmd_device_status() -> Result<()> {
+    let registry_path = tcfs_secrets::device::default_registry_path();
+    let registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
+
+    let hostname = tcfs_secrets::device::default_device_name();
+    match registry.find(&hostname) {
+        Some(device) => {
+            println!("This device: {}", device.name);
+            println!("  device_id:       {}", device.device_id);
+            println!("  public_key:      {}", device.public_key);
+            println!("  signing_key:     {}", device.signing_key_hash);
+            println!("  enrolled_at:     {}", device.enrolled_at);
+            println!("  revoked:         {}", device.revoked);
+            println!("  last_nats_seq:   {}", device.last_nats_seq);
+            if let Some(ref desc) = device.description {
+                println!("  description:     {}", desc);
+            }
+        }
+        None => {
+            println!("This device ({}) is not enrolled.", hostname);
+            println!("Run 'tcfs device enroll' to register it.");
+        }
     }
 
     Ok(())
@@ -1373,6 +1440,44 @@ async fn cmd_rotate_credentials(
     println!("  3. Deactivate old credentials on the S3/SeaweedFS admin console");
 
     Ok(())
+}
+
+// ── Interactive conflict resolver ──────────────────────────────────────────
+
+/// Prompt the user to resolve a sync conflict interactively.
+fn resolve_conflict_interactive(
+    info: &tcfs_sync::conflict::ConflictInfo,
+) -> tcfs_sync::conflict::Resolution {
+    println!();
+    println!("CONFLICT DETECTED: {}", info.rel_path);
+    println!("  Local device:    {}", info.local_device);
+    println!(
+        "  Local hash:      {}",
+        &info.local_blake3[..16.min(info.local_blake3.len())]
+    );
+    println!("  Remote device:   {}", info.remote_device);
+    println!(
+        "  Remote hash:     {}",
+        &info.remote_blake3[..16.min(info.remote_blake3.len())]
+    );
+    println!();
+    println!("  [K]eep local / [R]emote / [B]oth / [D]efer?");
+
+    loop {
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_err() {
+            return tcfs_sync::conflict::Resolution::Defer;
+        }
+        match input.trim().to_lowercase().as_str() {
+            "k" | "keep" | "local" => return tcfs_sync::conflict::Resolution::KeepLocal,
+            "r" | "remote" => return tcfs_sync::conflict::Resolution::KeepRemote,
+            "b" | "both" => return tcfs_sync::conflict::Resolution::KeepBoth,
+            "d" | "defer" => return tcfs_sync::conflict::Resolution::Defer,
+            _ => {
+                println!("  Please enter K, R, B, or D:");
+            }
+        }
+    }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────

@@ -79,6 +79,20 @@ pub struct SyncConfig {
     pub workers: usize,
     /// Retry limit for failed tasks
     pub max_retries: u32,
+    /// Path to device identity JSON file
+    pub device_identity: Option<PathBuf>,
+    /// Device name (defaults to hostname)
+    pub device_name: Option<String>,
+    /// Conflict resolution mode: "auto", "interactive", or "defer"
+    pub conflict_mode: String,
+    /// Whether to sync .git directories
+    pub sync_git_dirs: bool,
+    /// Git sync mode: "bundle" or "raw"
+    pub git_sync_mode: String,
+    /// Whether to sync hidden directories (dotfiles/dotdirs)
+    pub sync_hidden_dirs: bool,
+    /// Glob patterns to exclude from sync
+    pub exclude_patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +202,13 @@ impl Default for SyncConfig {
             state_db: PathBuf::from("~/.local/share/tcfsd/state.db"),
             workers: 0,
             max_retries: 3,
+            device_identity: None,
+            device_name: None,
+            conflict_mode: "auto".into(),
+            sync_git_dirs: false,
+            git_sync_mode: "bundle".into(),
+            sync_hidden_dirs: false,
+            exclude_patterns: Vec::new(),
         }
     }
 }

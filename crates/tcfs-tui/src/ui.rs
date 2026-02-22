@@ -25,6 +25,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Config => widgets::config::draw(f, app, chunks[1]),
         Tab::Mounts => widgets::mounts::draw(f, app, chunks[1]),
         Tab::Secrets => widgets::secrets::draw(f, app, chunks[1]),
+        Tab::Conflicts => widgets::conflicts::render(f, chunks[1], app),
     }
 
     draw_footer(f, app, chunks[2]);
@@ -75,7 +76,7 @@ fn draw_footer(f: &mut Frame, _app: &App, area: ratatui::layout::Rect) {
         Span::raw(" Quit  "),
         Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
         Span::raw(" Switch  "),
-        Span::styled("[1-4]", Style::default().fg(Color::Yellow)),
+        Span::styled("[1-5]", Style::default().fg(Color::Yellow)),
         Span::raw(" Jump  "),
     ]);
     f.render_widget(ratatui::widgets::Paragraph::new(hints), area);

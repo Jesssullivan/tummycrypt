@@ -58,6 +58,43 @@ in {
       description = "List of mounts to configure at startup";
     };
 
+    # ── Fleet / multi-machine sync options ─────────────────────────────────
+    deviceName = lib.mkOption {
+      type = lib.types.str;
+      default = config.networking.hostName;
+      description = "Device name for fleet identification (defaults to hostname)";
+    };
+
+    conflictMode = lib.mkOption {
+      type = lib.types.enum' [ "auto" "interactive" "defer" ];
+      default = "auto";
+      description = "Conflict resolution mode: auto (deterministic), interactive (prompt), defer (skip)";
+    };
+
+    syncGitDirs = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Whether to sync .git directories";
+    };
+
+    gitSyncMode = lib.mkOption {
+      type = lib.types.enum' [ "bundle" "raw" ];
+      default = "bundle";
+      description = "Git sync mode: bundle (git bundle) or raw (file-by-file)";
+    };
+
+    natsUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "NATS server URL for real-time state sync (e.g., nats://localhost:4222)";
+    };
+
+    excludePatterns = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = "Glob patterns for files/dirs to exclude from sync";
+    };
+
     remoteJuggler = {
       enable = lib.mkEnableOption "RemoteJuggler credential injection";
 
@@ -129,6 +166,14 @@ in {
 
       environment = {
         TCFS_CONFIG = cfg.configFile;
+        TCFS_DEVICE_NAME = cfg.deviceName;
+        TCFS_CONFLICT_MODE = cfg.conflictMode;
+        TCFS_SYNC_GIT_DIRS = lib.boolToString cfg.syncGitDirs;
+        TCFS_GIT_SYNC_MODE = cfg.gitSyncMode;
+      } // lib.optionalAttrs (cfg.natsUrl != null) {
+        TCFS_NATS_URL = cfg.natsUrl;
+      } // lib.optionalAttrs (cfg.excludePatterns != []) {
+        TCFS_EXCLUDE_PATTERNS = lib.concatStringsSep "," cfg.excludePatterns;
       } // lib.optionalAttrs (cfg.credentialsFile != null) {
         CREDENTIALS_DIRECTORY = "%d";
       } // lib.optionalAttrs (cfg.remoteJuggler.enable && cfg.remoteJuggler.identity != "") {

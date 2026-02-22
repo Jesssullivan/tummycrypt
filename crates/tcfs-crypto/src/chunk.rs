@@ -108,6 +108,24 @@ fn build_aad(chunk_index: u64, file_id: &[u8; 32]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+mod proptest_suite {
+    use super::*;
+    use crate::keys::generate_file_key;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn chunk_encrypt_decrypt_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..=65536)) {
+            let key = generate_file_key();
+            let file_id = [0xABu8; 32];
+            let encrypted = encrypt_chunk(&key, 0, &file_id, &data).unwrap();
+            let decrypted = decrypt_chunk(&key, 0, &file_id, &encrypted).unwrap();
+            prop_assert_eq!(decrypted, data);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::keys::generate_file_key;

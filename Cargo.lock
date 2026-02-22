@@ -4622,6 +4622,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tcfs-core",
+ "tcfs-secrets",
  "tokio",
  "tokio-stream",
  "toml 0.8.23",
@@ -4639,10 +4640,12 @@ dependencies = [
  "age",
  "anyhow",
  "base64 0.22.1",
+ "blake3",
  "hostname",
  "keepass",
  "keyring",
  "notify",
+ "opendal",
  "rpassword",
  "secrecy",
  "serde",
@@ -4655,6 +4658,7 @@ dependencies = [
  "tokio-test",
  "toml 0.8.23",
  "tracing",
+ "uuid",
  "zeroize",
 ]
 
@@ -4699,6 +4703,7 @@ dependencies = [
  "async-nats",
  "bytes",
  "futures",
+ "glob",
  "notify",
  "opendal",
  "proptest",
@@ -4714,6 +4719,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4742,6 +4748,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "axum",
+ "blake3",
  "clap",
  "futures",
  "notify",
