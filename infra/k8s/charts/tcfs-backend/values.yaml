@@ -6,6 +6,9 @@ image:
   tag: latest
   pullPolicy: Always
 
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
 replicaCount: 1
 
 nameOverride: ""
