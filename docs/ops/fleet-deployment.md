@@ -317,3 +317,20 @@ just k8s-logs app=tcfsd
 ```
 
 The Justfile is at the project root. All recipes use the `civo` environment by default.
+
+---
+
+## 5. TLS Status
+
+SeaweedFS runs HTTP internally (trusted network, not internet-facing). mTLS is
+supported via `scripts/generate-certs.sh` but not currently enabled in any
+deployment (docker-compose, Ansible, or Civo K8s).
+
+The historical TLS private keys committed in the initial monorepo have been
+removed from tracking (`.gitignore`) and should be considered compromised.
+Regenerate with `./scripts/generate-certs.sh` before enabling mTLS.
+
+NATS and the tcfsd gRPC socket also run unencrypted. For production hardening:
+- Set `storage.enforce_tls = true` in tcfs config for HTTPS S3
+- Set `sync.nats_tls = true` for TLS NATS connections
+- Wire `security.toml` into SeaweedFS Ansible roles / Helm values for mTLS

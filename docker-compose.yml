@@ -20,7 +20,7 @@ services:
       -garbageThreshold=0.3
     volumes:
       - master_data_1:/data
-      - ./certs:/certs:ro
+
     networks:
       - tcfs-net
     healthcheck:
@@ -45,7 +45,7 @@ services:
       -garbageThreshold=0.3
     volumes:
       - master_data_2:/data
-      - ./certs:/certs:ro
+
     networks:
       - tcfs-net
     depends_on:
@@ -72,7 +72,7 @@ services:
       -garbageThreshold=0.3
     volumes:
       - master_data_3:/data
-      - ./certs:/certs:ro
+
     networks:
       - tcfs-net
     depends_on:
@@ -102,7 +102,7 @@ services:
       -ip.bind=0.0.0.0
     volumes:
       - volume_data:/data
-      - ./certs:/certs:ro
+
     networks:
       - tcfs-net
     depends_on:
@@ -134,7 +134,7 @@ services:
       - filer_data:/data
       - ./config/filer.toml:/etc/seaweedfs/filer.toml:ro
       - ./config/s3.json:/etc/seaweedfs/s3.json:ro
-      - ./certs:/certs:ro
+
     networks:
       - tcfs-net
     depends_on:

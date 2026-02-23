@@ -52,6 +52,9 @@ dns-status:
     @dig +short nats.tcfs.tummycrypt.dev
 
 # Full deploy: infra + DNS (may need two runs for Tailscale IP)
+# First run installs operators + CRDs, second creates DNS after IP is assigned.
+# Import existing DNS record first if needed:
+#   cd infra/tofu/environments/civo && tofu import 'module.nats_dns[0].porkbun_dns_record.this' 'tummycrypt.dev:RECORD_ID'
 deploy env="civo":
     cd infra/tofu/environments/{{env}} && tofu apply
 

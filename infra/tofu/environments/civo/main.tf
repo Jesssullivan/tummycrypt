@@ -42,7 +42,8 @@ provider "porkbun" {
 # ── NATS JetStream ────────────────────────────────────────────────────────────
 
 module "nats" {
-  source = "../../modules/nats"
+  source     = "../../modules/nats"
+  depends_on = [module.observability]  # CRD: ServiceMonitor
 
   namespace      = var.namespace
   cluster_size   = 3
@@ -74,7 +75,8 @@ module "nats_dns" {
 # ── KEDA autoscaler ───────────────────────────────────────────────────────────
 
 module "keda" {
-  source = "../../modules/keda"
+  source     = "../../modules/keda"
+  depends_on = [module.observability]  # CRD: ScaledObject + ServiceMonitor
 
   namespace         = var.namespace
   nats_url          = module.nats.nats_url
@@ -87,7 +89,8 @@ module "keda" {
 # ── tcfs-backend (sync workers) ───────────────────────────────────────────────
 
 module "tcfs_backend" {
-  source = "../../modules/tcfs-backend"
+  source     = "../../modules/tcfs-backend"
+  depends_on = [module.observability]  # CRD: ServiceMonitor
 
   namespace  = var.namespace
   image      = "ghcr.io/tinyland-inc/tcfsd:${var.image_tag}"
