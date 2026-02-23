@@ -30,6 +30,7 @@ pub struct TcfsDaemonImpl {
     device_name: String,
     nats_ok: std::sync::atomic::AtomicBool,
     nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
+    active_mounts: Arc<TokioMutex<std::collections::HashMap<String, tokio::process::Child>>>,
 }
 
 impl TcfsDaemonImpl {
@@ -56,6 +57,7 @@ impl TcfsDaemonImpl {
             device_name,
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
+            active_mounts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -67,6 +69,32 @@ impl TcfsDaemonImpl {
     /// Get a handle to the NATS client for shutdown notification.
     pub fn nats_handle(&self) -> Arc<TokioMutex<Option<tcfs_sync::NatsClient>>> {
         self.nats.clone()
+    }
+
+    /// Publish a ConflictResolved event via NATS (best-effort).
+    async fn publish_conflict_resolved(&self, rel_path: &str, resolution: &str) {
+        if let Some(nats) = self.nats.lock().await.as_ref() {
+            // Build merged vclock from state cache
+            let merged_vclock = {
+                let cache = self.state_cache.lock().await;
+                let path = std::path::PathBuf::from(rel_path);
+                cache
+                    .get(&path)
+                    .map(|e| e.vclock.clone())
+                    .unwrap_or_default()
+            };
+
+            let event = tcfs_sync::StateEvent::ConflictResolved {
+                device_id: self.device_id.clone(),
+                rel_path: rel_path.to_string(),
+                resolution: resolution.to_string(),
+                merged_vclock,
+                timestamp: tcfs_sync::StateEvent::now(),
+            };
+            if let Err(e) = nats.publish_state_event(&event).await {
+                tracing::warn!("failed to publish ConflictResolved: {e}");
+            }
+        }
     }
 
     /// Set the NATS client (called from daemon after connecting).
@@ -92,12 +120,13 @@ impl TcfsDaemon for TcfsDaemonImpl {
         _request: tonic::Request<StatusRequest>,
     ) -> Result<tonic::Response<StatusResponse>, tonic::Status> {
         let uptime = self.start_time.elapsed().as_secs() as i64;
+        let mount_count = self.active_mounts.lock().await.len() as i32;
         Ok(tonic::Response::new(StatusResponse {
             version: env!("CARGO_PKG_VERSION").into(),
             storage_endpoint: self.storage_endpoint.clone(),
             storage_ok: self.storage_ok,
             nats_ok: self.nats_ok.load(std::sync::atomic::Ordering::Relaxed),
-            active_mounts: 0,
+            active_mounts: mount_count,
             uptime_secs: uptime,
             device_id: self.device_id.clone(),
             device_name: self.device_name.clone(),
@@ -128,20 +157,128 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
     async fn mount(
         &self,
-        _request: tonic::Request<MountRequest>,
+        request: tonic::Request<MountRequest>,
     ) -> Result<tonic::Response<MountResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "mount: not yet wired (use `tcfs mount` CLI directly)",
-        ))
+        let req = request.into_inner();
+
+        if req.mountpoint.is_empty() || req.remote.is_empty() {
+            return Ok(tonic::Response::new(MountResponse {
+                success: false,
+                error: "mountpoint and remote are required".into(),
+            }));
+        }
+
+        let mountpoint = std::path::PathBuf::from(&req.mountpoint);
+
+        // Check not already mounted
+        {
+            let mounts = self.active_mounts.lock().await;
+            if mounts.contains_key(&req.mountpoint) {
+                return Ok(tonic::Response::new(MountResponse {
+                    success: false,
+                    error: format!("already mounted at: {}", req.mountpoint),
+                }));
+            }
+        }
+
+        // Ensure mountpoint directory exists
+        if !mountpoint.exists() {
+            std::fs::create_dir_all(&mountpoint).map_err(|e| {
+                tonic::Status::internal(format!("create mountpoint {}: {e}", req.mountpoint))
+            })?;
+        }
+
+        info!(
+            mountpoint = %req.mountpoint,
+            remote = %req.remote,
+            "spawning FUSE mount"
+        );
+
+        // Spawn tcfs mount as subprocess
+        let child = tokio::process::Command::new("tcfs")
+            .args(["mount", &req.remote, &req.mountpoint])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| tonic::Status::internal(format!("spawn tcfs mount: {e}")))?;
+
+        // Give the mount a moment to start
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        {
+            let mut mounts = self.active_mounts.lock().await;
+            mounts.insert(req.mountpoint.clone(), child);
+        }
+
+        Ok(tonic::Response::new(MountResponse {
+            success: true,
+            error: String::new(),
+        }))
     }
 
     async fn unmount(
         &self,
-        _request: tonic::Request<UnmountRequest>,
+        request: tonic::Request<UnmountRequest>,
     ) -> Result<tonic::Response<UnmountResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "unmount: not yet wired (use `tcfs unmount` CLI directly)",
-        ))
+        let req = request.into_inner();
+
+        if req.mountpoint.is_empty() {
+            return Ok(tonic::Response::new(UnmountResponse {
+                success: false,
+                error: "mountpoint is required".into(),
+            }));
+        }
+
+        info!(mountpoint = %req.mountpoint, "unmount requested");
+
+        // Try fusermount3 first, fallback to fusermount
+        let result = tokio::process::Command::new("fusermount3")
+            .args(["-u", &req.mountpoint])
+            .output()
+            .await;
+
+        let ok = match result {
+            Ok(output) if output.status.success() => true,
+            _ => {
+                // Fallback to fusermount
+                match tokio::process::Command::new("fusermount")
+                    .args(["-u", &req.mountpoint])
+                    .output()
+                    .await
+                {
+                    Ok(output) if output.status.success() => true,
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                        return Ok(tonic::Response::new(UnmountResponse {
+                            success: false,
+                            error: format!("fusermount failed: {stderr}"),
+                        }));
+                    }
+                    Err(e) => {
+                        return Ok(tonic::Response::new(UnmountResponse {
+                            success: false,
+                            error: format!("neither fusermount3 nor fusermount available: {e}"),
+                        }));
+                    }
+                }
+            }
+        };
+
+        if ok {
+            // Remove from active mounts and kill child if still running
+            let mut mounts = self.active_mounts.lock().await;
+            if let Some(mut child) = mounts.remove(&req.mountpoint) {
+                let _ = child.kill().await;
+            }
+
+            info!(mountpoint = %req.mountpoint, "unmounted");
+        }
+
+        Ok(tonic::Response::new(UnmountResponse {
+            success: ok,
+            error: String::new(),
+        }))
     }
 
     // ── Push: client-streaming upload ─────────────────────────────────────
@@ -338,20 +475,131 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
     async fn hydrate(
         &self,
-        _request: tonic::Request<HydrateRequest>,
+        request: tonic::Request<HydrateRequest>,
     ) -> Result<tonic::Response<Self::HydrateStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("hydrate: not yet wired"))
+        let req = request.into_inner();
+        let stub_path = std::path::PathBuf::from(&req.stub_path);
+
+        info!(stub = %req.stub_path, "hydrate requested");
+
+        // Read and parse stub file
+        let stub_content = std::fs::read_to_string(&stub_path)
+            .map_err(|e| tonic::Status::not_found(format!("read stub: {e}")))?;
+        let meta = tcfs_fuse::stub::StubMeta::parse(&stub_content)
+            .map_err(|e| tonic::Status::invalid_argument(format!("parse stub: {e}")))?;
+
+        // Derive real file path from stub path
+        let real_path =
+            tcfs_fuse::stub::stub_to_real_name(stub_path.as_os_str()).ok_or_else(|| {
+                tonic::Status::invalid_argument(format!(
+                    "cannot derive real name from stub: {}",
+                    req.stub_path
+                ))
+            })?;
+
+        // Extract manifest hash from oid
+        let blake3_hex = meta
+            .blake3_hex()
+            .ok_or_else(|| tonic::Status::invalid_argument("stub oid missing blake3: prefix"))?;
+        let prefix = self.config.storage.bucket.clone();
+        let manifest_path = format!("{prefix}/manifests/{blake3_hex}");
+
+        let op = self.operator.lock().await;
+        let op = op
+            .as_ref()
+            .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
+        let op = op.clone();
+        drop(self.operator.lock().await);
+
+        let total_bytes = meta.size;
+
+        let result = {
+            let mut cache = self.state_cache.lock().await;
+            tcfs_sync::engine::download_file_with_device(
+                &op,
+                &manifest_path,
+                &real_path,
+                &prefix,
+                None,
+                &self.device_id,
+                Some(&mut cache),
+            )
+            .await
+        };
+
+        match result {
+            Ok(dl) => {
+                // Remove stub file after successful hydration
+                let _ = std::fs::remove_file(&stub_path);
+
+                info!(
+                    real_path = %real_path.display(),
+                    bytes = dl.bytes,
+                    "hydration complete"
+                );
+
+                let progress = HydrateProgress {
+                    bytes_received: dl.bytes,
+                    total_bytes,
+                    local_path: real_path.to_string_lossy().to_string(),
+                    done: true,
+                    error: String::new(),
+                };
+                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
+                    progress,
+                )))))
+            }
+            Err(e) => {
+                let progress = HydrateProgress {
+                    bytes_received: 0,
+                    total_bytes,
+                    local_path: String::new(),
+                    done: true,
+                    error: format!("{e}"),
+                };
+                Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
+                    progress,
+                )))))
+            }
+        }
     }
 
     // ── Unsync ────────────────────────────────────────────────────────────
 
     async fn unsync(
         &self,
-        _request: tonic::Request<UnsyncRequest>,
+        request: tonic::Request<UnsyncRequest>,
     ) -> Result<tonic::Response<UnsyncResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "unsync: not yet wired (use `tcfs unsync` CLI directly)",
-        ))
+        let req = request.into_inner();
+        let path = std::path::PathBuf::from(&req.path);
+
+        info!(path = %req.path, force = req.force, "unsync requested");
+
+        let mut cache = self.state_cache.lock().await;
+        if cache.get(&path).is_none() {
+            return Ok(tonic::Response::new(UnsyncResponse {
+                success: false,
+                stub_path: String::new(),
+                error: format!("path not in sync state: {}", req.path),
+            }));
+        }
+
+        cache.remove(&path);
+        if let Err(e) = cache.flush() {
+            return Ok(tonic::Response::new(UnsyncResponse {
+                success: false,
+                stub_path: String::new(),
+                error: format!("state cache flush failed: {e}"),
+            }));
+        }
+
+        info!(path = %req.path, "unsynced successfully");
+
+        Ok(tonic::Response::new(UnsyncResponse {
+            success: true,
+            stub_path: String::new(),
+            error: String::new(),
+        }))
     }
 
     // ── Sync Status ───────────────────────────────────────────────────────
@@ -420,13 +668,230 @@ impl TcfsDaemon for TcfsDaemonImpl {
             "conflict resolution requested"
         );
 
-        // TODO: Apply resolution against state cache and remote manifest
-        // For now, acknowledge the resolution request
-        Ok(tonic::Response::new(ResolveConflictResponse {
-            success: true,
-            resolved_path: req.path,
-            error: String::new(),
-        }))
+        let path = std::path::PathBuf::from(&req.path);
+
+        match resolution.as_str() {
+            "defer" => {
+                info!(path = %req.path, "conflict deferred");
+                Ok(tonic::Response::new(ResolveConflictResponse {
+                    success: true,
+                    resolved_path: req.path,
+                    error: String::new(),
+                }))
+            }
+            "keep_local" => {
+                // Read local state, tick vclock, build new manifest, upload
+                let local_state = {
+                    let cache = self.state_cache.lock().await;
+                    cache.get(&path).cloned()
+                };
+
+                let local_state = match local_state {
+                    Some(s) => s,
+                    None => {
+                        return Ok(tonic::Response::new(ResolveConflictResponse {
+                            success: false,
+                            resolved_path: String::new(),
+                            error: format!("no local state for path: {}", req.path),
+                        }));
+                    }
+                };
+
+                // Tick our vclock and build updated manifest
+                let mut vclock = local_state.vclock.clone();
+                vclock.tick(&self.device_id);
+
+                let manifest = tcfs_sync::manifest::SyncManifest {
+                    version: 2,
+                    file_hash: local_state.blake3.clone(),
+                    file_size: local_state.size,
+                    chunks: vec![],
+                    vclock: vclock.clone(),
+                    written_by: self.device_id.clone(),
+                    written_at: tcfs_sync::StateEvent::now(),
+                    rel_path: Some(req.path.clone()),
+                };
+
+                // Upload updated manifest
+                let op = self.operator.lock().await;
+                if let Some(op) = op.as_ref() {
+                    let manifest_key = local_state.remote_path.clone();
+                    let manifest_bytes = manifest
+                        .to_bytes()
+                        .map_err(|e| tonic::Status::internal(format!("manifest serialize: {e}")))?;
+                    op.write(&manifest_key, manifest_bytes)
+                        .await
+                        .map_err(|e| tonic::Status::internal(format!("manifest upload: {e}")))?;
+                }
+                drop(op);
+
+                // Update state cache
+                {
+                    let mut cache = self.state_cache.lock().await;
+                    if let Some(entry) = cache.get(&path).cloned() {
+                        let updated = tcfs_sync::state::SyncState {
+                            vclock,
+                            last_synced: tcfs_sync::StateEvent::now(),
+                            ..entry
+                        };
+                        cache.set(&path, updated);
+                        let _ = cache.flush();
+                    }
+                }
+
+                // Publish ConflictResolved via NATS
+                self.publish_conflict_resolved(&req.path, "keep_local")
+                    .await;
+
+                Ok(tonic::Response::new(ResolveConflictResponse {
+                    success: true,
+                    resolved_path: req.path,
+                    error: String::new(),
+                }))
+            }
+            "keep_remote" => {
+                // Download remote version to local path
+                let (remote_path, prefix) = {
+                    let cache = self.state_cache.lock().await;
+                    let entry = cache.get(&path);
+                    let remote = entry.map(|e| e.remote_path.clone()).unwrap_or_default();
+                    let prefix = self.config.storage.bucket.clone();
+                    (remote, prefix)
+                };
+
+                if remote_path.is_empty() {
+                    return Ok(tonic::Response::new(ResolveConflictResponse {
+                        success: false,
+                        resolved_path: String::new(),
+                        error: format!("no remote path for: {}", req.path),
+                    }));
+                }
+
+                let op = self.operator.lock().await;
+                let op = op
+                    .as_ref()
+                    .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
+                let op = op.clone();
+                drop(self.operator.lock().await);
+
+                let result = {
+                    let mut cache = self.state_cache.lock().await;
+                    tcfs_sync::engine::download_file_with_device(
+                        &op,
+                        &remote_path,
+                        &path,
+                        &prefix,
+                        None,
+                        &self.device_id,
+                        Some(&mut cache),
+                    )
+                    .await
+                };
+
+                match result {
+                    Ok(_dl) => {
+                        self.publish_conflict_resolved(&req.path, "keep_remote")
+                            .await;
+                        Ok(tonic::Response::new(ResolveConflictResponse {
+                            success: true,
+                            resolved_path: req.path,
+                            error: String::new(),
+                        }))
+                    }
+                    Err(e) => Ok(tonic::Response::new(ResolveConflictResponse {
+                        success: false,
+                        resolved_path: String::new(),
+                        error: format!("download failed: {e}"),
+                    })),
+                }
+            }
+            "keep_both" => {
+                // Rename local file to {stem}.conflict-{device_id}{ext}, then download remote
+                let (remote_path, prefix) = {
+                    let cache = self.state_cache.lock().await;
+                    let entry = cache.get(&path);
+                    let remote = entry.map(|e| e.remote_path.clone()).unwrap_or_default();
+                    let prefix = self.config.storage.bucket.clone();
+                    (remote, prefix)
+                };
+
+                if remote_path.is_empty() {
+                    return Ok(tonic::Response::new(ResolveConflictResponse {
+                        success: false,
+                        resolved_path: String::new(),
+                        error: format!("no remote path for: {}", req.path),
+                    }));
+                }
+
+                // Rename local file
+                let conflict_path = {
+                    let p = std::path::Path::new(&req.path);
+                    let stem = p.file_stem().unwrap_or_default().to_string_lossy();
+                    let ext = p
+                        .extension()
+                        .map(|e| format!(".{}", e.to_string_lossy()))
+                        .unwrap_or_default();
+                    let parent = p.parent().unwrap_or(std::path::Path::new(""));
+                    parent
+                        .join(format!("{}.conflict-{}{}", stem, self.device_id, ext))
+                        .to_string_lossy()
+                        .to_string()
+                };
+
+                if path.exists() {
+                    if let Err(e) = std::fs::rename(&path, &conflict_path) {
+                        return Ok(tonic::Response::new(ResolveConflictResponse {
+                            success: false,
+                            resolved_path: String::new(),
+                            error: format!("rename failed: {e}"),
+                        }));
+                    }
+                }
+
+                // Download remote to original path
+                let op = self.operator.lock().await;
+                let op = op
+                    .as_ref()
+                    .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
+                let op = op.clone();
+                drop(self.operator.lock().await);
+
+                let result = {
+                    let mut cache = self.state_cache.lock().await;
+                    tcfs_sync::engine::download_file_with_device(
+                        &op,
+                        &remote_path,
+                        &path,
+                        &prefix,
+                        None,
+                        &self.device_id,
+                        Some(&mut cache),
+                    )
+                    .await
+                };
+
+                match result {
+                    Ok(_dl) => {
+                        self.publish_conflict_resolved(&req.path, "keep_both").await;
+                        Ok(tonic::Response::new(ResolveConflictResponse {
+                            success: true,
+                            resolved_path: conflict_path,
+                            error: String::new(),
+                        }))
+                    }
+                    Err(e) => {
+                        // Try to rename back on failure
+                        let _ = std::fs::rename(&conflict_path, &path);
+                        Ok(tonic::Response::new(ResolveConflictResponse {
+                            success: false,
+                            resolved_path: String::new(),
+                            error: format!("download after rename failed: {e}"),
+                        }))
+                    }
+                }
+            }
+            _ => unreachable!("already validated"),
+        }
     }
 
     // ── Watch ─────────────────────────────────────────────────────────────
@@ -437,9 +902,84 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
     async fn watch(
         &self,
-        _request: tonic::Request<WatchRequest>,
+        request: tonic::Request<WatchRequest>,
     ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("watch: not yet wired"))
+        use notify::{RecursiveMode, Watcher};
+
+        let req = request.into_inner();
+        if req.paths.is_empty() {
+            return Err(tonic::Status::invalid_argument(
+                "at least one path is required",
+            ));
+        }
+
+        info!(paths = ?req.paths, "watch requested");
+
+        let (sync_tx, sync_rx) = std::sync::mpsc::channel();
+
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let _ = sync_tx.send(res);
+        })
+        .map_err(|e| tonic::Status::internal(format!("create watcher: {e}")))?;
+
+        for path_str in &req.paths {
+            let path = std::path::Path::new(path_str);
+            if !path.exists() {
+                return Err(tonic::Status::not_found(format!(
+                    "watch path does not exist: {path_str}"
+                )));
+            }
+            watcher
+                .watch(path, RecursiveMode::Recursive)
+                .map_err(|e| tonic::Status::internal(format!("watch {path_str}: {e}")))?;
+        }
+
+        let (async_tx, async_rx) = tokio::sync::mpsc::channel(256);
+
+        // Bridge sync watcher events to async channel
+        tokio::task::spawn_blocking(move || {
+            // Keep watcher alive while client is connected
+            let _watcher = watcher;
+            while let Ok(result) = sync_rx.recv() {
+                let event = match result {
+                    Ok(event) => {
+                        let event_type = match event.kind {
+                            notify::EventKind::Create(_) => "created",
+                            notify::EventKind::Modify(_) => "modified",
+                            notify::EventKind::Remove(_) => "deleted",
+                            notify::EventKind::Access(_) => continue,
+                            notify::EventKind::Other => continue,
+                            notify::EventKind::Any => continue,
+                        };
+                        let path = event
+                            .paths
+                            .first()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        WatchEvent {
+                            path,
+                            event_type: event_type.to_string(),
+                            timestamp,
+                        }
+                    }
+                    Err(e) => WatchEvent {
+                        path: String::new(),
+                        event_type: format!("error: {e}"),
+                        timestamp: 0,
+                    },
+                };
+                if async_tx.blocking_send(Ok(event)).is_err() {
+                    break; // Client disconnected
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(async_rx);
+        Ok(tonic::Response::new(Box::pin(stream)))
     }
 }
 

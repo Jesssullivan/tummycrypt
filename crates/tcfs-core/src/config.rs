@@ -93,6 +93,8 @@ pub struct SyncConfig {
     pub sync_hidden_dirs: bool,
     /// Glob patterns to exclude from sync
     pub exclude_patterns: Vec<String>,
+    /// Local directory root for synced files (used by auto-pull)
+    pub sync_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +211,7 @@ impl Default for SyncConfig {
             git_sync_mode: "bundle".into(),
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
+            sync_root: None,
         }
     }
 }
@@ -251,6 +254,7 @@ nats_url = "tls://nats.example.com:4222"
 nats_tls = true
 workers = 4
 max_retries = 5
+sync_root = "/home/user/tcfs"
 
 [fuse]
 negative_cache_ttl_secs = 60
@@ -272,6 +276,10 @@ argon2_parallelism = 8
         assert_eq!(config.storage.bucket, "my-bucket");
         assert!(config.sync.nats_tls);
         assert_eq!(config.sync.workers, 4);
+        assert_eq!(
+            config.sync.sync_root,
+            Some(PathBuf::from("/home/user/tcfs"))
+        );
         assert_eq!(config.fuse.cache_max_mb, 20480);
         assert!(config.crypto.enabled);
         assert_eq!(config.crypto.argon2_mem_cost_kib, 131072);
