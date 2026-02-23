@@ -6,7 +6,7 @@ output "tailscale_nats_url" {
 output "tailscale_ip" {
   description = "Tailscale CGNAT IP assigned to the NATS LoadBalancer (populated after operator reconciles)"
   value       = try(
-    kubernetes_service_v1.nats_tailscale.status[0].load_balancer[0].ingress[0].ip,
+    [for ingress in kubernetes_service_v1.nats_tailscale.status[0].load_balancer[0].ingress : ingress.ip if ingress.ip != ""][0],
     ""
   )
 }

@@ -46,7 +46,7 @@ k8s-describe app="tcfsd" ns="tcfs":
 # Show current DNS records for tummycrypt.dev
 dns-status:
     @echo "NATS Tailscale IP:"
-    @kubectl get svc nats-tailscale -n tcfs -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+    @kubectl get svc nats-tailscale -n tcfs -o jsonpath='{.status.loadBalancer.ingress[?(@.ip)].ip}'
     @echo ""
     @echo "DNS record:"
     @dig +short nats.tcfs.tummycrypt.dev
