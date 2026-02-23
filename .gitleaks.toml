@@ -1,0 +1,25 @@
+# gitleaks configuration for tummycrypt
+# Secret scanning — runs in CI and can be run locally:
+#   gitleaks detect --source . --config .gitleaks.toml --verbose
+
+title = "tummycrypt gitleaks config"
+
+[allowlist]
+  # SOPS-encrypted credential files (values are ENC[AES256_GCM,...])
+  paths = [
+    '''credentials/.*\.yaml$''',
+    '''\.sops\.yaml$''',
+  ]
+
+  # Age recipient public keys are not secrets
+  regexTarget = "line"
+  regexes = [
+    '''age1[a-z0-9]{58}''',
+  ]
+
+  # Historical commits containing SeaweedFS TLS certs (removed in f3d3053, .gitignored)
+  commits = [
+    "64e0792900a94b15f6332c4feab4e81d966d1304",
+    "f3d305340a3c852047e018fb29c2e8924bcda1ad",
+    "be626d9",
+  ]
