@@ -12,6 +12,7 @@ exclude = [
   "nats.example.com",
   "filer.example.com",
   "example.com",
+  "^https://developer.apple.com/videos",
 ]
 exclude_path = [
   "docs/archive/",
