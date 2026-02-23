@@ -8,3 +8,7 @@ pub mod nats;
 pub mod scheduler;
 pub mod state;
 pub mod watcher;
+
+// Re-export key NATS types for convenience
+#[cfg(feature = "nats")]
+pub use nats::{NatsClient, StateEvent};

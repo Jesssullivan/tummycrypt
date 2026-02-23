@@ -155,13 +155,127 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         config.storage.endpoint.clone(),
         state_cache,
         operator,
+        device_id.clone(),
+        device_name.clone(),
     );
+
+    // Connect to NATS for fleet state sync (non-blocking, best-effort)
+    let nats_url = &config.sync.nats_url;
+    if nats_url != "nats://localhost:4222" || std::env::var("TCFS_NATS_URL").is_ok() {
+        let url = std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| nats_url.clone());
+        match tcfs_sync::NatsClient::connect(&url).await {
+            Ok(nats) => {
+                if let Err(e) = nats.ensure_streams().await {
+                    warn!("NATS stream setup failed: {e}");
+                } else {
+                    // Publish DeviceOnline event
+                    let online_event = tcfs_sync::StateEvent::DeviceOnline {
+                        device_id: device_id.clone(),
+                        last_seq: 0,
+                        timestamp: tcfs_sync::StateEvent::now(),
+                    };
+                    if let Err(e) = nats.publish_state_event(&online_event).await {
+                        warn!("failed to publish DeviceOnline: {e}");
+                    } else {
+                        info!("NATS: published DeviceOnline");
+                    }
+
+                    // Spawn state sync loop
+                    let sync_device_id = device_id.clone();
+                    let sync_conflict_mode = config.sync.conflict_mode.clone();
+                    spawn_state_sync_loop(&nats, &sync_device_id, &sync_conflict_mode).await;
+
+                    impl_.set_nats(nats);
+                }
+            }
+            Err(e) => {
+                warn!("NATS connection failed: {e} (fleet sync disabled)");
+            }
+        }
+    }
 
     info!(socket = %socket_path.display(), "gRPC: listening");
 
     crate::grpc::serve(&socket_path, impl_).await?;
 
     Ok(())
+}
+
+/// Spawn a background task that consumes state events from NATS.
+async fn spawn_state_sync_loop(nats: &tcfs_sync::NatsClient, device_id: &str, conflict_mode: &str) {
+    use futures::StreamExt;
+
+    match nats.state_consumer(device_id).await {
+        Ok(stream) => {
+            let device_id = device_id.to_string();
+            let conflict_mode = conflict_mode.to_string();
+            tokio::spawn(async move {
+                let mut stream = std::pin::pin!(stream);
+                info!(device = %device_id, "state sync loop started");
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(msg) => {
+                            let event_type = msg.event.event_type();
+                            let event_device = msg.event.device_id().to_string();
+
+                            // Skip events from our own device
+                            if event_device == device_id {
+                                if let Err(e) = msg.ack().await {
+                                    warn!("ack own event failed: {e}");
+                                }
+                                continue;
+                            }
+
+                            match &msg.event {
+                                tcfs_sync::StateEvent::FileSynced {
+                                    rel_path,
+                                    blake3,
+                                    size,
+                                    ..
+                                } => {
+                                    info!(
+                                        from_device = %event_device,
+                                        path = %rel_path,
+                                        hash = &blake3[..8.min(blake3.len())],
+                                        size,
+                                        mode = %conflict_mode,
+                                        "remote file synced"
+                                    );
+                                    // In auto mode: would trigger auto-pull
+                                    // In interactive mode: queue for user review
+                                    // In defer mode: log and skip
+                                }
+                                tcfs_sync::StateEvent::DeviceOnline { device_id: did, .. } => {
+                                    info!(device = %did, "remote device online");
+                                }
+                                tcfs_sync::StateEvent::DeviceOffline { device_id: did, .. } => {
+                                    info!(device = %did, "remote device offline");
+                                }
+                                _ => {
+                                    info!(
+                                        event = %event_type,
+                                        device = %event_device,
+                                        "state event received"
+                                    );
+                                }
+                            }
+
+                            if let Err(e) = msg.ack().await {
+                                warn!("ack state event failed: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            warn!("state sync stream error: {e}");
+                        }
+                    }
+                }
+                info!("state sync loop ended");
+            });
+        }
+        Err(e) => {
+            warn!("failed to create state consumer: {e}");
+        }
+    }
 }
 
 fn notify_ready() {

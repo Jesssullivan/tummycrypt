@@ -14,6 +14,7 @@ service TcfsDaemon {
   rpc SyncStatus(SyncStatusRequest) returns (SyncStatusResponse);
   rpc Watch(WatchRequest) returns (stream WatchEvent);
   rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
+  rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
 }
 
 message Empty {}
@@ -26,6 +27,9 @@ message StatusResponse {
   bool nats_ok = 4;
   int32 active_mounts = 5;
   int64 uptime_secs = 6;
+  string device_id = 7;
+  string device_name = 8;
+  string conflict_mode = 9;
 }
 
 message MountRequest {
@@ -119,4 +123,14 @@ message CredentialStatusResponse {
   string source = 2;
   int64 loaded_at = 3;
   bool needs_reload = 4;
+}
+
+message ResolveConflictRequest {
+  string path = 1;
+  string resolution = 2;
+}
+message ResolveConflictResponse {
+  bool success = 1;
+  string resolved_path = 2;
+  string error = 3;
 }

@@ -11,7 +11,8 @@ use rmcp::{
 };
 
 use tcfs_core::proto::{
-    tcfs_daemon_client::TcfsDaemonClient, Empty, PullRequest, StatusRequest, SyncStatusRequest,
+    tcfs_daemon_client::TcfsDaemonClient, Empty, PullRequest, ResolveConflictRequest,
+    StatusRequest, SyncStatusRequest,
 };
 use tonic::transport::Channel;
 
@@ -112,6 +113,9 @@ impl TcfsMcp {
                         "nats_ok": s.nats_ok,
                         "active_mounts": s.active_mounts,
                         "uptime_secs": s.uptime_secs,
+                        "device_id": s.device_id,
+                        "device_name": s.device_name,
+                        "conflict_mode": s.conflict_mode,
                     })
                     .to_string()
                 }
@@ -237,26 +241,29 @@ impl TcfsMcp {
         &self,
         Parameters(input): Parameters<ResolveConflictInput>,
     ) -> String {
-        let resolution = match input.resolution.as_str() {
-            "keep_local" => "keep_local",
-            "keep_remote" => "keep_remote",
-            "keep_both" => "keep_both",
-            "defer" => "defer",
-            other => {
-                return format!(
-                    "{{\"error\": \"invalid resolution '{}'. Use: keep_local, keep_remote, keep_both, defer\"}}",
-                    other
-                )
+        match self.connect().await {
+            Ok(mut client) => {
+                match client
+                    .resolve_conflict(ResolveConflictRequest {
+                        path: input.rel_path.clone(),
+                        resolution: input.resolution.clone(),
+                    })
+                    .await
+                {
+                    Ok(resp) => {
+                        let r = resp.into_inner();
+                        serde_json::json!({
+                            "success": r.success,
+                            "resolved_path": r.resolved_path,
+                            "error": if r.error.is_empty() { None } else { Some(&r.error) },
+                        })
+                        .to_string()
+                    }
+                    Err(e) => format!("{{\"error\": \"resolve_conflict RPC failed: {e}\"}}"),
+                }
             }
-        };
-
-        serde_json::json!({
-            "rel_path": input.rel_path,
-            "resolution": resolution,
-            "status": "acknowledged",
-            "note": "Conflict resolution queued. The daemon will apply this on next sync cycle."
-        })
-        .to_string()
+            Err(e) => format!("{{\"error\": \"{e}\"}}"),
+        }
     }
 
     #[tool(description = "Show all enrolled devices in the fleet and their sync status")]

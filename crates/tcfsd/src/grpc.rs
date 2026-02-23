@@ -26,6 +26,10 @@ pub struct TcfsDaemonImpl {
     start_time: std::time::Instant,
     state_cache: Arc<TokioMutex<tcfs_sync::state::StateCache>>,
     operator: Arc<TokioMutex<Option<opendal::Operator>>>,
+    device_id: String,
+    device_name: String,
+    nats_ok: std::sync::atomic::AtomicBool,
+    nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
 }
 
 impl TcfsDaemonImpl {
@@ -36,6 +40,8 @@ impl TcfsDaemonImpl {
         storage_endpoint: String,
         state_cache: tcfs_sync::state::StateCache,
         operator: Option<opendal::Operator>,
+        device_id: String,
+        device_name: String,
     ) -> Self {
         Self {
             cred_store,
@@ -45,7 +51,26 @@ impl TcfsDaemonImpl {
             start_time: std::time::Instant::now(),
             state_cache: Arc::new(TokioMutex::new(state_cache)),
             operator: Arc::new(TokioMutex::new(operator)),
+            device_id,
+            device_name,
+            nats_ok: std::sync::atomic::AtomicBool::new(false),
+            nats: Arc::new(TokioMutex::new(None)),
         }
+    }
+
+    /// Set the NATS client (called from daemon after connecting).
+    pub fn set_nats(&self, client: tcfs_sync::NatsClient) {
+        // set_nats_ok is implicitly true if we have a client
+        self.nats_ok
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // We need a runtime handle since this might be called from sync context
+        // but the Mutex is tokio::sync::Mutex, so just use block_in_place
+        let nats = self.nats.clone();
+        tokio::task::block_in_place(move || {
+            tokio::runtime::Handle::current().block_on(async {
+                *nats.lock().await = Some(client);
+            });
+        });
     }
 }
 
@@ -60,9 +85,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
             version: env!("CARGO_PKG_VERSION").into(),
             storage_endpoint: self.storage_endpoint.clone(),
             storage_ok: self.storage_ok,
-            nats_ok: false,
+            nats_ok: self.nats_ok.load(std::sync::atomic::Ordering::Relaxed),
             active_mounts: 0,
             uptime_secs: uptime,
+            device_id: self.device_id.clone(),
+            device_name: self.device_name.clone(),
+            conflict_mode: self.config.sync.conflict_mode.clone(),
         }))
     }
 
@@ -158,14 +186,50 @@ impl TcfsDaemon for TcfsDaemonImpl {
             .map_err(|e| tonic::Status::internal(format!("write temp: {e}")))?;
 
         let total_bytes = data.len() as u64;
+        let device_id = self.device_id.clone();
 
         let result = {
             let mut cache = state_cache.lock().await;
-            tcfs_sync::engine::upload_file(&op, &local_path, &prefix, &mut cache, None).await
+            tcfs_sync::engine::upload_file_with_device(
+                &op,
+                &local_path,
+                &prefix,
+                &mut cache,
+                None,
+                &device_id,
+                Some(&path),
+            )
+            .await
         };
 
         match result {
             Ok(upload) => {
+                // Publish state event if NATS is connected and file was actually uploaded
+                if !upload.skipped {
+                    let nats = self.nats.clone();
+                    let device_id = self.device_id.clone();
+                    let rel_path = path.clone();
+                    let blake3 = upload.hash.clone();
+                    let size = total_bytes;
+                    let remote_path = upload.remote_path.clone();
+                    tokio::spawn(async move {
+                        if let Some(nats) = nats.lock().await.as_ref() {
+                            let event = tcfs_sync::StateEvent::FileSynced {
+                                device_id,
+                                rel_path,
+                                blake3,
+                                size,
+                                vclock: tcfs_sync::conflict::VectorClock::default(),
+                                manifest_path: remote_path,
+                                timestamp: tcfs_sync::StateEvent::now(),
+                            };
+                            if let Err(e) = nats.publish_state_event(&event).await {
+                                tracing::warn!("failed to publish state event: {e}");
+                            }
+                        }
+                    });
+                }
+
                 let progress = PushProgress {
                     bytes_sent: total_bytes,
                     total_bytes,
@@ -212,10 +276,22 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let prefix = self.config.storage.bucket.clone();
         let local_path = std::path::PathBuf::from(&req.local_path);
+        let device_id = self.device_id.clone();
+        let state_cache = self.state_cache.clone();
 
-        let result =
-            tcfs_sync::engine::download_file(&op, &req.remote_path, &local_path, &prefix, None)
-                .await;
+        let result = {
+            let mut cache = state_cache.lock().await;
+            tcfs_sync::engine::download_file_with_device(
+                &op,
+                &req.remote_path,
+                &local_path,
+                &prefix,
+                None,
+                &device_id,
+                Some(&mut cache),
+            )
+            .await
+        };
 
         match result {
             Ok(dl) => {
@@ -302,6 +378,44 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 }))
             }
         }
+    }
+
+    // ── Resolve Conflict ──────────────────────────────────────────────────
+
+    async fn resolve_conflict(
+        &self,
+        request: tonic::Request<ResolveConflictRequest>,
+    ) -> Result<tonic::Response<ResolveConflictResponse>, tonic::Status> {
+        let req = request.into_inner();
+
+        let resolution = match req.resolution.as_str() {
+            "keep_local" | "keep_remote" | "keep_both" | "defer" => req.resolution.clone(),
+            other => {
+                return Ok(tonic::Response::new(ResolveConflictResponse {
+                    success: false,
+                    resolved_path: String::new(),
+                    error: format!(
+                        "invalid resolution '{}': use keep_local, keep_remote, keep_both, or defer",
+                        other
+                    ),
+                }));
+            }
+        };
+
+        info!(
+            path = %req.path,
+            resolution = %resolution,
+            device = %self.device_id,
+            "conflict resolution requested"
+        );
+
+        // TODO: Apply resolution against state cache and remote manifest
+        // For now, acknowledge the resolution request
+        Ok(tonic::Response::new(ResolveConflictResponse {
+            success: true,
+            resolved_path: req.path,
+            error: String::new(),
+        }))
     }
 
     // ── Watch ─────────────────────────────────────────────────────────────

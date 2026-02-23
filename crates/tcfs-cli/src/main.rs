@@ -418,6 +418,40 @@ fn make_spinner(prefix: &str) -> ProgressBar {
     pb
 }
 
+/// Load the device_id from the registry, using config for device name and registry path.
+fn load_device_id(config: &tcfs_core::config::TcfsConfig) -> String {
+    let device_name = config
+        .sync
+        .device_name
+        .clone()
+        .unwrap_or_else(tcfs_secrets::device::default_device_name);
+    let registry_path = config
+        .sync
+        .device_identity
+        .clone()
+        .unwrap_or_else(tcfs_secrets::device::default_registry_path);
+
+    match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
+        Ok(registry) => registry
+            .find(&device_name)
+            .map(|d| d.device_id.clone())
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Build a CollectConfig from the sync config.
+fn collect_config_from_sync(
+    config: &tcfs_core::config::TcfsConfig,
+) -> tcfs_sync::engine::CollectConfig {
+    tcfs_sync::engine::CollectConfig {
+        sync_git_dirs: config.sync.sync_git_dirs,
+        git_sync_mode: config.sync.git_sync_mode.clone(),
+        sync_hidden_dirs: config.sync.sync_hidden_dirs,
+        exclude_patterns: config.sync.exclude_patterns.clone(),
+    }
+}
+
 // ── `tcfs push` ───────────────────────────────────────────────────────────────
 
 async fn cmd_push(
@@ -431,6 +465,9 @@ async fn cmd_push(
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
+    let device_id = load_device_id(config);
+    let collect_cfg = collect_config_from_sync(config);
+
     // Default prefix: local directory/file name
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
@@ -442,11 +479,16 @@ async fn cmd_push(
         });
 
     println!(
-        "Pushing {} → {}:{} (endpoint: {})",
+        "Pushing {} → {}:{} (endpoint: {}{})",
         local.display(),
         config.storage.bucket,
         remote_prefix,
         config.storage.endpoint,
+        if device_id.is_empty() {
+            String::new()
+        } else {
+            format!(", device: {}...", &device_id[..8.min(device_id.len())])
+        },
     );
 
     if local.is_file() {
@@ -461,12 +503,43 @@ async fn cmd_push(
             pb_clone.set_message(msg.to_string());
         });
 
-        let result =
-            tcfs_sync::engine::upload_file(&op, local, &remote_prefix, &mut state, Some(&progress))
-                .await
-                .with_context(|| format!("uploading {}", local.display()))?;
+        let rel = local
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let result = tcfs_sync::engine::upload_file_with_device(
+            &op,
+            local,
+            &remote_prefix,
+            &mut state,
+            Some(&progress),
+            &device_id,
+            Some(&rel),
+        )
+        .await
+        .with_context(|| format!("uploading {}", local.display()))?;
 
         state.flush().context("flushing state cache")?;
+
+        // Handle conflict outcomes
+        if let Some(ref outcome) = result.outcome {
+            match outcome {
+                tcfs_sync::conflict::SyncOutcome::Conflict(info) => {
+                    eprintln!(
+                        "CONFLICT: {} (local device: {}, remote device: {})",
+                        info.rel_path, info.local_device, info.remote_device
+                    );
+                    eprintln!(
+                        "  Use 'tcfs device list' to see fleet, resolve with conflict_mode config"
+                    );
+                }
+                tcfs_sync::conflict::SyncOutcome::RemoteNewer => {
+                    eprintln!("Remote is newer — run 'tcfs pull' first");
+                }
+                _ => {}
+            }
+        }
 
         if result.skipped {
             pb.finish_with_message(format!(
@@ -502,10 +575,17 @@ async fn cmd_push(
             pb_clone.set_message(msg.to_string());
         });
 
-        let (uploaded, skipped, bytes) =
-            tcfs_sync::engine::push_tree(&op, local, &remote_prefix, &mut state, Some(&progress))
-                .await
-                .with_context(|| format!("pushing tree: {}", local.display()))?;
+        let (uploaded, skipped, bytes) = tcfs_sync::engine::push_tree_with_device(
+            &op,
+            local,
+            &remote_prefix,
+            &mut state,
+            Some(&progress),
+            &device_id,
+            Some(&collect_cfg),
+        )
+        .await
+        .with_context(|| format!("pushing tree: {}", local.display()))?;
 
         pb.finish_with_message("done".to_string());
         println!();
@@ -530,9 +610,10 @@ async fn cmd_pull(
     manifest_path: &str,
     local: Option<&Path>,
     prefix: Option<&str>,
-    _state_override: Option<&Path>,
+    state_override: Option<&Path>,
 ) -> Result<()> {
     let op = build_operator_from_env(config)?;
+    let device_id = load_device_id(config);
 
     // Derive the remote prefix from the manifest path if not provided
     // e.g. "mydata/manifests/abc123" → prefix = "mydata"
@@ -564,15 +645,24 @@ async fn cmd_pull(
         pb_clone.set_message(msg.to_string());
     });
 
-    let result = tcfs_sync::engine::download_file(
+    // Open state cache for vclock merge during pull
+    let state_path = resolve_state_path(config, state_override);
+    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+
+    let result = tcfs_sync::engine::download_file_with_device(
         &op,
         manifest_path,
         &local_path,
         &remote_prefix,
         Some(&progress),
+        &device_id,
+        Some(&mut state),
     )
     .await
     .with_context(|| format!("downloading {}", manifest_path))?;
+
+    state.flush().context("flushing state cache")?;
 
     pb.finish_with_message("done".to_string());
     println!();
@@ -672,6 +762,14 @@ async fn cmd_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     println!("tcfsd v{}", status.version);
     println!("  uptime:        {uptime}");
     println!("  socket:        {}", socket.display());
+    if !status.device_id.is_empty() {
+        println!(
+            "  device:        {} ({})",
+            status.device_name,
+            &status.device_id[..8.min(status.device_id.len())]
+        );
+        println!("  conflict mode: {}", status.conflict_mode);
+    }
     println!(
         "  storage:       {} [{}]",
         status.storage_endpoint,
@@ -684,9 +782,9 @@ async fn cmd_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     println!(
         "  nats:          {}",
         if status.nats_ok {
-            "ok"
+            "connected"
         } else {
-            "not connected (Phase 2)"
+            "not connected"
         }
     );
     println!("  active mounts: {}", status.active_mounts);
