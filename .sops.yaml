@@ -12,7 +12,7 @@ creation_rules:
 
   # Admin/shared credentials (JWT, rclone passwords, S3 admin)
   - path_regex: ^credentials/.*\.yaml$
-    encrypted_regex: ^(access_key_id|secret_access_key|jwt_signing_key|password|token|rclone_password.*)$
+    encrypted_regex: ^(access_key_id|secret_access_key|jwt_signing_key|password|token|rclone_password.*|api_key|secret_api_key)$
     age: age1wc2s9pfju7haufdw0at0pm2cxx9rs9qmj80nf0nzy82w0fr0gp3skzfgds
 
   # Tofu environment tfvars
