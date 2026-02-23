@@ -1,4 +1,4 @@
-# Civo Kubernetes environment: bitter-darkness-16657317
+# Civo Kubernetes environment: tinyland-civo-dev
 #
 # Deploy the full tcfs stack to Civo K8s.
 # SeaweedFS and NATS run in-cluster in the tcfs namespace;
@@ -12,19 +12,26 @@
 
 terraform {
   required_version = ">= 1.6"
+
+  required_providers {
+    porkbun = {
+      source  = "marcfrederick/porkbun"
+      version = "~> 1.3"
+    }
+  }
 }
 
 # ── Providers ─────────────────────────────────────────────────────────────────
 
 provider "kubernetes" {
   config_path    = var.kubeconfig_path
-  config_context = "bitter-darkness-16657317"
+  config_context = "tinyland-civo-dev"
 }
 
 provider "helm" {
-  kubernetes {
+  kubernetes = {
     config_path    = var.kubeconfig_path
-    config_context = "bitter-darkness-16657317"
+    config_context = "tinyland-civo-dev"
   }
 }
 

@@ -36,10 +36,12 @@ resource "helm_release" "keda" {
   version    = var.chart_version
   namespace  = var.keda_namespace
 
-  set {
-    name  = "watchNamespace"
-    value = var.namespace
-  }
+  set = [
+    {
+      name  = "watchNamespace"
+      value = var.namespace
+    }
+  ]
 }
 
 # ── ScaledObject for sync-worker ──────────────────────────────────────────────
@@ -67,7 +69,7 @@ resource "kubernetes_manifest" "sync_worker_scaled_object" {
       triggers = [{
         type = "nats-jetstream"
         metadata = {
-          natsServerMonitoringEndpoint = replace(var.nats_url, "nats://", "http://") + ":8222"
+          natsServerMonitoringEndpoint = "${replace(var.nats_url, "nats://", "http://")}:8222"
           account                      = "$G"
           stream                       = var.nats_stream_name
           consumer                     = var.nats_consumer_name
