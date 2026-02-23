@@ -165,19 +165,19 @@ tracking per-file metadata:
 The daemon (\tcfsd{}) exposes a gRPC service over a Unix domain socket:
 
 \begin{lstlisting}[language=protobuf]
-service TcfsService {
-  rpc GetStatus(StatusRequest) returns (StatusResponse);
-  rpc GetCredentialStatus(CredentialStatusRequest)
-      returns (CredentialStatusResponse);
-  rpc Push(PushRequest) returns (PushResponse);
-  rpc Pull(PullRequest) returns (PullResponse);
-  rpc GetSyncStatus(SyncStatusRequest) returns (SyncStatusResponse);
+service TcfsDaemon {
+  rpc Status(StatusRequest) returns (StatusResponse);
   rpc Mount(MountRequest) returns (MountResponse);
   rpc Unmount(UnmountRequest) returns (UnmountResponse);
+  rpc Push(stream PushChunk) returns (stream PushProgress);
+  rpc Pull(PullRequest) returns (stream PullProgress);
+  rpc Hydrate(HydrateRequest) returns (stream HydrateProgress);
   rpc Unsync(UnsyncRequest) returns (UnsyncResponse);
-  rpc GetConfig(ConfigRequest) returns (ConfigResponse);
-  rpc RotateCredentials(RotateCredentialsRequest)
-      returns (RotateCredentialsResponse);
+  rpc SyncStatus(SyncStatusRequest) returns (SyncStatusResponse);
+  rpc Watch(WatchRequest) returns (stream WatchEvent);
+  rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
+  rpc ResolveConflict(ResolveConflictRequest)
+      returns (ResolveConflictResponse);
 }
 \end{lstlisting}
 

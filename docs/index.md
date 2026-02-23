@@ -27,7 +27,7 @@ sudo rpm -i tcfsd-*.rpm
 ### Container (K8s worker mode)
 
 ```bash
-podman pull ghcr.io/tinyland-inc/tcfsd:v0.3.0
+podman pull ghcr.io/tinyland-inc/tcfsd:latest
 ```
 
 ### From Source
@@ -122,6 +122,8 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 ### RFCs
 
 - [RFC 0001: Fleet Sync Integration](rfc/0001-fleet-sync-integration.md) — multi-machine sync design and rollout plan
+- [RFC 0002: Darwin FUSE Strategy](rfc/0002-darwin-fuse-strategy.md) — FileProvider as primary macOS/iOS path
+- [RFC 0003: iOS File Provider](rfc/0003-ios-file-provider.md) — UniFFI bridge and .appex architecture
 
 ## Platform Support
 
@@ -129,8 +131,8 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 |----------|--------|-------|
 | Linux x86_64 | Full | FUSE mount, CLI, daemon, TUI, MCP |
 | Linux aarch64 | Full | FUSE mount, CLI, daemon, TUI, MCP |
-| macOS (Apple Silicon) | CLI + FUSE-T | No daemon (gRPC uses Unix socket); FUSE via macFUSE/FUSE-T |
-| macOS (Intel) | CLI + FUSE-T | No daemon (gRPC uses Unix socket); FUSE via macFUSE/FUSE-T |
+| macOS (Apple Silicon) | CLI + FUSE-T | Daemon over Unix socket; FileProvider extension in progress (RFC 0002) |
+| macOS (Intel) | CLI + FUSE-T | Daemon over Unix socket; FileProvider extension in progress (RFC 0002) |
 | Windows x86_64 | CLI only | Cloud Files API skeleton; no FUSE or daemon |
 | NixOS | Full | Flake + NixOS module + Home Manager module |
 

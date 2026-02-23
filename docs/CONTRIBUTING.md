@@ -57,7 +57,7 @@ integration tests (S3 access key, secret key, endpoint, bucket name).
 
 ## Project Structure
 
-The workspace is split into 13 crates under `crates/`:
+The workspace is split into 14 crates under `crates/`:
 
 | Crate | Type | Description |
 |-------|------|-------------|
@@ -70,6 +70,7 @@ The workspace is split into 13 crates under `crates/`:
 | `tcfs-fuse` | lib | Linux FUSE driver (fuse3 crate) |
 | `tcfs-cloudfilter` | lib | Windows Cloud Files API (skeleton) |
 | `tcfs-sops` | lib | SOPS+age fleet secret propagation |
+| `tcfs-file-provider` | lib | macOS/iOS FileProvider FFI (RFC 0002) |
 | `tcfsd` | bin | Daemon: gRPC, FUSE, metrics, systemd notify |
 | `tcfs-cli` | bin | CLI: push, pull, mount, unmount, status, device management |
 | `tcfs-tui` | bin | Interactive terminal UI (ratatui) |
@@ -105,6 +106,7 @@ cargo clippy --workspace --all-targets --fix  # Auto-fix lints
 
 ```bash
 # Start the dev stack (SeaweedFS + NATS + Prometheus + Grafana)
+# This runs docker-compose with the local dev infrastructure
 task dev
 
 # In another terminal, run the daemon
@@ -118,7 +120,7 @@ cargo run -p tcfs-cli -- mount seaweedfs://localhost:8333/tcfs /tmp/tcfs-mount
 
 ## Pull Request Guidelines
 
-1. **Branch from** `main`
+1. **Branch from** `main` (use `sid/` prefix for feature branches)
 2. **Run checks locally** before pushing: `task check` (fmt + clippy + test + build)
 3. **Keep PRs focused** - one feature or fix per PR
 4. **Add tests** for new functionality

@@ -158,7 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Rust monorepo with 13 workspace crates
+- Rust monorepo with 14 workspace crates
 - Core daemon (`tcfsd`) with gRPC over Unix domain socket
 - CLI (`tcfs`): `status`, `config show`, `push`, `pull`, `sync-status`, `mount`, `unmount`, `unsync`
 - FUSE driver for Linux with on-demand hydration via `.tc` stubs

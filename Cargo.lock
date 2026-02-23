@@ -671,9 +671,9 @@ dependencies = [
 
 [[package]]
 name = "chrono"
-version = "0.4.43"
+version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
+checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
  "js-sys",
@@ -3322,9 +3322,9 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e8bbe1a966bd2f362681a44f6edce3c2310ac21e4d5067a6e7ec396297a6ea0"
+checksum = "83c41efbf8f90ac44de7f3a868f0867851d261b56291732d0cbf7cceaaeb55a6"
 dependencies = [
  "bitflags 2.11.0",
  "memchr",
@@ -4545,7 +4545,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-chunks"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4563,7 +4563,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-cli"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4596,7 +4596,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-cloudfilter"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "opendal",
@@ -4616,7 +4616,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-core"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "prost",
@@ -4633,7 +4633,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-crypto"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "aes-siv",
  "anyhow",
@@ -4658,7 +4658,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-file-provider"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "cbindgen",
@@ -4675,7 +4675,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-fuse"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4696,7 +4696,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-mcp"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "hyper-util",
@@ -4717,7 +4717,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-secrets"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "age",
@@ -4747,7 +4747,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-sops"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4766,7 +4766,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-storage"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "opendal",
@@ -4780,7 +4780,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-sync"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -4809,7 +4809,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-tui"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -4828,7 +4828,7 @@ dependencies = [
 
 [[package]]
 name = "tcfsd"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-nats",

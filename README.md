@@ -77,7 +77,7 @@ sudo dpkg -i tcfs-*.deb
 sudo rpm -i tcfsd-*.rpm
 
 # Container (K8s worker mode)
-podman pull ghcr.io/tinyland-inc/tcfsd:v0.3.0
+podman pull ghcr.io/tinyland-inc/tcfsd:latest
 
 # Nix
 nix build github:tinyland-inc/tummycrypt
@@ -108,7 +108,7 @@ tummycrypt/
 ├── Taskfile.yaml           # Build tasks (task --list)
 ├── docker-compose.yml      # Local dev stack
 ├── .sops.yaml              # SOPS encryption rules
-├── crates/                 # Rust workspace members (13 crates)
+├── crates/                 # Rust workspace members (14 crates)
 │   ├── tcfs-core/          # Shared types, config, protobuf definitions
 │   ├── tcfs-crypto/        # XChaCha20-Poly1305 encryption, key derivation
 │   ├── tcfs-secrets/       # SOPS/age/KDBX + device identity/registry
@@ -118,6 +118,7 @@ tummycrypt/
 │   ├── tcfs-fuse/          # FUSE driver (Linux)
 │   ├── tcfs-cloudfilter/   # Windows CFAPI (skeleton)
 │   ├── tcfs-sops/          # SOPS+age fleet secret propagation
+│   ├── tcfs-file-provider/ # macOS/iOS FileProvider FFI (RFC 0002)
 │   ├── tcfsd/              # Daemon binary (gRPC + metrics + systemd)
 │   ├── tcfs-cli/           # CLI binary (tcfs)
 │   ├── tcfs-tui/           # TUI binary (ratatui dashboard)
@@ -171,7 +172,7 @@ tummycrypt/
 
 ```bash
 task build          # Build all Rust crates
-task test           # Run all tests (133 tests + 18 proptest properties)
+task test           # Run all tests (150 tests + 18 proptest properties)
 task lint           # Clippy + rustfmt check
 task deny           # License + advisory check
 task check          # All of the above

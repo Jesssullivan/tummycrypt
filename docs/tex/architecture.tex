@@ -52,10 +52,10 @@ The client runs on user machines and consists of:
   \item[\tcfs{} (CLI)] Command-line interface for push, pull, mount, unmount,
     sync-status, and unsync operations.
   \item[\code{tcfs-tui} (TUI)] Interactive terminal dashboard built with
-    ratatui~0.30, connecting to the daemon via gRPC. Four tabs: Dashboard,
-    Config, Mounts, Secrets.
+    ratatui~0.30, connecting to the daemon via gRPC. Five tabs: Dashboard,
+    Config, Mounts, Secrets, Conflicts.
   \item[\code{tcfs-mcp} (MCP server)] Model Context Protocol server for AI
-    agent integration. Six tools over stdio JSON-RPC transport.
+    agent integration. Eight tools over stdio JSON-RPC transport.
 \end{description}
 
 \subsection{Server Side (Kubernetes)}
@@ -74,7 +74,7 @@ The client runs on user machines and consists of:
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Crate Map}
 
-All Rust code lives in \filepath{crates/}. The workspace contains 13 crates:
+All Rust code lives in \filepath{crates/}. The workspace contains 14 crates:
 
 \begin{longtable}{llp{8cm}}
   \toprule
@@ -90,10 +90,11 @@ All Rust code lives in \filepath{crates/}. The workspace contains 13 crates:
   \code{tcfs-fuse}        & library & Linux FUSE driver (fuse3 crate) \\
   \code{tcfs-cloudfilter} & library & Windows Cloud Files API (skeleton) \\
   \code{tcfs-sops}        & library & SOPS+age fleet secret propagation \\
+  \code{tcfs-file-provider} & library & macOS/iOS FileProvider FFI (RFC 0002) \\
   \code{tcfsd}            & binary  & Daemon: gRPC, FUSE, metrics, systemd \\
   \code{tcfs-cli}         & binary  & CLI: push, pull, mount, status, unsync \\
   \code{tcfs-tui}         & binary  & TUI: ratatui dashboard \\
-  \code{tcfs-mcp}         & binary  & MCP server: 6 tools, stdio transport \\
+  \code{tcfs-mcp}         & binary  & MCP server: 8 tools, stdio transport \\
   \bottomrule
 \end{longtable}
 
@@ -170,7 +171,7 @@ auto-reloads credentials when the file changes on disk.
   4 & Complete & K8s backend + HPA + full OpenTofu deploy \\
   5 & Complete & Release pipeline + packaging + docs site \\
   6 & Complete & macOS FUSE-T + Windows CFAPI skeleton + GitLab mirror \\
-  7 & Pending  & Production hardening + chaos tests \\
+  7 & Complete & Benchmarks, fleet ops, Darwin RFC, production hardening \\
   \bottomrule
 \end{longtable}
 
