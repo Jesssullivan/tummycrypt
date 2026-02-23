@@ -89,6 +89,12 @@ in {
       description = "NATS server URL for real-time state sync (e.g., nats://localhost:4222)";
     };
 
+    syncRoot = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Local directory for auto-pull sync (daemon watches NATS and pulls files here)";
+    };
+
     excludePatterns = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];

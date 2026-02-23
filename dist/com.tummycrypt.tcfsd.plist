@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Manual-install launchd plist for tcfsd.
+  Prefer the Home Manager module (programs.tcfs) which manages this automatically
+  with the correct Nix store path. This plist is for non-Nix manual installs only.
+
+  Install:
+    cp dist/com.tummycrypt.tcfsd.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.tummycrypt.tcfsd.plist
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -8,6 +17,8 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/tcfsd</string>
+        <string>--mode</string>
+        <string>daemon</string>
     </array>
 
     <key>RunAtLoad</key>
