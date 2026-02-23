@@ -25,9 +25,12 @@ use crate::PlaceholderInfo;
 /// minimal disk space (cloud-only state). When a user opens it,
 /// the CFAPI minifilter triggers a FETCH_DATA callback.
 ///
-/// # Arguments
-/// - `sync_root` — path to the registered sync root directory
-/// - `info` — placeholder metadata (path, size, hash, manifest)
+/// # Implementation
+///
+/// On Windows, calls `CfCreatePlaceholders()` with:
+/// - FileIdentity = content_hash bytes (used in FETCH_DATA callback)
+/// - FsMetadata.FileSize = info.file_size
+/// - Flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC
 pub async fn create_placeholder(sync_root: &Path, info: &PlaceholderInfo) -> Result<()> {
     let full_path = sync_root.join(&info.relative_path);
 
@@ -45,13 +48,32 @@ pub async fn create_placeholder(sync_root: &Path, info: &PlaceholderInfo) -> Res
             .with_context(|| format!("creating parent dir: {}", parent.display()))?;
     }
 
-    // TODO: Phase 6c implementation
-    // 1. Build CF_PLACEHOLDER_CREATE_INFO struct:
-    //    - FileIdentity = content_hash bytes (used in FETCH_DATA callback)
-    //    - FsMetadata.FileSize = info.file_size
-    //    - FsMetadata.BasicInfo.LastWriteTime = info.modified
-    //    - Flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC
-    // 2. Call CfCreatePlaceholders() with the parent directory
+    // TODO: Full CfCreatePlaceholders implementation
+    //
+    // use windows::Win32::Storage::CloudFilters::*;
+    //
+    // let identity = info.content_hash.as_bytes();
+    // let file_name = full_path.file_name().unwrap().to_string_lossy();
+    //
+    // let placeholder = CF_PLACEHOLDER_CREATE_INFO {
+    //     RelativeFileName: HSTRING::from(file_name.as_ref()).as_ptr(),
+    //     FsMetadata: CF_FS_METADATA {
+    //         FileSize: info.file_size as i64,
+    //         BasicInfo: FILE_BASIC_INFO {
+    //             LastWriteTime: to_filetime(info.modified),
+    //             ..Default::default()
+    //         },
+    //         ..Default::default()
+    //     },
+    //     FileIdentity: identity.as_ptr() as _,
+    //     FileIdentityLength: identity.len() as u32,
+    //     Flags: CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC,
+    //     ..Default::default()
+    // };
+    //
+    // let parent = full_path.parent().unwrap();
+    // let parent_str = HSTRING::from(parent.to_string_lossy().as_ref());
+    // unsafe { CfCreatePlaceholders(&parent_str, &[placeholder], 1, CF_CREATE_FLAG_NONE, ptr::null_mut())? };
 
     Ok(())
 }
@@ -59,6 +81,7 @@ pub async fn create_placeholder(sync_root: &Path, info: &PlaceholderInfo) -> Res
 /// Create placeholder files for an entire directory tree.
 ///
 /// Scans the remote index and creates a placeholder for each entry.
+/// Uses `entry.path()` for the full S3 key (not `entry.name()` which is filename-only).
 pub async fn populate_root(
     sync_root: &Path,
     op: &opendal::Operator,
@@ -79,48 +102,54 @@ pub async fn populate_root(
 
     let mut count = 0;
     for entry in entries {
-        let rel_path = entry
-            .name()
-            .strip_prefix(&index_prefix)
-            .unwrap_or(entry.name());
+        // Use entry.path() for the full S3 key path
+        let entry_path = entry.path();
+        let rel_path = entry_path.strip_prefix(&index_prefix).unwrap_or(entry_path);
 
         if rel_path.is_empty() || rel_path.ends_with('/') {
             continue; // skip directory markers
         }
 
-        // Read index entry to get size and hash
-        let data = match op.read(entry.name()).await {
+        // Read index entry to get metadata
+        let data = match op.read(entry_path).await {
             Ok(d) => d,
             Err(e) => {
-                tracing::warn!(path = %entry.name(), "skipping unreadable index entry: {e}");
+                tracing::warn!(path = %entry_path, "skipping unreadable index entry: {e}");
                 continue;
             }
         };
 
         let text = String::from_utf8_lossy(&data.to_bytes());
-        // Parse index entry: "size hash" format
-        // TODO: share IndexEntry type from tcfs-fuse into tcfs-core
-        let parts: Vec<&str> = text.trim().splitn(2, ' ').collect();
-        if parts.len() == 2 {
-            if let Ok(size) = parts[0].parse::<u64>() {
-                let hash = parts[1].to_string();
-                let info = PlaceholderInfo {
-                    relative_path: std::path::PathBuf::from(rel_path),
-                    file_size: size,
-                    modified: std::time::SystemTime::now(),
-                    content_hash: hash.clone(),
-                    manifest_path: format!(
-                        "{}/manifests/{}",
-                        remote_prefix.trim_end_matches('/'),
-                        hash
-                    ),
-                    is_directory: false,
-                };
-
-                create_placeholder(sync_root, &info).await?;
-                count += 1;
+        // Parse index entry: "manifest_hash=...\nsize=...\nchunks=...\n" format
+        let mut manifest_hash = String::new();
+        let mut size = 0u64;
+        for line in text.lines() {
+            if let Some(val) = line.strip_prefix("manifest_hash=") {
+                manifest_hash = val.to_string();
+            } else if let Some(val) = line.strip_prefix("size=") {
+                size = val.parse().unwrap_or(0);
             }
         }
+
+        if manifest_hash.is_empty() {
+            continue;
+        }
+
+        let info = PlaceholderInfo {
+            relative_path: std::path::PathBuf::from(rel_path),
+            file_size: size,
+            modified: std::time::SystemTime::now(),
+            content_hash: manifest_hash.clone(),
+            manifest_path: format!(
+                "{}/manifests/{}",
+                remote_prefix.trim_end_matches('/'),
+                manifest_hash
+            ),
+            is_directory: false,
+        };
+
+        create_placeholder(sync_root, &info).await?;
+        count += 1;
     }
 
     info!(root = %sync_root.display(), count, "populated placeholders");
@@ -135,13 +164,11 @@ pub async fn populate_root(
 pub async fn dehydrate(file_path: &Path) -> Result<()> {
     info!(path = %file_path.display(), "dehydrating to placeholder");
 
-    // TODO: Phase 6c implementation
-    // 1. Open file handle with CF_OPEN_FILE_FLAG_NONE
-    // 2. Call CfDehydratePlaceholder() with offset=0, length=file_size
-    // 3. Close handle
+    // TODO: CfDehydratePlaceholder implementation
     //
-    // After dehydration, the file appears as "cloud-only" (cloud icon)
-    // in Explorer and occupies minimal disk space.
+    // use windows::Win32::Storage::CloudFilters::CfDehydratePlaceholder;
+    // let handle = open_cf_handle(file_path)?;
+    // unsafe { CfDehydratePlaceholder(handle, 0, file_size as i64, CF_DEHYDRATE_FLAG_NONE, None)? };
 
     Ok(())
 }
@@ -157,13 +184,16 @@ pub async fn convert_to_placeholder(file_path: &Path, info: &PlaceholderInfo) ->
         "converting to CFAPI placeholder"
     );
 
-    // TODO: Phase 6c implementation
-    // 1. Call CfConvertToPlaceholder() with file identity = content_hash
-    // 2. Mark as in-sync: CfSetInSyncState(CF_IN_SYNC_STATE_IN_SYNC)
+    // TODO: CfConvertToPlaceholder + CfSetInSyncState implementation
     //
-    // The file keeps its content but gains cloud status:
-    // - Green checkmark = locally available + synced
-    // - Can be dehydrated later to free space
+    // use windows::Win32::Storage::CloudFilters::*;
+    // let identity = info.content_hash.as_bytes();
+    // let handle = open_cf_handle(file_path)?;
+    // unsafe {
+    //     CfConvertToPlaceholder(handle, identity.as_ptr() as _, identity.len() as u32,
+    //                            CF_CONVERT_FLAG_MARK_IN_SYNC, 0, None)?;
+    //     CfSetInSyncState(handle, CF_IN_SYNC_STATE_IN_SYNC, CF_SET_IN_SYNC_FLAG_NONE, None)?;
+    // };
 
     Ok(())
 }

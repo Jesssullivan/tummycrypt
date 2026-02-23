@@ -10,12 +10,14 @@ description = "tcfs sync engine: state machine, workers, conflict resolution"
 tcfs-core = { path = "../tcfs-core" }
 tcfs-chunks = { path = "../tcfs-chunks" }
 tcfs-storage = { path = "../tcfs-storage" }
+tcfs-crypto = { path = "../tcfs-crypto", optional = true }
 opendal = { workspace = true }
 # rocksdb and async-nats are optional until Phase 4 implementation
 rocksdb = { workspace = true, optional = true }
 async-nats = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 notify = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,8 +33,10 @@ glob = { workspace = true }
 default = []
 # NATS JetStream messaging only (no RocksDB) — used by tcfsd k8s-worker
 nats = ["dep:async-nats", "dep:futures", "dep:bytes"]
-# Full feature set including RocksDB persistent state
-full = ["dep:rocksdb", "nats"]
+# E2E encryption support (XChaCha20-Poly1305 chunk encryption)
+crypto = ["dep:tcfs-crypto", "dep:base64"]
+# Full feature set including RocksDB persistent state + encryption
+full = ["dep:rocksdb", "nats", "crypto"]
 
 [dev-dependencies]
 proptest = { workspace = true }

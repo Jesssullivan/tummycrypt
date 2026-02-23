@@ -14,25 +14,21 @@
 
 #![cfg(target_os = "windows")]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 /// Handle a FETCH_DATA callback from the Cloud Files minifilter.
 ///
 /// Called when a user or application opens a dehydrated placeholder.
-/// The callback provides:
-/// - File identity (our content hash, set during placeholder creation)
-/// - Required data range (offset + length)
-/// - Transfer key (used to send data back)
+/// Uses `tcfs_sync::manifest::SyncManifest` for manifest parsing and
+/// `tcfs_chunks` for chunk integrity verification.
 ///
 /// # Flow
 /// 1. Parse file identity → content hash
 /// 2. Look up manifest path: `{prefix}/manifests/{hash}`
-/// 3. Read manifest → list of chunk hashes
-/// 4. For each chunk in the requested range:
-///    a. Fetch from `{prefix}/chunks/{chunk_hash}`
-///    b. Transfer to placeholder via CfExecute(TRANSFER_DATA)
-/// 5. Acknowledge completion via CfExecute(ACK_DATA)
+/// 3. Read and parse SyncManifest (v1/v2 auto-detect)
+/// 4. Fetch and verify each chunk via BLAKE3
+/// 5. Return assembled data (Windows CfExecute transfer would go here)
 pub async fn handle_fetch_data(
     op: &opendal::Operator,
     remote_prefix: &str,
@@ -47,29 +43,60 @@ pub async fn handle_fetch_data(
 
     debug!(hash = %content_hash, manifest = %manifest_path, "hydrating via CFAPI callback");
 
-    // Read manifest
+    // Read and parse manifest using SyncManifest (supports v1 + v2)
     let manifest_bytes = op
         .read(&manifest_path)
         .await
-        .map_err(|e| anyhow::anyhow!("reading manifest {}: {}", manifest_path, e))?;
-    let manifest_str = String::from_utf8(manifest_bytes.to_bytes().to_vec())
-        .map_err(|e| anyhow::anyhow!("manifest not UTF-8: {}", e))?;
+        .with_context(|| format!("reading manifest: {}", manifest_path))?;
 
-    let chunk_hashes: Vec<&str> = manifest_str.lines().filter(|l| !l.is_empty()).collect();
+    let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())
+        .with_context(|| format!("parsing manifest: {}", manifest_path))?;
+
+    let chunk_hashes = manifest.chunk_hashes();
 
     if chunk_hashes.is_empty() {
         anyhow::bail!("empty manifest: {}", manifest_path);
     }
 
-    // Fetch and assemble all chunks
+    // Fetch and assemble all chunks with integrity verification
     let mut assembled = Vec::new();
     for (i, hash) in chunk_hashes.iter().enumerate() {
         let chunk_key = format!("{}/chunks/{}", prefix, hash);
-        let chunk = op
-            .read(&chunk_key)
-            .await
-            .map_err(|e| anyhow::anyhow!("chunk {}/{}: {}", i + 1, chunk_hashes.len(), e))?;
-        assembled.extend_from_slice(&chunk.to_bytes());
+        let chunk_data = op.read(&chunk_key).await.with_context(|| {
+            format!(
+                "downloading chunk {}/{}: {}",
+                i + 1,
+                chunk_hashes.len(),
+                chunk_key
+            )
+        })?;
+
+        let chunk_bytes = chunk_data.to_bytes();
+
+        // Verify chunk integrity via BLAKE3
+        let actual_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
+        if actual_hash != *hash {
+            anyhow::bail!(
+                "chunk integrity check failed for {}: expected {}, got {}",
+                chunk_key,
+                hash,
+                actual_hash
+            );
+        }
+
+        assembled.extend_from_slice(&chunk_bytes);
+    }
+
+    // Verify reassembled file hash if manifest has one (v2)
+    if !manifest.file_hash.is_empty() {
+        let actual_file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&assembled));
+        if actual_file_hash != manifest.file_hash {
+            anyhow::bail!(
+                "file integrity check failed: expected {}, got {}",
+                manifest.file_hash,
+                actual_file_hash
+            );
+        }
     }
 
     info!(
@@ -79,25 +106,24 @@ pub async fn handle_fetch_data(
         "CFAPI hydration complete"
     );
 
-    // TODO: Phase 6c — instead of returning bytes, use CfExecute() to
-    // stream data directly to the placeholder file via the transfer_key:
+    // TODO: Instead of returning bytes, use CfExecute() to stream data
+    // directly to the placeholder file via the transfer_key:
     //
-    // for chunk in chunks {
+    // use windows::Win32::Storage::CloudFilters::*;
+    // for chunk in &chunks {
     //     let op_info = CF_OPERATION_INFO { TransferKey, ... };
     //     let op_params = CF_OPERATION_PARAMETERS {
-    //         ParamSize = size_of::<CF_OPERATION_PARAMETERS>(),
-    //         TransferData = CF_OPERATION_TRANSFER_DATA_PARAMS {
-    //             Buffer = chunk.as_ptr(),
-    //             Length = chunk.len(),
-    //             Offset = current_offset,
+    //         ParamSize: size_of::<CF_OPERATION_PARAMETERS>() as u32,
+    //         TransferData: CF_OPERATION_TRANSFER_DATA_PARAMS {
+    //             Buffer: chunk.as_ptr() as _,
+    //             Length: chunk.len() as i64,
+    //             Offset: current_offset as i64,
+    //             ..Default::default()
     //         },
     //     };
     //     CfExecute(&op_info, &op_params)?;
     //     current_offset += chunk.len();
     // }
-    //
-    // Then acknowledge:
-    // CfExecute(&op_info, &ack_params)?;
 
     Ok(assembled)
 }
@@ -121,14 +147,5 @@ pub fn report_progress(
     _total: u64,
     _completed: u64,
 ) {
-    // TODO: Phase 6c
-    // let op_info = CF_OPERATION_INFO { TransferKey, ... };
-    // let progress_params = CF_OPERATION_PARAMETERS {
-    //     ParamSize = ...,
-    //     ReportProgress = CF_OPERATION_REPORT_PROGRESS_PARAMS {
-    //         Total = total,
-    //         Completed = completed,
-    //     },
-    // };
-    // CfExecute(&op_info, &progress_params);
+    // TODO: CfExecute with CF_OPERATION_TYPE_REPORT_PROGRESS
 }

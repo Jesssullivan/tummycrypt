@@ -8,6 +8,7 @@ description = "tcfs Windows Cloud Files API (CFAPI) provider for native Explorer
 
 [dependencies]
 tcfs-core = { path = "../tcfs-core" }
+tcfs-sync = { path = "../tcfs-sync" }
 tcfs-storage = { path = "../tcfs-storage" }
 tcfs-chunks = { path = "../tcfs-chunks" }
 opendal = { workspace = true }

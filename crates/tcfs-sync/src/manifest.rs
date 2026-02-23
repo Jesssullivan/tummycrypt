@@ -25,6 +25,9 @@ pub struct SyncManifest {
     pub written_at: u64,
     /// Relative path of the file (for cross-device lookup)
     pub rel_path: Option<String>,
+    /// Base64-encoded wrapped file key (present only when E2E encryption is enabled)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_file_key: Option<String>,
 }
 
 impl SyncManifest {
@@ -61,6 +64,7 @@ impl SyncManifest {
             written_by: String::new(),
             written_at: 0,
             rel_path: None,
+            encrypted_file_key: None,
         })
     }
 
@@ -98,6 +102,7 @@ mod tests {
             written_by: "yoga".into(),
             written_at: 1000,
             rel_path: Some("docs/readme.md".into()),
+            encrypted_file_key: None,
         };
 
         let bytes = manifest.to_bytes().unwrap();

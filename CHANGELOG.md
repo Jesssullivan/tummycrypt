@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-dev] - Unreleased
+
+### Added
+
+- **RocksDB state cache backend**: `StateCacheBackend` trait with JSON (default) and RocksDB (behind `full` feature) implementations
+- **E2E encryption in push/pull pipeline**: `EncryptionContext` wires `tcfs-crypto` into chunk upload/download when `config.crypto.enabled = true`
+- **SyncManifest `encrypted_file_key`**: Base64-encoded wrapped per-file key stored in manifest for encrypted files
+- **Windows CFAPI wiring**: `tcfs-cloudfilter` provider, hydration, and placeholder modules use `tcfs-sync` manifest parsing and chunk integrity verification
+- **macOS FileProvider FFI**: `tcfs-file-provider` exposes C-compatible `extern "C"` functions via cbindgen for Swift consumption
+- Encryption round-trip integration tests (`encrypted_roundtrip_test.rs`)
+- RocksDB persistence tests (`rocksdb_state_test.rs`)
+
+### Changed
+
+- `tcfs-sync` gains `crypto` feature flag (optional `tcfs-crypto` + `base64` deps)
+- `upload_file_with_device()` and `download_file_with_device()` accept optional `EncryptionContext`
+- `tcfs-file-provider` crate type changed from lib to `["lib", "staticlib"]` with cbindgen header generation
+
 ## [0.5.0] - 2026-02-23
 
 ### Added
@@ -148,6 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Homebrew formula, `.deb`/`.rpm` packages, install scripts
 - 77 tests, cargo-deny license/advisory checks, security audit CI
 
+[0.5.0]: https://github.com/tinyland-inc/tummycrypt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tinyland-inc/tummycrypt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tinyland-inc/tummycrypt/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/tinyland-inc/tummycrypt/compare/v0.2.1...v0.2.5

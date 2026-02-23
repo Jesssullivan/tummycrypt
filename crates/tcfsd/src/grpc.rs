@@ -346,6 +346,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 None,
                 &device_id,
                 Some(&path),
+                None,
             )
             .await
         };
@@ -437,6 +438,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 None,
                 &device_id,
                 Some(&mut cache),
+                None,
             )
             .await
         };
@@ -523,6 +525,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 None,
                 &self.device_id,
                 Some(&mut cache),
+                None,
             )
             .await
         };
@@ -710,6 +713,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     written_by: self.device_id.clone(),
                     written_at: tcfs_sync::StateEvent::now(),
                     rel_path: Some(req.path.clone()),
+                    encrypted_file_key: None,
                 };
 
                 // Upload updated manifest
@@ -784,6 +788,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         None,
                         &self.device_id,
                         Some(&mut cache),
+                        None,
                     )
                     .await
                 };
@@ -866,6 +871,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         None,
                         &self.device_id,
                         Some(&mut cache),
+                        None,
                     )
                     .await
                 };

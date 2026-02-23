@@ -244,6 +244,7 @@ async fn roundtrip_with_device_identity() {
         None,
         device_id,
         Some("device.txt"),
+        None,
     )
     .await
     .expect("upload with device");
@@ -259,6 +260,7 @@ async fn roundtrip_with_device_identity() {
         None,
         device_id,
         Some(&mut state),
+        None,
     )
     .await
     .expect("download with device");

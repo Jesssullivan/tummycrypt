@@ -1,7 +1,10 @@
 //! Local sync state cache — tracks which files have been uploaded and their content hashes.
 //!
-//! Backed by a JSON file in Phase 2 (no RocksDB required). The state is loaded
-//! into memory at startup, updated on each sync operation, and flushed atomically.
+//! Two backends are available:
+//!   - **JSON** (default): loads entirely into memory, flushed atomically via temp+rename.
+//!   - **RocksDB** (behind `full` feature): write-through to RocksDB with in-memory mirror.
+//!
+//! Both implement `StateCacheBackend`, so callers can use either transparently.
 //!
 //! Each entry records: blake3 hash, file size, mtime, chunk count, remote path,
 //! and last sync timestamp. This allows re-push to detect unchanged files in O(1)
@@ -185,6 +188,332 @@ impl Drop for StateCache {
             if let Err(e) = self.flush() {
                 tracing::warn!("failed to flush state cache on drop: {e}");
             }
+        }
+    }
+}
+
+/// Trait for state cache backends (JSON and RocksDB).
+pub trait StateCacheBackend {
+    /// Look up the sync state for a local file path.
+    fn get(&self, local_path: &Path) -> Option<&SyncState>;
+    /// Update (or insert) the sync state for a local file.
+    fn set(&mut self, local_path: &Path, state: SyncState);
+    /// Remove the sync state for a file.
+    fn remove(&mut self, local_path: &Path);
+    /// Flush pending changes to durable storage.
+    fn flush(&mut self) -> Result<()>;
+    /// Return all entries as (key, state) pairs.
+    fn all_entries(&self) -> Vec<(String, &SyncState)>;
+    /// Find a state entry by its remote path suffix.
+    fn get_by_rel_path(&self, rel_path: &str) -> Option<(&str, &SyncState)>;
+    /// Check if a file needs sync (returns reason or None if up-to-date).
+    fn needs_sync(&self, local_path: &Path) -> Result<Option<String>>;
+    /// Number of tracked files.
+    fn len(&self) -> usize;
+    /// Whether the cache is empty.
+    fn is_empty(&self) -> bool;
+}
+
+impl StateCacheBackend for StateCache {
+    fn get(&self, local_path: &Path) -> Option<&SyncState> {
+        self.get(local_path)
+    }
+    fn set(&mut self, local_path: &Path, state: SyncState) {
+        self.set(local_path, state);
+    }
+    fn remove(&mut self, local_path: &Path) {
+        self.remove(local_path);
+    }
+    fn flush(&mut self) -> Result<()> {
+        self.flush()
+    }
+    fn all_entries(&self) -> Vec<(String, &SyncState)> {
+        self.entries.iter().map(|(k, v)| (k.clone(), v)).collect()
+    }
+    fn get_by_rel_path(&self, rel_path: &str) -> Option<(&str, &SyncState)> {
+        self.get_by_rel_path(rel_path)
+    }
+    fn needs_sync(&self, local_path: &Path) -> Result<Option<String>> {
+        self.needs_sync(local_path)
+    }
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+}
+
+// ── RocksDB backend ──────────────────────────────────────────────────────────
+
+#[cfg(feature = "full")]
+mod rocksdb_backend {
+    use super::*;
+
+    /// RocksDB-backed state cache with in-memory mirror for API compatibility.
+    ///
+    /// On `open()`, all keys are loaded into a `HashMap` mirror so that
+    /// `get()` can return `&SyncState` references. Writes go through to
+    /// RocksDB immediately (write-through), so `flush()` is a no-op.
+    pub struct RocksDbStateCache {
+        db: rocksdb::DB,
+        /// In-memory mirror loaded on open, updated on set/remove.
+        entries: HashMap<String, SyncState>,
+        /// Device ID for this machine.
+        pub device_id: String,
+        /// Last NATS JetStream sequence processed.
+        pub last_nats_seq: u64,
+    }
+
+    impl RocksDbStateCache {
+        /// Open or create a RocksDB state cache at the given path.
+        pub fn open(db_path: &Path) -> Result<Self> {
+            let mut opts = rocksdb::Options::default();
+            opts.create_if_missing(true);
+
+            let db = rocksdb::DB::open(&opts, db_path)
+                .with_context(|| format!("opening RocksDB: {}", db_path.display()))?;
+
+            // Load all entries into memory mirror
+            let mut entries = HashMap::new();
+            let iter = db.iterator(rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key_bytes, value_bytes) = item.with_context(|| "iterating RocksDB entries")?;
+                let key = String::from_utf8_lossy(&key_bytes).to_string();
+                if let Ok(state) = serde_json::from_slice::<SyncState>(&value_bytes) {
+                    entries.insert(key, state);
+                }
+            }
+
+            Ok(RocksDbStateCache {
+                db,
+                entries,
+                device_id: String::new(),
+                last_nats_seq: 0,
+            })
+        }
+    }
+
+    impl StateCacheBackend for RocksDbStateCache {
+        fn get(&self, local_path: &Path) -> Option<&SyncState> {
+            let key = super::path_key(local_path);
+            self.entries.get(&key)
+        }
+
+        fn set(&mut self, local_path: &Path, state: SyncState) {
+            let key = super::path_key(local_path);
+            // Write-through to RocksDB
+            if let Ok(json) = serde_json::to_vec(&state) {
+                if let Err(e) = self.db.put(key.as_bytes(), &json) {
+                    tracing::warn!("RocksDB put failed for {key}: {e}");
+                }
+            }
+            self.entries.insert(key, state);
+        }
+
+        fn remove(&mut self, local_path: &Path) {
+            let key = super::path_key(local_path);
+            if let Err(e) = self.db.delete(key.as_bytes()) {
+                tracing::warn!("RocksDB delete failed for {key}: {e}");
+            }
+            self.entries.remove(&key);
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            // Write-through means nothing to flush; RocksDB WAL handles durability.
+            Ok(())
+        }
+
+        fn all_entries(&self) -> Vec<(String, &SyncState)> {
+            self.entries.iter().map(|(k, v)| (k.clone(), v)).collect()
+        }
+
+        fn get_by_rel_path(&self, rel_path: &str) -> Option<(&str, &SyncState)> {
+            self.entries
+                .iter()
+                .find(|(_, state)| {
+                    state.remote_path.ends_with(&format!("/{}", rel_path))
+                        || state.remote_path == rel_path
+                })
+                .map(|(k, v)| (k.as_str(), v))
+        }
+
+        fn needs_sync(&self, local_path: &Path) -> Result<Option<String>> {
+            let meta = std::fs::metadata(local_path)
+                .with_context(|| format!("stat: {}", local_path.display()))?;
+
+            let size = meta.len();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            match self.get(local_path) {
+                None => Ok(Some("new file".into())),
+                Some(cached) => {
+                    if cached.size != size {
+                        return Ok(Some(format!("size changed: {} -> {}", cached.size, size)));
+                    }
+                    if cached.mtime != mtime {
+                        let hash = tcfs_chunks::hash_file(local_path)?;
+                        let hash_hex = tcfs_chunks::hash_to_hex(&hash);
+                        if hash_hex != cached.blake3 {
+                            return Ok(Some("content changed (hash mismatch)".into()));
+                        }
+                    }
+                    Ok(None)
+                }
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        fn is_empty(&self) -> bool {
+            self.entries.is_empty()
+        }
+    }
+}
+
+#[cfg(feature = "full")]
+pub use rocksdb_backend::RocksDbStateCache;
+
+/// Dispatch enum that wraps either a JSON or RocksDB state cache.
+///
+/// Used by `tcfsd` to select backend at runtime based on config path.
+pub enum StateBackend {
+    Json(StateCache),
+    #[cfg(feature = "full")]
+    Rocks(RocksDbStateCache),
+}
+
+impl StateBackend {
+    /// Open the appropriate backend based on path extension.
+    ///
+    /// Paths ending in `.json` use the JSON backend; otherwise RocksDB (if compiled with `full`).
+    pub fn open(db_path: &Path) -> Result<Self> {
+        let is_json = db_path
+            .extension()
+            .map(|ext| ext == "json")
+            .unwrap_or(false);
+
+        #[cfg(feature = "full")]
+        if !is_json {
+            return Ok(StateBackend::Rocks(RocksDbStateCache::open(db_path)?));
+        }
+
+        #[cfg(not(feature = "full"))]
+        if !is_json {
+            tracing::warn!(
+                "RocksDB not compiled in (missing 'full' feature), falling back to JSON backend"
+            );
+        }
+
+        Ok(StateBackend::Json(StateCache::open(db_path)?))
+    }
+
+    /// Get the device_id.
+    pub fn device_id(&self) -> &str {
+        match self {
+            StateBackend::Json(c) => &c.device_id,
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => &c.device_id,
+        }
+    }
+
+    /// Set the device_id.
+    pub fn set_device_id(&mut self, id: String) {
+        match self {
+            StateBackend::Json(c) => c.device_id = id,
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.device_id = id,
+        }
+    }
+
+    /// Get the last NATS sequence.
+    pub fn last_nats_seq(&self) -> u64 {
+        match self {
+            StateBackend::Json(c) => c.last_nats_seq,
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.last_nats_seq,
+        }
+    }
+
+    /// Set the last NATS sequence.
+    pub fn set_last_nats_seq(&mut self, seq: u64) {
+        match self {
+            StateBackend::Json(c) => c.last_nats_seq = seq,
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.last_nats_seq = seq,
+        }
+    }
+}
+
+impl StateCacheBackend for StateBackend {
+    fn get(&self, local_path: &Path) -> Option<&SyncState> {
+        match self {
+            StateBackend::Json(c) => c.get(local_path),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.get(local_path),
+        }
+    }
+    fn set(&mut self, local_path: &Path, state: SyncState) {
+        match self {
+            StateBackend::Json(c) => c.set(local_path, state),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.set(local_path, state),
+        }
+    }
+    fn remove(&mut self, local_path: &Path) {
+        match self {
+            StateBackend::Json(c) => c.remove(local_path),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.remove(local_path),
+        }
+    }
+    fn flush(&mut self) -> Result<()> {
+        match self {
+            StateBackend::Json(c) => c.flush(),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.flush(),
+        }
+    }
+    fn all_entries(&self) -> Vec<(String, &SyncState)> {
+        match self {
+            StateBackend::Json(c) => StateCacheBackend::all_entries(c),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.all_entries(),
+        }
+    }
+    fn get_by_rel_path(&self, rel_path: &str) -> Option<(&str, &SyncState)> {
+        match self {
+            StateBackend::Json(c) => StateCacheBackend::get_by_rel_path(c, rel_path),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.get_by_rel_path(rel_path),
+        }
+    }
+    fn needs_sync(&self, local_path: &Path) -> Result<Option<String>> {
+        match self {
+            StateBackend::Json(c) => StateCacheBackend::needs_sync(c, local_path),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.needs_sync(local_path),
+        }
+    }
+    fn len(&self) -> usize {
+        match self {
+            StateBackend::Json(c) => StateCacheBackend::len(c),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.len(),
+        }
+    }
+    fn is_empty(&self) -> bool {
+        match self {
+            StateBackend::Json(c) => StateCacheBackend::is_empty(c),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.is_empty(),
         }
     }
 }
