@@ -30,7 +30,7 @@ with a FUSE-based mount that transparently hydrates files on demand.
         before upload; storage operator never sees plaintext.
   \item \textbf{Content-addressed deduplication} --- FastCDC chunking with BLAKE3
         hashing eliminates redundant storage.
-  \item \textbf{Cross-platform} --- Linux (FUSE3), macOS (FUSE-T), Windows (Cloud Files API).
+  \item \textbf{Cross-platform} --- Linux (FUSE3), macOS/iOS (FileProvider), Windows (Cloud Files API).
   \item \textbf{Kubernetes-native backend} --- stateless sync workers scaled by KEDA,
         NATS JetStream for reliable task dispatch.
 \end{enumerate}

@@ -1,0 +1,489 @@
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\fancyhead[L]{\small\textsc{tcfs}}
+\fancyhead[R]{\small FileProvider Design}
+
+\title{tcfs FileProvider Integration\\
+\large macOS \& iOS On-Demand Hydration via NSFileProviderReplicatedExtension}
+\author{tcfs / TummyCrypt}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Overview}
+
+This document describes the design for integrating \tcfs{} with Apple's
+FileProvider framework on macOS and iOS. FileProvider is the official mechanism
+for cloud storage providers to present files in Finder (macOS) and the Files app
+(iOS) with on-demand hydration, cloud status icons, and native Spotlight
+integration.
+
+FileProvider replaces FUSE as the primary file integration point on Apple
+platforms. FUSE remains the correct approach for Linux via \code{tcfs-fuse}.
+
+\subsection{Design Goals}
+
+\begin{enumerate}
+  \item \textbf{Native Finder integration} --- files appear under Locations in
+        the Finder sidebar at \filepath{\textasciitilde/Library/CloudStorage/}.
+  \item \textbf{On-demand hydration} --- files exist as APFS dataless stubs
+        until opened; kernel calls FileProvider extension to fetch content.
+  \item \textbf{Reuse existing Rust crates} --- \code{tcfs-storage},
+        \code{tcfs-chunks}, \code{tcfs-crypto}, and \code{tcfs-sync} are
+        linked as a static library with a thin Swift shim.
+  \item \textbf{No kernel extensions} --- FileProvider runs entirely in
+        userspace as an application extension (.appex).
+  \item \textbf{No root privileges} --- no \code{sudo}, no system extension
+        approval, no Reduced Security mode on Apple Silicon.
+  \item \textbf{Cross-Apple platform} --- shared Rust crate serves both
+        macOS and iOS with platform-conditional compilation.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Platform Integration Matrix}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{lllXl}
+\toprule
+\textbf{Platform} & \textbf{Framework} & \textbf{Crate} & \textbf{Mechanism} & \textbf{Status} \\
+\midrule
+Linux   & FUSE3                & tcfs-fuse         & Kernel FUSE module           & Working (v0.3.0) \\
+Windows & Cloud Files API      & tcfs-cloudfilter  & CFAPI minifilter             & Skeleton \\
+macOS   & FileProvider         & tcfs-fileprovider & APFS dataless files          & This design \\
+iOS     & FileProvider         & tcfs-fileprovider & APFS dataless files          & RFC 0003 \\
+\bottomrule
+\end{tabularx}
+\caption{Per-platform file integration strategy}
+\end{table}
+
+All four platforms share the same hydration concept: a lightweight stub
+represents each remote file; content is fetched on demand from SeaweedFS via
+the CAS chunk store.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Architecture}
+
+\subsection{Component Stack}
+
+\begin{lstlisting}[language={},title={FileProvider component stack}]
+[Finder / CLI / Any App]
+       |
+       v
+[macOS Kernel -- APFS dataless files]
+       |  (on-demand hydration callback)
+       v
+[FileProvider Extension (.appex)]     ~200 LOC Swift
+       |  extern "C" function calls
+       v
+[tcfs-fileprovider (Rust static lib)]
+       |  uses existing tcfs crates
+       +---> tcfs-storage  (OpenDAL S3)
+       +---> tcfs-chunks   (FastCDC + BLAKE3 + zstd)
+       +---> tcfs-crypto   (XChaCha20-Poly1305)
+       +---> tcfs-sync     (vector clocks, state cache)
+       |
+       v
+[SeaweedFS S3 / NATS JetStream]
+\end{lstlisting}
+
+\subsection{Extension Bundle Structure}
+
+FileProvider extensions are delivered inside a host application:
+
+\begin{lstlisting}[language={}]
+TummyCrypt.app/
+  Contents/
+    MacOS/
+      TummyCrypt            # Host app (manages extension lifecycle)
+    PlugIns/
+      TcfsFileProvider.appex/
+        Contents/
+          MacOS/
+            TcfsFileProvider   # Extension binary (Swift + Rust staticlib)
+          Info.plist           # NSExtension metadata
+          Resources/
+            tcfs_fileprovider.h  # C header (cbindgen output)
+    Frameworks/
+      libtcfs_fileprovider.a   # Rust static library
+\end{lstlisting}
+
+\subsection{Data Flow}
+
+\begin{enumerate}
+  \item \textbf{Enumeration}: Finder opens the tcfs location. The extension's
+        \code{enumerator(for:)} creates an enumerator that calls the Rust
+        backend's \code{tcfs\_fp\_enumerate\_dir()}, which lists manifests
+        from S3. Each manifest becomes an \code{NSFileProviderItem} with
+        metadata (name, size, hash, modified time).
+
+  \item \textbf{Hydration}: User opens a cloud-only file. The kernel detects
+        the APFS dataless flag and calls \code{fetchContents(for:version:)}.
+        The Swift shim calls \code{tcfs\_fp\_fetch\_contents()}, which:
+        \begin{enumerate}[label=\alph*)]
+          \item Fetches the manifest from \code{manifests/\{file\_hash\}}
+          \item Fetches chunks in parallel from \code{chunks/\{chunk\_hash\}}
+          \item Decrypts each chunk (XChaCha20-Poly1305 per-chunk encryption)
+          \item Decompresses each chunk (zstd)
+          \item Reassembles and writes to the provided temporary URL
+        \end{enumerate}
+        The kernel then delivers the content to the requesting application.
+
+  \item \textbf{Upload}: User saves a file. The extension's \code{createItem}
+        or \code{modifyItem} callback receives the new content. The Rust
+        backend chunks, compresses, encrypts, and pushes to S3.
+
+  \item \textbf{Eviction}: When disk space is low, macOS automatically evicts
+        hydrated files back to dataless stubs. The extension's
+        \code{materializedSetDidChange()} callback is notified.
+
+  \item \textbf{Sync}: Background sync is triggered by
+        \code{NSFileProviderManager.signalEnumerator(for:)}, which causes
+        the system to re-enumerate and detect remote changes.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Swift Shim Design}
+
+The FileProvider extension entry point must be Swift or Objective-C.
+The shim implements three protocols with all logic delegated to Rust:
+
+\subsection{Extension Entry Point}
+
+\begin{lstlisting}[language={},title={TcfsFileProvider.swift (simplified)}]
+import FileProvider
+
+class TcfsFileProvider: NSObject,
+    NSFileProviderReplicatedExtension {
+
+    let domain: NSFileProviderDomain
+
+    required init(domain: NSFileProviderDomain) {
+        self.domain = domain
+        tcfs_fp_initialize()  // Rust: load config, connect S3
+    }
+
+    func invalidate() {
+        tcfs_fp_shutdown()
+    }
+
+    func item(for identifier: NSFileProviderItemIdentifier,
+              request: NSFileProviderRequest,
+              completionHandler: @escaping (NSFileProviderItem?,
+                  Error?) -> Void) -> Progress {
+        // Call Rust backend
+        var item = FPItem()
+        let rc = tcfs_fp_get_item_metadata(
+            identifier.rawValue, &item)
+        if rc == 0 {
+            completionHandler(TcfsItem(item), nil)
+        } else {
+            completionHandler(nil, mapError(rc))
+        }
+        return Progress()
+    }
+
+    func fetchContents(
+        for itemIdentifier: NSFileProviderItemIdentifier,
+        version: NSFileProviderItemVersion?,
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (URL?,
+            NSFileProviderItem?, Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 100)
+        DispatchQueue.global().async {
+            let tmpURL = /* temporary file URL */
+            let rc = tcfs_fp_fetch_contents(
+                itemIdentifier.rawValue,
+                tmpURL.path,
+                { pct in progress.completedUnitCount =
+                    Int64(pct * 100) }
+            )
+            if rc == 0 {
+                completionHandler(tmpURL, /*item*/, nil)
+            } else {
+                completionHandler(nil, nil, mapError(rc))
+            }
+        }
+        return progress
+    }
+
+    func enumerator(
+        for containerItemIdentifier:
+            NSFileProviderItemIdentifier,
+        request: NSFileProviderRequest
+    ) throws -> NSFileProviderEnumerator {
+        return TcfsEnumerator(containerItemIdentifier)
+    }
+}
+\end{lstlisting}
+
+\subsection{Item and Enumerator}
+
+The \code{TcfsItem} class wraps the C struct returned by Rust:
+
+\begin{lstlisting}[language={},title={C bridge types (cbindgen output)}]
+typedef struct {
+    const char *item_id;
+    const char *filename;
+    const char *parent_id;
+    uint64_t    file_size;
+    int64_t     modified_ts;
+    bool        is_directory;
+    const char *content_hash;
+} FPItem;
+\end{lstlisting}
+
+The enumerator calls \code{tcfs\_fp\_enumerate\_dir()} and wraps each
+\code{FPItem} in an \code{NSFileProviderItem}-conforming Swift object.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Rust Static Library}
+
+\subsection{Crate Configuration}
+
+\begin{lstlisting}[language=toml,title={crates/tcfs-fileprovider/Cargo.toml (future)}]
+[package]
+name = "tcfs-fileprovider"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+tcfs-core    = { path = "../tcfs-core" }
+tcfs-storage = { path = "../tcfs-storage" }
+tcfs-chunks  = { path = "../tcfs-chunks" }
+tcfs-crypto  = { path = "../tcfs-crypto" }
+tcfs-sync    = { path = "../tcfs-sync" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+cbindgen = "0.27"
+\end{lstlisting}
+
+\subsection{C API Surface}
+
+The Rust library exposes a minimal C API. All functions return \code{i32}
+error codes (0 = success, negative = error) and write output through
+pointer parameters.
+
+\begin{lstlisting}[language={},title={Exported C functions}]
+// Lifecycle
+int32_t tcfs_fp_initialize(void);
+int32_t tcfs_fp_shutdown(void);
+
+// Enumeration
+int32_t tcfs_fp_enumerate_dir(
+    const char *path,
+    FPItem    **out_items,
+    size_t     *out_count
+);
+void tcfs_fp_free_items(FPItem *items, size_t count);
+
+// Item metadata
+int32_t tcfs_fp_get_item_metadata(
+    const char *item_id,
+    FPItem     *out_item
+);
+
+// Hydration (download + decrypt + decompress)
+int32_t tcfs_fp_fetch_contents(
+    const char *item_id,
+    const char *dest_path,
+    void      (*progress_cb)(double)
+);
+
+// Upload (chunk + compress + encrypt + push)
+int32_t tcfs_fp_upload_file(
+    const char *local_path,
+    const char *remote_path,
+    void      (*progress_cb)(double)
+);
+
+// Sync status
+int32_t tcfs_fp_sync_status(FPSyncStatus *out);
+\end{lstlisting}
+
+\subsection{Async Bridge}
+
+The Rust library owns a \code{tokio::Runtime} for async operations. All
+C-exported functions block on the runtime:
+
+\begin{lstlisting}[language={},title={Async bridge pattern}]
+use std::sync::LazyLock;
+use tokio::runtime::Runtime;
+
+static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+    Runtime::new().expect("Failed to create tokio runtime")
+});
+
+#[no_mangle]
+pub extern "C" fn tcfs_fp_fetch_contents(
+    item_id: *const c_char,
+    dest: *const c_char,
+    progress: extern "C" fn(f64),
+) -> i32 {
+    RUNTIME.block_on(async {
+        // ... hydration using tcfs-storage, tcfs-chunks,
+        //     tcfs-crypto (all async)
+    })
+}
+\end{lstlisting}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Credential Storage}
+
+FileProvider extensions run in a sandboxed process and cannot read environment
+variables or arbitrary config files. Credentials are stored via:
+
+\begin{description}
+  \item[Keychain] S3 access and secret credentials stored in a shared Keychain
+    access group (\code{group.com.tummycrypt.tcfs}). The host app writes
+    credentials during setup; the extension reads them at runtime.
+  \item[App Group UserDefaults] Configuration values (S3 endpoint, bucket,
+    prefix, NATS URL) stored in shared UserDefaults.
+  \item[App Group Container] Large config files or state caches stored in
+    the shared App Group container directory.
+\end{description}
+
+The credential flow:
+
+\begin{enumerate}
+  \item User launches TummyCrypt.app host application
+  \item Host app prompts for S3 endpoint, credentials, encryption passphrase
+  \item Credentials written to shared Keychain; config to shared UserDefaults
+  \item FileProvider extension reads credentials on first enumeration
+  \item Encryption key derived from passphrase via Argon2id (same as desktop)
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Build Pipeline}
+
+\subsection{Cross-Compilation}
+
+\begin{lstlisting}[language={},title={Build steps}]
+# 1. Build Rust static library for Apple targets
+cargo build --lib -p tcfs-fileprovider \
+    --target aarch64-apple-darwin    # macOS Apple Silicon
+cargo build --lib -p tcfs-fileprovider \
+    --target aarch64-apple-ios       # iOS
+
+# 2. Generate C header
+cbindgen --crate tcfs-fileprovider --lang c \
+    -o TcfsFileProvider.h
+
+# 3. Build Xcode project (extension + host app)
+xcodebuild -project TummyCrypt.xcodeproj \
+    -scheme TummyCrypt \
+    -configuration Release \
+    -archivePath build/TummyCrypt.xcarchive \
+    archive
+
+# 4. Sign and notarize
+codesign --sign "Developer ID Application: Tinyland Inc" \
+    --options runtime \
+    --entitlements entitlements.plist \
+    build/TummyCrypt.app
+
+xcrun notarytool submit build/TummyCrypt.zip \
+    --apple-id "$APPLE_ID" \
+    --team-id "$TEAM_ID" \
+    --password "$APP_SPECIFIC_PASSWORD" \
+    --wait
+\end{lstlisting}
+
+\subsection{CI Integration}
+
+The build runs on macOS GitHub Actions runners:
+
+\begin{enumerate}
+  \item Rust cross-compilation: \code{cargo build} with Apple targets
+  \item \code{cbindgen} header generation
+  \item \code{xcodebuild} for the extension bundle
+  \item Code signing with stored certificates (GitHub Secrets)
+  \item Notarization via \code{notarytool}
+  \item Archive as \code{.dmg} release asset
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Comparison with Other Platforms}
+
+\subsection{Hydration Trigger Comparison}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{lXXX}
+\toprule
+\textbf{Concept} & \textbf{Linux (tcfs-fuse)} & \textbf{Windows (tcfs-cloudfilter)} & \textbf{macOS/iOS (tcfs-fileprovider)} \\
+\midrule
+Stub file        & \code{.tc} JSON file         & CFAPI placeholder         & APFS dataless file \\
+Hydration trigger & \code{read()} syscall        & \code{CF\_CALLBACK\_FETCH\_DATA} & \code{fetchContents(for:)} \\
+Dehydration      & \code{unsync} command         & \code{CfDehydratePlaceholder}    & System automatic eviction \\
+Directory listing & \code{readdir()}             & \code{CfGetPlaceholders}          & \code{enumerator(for:)} \\
+Status icons     & None (FUSE limitation)        & Explorer cloud icons              & Finder cloud icons \\
+Spotlight        & N/A                           & Windows Search integration        & Native APFS indexing \\
+\bottomrule
+\end{tabularx}
+\caption{Platform comparison for file integration}
+\end{table}
+
+\subsection{Reuse Matrix}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Crate} & \textbf{Linux} & \textbf{Windows} & \textbf{macOS} & \textbf{iOS} \\
+\midrule
+tcfs-core       & 100\% & 100\% & 100\% & 100\% \\
+tcfs-storage    & 100\% & 100\% & 100\% & 70\%  \\
+tcfs-chunks     & 100\% & 100\% & 100\% & 100\% \\
+tcfs-crypto     & 100\% & 100\% & 100\% & 100\% \\
+tcfs-sync       & 100\% & 100\% & 100\% & 80\%  \\
+\bottomrule
+\end{tabular}
+\caption{Crate reuse across platforms (iOS storage/sync need minor adaptation)}
+\end{table}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Implementation Phases}
+
+\begin{description}
+  \item[Phase 1 (v0.4.x)] Transitional: macOS daemon with \code{--no-mount}
+    default. Push/pull/sync work without FUSE. macFUSE opt-in for existing users.
+  \item[Phase 2 (v0.5.x)] FileProvider MVP: read-only enumeration + on-demand
+    hydration. Rust staticlib + Swift shim. Keychain credentials. Apple
+    Developer ID enrollment.
+  \item[Phase 3 (v0.6.x)] Full FileProvider: write support, conflict resolution,
+    background sync, progress reporting, file pinning, E2E encryption through
+    the hydration path.
+  \item[Phase 4 (v1.0)] Polish: automatic eviction integration, thumbnails,
+    QuickLook, share extension. Deprecate macFUSE transitional path.
+\end{description}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Open Questions}
+
+\begin{enumerate}
+  \item \textbf{Apple Developer enrollment}: Is Tinyland Inc enrolled in the
+    Apple Developer Program (\$99/year)? If not, who initiates enrollment?
+  \item \textbf{App Group identifier}: Proposed
+    \code{group.com.tummycrypt.tcfs} for shared Keychain and container access.
+  \item \textbf{Distribution}: \code{.dmg} with drag-to-install? Homebrew cask?
+    Both?
+  \item \textbf{Minimum macOS}: \code{NSFileProviderReplicatedExtension}
+    matured in macOS 13+. Recommend targeting macOS 13 (Ventura) as minimum.
+  \item \textbf{iOS timeline}: Shared crate enables iOS but requires Xcode
+    project, TestFlight, and App Store submission. Defer to Phase 3+.
+\end{enumerate}
+
+\end{document}

@@ -191,6 +191,7 @@ tasks:
       - cmd: 'cd docs/tex && tectonic architecture.tex -o ../../dist/docs'
       - cmd: 'cd docs/tex && tectonic protocol.tex -o ../../dist/docs'
       - cmd: 'cd docs/tex && tectonic security.tex -o ../../dist/docs'
+      - cmd: 'cd docs/tex && tectonic fileprovider.tex -o ../../dist/docs'
 
   docs:serve:
     desc: Serve docs site locally with Jekyll
