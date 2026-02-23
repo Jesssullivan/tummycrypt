@@ -249,6 +249,8 @@ resource "kubernetes_service" "sync_worker_metrics" {
 # ── ServiceMonitor for Prometheus ─────────────────────────────────────────────
 
 resource "kubernetes_manifest" "worker_service_monitor" {
+  count = var.enable_monitoring ? 1 : 0
+
   manifest = {
     apiVersion = "monitoring.coreos.com/v1"
     kind       = "ServiceMonitor"

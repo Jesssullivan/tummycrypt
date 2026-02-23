@@ -29,3 +29,9 @@ variable "dns_domain" {
   type        = string
   default     = "tummycrypt.dev"
 }
+
+variable "enable_crds" {
+  description = "Create CRD-based resources (ServiceMonitor, ScaledObject). Set false on first apply before operators install CRDs."
+  type        = bool
+  default     = true
+}

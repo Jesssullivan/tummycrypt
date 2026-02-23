@@ -52,11 +52,17 @@ dns-status:
     @dig +short nats.tcfs.tummycrypt.dev
 
 # Full deploy: infra + DNS (may need two runs for Tailscale IP)
-# First run installs operators + CRDs, second creates DNS after IP is assigned.
+# Fresh cluster (no CRDs installed yet):
+#   just deploy-fresh   # Installs operators without CRD consumers
+#   just deploy         # Second run creates ServiceMonitors + ScaledObject
 # Import existing DNS record first if needed:
 #   cd infra/tofu/environments/civo && tofu import 'module.nats_dns[0].porkbun_dns_record.this' 'tummycrypt.dev:RECORD_ID'
 deploy env="civo":
     cd infra/tofu/environments/{{env}} && tofu apply
+
+# First-apply on fresh cluster: skip CRD consumers (ServiceMonitor, ScaledObject)
+deploy-fresh env="civo":
+    cd infra/tofu/environments/{{env}} && tofu apply -var='enable_crds=false'
 
 # ── NATS ────────────────────────────────────────────────────────────────────
 

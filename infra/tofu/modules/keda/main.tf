@@ -47,6 +47,7 @@ resource "helm_release" "keda" {
 # ── ScaledObject for sync-worker ──────────────────────────────────────────────
 
 resource "kubernetes_manifest" "sync_worker_scaled_object" {
+  count      = var.enable_autoscaling ? 1 : 0
   depends_on = [helm_release.keda]
 
   manifest = {

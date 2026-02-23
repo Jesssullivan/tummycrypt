@@ -45,11 +45,12 @@ module "nats" {
   source     = "../../modules/nats"
   depends_on = [module.observability]  # CRD: ServiceMonitor
 
-  namespace      = var.namespace
-  cluster_size   = 3
-  storage_type   = "file"
-  storage_size_gi = 20
-  storage_class  = "civo-volume"
+  namespace         = var.namespace
+  cluster_size      = 3
+  storage_type      = "file"
+  storage_size_gi   = 20
+  storage_class     = "civo-volume"
+  enable_monitoring = var.enable_crds
 }
 
 # ── Tailscale NATS exposure (tailnet only, no public IP) ──────────────────────
@@ -78,12 +79,13 @@ module "keda" {
   source     = "../../modules/keda"
   depends_on = [module.observability]  # CRD: ScaledObject + ServiceMonitor
 
-  namespace         = var.namespace
-  nats_url          = module.nats.nats_url
-  target_deployment = module.tcfs_backend.worker_deployment_name
-  min_replicas      = 1
-  max_replicas      = 50
-  lag_threshold     = 100
+  namespace          = var.namespace
+  nats_url           = module.nats.nats_url
+  target_deployment  = module.tcfs_backend.worker_deployment_name
+  min_replicas       = 1
+  max_replicas       = 50
+  lag_threshold      = 100
+  enable_autoscaling = var.enable_crds
 }
 
 # ── tcfs-backend (sync workers) ───────────────────────────────────────────────
@@ -108,6 +110,7 @@ module "tcfs_backend" {
   worker_memory_request = "512Mi"
   worker_cpu_limit      = "2"
   worker_memory_limit   = "2Gi"
+  enable_monitoring     = var.enable_crds
 }
 
 # ── Observability ─────────────────────────────────────────────────────────────

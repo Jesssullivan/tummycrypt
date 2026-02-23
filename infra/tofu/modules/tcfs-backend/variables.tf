@@ -73,3 +73,9 @@ variable "worker_concurrency" {
   type        = number
   default     = 4
 }
+
+variable "enable_monitoring" {
+  description = "Create ServiceMonitor (requires kube-prometheus-stack CRDs)"
+  type        = bool
+  default     = true
+}

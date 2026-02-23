@@ -33,3 +33,9 @@ variable "chart_version" {
   type        = string
   default     = "1.2.6"
 }
+
+variable "enable_monitoring" {
+  description = "Create ServiceMonitor (requires kube-prometheus-stack CRDs)"
+  type        = bool
+  default     = true
+}

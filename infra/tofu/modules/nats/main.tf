@@ -72,6 +72,8 @@ resource "helm_release" "nats" {
 
 # ServiceMonitor for Prometheus scraping (if kube-prometheus-stack is installed)
 resource "kubernetes_manifest" "nats_service_monitor" {
+  count = var.enable_monitoring ? 1 : 0
+
   manifest = {
     apiVersion = "monitoring.coreos.com/v1"
     kind       = "ServiceMonitor"

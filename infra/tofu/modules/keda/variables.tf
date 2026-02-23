@@ -62,3 +62,9 @@ variable "nats_stream_name" {
   type        = string
   default     = "SYNC_TASKS"
 }
+
+variable "enable_autoscaling" {
+  description = "Create ScaledObject (requires KEDA CRDs — set false on first apply)"
+  type        = bool
+  default     = true
+}
