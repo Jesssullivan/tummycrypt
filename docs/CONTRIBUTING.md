@@ -16,7 +16,7 @@
 # Clone and enter devShell
 git clone https://github.com/tinyland-inc/tummycrypt.git
 cd tummycrypt
-nix develop    # or: direnv allow
+nix develop    # or: echo 'use flake' > .envrc && direnv allow
 
 # Build everything
 task build
@@ -24,6 +24,8 @@ task build
 # Run tests
 task test
 ```
+
+> **Rocky Linux note**: `cargo` is not in `$PATH` by default. Use `~/.cargo/bin/cargo` for all cargo commands outside the Nix devShell.
 
 ### Quick Start without Nix
 
@@ -69,7 +71,7 @@ The workspace is split into 13 crates under `crates/`:
 | `tcfs-cloudfilter` | lib | Windows Cloud Files API (skeleton) |
 | `tcfs-sops` | lib | SOPS+age fleet secret propagation |
 | `tcfsd` | bin | Daemon: gRPC, FUSE, metrics, systemd notify |
-| `tcfs-cli` | bin | CLI: push, pull, mount, unmount, status |
+| `tcfs-cli` | bin | CLI: push, pull, mount, unmount, status, device management |
 | `tcfs-tui` | bin | Interactive terminal UI (ratatui) |
 | `tcfs-mcp` | bin | MCP server for AI agent integration |
 

@@ -24,4 +24,7 @@ See the [Protocol PDF](https://github.com/tinyland-inc/tummycrypt/actions/workfl
 - FastCDC chunking parameters
 - Hydration flow
 - State tracking schema
-- gRPC wire protocol (10 RPCs)
+- gRPC wire protocol (11 RPCs, including `ResolveConflict`)
+- NATS `StateEvent` types: `FileSynced`, `FileDeleted`, `FileRenamed`, `DeviceOnline`, `DeviceOffline`, `ConflictResolved`
+- NATS subject hierarchy: `STATE.{device_id}.{event_type}`
+- SyncManifest v2 JSON format (with v1 text fallback)

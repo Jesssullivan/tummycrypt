@@ -1,3 +1,5 @@
+//! tcfs-core: shared types, config parsing, and protobuf definitions for the tcfs workspace.
+
 pub mod config;
 pub mod error;
 pub mod types;

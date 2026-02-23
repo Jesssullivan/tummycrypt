@@ -1,7 +1,8 @@
 # Benchmarks
 
-Performance characteristics of tcfs operations. All measurements are preliminary
-and will be updated as the benchmark harness matures.
+> **Note**: Benchmarks are planned for v0.4.0. The tables below define the measurement framework; all values are currently TBD.
+
+Performance characteristics of tcfs operations.
 
 ## Chunking Throughput
 

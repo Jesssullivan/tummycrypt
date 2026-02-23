@@ -1,6 +1,6 @@
 # RFC 0001: Fleet Sync Integration for Lab Machines
 
-**Status**: Draft
+**Status**: Implemented (v0.3.0)
 **Author**: xoxd
 **Date**: 2026-02-22
 **Branch**: `fleet/multi-machine-sync` (PR #18)
@@ -224,6 +224,15 @@ tinyland.host.tummycrypt = {
    SeaweedFS creds to `nix/secrets/hosts/*.yaml` for each host.
 3. **Automatic daemon startup**: Should tcfsd start automatically via systemd/launchd?
    Or on-demand via CLI? Recommend: systemd on yoga, launchd on macOS machines.
+
+---
+
+## Implementation Notes
+
+- PR #18: Core implementation (vector clocks, device identity, NATS events, git safety, PBT, Nix modules)
+- PR #19: Stack wiring (device_id through CLI/daemon/gRPC/MCP, ResolveConflict RPC, NATS publishing)
+- Tagged as v0.3.0 on 2026-02-22, all CI green across 9 build targets
+- 133 tests passing, 18 proptest properties
 
 ---
 
