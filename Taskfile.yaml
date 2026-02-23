@@ -49,6 +49,12 @@ tasks:
     cmds:
       - cargo clean
 
+  bench:
+    desc: Run all divan benchmarks
+    cmds:
+      - ~/.cargo/bin/cargo bench -p tcfs-chunks --bench chunks
+      - ~/.cargo/bin/cargo bench -p tcfs-crypto --bench crypto
+
   deny:
     desc: Check licenses and advisories (cargo-deny)
     cmds:

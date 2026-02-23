@@ -215,15 +215,21 @@ tinyland.host.tummycrypt = {
 | Git bundle fails (dirty worktree) | Medium | .git sync skipped | `git_is_safe()` pre-checks, warnings logged |
 | macOS FUSE unavailable | Low | Mount doesn't work | Push/pull/sync work without FUSE |
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. **NATS access path**: NodePort, WireGuard, or leaf node? Leaf node recommended
-   for offline resilience but requires running NATS on one lab machine.
-2. **Credential distribution**: How to distribute SeaweedFS S3 credentials to all
-   machines? Currently via `TCFS_*` env vars from sops-nix secrets. Need to add
-   SeaweedFS creds to `nix/secrets/hosts/*.yaml` for each host.
-3. **Automatic daemon startup**: Should tcfsd start automatically via systemd/launchd?
-   Or on-demand via CLI? Recommend: systemd on yoga, launchd on macOS machines.
+All open questions have been resolved. See [Fleet Deployment Guide](../ops/fleet-deployment.md) for full details.
+
+1. **NATS access path**: Resolved — **NATS leaf node** on yoga (recommended). Provides lowest
+   latency for LAN operations and offline resilience. NodePort and WireGuard documented as
+   alternatives. See [Fleet Deployment Guide, Section 1](../ops/fleet-deployment.md#1-nats-access-path).
+
+2. **Credential distribution**: Resolved — **SOPS+age** per-host encrypted secrets with
+   sops-nix for NixOS hosts, env file for others. Credential precedence: env vars > SOPS >
+   KDBX > config file. Rotation procedure documented. See [Fleet Deployment Guide, Section 2](../ops/fleet-deployment.md#2-credential-distribution).
+
+3. **Automatic daemon startup**: Resolved — **systemd** on Linux (NixOS module or manual unit),
+   **launchd** on macOS (plist at `dist/com.tummycrypt.tcfsd.plist`). Both configured for
+   auto-start on boot with restart-on-failure. See [Fleet Deployment Guide, Section 3](../ops/fleet-deployment.md#3-automatic-daemon-startup).
 
 ---
 

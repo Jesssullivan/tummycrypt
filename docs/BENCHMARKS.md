@@ -1,19 +1,31 @@
 # Benchmarks
 
-> **Note**: Benchmarks are planned for v0.4.0. The tables below define the measurement framework; all values are currently TBD.
-
-Performance characteristics of tcfs operations.
+Performance characteristics of tcfs operations, measured with [divan](https://github.com/nvzqz/divan).
 
 ## Chunking Throughput
 
-FastCDC content-defined chunking with BLAKE3 hashing:
+FastCDC content-defined chunking with BLAKE3 hashing (single-threaded, in-memory):
 
-| Operation | Throughput | Notes |
-|-----------|-----------|-------|
-| FastCDC split (8 KiB avg) | TBD | Single-threaded, in-memory |
-| BLAKE3 hash | TBD | Single-threaded |
-| zstd compress (level 3) | TBD | Single-threaded |
-| Full pipeline (chunk + hash + compress) | TBD | Single-threaded |
+| Operation | 1 KiB | 64 KiB | 1 MiB | 10 MiB |
+|-----------|-------|--------|-------|--------|
+| FastCDC split (4 KiB avg) | 434 MB/s | 564 MB/s | 405 MB/s | 533 MB/s |
+| BLAKE3 hash | 555 MB/s | 1.58 GB/s | 1.39 GB/s | 701 MB/s |
+| zstd compress (level 3) | 23.5 MB/s | 838 MB/s | 1.26 GB/s | 1.24 GB/s |
+| zstd decompress | 693 MB/s | 3.94 GB/s | 2.79 GB/s | 2.58 GB/s |
+| Full pipeline (chunk + hash + compress) | 19.2 MB/s | 57.2 MB/s | 44.6 MB/s | 40.9 MB/s |
+
+All values are median throughput. The 1 KiB compress result is dominated by frame setup overhead; real-world chunks average 4-8 KiB and compress at much higher throughput.
+
+## Encryption Throughput
+
+XChaCha20-Poly1305 per-chunk encryption (single-threaded):
+
+| Operation | 1 KiB | 64 KiB | 1 MiB |
+|-----------|-------|--------|-------|
+| Encrypt chunk | 200 MB/s | 461 MB/s | 252 MB/s |
+| Decrypt chunk | 199 MB/s | 484 MB/s | 346 MB/s |
+
+All values are median throughput.
 
 ## Push / Pull Latency
 
@@ -26,7 +38,7 @@ End-to-end latency for push and pull operations against local SeaweedFS:
 | 100 MiB | TBD | TBD | ~12,800 chunks |
 | 1 GiB | TBD | TBD | ~128,000 chunks |
 
-Measured on: localhost SeaweedFS (single master, single volume).
+> Push/pull latencies depend on SeaweedFS deployment topology and will be measured in a future sprint with the local dev stack running.
 
 ## Compression Ratios
 
@@ -40,6 +52,8 @@ zstd level 3 compression ratios by file type:
 | Binary executables | TBD | Moderate compressibility |
 | Random data | TBD | ~1.0x (incompressible) |
 
+> Compression ratios are workload-dependent and will be measured with representative file sets in a future sprint.
+
 ## FUSE Read Latency
 
 On-demand hydration latency (cold cache, local SeaweedFS):
@@ -52,6 +66,8 @@ On-demand hydration latency (cold cache, local SeaweedFS):
 | Full hydration (1 MiB file) | TBD | All chunks fetched in parallel |
 | Cached read (after hydration) | TBD | Direct filesystem read |
 
+> FUSE latencies require a running mount point and will be measured in a future sprint.
+
 ## Deduplication Efficiency
 
 Content-addressed storage deduplication across common workloads:
@@ -62,21 +78,25 @@ Content-addressed storage deduplication across common workloads:
 | Photo library (RAW+JPEG) | TBD | TBD | TBD | TBD |
 | Node.js project (with node_modules) | TBD | TBD | TBD | TBD |
 
+> Deduplication efficiency depends on workload characteristics and will be measured with real datasets.
+
 ## Test Environment
 
-Benchmarks will be run on:
-- **Hardware**: TBD
-- **OS**: Rocky Linux 10 / NixOS
-- **SeaweedFS**: 3-master Raft cluster, Drobo 5C volume server
-- **Network**: Gigabit Ethernet (local) / Civo K8s (remote)
+Benchmarks measured on:
+- **CPU**: Intel Core i7-8550U @ 1.80 GHz (4 cores / 8 threads, turbo to 4.0 GHz)
+- **RAM**: 16 GB DDR4
+- **Storage**: Samsung MZVLW256 NVMe SSD (238.5 GB)
+- **OS**: Rocky Linux 10 (kernel 6.12.0)
+- **Rust**: 1.93+ (edition 2021, `opt-level = 3`, `lto = "thin"`)
+- **Benchmark framework**: divan 0.1
 
 ## Running Benchmarks
 
 ```bash
-# Automated benchmark suite (future)
+# All benchmarks
 task bench
 
-# Manual timing
-time cargo run -p tcfs-cli -- push /path/to/testfile
-time cargo run -p tcfs-cli -- pull testfile -o /tmp/output
+# Individual suites
+~/.cargo/bin/cargo bench -p tcfs-chunks --bench chunks
+~/.cargo/bin/cargo bench -p tcfs-crypto --bench crypto
 ```

@@ -1,0 +1,23 @@
+[package]
+name = "tcfs-file-provider"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs UniFFI bridge for iOS/macOS File Provider extensions"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+tcfs-storage = { path = "../tcfs-storage" }
+tcfs-chunks = { path = "../tcfs-chunks" }
+tcfs-sync = { path = "../tcfs-sync" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# UniFFI will be enabled when implementation begins (Phase 7b)
+# uniffi = { workspace = true }
+
+# [build-dependencies]
+# uniffi = { workspace = true, features = ["build"] }

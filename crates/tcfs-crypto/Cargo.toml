@@ -27,3 +27,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+divan = { workspace = true }
+
+[[bench]]
+name = "crypto"
+harness = false
