@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SyncManifest `encrypted_file_key`**: Base64-encoded wrapped per-file key stored in manifest for encrypted files
 - **Windows CFAPI wiring**: `tcfs-cloudfilter` provider, hydration, and placeholder modules use `tcfs-sync` manifest parsing and chunk integrity verification
 - **macOS FileProvider FFI**: `tcfs-file-provider` exposes C-compatible `extern "C"` functions via cbindgen for Swift consumption
+- **Tailscale NATS exposure**: OpenTofu module `tailscale-nats` exposes NATS to tailnet via Tailscale operator (no public IP)
+- **Darwin launchd support**: Home Manager module generates `launchd.agents.tcfsd` on macOS, `systemd.user.services.tcfsd` on Linux
+- **`syncRoot` option**: Exposed in both NixOS and Home Manager modules for daemon auto-pull target directory
+- **`TCFS_S3_ACCESS`/`TCFS_S3_SECRET` env vars**: tcfs-native credential env var names (highest priority in fallback chain)
+- **Justfile**: IaC command surface for OpenTofu, Kubernetes, NATS, and build operations
 - Encryption round-trip integration tests (`encrypted_roundtrip_test.rs`)
 - RocksDB persistence tests (`rocksdb_state_test.rs`)
 
@@ -22,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tcfs-sync` gains `crypto` feature flag (optional `tcfs-crypto` + `base64` deps)
 - `upload_file_with_device()` and `download_file_with_device()` accept optional `EncryptionContext`
 - `tcfs-file-provider` crate type changed from lib to `["lib", "staticlib"]` with cbindgen header generation
+- Lab fleet examples rewritten from `services.tcfsd` (NixOS) to `programs.tcfs` (Home Manager)
+- NATS URL in fleet configs changed to Tailscale MagicDNS (`nats://nats-tcfs:4222`)
+- `dist/com.tummycrypt.tcfsd.plist` updated with `--mode daemon` flag and Nix usage guidance
+- Fleet deployment docs overhauled: Tailscale NATS, Home Manager startup, corrected env var names
+- `just` added to flake.nix devShell
 
 ## [0.5.0] - 2026-02-23
 

@@ -1,11 +1,13 @@
 { config, lib, pkgs, ... }:
 # Home Manager module: programs.tcfs
-# Manages per-user tcfs CLI config, user systemd unit, and shell completions
+# Manages per-user tcfs CLI config, systemd unit (Linux), launchd agent (macOS)
 #
 # Example:
 #   programs.tcfs = {
 #     enable = true;
 #     identity = "~/.config/sops/age/keys.txt";
+#     syncRoot = "~/tcfs";
+#     natsUrl = "nats://nats-tcfs:4222";
 #     mounts = [
 #       { remote = "seaweedfs://host/bucket"; local = "~/tcfs"; }
 #     ];
@@ -23,6 +25,21 @@
 let
   cfg = config.programs.tcfs;
   toml = pkgs.formats.toml {};
+
+  # Environment variables shared between systemd and launchd
+  commonEnv = {
+    TCFS_CONFLICT_MODE = cfg.conflictMode;
+    TCFS_SYNC_GIT_DIRS = lib.boolToString cfg.syncGitDirs;
+    TCFS_GIT_SYNC_MODE = cfg.gitSyncMode;
+  } // lib.optionalAttrs (cfg.deviceName != null) {
+    TCFS_DEVICE_NAME = cfg.deviceName;
+  } // lib.optionalAttrs (cfg.natsUrl != null) {
+    TCFS_NATS_URL = cfg.natsUrl;
+  } // lib.optionalAttrs (cfg.excludePatterns != []) {
+    TCFS_EXCLUDE_PATTERNS = lib.concatStringsSep "," cfg.excludePatterns;
+  } // lib.optionalAttrs (cfg.remoteJuggler.enable && cfg.remoteJuggler.identity != null) {
+    REMOTE_JUGGLER_IDENTITY = cfg.remoteJuggler.identity;
+  };
 in {
   options.programs.tcfs = {
     enable = lib.mkEnableOption "tcfs TummyCrypt filesystem client";
@@ -52,6 +69,13 @@ in {
       type = lib.types.attrs;
       default = {};
       description = "Additional tcfs.toml settings";
+    };
+
+    # ── Sync options ──────────────────────────────────────────────────────────
+    syncRoot = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Local directory for auto-pull sync (daemon watches NATS and pulls files here)";
     };
 
     # ── Fleet / multi-machine sync options ─────────────────────────────────
@@ -109,11 +133,16 @@ in {
       lib.recursiveUpdate {
         daemon.socket = "%t/tcfsd/tcfsd.sock";
         secrets.age_identity = cfg.identity;
-      } cfg.settings
+      } (lib.recursiveUpdate
+        (lib.optionalAttrs (cfg.syncRoot != null) {
+          sync.sync_root = cfg.syncRoot;
+        })
+        cfg.settings
+      )
     );
 
-    # User systemd unit for tcfsd
-    systemd.user.services.tcfsd = {
+    # ── Linux: systemd user service ─────────────────────────────────────────
+    systemd.user.services.tcfsd = lib.mkIf pkgs.stdenv.isLinux {
       Unit = {
         Description = "TummyCrypt filesystem daemon (user)";
         After = [ "network.target" ];
@@ -142,6 +171,21 @@ in {
       };
       Install = {
         WantedBy = [ "default.target" ];
+      };
+    };
+
+    # ── macOS: launchd agent ────────────────────────────────────────────────
+    launchd.agents.tcfsd = lib.mkIf pkgs.stdenv.isDarwin {
+      enable = true;
+      config = {
+        ProgramArguments = [ "${cfg.package}/bin/tcfsd" "--mode" "daemon" ];
+        RunAtLoad = true;
+        KeepAlive = true;
+        StandardOutPath = "/tmp/tcfsd.stdout.log";
+        StandardErrorPath = "/tmp/tcfsd.stderr.log";
+        EnvironmentVariables = commonEnv // {
+          TCFS_CONFIG = "${config.xdg.configHome}/tcfs/config.toml";
+        };
       };
     };
   };

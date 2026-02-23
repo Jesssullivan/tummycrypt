@@ -143,12 +143,14 @@
 
             # Dev tools
             git
+            just
             yq-go
           ]);
 
           shellHook = ''
             echo "tcfs devShell (tummycrypt monorepo)"
-            echo "  task --list      # show available tasks"
+            echo "  just --list      # show available recipes"
+            echo "  task --list      # show go-task tasks"
             echo "  cargo build      # build workspace"
             echo "  task dev         # start local stack + watch"
           '';

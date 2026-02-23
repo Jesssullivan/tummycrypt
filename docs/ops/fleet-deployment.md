@@ -8,102 +8,59 @@ Companion to [RFC 0001: Fleet Sync Integration](../rfc/0001-fleet-sync-integrati
 - tcfs v0.3.0+ installed on all machines
 - SeaweedFS S3 reachable from all machines (verified: `dees-appu-bearts:8333`)
 - Each machine enrolled: `tcfs device enroll --name $(hostname)`
+- All fleet machines on the same Tailscale tailnet
 
 ---
 
 ## 1. NATS Access Path
 
 NATS JetStream runs in the Civo K8s cluster (`nats.tcfs.svc.cluster.local:4222`).
-Lab machines need external access. Three options:
+Lab machines access it via the Tailscale operator — no public IP, tailnet only.
 
-### Option A: NodePort / LoadBalancer (Simplest)
+### Tailscale Exposure (Recommended)
 
-Expose NATS via Civo LoadBalancer:
-
-```bash
-# Create NATS LoadBalancer service
-kubectl -n tcfs expose deployment nats \
-  --type=LoadBalancer \
-  --port=4222 \
-  --target-port=4222 \
-  --name=nats-external
-
-# Get external IP
-kubectl -n tcfs get svc nats-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
-```
-
-**Pros**: Simplest setup, no VPN needed.
-**Cons**: NATS port exposed to internet (add firewall rules), requires static IP, no offline resilience.
-
-Firewall rules (Civo):
-```bash
-# Allow only lab IPs
-civo firewall rule create tcfs-fw \
-  --protocol tcp --startport 4222 --endport 4222 \
-  --cidr "YOUR_LAB_PUBLIC_IP/32"
-```
-
-### Option B: WireGuard Tunnel (Secure)
-
-Route NATS over a WireGuard mesh:
+The `tailscale-nats` OpenTofu module creates a Tailscale-only LoadBalancer service:
 
 ```bash
-# On each lab machine
-wg-quick up tcfs-mesh
+# Deploy via IaC
+just tofu-apply env=civo
 
-# NATS URL uses WireGuard IP
-natsUrl = "nats://10.0.0.1:4222"  # WireGuard peer address
+# Or manually
+cd infra/tofu/environments/civo && tofu apply
 ```
 
-**Pros**: Encrypted tunnel, works behind NAT, no exposed ports.
-**Cons**: Requires VPN setup on all machines, adds latency, single point of failure if relay goes down.
+This creates a `LoadBalancer` service with `loadBalancerClass: tailscale` and
+hostname annotation `nats-tcfs`. The Tailscale operator picks it up and exposes
+NATS as a tailnet device.
 
-### Option C: NATS Leaf Node (Recommended)
-
-Run a NATS leaf node on one lab machine that connects upstream to the Civo cluster:
-
-```bash
-# Install NATS server on yoga
-nix-env -iA nixpkgs.nats-server
-
-# /etc/nats/leaf.conf
-leafnodes {
-  remotes [
-    {
-      url: "nats-leaf://nats.tcfs.svc.cluster.local:7422"
-      credentials: "/etc/nats/tcfs.creds"
-    }
-  ]
-}
-
-listen: "0.0.0.0:4222"
-jetstream {
-  store_dir: "/var/lib/nats/jetstream"
-  max_mem: 256MB
-  max_file: 1GB
-}
-
-# Start
-nats-server -c /etc/nats/leaf.conf
+Lab machines connect via MagicDNS:
+```
+nats://nats-tcfs:4222
 ```
 
-All lab machines connect to `nats://yoga.local:4222` (or `nats://192.168.101.X:4222`).
-
-**Pros**: Lowest latency for LAN operations, offline resilience (leaf buffers messages), single upstream connection to cluster.
-**Cons**: Requires running NATS on one lab machine, leaf node is a dependency.
+Optionally, add a DNS alias in the Tailscale admin console to use a custom domain:
+```
+nats://nats.tcfs.tinyland.dev:4222
+```
 
 ### Connectivity Verification
 
 ```bash
-# Test NATS connectivity
-nats pub test "hello" --server nats://NATS_HOST:4222
-nats sub test --server nats://NATS_HOST:4222
+# Test NATS connectivity via Tailscale
+just nats-status
 
-# Check JetStream status
-nats stream ls --server nats://NATS_HOST:4222
+# Or manually
+nats server info --server nats://nats-tcfs:4222
+
+# Check JetStream streams
+just nats-streams
+
+# Publish a test ping
+just nats-ping
 
 # tcfs daemon connectivity
-tcfs status  # Shows NATS connection state
+tcfs status
+tcfs sync-status
 ```
 
 ### Fallback Behavior
@@ -120,12 +77,14 @@ tcfs works without NATS. If NATS is unreachable:
 
 ### Credential Precedence
 
-tcfs resolves credentials in this order (first match wins):
+tcfs resolves S3 credentials in this order (first match wins):
 
-1. **Environment variables**: `TCFS_S3_ACCESS`, `TCFS_S3_SECRET` (or standard AWS S3 credential env vars)
-2. **SOPS-encrypted file**: `~/.config/tcfs/secrets.yaml` (decrypted at runtime)
-3. **RemoteJuggler KDBX**: KeePassXC database via `keyring` crate
-4. **Config file**: `~/.config/tcfs/config.toml` (plaintext, not recommended)
+1. **SOPS-encrypted file**: `storage.credentials_file` in config.toml (decrypted with age identity)
+2. **RemoteJuggler KDBX**: KeePassXC database via `remote-juggler kdbx get` (if `$REMOTE_JUGGLER_IDENTITY` is set)
+3. **Environment variables** (in priority order):
+   - `TCFS_S3_ACCESS` / `TCFS_S3_SECRET` (tcfs-native, recommended)
+   - Standard AWS S3 credential env vars (access key ID / secret)
+   - `SEAWEED_ACCESS_KEY` / `SEAWEED_SECRET_KEY` (SeaweedFS-specific)
 
 ### Creating Per-Host Age Keys
 
@@ -161,7 +120,7 @@ creation_rules:
 s3_access: "<access-credential>"
 s3_secret: "<secret-credential>"
 s3_endpoint: "http://dees-appu-bearts:8333"
-nats_url: "nats://yoga.local:4222"
+nats_url: "nats://nats-tcfs:4222"
 ```
 
 ```bash
@@ -192,7 +151,7 @@ For non-NixOS machines:
 TCFS_S3_ACCESS=<your-access-credential>
 TCFS_S3_SECRET=<your-secret-credential>
 TCFS_S3_ENDPOINT=http://dees-appu-bearts:8333
-TCFS_NATS_URL=nats://yoga.local:4222
+TCFS_NATS_URL=nats://nats-tcfs:4222
 ```
 
 ### Credential Rotation
@@ -218,21 +177,44 @@ sops --encrypt --in-place secrets/hosts/yoga.yaml
 
 ## 3. Automatic Daemon Startup
 
-### Linux (NixOS)
+### Home Manager (All Platforms — Recommended)
 
-Already handled by the NixOS module:
+The Home Manager module handles both Linux (systemd) and macOS (launchd) automatically:
 
 ```nix
-# In host configuration
+# In your Home Manager configuration
+programs.tcfs = {
+  enable = true;
+  package = pkgs.tcfsd;
+  identity = "~/.config/sops/age/keys.txt";
+  deviceName = "yoga";
+  conflictMode = "interactive";
+  natsUrl = "nats://nats-tcfs:4222";
+  syncRoot = "~/tcfs";
+  mounts = [
+    { remote = "seaweedfs://dees-appu-bearts:8333/tcfs"; local = "~/tcfs"; }
+  ];
+};
+```
+
+On Linux, this creates a `systemd.user.services.tcfsd` unit.
+On macOS, this creates a `launchd.agents.tcfsd` agent.
+
+See `examples/lab-fleet/` for per-machine configurations.
+
+### NixOS System Module
+
+For system-level daemon (runs as dedicated user with hardening):
+
+```nix
 services.tcfsd = {
   enable = true;
   deviceName = "yoga";
   conflictMode = "interactive";
-  natsUrl = "nats://yoga.local:4222";
+  natsUrl = "nats://nats-tcfs:4222";
+  syncRoot = "/srv/tcfs";
 };
 ```
-
-This generates a systemd unit with `After=network-online.target` and restart-on-failure.
 
 ### Linux (systemd, non-NixOS)
 
@@ -248,11 +230,9 @@ systemctl --user enable tcfsd
 systemctl --user start tcfsd
 ```
 
-The unit file is at `crates/tcfsd/tcfsd.service` in the repo.
+### macOS (launchd, non-Nix)
 
-### macOS (launchd)
-
-Install the launchd plist:
+For manual installs without Home Manager:
 
 ```bash
 # Copy plist
@@ -265,35 +245,12 @@ launchctl load ~/Library/LaunchAgents/com.tummycrypt.tcfsd.plist
 launchctl list | grep tcfs
 ```
 
-To unload:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.tummycrypt.tcfsd.plist
-```
-
-The plist file is at `dist/com.tummycrypt.tcfsd.plist` in the repo.
-
-### Startup Dependencies
-
-```
-network-online.target (Linux) / NetworkReady (macOS)
-       │
-       ▼
-   NATS (optional — daemon starts without it, reconnects later)
-       │
-       ▼
-     tcfsd
-       │
-       ├── gRPC socket: /run/tcfsd.sock (Linux) / /tmp/tcfsd.sock (macOS)
-       ├── Metrics: http://localhost:9100/metrics
-       └── FUSE mount (if configured)
-```
-
 ### Troubleshooting
 
 ```bash
 # Linux: check daemon logs
-journalctl -u tcfsd -f
-journalctl -u tcfsd --since "5 min ago"
+journalctl --user -u tcfsd -f
+journalctl --user -u tcfsd --since "5 min ago"
 
 # macOS: check daemon logs
 tail -f /tmp/tcfsd.stdout.log
@@ -310,3 +267,30 @@ tcfs status
 # Check NATS connectivity
 tcfs sync-status
 ```
+
+---
+
+## 4. IaC Operations
+
+All Civo infrastructure is managed via OpenTofu. Use the Justfile for common operations:
+
+```bash
+# List all recipes
+just --list
+
+# Plan and apply infrastructure changes
+just tofu-plan
+just tofu-apply
+
+# Check cluster status
+just k8s-status
+
+# Check NATS
+just nats-status
+just nats-streams
+
+# View logs
+just k8s-logs app=tcfsd
+```
+
+The Justfile is at the project root. All recipes use the `civo` environment by default.

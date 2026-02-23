@@ -40,6 +40,14 @@ module "nats" {
   storage_class  = "civo-volume"
 }
 
+# ── Tailscale NATS exposure (tailnet only, no public IP) ──────────────────────
+
+module "tailscale_nats" {
+  source             = "../../modules/tailscale-nats"
+  namespace          = var.namespace
+  tailscale_hostname = "nats-tcfs"
+}
+
 # ── KEDA autoscaler ───────────────────────────────────────────────────────────
 
 module "keda" {

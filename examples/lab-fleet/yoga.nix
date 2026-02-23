@@ -1,21 +1,22 @@
-# yoga fleet configuration fragment
+# yoga fleet configuration fragment (Home Manager)
 # Hybrid server/workstation — interactive conflicts, sync .git via bundle
 { pkgs, ... }:
 {
-  services.tcfsd = {
+  programs.tcfs = {
     enable = true;
     package = pkgs.tcfsd;
-    configFile = "/etc/tcfs/config.toml";
+    identity = "~/.config/sops/age/keys.txt";
 
     deviceName = "yoga";
     conflictMode = "interactive";
     syncGitDirs = true;
     gitSyncMode = "bundle";
-    natsUrl = "nats://nats.tcfs.svc.cluster.local:4222";
+    natsUrl = "nats://nats-tcfs:4222";
+    syncRoot = "~/tcfs";
     excludePatterns = [ "*.swp" "*.swo" ".direnv" "*.pyc" ];
 
     mounts = [
-      { remote = "seaweedfs://dees-appu-bearts:8333/tcfs"; local = "/home/jsullivan2/tcfs"; }
+      { remote = "seaweedfs://dees-appu-bearts:8333/tcfs"; local = "~/tcfs"; }
     ];
   };
 }

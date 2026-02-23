@@ -1,20 +1,21 @@
-# xoxd-bates fleet configuration fragment
+# xoxd-bates fleet configuration fragment (Home Manager)
 # Primary workstation — auto-resolve conflicts, no .git sync
 { pkgs, ... }:
 {
-  services.tcfsd = {
+  programs.tcfs = {
     enable = true;
     package = pkgs.tcfsd;
-    configFile = "/etc/tcfs/config.toml";
+    identity = "~/.config/sops/age/keys.txt";
 
     deviceName = "xoxd-bates";
     conflictMode = "auto";
     syncGitDirs = false;
-    natsUrl = "nats://nats.tcfs.svc.cluster.local:4222";
+    natsUrl = "nats://nats-tcfs:4222";
+    syncRoot = "~/tcfs";
     excludePatterns = [ "*.swp" "*.swo" ".direnv" ];
 
     mounts = [
-      { remote = "seaweedfs://dees-appu-bearts:8333/tcfs"; local = "/home/jsullivan2/tcfs"; }
+      { remote = "seaweedfs://dees-appu-bearts:8333/tcfs"; local = "~/tcfs"; }
     ];
   };
 }

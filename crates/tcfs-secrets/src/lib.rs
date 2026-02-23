@@ -184,10 +184,12 @@ impl CredStore {
     }
 
     fn load_from_env(storage: &tcfs_core::config::StorageConfig) -> Result<Self> {
-        let access_key = std::env::var("AWS_ACCESS_KEY_ID")
+        let access_key = std::env::var("TCFS_S3_ACCESS")
+            .or_else(|_| std::env::var("AWS_ACCESS_KEY_ID"))
             .or_else(|_| std::env::var("SEAWEED_ACCESS_KEY"))
             .unwrap_or_default();
-        let mut secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
+        let mut secret_key = std::env::var("TCFS_S3_SECRET")
+            .or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY"))
             .or_else(|_| std::env::var("SEAWEED_SECRET_KEY"))
             .unwrap_or_default();
 
