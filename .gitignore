@@ -178,5 +178,8 @@ dist
 .pnp.*
 notes/
 
+# Claude Code (local per-user config)
+.claude/
+
 # Generated docs
 dist/docs/
