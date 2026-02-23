@@ -9,8 +9,8 @@
 #
 # Lab machines connect via MagicDNS:
 #   nats://nats-tcfs:4222
-# Or via DNS alias (if configured in Tailscale admin):
-#   nats://nats.tcfs.tinyland.dev:4222
+# Or via the IaC-managed FQDN (Porkbun A record → Tailscale CGNAT IP):
+#   nats://nats.tcfs.tummycrypt.dev:4222
 
 terraform {
   required_providers {

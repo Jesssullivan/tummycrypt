@@ -10,7 +10,7 @@
     deviceName = "xoxd-bates";
     conflictMode = "auto";
     syncGitDirs = false;
-    natsUrl = "nats://nats-tcfs:4222";
+    natsUrl = "nats://nats.tcfs.tummycrypt.dev:4222";
     syncRoot = "~/tcfs";
     excludePatterns = [ "*.swp" "*.swo" ".direnv" ];
 

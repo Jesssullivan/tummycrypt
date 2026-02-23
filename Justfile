@@ -41,18 +41,32 @@ k8s-logs app="tcfsd" ns="tcfs":
 k8s-describe app="tcfsd" ns="tcfs":
     kubectl describe pods -l app.kubernetes.io/name={{app}} -n {{ns}}
 
+# ── DNS ────────────────────────────────────────────────────────────────────
+
+# Show current DNS records for tummycrypt.dev
+dns-status:
+    @echo "NATS Tailscale IP:"
+    @kubectl get svc nats-tailscale -n tcfs -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+    @echo ""
+    @echo "DNS record:"
+    @dig +short nats.tcfs.tummycrypt.dev
+
+# Full deploy: infra + DNS (may need two runs for Tailscale IP)
+deploy env="civo":
+    cd infra/tofu/environments/{{env}} && tofu apply
+
 # ── NATS ────────────────────────────────────────────────────────────────────
 
 # Check NATS server info via Tailscale
-nats-status server="nats://nats-tcfs:4222":
+nats-status server="nats://nats.tcfs.tummycrypt.dev:4222":
     nats server info --server {{server}}
 
 # List JetStream streams
-nats-streams server="nats://nats-tcfs:4222":
+nats-streams server="nats://nats.tcfs.tummycrypt.dev:4222":
     nats stream ls --server {{server}}
 
 # Publish a test ping to verify connectivity
-nats-ping server="nats://nats-tcfs:4222":
+nats-ping server="nats://nats.tcfs.tummycrypt.dev:4222":
     @echo "Pinging NATS via Tailscale..."
     nats pub STATE.ping '{"from":"operator","ts":"'$(date -Iseconds)'"}' --server {{server}}
 
@@ -61,7 +75,7 @@ nats-ping server="nats://nats-tcfs:4222":
 # Check fleet NATS connectivity from this machine
 fleet-check:
     @echo "Checking fleet NATS connectivity..."
-    nats server info --server nats://nats-tcfs:4222
+    nats server info --server nats://nats.tcfs.tummycrypt.dev:4222
 
 # ── Nix ─────────────────────────────────────────────────────────────────────
 

@@ -8,6 +8,7 @@ exclude = [
   "192\\.168\\.",
   "dees-appu-bearts",
   "seaweedfs.tcfs.svc",
+  "nats.tcfs.tummycrypt.dev",
   "seaweedfs.example.com",
   "nats.example.com",
   "filer.example.com",

@@ -28,6 +28,10 @@ provider "helm" {
   }
 }
 
+provider "porkbun" {
+  # Credentials via env: PORKBUN_API_KEY + PORKBUN_SECRET_API_KEY
+}
+
 # ── NATS JetStream ────────────────────────────────────────────────────────────
 
 module "nats" {
@@ -46,6 +50,18 @@ module "tailscale_nats" {
   source             = "../../modules/tailscale-nats"
   namespace          = var.namespace
   tailscale_hostname = "nats-tcfs"
+}
+
+# ── DNS (Porkbun A record → Tailscale CGNAT IP) ─────────────────────────────
+
+module "nats_dns" {
+  source = "../../modules/porkbun-dns"
+  count  = module.tailscale_nats.tailscale_ip != "" ? 1 : 0
+
+  domain      = var.dns_domain
+  subdomain   = "nats.tcfs"
+  record_type = "A"
+  content     = module.tailscale_nats.tailscale_ip
 }
 
 # ── KEDA autoscaler ───────────────────────────────────────────────────────────
