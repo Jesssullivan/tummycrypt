@@ -14,5 +14,9 @@ terraform {
       source  = "civo/civo"
       version = "~> 1.0"
     }
+    porkbun = {
+      source  = "marcfrederick/porkbun"
+      version = "~> 1.3"
+    }
   }
 }

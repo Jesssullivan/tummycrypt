@@ -23,3 +23,9 @@ variable "grafana_admin_pw" {
   default     = "tcfs-changeme"
   sensitive   = true
 }
+
+variable "dns_domain" {
+  description = "Base domain for DNS records"
+  type        = string
+  default     = "tummycrypt.dev"
+}

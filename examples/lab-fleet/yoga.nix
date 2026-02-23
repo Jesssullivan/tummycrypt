@@ -11,7 +11,7 @@
     conflictMode = "interactive";
     syncGitDirs = true;
     gitSyncMode = "bundle";
-    natsUrl = "nats://nats-tcfs:4222";
+    natsUrl = "nats://nats.tcfs.tummycrypt.dev:4222";
     syncRoot = "~/tcfs";
     excludePatterns = [ "*.swp" "*.swo" ".direnv" "*.pyc" ];
 
