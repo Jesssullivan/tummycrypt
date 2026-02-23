@@ -14,11 +14,11 @@ path = "src/main.rs"
 tcfs-core = { path = "../tcfs-core" }
 tcfs-secrets = { path = "../tcfs-secrets" }
 tcfs-storage = { path = "../tcfs-storage" }
-tcfs-sync = { path = "../tcfs-sync" }
+tcfs-sync = { path = "../tcfs-sync", features = ["nats"] }
 tcfs-fuse = { path = "../tcfs-fuse" }
 opendal = { workspace = true }
-async-nats = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
+async-nats = { workspace = true }
+futures = { workspace = true }
 service-manager = { workspace = true }
 tonic = { workspace = true }
 tokio-stream = { workspace = true }
@@ -41,7 +41,7 @@ blake3 = { workspace = true }
 [features]
 default = []
 # Enables NATS consumer worker mode (for K8s pods)
-k8s-worker = ["dep:async-nats", "dep:futures", "tcfs-sync/nats"]
+k8s-worker = []
 
 [package.metadata.deb]
 maintainer = "TummyCrypt Contributors <jess@sulliwood.org>"
