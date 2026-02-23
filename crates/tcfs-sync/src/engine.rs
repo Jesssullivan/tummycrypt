@@ -374,7 +374,7 @@ pub async fn download_file_with_device(
         anyhow::bail!("manifest is empty: {remote_manifest}");
     }
 
-    // Fetch and reassemble chunks
+    // Fetch and reassemble chunks, verifying each chunk's BLAKE3 hash
     let mut assembled = Vec::new();
     let total = chunk_hashes.len();
 
@@ -385,7 +385,17 @@ pub async fn download_file_with_device(
             .await
             .with_context(|| format!("downloading chunk {i}: {chunk_key}"))?;
 
-        assembled.extend_from_slice(&chunk_data.to_bytes());
+        let chunk_bytes = chunk_data.to_bytes();
+
+        // Verify chunk integrity: BLAKE3 hash must match the manifest entry
+        let actual_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
+        if actual_hash != *hash {
+            anyhow::bail!(
+                "chunk integrity check failed for {chunk_key}: expected {hash}, got {actual_hash}"
+            );
+        }
+
+        assembled.extend_from_slice(&chunk_bytes);
 
         if let Some(cb) = progress {
             cb(
@@ -397,6 +407,15 @@ pub async fn download_file_with_device(
     }
 
     let bytes = assembled.len() as u64;
+
+    // Verify reassembled file hash matches the manifest
+    let actual_file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&assembled));
+    if actual_file_hash != manifest.file_hash {
+        anyhow::bail!(
+            "file integrity check failed for {remote_manifest}: expected {}, got {actual_file_hash}",
+            manifest.file_hash
+        );
+    }
 
     // Atomic write to local path
     if let Some(parent) = local_path.parent() {

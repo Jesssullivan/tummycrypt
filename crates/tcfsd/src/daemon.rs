@@ -97,13 +97,18 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             .expect("fallback state cache")
         });
 
-    // Start Prometheus metrics endpoint
+    // Wrap operator in Arc<Mutex> for shared access
+    let operator = Arc::new(tokio::sync::Mutex::new(operator));
+
+    // Start Prometheus metrics + health check endpoint
     let metrics_addr = config.daemon.metrics_addr.clone();
     if let Some(addr) = metrics_addr {
-        let registry = Arc::new(crate::metrics::Registry::default());
-        let registry_clone = registry.clone();
+        let health_state = crate::metrics::HealthState {
+            registry: Arc::new(crate::metrics::Registry::default()),
+            operator: operator.clone(),
+        };
         tokio::spawn(async move {
-            if let Err(e) = crate::metrics::serve(addr, registry_clone).await {
+            if let Err(e) = crate::metrics::serve(addr, health_state).await {
                 error!("metrics server failed: {e}");
             }
         });
@@ -154,7 +159,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         storage_ok,
         config.storage.endpoint.clone(),
         state_cache,
-        operator,
+        operator.clone(),
         device_id.clone(),
         device_name.clone(),
     );
@@ -194,9 +199,59 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         }
     }
 
+    // Prepare shutdown handles
+    let state_cache_for_shutdown = impl_.state_cache_handle();
+    let nats_for_shutdown = impl_.nats_handle();
+    let device_id_for_shutdown = device_id.clone();
+
+    // Set up graceful shutdown on SIGTERM/SIGINT
+    let shutdown_signal = async move {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("received SIGINT, initiating graceful shutdown");
+            }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM, initiating graceful shutdown");
+            }
+        }
+
+        // Notify systemd we're stopping
+        notify_stopping();
+
+        // Flush state cache before exit
+        let mut cache = state_cache_for_shutdown.lock().await;
+        if let Err(e) = cache.flush() {
+            error!("failed to flush state cache on shutdown: {e}");
+        } else {
+            info!("state cache flushed");
+        }
+
+        // Publish DeviceOffline event if NATS connected
+        if let Some(nats) = nats_for_shutdown.lock().await.as_ref() {
+            let offline_event = tcfs_sync::StateEvent::DeviceOffline {
+                device_id: device_id_for_shutdown.clone(),
+                last_seq: 0,
+                timestamp: tcfs_sync::StateEvent::now(),
+            };
+            if let Err(e) = nats.publish_state_event(&offline_event).await {
+                warn!("failed to publish DeviceOffline: {e}");
+            } else {
+                info!("NATS: published DeviceOffline");
+            }
+        }
+
+        info!("shutdown complete");
+    };
+
     info!(socket = %socket_path.display(), "gRPC: listening");
 
-    crate::grpc::serve(&socket_path, impl_).await?;
+    crate::grpc::serve(&socket_path, impl_, shutdown_signal).await?;
+
+    // Clean up socket file
+    let _ = tokio::fs::remove_file(&socket_path).await;
 
     Ok(())
 }
@@ -286,6 +341,16 @@ fn notify_ready() {
         if let Ok(sock) = UnixDatagram::unbound() {
             let _ = sock.send_to(b"READY=1\n", &socket);
             tracing::debug!(notify_socket = %socket, "sent systemd READY=1");
+        }
+    }
+}
+
+fn notify_stopping() {
+    if let Ok(socket) = std::env::var("NOTIFY_SOCKET") {
+        use std::os::unix::net::UnixDatagram;
+        if let Ok(sock) = UnixDatagram::unbound() {
+            let _ = sock.send_to(b"STOPPING=1\n", &socket);
+            tracing::debug!(notify_socket = %socket, "sent systemd STOPPING=1");
         }
     }
 }

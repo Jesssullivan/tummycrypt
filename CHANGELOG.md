@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-23
+
+### Added
+
+- **Benchmarks**: divan benchmark framework for chunking and encryption throughput (#22)
+  - FastCDC chunking, BLAKE3 hashing, zstd compress/decompress, XChaCha20-Poly1305 encrypt/decrypt
+  - `task bench` command for running all benchmarks
+  - `docs/BENCHMARKS.md` populated with real measurements (BLAKE3: 1.39 GB/s, zstd: 1.26 GB/s)
+- **Chunk integrity verification**: BLAKE3 hash verified per-chunk on download and against manifest file hash (#23)
+- **Graceful shutdown**: SIGTERM/SIGINT handler flushes state cache, publishes DeviceOffline, sends systemd STOPPING=1 (#23)
+- **Health endpoints**: `/healthz` (liveness) and `/readyz` (readiness with S3 check) on metrics HTTP server (#23)
+- **7 integration tests**: push/pull round-trip, dedup, integrity, tree push, device-aware sync using in-memory backend (#23)
+- **Fleet deployment guide**: `docs/ops/fleet-deployment.md` covering NATS access, credential distribution, daemon startup (#22)
+- **macOS launchd plist**: `dist/com.tummycrypt.tcfsd.plist` for automatic daemon startup (#22)
+- RFC 0002: Darwin File Integration Strategy — FileProvider as primary macOS/iOS path (#21)
+- RFC 0003: iOS File Provider with UniFFI bridge design (#22)
+- `tcfs-file-provider` crate skeleton for macOS/iOS FileProvider extension (#22)
+- `docs/tex/fileprovider.tex` LaTeX design document (#21)
+
+### Changed
+
+- Storage retry improved: 5 retries with jitter (was 3 without jitter) + OpenDAL logging layer (#23)
+- gRPC `serve()` now supports graceful shutdown via async signal (#23)
+- Metrics server operator handle shared with health endpoint for live readiness checks (#23)
+
+### Fixed
+
+- Resolved RFC 0001 open questions (NATS access path, credential distribution, daemon startup) (#22)
+
 ## [0.3.0] - 2026-02-22
 
 ### Added
@@ -98,6 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Homebrew formula, `.deb`/`.rpm` packages, install scripts
 - 77 tests, cargo-deny license/advisory checks, security audit CI
 
+[0.4.0]: https://github.com/tinyland-inc/tummycrypt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tinyland-inc/tummycrypt/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/tinyland-inc/tummycrypt/compare/v0.2.1...v0.2.5
 [0.2.1]: https://github.com/tinyland-inc/tummycrypt/compare/v0.1.0...v0.2.1

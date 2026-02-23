@@ -33,13 +33,14 @@ pub struct TcfsDaemonImpl {
 }
 
 impl TcfsDaemonImpl {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cred_store: SharedCredStore,
         config: Arc<TcfsConfig>,
         storage_ok: bool,
         storage_endpoint: String,
         state_cache: tcfs_sync::state::StateCache,
-        operator: Option<opendal::Operator>,
+        operator: Arc<TokioMutex<Option<opendal::Operator>>>,
         device_id: String,
         device_name: String,
     ) -> Self {
@@ -50,12 +51,22 @@ impl TcfsDaemonImpl {
             storage_endpoint,
             start_time: std::time::Instant::now(),
             state_cache: Arc::new(TokioMutex::new(state_cache)),
-            operator: Arc::new(TokioMutex::new(operator)),
+            operator,
             device_id,
             device_name,
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
         }
+    }
+
+    /// Get a handle to the state cache for shutdown flushing.
+    pub fn state_cache_handle(&self) -> Arc<TokioMutex<tcfs_sync::state::StateCache>> {
+        self.state_cache.clone()
+    }
+
+    /// Get a handle to the NATS client for shutdown notification.
+    pub fn nats_handle(&self) -> Arc<TokioMutex<Option<tcfs_sync::NatsClient>>> {
+        self.nats.clone()
     }
 
     /// Set the NATS client (called from daemon after connecting).
@@ -432,8 +443,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
     }
 }
 
-/// Start the gRPC server on a Unix domain socket
-pub async fn serve(socket_path: &Path, impl_: TcfsDaemonImpl) -> Result<()> {
+/// Start the gRPC server on a Unix domain socket with graceful shutdown support.
+pub async fn serve(
+    socket_path: &Path,
+    impl_: TcfsDaemonImpl,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
     // Remove stale socket if it exists
     if socket_path.exists() {
         tokio::fs::remove_file(socket_path).await?;
@@ -451,7 +466,7 @@ pub async fn serve(socket_path: &Path, impl_: TcfsDaemonImpl) -> Result<()> {
 
     Server::builder()
         .add_service(TcfsDaemonServer::new(impl_))
-        .serve_with_incoming(stream)
+        .serve_with_incoming_shutdown(stream, shutdown)
         .await
         .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))
 }

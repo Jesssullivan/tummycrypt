@@ -30,7 +30,12 @@ pub fn build_operator(cfg: &StorageConfig) -> Result<Operator> {
 
     let op = Operator::new(builder)
         .context("creating OpenDAL S3 operator")?
-        .layer(opendal::layers::RetryLayer::new().with_max_times(3))
+        .layer(opendal::layers::LoggingLayer::default())
+        .layer(
+            opendal::layers::RetryLayer::new()
+                .with_max_times(5)
+                .with_jitter(),
+        )
         .finish();
 
     Ok(op)
