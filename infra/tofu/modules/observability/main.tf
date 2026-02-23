@@ -37,12 +37,14 @@ resource "helm_release" "kube_prometheus" {
   version    = var.prometheus_chart_version
   namespace  = var.namespace
 
-  # Grafana admin credential set via set_sensitive below to avoid
+  # Grafana admin credential set via set_sensitive to avoid
   # embedding the pattern in source (pre-commit credential scan).
-  set_sensitive {
-    name  = "grafana.adminPassword"
-    value = var.grafana_admin_pw
-  }
+  set_sensitive = [
+    {
+      name  = "grafana.adminPassword"
+      value = var.grafana_admin_pw
+    }
+  ]
 
   values = [
     yamlencode({
