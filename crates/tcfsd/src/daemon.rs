@@ -4,6 +4,7 @@ use anyhow::Result;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tcfs_core::config::TcfsConfig;
+use tcfs_sync::conflict::ConflictResolver;
 use tracing::{error, info, warn};
 
 use crate::cred_store::{new_shared as new_cred_store, SharedCredStore};
@@ -185,10 +186,21 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         info!("NATS: published DeviceOnline");
                     }
 
-                    // Spawn state sync loop
+                    // Spawn state sync loop with auto-pull support
                     let sync_device_id = device_id.clone();
                     let sync_conflict_mode = config.sync.conflict_mode.clone();
-                    spawn_state_sync_loop(&nats, &sync_device_id, &sync_conflict_mode).await;
+                    let sync_root = config.sync.sync_root.clone();
+                    let storage_prefix = config.storage.bucket.clone();
+                    spawn_state_sync_loop(
+                        &nats,
+                        &sync_device_id,
+                        &sync_conflict_mode,
+                        operator.clone(),
+                        impl_.state_cache_handle(),
+                        sync_root,
+                        storage_prefix,
+                    )
+                    .await;
 
                     impl_.set_nats(nats);
                 }
@@ -257,7 +269,16 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 }
 
 /// Spawn a background task that consumes state events from NATS.
-async fn spawn_state_sync_loop(nats: &tcfs_sync::NatsClient, device_id: &str, conflict_mode: &str) {
+#[allow(clippy::too_many_arguments)]
+async fn spawn_state_sync_loop(
+    nats: &tcfs_sync::NatsClient,
+    device_id: &str,
+    conflict_mode: &str,
+    operator: Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+    state_cache: Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+    sync_root: Option<std::path::PathBuf>,
+    storage_prefix: String,
+) {
     use futures::StreamExt;
 
     match nats.state_consumer(device_id).await {
@@ -286,6 +307,8 @@ async fn spawn_state_sync_loop(nats: &tcfs_sync::NatsClient, device_id: &str, co
                                     rel_path,
                                     blake3,
                                     size,
+                                    vclock: remote_vclock,
+                                    manifest_path,
                                     ..
                                 } => {
                                     info!(
@@ -296,9 +319,61 @@ async fn spawn_state_sync_loop(nats: &tcfs_sync::NatsClient, device_id: &str, co
                                         mode = %conflict_mode,
                                         "remote file synced"
                                     );
-                                    // In auto mode: would trigger auto-pull
-                                    // In interactive mode: queue for user review
-                                    // In defer mode: log and skip
+
+                                    match conflict_mode.as_str() {
+                                        "auto" => {
+                                            handle_auto_pull(
+                                                &device_id,
+                                                &event_device,
+                                                rel_path,
+                                                blake3,
+                                                remote_vclock,
+                                                manifest_path,
+                                                &operator,
+                                                &state_cache,
+                                                sync_root.as_deref(),
+                                                &storage_prefix,
+                                            )
+                                            .await;
+                                        }
+                                        "interactive" => {
+                                            info!(
+                                                path = %rel_path,
+                                                from = %event_device,
+                                                "conflict queued for review"
+                                            );
+                                        }
+                                        _ => {
+                                            // defer or unknown — log and skip
+                                        }
+                                    }
+                                }
+                                tcfs_sync::StateEvent::ConflictResolved {
+                                    rel_path,
+                                    merged_vclock,
+                                    ..
+                                } => {
+                                    info!(
+                                        from_device = %event_device,
+                                        path = %rel_path,
+                                        "remote conflict resolved, merging vclock"
+                                    );
+                                    // Merge the resolved vclock into our local state
+                                    let mut cache = state_cache.lock().await;
+                                    let local_path = sync_root
+                                        .as_ref()
+                                        .map(|r| r.join(rel_path))
+                                        .unwrap_or_else(|| std::path::PathBuf::from(rel_path));
+                                    if let Some(entry) = cache.get(&local_path).cloned() {
+                                        let mut updated_vclock = entry.vclock.clone();
+                                        updated_vclock.merge(merged_vclock);
+                                        let updated = tcfs_sync::state::SyncState {
+                                            vclock: updated_vclock,
+                                            ..entry
+                                        };
+                                        cache.set(&local_path, updated);
+                                        let _ = cache.flush();
+                                    }
                                 }
                                 tcfs_sync::StateEvent::DeviceOnline { device_id: did, .. } => {
                                     info!(device = %did, "remote device online");
@@ -329,6 +404,184 @@ async fn spawn_state_sync_loop(nats: &tcfs_sync::NatsClient, device_id: &str, co
         }
         Err(e) => {
             warn!("failed to create state consumer: {e}");
+        }
+    }
+}
+
+/// Handle auto-pull logic for a remote FileSynced event.
+#[allow(clippy::too_many_arguments)]
+async fn handle_auto_pull(
+    device_id: &str,
+    remote_device: &str,
+    rel_path: &str,
+    remote_blake3: &str,
+    remote_vclock: &tcfs_sync::conflict::VectorClock,
+    manifest_path: &str,
+    operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+    state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+    sync_root: Option<&std::path::Path>,
+    storage_prefix: &str,
+) {
+    // Determine local path for this rel_path
+    let local_path = match sync_root {
+        Some(root) => root.join(rel_path),
+        None => {
+            // Try to find in state cache by rel_path
+            let cache = state_cache.lock().await;
+            match cache.get_by_rel_path(rel_path) {
+                Some((key, _)) => std::path::PathBuf::from(key),
+                None => {
+                    info!(
+                        path = %rel_path,
+                        "no sync_root configured and file not in state cache, skipping auto-pull"
+                    );
+                    return;
+                }
+            }
+        }
+    };
+
+    // Compare vector clocks
+    let (local_blake3, local_vclock) = {
+        let cache = state_cache.lock().await;
+        match cache.get(&local_path) {
+            Some(entry) => (entry.blake3.clone(), entry.vclock.clone()),
+            None => {
+                // New file from remote — download it
+                info!(path = %rel_path, from = %remote_device, "new file from remote, pulling");
+                drop(cache);
+                do_auto_download(
+                    device_id,
+                    manifest_path,
+                    &local_path,
+                    operator,
+                    state_cache,
+                    storage_prefix,
+                )
+                .await;
+                return;
+            }
+        }
+    };
+
+    let outcome = tcfs_sync::conflict::compare_clocks(
+        &local_vclock,
+        remote_vclock,
+        &local_blake3,
+        remote_blake3,
+        rel_path,
+        device_id,
+        remote_device,
+    );
+
+    match outcome {
+        tcfs_sync::conflict::SyncOutcome::UpToDate => {
+            info!(path = %rel_path, "already up to date");
+        }
+        tcfs_sync::conflict::SyncOutcome::LocalNewer => {
+            info!(path = %rel_path, "local is newer, skipping pull");
+        }
+        tcfs_sync::conflict::SyncOutcome::RemoteNewer => {
+            info!(path = %rel_path, from = %remote_device, "remote is newer, auto-pulling");
+            do_auto_download(
+                device_id,
+                manifest_path,
+                &local_path,
+                operator,
+                state_cache,
+                storage_prefix,
+            )
+            .await;
+        }
+        tcfs_sync::conflict::SyncOutcome::Conflict(ref conflict_info) => {
+            info!(
+                path = %rel_path,
+                local_device = %conflict_info.local_device,
+                remote_device = %conflict_info.remote_device,
+                "conflict detected, applying AutoResolver"
+            );
+            let resolver = tcfs_sync::conflict::AutoResolver;
+            match resolver.resolve(conflict_info) {
+                Some(tcfs_sync::conflict::Resolution::KeepLocal) => {
+                    info!(path = %rel_path, "AutoResolver: keeping local");
+                }
+                Some(tcfs_sync::conflict::Resolution::KeepRemote) => {
+                    info!(path = %rel_path, "AutoResolver: keeping remote");
+                    do_auto_download(
+                        device_id,
+                        manifest_path,
+                        &local_path,
+                        operator,
+                        state_cache,
+                        storage_prefix,
+                    )
+                    .await;
+                }
+                _ => {
+                    info!(path = %rel_path, "AutoResolver: deferred");
+                }
+            }
+        }
+    }
+}
+
+/// Download a file from remote and update state cache.
+async fn do_auto_download(
+    device_id: &str,
+    manifest_path: &str,
+    local_path: &std::path::Path,
+    operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+    state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+    storage_prefix: &str,
+) {
+    // Ensure parent directory exists
+    if let Some(parent) = local_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(path = %local_path.display(), "mkdir for auto-pull failed: {e}");
+            return;
+        }
+    }
+
+    let op = operator.lock().await;
+    let op = match op.as_ref() {
+        Some(op) => op.clone(),
+        None => {
+            warn!("no storage operator for auto-pull");
+            return;
+        }
+    };
+    drop(operator.lock().await);
+
+    let result = {
+        let mut cache = state_cache.lock().await;
+        tcfs_sync::engine::download_file_with_device(
+            &op,
+            manifest_path,
+            local_path,
+            storage_prefix,
+            None,
+            device_id,
+            Some(&mut cache),
+        )
+        .await
+    };
+
+    match result {
+        Ok(dl) => {
+            info!(
+                path = %local_path.display(),
+                bytes = dl.bytes,
+                "auto-pull complete"
+            );
+            // Flush state cache
+            let mut cache = state_cache.lock().await;
+            let _ = cache.flush();
+        }
+        Err(e) => {
+            warn!(
+                path = %local_path.display(),
+                "auto-pull failed: {e}"
+            );
         }
     }
 }

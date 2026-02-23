@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-02-23
+
+### Added
+
+- **ResolveConflict RPC**: Fully wired with keep_local (re-upload manifest with ticked vclock), keep_remote (download remote version), keep_both (rename local + download remote), and defer strategies
+- **NATS auto-pull**: State sync loop now downloads remote files automatically in `auto` conflict mode, with vclock comparison and AutoResolver tie-breaking for concurrent edits
+- **Hydrate RPC**: Downloads file from `.tc` stub metadata, removes stub after successful hydration
+- **Unsync RPC**: Removes path from state cache without deleting remote or local data
+- **Watch RPC**: Streams filesystem events (created/modified/deleted) using `notify` crate with recursive watching
+- **Mount RPC**: Spawns `tcfs mount` subprocess with active mount tracking
+- **Unmount RPC**: Runs `fusermount3 -u` (fallback `fusermount -u`), cleans up tracked subprocess
+- `sync_root` config option: local directory root for auto-pull file downloads
+- ConflictResolved NATS events published after resolution, merged by remote peers
+- 10 new tests: 4 conflict resolution integration tests + 6 vclock comparison unit tests
+
+### Changed
+
+- `spawn_state_sync_loop` now accepts operator, state cache, sync_root, and storage prefix for auto-pull
+- `status` RPC reports live `active_mounts` count from tracked subprocess map
+- All 11 gRPC RPCs now return meaningful responses (zero `UNIMPLEMENTED` stubs remain)
+
 ## [0.4.0] - 2026-02-23
 
 ### Added
