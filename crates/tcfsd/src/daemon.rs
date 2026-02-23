@@ -562,6 +562,7 @@ async fn do_auto_download(
             None,
             device_id,
             Some(&mut cache),
+            None,
         )
         .await
     };

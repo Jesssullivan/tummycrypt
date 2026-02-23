@@ -42,6 +42,7 @@ async fn resolve_keep_remote_downloads_remote() {
         None,
         "device-a",
         Some("doc.txt"),
+        None,
     )
     .await
     .expect("device A upload");
@@ -60,6 +61,7 @@ async fn resolve_keep_remote_downloads_remote() {
         None,
         "device-b",
         Some(&mut state_b),
+        None,
     )
     .await
     .expect("device B download");
@@ -96,6 +98,7 @@ async fn resolve_keep_local_re_uploads() {
         None,
         "device-a",
         Some("notes.txt"),
+        None,
     )
     .await
     .expect("device A upload");
@@ -118,6 +121,7 @@ async fn resolve_keep_local_re_uploads() {
         None,
         "device-b",
         Some("notes.txt"),
+        None,
     )
     .await
     .expect("device B re-upload");
@@ -159,6 +163,7 @@ async fn resolve_keep_both_preserves_files() {
         None,
         "device-a",
         Some("report.txt"),
+        None,
     )
     .await
     .expect("upload");
@@ -181,6 +186,7 @@ async fn resolve_keep_both_preserves_files() {
         None,
         "device-b",
         Some(&mut state),
+        None,
     )
     .await
     .expect("download remote to original path");

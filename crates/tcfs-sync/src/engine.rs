@@ -20,6 +20,23 @@ use crate::conflict::{compare_clocks, SyncOutcome};
 use crate::manifest::SyncManifest;
 use crate::state::{make_sync_state_full, StateCache};
 
+/// Optional encryption context for E2E encrypted push/pull.
+///
+/// When present, chunks are encrypted before upload and decrypted after download
+/// using XChaCha20-Poly1305 with per-file keys wrapped by the master key.
+#[cfg(feature = "crypto")]
+pub struct EncryptionContext {
+    pub master_key: tcfs_crypto::MasterKey,
+}
+
+/// Type alias for optional encryption context (feature-gated).
+#[cfg(feature = "crypto")]
+pub type OptionalEncryption<'a> = Option<&'a EncryptionContext>;
+
+/// Stub type when crypto feature is disabled — always None.
+#[cfg(not(feature = "crypto"))]
+pub type OptionalEncryption<'a> = Option<&'a ()>;
+
 /// Progress callback type (bytes_done, bytes_total, message)
 pub type ProgressFn = Box<dyn Fn(u64, u64, &str) + Send + Sync>;
 
@@ -86,10 +103,21 @@ pub async fn upload_file(
     state: &mut StateCache,
     progress: Option<&ProgressFn>,
 ) -> Result<UploadResult> {
-    upload_file_with_device(op, local_path, remote_prefix, state, progress, "", None).await
+    upload_file_with_device(
+        op,
+        local_path,
+        remote_prefix,
+        state,
+        progress,
+        "",
+        None,
+        None,
+    )
+    .await
 }
 
-/// Upload with device identity and vector clock awareness.
+/// Upload with device identity, vector clock awareness, and optional encryption.
+#[allow(unused_variables)]
 pub async fn upload_file_with_device(
     op: &Operator,
     local_path: &Path,
@@ -98,6 +126,7 @@ pub async fn upload_file_with_device(
     progress: Option<&ProgressFn>,
     device_id: &str,
     rel_path: Option<&str>,
+    encryption: OptionalEncryption<'_>,
 ) -> Result<UploadResult> {
     // Fast-path: check if file is already up-to-date
     match state.needs_sync(local_path)? {
@@ -250,13 +279,48 @@ pub async fn upload_file_with_device(
     let mut chunk_hashes = Vec::with_capacity(chunks.len());
     let mut bytes_uploaded = 0u64;
 
+    // Generate per-file encryption key if encryption is enabled
+    #[cfg(feature = "crypto")]
+    let (file_key, file_id) = if encryption.is_some() {
+        let fk = tcfs_crypto::generate_file_key();
+        // Use the plaintext file hash as the file_id for AAD binding
+        let fid: [u8; 32] = {
+            let hash = tcfs_chunks::hash_from_hex(&file_hash_hex)
+                .context("parsing file hash for encryption file_id")?;
+            *hash.as_bytes()
+        };
+        (Some(fk), Some(fid))
+    } else {
+        (None, None)
+    };
+
     for (i, chunk) in chunks.iter().enumerate() {
-        let chunk_hash_hex = tcfs_chunks::hash_to_hex(&chunk.hash);
+        let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
+
+        // Encrypt chunk if encryption is enabled
+        #[cfg(feature = "crypto")]
+        let (upload_data, chunk_hash_hex) =
+            if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
+                let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, chunk_data)
+                    .with_context(|| format!("encrypting chunk {i}"))?;
+                // CAS key is ciphertext hash (not plaintext hash)
+                let ct_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
+                (ciphertext, ct_hash)
+            } else {
+                let h = tcfs_chunks::hash_to_hex(&chunk.hash);
+                (chunk_data.to_vec(), h)
+            };
+
+        #[cfg(not(feature = "crypto"))]
+        let (upload_data, chunk_hash_hex) = {
+            let h = tcfs_chunks::hash_to_hex(&chunk.hash);
+            (chunk_data.to_vec(), h)
+        };
+
         let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
 
         if !op.exists(&chunk_key).await.unwrap_or(false) {
-            let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
-            op.write(&chunk_key, chunk_data.to_vec())
+            op.write(&chunk_key, upload_data)
                 .await
                 .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
             bytes_uploaded += chunk.length as u64;
@@ -273,6 +337,21 @@ pub async fn upload_file_with_device(
         }
     }
 
+    // Wrap file key for manifest if encryption is enabled
+    #[cfg(feature = "crypto")]
+    let encrypted_file_key = if let (Some(ctx), Some(ref fk)) = (encryption, &file_key) {
+        let wrapped = tcfs_crypto::wrap_key(&ctx.master_key, fk).context("wrapping file key")?;
+        Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &wrapped,
+        ))
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "crypto"))]
+    let encrypted_file_key: Option<String> = None;
+
     // Build and upload SyncManifest v2
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -288,6 +367,7 @@ pub async fn upload_file_with_device(
         written_by: device_id.to_string(),
         written_at: now,
         rel_path: rel_path.map(|s| s.to_string()),
+        encrypted_file_key,
     };
 
     let manifest_bytes = manifest.to_bytes()?;
@@ -345,11 +425,13 @@ pub async fn download_file(
         progress,
         "",
         None,
+        None,
     )
     .await
 }
 
-/// Download with device identity and vector clock merge.
+/// Download with device identity, vector clock merge, and optional decryption.
+#[allow(unused_variables)]
 pub async fn download_file_with_device(
     op: &Operator,
     remote_manifest: &str,
@@ -358,6 +440,7 @@ pub async fn download_file_with_device(
     progress: Option<&ProgressFn>,
     _device_id: &str,
     state: Option<&mut StateCache>,
+    encryption: OptionalEncryption<'_>,
 ) -> Result<DownloadResult> {
     // Read manifest
     let manifest_bytes = op
@@ -373,6 +456,34 @@ pub async fn download_file_with_device(
     if chunk_hashes.is_empty() {
         anyhow::bail!("manifest is empty: {remote_manifest}");
     }
+
+    // Unwrap file key if manifest is encrypted
+    #[cfg(feature = "crypto")]
+    let file_key = if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
+        let ctx = encryption.ok_or_else(|| {
+            anyhow::anyhow!(
+                "manifest is encrypted but no encryption context provided for: {remote_manifest}"
+            )
+        })?;
+        let wrapped =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, wrapped_b64)
+                .context("decoding wrapped file key from manifest")?;
+        Some(
+            tcfs_crypto::unwrap_key(&ctx.master_key, &wrapped)
+                .context("unwrapping file key from manifest")?,
+        )
+    } else {
+        None
+    };
+
+    #[cfg(feature = "crypto")]
+    let file_id: Option<[u8; 32]> = if file_key.is_some() {
+        let hash = tcfs_chunks::hash_from_hex(&manifest.file_hash)
+            .context("parsing manifest file_hash for decryption file_id")?;
+        Some(*hash.as_bytes())
+    } else {
+        None
+    };
 
     // Fetch and reassemble chunks, verifying each chunk's BLAKE3 hash
     let mut assembled = Vec::new();
@@ -395,7 +506,19 @@ pub async fn download_file_with_device(
             );
         }
 
-        assembled.extend_from_slice(&chunk_bytes);
+        // Decrypt chunk if file key is present
+        #[cfg(feature = "crypto")]
+        let plaintext = if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
+            tcfs_crypto::decrypt_chunk(fk, i as u64, fid, &chunk_bytes)
+                .with_context(|| format!("decrypting chunk {i}"))?
+        } else {
+            chunk_bytes.to_vec()
+        };
+
+        #[cfg(not(feature = "crypto"))]
+        let plaintext = chunk_bytes.to_vec();
+
+        assembled.extend_from_slice(&plaintext);
 
         if let Some(cb) = progress {
             cb(
@@ -408,7 +531,7 @@ pub async fn download_file_with_device(
 
     let bytes = assembled.len() as u64;
 
-    // Verify reassembled file hash matches the manifest
+    // Verify reassembled file hash matches the manifest (plaintext hash)
     let actual_file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&assembled));
     if actual_file_hash != manifest.file_hash {
         anyhow::bail!(
@@ -480,10 +603,20 @@ pub async fn push_tree(
     state: &mut StateCache,
     progress: Option<&ProgressFn>,
 ) -> Result<(usize, usize, u64)> {
-    push_tree_with_device(op, local_root, remote_prefix, state, progress, "", None).await
+    push_tree_with_device(
+        op,
+        local_root,
+        remote_prefix,
+        state,
+        progress,
+        "",
+        None,
+        None,
+    )
+    .await
 }
 
-/// Push tree with device identity and optional collection config.
+/// Push tree with device identity, optional collection config, and optional encryption.
 pub async fn push_tree_with_device(
     op: &Operator,
     local_root: &Path,
@@ -492,6 +625,7 @@ pub async fn push_tree_with_device(
     progress: Option<&ProgressFn>,
     device_id: &str,
     collect_cfg: Option<&CollectConfig>,
+    encryption: OptionalEncryption<'_>,
 ) -> Result<(usize, usize, u64)> {
     let mut uploaded = 0usize;
     let mut skipped = 0usize;
@@ -518,6 +652,7 @@ pub async fn push_tree_with_device(
             None,
             device_id,
             Some(&rel_str),
+            encryption,
         )
         .await
         {

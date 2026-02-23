@@ -516,6 +516,7 @@ async fn cmd_push(
             Some(&progress),
             &device_id,
             Some(&rel),
+            None,
         )
         .await
         .with_context(|| format!("uploading {}", local.display()))?;
@@ -583,6 +584,7 @@ async fn cmd_push(
             Some(&progress),
             &device_id,
             Some(&collect_cfg),
+            None,
         )
         .await
         .with_context(|| format!("pushing tree: {}", local.display()))?;
@@ -658,6 +660,7 @@ async fn cmd_pull(
         Some(&progress),
         &device_id,
         Some(&mut state),
+        None,
     )
     .await
     .with_context(|| format!("downloading {}", manifest_path))?;
