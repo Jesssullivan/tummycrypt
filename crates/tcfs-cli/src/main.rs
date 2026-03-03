@@ -126,6 +126,12 @@ enum Commands {
         mountpoint: PathBuf,
     },
 
+    /// Cache management (stats, clear)
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+
     /// Convert hydrated file back to .tc stub, reclaiming disk space
     Unsync {
         /// Path to unsync
@@ -204,6 +210,14 @@ enum AuthAction {
 enum ConfigAction {
     /// Print the active configuration (merged defaults + config file)
     Show,
+}
+
+#[derive(Subcommand, Debug)]
+enum CacheAction {
+    /// Show cache usage statistics
+    Stats,
+    /// Clear all cached content
+    Clear,
 }
 
 #[derive(Subcommand, Debug)]
@@ -290,6 +304,10 @@ async fn main() -> Result<()> {
         Commands::SyncStatus { path, state } => {
             cmd_sync_status(&config, path.as_deref(), state.as_deref())
         }
+        Commands::Cache { action } => match action {
+            CacheAction::Stats => cmd_cache_stats(&config).await,
+            CacheAction::Clear => cmd_cache_clear(&config).await,
+        },
         #[cfg(feature = "fuse")]
         Commands::Mount {
             remote,
@@ -549,6 +567,16 @@ async fn cmd_push(
             ));
             println!("  skipped (unchanged since last sync)");
         } else {
+            // Write index entry for FUSE discoverability (same pattern as push_tree_with_device)
+            let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), &rel);
+            let index_entry = format!(
+                "manifest_hash={}\nsize={}\nchunks={}\n",
+                result.hash, result.bytes, result.chunks
+            );
+            if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
+                eprintln!("warning: failed to write index entry: {e}");
+            }
+
             pb.finish_with_message("done".to_string());
             println!("  hash:    {}", &result.hash[..16.min(result.hash.len())]);
             println!("  chunks:  {}", result.chunks);
@@ -1017,32 +1045,55 @@ fn format_uptime(secs: i64) -> String {
     }
 }
 
-// ── `tcfs mount` (requires fuse feature) ────────────────────────────────────
+// ── `tcfs cache stats` / `tcfs cache clear` ──────────────────────────────────
 
-#[cfg(feature = "fuse")]
-/// Parse a remote spec like `seaweedfs://host:port/bucket[/prefix]`
-fn parse_remote_spec(spec: &str) -> anyhow::Result<(String, String, String)> {
-    let rest = spec
-        .strip_prefix("seaweedfs://")
-        .with_context(|| format!("remote spec must start with seaweedfs:// — got: {}", spec))?;
+async fn cmd_cache_stats(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
+    let cache_dir = expand_tilde(&config.fuse.cache_dir);
+    let cache_max = config.fuse.cache_max_mb * 1024 * 1024;
+    let cache = tcfs_fuse::DiskCache::new(cache_dir.clone(), cache_max);
 
-    // Split host:port from /bucket[/prefix]
-    let slash = rest
-        .find('/')
-        .with_context(|| format!("remote spec must include /bucket — got: {}", spec))?;
+    let stats = cache.stats().await.context("reading cache stats")?;
 
-    let host = &rest[..slash]; // e.g. "dees-appu-bearts:8333"
-    let path = &rest[slash + 1..]; // e.g. "tcfs-test" or "tcfs-test/subdir"
-
-    // First path component = bucket, remainder = prefix
-    let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
-
-    Ok((
-        format!("http://{}", host),
-        bucket.to_string(),
-        prefix.trim_end_matches('/').to_string(),
-    ))
+    println!("Cache: {}", cache_dir.display());
+    println!("  entries:  {}", stats.entry_count);
+    println!("  shards:   {}", stats.shard_count);
+    println!("  used:     {}", fmt_bytes(stats.total_bytes));
+    println!("  budget:   {}", fmt_bytes(stats.max_bytes));
+    println!(
+        "  usage:    {:.1}%",
+        if stats.max_bytes > 0 {
+            stats.total_bytes as f64 / stats.max_bytes as f64 * 100.0
+        } else {
+            0.0
+        }
+    );
+    Ok(())
 }
+
+async fn cmd_cache_clear(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
+    let cache_dir = expand_tilde(&config.fuse.cache_dir);
+    if cache_dir.exists() {
+        let before = tcfs_fuse::DiskCache::new(cache_dir.clone(), 0)
+            .stats()
+            .await?;
+        tokio::fs::remove_dir_all(&cache_dir)
+            .await
+            .context("clearing cache directory")?;
+        tokio::fs::create_dir_all(&cache_dir)
+            .await
+            .context("recreating cache directory")?;
+        println!(
+            "Cleared {} entries ({}).",
+            before.entry_count,
+            fmt_bytes(before.total_bytes)
+        );
+    } else {
+        println!("Cache directory does not exist: {}", cache_dir.display());
+    }
+    Ok(())
+}
+
+// ── `tcfs mount` (requires fuse feature) ────────────────────────────────────
 
 #[cfg(feature = "fuse")]
 async fn cmd_mount(
@@ -1051,7 +1102,41 @@ async fn cmd_mount(
     mountpoint: &std::path::Path,
     read_only: bool,
 ) -> Result<()> {
-    let (endpoint, bucket, prefix) = parse_remote_spec(remote)?;
+    // Try daemon-managed mount first
+    let socket_path = expand_tilde(&config.daemon.socket);
+    if let Ok(mut client) = connect_daemon(&socket_path).await {
+        let resp = client
+            .mount(tonic::Request::new(tcfs_core::proto::MountRequest {
+                remote: remote.to_string(),
+                mountpoint: mountpoint.to_string_lossy().to_string(),
+                read_only,
+                options: vec![],
+            }))
+            .await;
+
+        match resp {
+            Ok(r) if r.get_ref().success => {
+                println!(
+                    "Mounted via daemon: {} → {}",
+                    remote,
+                    mountpoint.display()
+                );
+                return Ok(());
+            }
+            Ok(r) => {
+                eprintln!(
+                    "Daemon mount failed: {}, falling back to direct mount",
+                    r.into_inner().error
+                );
+            }
+            Err(e) => {
+                eprintln!("Daemon unavailable: {e}, falling back to direct mount");
+            }
+        }
+    }
+
+    // Fallback: direct FUSE mount
+    let (endpoint, bucket, prefix) = tcfs_storage::parse_remote_spec(remote)?;
 
     // Credentials
     let access_key = std::env::var("AWS_ACCESS_KEY_ID")

@@ -15,6 +15,6 @@ pub mod stub;
 #[cfg(feature = "fuse")]
 pub use driver::{mount, MountConfig};
 
-pub use cache::DiskCache;
+pub use cache::{CacheStats, DiskCache};
 pub use negative_cache::NegativeCache;
 pub use stub::{is_stub_path, real_to_stub_name, stub_to_real_name, IndexEntry, StubMeta};

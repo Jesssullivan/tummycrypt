@@ -109,6 +109,8 @@ mod inner {
         /// Build the index path for a virtual FS path.
         ///
         /// `/src/main.rs.tc` → `{prefix}/index/src/main.rs`
+        ///
+        /// Handles empty prefix correctly: `""` prefix + `/file.txt.tc` → `index/file.txt`
         fn index_key_for(&self, vpath: &str) -> Option<String> {
             // Strip leading slash
             let rel = vpath.trim_start_matches('/');
@@ -120,22 +122,52 @@ mod inner {
                 .strip_suffix(".tc")
                 .or_else(|| rel.strip_suffix(".tcf"))
                 .unwrap_or(rel);
-            Some(format!(
-                "{}/index/{}",
-                self.prefix.trim_end_matches('/'),
-                real
-            ))
+            let prefix = self.prefix.trim_end_matches('/');
+            if prefix.is_empty() {
+                Some(format!("index/{}", real))
+            } else {
+                Some(format!("{}/index/{}", prefix, real))
+            }
         }
 
         /// The index prefix for directory listing: `{prefix}/index/{rel_dir}/`
+        ///
+        /// Handles empty prefix correctly: `""` prefix + `/` → `index/`
         fn index_prefix_for_dir(&self, vdir: &str) -> String {
             let rel = vdir.trim_start_matches('/').trim_end_matches('/');
             let prefix = self.prefix.trim_end_matches('/');
-            if rel.is_empty() {
-                format!("{}/index/", prefix)
-            } else {
-                format!("{}/index/{}/", prefix, rel)
+            match (prefix.is_empty(), rel.is_empty()) {
+                (true, true) => "index/".to_string(),
+                (true, false) => format!("index/{}/", rel),
+                (false, true) => format!("{}/index/", prefix),
+                (false, false) => format!("{}/index/{}/", prefix, rel),
             }
+        }
+
+        /// Discover prefixes that have index entries (bucket root scan).
+        ///
+        /// Returns a list of prefix strings (e.g. `["data", "backup"]`) that
+        /// contain `index/` subdirectories. Used as a fallback when readdir("/")`
+        /// returns empty with an empty configured prefix.
+        async fn discover_prefixes(&self) -> Vec<String> {
+            let entries = match self.op.list("/").await {
+                Ok(e) => e,
+                Err(_) => match self.op.list("").await {
+                    Ok(e) => e,
+                    Err(_) => return vec![],
+                },
+            };
+            entries
+                .into_iter()
+                .filter_map(|e| {
+                    let p = e.path().trim_end_matches('/').to_string();
+                    if !p.is_empty() && !p.contains('/') {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         }
 
         /// Fetch and parse an IndexEntry for a virtual path.
@@ -401,6 +433,25 @@ mod inner {
                 next_offset += 1;
             }
 
+            // Fallback: if root dir is empty and prefix is empty, discover prefixes
+            if path_str == "/" && self.prefix.is_empty() && entries.len() <= 2 {
+                let prefixes = self.discover_prefixes().await;
+                for pfx in prefixes {
+                    let probe = format!("{}/index/", pfx);
+                    if let Ok(idx_entries) = self.op.list(&probe).await {
+                        if !idx_entries.is_empty() && !seen_dirs.contains(&pfx) {
+                            seen_dirs.insert(pfx.clone());
+                            entries.push(Ok(DirectoryEntry {
+                                kind: FileType::Directory,
+                                name: pfx.into(),
+                                offset: next_offset,
+                            }));
+                            next_offset += 1;
+                        }
+                    }
+                }
+            }
+
             Ok(ReplyDirectory {
                 entries: stream::iter(entries),
             })
@@ -486,6 +537,28 @@ mod inner {
                     }));
                 }
                 next_offset += 1;
+            }
+
+            // Fallback: if root dir is empty and prefix is empty, discover prefixes
+            if path_str == "/" && self.prefix.is_empty() && entries.len() <= 2 {
+                let prefixes = self.discover_prefixes().await;
+                for pfx in prefixes {
+                    let probe = format!("{}/index/", pfx);
+                    if let Ok(idx_entries) = self.op.list(&probe).await {
+                        if !idx_entries.is_empty() && !seen_dirs.contains(&pfx) {
+                            seen_dirs.insert(pfx.clone());
+                            entries.push(Ok(DirectoryEntryPlus {
+                                kind: FileType::Directory,
+                                name: pfx.into(),
+                                offset: next_offset,
+                                attr: self.dir_attr(),
+                                entry_ttl: ATTR_TTL,
+                                attr_ttl: ATTR_TTL,
+                            }));
+                            next_offset += 1;
+                        }
+                    }
+                }
             }
 
             Ok(ReplyDirectoryPlus {
@@ -636,6 +709,94 @@ mod inner {
             .await?;
 
         handle.await
+    }
+
+    // ── Unit tests ───────────────────────────────────────────────────────────
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Helper to create a TcfsFs with a given prefix (no real operator needed for key tests)
+        fn make_fs(prefix: &str) -> TcfsFs {
+            // Build a minimal in-memory operator for testing
+            let op = Operator::new(opendal::services::Memory::default())
+                .unwrap()
+                .finish();
+            TcfsFs::new(
+                op,
+                prefix.to_string(),
+                std::path::PathBuf::from("/tmp/tcfs-test-cache"),
+                64 * 1024 * 1024,
+                Duration::from_secs(30),
+            )
+        }
+
+        #[test]
+        fn test_index_prefix_empty_prefix_root() {
+            let fs = make_fs("");
+            assert_eq!(fs.index_prefix_for_dir("/"), "index/");
+        }
+
+        #[test]
+        fn test_index_prefix_empty_prefix_subdir() {
+            let fs = make_fs("");
+            assert_eq!(fs.index_prefix_for_dir("/src"), "index/src/");
+        }
+
+        #[test]
+        fn test_index_prefix_with_prefix_root() {
+            let fs = make_fs("data");
+            assert_eq!(fs.index_prefix_for_dir("/"), "data/index/");
+        }
+
+        #[test]
+        fn test_index_prefix_with_prefix_subdir() {
+            let fs = make_fs("data");
+            assert_eq!(fs.index_prefix_for_dir("/src"), "data/index/src/");
+        }
+
+        #[test]
+        fn test_index_key_empty_prefix() {
+            let fs = make_fs("");
+            assert_eq!(
+                fs.index_key_for("/file.txt.tc"),
+                Some("index/file.txt".to_string())
+            );
+        }
+
+        #[test]
+        fn test_index_key_with_prefix() {
+            let fs = make_fs("data");
+            assert_eq!(
+                fs.index_key_for("/file.txt.tc"),
+                Some("data/index/file.txt".to_string())
+            );
+        }
+
+        #[test]
+        fn test_index_key_strips_tc_suffix() {
+            let fs = make_fs("data");
+            assert_eq!(
+                fs.index_key_for("/src/main.rs.tc"),
+                Some("data/index/src/main.rs".to_string())
+            );
+        }
+
+        #[test]
+        fn test_index_key_strips_tcf_suffix() {
+            let fs = make_fs("data");
+            assert_eq!(
+                fs.index_key_for("/doc.pdf.tcf"),
+                Some("data/index/doc.pdf".to_string())
+            );
+        }
+
+        #[test]
+        fn test_index_key_root_returns_none() {
+            let fs = make_fs("data");
+            assert_eq!(fs.index_key_for("/"), None);
+        }
     }
 }
 
