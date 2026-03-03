@@ -222,7 +222,6 @@ impl TcfsDaemon for TcfsDaemonImpl {
         request: tonic::Request<UnmountRequest>,
     ) -> Result<tonic::Response<UnmountResponse>, tonic::Status> {
         let req = request.into_inner();
-
         if req.mountpoint.is_empty() {
             return Ok(tonic::Response::new(UnmountResponse {
                 success: false,
@@ -436,7 +435,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 &local_path,
                 &prefix,
                 None,
-                &device_id,
+                &self.device_id,
                 Some(&mut cache),
                 None,
             )

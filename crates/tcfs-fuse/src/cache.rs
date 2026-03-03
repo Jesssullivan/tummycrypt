@@ -105,6 +105,60 @@ impl DiskCache {
     }
 }
 
+/// Statistics about the disk cache
+#[derive(Debug)]
+pub struct CacheStats {
+    /// Total bytes used by cached entries
+    pub total_bytes: u64,
+    /// Maximum allowed cache size in bytes
+    pub max_bytes: u64,
+    /// Number of cached file entries
+    pub entry_count: usize,
+    /// Number of shard directories
+    pub shard_count: usize,
+}
+
+impl DiskCache {
+    /// Compute cache usage statistics by walking the two-level shard dirs.
+    pub async fn stats(&self) -> Result<CacheStats> {
+        let mut total: u64 = 0;
+        let mut count: usize = 0;
+        let mut shards: usize = 0;
+
+        if !self.dir.exists() {
+            return Ok(CacheStats {
+                total_bytes: 0,
+                max_bytes: self.max_bytes,
+                entry_count: 0,
+                shard_count: 0,
+            });
+        }
+
+        let mut top = fs::read_dir(&self.dir).await?;
+        while let Some(shard) = top.next_entry().await? {
+            if !shard.file_type().await?.is_dir() {
+                continue;
+            }
+            shards += 1;
+            let mut inner = fs::read_dir(shard.path()).await?;
+            while let Some(entry) = inner.next_entry().await? {
+                let meta = entry.metadata().await?;
+                if meta.is_file() && !entry.file_name().to_string_lossy().ends_with(".tmp") {
+                    total += meta.len();
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(CacheStats {
+            total_bytes: total,
+            max_bytes: self.max_bytes,
+            entry_count: count,
+            shard_count: shards,
+        })
+    }
+}
+
 /// Derive a safe filesystem key from a manifest path by hashing it.
 /// Use the manifest hash directly when available; this is for fallback.
 pub fn cache_key_for_path(manifest_path: &str) -> String {
@@ -145,5 +199,49 @@ mod tests {
             "abc123def"
         );
         assert_eq!(cache_key_for_path("abc"), "abc");
+    }
+
+    #[tokio::test]
+    async fn test_stats_empty_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 100 * 1024 * 1024);
+        let stats = cache.stats().await.unwrap();
+        assert_eq!(stats.entry_count, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.shard_count, 0);
+        assert_eq!(stats.max_bytes, 100 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_stats_after_put() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 100 * 1024 * 1024);
+
+        cache.put("abc123", b"hello world").await.unwrap();
+        cache.put("def456", b"foo bar baz").await.unwrap();
+        cache.put("ghi789", b"test").await.unwrap();
+
+        let stats = cache.stats().await.unwrap();
+        assert_eq!(stats.entry_count, 3);
+        assert_eq!(stats.total_bytes, 11 + 11 + 4);
+        assert!(stats.shard_count > 0);
+    }
+
+    #[tokio::test]
+    async fn test_stats_excludes_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 100 * 1024 * 1024);
+
+        cache.put("abc123", b"hello world").await.unwrap();
+
+        // Manually create a .tmp file in the same shard
+        let shard_dir = dir.path().join("ab");
+        tokio::fs::write(shard_dir.join("stale.tmp"), b"garbage")
+            .await
+            .unwrap();
+
+        let stats = cache.stats().await.unwrap();
+        assert_eq!(stats.entry_count, 1);
+        assert_eq!(stats.total_bytes, 11);
     }
 }
