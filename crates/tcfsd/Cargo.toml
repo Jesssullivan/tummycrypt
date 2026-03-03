@@ -39,7 +39,9 @@ tempfile = { workspace = true }
 blake3 = { workspace = true }
 
 [features]
-default = []
+default = ["fuse"]
+# Enable FUSE mount support (requires fuse3 system library)
+fuse = ["tcfs-fuse/fuse"]
 # Enables NATS consumer worker mode (for K8s pods)
 k8s-worker = []
 
