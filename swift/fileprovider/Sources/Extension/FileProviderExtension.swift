@@ -161,17 +161,22 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
     }
 
-    /// Load TCFS config from App Group shared container.
+    /// Load TCFS config from App Group shared container, falling back to XDG config.
     private static func loadConfig() -> String? {
+        // Try App Group container first (sandboxed .appex)
         let groupId = "group.io.tinyland.tcfs"
-
-        guard let containerURL = FileManager.default.containerURL(
+        if let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: groupId
-        ) else {
-            return nil
+        ) {
+            let configPath = containerURL.appendingPathComponent("config.json")
+            if let config = try? String(contentsOf: configPath, encoding: .utf8) {
+                return config
+            }
         }
 
-        let configPath = containerURL.appendingPathComponent("config.json")
-        return try? String(contentsOf: configPath, encoding: .utf8)
+        // Fall back to XDG config path (development / non-sandboxed)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let xdgPath = home.appendingPathComponent(".config/tcfs/fileprovider/config.json")
+        return try? String(contentsOf: xdgPath, encoding: .utf8)
     }
 }
