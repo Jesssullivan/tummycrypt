@@ -83,7 +83,8 @@ cat > "$CONFIG_JSON" <<CONFIGEOF
   "s3_bucket": "$S3_BUCKET",
   "s3_access": "$S3_ACCESS",
   "s3_secret": "$S3_SECRET",
-  "remote_prefix": "devices/$DEVICE_ID"
+  "remote_prefix": "devices/$DEVICE_ID",
+  "device_id": "$DEVICE_ID"
 }
 CONFIGEOF
 

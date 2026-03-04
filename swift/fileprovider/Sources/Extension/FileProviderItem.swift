@@ -32,6 +32,13 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         )
     }
 
+    var capabilities: NSFileProviderItemCapabilities {
+        if contentType == .folder {
+            return [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems, .allowsDeleting, .allowsRenaming]
+        }
+        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting]
+    }
+
     static func rootItem() -> TCFSFileProviderItem {
         return TCFSFileProviderItem(
             identifier: .rootContainer,
