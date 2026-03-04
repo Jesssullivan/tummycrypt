@@ -27,6 +27,8 @@
         <string>com.apple.fileprovider-nonui</string>
         <key>NSExtensionPrincipalClass</key>
         <string>TCFSFileProviderExtension</string>
+        <key>NSExtensionFileProviderSupportsEnumeration</key>
+        <true/>
     </dict>
 </dict>
 </plist>
