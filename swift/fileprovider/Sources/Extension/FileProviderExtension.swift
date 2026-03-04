@@ -8,12 +8,14 @@ import Foundation
 class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     let domain: NSFileProviderDomain
-    private var provider: OpaquePointer?
+    /// Provider is created lazily on first use to avoid blocking the XPC bringup.
+    /// `tcfs_provider_new()` creates a tokio runtime and S3 operator, which can
+    /// take seconds — long enough to exceed fileproviderd's initial handshake timeout.
+    private lazy var provider: OpaquePointer? = Self.createProvider()
 
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
         super.init()
-        self.provider = Self.createProvider()
     }
 
     func invalidate() {

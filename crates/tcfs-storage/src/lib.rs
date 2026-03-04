@@ -15,9 +15,9 @@ pub use operator::{build_operator, StorageConfig};
 /// - bucket: first path component
 /// - prefix: remaining path (may be empty)
 pub fn parse_remote_spec(spec: &str) -> anyhow::Result<(String, String, String)> {
-    let rest = spec
-        .strip_prefix("seaweedfs://")
-        .ok_or_else(|| anyhow::anyhow!("remote spec must start with seaweedfs:// — got: {}", spec))?;
+    let rest = spec.strip_prefix("seaweedfs://").ok_or_else(|| {
+        anyhow::anyhow!("remote spec must start with seaweedfs:// — got: {}", spec)
+    })?;
 
     // Split host:port from /bucket[/prefix]
     let slash = rest
@@ -60,15 +60,13 @@ mod tests {
 
     #[test]
     fn test_parse_remote_spec_nested_prefix() {
-        let (_, _, prefix) =
-            parse_remote_spec("seaweedfs://host:8333/bucket/a/b/c").unwrap();
+        let (_, _, prefix) = parse_remote_spec("seaweedfs://host:8333/bucket/a/b/c").unwrap();
         assert_eq!(prefix, "a/b/c");
     }
 
     #[test]
     fn test_parse_remote_spec_trailing_slash() {
-        let (_, _, prefix) =
-            parse_remote_spec("seaweedfs://host:8333/bucket/data/").unwrap();
+        let (_, _, prefix) = parse_remote_spec("seaweedfs://host:8333/bucket/data/").unwrap();
         assert_eq!(prefix, "data");
     }
 

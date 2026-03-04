@@ -1116,11 +1116,7 @@ async fn cmd_mount(
 
         match resp {
             Ok(r) if r.get_ref().success => {
-                println!(
-                    "Mounted via daemon: {} → {}",
-                    remote,
-                    mountpoint.display()
-                );
+                println!("Mounted via daemon: {} → {}", remote, mountpoint.display());
                 return Ok(());
             }
             Ok(r) => {
