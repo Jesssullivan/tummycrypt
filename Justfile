@@ -140,8 +140,12 @@ fileprovider-build:
     bash swift/fileprovider/build.sh "target/release" "$HEADER" "build/fileprovider"
     echo "==> Output: build/fileprovider/TCFSProvider.app"
 
+# Provision FileProvider config (writes S3 creds to App Group container)
+fileprovider-provision:
+    bash swift/fileprovider/provision-config.sh
+
 # Install FileProvider .appex to ~/Applications (macOS only)
-fileprovider-install: fileprovider-build
+fileprovider-install: fileprovider-build fileprovider-provision
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p ~/Applications
