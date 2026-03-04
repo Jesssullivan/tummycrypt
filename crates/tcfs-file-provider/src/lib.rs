@@ -44,6 +44,10 @@ pub enum TcfsError {
     TcfsErrorNotFound = 3,
     /// Internal error (panic caught, unexpected state).
     TcfsErrorInternal = 4,
+    /// Concurrent vclock modification detected.
+    TcfsErrorConflict = 5,
+    /// Item already exists at the target path.
+    TcfsErrorAlreadyExists = 6,
 }
 
 /// A file item returned by directory enumeration.
@@ -73,6 +77,7 @@ pub struct TcfsProvider {
     runtime: tokio::runtime::Runtime,
     operator: opendal::Operator,
     remote_prefix: String,
+    device_id: String,
 }
 
 /// Create a new provider from a JSON configuration string.
@@ -120,6 +125,10 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             .as_str()
             .unwrap_or("default")
             .to_string();
+        let device_id = config["device_id"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
 
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -144,6 +153,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             runtime,
             operator,
             remote_prefix: prefix,
+            device_id,
         }))
     }));
 
@@ -377,14 +387,49 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                 chunk_hashes.push(hash);
             }
 
+            // Build vclock: read existing manifest if present and merge
+            let mut vclock = tcfs_sync::conflict::VectorClock::new();
+            let existing_index_key = format!(
+                "{}/index/{}",
+                prov.remote_prefix.trim_end_matches('/'),
+                remote_str.trim_start_matches('/')
+            );
+            if let Ok(existing_data) = prov.operator.read(&existing_index_key).await {
+                let existing_bytes = existing_data.to_bytes();
+                let existing_text = String::from_utf8_lossy(&existing_bytes);
+                for line in existing_text.lines() {
+                    if let Some(hash) = line.strip_prefix("manifest_hash=") {
+                        let manifest_path = format!(
+                            "{}/manifests/{}",
+                            prov.remote_prefix.trim_end_matches('/'),
+                            hash
+                        );
+                        if let Ok(mb) = prov.operator.read(&manifest_path).await {
+                            if let Ok(existing_manifest) =
+                                tcfs_sync::manifest::SyncManifest::from_bytes(&mb.to_bytes())
+                            {
+                                vclock.merge(&existing_manifest.vclock);
+                            }
+                        }
+                    }
+                }
+            }
+            // Tick our device_id in the vclock
+            vclock.tick(&prov.device_id);
+
+            let written_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
             let manifest = tcfs_sync::manifest::SyncManifest {
                 version: 2,
                 file_hash: file_hash.clone(),
                 file_size: data.len() as u64,
                 chunks: chunk_hashes,
-                vclock: Default::default(),
-                written_by: String::new(),
-                written_at: 0,
+                vclock,
+                written_by: prov.device_id.clone(),
+                written_at,
                 rel_path: Some(remote_str.to_string()),
                 encrypted_file_key: None,
             };
@@ -416,6 +461,122 @@ pub unsafe extern "C" fn tcfs_provider_upload(
 
         match upload_result {
             Ok(()) => TcfsError::TcfsErrorNone,
+            Err(_) => TcfsError::TcfsErrorStorage,
+        }
+    }));
+
+    result.unwrap_or(TcfsError::TcfsErrorInternal)
+}
+
+/// Delete a file or directory by its item ID (index path).
+///
+/// Performs a soft delete: removes the index entry and its manifest.
+/// Content-addressed chunks are left for GC (they may be shared).
+///
+/// # Safety
+///
+/// - `provider` must be a valid pointer from `tcfs_provider_new`.
+/// - `item_id` must be a valid null-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_delete(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+) -> TcfsError {
+    if provider.is_null() || item_id.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let prov = unsafe { &*provider };
+        let c_item = unsafe { CStr::from_ptr(item_id) };
+        let item_str = match c_item.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+
+        let delete_result = prov.runtime.block_on(async {
+            // Read the index entry to get the manifest hash (for optional manifest cleanup)
+            let index_data = prov.operator.read(item_str).await;
+            if let Ok(data) = index_data {
+                let bytes = data.to_bytes();
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    if let Some(hash) = line.strip_prefix("manifest_hash=") {
+                        let manifest_path = format!(
+                            "{}/manifests/{}",
+                            prov.remote_prefix.trim_end_matches('/'),
+                            hash
+                        );
+                        // Best-effort manifest cleanup (content-addressed, may be shared)
+                        let _ = prov.operator.delete(&manifest_path).await;
+                    }
+                }
+            }
+
+            // Delete the index entry itself
+            prov.operator.delete(item_str).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        match delete_result {
+            Ok(()) => TcfsError::TcfsErrorNone,
+            Err(_) => TcfsError::TcfsErrorStorage,
+        }
+    }));
+
+    result.unwrap_or(TcfsError::TcfsErrorInternal)
+}
+
+/// Create a directory under the given parent path.
+///
+/// Writes a zero-byte marker at `{prefix}/index/{parent}/{dir_name}/`
+/// following the S3 directory convention.
+///
+/// # Safety
+///
+/// - `provider` must be a valid pointer from `tcfs_provider_new`.
+/// - `parent_path` and `dir_name` must be valid null-terminated UTF-8 C strings.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_create_dir(
+    provider: *mut TcfsProvider,
+    parent_path: *const c_char,
+    dir_name: *const c_char,
+) -> TcfsError {
+    if provider.is_null() || parent_path.is_null() || dir_name.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let prov = unsafe { &*provider };
+        let c_parent = unsafe { CStr::from_ptr(parent_path) };
+        let c_name = unsafe { CStr::from_ptr(dir_name) };
+
+        let parent_str = match c_parent.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+        let name_str = match c_name.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+
+        let dir_path = format!(
+            "{}/index/{}{}/",
+            prov.remote_prefix.trim_end_matches('/'),
+            if parent_str.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", parent_str.trim_matches('/'))
+            },
+            name_str.trim_matches('/')
+        );
+
+        let create_result = prov
+            .runtime
+            .block_on(prov.operator.write(&dir_path, Vec::<u8>::new()));
+
+        match create_result {
+            Ok(_) => TcfsError::TcfsErrorNone,
             Err(_) => TcfsError::TcfsErrorStorage,
         }
     }));

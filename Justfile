@@ -118,3 +118,39 @@ lint:
 # cargo-deny license and advisory check
 deny:
     ~/.cargo/bin/cargo deny check
+
+# ── FileProvider (Darwin) ──────────────────────────────────────────────────
+
+# Build FileProvider .appex bundle (macOS only, requires Xcode CLT)
+fileprovider-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "$(uname)" != "Darwin" ]; then
+        echo "FileProvider extension only builds on macOS" >&2
+        exit 1
+    fi
+    echo "==> Building Rust staticlib..."
+    ~/.cargo/bin/cargo build -p tcfs-file-provider --release -j 4
+    HEADER=$(find target/release/build -name "tcfs_file_provider.h" | head -1)
+    if [ -z "$HEADER" ]; then
+        echo "ERROR: cbindgen header not found" >&2
+        exit 1
+    fi
+    echo "==> Building Swift .appex bundle..."
+    bash swift/fileprovider/build.sh "target/release" "$HEADER" "build/fileprovider"
+    echo "==> Output: build/fileprovider/TCFSProvider.app"
+
+# Provision FileProvider config (writes S3 creds to App Group container)
+fileprovider-provision:
+    bash swift/fileprovider/provision-config.sh
+
+# Install FileProvider .appex to ~/Applications (macOS only)
+fileprovider-install: fileprovider-build fileprovider-provision
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p ~/Applications
+    rm -rf ~/Applications/TCFSProvider.app
+    cp -R build/fileprovider/TCFSProvider.app ~/Applications/
+    echo "==> Installed to ~/Applications/TCFSProvider.app"
+    echo "==> Launching to register FileProvider domain..."
+    open ~/Applications/TCFSProvider.app
