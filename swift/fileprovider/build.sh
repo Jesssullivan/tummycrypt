@@ -3,16 +3,35 @@
 # Compiles Swift sources, links Rust staticlib, assembles .appex bundle.
 #
 # Usage:
-#   ./build.sh <rust_lib_dir> <rust_header_path> <output_dir>
+#   ./build.sh <rust_lib_dir> <rust_header_path> <output_dir> [signing_identity]
 #
-# Example:
+# Examples:
 #   ./build.sh target/release include/tcfs_file_provider.h build/
+#   ./build.sh target/release include/tcfs_file_provider.h build/ "Developer ID Application: ..."
+#   ./build.sh target/release include/tcfs_file_provider.h build/ auto
+#
+# Signing identity:
+#   - omitted or "-":   ad-hoc signing (development)
+#   - "auto":           auto-detect Developer ID Application from Keychain
+#   - other string:     use as explicit codesign identity
 
 set -euo pipefail
 
-RUST_LIB_DIR="${1:?Usage: build.sh <rust_lib_dir> <rust_header_path> <output_dir>}"
-RUST_HEADER="${2:?Usage: build.sh <rust_lib_dir> <rust_header_path> <output_dir>}"
-OUTPUT_DIR="${3:?Usage: build.sh <rust_lib_dir> <rust_header_path> <output_dir>}"
+RUST_LIB_DIR="${1:?Usage: build.sh <rust_lib_dir> <rust_header_path> <output_dir> [signing_identity]}"
+RUST_HEADER="${2:?Usage: build.sh <rust_lib_dir> <rust_header_path> <output_dir> [signing_identity]}"
+OUTPUT_DIR="${3:?Usage: build.sh <rust_lib_dir> <rust_header_path> <output_dir> [signing_identity]}"
+SIGNING_IDENTITY="${4:--}"
+
+# Auto-detect Developer ID from Keychain
+if [ "$SIGNING_IDENTITY" = "auto" ]; then
+  SIGNING_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
+  if [ -z "$SIGNING_IDENTITY" ]; then
+    echo "WARNING: No Developer ID Application found in Keychain, falling back to ad-hoc" >&2
+    SIGNING_IDENTITY="-"
+  else
+    echo "==> Auto-detected signing identity: $SIGNING_IDENTITY"
+  fi
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SDKPATH="$(xcrun --sdk macosx --show-sdk-path)"
@@ -66,15 +85,29 @@ cp "$SCRIPT_DIR/resources/HostApp-Info.plist" "$APP/Info.plist"
 cp TCFSFileProvider "$EXT/MacOS/"
 cp "$SCRIPT_DIR/resources/Extension-Info.plist" "$EXT/Info.plist"
 
-# --- Code sign (inside-out) ---
+# --- Code sign (inside-out: extension first, then host app) ---
 echo "==> Signing..."
-/usr/bin/codesign -f -s - \
-    --entitlements "$SCRIPT_DIR/resources/Extension.entitlements" \
-    "$APP/Extensions/TCFSFileProvider.appex"
+if [ "$SIGNING_IDENTITY" != "-" ]; then
+    echo "    Identity: $SIGNING_IDENTITY (Developer ID)"
+    /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
+        --options runtime --timestamp \
+        --entitlements "$SCRIPT_DIR/resources/Extension.entitlements" \
+        "$APP/Extensions/TCFSFileProvider.appex"
 
-/usr/bin/codesign -f -s - \
-    --entitlements "$SCRIPT_DIR/resources/HostApp.entitlements" \
-    "$OUTPUT_DIR/TCFSProvider.app"
+    /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
+        --options runtime --timestamp \
+        --entitlements "$SCRIPT_DIR/resources/HostApp.entitlements" \
+        "$OUTPUT_DIR/TCFSProvider.app"
+else
+    echo "    Identity: ad-hoc (development)"
+    /usr/bin/codesign -f -s - \
+        --entitlements "$SCRIPT_DIR/resources/Extension.entitlements" \
+        "$APP/Extensions/TCFSFileProvider.appex"
+
+    /usr/bin/codesign -f -s - \
+        --entitlements "$SCRIPT_DIR/resources/HostApp.entitlements" \
+        "$OUTPUT_DIR/TCFSProvider.app"
+fi
 
 # --- Cleanup temp binaries ---
 rm -f TCFSFileProvider TCFSProvider

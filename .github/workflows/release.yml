@@ -506,12 +506,120 @@ jobs:
             install.ps1
           retention-days: 7
 
+  # ── Build FileProvider extension (macOS) ──────────────────────────────────
+
+  build-fileprovider:
+    name: Build FileProvider (macOS)
+    runs-on: macos-14
+    needs: plan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build staticlib
+        run: cargo build -p tcfs-file-provider --release
+
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_BASE64" ]; then
+            echo "::warning::APPLE_CERTIFICATE_BASE64 not set, using ad-hoc signing"
+            echo "SIGNING_IDENTITY=-" >> $GITHUB_ENV
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          # Create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          rm "$RUNNER_TEMP/cert.p12"
+
+          # Import Apple Developer ID CA G2 (intermediate cert)
+          if [ -n "${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}" ]; then
+            echo "${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}" | base64 -d > "$RUNNER_TEMP/ca.cer"
+            security import "$RUNNER_TEMP/ca.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+            rm "$RUNNER_TEMP/ca.cer"
+          fi
+
+          # Set partition list for codesign access
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add to search path
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          # Detect signing identity
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -1 \
+            | sed 's/.*"\(.*\)".*/\1/' || true)
+          if [ -n "$IDENTITY" ]; then
+            echo "SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          else
+            echo "::warning::No Developer ID found in keychain, using ad-hoc"
+            echo "SIGNING_IDENTITY=-" >> $GITHUB_ENV
+          fi
+
+      - name: Build FileProvider extension
+        run: |
+          HEADER=$(find target -name tcfs_file_provider.h | head -1)
+          swift/fileprovider/build.sh \
+            target/release \
+            "$HEADER" \
+            build/ \
+            "$SIGNING_IDENTITY"
+
+      - name: Notarize (if Developer ID signed)
+        if: env.SIGNING_IDENTITY != '-'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+        run: |
+          swift/fileprovider/notarize.sh build/TCFSProvider.app
+
+      - name: Create artifact archive
+        run: |
+          VERSION="${{ needs.plan.outputs.version }}"
+          cd build
+          /usr/bin/ditto -c -k --keepParent TCFSProvider.app \
+            "TCFSProvider-${VERSION}-macos-aarch64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-fileprovider
+          path: build/TCFSProvider-*.zip
+          retention-days: 7
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          fi
+
   # ── Create GitHub Release ─────────────────────────────────────────────────
 
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [plan, build-binaries, build-image, generate-installers]
+    needs: [plan, build-binaries, build-image, generate-installers, build-fileprovider]
     if: startsWith(github.ref, 'refs/tags/v') && !cancelled()
 
     steps:
