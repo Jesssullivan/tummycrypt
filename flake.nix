@@ -103,10 +103,25 @@
           meta.mainProgram = "tcfs-mcp";
         });
 
+        # FileProvider FFI static library (pure Rust build).
+        # Header: $out/include/tcfs_file_provider.h
+        # Library: $out/lib/libtcfs_file_provider.a
+        # Used by: swift/fileprovider/build.sh (impure, needs system swiftc)
+        tcfs-file-provider-staticlib = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "tcfs-file-provider-staticlib";
+          cargoExtraArgs = "-p tcfs-file-provider";
+          postInstall = ''
+            mkdir -p $out/lib $out/include
+            find target -name "libtcfs_file_provider.a" -exec cp {} $out/lib/ \;
+            find target -name "tcfs_file_provider.h" -exec cp {} $out/include/ \;
+          '';
+        });
+
       in {
         packages = {
           default = tcfsd;
-          inherit tcfsd tcfs-cli tcfs-tui tcfs-mcp;
+          inherit tcfsd tcfs-cli tcfs-tui tcfs-mcp tcfs-file-provider-staticlib;
         };
 
         devShells.default = pkgs.mkShell {

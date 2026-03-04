@@ -70,6 +70,34 @@ jobs:
       - name: Build all packages
         run: nix build .#tcfsd .#tcfs-cli .#tcfs-tui .#tcfs-mcp
 
+  fileprovider-staticlib:
+    name: FileProvider staticlib (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build staticlib
+        run: cargo build -p tcfs-file-provider --release
+
+      - name: Verify staticlib exists
+        run: |
+          test -f target/release/libtcfs_file_provider.a
+          echo "staticlib size: $(du -h target/release/libtcfs_file_provider.a | cut -f1)"
+
+      - name: Verify cbindgen header
+        run: |
+          HEADER=$(find target -name tcfs_file_provider.h | head -1)
+          test -n "$HEADER"
+          grep -q "tcfs_provider_new" "$HEADER"
+          grep -q "tcfs_provider_upload" "$HEADER"
+          grep -q "tcfs_provider_delete" "$HEADER"
+          echo "header: $HEADER"
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
