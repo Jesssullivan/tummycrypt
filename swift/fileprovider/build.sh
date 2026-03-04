@@ -46,6 +46,8 @@ echo "==> Compiling host app..."
 /usr/bin/swiftc \
     -sdk "$SDKPATH" \
     -parse-as-library \
+    -framework FileProvider \
+    -framework Foundation \
     -target arm64-apple-macos${MIN_MACOS} \
     -O \
     -o TCFSProvider \
