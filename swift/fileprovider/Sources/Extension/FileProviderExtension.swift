@@ -43,6 +43,14 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return progress
         }
 
+        // Trash container not supported — tell fileproviderd so it doesn't
+        // create reconciliation entries that never resolve.
+        if identifier == .trashContainer {
+            completionHandler(nil, NSFileProviderError(.noSuchItem))
+            progress.completedUnitCount = 1
+            return progress
+        }
+
         // For non-root items, return the item from its identifier path
         completionHandler(
             TCFSFileProviderItem(
