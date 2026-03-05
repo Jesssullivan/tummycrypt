@@ -45,10 +45,25 @@ echo "    SDK:        $SDKPATH"
 echo "    Output:     $OUTPUT_DIR"
 
 # --- Compile extension binary ---
-# NOTE: no -parse-as-library — main.swift provides the entry point
+# The ObjC entry point (extension_main.m) calls NSExtensionMain() which
+# handles XPC listener setup, principal class discovery, and main loop.
+# Swift sources are compiled with -parse-as-library since the C entry
+# point provides main().
 echo "==> Compiling FileProvider extension..."
+
+# Compile ObjC entry point
+/usr/bin/clang -c \
+    -isysroot "$SDKPATH" \
+    -target arm64-apple-macos${MIN_MACOS} \
+    -fobjc-arc \
+    -O2 \
+    -o extension_main.o \
+    "$SCRIPT_DIR/Sources/Extension/extension_main.m"
+
+# Compile Swift sources + link everything
 /usr/bin/swiftc \
     -sdk "$SDKPATH" \
+    -parse-as-library \
     -framework FileProvider \
     -framework Foundation \
     -target arm64-apple-macos${MIN_MACOS} \
@@ -58,7 +73,8 @@ echo "==> Compiling FileProvider extension..."
     -lc++ \
     -O \
     -o TCFSFileProvider \
-    "$SCRIPT_DIR/Sources/Extension/"*.swift
+    "$SCRIPT_DIR/Sources/Extension/"*.swift \
+    extension_main.o
 
 # --- Compile host app binary ---
 echo "==> Compiling host app..."
@@ -110,6 +126,6 @@ else
 fi
 
 # --- Cleanup temp binaries ---
-rm -f TCFSFileProvider TCFSProvider
+rm -f TCFSFileProvider TCFSProvider extension_main.o
 
 echo "==> Done: $OUTPUT_DIR/TCFSProvider.app"
