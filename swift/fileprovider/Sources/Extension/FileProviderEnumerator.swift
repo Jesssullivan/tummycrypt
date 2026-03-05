@@ -4,14 +4,14 @@ import Foundation
 /// Enumerates TCFS directory contents by calling into the Rust FFI layer.
 class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
-    private let provider: OpaquePointer?
+    private let providerAccessor: () -> OpaquePointer?
     private let containerIdentifier: NSFileProviderItemIdentifier
 
     init(
-        provider: OpaquePointer?,
+        providerAccessor: @escaping () -> OpaquePointer?,
         containerIdentifier: NSFileProviderItemIdentifier
     ) {
-        self.provider = provider
+        self.providerAccessor = providerAccessor
         self.containerIdentifier = containerIdentifier
         super.init()
     }
@@ -24,55 +24,62 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderEnumerationObserver,
         startingAt page: NSFileProviderPage
     ) {
-        guard let prov = provider else {
-            observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
-            return
-        }
+        let containerId = containerIdentifier
+        let accessor = providerAccessor
 
-        let path: String
-        if containerIdentifier == .rootContainer {
-            path = ""
-        } else {
-            path = containerIdentifier.rawValue
-        }
+        // Dispatch off the file-coordination thread to avoid EDEADLK when the
+        // lazy provider init (tokio runtime + S3 operator) blocks.
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let prov = accessor() else {
+                observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
+                return
+            }
 
-        var outItems: UnsafeMutablePointer<TcfsFileItem>?
-        var outCount: UInt = 0
+            let path: String
+            if containerId == .rootContainer {
+                path = ""
+            } else {
+                path = containerId.rawValue
+            }
 
-        let result = path.withCString { pathPtr in
-            tcfs_provider_enumerate(prov, pathPtr, &outItems, &outCount)
-        }
+            var outItems: UnsafeMutablePointer<TcfsFileItem>?
+            var outCount: UInt = 0
 
-        guard result == TCFS_ERROR_TCFS_ERROR_NONE, let items = outItems, outCount > 0 else {
-            observer.finishEnumerating(upTo: nil)
-            return
-        }
+            let result = path.withCString { pathPtr in
+                tcfs_provider_enumerate(prov, pathPtr, &outItems, &outCount)
+            }
 
-        var providerItems: [NSFileProviderItem] = []
-        let count = Int(outCount)
+            guard result == TCFS_ERROR_TCFS_ERROR_NONE, let items = outItems, outCount > 0 else {
+                observer.finishEnumerating(upTo: nil)
+                return
+            }
 
-        for i in 0..<count {
-            let item = items[i]
+            var providerItems: [NSFileProviderItem] = []
+            let count = Int(outCount)
 
-            let itemId = item.item_id.map { String(cString: $0) } ?? ""
-            let filename = item.filename.map { String(cString: $0) } ?? ""
+            for i in 0..<count {
+                let item = items[i]
 
-            providerItems.append(
-                TCFSFileProviderItem(
-                    identifier: NSFileProviderItemIdentifier(itemId),
-                    parentIdentifier: containerIdentifier,
-                    filename: filename,
-                    isDirectory: item.is_directory,
-                    fileSize: item.file_size
+                let itemId = item.item_id.map { String(cString: $0) } ?? ""
+                let filename = item.filename.map { String(cString: $0) } ?? ""
+
+                providerItems.append(
+                    TCFSFileProviderItem(
+                        identifier: NSFileProviderItemIdentifier(itemId),
+                        parentIdentifier: containerId,
+                        filename: filename,
+                        isDirectory: item.is_directory,
+                        fileSize: item.file_size
+                    )
                 )
-            )
+            }
+
+            // Free the C array
+            tcfs_file_items_free(outItems, outCount)
+
+            observer.didEnumerate(providerItems)
+            observer.finishEnumerating(upTo: nil)
         }
-
-        // Free the C array
-        tcfs_file_items_free(outItems, outCount)
-
-        observer.didEnumerate(providerItems)
-        observer.finishEnumerating(upTo: nil)
     }
 
     func enumerateChanges(

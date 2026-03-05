@@ -109,8 +109,12 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         for containerItemIdentifier: NSFileProviderItemIdentifier,
         request: NSFileProviderRequest
     ) throws -> NSFileProviderEnumerator {
+        // Pass a closure so the enumerator can resolve the provider off the
+        // calling (file-coordination) thread.  Accessing `self.provider` here
+        // would trigger the lazy init synchronously, which blocks long enough
+        // to cause an EDEADLK file-coordination deadlock on first access.
         return TCFSFileProviderEnumerator(
-            provider: provider,
+            providerAccessor: { [weak self] in self?.provider ?? nil },
             containerIdentifier: containerItemIdentifier
         )
     }
