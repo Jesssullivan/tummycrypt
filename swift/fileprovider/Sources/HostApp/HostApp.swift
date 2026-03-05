@@ -1,5 +1,6 @@
 import FileProvider
 import Foundation
+import Security
 
 @main
 struct TCFSProviderApp {
@@ -66,9 +67,9 @@ struct TCFSProviderApp {
         RunLoop.current.run()
     }
 
-    /// Read config.json from XDG path and store it in the shared UserDefaults
-    /// suite so the extension can access it without file I/O into the Group
-    /// Container (which deadlocks with fileproviderd's file coordination).
+    /// Read config.json from XDG path and store it in the shared Keychain
+    /// so the extension can access it via securityd XPC without touching the
+    /// Group Container filesystem (which deadlocks with fileproviderd).
     private static func provisionConfig() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let xdgPath = home.appendingPathComponent(".config/tcfs/fileprovider/config.json")
@@ -78,13 +79,41 @@ struct TCFSProviderApp {
             return
         }
 
-        guard let defaults = UserDefaults(suiteName: "group.io.tinyland.tcfs") else {
-            print("Config: failed to open shared UserDefaults suite")
+        guard let data = config.data(using: .utf8) else {
+            print("Config: failed to encode config as UTF-8")
             return
         }
 
-        defaults.set(config, forKey: "configJSON")
-        defaults.synchronize()
-        print("Config: provisioned \(config.count) bytes to shared UserDefaults")
+        // Write to shared Keychain access group (securityd XPC, no file I/O).
+        let service = "io.tinyland.tcfs.config"
+        let account = "configJSON"
+        let accessGroup = "group.io.tinyland.tcfs"
+
+        // Try to update existing item first.
+        let updateQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: accessGroup,
+        ]
+        let updateAttrs: [String: Any] = [
+            kSecValueData as String: data,
+        ]
+
+        var status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+
+        if status == errSecItemNotFound {
+            // Item doesn't exist yet — add it.
+            var addQuery = updateQuery
+            addQuery[kSecValueData as String] = data
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            status = SecItemAdd(addQuery as CFDictionary, nil)
+        }
+
+        if status == errSecSuccess {
+            print("Config: provisioned \(config.count) bytes to shared Keychain")
+        } else {
+            print("Config: Keychain write failed with status \(status)")
+        }
     }
 }
