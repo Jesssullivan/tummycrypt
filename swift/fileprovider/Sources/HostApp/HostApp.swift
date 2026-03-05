@@ -12,6 +12,11 @@ struct TCFSProviderApp {
         let args = CommandLine.arguments
         let shouldReset = args.contains("--reset")
 
+        // Provision config to shared UserDefaults BEFORE domain registration.
+        // The extension reads from this suite instead of the Group Container
+        // filesystem, which avoids file coordination deadlocks with fileproviderd.
+        provisionConfig()
+
         // Run domain setup on a background thread so the main RunLoop
         // can process XPC callbacks from fileproviderd.
         DispatchQueue.global(qos: .userInitiated).async {
@@ -59,5 +64,27 @@ struct TCFSProviderApp {
 
         // Main RunLoop — processes XPC callbacks and keeps app alive.
         RunLoop.current.run()
+    }
+
+    /// Read config.json from XDG path and store it in the shared UserDefaults
+    /// suite so the extension can access it without file I/O into the Group
+    /// Container (which deadlocks with fileproviderd's file coordination).
+    private static func provisionConfig() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let xdgPath = home.appendingPathComponent(".config/tcfs/fileprovider/config.json")
+
+        guard let config = try? String(contentsOf: xdgPath, encoding: .utf8) else {
+            print("Config: no config at \(xdgPath.path), skipping provision")
+            return
+        }
+
+        guard let defaults = UserDefaults(suiteName: "group.io.tinyland.tcfs") else {
+            print("Config: failed to open shared UserDefaults suite")
+            return
+        }
+
+        defaults.set(config, forKey: "configJSON")
+        defaults.synchronize()
+        print("Config: provisioned \(config.count) bytes to shared UserDefaults")
     }
 }
