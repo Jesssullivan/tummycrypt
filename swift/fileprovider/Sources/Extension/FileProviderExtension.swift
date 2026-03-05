@@ -9,6 +9,7 @@ private let logger = Logger(subsystem: "io.tinyland.tcfs.fileprovider", category
 ///
 /// Implements NSFileProviderReplicatedExtension for on-demand hydration
 /// of files stored in SeaweedFS S3 via the tcfs-file-provider Rust crate.
+@objc(TCFSFileProviderExtension)
 class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     let domain: NSFileProviderDomain
@@ -339,18 +340,18 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     // MARK: - Provider setup
 
     private static func createProvider() -> OpaquePointer? {
-        logger.info("createProvider: loading config...")
+        logger.error("createProvider: loading config...")
         guard let config = loadConfig() else {
             logger.error("createProvider: config load failed — provider will be nil")
             return nil
         }
-        logger.info("createProvider: config loaded (\(config.count) bytes), creating provider")
+        logger.error("createProvider: config loaded (\(config.count) bytes), creating provider")
 
         let ptr = config.withCString { configPtr in
             tcfs_provider_new(configPtr)
         }
         if ptr != nil {
-            logger.info("createProvider: provider created successfully")
+            logger.error("createProvider: provider created successfully")
         } else {
             logger.error("createProvider: tcfs_provider_new returned null")
         }
@@ -369,6 +370,17 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// suite stores data in the Group Container, which is file-coordinated
     /// by fileproviderd — reading it during enumeration deadlocks.
     private static func loadConfig() -> String? {
+        // 0. Build-time embedded config (most reliable — no IPC needed).
+        //    build.sh bakes config.json into the binary as base64.
+        if let b64 = embeddedConfigBase64,
+           let data = Data(base64Encoded: b64),
+           let config = String(data: data, encoding: .utf8),
+           !config.isEmpty {
+            logger.error("loadConfig: loaded from build-time embedded config")
+            return config
+        }
+        logger.warning("loadConfig: no embedded config, trying Keychain")
+
         // 1. Shared Keychain — provisioned by the host app.
         //    Uses securityd XPC, no file I/O, no file coordination, no deadlock.
         if let config = readConfigFromKeychain() {
