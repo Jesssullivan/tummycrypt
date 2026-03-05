@@ -87,19 +87,17 @@ struct TCFSProviderApp {
             return
         }
 
-        // Write to shared Keychain via data protection keychain (securityd XPC).
-        // Uses App Group access group directly — no TeamID prefix needed.
+        // Write to macOS login keychain via securityd XPC (no file I/O).
+        // Both host app and extension share the same Developer ID signing,
+        // so they can access each other's keychain items.
         let service = "io.tinyland.tcfs.config"
         let account = "configJSON"
-        let accessGroup = "group.io.tinyland.tcfs"
 
         // Try to update existing item first.
         let updateQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: accessGroup,
-            kSecUseDataProtectionKeychain as String: true,
         ]
         let updateAttrs: [String: Any] = [
             kSecValueData as String: data,
