@@ -1,5 +1,6 @@
 import FileProvider
 import Foundation
+import Security
 import os.log
 
 private let logger = Logger(subsystem: "io.tinyland.tcfs.fileprovider", category: "extension")
@@ -359,26 +360,22 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// Load TCFS config, trying multiple sources in order of safety.
     ///
     /// Sources (in priority order):
-    /// 1. Shared UserDefaults (App Group suite) — no file I/O, no deadlock risk
+    /// 1. Shared Keychain — provisioned by host app, accessed via securityd XPC
     /// 2. XDG config path — requires sandbox temp-exception entitlement
     /// 3. App Group container file — deadlock-prone, short timeout
     ///
-    /// IMPORTANT: The App Group container file is checked LAST because
-    /// fileproviderd holds file coordination locks on group container paths.
-    /// Reading from the group container during an enumeration callback can
-    /// deadlock the extension (open() blocks in the kernel waiting for the
-    /// lock that fileproviderd holds until enumeration completes).
+    /// IMPORTANT: Keychain is checked FIRST because it uses securityd XPC,
+    /// completely bypassing the filesystem. UserDefaults with an App Group
+    /// suite stores data in the Group Container, which is file-coordinated
+    /// by fileproviderd — reading it during enumeration deadlocks.
     private static func loadConfig() -> String? {
-        // 1. Shared UserDefaults — provisioned by the host app from XDG config.
-        //    No file I/O, no file coordination, no deadlock risk.
-        let groupId = "group.io.tinyland.tcfs"
-        if let defaults = UserDefaults(suiteName: groupId),
-           let config = defaults.string(forKey: "configJSON"),
-           !config.isEmpty {
-            logger.info("loadConfig: loaded from shared UserDefaults")
+        // 1. Shared Keychain — provisioned by the host app.
+        //    Uses securityd XPC, no file I/O, no file coordination, no deadlock.
+        if let config = readConfigFromKeychain() {
+            logger.info("loadConfig: loaded from shared Keychain")
             return config
         }
-        logger.warning("loadConfig: UserDefaults empty, trying XDG path")
+        logger.warning("loadConfig: Keychain empty, trying XDG path")
 
         // 2. XDG config path (sandbox temp-exception may or may not work for extensions).
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -390,13 +387,12 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         logger.warning("loadConfig: XDG path not accessible, trying App Group container file")
 
         // 3. App Group container file (last resort, deadlock-prone).
+        let groupId = "group.io.tinyland.tcfs"
         if let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: groupId
         ) {
             let configPath = containerURL.appendingPathComponent("config.json")
 
-            // Use a background thread with timeout to avoid blocking forever
-            // if file coordination deadlocks.
             var result: String?
             let sem = DispatchSemaphore(value: 0)
             DispatchQueue.global(qos: .utility).async {
@@ -412,5 +408,38 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
         logger.error("loadConfig: no config found at any location")
         return nil
+    }
+
+    /// Read config JSON from the shared Keychain access group.
+    /// Keychain access uses securityd XPC — no filesystem I/O, immune to
+    /// fileproviderd's file coordination locks.
+    ///
+    /// Uses the data protection keychain (kSecUseDataProtectionKeychain)
+    /// which works with App Group names directly — no TeamID prefix needed.
+    private static func readConfigFromKeychain() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "io.tinyland.tcfs.config",
+            kSecAttrAccount as String: "configJSON",
+            kSecAttrAccessGroup as String: "group.io.tinyland.tcfs",
+            kSecUseDataProtectionKeychain as String: true,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+
+        if status != errSecSuccess {
+            logger.warning("readConfigFromKeychain: SecItemCopyMatching returned \(status)")
+        }
+
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let config = String(data: data, encoding: .utf8),
+              !config.isEmpty else {
+            return nil
+        }
+        return config
     }
 }
