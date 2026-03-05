@@ -47,6 +47,9 @@ bin/
 out/
 /build/
 
+# Generated at build time (contains credentials)
+EmbeddedConfig.generated.swift
+
 # Logs
 logs
 *.log
