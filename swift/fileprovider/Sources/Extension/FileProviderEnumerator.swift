@@ -1,5 +1,8 @@
 import FileProvider
 import Foundation
+import os.log
+
+private let enumLogger = Logger(subsystem: "io.tinyland.tcfs.fileprovider", category: "enumerator")
 
 /// Enumerates TCFS directory contents by calling into the Rust FFI layer.
 class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
@@ -30,7 +33,9 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         // Dispatch off the file-coordination thread to avoid EDEADLK when the
         // lazy provider init (tokio runtime + S3 operator) blocks.
         DispatchQueue.global(qos: .userInitiated).async {
+            enumLogger.info("enumerateItems: resolving provider for container \(containerId.rawValue)")
             guard let prov = accessor() else {
+                enumLogger.error("enumerateItems: provider is nil — returning serverUnreachable")
                 observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
                 return
             }
@@ -42,6 +47,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 path = containerId.rawValue
             }
 
+            enumLogger.info("enumerateItems: calling tcfs_provider_enumerate for path='\(path)'")
+
             var outItems: UnsafeMutablePointer<TcfsFileItem>?
             var outCount: UInt = 0
 
@@ -49,7 +56,12 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 tcfs_provider_enumerate(prov, pathPtr, &outItems, &outCount)
             }
 
+            enumLogger.info("enumerateItems: enumerate returned \(result.rawValue), count=\(outCount)")
+
             guard result == TCFS_ERROR_TCFS_ERROR_NONE, let items = outItems, outCount > 0 else {
+                if result != TCFS_ERROR_TCFS_ERROR_NONE {
+                    enumLogger.error("enumerateItems: enumerate failed with code \(result.rawValue)")
+                }
                 observer.finishEnumerating(upTo: nil)
                 return
             }
@@ -77,6 +89,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             // Free the C array
             tcfs_file_items_free(outItems, outCount)
 
+            enumLogger.info("enumerateItems: returning \(providerItems.count) items")
             observer.didEnumerate(providerItems)
             observer.finishEnumerating(upTo: nil)
         }
