@@ -1,5 +1,8 @@
 import FileProvider
 import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "io.tinyland.tcfs.fileprovider", category: "extension")
 
 /// TCFS FileProvider extension — bridges to Rust via cbindgen C FFI.
 ///
@@ -335,29 +338,69 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     // MARK: - Provider setup
 
     private static func createProvider() -> OpaquePointer? {
-        guard let config = loadConfig() else { return nil }
+        logger.info("createProvider: loading config...")
+        guard let config = loadConfig() else {
+            logger.error("createProvider: config load failed — provider will be nil")
+            return nil
+        }
+        logger.info("createProvider: config loaded (\(config.count) bytes), creating provider")
 
-        return config.withCString { configPtr in
+        let ptr = config.withCString { configPtr in
             tcfs_provider_new(configPtr)
         }
+        if ptr != nil {
+            logger.info("createProvider: provider created successfully")
+        } else {
+            logger.error("createProvider: tcfs_provider_new returned null")
+        }
+        return ptr
     }
 
-    /// Load TCFS config from App Group shared container, falling back to XDG config.
+    /// Load TCFS config, trying XDG path first (fast, no file coordination),
+    /// then App Group container as fallback.
+    ///
+    /// IMPORTANT: The App Group container is checked LAST because fileproviderd
+    /// holds file coordination locks on group container paths.  Reading from the
+    /// group container during an enumeration callback can deadlock the extension
+    /// (open() blocks in the kernel waiting for the lock that fileproviderd holds
+    /// until the enumeration completes — circular dependency).
     private static func loadConfig() -> String? {
-        // Try App Group container first (sandboxed .appex)
+        // 1. Try XDG config path first (requires sandbox temp-exception entitlement).
+        //    This uses a plain POSIX path that doesn't go through file coordination,
+        //    so it can never deadlock with fileproviderd.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let xdgPath = home.appendingPathComponent(".config/tcfs/fileprovider/config.json")
+        if let config = try? String(contentsOf: xdgPath, encoding: .utf8) {
+            logger.info("loadConfig: loaded from XDG path")
+            return config
+        }
+        logger.warning("loadConfig: XDG path not accessible, trying App Group container")
+
+        // 2. App Group container (sandboxed fallback).
+        //    Only safe when NOT called from a fileproviderd callback path, but we
+        //    attempt it as last resort with a short timeout to avoid deadlock.
         let groupId = "group.io.tinyland.tcfs"
         if let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: groupId
         ) {
             let configPath = containerURL.appendingPathComponent("config.json")
-            if let config = try? String(contentsOf: configPath, encoding: .utf8) {
+
+            // Use a background thread with timeout to avoid blocking forever
+            // if file coordination deadlocks.
+            var result: String?
+            let sem = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .utility).async {
+                result = try? String(contentsOf: configPath, encoding: .utf8)
+                sem.signal()
+            }
+            if sem.wait(timeout: .now() + 3.0) == .success, let config = result {
+                logger.info("loadConfig: loaded from App Group container")
                 return config
             }
+            logger.warning("loadConfig: App Group container read timed out or failed")
         }
 
-        // Fall back to XDG config path (development / non-sandboxed)
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let xdgPath = home.appendingPathComponent(".config/tcfs/fileprovider/config.json")
-        return try? String(contentsOf: xdgPath, encoding: .utf8)
+        logger.error("loadConfig: no config found at any location")
+        return nil
     }
 }
