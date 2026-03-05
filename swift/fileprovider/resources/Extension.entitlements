@@ -11,5 +11,11 @@
     <array>
         <string>group.io.tinyland.tcfs</string>
     </array>
+    <key>com.apple.application-identifier</key>
+    <string>$(AppIdentifierPrefix)io.tinyland.tcfs.fileprovider</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)group.io.tinyland.tcfs</string>
+    </array>
 </dict>
 </plist>
