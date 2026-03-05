@@ -1,6 +1,9 @@
 import FileProvider
 import Foundation
 import Security
+import os.log
+
+private let hostLogger = Logger(subsystem: "io.tinyland.tcfs", category: "host")
 
 @main
 struct TCFSProviderApp {
@@ -113,9 +116,9 @@ struct TCFSProviderApp {
         }
 
         if status == errSecSuccess {
-            print("Config: provisioned \(config.count) bytes to shared Keychain")
+            hostLogger.info("provisionConfig: provisioned \(config.count) bytes to shared Keychain")
         } else {
-            print("Config: Keychain write failed with status \(status)")
+            hostLogger.error("provisionConfig: Keychain write failed with status \(status)")
         }
     }
 }
