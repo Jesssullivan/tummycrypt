@@ -356,30 +356,40 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return ptr
     }
 
-    /// Load TCFS config, trying XDG path first (fast, no file coordination),
-    /// then App Group container as fallback.
+    /// Load TCFS config, trying multiple sources in order of safety.
     ///
-    /// IMPORTANT: The App Group container is checked LAST because fileproviderd
-    /// holds file coordination locks on group container paths.  Reading from the
-    /// group container during an enumeration callback can deadlock the extension
-    /// (open() blocks in the kernel waiting for the lock that fileproviderd holds
-    /// until the enumeration completes — circular dependency).
+    /// Sources (in priority order):
+    /// 1. Shared UserDefaults (App Group suite) — no file I/O, no deadlock risk
+    /// 2. XDG config path — requires sandbox temp-exception entitlement
+    /// 3. App Group container file — deadlock-prone, short timeout
+    ///
+    /// IMPORTANT: The App Group container file is checked LAST because
+    /// fileproviderd holds file coordination locks on group container paths.
+    /// Reading from the group container during an enumeration callback can
+    /// deadlock the extension (open() blocks in the kernel waiting for the
+    /// lock that fileproviderd holds until enumeration completes).
     private static func loadConfig() -> String? {
-        // 1. Try XDG config path first (requires sandbox temp-exception entitlement).
-        //    This uses a plain POSIX path that doesn't go through file coordination,
-        //    so it can never deadlock with fileproviderd.
+        // 1. Shared UserDefaults — provisioned by the host app from XDG config.
+        //    No file I/O, no file coordination, no deadlock risk.
+        let groupId = "group.io.tinyland.tcfs"
+        if let defaults = UserDefaults(suiteName: groupId),
+           let config = defaults.string(forKey: "configJSON"),
+           !config.isEmpty {
+            logger.info("loadConfig: loaded from shared UserDefaults")
+            return config
+        }
+        logger.warning("loadConfig: UserDefaults empty, trying XDG path")
+
+        // 2. XDG config path (sandbox temp-exception may or may not work for extensions).
         let home = FileManager.default.homeDirectoryForCurrentUser
         let xdgPath = home.appendingPathComponent(".config/tcfs/fileprovider/config.json")
         if let config = try? String(contentsOf: xdgPath, encoding: .utf8) {
             logger.info("loadConfig: loaded from XDG path")
             return config
         }
-        logger.warning("loadConfig: XDG path not accessible, trying App Group container")
+        logger.warning("loadConfig: XDG path not accessible, trying App Group container file")
 
-        // 2. App Group container (sandboxed fallback).
-        //    Only safe when NOT called from a fileproviderd callback path, but we
-        //    attempt it as last resort with a short timeout to avoid deadlock.
-        let groupId = "group.io.tinyland.tcfs"
+        // 3. App Group container file (last resort, deadlock-prone).
         if let containerURL = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: groupId
         ) {
@@ -394,10 +404,10 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 sem.signal()
             }
             if sem.wait(timeout: .now() + 3.0) == .success, let config = result {
-                logger.info("loadConfig: loaded from App Group container")
+                logger.info("loadConfig: loaded from App Group container file")
                 return config
             }
-            logger.warning("loadConfig: App Group container read timed out or failed")
+            logger.warning("loadConfig: App Group container file read timed out or failed")
         }
 
         logger.error("loadConfig: no config found at any location")
