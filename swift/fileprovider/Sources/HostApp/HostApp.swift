@@ -13,87 +13,65 @@ struct TCFSProviderApp {
             displayName: "TCFS"
         )
 
-        let args = CommandLine.arguments
-        let shouldReset = args.contains("--reset")
-
-        // Provision config to shared UserDefaults BEFORE domain registration.
-        // The extension reads from this suite instead of the Group Container
-        // filesystem, which avoids file coordination deadlocks with fileproviderd.
+        // Provision config to Keychain (best-effort fallback for pre-built binaries).
         provisionConfig()
 
-        // Run domain setup on a background thread so the main RunLoop
-        // can process XPC callbacks from fileproviderd.
         DispatchQueue.global(qos: .userInitiated).async {
-            if shouldReset {
-                let sem = DispatchSemaphore(value: 0)
-                print("Removing domain...")
-                NSFileProviderManager.remove(domain) { error in
-                    if let error = error {
-                        print("Remove: \(error.localizedDescription)")
-                    } else {
-                        print("Domain removed")
-                    }
-                    sem.signal()
+            // Always remove then re-add the domain. This triggers a fresh
+            // domainCreation in fileproviderd, which forces initial enumeration.
+            //
+            // IMPORTANT: Do NOT use NSFileProviderManager(for:) after add.
+            // That constructor accesses the Group Container to find domain
+            // metadata, which deadlocks because fileproviderd holds a
+            // permanent file coordination lock on the Group Container.
+            let removeSem = DispatchSemaphore(value: 0)
+            NSFileProviderManager.remove(domain) { error in
+                if let error = error {
+                    hostLogger.error("remove: \(error.localizedDescription)")
+                } else {
+                    hostLogger.error("remove: OK")
                 }
-                sem.wait()
-                Thread.sleep(forTimeInterval: 3.0)
+                removeSem.signal()
             }
+            removeSem.wait()
+
+            // Brief pause for fileproviderd to clean up.
+            Thread.sleep(forTimeInterval: 2.0)
 
             let addSem = DispatchSemaphore(value: 0)
             NSFileProviderManager.add(domain) { error in
                 if let error = error {
-                    let nsError = error as NSError
-                    if nsError.domain == NSFileProviderErrorDomain && nsError.code == -1004 {
-                        print("TCFS domain already registered")
-                    } else {
-                        print("Failed to add domain: \(error)")
-                    }
+                    hostLogger.error("add: \(error.localizedDescription)")
                 } else {
-                    print("TCFS FileProvider domain registered")
+                    hostLogger.error("add: OK — domain created, enumeration will start")
                 }
                 addSem.signal()
             }
             addSem.wait()
 
-            // Signal re-enumeration after domain is ready
-            if let manager = NSFileProviderManager(for: domain) {
-                manager.signalEnumerator(for: .rootContainer) { error in
-                    print("Signal root: \(error?.localizedDescription ?? "OK")")
-                }
-                manager.reimportItems(below: .rootContainer) { error in
-                    print("Reimport: \(error?.localizedDescription ?? "OK")")
-                }
-            }
+            // Give fileproviderd time to start initial enumeration.
+            Thread.sleep(forTimeInterval: 5.0)
+            hostLogger.error("host app exiting")
+            exit(0)
         }
 
-        // Main RunLoop — processes XPC callbacks and keeps app alive.
         RunLoop.current.run()
     }
 
-    /// Read config.json from XDG path and store it in the shared Keychain
-    /// so the extension can access it via securityd XPC without touching the
-    /// Group Container filesystem (which deadlocks with fileproviderd).
     private static func provisionConfig() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let xdgPath = home.appendingPathComponent(".config/tcfs/fileprovider/config.json")
 
         guard let config = try? String(contentsOf: xdgPath, encoding: .utf8) else {
-            print("Config: no config at \(xdgPath.path), skipping provision")
+            hostLogger.error("provisionConfig: no config at \(xdgPath.path)")
             return
         }
 
-        guard let data = config.data(using: .utf8) else {
-            print("Config: failed to encode config as UTF-8")
-            return
-        }
+        guard let data = config.data(using: .utf8) else { return }
 
-        // Write to macOS login keychain via securityd XPC (no file I/O).
-        // Both host app and extension share the same Developer ID signing,
-        // so they can access each other's keychain items.
         let service = "io.tinyland.tcfs.config"
         let account = "configJSON"
 
-        // Try to update existing item first.
         let updateQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -106,7 +84,6 @@ struct TCFSProviderApp {
         var status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
 
         if status == errSecItemNotFound {
-            // Item doesn't exist yet — add it.
             var addQuery = updateQuery
             addQuery[kSecValueData as String] = data
             addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
@@ -114,7 +91,7 @@ struct TCFSProviderApp {
         }
 
         if status == errSecSuccess {
-            hostLogger.info("provisionConfig: provisioned \(config.count) bytes to shared Keychain")
+            hostLogger.error("provisionConfig: provisioned \(config.count) bytes to Keychain")
         } else {
             hostLogger.error("provisionConfig: Keychain write failed with status \(status)")
         }
