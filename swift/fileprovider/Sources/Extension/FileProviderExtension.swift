@@ -413,18 +413,26 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// Read config JSON from the shared Keychain access group.
     /// Keychain access uses securityd XPC — no filesystem I/O, immune to
     /// fileproviderd's file coordination locks.
+    ///
+    /// Uses the data protection keychain (kSecUseDataProtectionKeychain)
+    /// which works with App Group names directly — no TeamID prefix needed.
     private static func readConfigFromKeychain() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "io.tinyland.tcfs.config",
             kSecAttrAccount as String: "configJSON",
             kSecAttrAccessGroup as String: "group.io.tinyland.tcfs",
+            kSecUseDataProtectionKeychain as String: true,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
+
+        if status != errSecSuccess {
+            logger.warning("readConfigFromKeychain: SecItemCopyMatching returned \(status)")
+        }
 
         guard status == errSecSuccess,
               let data = item as? Data,

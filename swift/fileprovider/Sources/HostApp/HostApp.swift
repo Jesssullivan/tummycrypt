@@ -84,7 +84,8 @@ struct TCFSProviderApp {
             return
         }
 
-        // Write to shared Keychain access group (securityd XPC, no file I/O).
+        // Write to shared Keychain via data protection keychain (securityd XPC).
+        // Uses App Group access group directly — no TeamID prefix needed.
         let service = "io.tinyland.tcfs.config"
         let account = "configJSON"
         let accessGroup = "group.io.tinyland.tcfs"
@@ -95,6 +96,7 @@ struct TCFSProviderApp {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrAccessGroup as String: accessGroup,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         let updateAttrs: [String: Any] = [
             kSecValueData as String: data,
