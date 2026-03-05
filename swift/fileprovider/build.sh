@@ -101,27 +101,52 @@ cp "$SCRIPT_DIR/resources/HostApp-Info.plist" "$APP/Info.plist"
 cp TCFSFileProvider "$EXT/MacOS/"
 cp "$SCRIPT_DIR/resources/Extension-Info.plist" "$EXT/Info.plist"
 
+# --- Resolve entitlements (expand TeamID for keychain-access-groups) ---
+echo "==> Resolving entitlements..."
+EXT_ENTITLEMENTS="$SCRIPT_DIR/resources/Extension.entitlements"
+HOST_ENTITLEMENTS="$SCRIPT_DIR/resources/HostApp.entitlements"
+
+if [ "$SIGNING_IDENTITY" != "-" ]; then
+    # Extract TeamID from the signing certificate.
+    TEAM_ID=$(/usr/bin/security find-identity -v -p codesigning \
+        | grep "$SIGNING_IDENTITY" \
+        | head -1 \
+        | sed -E 's/.*\(([A-Z0-9]{10})\).*/\1/')
+    if [ -n "$TEAM_ID" ]; then
+        echo "    TeamID: $TEAM_ID"
+        # Generate entitlements with resolved keychain-access-groups
+        EXT_ENTITLEMENTS="/tmp/tcfs-ext-entitlements.$$.plist"
+        HOST_ENTITLEMENTS="/tmp/tcfs-host-entitlements.$$.plist"
+        sed "s/\$(AppIdentifierPrefix)/${TEAM_ID}./g" \
+            "$SCRIPT_DIR/resources/Extension.entitlements" > "$EXT_ENTITLEMENTS"
+        sed "s/\$(AppIdentifierPrefix)/${TEAM_ID}./g" \
+            "$SCRIPT_DIR/resources/HostApp.entitlements" > "$HOST_ENTITLEMENTS"
+    else
+        echo "    WARNING: Could not extract TeamID, using entitlements as-is"
+    fi
+fi
+
 # --- Code sign (inside-out: extension first, then host app) ---
 echo "==> Signing..."
 if [ "$SIGNING_IDENTITY" != "-" ]; then
     echo "    Identity: $SIGNING_IDENTITY (Developer ID)"
     /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
         --options runtime --timestamp \
-        --entitlements "$SCRIPT_DIR/resources/Extension.entitlements" \
+        --entitlements "$EXT_ENTITLEMENTS" \
         "$APP/Extensions/TCFSFileProvider.appex"
 
     /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
         --options runtime --timestamp \
-        --entitlements "$SCRIPT_DIR/resources/HostApp.entitlements" \
+        --entitlements "$HOST_ENTITLEMENTS" \
         "$OUTPUT_DIR/TCFSProvider.app"
 else
     echo "    Identity: ad-hoc (development)"
     /usr/bin/codesign -f -s - \
-        --entitlements "$SCRIPT_DIR/resources/Extension.entitlements" \
+        --entitlements "$EXT_ENTITLEMENTS" \
         "$APP/Extensions/TCFSFileProvider.appex"
 
     /usr/bin/codesign -f -s - \
-        --entitlements "$SCRIPT_DIR/resources/HostApp.entitlements" \
+        --entitlements "$HOST_ENTITLEMENTS" \
         "$OUTPUT_DIR/TCFSProvider.app"
 fi
 
