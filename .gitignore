@@ -45,6 +45,7 @@ tfplan
 # Build outputs
 bin/
 out/
+/build/
 
 # Logs
 logs
