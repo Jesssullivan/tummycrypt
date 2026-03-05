@@ -11,5 +11,9 @@
     <array>
         <string>group.io.tinyland.tcfs</string>
     </array>
+    <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+    <array>
+        <string>.config/tcfs/</string>
+    </array>
 </dict>
 </plist>
