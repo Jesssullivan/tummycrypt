@@ -7,6 +7,8 @@ use tcfs_core::config::TcfsConfig;
 use tcfs_sync::conflict::ConflictResolver;
 use tracing::{error, info, warn};
 
+use tcfs_crypto::MasterKey;
+
 use crate::cred_store::{new_shared as new_cred_store, SharedCredStore};
 use crate::grpc::TcfsDaemonImpl;
 
@@ -32,20 +34,40 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             tcfs_secrets::device::DeviceRegistry::default()
         });
 
-    // Auto-enroll this device on first run
+    // Auto-enroll this device on first run (with real age X25519 keypair)
     let device_id = if let Some(dev) = registry.find(&device_name) {
         info!(device = %device_name, id = %dev.device_id, "device identity loaded");
         dev.device_id.clone()
     } else {
-        let public_key = format!(
-            "age1-device-{}",
-            &blake3::hash(device_name.as_bytes()).to_hex().as_str()[..8]
-        );
+        let identity = age::x25519::Identity::generate();
+        let public_key = identity.to_public().to_string();
+        let secret_key = identity.to_string();
+
         let id = registry.enroll(&device_name, &public_key, None);
+
+        // Persist the device secret key alongside the registry
+        let secret_key_path = registry_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(format!("device-{id}.age"));
+        if let Err(e) = std::fs::write(&secret_key_path, secret_key.expose_secret().as_bytes()) {
+            warn!("failed to write device secret key: {e}");
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &secret_key_path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+            }
+            info!(path = %secret_key_path.display(), "device secret key saved");
+        }
+
         if let Err(e) = registry.save(&registry_path) {
             warn!("failed to save device registry: {e}");
         }
-        info!(device = %device_name, id = %id, "device auto-enrolled");
+        info!(device = %device_name, id = %id, "device auto-enrolled with age keypair");
         id
     };
 
@@ -59,6 +81,47 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         Err(e) => {
             warn!("credential load failed: {e}  (daemon will start without creds)");
         }
+    }
+
+    // ── Load master key for E2E encryption ─────────────────────────────
+    let master_key: Option<MasterKey> = if config.crypto.enabled {
+        if let Some(ref key_path) = config.crypto.master_key_file {
+            match std::fs::read(key_path) {
+                Ok(bytes) if bytes.len() == tcfs_crypto::KEY_SIZE => {
+                    let mut key_bytes = [0u8; tcfs_crypto::KEY_SIZE];
+                    key_bytes.copy_from_slice(&bytes);
+                    info!(path = %key_path.display(), "master key loaded");
+                    Some(MasterKey::from_bytes(key_bytes))
+                }
+                Ok(bytes) => {
+                    warn!(
+                        path = %key_path.display(),
+                        size = bytes.len(),
+                        expected = tcfs_crypto::KEY_SIZE,
+                        "master key file has wrong size, encryption disabled"
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!(
+                        path = %key_path.display(),
+                        "failed to read master key file: {e} (encryption disabled)"
+                    );
+                    None
+                }
+            }
+        } else {
+            warn!("crypto.enabled = true but no master_key_file configured");
+            None
+        }
+    } else {
+        None
+    };
+
+    if config.crypto.enabled && master_key.is_some() {
+        info!("E2E encryption: active");
+    } else if config.crypto.enabled {
+        warn!("E2E encryption: configured but master key unavailable");
     }
 
     // Build storage operator and verify connectivity
@@ -163,6 +226,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         operator.clone(),
         device_id.clone(),
         device_name.clone(),
+        master_key,
     );
 
     // Connect to NATS for fleet state sync (non-blocking, best-effort)

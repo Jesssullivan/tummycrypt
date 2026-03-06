@@ -28,6 +28,8 @@ pub struct TcfsDaemonImpl {
     operator: Arc<TokioMutex<Option<opendal::Operator>>>,
     device_id: String,
     device_name: String,
+    #[allow(dead_code)] // Will be used when sync engine gets encryption support
+    master_key: Option<tcfs_crypto::MasterKey>,
     nats_ok: std::sync::atomic::AtomicBool,
     nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
     active_mounts: Arc<TokioMutex<std::collections::HashMap<String, tokio::process::Child>>>,
@@ -44,6 +46,7 @@ impl TcfsDaemonImpl {
         operator: Arc<TokioMutex<Option<opendal::Operator>>>,
         device_id: String,
         device_name: String,
+        master_key: Option<tcfs_crypto::MasterKey>,
     ) -> Self {
         Self {
             cred_store,
@@ -55,6 +58,7 @@ impl TcfsDaemonImpl {
             operator,
             device_id,
             device_name,
+            master_key,
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
             active_mounts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
