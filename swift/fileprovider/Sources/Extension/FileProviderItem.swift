@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 ///
 /// Maps between the Rust `TcfsFileItem` C struct and the
 /// NSFileProviderItem protocol that macOS/iOS expect.
+///
+/// Supports placeholder (dataless) files: items with `isDownloaded = false`
+/// appear in Finder but content is only fetched on demand via `fetchContents`.
 class TCFSFileProviderItem: NSObject, NSFileProviderItem {
 
     let itemIdentifier: NSFileProviderItemIdentifier
@@ -14,12 +17,24 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
     let documentSize: NSNumber?
     let itemVersion: NSFileProviderItemVersion
 
+    /// Whether the file content is available locally (false = placeholder).
+    var isDownloaded: Bool
+
+    /// Whether the file has been uploaded to remote storage.
+    var isUploaded: Bool
+
+    /// Whether the local copy is the latest version from remote.
+    var isMostRecentVersionDownloaded: Bool
+
     init(
         identifier: NSFileProviderItemIdentifier,
         parentIdentifier: NSFileProviderItemIdentifier,
         filename: String,
         isDirectory: Bool,
-        fileSize: UInt64
+        fileSize: UInt64,
+        downloaded: Bool = true,
+        uploaded: Bool = true,
+        versionTag: String = "1"
     ) {
         self.itemIdentifier = identifier
         self.parentItemIdentifier = parentIdentifier
@@ -27,16 +42,19 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         self.contentType = isDirectory ? .folder : (UTType(filenameExtension: (filename as NSString).pathExtension) ?? .data)
         self.documentSize = isDirectory ? nil : NSNumber(value: fileSize)
         self.itemVersion = NSFileProviderItemVersion(
-            contentVersion: "1".data(using: .utf8)!,
-            metadataVersion: "1".data(using: .utf8)!
+            contentVersion: versionTag.data(using: .utf8)!,
+            metadataVersion: versionTag.data(using: .utf8)!
         )
+        self.isDownloaded = isDirectory ? true : downloaded
+        self.isUploaded = uploaded
+        self.isMostRecentVersionDownloaded = isDirectory ? true : downloaded
     }
 
     var capabilities: NSFileProviderItemCapabilities {
         if contentType == .folder {
             return [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems, .allowsDeleting, .allowsRenaming]
         }
-        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting]
+        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting, .allowsEvicting]
     }
 
     static func rootItem() -> TCFSFileProviderItem {

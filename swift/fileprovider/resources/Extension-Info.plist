@@ -29,6 +29,8 @@
         <string>TCFSFileProviderExtension</string>
         <key>NSExtensionFileProviderSupportsEnumeration</key>
         <true/>
+        <key>NSExtensionFileProviderSupportsDatalessFolders</key>
+        <true/>
     </dict>
 </dict>
 </plist>
