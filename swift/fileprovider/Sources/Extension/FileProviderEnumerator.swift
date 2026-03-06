@@ -5,6 +5,10 @@ import os.log
 private let enumLogger = Logger(subsystem: "io.tinyland.tcfs.fileprovider", category: "enumerator")
 
 /// Enumerates TCFS directory contents by calling into the Rust FFI layer.
+///
+/// Items are returned as placeholders (`isDownloaded = false`) so that
+/// macOS shows them in Finder without downloading content. Content is
+/// fetched on demand via `fetchContents` when the user opens a file.
 class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
     private let providerAccessor: () -> OpaquePointer?
@@ -75,13 +79,17 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 let itemId = item.item_id.map { String(cString: $0) } ?? ""
                 let filename = item.filename.map { String(cString: $0) } ?? ""
 
+                // Items are created as placeholders (downloaded: false).
+                // Content will be fetched on demand via fetchContents.
                 providerItems.append(
                     TCFSFileProviderItem(
                         identifier: NSFileProviderItemIdentifier(itemId),
                         parentIdentifier: containerId,
                         filename: filename,
                         isDirectory: item.is_directory,
-                        fileSize: item.file_size
+                        fileSize: item.file_size,
+                        downloaded: false,
+                        uploaded: true
                     )
                 )
             }
@@ -89,7 +97,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             // Free the C array
             tcfs_file_items_free(outItems, outCount)
 
-            enumLogger.info("enumerateItems: returning \(providerItems.count) items")
+            enumLogger.info("enumerateItems: returning \(providerItems.count) placeholder items")
             observer.didEnumerate(providerItems)
             observer.finishEnumerating(upTo: nil)
         }
@@ -99,12 +107,13 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderChangeObserver,
         from anchor: NSFileProviderSyncAnchor
     ) {
-        // MVP: no incremental changes — full re-enumeration
+        // TODO: Wire to daemon Watch gRPC stream for incremental changes.
+        // For now, signal no changes — fileproviderd will re-enumerate periodically.
         observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        // MVP: use timestamp as anchor
+        // Use timestamp as anchor — will be replaced with daemon event sequence
         let data = "\(Date().timeIntervalSince1970)".data(using: .utf8)!
         completionHandler(NSFileProviderSyncAnchor(data))
     }

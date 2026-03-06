@@ -1,0 +1,14 @@
+[package]
+name = "tcfs-dbus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "D-Bus interface for TCFS file sync status"
+
+[dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
