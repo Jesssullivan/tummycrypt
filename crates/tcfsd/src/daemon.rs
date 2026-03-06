@@ -212,6 +212,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         "fleet identity ready"
     );
 
+    // Channel for status change events (consumed by D-Bus signal emitter on Linux)
+    #[allow(unused_variables, unused_mut)]
+    let (status_tx, mut status_rx) = tokio::sync::mpsc::channel::<(String, String)>(64);
+
     // ── File Watcher + Scheduler ─────────────────────────────────────
     // If sync_root is configured, start watching for local file changes
     // and feed them through the priority scheduler for automatic sync.
@@ -258,6 +262,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sched_prefix = config.storage.bucket.clone();
                     let sched_device = device_id.clone();
                     let sched_sync_root = sync_root.clone();
+                    let sched_status_tx = status_tx.clone();
 
                     tokio::spawn({
                         let scheduler = scheduler.clone();
@@ -269,6 +274,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     let prefix = sched_prefix.clone();
                                     let device = sched_device.clone();
                                     let root = sched_sync_root.clone();
+                                    let status_tx = sched_status_tx.clone();
 
                                     Box::pin(async move {
                                         match task.op {
@@ -285,17 +291,48 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     .to_string_lossy()
                                                     .to_string();
                                                 let mut cache = state.lock().await;
-                                                tcfs_sync::engine::upload_file_with_device(
-                                                    op_ref,
-                                                    &task.path,
-                                                    &prefix,
-                                                    &mut cache,
-                                                    None,
-                                                    &device,
-                                                    Some(&rel_path),
-                                                    None,
-                                                )
-                                                .await?;
+                                                let upload_result =
+                                                    tcfs_sync::engine::upload_file_with_device(
+                                                        op_ref,
+                                                        &task.path,
+                                                        &prefix,
+                                                        &mut cache,
+                                                        None,
+                                                        &device,
+                                                        Some(&rel_path),
+                                                        None,
+                                                    )
+                                                    .await?;
+
+                                                // Record conflict in state cache if detected
+                                                if let Some(
+                                                    tcfs_sync::conflict::SyncOutcome::Conflict(
+                                                        ref info,
+                                                    ),
+                                                ) = upload_result.outcome
+                                                {
+                                                    warn!(
+                                                        path = %task.path.display(),
+                                                        local_device = %info.local_device,
+                                                        remote_device = %info.remote_device,
+                                                        "watcher: conflict detected"
+                                                    );
+                                                    if let Some(entry) =
+                                                        cache.get(&task.path).cloned()
+                                                    {
+                                                        let updated = tcfs_sync::state::SyncState {
+                                                            conflict: Some(info.clone()),
+                                                            ..entry
+                                                        };
+                                                        cache.set(&task.path, updated);
+                                                    }
+                                                    // Emit status change for D-Bus listeners
+                                                    let _ = status_tx.try_send((
+                                                        task.path.to_string_lossy().to_string(),
+                                                        "conflict".to_string(),
+                                                    ));
+                                                }
+
                                                 let _ = cache.flush();
                                                 info!(
                                                     path = %task.path.display(),
@@ -360,9 +397,14 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 let cache = self.state_cache.lock().await;
                 let p = std::path::Path::new(path);
                 match cache.get(p) {
-                    Some(_entry) => SyncStatus::Synced,
+                    Some(entry) => {
+                        if entry.conflict.is_some() {
+                            SyncStatus::Conflict
+                        } else {
+                            SyncStatus::Synced
+                        }
+                    }
                     None => {
-                        // Check if operator is available — if not, report unknown
                         let op = self.operator.lock().await;
                         if op.is_none() {
                             SyncStatus::Unknown
@@ -375,17 +417,40 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
             async fn sync(&self, path: &str) -> anyhow::Result<()> {
                 let op_guard = self.operator.lock().await;
-                let _op = op_guard
+                let op = op_guard
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("no storage operator available"))?;
+                    .ok_or_else(|| anyhow::anyhow!("no storage operator available"))?
+                    .clone();
+                drop(op_guard);
+
                 info!(path, device = %self.device_id, "D-Bus sync requested");
-                // TODO: wire to actual upload via sync engine
+
+                let p = std::path::Path::new(path);
+                let mut cache = self.state_cache.lock().await;
+                tcfs_sync::engine::upload_file_with_device(
+                    &op,
+                    p,
+                    &self.device_id,
+                    &mut cache,
+                    None,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("sync failed: {e}"))?;
+                let _ = cache.flush();
                 Ok(())
             }
 
             async fn unsync(&self, path: &str) -> anyhow::Result<()> {
                 info!(path, device = %self.device_id, "D-Bus unsync requested");
-                // TODO: wire to dehydration logic
+                let p = std::path::Path::new(path);
+                let mut cache = self.state_cache.lock().await;
+                cache.remove(p);
+                let _ = cache.flush();
+
+                // Remove local cached file (dehydrate)
+                if p.exists() {
+                    std::fs::remove_file(p).ok();
+                }
                 Ok(())
             }
         }
@@ -399,6 +464,17 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         match tcfs_dbus::serve(backend).await {
             Ok(conn) => {
                 info!("D-Bus service started on session bus");
+
+                // Spawn D-Bus signal emitter: reads status change events and
+                // emits StatusChanged signals so Nautilus can update overlays.
+                let dbus_conn = conn.clone();
+                let mut status_rx = status_rx;
+                tokio::spawn(async move {
+                    while let Some((path, status)) = status_rx.recv().await {
+                        tcfs_dbus::emit_status_changed(&dbus_conn, &path, &status).await;
+                    }
+                });
+
                 Some(conn)
             }
             Err(e) => {

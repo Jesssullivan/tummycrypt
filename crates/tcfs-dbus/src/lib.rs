@@ -150,6 +150,28 @@ pub async fn serve_stub() -> anyhow::Result<Connection> {
     serve(StubBackend).await
 }
 
+/// Emit a `StatusChanged` signal on the D-Bus session bus.
+///
+/// Call this from the watcher/scheduler when a file's sync status changes
+/// (e.g., conflict detected, sync completed, file evicted).
+///
+/// Uses raw D-Bus signal emission to avoid generic type constraints on
+/// the registered interface.
+pub async fn emit_status_changed(conn: &Connection, path: &str, status: &str) {
+    if let Err(e) = conn
+        .emit_signal(
+            None::<zbus::names::BusName>,
+            "/io/tinyland/tcfs",
+            "io.tinyland.tcfs",
+            "StatusChanged",
+            &(path, status),
+        )
+        .await
+    {
+        tracing::debug!("failed to emit StatusChanged signal: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,6 +18,7 @@ fn make_state(rel_path: &str, hash: &str) -> SyncState {
         file_size: 42,
         vclock: Default::default(),
         device_id: "test-device".to_string(),
+        conflict: None,
     }
 }
 
