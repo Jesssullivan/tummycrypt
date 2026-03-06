@@ -100,17 +100,19 @@ impl<B: StatusBackend> TcfsFileStatus<B> {
     /// Request that `path` be synced locally.
     async fn sync(&self, path: &str) -> zbus::fdo::Result<()> {
         let backend = self.backend.lock().await;
-        backend.sync(path).await.map_err(|e| {
-            zbus::fdo::Error::Failed(format!("sync failed: {e}"))
-        })
+        backend
+            .sync(path)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("sync failed: {e}")))
     }
 
     /// Request that the local copy of `path` be removed (dehydrated).
     async fn unsync(&self, path: &str) -> zbus::fdo::Result<()> {
         let backend = self.backend.lock().await;
-        backend.unsync(path).await.map_err(|e| {
-            zbus::fdo::Error::Failed(format!("unsync failed: {e}"))
-        })
+        backend
+            .unsync(path)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("unsync failed: {e}")))
     }
 
     /// Signal emitted when a file's sync status changes.
@@ -135,9 +137,7 @@ pub async fn serve<B: StatusBackend>(backend: B) -> anyhow::Result<Connection> {
 
     let conn = Connection::session().await?;
 
-    conn.object_server()
-        .at("/io/tinyland/tcfs", iface)
-        .await?;
+    conn.object_server().at("/io/tinyland/tcfs", iface).await?;
 
     conn.request_name("io.tinyland.tcfs").await?;
 

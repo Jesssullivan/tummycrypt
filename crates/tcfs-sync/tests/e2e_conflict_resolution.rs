@@ -57,13 +57,7 @@ fn vclock_comparison_detects_concurrent() {
     );
 
     let outcome = compare_clocks(
-        &clock_a,
-        &clock_b,
-        "hash_a",
-        "hash_b",
-        "file.txt",
-        "device-a",
-        "device-b",
+        &clock_a, &clock_b, "hash_a", "hash_b", "file.txt", "device-a", "device-b",
     );
 
     match outcome {
@@ -114,13 +108,7 @@ fn vclock_comparison_local_newer() {
     clock_b.tick("device-a"); // B knows about A's first tick only
 
     let outcome = compare_clocks(
-        &clock_a,
-        &clock_b,
-        "hash_new",
-        "hash_old",
-        "file.txt",
-        "device-a",
-        "device-b",
+        &clock_a, &clock_b, "hash_new", "hash_old", "file.txt", "device-a", "device-b",
     );
 
     assert!(
@@ -140,13 +128,7 @@ fn vclock_comparison_remote_newer() {
     clock_b.tick("device-b"); // B has strictly more info
 
     let outcome = compare_clocks(
-        &clock_a,
-        &clock_b,
-        "hash_old",
-        "hash_new",
-        "file.txt",
-        "device-a",
-        "device-b",
+        &clock_a, &clock_b, "hash_old", "hash_new", "file.txt", "device-a", "device-b",
     );
 
     assert!(
@@ -366,10 +348,7 @@ async fn resolve_keep_both_workflow() {
         local_file.exists(),
         "original path should have remote content"
     );
-    assert!(
-        conflict_file.exists(),
-        "conflict copy should still exist"
-    );
+    assert!(conflict_file.exists(), "conflict copy should still exist");
 
     let original_content = std::fs::read(&local_file).unwrap();
     let conflict_content = std::fs::read(&conflict_file).unwrap();

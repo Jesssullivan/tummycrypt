@@ -37,10 +37,8 @@ async fn two_device_push_then_pull() {
     let src_a = write_test_file(tmp.path(), "src_a/doc.txt", original);
     let dst_b = tmp.path().join("dst_b/doc.txt");
 
-    let mut state_a =
-        StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
-    let mut state_b =
-        StateCache::open(&tmp.path().join("state_b.db")).expect("open state_b");
+    let mut state_a = StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
+    let mut state_b = StateCache::open(&tmp.path().join("state_b.db")).expect("open state_b");
 
     // Device A uploads
     let upload = upload_file_with_device(
@@ -100,8 +98,7 @@ async fn two_device_modify_and_re_sync() {
     // Step 1: Device A uploads original
     let content_v1 = b"version 1 from device-a";
     let src_a = write_test_file(tmp.path(), "src_a/notes.txt", content_v1);
-    let mut state_a =
-        StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
+    let mut state_a = StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
 
     let upload_a = upload_file_with_device(
         &op,
@@ -118,8 +115,7 @@ async fn two_device_modify_and_re_sync() {
 
     // Step 2: Device B downloads v1
     let dst_b = tmp.path().join("dst_b/notes.txt");
-    let mut state_b =
-        StateCache::open(&tmp.path().join("state_b.db")).expect("open state_b");
+    let mut state_b = StateCache::open(&tmp.path().join("state_b.db")).expect("open state_b");
 
     download_file_with_device(
         &op,
@@ -203,8 +199,7 @@ async fn two_device_simultaneous_conflict_detection() {
     // Step 1: Device A uploads initial version
     let content_a_v1 = b"initial content from device-a";
     let src_a_v1 = write_test_file(tmp.path(), "src_a/shared.txt", content_a_v1);
-    let mut state_a =
-        StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
+    let mut state_a = StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
 
     let upload_a_v1 = upload_file_with_device(
         &op,
@@ -221,8 +216,7 @@ async fn two_device_simultaneous_conflict_detection() {
 
     // Step 2: Device B downloads v1 (shared baseline)
     let dst_b = tmp.path().join("dst_b/shared.txt");
-    let mut state_b =
-        StateCache::open(&tmp.path().join("state_b.db")).expect("open state_b");
+    let mut state_b = StateCache::open(&tmp.path().join("state_b.db")).expect("open state_b");
 
     download_file_with_device(
         &op,
@@ -277,16 +271,8 @@ async fn two_device_simultaneous_conflict_detection() {
     // Step 4: Simulate NATS-layer conflict detection by comparing vclocks
     // In production, when device B receives device A's NATS event (or vice versa),
     // it compares the vclocks to detect the conflict.
-    let vclock_a = state_a
-        .get(&src_a_v2)
-        .expect("A state")
-        .vclock
-        .clone();
-    let vclock_b = state_b
-        .get(&src_b_v2)
-        .expect("B state")
-        .vclock
-        .clone();
+    let vclock_a = state_a.get(&src_a_v2).expect("A state").vclock.clone();
+    let vclock_b = state_b.get(&src_b_v2).expect("B state").vclock.clone();
 
     // The vclocks should be concurrent (neither dominates)
     assert!(
@@ -317,10 +303,7 @@ async fn two_device_simultaneous_conflict_detection() {
                 "conflicting versions should have different hashes"
             );
         }
-        other => panic!(
-            "expected Conflict from vclock comparison, got: {:?}",
-            other
-        ),
+        other => panic!("expected Conflict from vclock comparison, got: {:?}", other),
     }
 }
 
@@ -331,16 +314,21 @@ async fn two_device_multi_round_sync() {
     let op = memory_operator();
     let prefix = "e2e/two-device/multi-round";
 
-    let mut state_a =
-        StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
-    let mut state_b =
-        StateCache::open(&tmp.path().join("state_b.db")).expect("open state_b");
+    let mut state_a = StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
+    let mut state_b = StateCache::open(&tmp.path().join("state_b.db")).expect("open state_b");
 
     // Round 1: A writes, B pulls
     let content_r1 = b"round 1 content";
     let src = write_test_file(tmp.path(), "round/1/file.txt", content_r1);
     let upload_r1 = upload_file_with_device(
-        &op, &src, prefix, &mut state_a, None, "device-a", Some("file.txt"), None,
+        &op,
+        &src,
+        prefix,
+        &mut state_a,
+        None,
+        "device-a",
+        Some("file.txt"),
+        None,
     )
     .await
     .expect("r1 upload");

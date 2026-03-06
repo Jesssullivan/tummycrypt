@@ -158,12 +158,16 @@ impl SyncScheduler {
     /// This method runs until the submit channel is closed and the queue is drained.
     pub async fn run<F>(&self, handler: F)
     where
-        F: Fn(SyncTask) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        F: Fn(
+                SyncTask,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
             + Send
             + Sync
             + 'static,
     {
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrent));
+        let semaphore =
+            std::sync::Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrent));
         let mut rx = self.submit_rx.lock().await;
 
         info!(

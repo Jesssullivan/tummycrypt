@@ -72,9 +72,10 @@ impl FileWatcher {
     ) -> anyhow::Result<Self> {
         let (raw_tx, raw_rx) = std::sync::mpsc::channel();
 
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let _ = raw_tx.send(res);
-        })?;
+        let mut watcher =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                let _ = raw_tx.send(res);
+            })?;
 
         watcher.watch(watch_dir, RecursiveMode::Recursive)?;
 
@@ -131,11 +132,7 @@ fn debounce_loop(
             // Check again after the shortest remaining debounce
             let min_remaining = pending
                 .values()
-                .map(|(_, t)| {
-                    config
-                        .debounce
-                        .saturating_sub(now.duration_since(*t))
-                })
+                .map(|(_, t)| config.debounce.saturating_sub(now.duration_since(*t)))
                 .min()
                 .unwrap_or(config.debounce);
             min_remaining.max(Duration::from_millis(10))
@@ -196,9 +193,18 @@ mod tests {
     fn test_should_ignore() {
         let ignore = vec![".git".into(), "node_modules".into()];
 
-        assert!(should_ignore(Path::new("/home/user/project/.git/HEAD"), &ignore));
-        assert!(should_ignore(Path::new("/home/user/project/node_modules/pkg/index.js"), &ignore));
-        assert!(!should_ignore(Path::new("/home/user/project/src/main.rs"), &ignore));
+        assert!(should_ignore(
+            Path::new("/home/user/project/.git/HEAD"),
+            &ignore
+        ));
+        assert!(should_ignore(
+            Path::new("/home/user/project/node_modules/pkg/index.js"),
+            &ignore
+        ));
+        assert!(!should_ignore(
+            Path::new("/home/user/project/src/main.rs"),
+            &ignore
+        ));
     }
 
     #[test]

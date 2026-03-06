@@ -147,11 +147,9 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
             // Query sync status for the path — the daemon returns file metadata
             let resp = prov
                 .client
-                .sync_status(tonic::Request::new(
-                    tcfs_core::proto::SyncStatusRequest {
-                        path: rel_path.to_string(),
-                    },
-                ))
+                .sync_status(tonic::Request::new(tcfs_core::proto::SyncStatusRequest {
+                    path: rel_path.to_string(),
+                }))
                 .await?;
 
             let status = resp.into_inner();
@@ -162,11 +160,7 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
             let mut items: Vec<TcfsFileItem> = Vec::new();
 
             if !status.path.is_empty() && status.state != "not_found" {
-                let filename = status
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&status.path);
+                let filename = status.path.rsplit('/').next().unwrap_or(&status.path);
                 let is_dir = status.state == "directory";
 
                 items.push(TcfsFileItem {
@@ -237,12 +231,10 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
             // Use Hydrate RPC — daemon handles download, decryption, assembly
             let mut stream = prov
                 .client
-                .hydrate(tonic::Request::new(
-                    tcfs_core::proto::HydrateRequest {
-                        stub_path: item_str.to_string(),
-                        partial_ok: false,
-                    },
-                ))
+                .hydrate(tonic::Request::new(tcfs_core::proto::HydrateRequest {
+                    stub_path: item_str.to_string(),
+                    partial_ok: false,
+                }))
                 .await?
                 .into_inner();
 
@@ -258,7 +250,9 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
             }
 
             if local_path.is_empty() {
-                return Err(tonic::Status::internal("hydrate completed without local_path"));
+                return Err(tonic::Status::internal(
+                    "hydrate completed without local_path",
+                ));
             }
 
             // Copy the daemon's hydrated file to the FileProvider's destination
@@ -312,9 +306,9 @@ pub unsafe extern "C" fn tcfs_provider_upload(
         };
 
         let upload_result = prov.runtime.block_on(async {
-            let data = tokio::fs::read(local_str).await.map_err(|e| {
-                tonic::Status::internal(format!("read local file: {e}"))
-            })?;
+            let data = tokio::fs::read(local_str)
+                .await
+                .map_err(|e| tonic::Status::internal(format!("read local file: {e}")))?;
 
             let remote_path = format!(
                 "{}/{}",
@@ -388,12 +382,10 @@ pub unsafe extern "C" fn tcfs_provider_delete(
         let delete_result = prov.runtime.block_on(async {
             let resp = prov
                 .client
-                .unsync(tonic::Request::new(
-                    tcfs_core::proto::UnsyncRequest {
-                        path: item_str.to_string(),
-                        force: true,
-                    },
-                ))
+                .unsync(tonic::Request::new(tcfs_core::proto::UnsyncRequest {
+                    path: item_str.to_string(),
+                    force: true,
+                }))
                 .await?
                 .into_inner();
 

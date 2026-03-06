@@ -10,7 +10,9 @@ use opendal::Operator;
 use std::path::Path;
 use tempfile::TempDir;
 
-use tcfs_sync::engine::{download_file, download_file_with_device, upload_file, upload_file_with_device};
+use tcfs_sync::engine::{
+    download_file, download_file_with_device, upload_file, upload_file_with_device,
+};
 use tcfs_sync::state::StateCache;
 
 fn memory_operator() -> Operator {
@@ -48,7 +50,9 @@ async fn placeholder_lifecycle_basic() {
     assert!(upload.chunks > 0);
 
     // Step 2: Verify state cache has the entry
-    let cached = state.get(&src).expect("state cache should have entry after push");
+    let cached = state
+        .get(&src)
+        .expect("state cache should have entry after push");
     assert_eq!(cached.size, original.len() as u64);
     assert!(!cached.blake3.is_empty(), "blake3 hash should be recorded");
     assert!(
@@ -218,8 +222,7 @@ async fn placeholder_lifecycle_selective_rehydrate() {
 
     let beta_content = std::fs::read(&hydrated_beta).unwrap();
     assert_eq!(
-        beta_content,
-        b"content of beta",
+        beta_content, b"content of beta",
         "rehydrated beta content must match"
     );
 }
