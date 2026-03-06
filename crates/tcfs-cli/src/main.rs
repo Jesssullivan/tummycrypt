@@ -11,8 +11,10 @@
 //!   sync-status [<path>]         - show local sync state for a file/dir
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
+use secrecy::ExposeSecret;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -174,6 +176,20 @@ enum Commands {
         #[arg(long)]
         cred_file: Option<PathBuf>,
         /// Non-interactive mode (reads new credentials from environment)
+        #[arg(long)]
+        non_interactive: bool,
+    },
+
+    /// Rotate the master encryption key (re-wraps all file keys)
+    #[command(name = "rotate-key")]
+    RotateKey {
+        /// Path to old master key file (default: ~/.config/tcfs/master.key)
+        #[arg(long)]
+        old_key_file: Option<PathBuf>,
+        /// Use passphrase for the new key (instead of generating a mnemonic)
+        #[arg(long)]
+        password: bool,
+        /// Non-interactive mode (generate and print mnemonic without prompt)
         #[arg(long)]
         non_interactive: bool,
     },
@@ -343,6 +359,11 @@ async fn main() -> Result<()> {
             cred_file,
             non_interactive,
         } => cmd_rotate_credentials(&config, cred_file.as_deref(), non_interactive).await,
+        Commands::RotateKey {
+            old_key_file,
+            password,
+            non_interactive,
+        } => cmd_rotate_key(&config, old_key_file.as_deref(), password, non_interactive).await,
     }
 }
 
@@ -1651,6 +1672,206 @@ async fn cmd_auth_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     } else {
         println!("Encryption: DISABLED (crypto.enabled = false in config)");
     }
+    Ok(())
+}
+
+// ── `tcfs rotate-key` ─────────────────────────────────────────────────────
+
+async fn cmd_rotate_key(
+    config: &tcfs_core::config::TcfsConfig,
+    old_key_file: Option<&Path>,
+    use_password: bool,
+    non_interactive: bool,
+) -> Result<()> {
+    use tcfs_crypto::{MasterKey, KEY_SIZE};
+
+    // Step 1: Load old master key
+    let key_path = old_key_file
+        .map(|p| p.to_path_buf())
+        .or_else(|| config.crypto.master_key_file.clone())
+        .unwrap_or_else(|| {
+            tcfs_secrets::device::default_registry_path()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("master.key")
+        });
+
+    let old_bytes = std::fs::read(&key_path)
+        .with_context(|| format!("reading old master key: {}", key_path.display()))?;
+    if old_bytes.len() != KEY_SIZE {
+        anyhow::bail!(
+            "old master key has wrong size: {} bytes (expected {})",
+            old_bytes.len(),
+            KEY_SIZE
+        );
+    }
+    let mut old_key_bytes = [0u8; KEY_SIZE];
+    old_key_bytes.copy_from_slice(&old_bytes);
+    let old_master = MasterKey::from_bytes(old_key_bytes);
+
+    println!("Old master key loaded from: {}", key_path.display());
+
+    // Step 2: Generate new master key
+    let new_master = if use_password {
+        let passphrase =
+            rpassword::prompt_password("New master passphrase: ").context("reading passphrase")?;
+        let confirm =
+            rpassword::prompt_password("Confirm passphrase: ").context("reading confirmation")?;
+        if passphrase != confirm {
+            anyhow::bail!("passphrases do not match");
+        }
+
+        println!("Deriving new master key from passphrase...");
+        let salt: [u8; 16] = rand::random();
+        tcfs_crypto::derive_master_key(
+            &secrecy::SecretString::from(passphrase),
+            &salt,
+            &tcfs_crypto::kdf::KdfParams::default(),
+        )?
+    } else {
+        let (mnemonic, master_key) = tcfs_crypto::generate_mnemonic()?;
+
+        if non_interactive {
+            println!("\nNew BIP-39 recovery mnemonic:");
+            println!("{mnemonic}");
+        } else {
+            println!("\n{}", "=".repeat(60));
+            println!("NEW RECOVERY MNEMONIC (write this down!):");
+            println!("{}", "=".repeat(60));
+            println!("\n  {mnemonic}\n");
+            println!("{}", "=".repeat(60));
+            println!("This mnemonic is the ONLY way to recover your new master key.");
+            println!("Store it securely and NEVER share it.\n");
+
+            let confirm = rpassword::prompt_password("Type 'ROTATE' to confirm key rotation: ")
+                .context("reading confirmation")?;
+            if confirm != "ROTATE" {
+                anyhow::bail!("key rotation cancelled");
+            }
+        }
+        master_key
+    };
+
+    // Step 3: Connect to storage and enumerate manifests
+    let cred_store = tcfs_secrets::CredStore::load(&config.secrets, &config.storage)
+        .await
+        .context("loading credentials for S3 access")?;
+
+    let s3 = cred_store
+        .s3
+        .as_ref()
+        .context("no S3 credentials available")?;
+
+    let op = tcfs_storage::operator::build_from_core_config(
+        &config.storage,
+        &s3.access_key_id,
+        s3.secret_access_key.expose_secret(),
+    )?;
+
+    let manifest_prefix = format!("{}/manifests/", config.storage.bucket);
+    println!("Scanning manifests at: {manifest_prefix}");
+
+    let entries = op
+        .list(&manifest_prefix)
+        .await
+        .context("listing manifests from S3")?;
+
+    let mut rotated = 0u64;
+    let mut skipped = 0u64;
+    let mut errors = 0u64;
+
+    for entry in entries {
+        let path = entry.path().to_string();
+        if entry.metadata().is_dir() {
+            continue;
+        }
+
+        // Read manifest
+        let data = match op.read(&path).await {
+            Ok(d) => d.to_bytes(),
+            Err(e) => {
+                eprintln!("  WARN: failed to read {path}: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+
+        let mut manifest: tcfs_sync::manifest::SyncManifest =
+            match tcfs_sync::manifest::SyncManifest::from_bytes(&data) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("  WARN: failed to parse {path}: {e}");
+                    errors += 1;
+                    continue;
+                }
+            };
+
+        // Only rotate manifests that have wrapped file keys
+        let wrapped_b64 = match &manifest.encrypted_file_key {
+            Some(k) => k.clone(),
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // Unwrap with old key, re-wrap with new key
+        let wrapped_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&wrapped_b64)
+            .context("decoding wrapped file key")?;
+
+        let file_key = match tcfs_crypto::unwrap_key(&old_master, &wrapped_bytes) {
+            Ok(fk) => fk,
+            Err(e) => {
+                eprintln!("  WARN: unwrap failed for {path}: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+
+        let new_wrapped = tcfs_crypto::wrap_key(&new_master, &file_key)?;
+        let new_wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&new_wrapped);
+
+        manifest.encrypted_file_key = Some(new_wrapped_b64);
+
+        // Write back
+        let new_data = serde_json::to_vec(&manifest).context("serializing rotated manifest")?;
+        op.write(&path, new_data)
+            .await
+            .with_context(|| format!("writing rotated manifest: {path}"))?;
+
+        rotated += 1;
+    }
+
+    // Step 4: Write new master key file
+    std::fs::write(&key_path, new_master.as_bytes())
+        .with_context(|| format!("writing new master key: {}", key_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    println!("\nKey rotation complete:");
+    println!("  Manifests rotated: {rotated}");
+    println!("  Manifests skipped (plaintext): {skipped}");
+    if errors > 0 {
+        println!("  Errors: {errors}");
+    }
+    println!("  New master key: {}", key_path.display());
+
+    // Step 5: Notify daemon to reload if running
+    if let Ok(mut client) = connect_daemon(&config.daemon.socket).await {
+        let key_bytes = std::fs::read(&key_path)?;
+        let _ = client
+            .auth_unlock(tcfs_core::proto::AuthUnlockRequest {
+                master_key: key_bytes,
+            })
+            .await;
+        println!("  Daemon notified with new key.");
+    }
+
     Ok(())
 }
 
