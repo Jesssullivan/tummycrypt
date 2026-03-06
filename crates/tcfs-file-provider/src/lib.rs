@@ -149,9 +149,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
                 salt[..copy_len].copy_from_slice(&salt_bytes[..copy_len]);
 
                 let params = tcfs_crypto::kdf::KdfParams {
-                    mem_cost_kib: config["argon2_mem_cost_kib"]
-                        .as_u64()
-                        .unwrap_or(65536) as u32,
+                    mem_cost_kib: config["argon2_mem_cost_kib"].as_u64().unwrap_or(65536) as u32,
                     time_cost: config["argon2_time_cost"].as_u64().unwrap_or(3) as u32,
                     parallelism: config["argon2_parallelism"].as_u64().unwrap_or(4) as u32,
                 };
@@ -372,7 +370,8 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
 
                 // Decrypt if E2EE
                 if let Some(ref fk) = file_key {
-                    let plaintext = tcfs_crypto::decrypt_chunk(fk, idx as u64, &file_id_bytes, &chunk_bytes)?;
+                    let plaintext =
+                        tcfs_crypto::decrypt_chunk(fk, idx as u64, &file_id_bytes, &chunk_bytes)?;
                     assembled.extend_from_slice(&plaintext);
                 } else {
                     assembled.extend_from_slice(&chunk_bytes);
@@ -430,7 +429,10 @@ pub unsafe extern "C" fn tcfs_provider_upload(
             let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data));
 
             // Generate per-file encryption key if E2EE is enabled
-            let file_key = prov.master_key.as_ref().map(|_| tcfs_crypto::generate_file_key());
+            let file_key = prov
+                .master_key
+                .as_ref()
+                .map(|_| tcfs_crypto::generate_file_key());
             let file_id_bytes: [u8; 32] = {
                 let h = tcfs_chunks::hash_bytes(&data);
                 let mut arr = [0u8; 32];
@@ -458,9 +460,7 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                     prov.remote_prefix.trim_end_matches('/'),
                     hash
                 );
-                prov.operator
-                    .write(&chunk_key, upload_bytes)
-                    .await?;
+                prov.operator.write(&chunk_key, upload_bytes).await?;
                 chunk_hashes.push(hash);
             }
 
