@@ -184,14 +184,20 @@ class TcfsOverlayExtension(
                     self._call_action("Unsync", path)
 
     def _on_resolve_conflict(self, _menu_item, files):
-        """Open conflict resolution.
+        """Open conflict resolution in a terminal."""
+        import subprocess
 
-        For now this just calls Sync which will trigger the daemon's
-        conflict resolver. A future version could open a dedicated GUI.
-        """
         for f in files:
             loc = f.get_location()
             if loc:
                 path = loc.get_path()
                 if path and self._get_status(path) == "conflict":
-                    self._call_action("Sync", path)
+                    # Launch tcfs resolve in a terminal for interactive resolution
+                    try:
+                        subprocess.Popen(
+                            ["tcfs", "resolve", path],
+                            start_new_session=True,
+                        )
+                    except FileNotFoundError:
+                        # tcfs CLI not in PATH — try via D-Bus fallback
+                        self._call_action("Sync", path)

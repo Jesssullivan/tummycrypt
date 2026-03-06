@@ -39,6 +39,10 @@ pub struct SyncState {
     /// Device ID that performed this sync
     #[serde(default)]
     pub device_id: String,
+    /// Conflict info if a vclock divergence was detected during sync.
+    /// Set by the sync engine, cleared by `tcfs resolve`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<crate::conflict::ConflictInfo>,
 }
 
 /// In-memory state cache, persisted to a JSON file
@@ -577,6 +581,7 @@ pub fn make_sync_state_full(
         last_synced: now,
         vclock,
         device_id,
+        conflict: None,
     })
 }
 
@@ -612,6 +617,7 @@ mod tests {
                 last_synced: 9999,
                 vclock: VectorClock::new(),
                 device_id: String::new(),
+                conflict: None,
             },
         );
         cache.flush().unwrap();
@@ -643,6 +649,7 @@ mod tests {
                 last_synced: 9999,
                 vclock: VectorClock::new(),
                 device_id: String::new(),
+                conflict: None,
             },
         );
         assert_eq!(cache.len(), 1);
@@ -673,6 +680,7 @@ mod tests {
                     last_synced: 9999,
                     vclock: VectorClock::new(),
                     device_id: String::new(),
+                    conflict: None,
                 },
             );
         }
