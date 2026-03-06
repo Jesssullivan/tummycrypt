@@ -88,6 +88,9 @@ echo "==> Compiling FileProvider extension..."
     "$SCRIPT_DIR/Sources/Extension/extension_main.m"
 
 # Compile Swift sources + link everything
+# -disable-modules-validate-system-headers: work around CLT packaging bug where
+# the compiler version (e.g. Swift 6.2.4) is newer than the SDK's pre-built
+# Swift module interfaces (e.g. Swift 6.2). Safe for production builds.
 /usr/bin/swiftc \
     -sdk "$SDKPATH" \
     -parse-as-library \
@@ -95,6 +98,7 @@ echo "==> Compiling FileProvider extension..."
     -framework Foundation \
     -target arm64-apple-macos${MIN_MACOS} \
     -import-objc-header "$RUST_HEADER" \
+    -Xfrontend -disable-modules-validate-system-headers \
     -Xlinker -all_load \
     -L "$RUST_LIB_DIR" -ltcfs_file_provider \
     -lc++ \
@@ -112,6 +116,7 @@ echo "==> Compiling host app..."
     -framework FileProvider \
     -framework Foundation \
     -target arm64-apple-macos${MIN_MACOS} \
+    -Xfrontend -disable-modules-validate-system-headers \
     -O \
     -o TCFSProvider \
     "$SCRIPT_DIR/Sources/HostApp/"*.swift
