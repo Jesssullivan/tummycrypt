@@ -1332,69 +1332,111 @@ async fn cmd_init(
 ) -> Result<()> {
     let device_name = device_name.unwrap_or_else(tcfs_secrets::device::default_device_name);
 
-    // Check if already initialized
-    let registry_path = tcfs_secrets::device::default_registry_path();
-    let registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
-    if registry.find(&device_name).is_some() {
+    // Step 1: Check if already initialized (master key file exists)
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".config")
+        })
+        .join("tcfs");
+    let master_key_path = config_dir.join("master.key");
+
+    if master_key_path.exists() {
         anyhow::bail!(
-            "Device '{}' is already enrolled. Use 'tcfs device list' to see devices.",
-            device_name
+            "Already initialized: {} exists. Remove it to re-initialize.",
+            master_key_path.display()
         );
     }
 
-    // Get master passphrase
-    let passphrase = if non_interactive {
-        password.context("--password is required in non-interactive mode")?
-    } else {
-        let p = rpassword::prompt_password("Master passphrase: ")
-            .context("failed to read passphrase")?;
-        let confirm = rpassword::prompt_password("Confirm passphrase: ")
-            .context("failed to read confirmation")?;
-        if p != confirm {
-            anyhow::bail!("Passphrases do not match");
+    // Step 2-4: Derive or generate master key
+    let master_key = if let Some(ref pw) = password {
+        // Password provided: derive master key from passphrase via Argon2id
+        println!("Deriving master key from passphrase...");
+        let salt: [u8; 16] = rand_salt();
+        tcfs_crypto::derive_master_key(
+            &secrecy::SecretString::from(pw.clone()),
+            &salt,
+            &tcfs_crypto::kdf::KdfParams::default(),
+        )?
+    } else if non_interactive {
+        // Non-interactive, no password: generate mnemonic, print it, no prompt
+        println!("Generating BIP-39 recovery mnemonic...");
+        let (mnemonic, master_key) = tcfs_crypto::generate_mnemonic()?;
+        println!();
+        println!("RECOVERY MNEMONIC (store this securely):");
+        println!();
+        let words: Vec<&str> = mnemonic.split_whitespace().collect();
+        for (i, chunk) in words.chunks(4).enumerate() {
+            println!("  {:2}. {}", i * 4 + 1, chunk.join("  "));
         }
-        p
+        println!();
+        master_key
+    } else {
+        // Interactive, no password: generate mnemonic, display prominently, confirm
+        println!("Generating BIP-39 recovery mnemonic...");
+        let (mnemonic, master_key) = tcfs_crypto::generate_mnemonic()?;
+        println!();
+        println!("╔══════════════════════════════════════════════════════════════╗");
+        println!("║  RECOVERY MNEMONIC — WRITE THIS DOWN AND STORE IT SAFELY   ║");
+        println!("╠══════════════════════════════════════════════════════════════╣");
+        println!("║                                                              ║");
+        let words: Vec<&str> = mnemonic.split_whitespace().collect();
+        for (i, chunk) in words.chunks(4).enumerate() {
+            let line = format!("  {:2}. {}", i * 4 + 1, chunk.join("  "));
+            println!("║ {:<60} ║", line);
+        }
+        println!("║                                                              ║");
+        println!("╚══════════════════════════════════════════════════════════════╝");
+        println!();
+        println!("This mnemonic is the ONLY way to recover your master key.");
+        println!("It will NOT be shown again.");
+        println!();
+
+        // Ask user to confirm they wrote it down
+        let confirmation = rpassword::prompt_password(
+            "Type 'yes' to confirm you have written down the mnemonic: ",
+        )
+        .context("failed to read confirmation")?;
+        if confirmation.trim().to_lowercase() != "yes" {
+            anyhow::bail!("Initialization aborted. Please run 'tcfs init' again when ready.");
+        }
+        master_key
     };
 
-    // Generate recovery mnemonic
-    println!("Creating tcfs identity...");
-    let (mnemonic, _master_key) = tcfs_crypto::generate_mnemonic()?;
+    // Step 5: Write master key to ~/.config/tcfs/master.key (raw 32 bytes)
+    std::fs::create_dir_all(&config_dir)
+        .with_context(|| format!("creating config dir: {}", config_dir.display()))?;
+    std::fs::write(&master_key_path, master_key.as_bytes())
+        .with_context(|| format!("writing master key: {}", master_key_path.display()))?;
 
-    // Derive master key from passphrase
-    let salt: [u8; 16] = rand_salt();
-    let master_key = tcfs_crypto::derive_master_key(
-        &secrecy::SecretString::from(passphrase),
-        &salt,
-        &tcfs_crypto::kdf::KdfParams::default(),
-    )?;
+    // Restrict permissions to owner-only (Unix)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&master_key_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on: {}", master_key_path.display()))?;
+    }
 
-    // Generate a device file key and store it
-    let file_key = tcfs_crypto::generate_file_key();
-    let _wrapped = tcfs_crypto::wrap_key(&master_key, &file_key)?;
-
-    // Register device
+    // Step 6: Create device registry and enroll this device
+    let registry_path = tcfs_secrets::device::default_registry_path();
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
     let public_key = format!("age1-device-{}", &blake3_short(&device_name));
     let device_id = registry.enroll(&device_name, &public_key, None);
     registry.save(&registry_path)?;
 
+    // Step 7: Print success message
     println!();
-    println!("Your recovery phrase (WRITE THIS DOWN):");
+    println!("tcfs initialized successfully.");
     println!();
-    // Display mnemonic in groups of 4 words
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
-    for (i, chunk) in words.chunks(4).enumerate() {
-        println!("  {:2}. {}", i * 4 + 1, chunk.join("  "));
-    }
-    println!();
-    println!("Device name:     {}", device_name);
-    println!("Device ID:       {}", device_id);
-    println!("Registry:        {}", registry_path.display());
+    println!("  Device name:  {}", device_name);
+    println!("  Device ID:    {}", device_id);
+    println!("  Master key:   {}", master_key_path.display());
+    println!("  Registry:     {}", registry_path.display());
     println!();
     println!("Next steps:");
-    println!("  1. Store your recovery phrase in a safe place");
-    println!("  2. Configure storage: tcfs config show");
-    println!("  3. Push files: tcfs push /path/to/files");
+    println!("  1. Configure storage: tcfs config show");
+    println!("  2. Push files: tcfs push /path/to/files");
 
     Ok(())
 }
