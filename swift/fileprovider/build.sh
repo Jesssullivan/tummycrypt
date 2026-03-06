@@ -51,7 +51,8 @@ echo "    Output:     $OUTPUT_DIR"
 # The config only changes when credentials rotate, which triggers
 # a home-manager rebuild anyway.
 CONFIG_PATH="${TCFS_FP_CONFIG:-$HOME/.config/tcfs/fileprovider/config.json}"
-EMBEDDED_CONFIG_SWIFT="$SCRIPT_DIR/Sources/Extension/EmbeddedConfig.generated.swift"
+mkdir -p "$OUTPUT_DIR"
+EMBEDDED_CONFIG_SWIFT="$OUTPUT_DIR/EmbeddedConfig.generated.swift"
 
 if [ -f "$CONFIG_PATH" ]; then
     CONFIG_B64=$(base64 < "$CONFIG_PATH" | tr -d '\n')
@@ -100,6 +101,7 @@ echo "==> Compiling FileProvider extension..."
     -O \
     -o TCFSFileProvider \
     "$SCRIPT_DIR/Sources/Extension/"*.swift \
+    "$EMBEDDED_CONFIG_SWIFT" \
     extension_main.o
 
 # --- Compile host app binary ---
