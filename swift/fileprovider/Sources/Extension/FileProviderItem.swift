@@ -54,7 +54,17 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         if contentType == .folder {
             return [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems, .allowsDeleting, .allowsRenaming]
         }
-        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting, .allowsEvicting]
+        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting]
+    }
+
+    /// Content policy controls eviction (dehydration) for placeholder support.
+    /// `.downloadLazilyAndEvictOnRemoteUpdate` means files are only downloaded
+    /// when opened and automatically evicted when a newer remote version exists.
+    var contentPolicy: NSFileProviderContentPolicy {
+        if contentType == .folder {
+            return .inherited
+        }
+        return .downloadLazilyAndEvictOnRemoteUpdate
     }
 
     static func rootItem() -> TCFSFileProviderItem {
