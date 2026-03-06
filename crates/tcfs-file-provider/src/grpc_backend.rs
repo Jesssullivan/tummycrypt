@@ -144,34 +144,28 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
         };
 
         let enumerate_result = prov.runtime.block_on(async {
-            // Query sync status for the path — the daemon returns file metadata
+            // Query daemon for all files matching the prefix
             let resp = prov
                 .client
-                .sync_status(tonic::Request::new(tcfs_core::proto::SyncStatusRequest {
-                    path: rel_path.to_string(),
+                .list_files(tonic::Request::new(tcfs_core::proto::ListFilesRequest {
+                    prefix: rel_path.to_string(),
                 }))
                 .await?;
 
-            let status = resp.into_inner();
+            let list = resp.into_inner();
 
-            // The daemon returns a single file's status. For directory enumeration,
-            // we need to list files. Use the Watch RPC to get initial state, or
-            // fall back to status queries. For now, return the single item if found.
-            let mut items: Vec<TcfsFileItem> = Vec::new();
-
-            if !status.path.is_empty() && status.state != "not_found" {
-                let filename = status.path.rsplit('/').next().unwrap_or(&status.path);
-                let is_dir = status.state == "directory";
-
-                items.push(TcfsFileItem {
-                    item_id: to_c_string(&status.path),
-                    filename: to_c_string(filename),
-                    file_size: status.size,
-                    modified_timestamp: status.last_synced,
-                    is_directory: is_dir,
-                    content_hash: to_c_string(&status.blake3),
-                });
-            }
+            let items: Vec<TcfsFileItem> = list
+                .files
+                .into_iter()
+                .map(|entry| TcfsFileItem {
+                    item_id: to_c_string(&entry.path),
+                    filename: to_c_string(&entry.filename),
+                    file_size: entry.size,
+                    modified_timestamp: entry.last_synced,
+                    is_directory: entry.is_directory,
+                    content_hash: to_c_string(&entry.blake3),
+                })
+                .collect();
 
             Ok::<Vec<TcfsFileItem>, tonic::Status>(items)
         });

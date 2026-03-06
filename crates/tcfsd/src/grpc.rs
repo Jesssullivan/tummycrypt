@@ -16,6 +16,7 @@ use tcfs_core::proto::{
     tcfs_daemon_server::{TcfsDaemon, TcfsDaemonServer},
     *,
 };
+use tcfs_sync::state::StateCacheBackend;
 
 /// Implementation of the TcfsDaemon gRPC service
 pub struct TcfsDaemonImpl {
@@ -650,6 +651,46 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 }))
             }
         }
+    }
+
+    // ── List Files ────────────────────────────────────────────────────────
+
+    async fn list_files(
+        &self,
+        request: tonic::Request<ListFilesRequest>,
+    ) -> Result<tonic::Response<ListFilesResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let prefix = req.prefix;
+
+        let cache = self.state_cache.lock().await;
+        let all = cache.all_entries();
+
+        let files: Vec<FileEntry> = all
+            .into_iter()
+            .filter(|(_, state)| {
+                if prefix.is_empty() {
+                    return true;
+                }
+                // Match entries whose remote_path contains the prefix
+                state.remote_path.contains(&prefix)
+            })
+            .map(|(key, state): (String, &tcfs_sync::state::SyncState)| {
+                // Extract filename from the key (last path component)
+                let filename = key.rsplit('/').next().unwrap_or(&key).to_string();
+                let is_directory = state.remote_path.ends_with('/');
+
+                FileEntry {
+                    path: state.remote_path.clone(),
+                    filename,
+                    size: state.size,
+                    last_synced: state.last_synced as i64,
+                    is_directory,
+                    blake3: state.blake3.clone(),
+                }
+            })
+            .collect();
+
+        Ok(tonic::Response::new(ListFilesResponse { files }))
     }
 
     // ── Resolve Conflict ──────────────────────────────────────────────────
