@@ -357,8 +357,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         match result {
             Ok(upload) => {
                 // Record conflict in state cache if detected
-                if let Some(tcfs_sync::conflict::SyncOutcome::Conflict(ref info)) = upload.outcome
-                {
+                if let Some(tcfs_sync::conflict::SyncOutcome::Conflict(ref info)) = upload.outcome {
                     tracing::warn!(
                         path = %path,
                         local_device = %info.local_device,

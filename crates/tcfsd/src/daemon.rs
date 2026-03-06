@@ -320,11 +320,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     if let Some(entry) =
                                                         cache.get(&task.path).cloned()
                                                     {
-                                                        let updated =
-                                                            tcfs_sync::state::SyncState {
-                                                                conflict: Some(info.clone()),
-                                                                ..entry
-                                                            };
+                                                        let updated = tcfs_sync::state::SyncState {
+                                                            conflict: Some(info.clone()),
+                                                            ..entry
+                                                        };
                                                         cache.set(&task.path, updated);
                                                     }
                                                     // Emit status change for D-Bus listeners
