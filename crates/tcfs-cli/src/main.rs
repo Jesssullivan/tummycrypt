@@ -193,6 +193,18 @@ enum Commands {
         #[arg(long)]
         non_interactive: bool,
     },
+
+    /// Resolve a sync conflict for a file
+    ///
+    /// When two devices modify the same file without syncing, a conflict is
+    /// detected. Use this command to pick a resolution strategy.
+    Resolve {
+        /// Path to the conflicted file
+        path: PathBuf,
+        /// Resolution strategy: keep-local, keep-remote, keep-both, or defer
+        #[arg(long, short = 's', value_parser = ["keep-local", "keep-remote", "keep-both", "defer"])]
+        strategy: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -364,6 +376,9 @@ async fn main() -> Result<()> {
             password,
             non_interactive,
         } => cmd_rotate_key(&config, old_key_file.as_deref(), password, non_interactive).await,
+        Commands::Resolve { path, strategy } => {
+            cmd_resolve(&config, &path, strategy.as_deref()).await
+        }
     }
 }
 
@@ -1954,6 +1969,64 @@ async fn cmd_rotate_credentials(
 }
 
 // ── Interactive conflict resolver ──────────────────────────────────────────
+
+// ── `tcfs resolve` ───────────────────────────────────────────────────────────
+
+async fn cmd_resolve(
+    config: &tcfs_core::config::TcfsConfig,
+    path: &Path,
+    strategy: Option<&str>,
+) -> Result<()> {
+    let resolution = match strategy {
+        Some(s) => s.replace('-', "_"),
+        None => {
+            // Interactive mode: reuse the existing interactive resolver
+            let dummy_info = tcfs_sync::conflict::ConflictInfo {
+                rel_path: path.to_string_lossy().to_string(),
+                local_blake3: String::new(),
+                remote_blake3: String::new(),
+                local_device: "local".to_string(),
+                remote_device: "remote".to_string(),
+                local_vclock: tcfs_sync::conflict::VectorClock::new(),
+                remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+                detected_at: 0,
+            };
+            match resolve_conflict_interactive(&dummy_info) {
+                tcfs_sync::conflict::Resolution::KeepLocal => "keep_local".to_string(),
+                tcfs_sync::conflict::Resolution::KeepRemote => "keep_remote".to_string(),
+                tcfs_sync::conflict::Resolution::KeepBoth => "keep_both".to_string(),
+                tcfs_sync::conflict::Resolution::Defer => {
+                    println!("Conflict deferred.");
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    // Call daemon's ResolveConflict gRPC
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let resp = client
+        .resolve_conflict(tonic::Request::new(
+            tcfs_core::proto::ResolveConflictRequest {
+                path: path.to_string_lossy().to_string(),
+                resolution: resolution.clone(),
+            },
+        ))
+        .await
+        .context("resolve_conflict RPC failed")?
+        .into_inner();
+
+    if resp.success {
+        println!("Conflict resolved ({}): {}", resolution, path.display());
+        if !resp.resolved_path.is_empty() && resp.resolved_path != path.to_string_lossy() {
+            println!("  Conflict copy: {}", resp.resolved_path);
+        }
+    } else {
+        anyhow::bail!("resolution failed: {}", resp.error);
+    }
+
+    Ok(())
+}
 
 /// Prompt the user to resolve a sync conflict interactively.
 fn resolve_conflict_interactive(

@@ -15,6 +15,7 @@ members = [
     "crates/tcfs-tui",
     "crates/tcfs-mcp",
     "crates/tcfs-file-provider",
+    "crates/tcfs-dbus",
 ]
 
 [workspace.package]

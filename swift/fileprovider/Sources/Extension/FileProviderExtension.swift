@@ -103,7 +103,9 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     parentIdentifier: .rootContainer,
                     filename: itemId.components(separatedBy: "/").last ?? itemId,
                     isDirectory: false,
-                    fileSize: (try? FileManager.default.attributesOfItem(atPath: tempFile.path)[.size] as? UInt64) ?? 0
+                    fileSize: (try? FileManager.default.attributesOfItem(atPath: tempFile.path)[.size] as? UInt64) ?? 0,
+                    downloaded: true,
+                    uploaded: true
                 )
                 progress.completedUnitCount = 100
                 completionHandler(tempFile, item, nil)
@@ -196,7 +198,9 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                         parentIdentifier: itemTemplate.parentItemIdentifier,
                         filename: filename,
                         isDirectory: false,
-                        fileSize: fileSize
+                        fileSize: fileSize,
+                        downloaded: true,
+                        uploaded: true
                     )
                     progress.completedUnitCount = 100
                     completionHandler(item, [], false, nil)
@@ -248,7 +252,9 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                         parentIdentifier: item.parentItemIdentifier,
                         filename: item.filename,
                         isDirectory: false,
-                        fileSize: fileSize
+                        fileSize: fileSize,
+                        downloaded: true,
+                        uploaded: true
                     )
                     progress.completedUnitCount = 100
                     completionHandler(updatedItem, [], false, nil)
