@@ -356,6 +356,26 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         match result {
             Ok(upload) => {
+                // Record conflict in state cache if detected
+                if let Some(tcfs_sync::conflict::SyncOutcome::Conflict(ref info)) = upload.outcome
+                {
+                    tracing::warn!(
+                        path = %path,
+                        local_device = %info.local_device,
+                        remote_device = %info.remote_device,
+                        "push: conflict detected"
+                    );
+                    let mut cache = state_cache.lock().await;
+                    if let Some(entry) = cache.get(&local_path).cloned() {
+                        let updated = tcfs_sync::state::SyncState {
+                            conflict: Some(info.clone()),
+                            ..entry
+                        };
+                        cache.set(&local_path, updated);
+                        let _ = cache.flush();
+                    }
+                }
+
                 // Publish state event if NATS is connected and file was actually uploaded
                 if !upload.skipped {
                     // Read the actual vclock from state cache (keyed by temp local_path)
@@ -780,13 +800,14 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 }
                 drop(op);
 
-                // Update state cache
+                // Update state cache (clear conflict)
                 {
                     let mut cache = self.state_cache.lock().await;
                     if let Some(entry) = cache.get(&path).cloned() {
                         let updated = tcfs_sync::state::SyncState {
                             vclock,
                             last_synced: tcfs_sync::StateEvent::now(),
+                            conflict: None,
                             ..entry
                         };
                         cache.set(&path, updated);
