@@ -41,7 +41,7 @@ impl TcfsDaemonImpl {
         config: Arc<TcfsConfig>,
         storage_ok: bool,
         storage_endpoint: String,
-        state_cache: tcfs_sync::state::StateCache,
+        state_cache: Arc<TokioMutex<tcfs_sync::state::StateCache>>,
         operator: Arc<TokioMutex<Option<opendal::Operator>>>,
         device_id: String,
         device_name: String,
@@ -53,7 +53,7 @@ impl TcfsDaemonImpl {
             storage_ok,
             storage_endpoint,
             start_time: std::time::Instant::now(),
-            state_cache: Arc::new(TokioMutex::new(state_cache)),
+            state_cache,
             operator,
             device_id,
             device_name,
@@ -357,6 +357,15 @@ impl TcfsDaemon for TcfsDaemonImpl {
             Ok(upload) => {
                 // Publish state event if NATS is connected and file was actually uploaded
                 if !upload.skipped {
+                    // Read the actual vclock from state cache (keyed by temp local_path)
+                    let vclock = {
+                        let cache = state_cache.lock().await;
+                        cache
+                            .get(&local_path)
+                            .map(|e| e.vclock.clone())
+                            .unwrap_or_default()
+                    };
+
                     let nats = self.nats.clone();
                     let device_id = self.device_id.clone();
                     let rel_path = path.clone();
@@ -370,7 +379,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                                 rel_path,
                                 blake3,
                                 size,
-                                vclock: tcfs_sync::conflict::VectorClock::default(),
+                                vclock,
                                 manifest_path: remote_path,
                                 timestamp: tcfs_sync::StateEvent::now(),
                             };
@@ -427,7 +436,6 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let prefix = self.config.storage.bucket.clone();
         let local_path = std::path::PathBuf::from(&req.local_path);
-        let device_id = self.device_id.clone();
         let state_cache = self.state_cache.clone();
 
         let result = {
