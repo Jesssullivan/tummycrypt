@@ -78,6 +78,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
                 let itemId = item.item_id.map { String(cString: $0) } ?? ""
                 let filename = item.filename.map { String(cString: $0) } ?? ""
+                let contentHash = item.content_hash.map { String(cString: $0) } ?? "1"
 
                 // Items are created as placeholders (downloaded: false).
                 // Content will be fetched on demand via fetchContents.
@@ -89,7 +90,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                         isDirectory: item.is_directory,
                         fileSize: item.file_size,
                         downloaded: false,
-                        uploaded: true
+                        uploaded: true,
+                        versionTag: contentHash
                     )
                 )
             }
@@ -146,6 +148,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 let item = items[i]
                 let itemId = item.item_id.map { String(cString: $0) } ?? ""
                 let filename = item.filename.map { String(cString: $0) } ?? ""
+                let contentHash = item.content_hash.map { String(cString: $0) } ?? "1"
 
                 providerItems.append(
                     TCFSFileProviderItem(
@@ -155,7 +158,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                         isDirectory: item.is_directory,
                         fileSize: item.file_size,
                         downloaded: false,
-                        uploaded: true
+                        uploaded: true,
+                        versionTag: contentHash
                     )
                 )
             }
