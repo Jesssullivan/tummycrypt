@@ -24,10 +24,45 @@ pub struct TcfsProvider {
     client: TcfsDaemonClient<Channel>,
     /// Remote prefix for path construction
     remote_prefix: String,
+    /// Socket path for lazy reconnection
+    socket_path: String,
 }
 
-/// Connect to the daemon over a Unix domain socket.
-async fn connect(socket_path: &str) -> Result<TcfsDaemonClient<Channel>, anyhow::Error> {
+/// Connect to the daemon over a Unix domain socket with retry.
+///
+/// Retries up to `max_retries` times with exponential backoff (200ms base).
+/// This handles the case where the daemon hasn't started yet when the
+/// FileProvider extension is loaded by fileproviderd.
+async fn connect_with_retry(
+    socket_path: &str,
+    max_retries: u32,
+) -> Result<TcfsDaemonClient<Channel>, anyhow::Error> {
+    let mut last_err = None;
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let backoff = std::time::Duration::from_millis(200 * 2u64.pow(attempt - 1));
+            tokio::time::sleep(backoff).await;
+        }
+
+        match connect_once(socket_path).await {
+            Ok(client) => return Ok(client),
+            Err(e) => {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max = max_retries + 1,
+                    "connect to tcfsd failed: {e}"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("connect failed")))
+}
+
+/// Single connection attempt to the daemon over a Unix domain socket.
+async fn connect_once(socket_path: &str) -> Result<TcfsDaemonClient<Channel>, anyhow::Error> {
     let path = PathBuf::from(socket_path);
 
     let channel = Endpoint::from_static("http://[::]:0")
@@ -99,7 +134,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             Err(_) => return ptr::null_mut(),
         };
 
-        let client = match runtime.block_on(connect(&socket_path)) {
+        let client = match runtime.block_on(connect_with_retry(&socket_path, 4)) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("failed to connect to tcfsd at {}: {}", socket_path, e);
@@ -111,10 +146,26 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             runtime,
             client,
             remote_prefix: prefix,
+            socket_path,
         }))
     }));
 
     result.unwrap_or(ptr::null_mut())
+}
+
+impl TcfsProvider {
+    /// Attempt to reconnect if the daemon connection was lost.
+    fn try_reconnect(&mut self) {
+        match self.runtime.block_on(connect_once(&self.socket_path)) {
+            Ok(new_client) => {
+                tracing::info!("reconnected to tcfsd at {}", self.socket_path);
+                self.client = new_client;
+            }
+            Err(e) => {
+                tracing::warn!("reconnect to tcfsd failed: {e}");
+            }
+        }
+    }
 }
 
 /// Enumerate files by querying daemon sync status.
@@ -182,7 +233,8 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
                 TcfsError::TcfsErrorNone
             }
             Err(e) => {
-                tracing::error!("enumerate failed: {}", e);
+                tracing::error!("enumerate failed: {}, attempting reconnect", e);
+                prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }
         }
@@ -260,7 +312,8 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
         match fetch_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("fetch failed: {}", e);
+                tracing::error!("fetch failed: {}, attempting reconnect", e);
+                prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }
         }
@@ -341,7 +394,8 @@ pub unsafe extern "C" fn tcfs_provider_upload(
         match upload_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("upload failed: {}", e);
+                tracing::error!("upload failed: {}, attempting reconnect", e);
+                prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }
         }
@@ -393,7 +447,8 @@ pub unsafe extern "C" fn tcfs_provider_delete(
         match delete_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("delete failed: {}", e);
+                tracing::error!("delete failed: {}, attempting reconnect", e);
+                prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }
         }
@@ -470,7 +525,8 @@ pub unsafe extern "C" fn tcfs_provider_create_dir(
         match create_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("create_dir failed: {}", e);
+                tracing::error!("create_dir failed: {}, attempting reconnect", e);
+                prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }
         }
