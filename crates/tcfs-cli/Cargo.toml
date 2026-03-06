@@ -20,6 +20,7 @@ tcfs-fuse = { path = "../tcfs-fuse" }
 tcfs-crypto = { path = "../tcfs-crypto" }
 secrecy = { workspace = true }
 rand = { workspace = true }
+base64 = { workspace = true }
 blake3 = { workspace = true }
 fuse3 = { workspace = true, optional = true }
 opendal = { workspace = true }
