@@ -4956,6 +4956,7 @@ dependencies = [
  "service-manager",
  "tcfs-core",
  "tcfs-crypto",
+ "tcfs-dbus",
  "tcfs-fuse",
  "tcfs-secrets",
  "tcfs-storage",

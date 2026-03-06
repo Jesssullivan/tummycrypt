@@ -151,15 +151,16 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         false
     };
 
-    // Open state cache
-    let state_cache =
+    // Open state cache (wrapped in Arc<Mutex> for shared access)
+    let state_cache = Arc::new(tokio::sync::Mutex::new(
         tcfs_sync::state::StateCache::open(&config.sync.state_db).unwrap_or_else(|e| {
             warn!("state cache open failed: {e}  (starting fresh)");
             tcfs_sync::state::StateCache::open(&std::path::PathBuf::from(
                 "/tmp/tcfsd-state.db.json",
             ))
             .expect("fallback state cache")
-        });
+        }),
+    ));
 
     // Wrap operator in Arc<Mutex> for shared access
     let operator = Arc::new(tokio::sync::Mutex::new(operator));
@@ -211,8 +212,201 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         "fleet identity ready"
     );
 
+    // ── File Watcher + Scheduler ─────────────────────────────────────
+    // If sync_root is configured, start watching for local file changes
+    // and feed them through the priority scheduler for automatic sync.
+    let _watcher_handle = if let Some(ref sync_root) = config.sync.sync_root {
+        if sync_root.exists() {
+            let (watch_tx, mut watch_rx) = tokio::sync::mpsc::channel(256);
+            let watcher_config = tcfs_sync::watcher::WatcherConfig::default();
+
+            match tcfs_sync::watcher::FileWatcher::start(sync_root, watcher_config, watch_tx) {
+                Ok(watcher) => {
+                    info!(dir = %sync_root.display(), "file watcher active");
+
+                    let scheduler = std::sync::Arc::new(tcfs_sync::scheduler::SyncScheduler::new(
+                        tcfs_sync::scheduler::SchedulerConfig::default(),
+                    ));
+                    let scheduler_tx = scheduler.sender();
+
+                    // Watcher → Scheduler bridge: convert watch events to sync tasks
+                    tokio::spawn(async move {
+                        while let Some(event) = watch_rx.recv().await {
+                            let op = match event.kind {
+                                tcfs_sync::watcher::WatchEventKind::Created
+                                | tcfs_sync::watcher::WatchEventKind::Modified => {
+                                    tcfs_sync::scheduler::SyncOp::Push
+                                }
+                                tcfs_sync::watcher::WatchEventKind::Deleted => {
+                                    tcfs_sync::scheduler::SyncOp::Delete
+                                }
+                            };
+                            let task = tcfs_sync::scheduler::SyncTask::new(
+                                event.path,
+                                op,
+                                tcfs_sync::scheduler::Priority::Normal,
+                            );
+                            if scheduler_tx.send(task).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    // Scheduler run loop: dispatch tasks to sync engine
+                    let sched_operator = operator.clone();
+                    let sched_state = state_cache.clone();
+                    let sched_prefix = config.storage.bucket.clone();
+                    let sched_device = device_id.clone();
+                    let sched_sync_root = sync_root.clone();
+
+                    tokio::spawn({
+                        let scheduler = scheduler.clone();
+                        async move {
+                            scheduler
+                                .run(move |task| {
+                                    let op = sched_operator.clone();
+                                    let state = sched_state.clone();
+                                    let prefix = sched_prefix.clone();
+                                    let device = sched_device.clone();
+                                    let root = sched_sync_root.clone();
+
+                                    Box::pin(async move {
+                                        match task.op {
+                                            tcfs_sync::scheduler::SyncOp::Push => {
+                                                let op_guard = op.lock().await;
+                                                let op_ref =
+                                                    op_guard.as_ref().ok_or_else(|| {
+                                                        anyhow::anyhow!("no storage operator")
+                                                    })?;
+                                                let rel_path = task
+                                                    .path
+                                                    .strip_prefix(&root)
+                                                    .unwrap_or(&task.path)
+                                                    .to_string_lossy()
+                                                    .to_string();
+                                                let mut cache = state.lock().await;
+                                                tcfs_sync::engine::upload_file_with_device(
+                                                    op_ref,
+                                                    &task.path,
+                                                    &prefix,
+                                                    &mut cache,
+                                                    None,
+                                                    &device,
+                                                    Some(&rel_path),
+                                                    None,
+                                                )
+                                                .await?;
+                                                let _ = cache.flush();
+                                                info!(
+                                                    path = %task.path.display(),
+                                                    "watcher: auto-pushed"
+                                                );
+                                                Ok(())
+                                            }
+                                            tcfs_sync::scheduler::SyncOp::Delete => {
+                                                // Remove from state cache on delete
+                                                let mut cache = state.lock().await;
+                                                cache.remove(&task.path);
+                                                let _ = cache.flush();
+                                                info!(
+                                                    path = %task.path.display(),
+                                                    "watcher: removed from state"
+                                                );
+                                                Ok(())
+                                            }
+                                            tcfs_sync::scheduler::SyncOp::Pull => {
+                                                // Pull is handled by NATS events, not watcher
+                                                Ok(())
+                                            }
+                                        }
+                                    })
+                                })
+                                .await;
+                        }
+                    });
+
+                    Some(watcher)
+                }
+                Err(e) => {
+                    warn!(dir = %sync_root.display(), "file watcher failed to start: {e}");
+                    None
+                }
+            }
+        } else {
+            info!(dir = %sync_root.display(), "sync_root does not exist, watcher disabled");
+            None
+        }
+    } else {
+        None
+    };
+
     // Send systemd ready notification
     notify_ready();
+
+    // ── D-Bus status interface (Linux only) ──────────────────────────────
+    #[cfg(all(target_os = "linux", feature = "dbus"))]
+    let _dbus_conn = {
+        use tcfs_dbus::{StatusBackend, SyncStatus};
+
+        /// Real D-Bus backend backed by daemon state.
+        struct DaemonStatusBackend {
+            state_cache: Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+            operator: Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+            device_id: String,
+        }
+
+        impl StatusBackend for DaemonStatusBackend {
+            async fn get_status(&self, path: &str) -> SyncStatus {
+                let cache = self.state_cache.lock().await;
+                let p = std::path::Path::new(path);
+                match cache.get(p) {
+                    Some(_entry) => SyncStatus::Synced,
+                    None => {
+                        // Check if operator is available — if not, report unknown
+                        let op = self.operator.lock().await;
+                        if op.is_none() {
+                            SyncStatus::Unknown
+                        } else {
+                            SyncStatus::Placeholder
+                        }
+                    }
+                }
+            }
+
+            async fn sync(&self, path: &str) -> anyhow::Result<()> {
+                let op_guard = self.operator.lock().await;
+                let _op = op_guard
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no storage operator available"))?;
+                info!(path, device = %self.device_id, "D-Bus sync requested");
+                // TODO: wire to actual upload via sync engine
+                Ok(())
+            }
+
+            async fn unsync(&self, path: &str) -> anyhow::Result<()> {
+                info!(path, device = %self.device_id, "D-Bus unsync requested");
+                // TODO: wire to dehydration logic
+                Ok(())
+            }
+        }
+
+        let backend = DaemonStatusBackend {
+            state_cache: state_cache.clone(),
+            operator: operator.clone(),
+            device_id: device_id.clone(),
+        };
+
+        match tcfs_dbus::serve(backend).await {
+            Ok(conn) => {
+                info!("D-Bus service started on session bus");
+                Some(conn)
+            }
+            Err(e) => {
+                warn!("D-Bus service failed to start: {e}");
+                None
+            }
+        }
+    };
 
     // Start gRPC server
     let socket_path = config.daemon.socket.clone();
