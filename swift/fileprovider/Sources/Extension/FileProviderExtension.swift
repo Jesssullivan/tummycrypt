@@ -17,6 +17,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// `tcfs_provider_new()` creates a tokio runtime and S3 operator, which can
     /// take seconds — long enough to exceed fileproviderd's initial handshake timeout.
     private lazy var provider: OpaquePointer? = Self.createProvider()
+    /// FileProvider manager for signaling enumerator updates after mutations.
+    private lazy var manager: NSFileProviderManager? = NSFileProviderManager(for: domain)
 
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
@@ -108,6 +110,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     uploaded: true
                 )
                 progress.completedUnitCount = 100
+                self.signalEnumeratorUpdate(for: .rootContainer)
                 completionHandler(tempFile, item, nil)
             } else {
                 progress.completedUnitCount = 100
@@ -174,6 +177,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                         fileSize: 0
                     )
                     progress.completedUnitCount = 100
+                    self.signalEnumeratorUpdate(for: itemTemplate.parentItemIdentifier)
                     completionHandler(item, [], false, nil)
                 } else {
                     progress.completedUnitCount = 100
@@ -203,6 +207,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                         uploaded: true
                     )
                     progress.completedUnitCount = 100
+                    self.signalEnumeratorUpdate(for: itemTemplate.parentItemIdentifier)
                     completionHandler(item, [], false, nil)
                 } else {
                     progress.completedUnitCount = 100
@@ -257,6 +262,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                         uploaded: true
                     )
                     progress.completedUnitCount = 100
+                    self.signalEnumeratorUpdate(for: item.parentItemIdentifier)
                     completionHandler(updatedItem, [], false, nil)
                 } else {
                     progress.completedUnitCount = 100
@@ -287,6 +293,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     fileSize: (item.documentSize as? UInt64) ?? 0
                 )
                 progress.completedUnitCount = 100
+                self.signalEnumeratorUpdate(for: item.parentItemIdentifier)
                 completionHandler(renamedItem, [], false, nil)
             } else {
                 // No content or filename change — return item as-is
@@ -319,6 +326,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
             progress.completedUnitCount = 1
             if result == TCFS_ERROR_TCFS_ERROR_NONE {
+                self.signalEnumeratorUpdate(for: .rootContainer)
                 completionHandler(nil)
             } else {
                 completionHandler(Self.mapError(result))
@@ -326,6 +334,17 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
 
         return progress
+    }
+
+    // MARK: - Enumerator signaling
+
+    /// Signal fileproviderd to re-enumerate after a mutation so Finder updates immediately.
+    private func signalEnumeratorUpdate(for containerIdentifier: NSFileProviderItemIdentifier) {
+        manager?.signalEnumerator(for: containerIdentifier) { error in
+            if let error = error {
+                logger.warning("signalEnumerator failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Error mapping
