@@ -4767,6 +4767,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "cbindgen",
+ "hyper-util",
  "opendal",
  "secrecy",
  "serde_json",
@@ -4777,6 +4778,9 @@ dependencies = [
  "tcfs-sync",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower",
  "tracing",
 ]
 
