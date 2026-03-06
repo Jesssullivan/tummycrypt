@@ -4,6 +4,7 @@
 //! Device keys are stored in the platform keychain or an age-encrypted file.
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -147,20 +148,23 @@ impl DeviceRegistry {
         Ok(())
     }
 
-    /// Enroll a device and sync to remote S3.
+    /// Enroll a device with a real age X25519 keypair and sync to remote S3.
+    ///
+    /// Returns `(device_id, age_secret_key)`. The caller MUST persist the secret
+    /// key securely (e.g., keychain, encrypted file) — it is not recoverable.
     pub async fn enroll_remote(
         &mut self,
         op: &opendal::Operator,
         name: &str,
         meta_prefix: &str,
-    ) -> Result<String> {
-        let public_key = format!(
-            "age1-device-{}",
-            &blake3::hash(name.as_bytes()).to_hex().as_str()[..8]
-        );
+    ) -> Result<(String, String)> {
+        let identity = age::x25519::Identity::generate();
+        let public_key = identity.to_public().to_string();
+        let secret_key = identity.to_string().expose_secret().to_string();
+
         let device_id = self.enroll(name, &public_key, None);
         self.sync_to_remote(op, meta_prefix).await?;
-        Ok(device_id)
+        Ok((device_id, secret_key))
     }
 }
 

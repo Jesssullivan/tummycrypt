@@ -4661,11 +4661,14 @@ name = "tcfs-file-provider"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "cbindgen",
  "opendal",
+ "secrecy",
  "serde_json",
  "tcfs-chunks",
  "tcfs-core",
+ "tcfs-crypto",
  "tcfs-storage",
  "tcfs-sync",
  "thiserror 1.0.69",

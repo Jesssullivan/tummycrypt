@@ -13,7 +13,10 @@ crate-type = ["lib", "staticlib"]
 tcfs-core = { path = "../tcfs-core" }
 tcfs-storage = { path = "../tcfs-storage" }
 tcfs-chunks = { path = "../tcfs-chunks" }
+tcfs-crypto = { path = "../tcfs-crypto" }
 tcfs-sync = { path = "../tcfs-sync" }
+secrecy = { workspace = true }
+base64 = { workspace = true }
 opendal = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
