@@ -28,8 +28,7 @@ pub struct TcfsDaemonImpl {
     operator: Arc<TokioMutex<Option<opendal::Operator>>>,
     device_id: String,
     device_name: String,
-    #[allow(dead_code)] // Will be used when sync engine gets encryption support
-    master_key: Option<tcfs_crypto::MasterKey>,
+    master_key: Arc<TokioMutex<Option<tcfs_crypto::MasterKey>>>,
     nats_ok: std::sync::atomic::AtomicBool,
     nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
     active_mounts: Arc<TokioMutex<std::collections::HashMap<String, tokio::process::Child>>>,
@@ -58,7 +57,7 @@ impl TcfsDaemonImpl {
             operator,
             device_id,
             device_name,
-            master_key,
+            master_key: Arc::new(TokioMutex::new(master_key)),
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
             active_mounts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
@@ -989,6 +988,68 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(async_rx);
         Ok(tonic::Response::new(Box::pin(stream)))
+    }
+
+    // ── Auth (encryption key management) ────────────────────────────────
+
+    async fn auth_unlock(
+        &self,
+        request: tonic::Request<AuthUnlockRequest>,
+    ) -> Result<tonic::Response<AuthUnlockResponse>, tonic::Status> {
+        let req = request.into_inner();
+
+        if req.master_key.len() != tcfs_crypto::KEY_SIZE {
+            return Ok(tonic::Response::new(AuthUnlockResponse {
+                success: false,
+                error: format!(
+                    "master key must be {} bytes, got {}",
+                    tcfs_crypto::KEY_SIZE,
+                    req.master_key.len()
+                ),
+            }));
+        }
+
+        let mut key_bytes = [0u8; tcfs_crypto::KEY_SIZE];
+        key_bytes.copy_from_slice(&req.master_key);
+        let master_key = tcfs_crypto::MasterKey::from_bytes(key_bytes);
+
+        let mut guard = self.master_key.lock().await;
+        *guard = Some(master_key);
+
+        info!("encryption unlocked via gRPC");
+        Ok(tonic::Response::new(AuthUnlockResponse {
+            success: true,
+            error: String::new(),
+        }))
+    }
+
+    async fn auth_lock(
+        &self,
+        _request: tonic::Request<Empty>,
+    ) -> Result<tonic::Response<AuthLockResponse>, tonic::Status> {
+        let mut guard = self.master_key.lock().await;
+        let was_unlocked = guard.is_some();
+        *guard = None;
+
+        if was_unlocked {
+            info!("encryption locked via gRPC");
+        }
+
+        Ok(tonic::Response::new(AuthLockResponse {
+            success: true,
+            error: String::new(),
+        }))
+    }
+
+    async fn auth_status(
+        &self,
+        _request: tonic::Request<Empty>,
+    ) -> Result<tonic::Response<AuthStatusResponse>, tonic::Status> {
+        let guard = self.master_key.lock().await;
+        Ok(tonic::Response::new(AuthStatusResponse {
+            unlocked: guard.is_some(),
+            crypto_enabled: self.config.crypto.enabled,
+        }))
     }
 }
 

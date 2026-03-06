@@ -200,10 +200,16 @@ enum DeviceAction {
 
 #[derive(Subcommand, Debug)]
 enum AuthAction {
-    /// Unlock the encryption session (store master key in keychain)
-    Unlock,
-    /// Lock the encryption session (clear master key from keychain)
+    /// Unlock the encryption session (load master key into daemon)
+    Unlock {
+        /// Path to master key file (default: ~/.config/tcfs/master.key)
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Lock the encryption session (clear master key from daemon memory)
     Lock,
+    /// Show encryption session status
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -329,8 +335,9 @@ async fn main() -> Result<()> {
             DeviceAction::Status => cmd_device_status(),
         },
         Commands::Auth { action } => match action {
-            AuthAction::Unlock => cmd_auth_unlock(),
-            AuthAction::Lock => cmd_auth_lock(),
+            AuthAction::Unlock { key_file } => cmd_auth_unlock(&config, key_file.as_deref()).await,
+            AuthAction::Lock => cmd_auth_lock(&config).await,
+            AuthAction::Status => cmd_auth_status(&config).await,
         },
         Commands::RotateCredentials {
             cred_file,
@@ -1559,32 +1566,91 @@ fn cmd_device_status() -> Result<()> {
 
 // ── `tcfs auth unlock` / `tcfs auth lock` ────────────────────────────────────
 
-fn cmd_auth_unlock() -> Result<()> {
-    if !tcfs_secrets::keychain::is_available() {
+async fn cmd_auth_unlock(
+    config: &tcfs_core::config::TcfsConfig,
+    key_file: Option<&Path>,
+) -> Result<()> {
+    // Resolve master key file path
+    let key_path = key_file
+        .map(|p| p.to_path_buf())
+        .or_else(|| config.crypto.master_key_file.clone())
+        .unwrap_or_else(|| {
+            tcfs_secrets::device::default_registry_path()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("master.key")
+        });
+
+    let key_bytes = std::fs::read(&key_path)
+        .with_context(|| format!("reading master key: {}", key_path.display()))?;
+
+    if key_bytes.len() != tcfs_crypto::KEY_SIZE {
         anyhow::bail!(
-            "Platform keychain not available. \
-             On Linux, ensure GNOME Keyring or KDE Wallet is running."
+            "master key file has wrong size: {} bytes (expected {})",
+            key_bytes.len(),
+            tcfs_crypto::KEY_SIZE
         );
     }
 
-    let passphrase =
-        rpassword::prompt_password("Master passphrase: ").context("failed to read passphrase")?;
+    // Send to daemon via gRPC
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let resp = client
+        .auth_unlock(tcfs_core::proto::AuthUnlockRequest {
+            master_key: key_bytes,
+        })
+        .await
+        .context("auth_unlock RPC failed")?
+        .into_inner();
 
-    // Store in keychain for session use
-    tcfs_secrets::keychain::store_secret(
-        tcfs_secrets::keychain::keys::SESSION_TOKEN,
-        &secrecy::SecretString::from(passphrase),
-    )?;
+    if resp.success {
+        println!("Encryption unlocked. Master key loaded into daemon.");
+        println!("Run 'tcfs auth lock' to clear it from memory.");
+    } else {
+        anyhow::bail!("unlock failed: {}", resp.error);
+    }
 
-    println!("Session unlocked. Master key stored in platform keychain.");
-    println!("Run 'tcfs auth lock' to clear it.");
     Ok(())
 }
 
-fn cmd_auth_lock() -> Result<()> {
-    tcfs_secrets::keychain::delete_secret(tcfs_secrets::keychain::keys::SESSION_TOKEN)?;
-    tcfs_secrets::keychain::delete_secret(tcfs_secrets::keychain::keys::MASTER_KEY)?;
-    println!("Session locked. Master key cleared from keychain.");
+async fn cmd_auth_lock(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
+    // Clear from daemon
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let resp = client
+        .auth_lock(tcfs_core::proto::Empty {})
+        .await
+        .context("auth_lock RPC failed")?
+        .into_inner();
+
+    if !resp.success {
+        anyhow::bail!("lock failed: {}", resp.error);
+    }
+
+    // Clear from platform keychain too
+    let _ = tcfs_secrets::keychain::delete_secret(tcfs_secrets::keychain::keys::SESSION_TOKEN);
+    let _ = tcfs_secrets::keychain::delete_secret(tcfs_secrets::keychain::keys::MASTER_KEY);
+
+    println!("Session locked. Master key cleared from daemon and keychain.");
+    Ok(())
+}
+
+async fn cmd_auth_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let resp = client
+        .auth_status(tcfs_core::proto::Empty {})
+        .await
+        .context("auth_status RPC failed")?
+        .into_inner();
+
+    if resp.crypto_enabled {
+        if resp.unlocked {
+            println!("Encryption: ACTIVE (master key loaded in daemon)");
+        } else {
+            println!("Encryption: LOCKED (configured but key not loaded)");
+            println!("Run 'tcfs auth unlock' to load the master key.");
+        }
+    } else {
+        println!("Encryption: DISABLED (crypto.enabled = false in config)");
+    }
     Ok(())
 }
 
