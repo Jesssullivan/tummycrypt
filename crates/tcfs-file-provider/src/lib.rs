@@ -31,6 +31,9 @@ use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
 use std::ptr;
 
+use base64::Engine;
+use secrecy::SecretString;
+
 /// Error codes returned by FFI functions.
 #[repr(C)]
 pub enum TcfsError {
@@ -78,6 +81,8 @@ pub struct TcfsProvider {
     operator: opendal::Operator,
     remote_prefix: String,
     device_id: String,
+    /// Master key for E2EE (None = plaintext mode for backwards compatibility)
+    master_key: Option<tcfs_crypto::MasterKey>,
 }
 
 /// Create a new provider from a JSON configuration string.
@@ -130,6 +135,34 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             .unwrap_or("unknown")
             .to_string();
 
+        // Derive master key from encryption_passphrase if provided (enables E2EE)
+        let master_key = config["encryption_passphrase"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|passphrase| {
+                let salt_str = config["encryption_salt"]
+                    .as_str()
+                    .unwrap_or("tcfs-default-salt!");
+                let mut salt = [0u8; 16];
+                let salt_bytes = salt_str.as_bytes();
+                let copy_len = salt_bytes.len().min(16);
+                salt[..copy_len].copy_from_slice(&salt_bytes[..copy_len]);
+
+                let params = tcfs_crypto::kdf::KdfParams {
+                    mem_cost_kib: config["argon2_mem_cost_kib"].as_u64().unwrap_or(65536) as u32,
+                    time_cost: config["argon2_time_cost"].as_u64().unwrap_or(3) as u32,
+                    parallelism: config["argon2_parallelism"].as_u64().unwrap_or(4) as u32,
+                };
+
+                tcfs_crypto::derive_master_key(
+                    &SecretString::from(passphrase.to_string()),
+                    &salt,
+                    &params,
+                )
+                .ok()
+            })
+            .flatten();
+
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(_) => return ptr::null_mut(),
@@ -154,6 +187,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             operator,
             remote_prefix: prefix,
             device_id,
+            master_key,
         }))
     }));
 
@@ -301,8 +335,25 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
             let manifest =
                 tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())?;
 
+            // Unwrap file key if E2EE manifest
+            let file_key = match (&prov.master_key, &manifest.encrypted_file_key) {
+                (Some(mk), Some(wrapped_b64)) => {
+                    let wrapped = base64::engine::general_purpose::STANDARD.decode(wrapped_b64)?;
+                    Some(tcfs_crypto::unwrap_key(mk, &wrapped)?)
+                }
+                (None, Some(_)) => {
+                    anyhow::bail!("file is encrypted but no master key configured");
+                }
+                _ => None,
+            };
+
+            // Reconstruct file_id for AAD verification (BLAKE3 of plaintext)
+            let file_id_bytes: [u8; 32] = tcfs_chunks::hash_from_hex(&manifest.file_hash)
+                .map(|h| *h.as_bytes())
+                .unwrap_or([0u8; 32]);
+
             let mut assembled = Vec::new();
-            for hash in manifest.chunk_hashes() {
+            for (idx, hash) in manifest.chunk_hashes().iter().enumerate() {
                 let chunk_key = format!(
                     "{}/chunks/{}",
                     prov.remote_prefix.trim_end_matches('/'),
@@ -311,12 +362,20 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
                 let chunk_data = prov.operator.read(&chunk_key).await?;
                 let chunk_bytes = chunk_data.to_bytes();
 
-                // BLAKE3 integrity verification
+                // BLAKE3 integrity verification (on ciphertext for E2EE, plaintext otherwise)
                 let actual = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
                 if actual != *hash {
                     anyhow::bail!("chunk integrity failure: expected {}, got {}", hash, actual);
                 }
-                assembled.extend_from_slice(&chunk_bytes);
+
+                // Decrypt if E2EE
+                if let Some(ref fk) = file_key {
+                    let plaintext =
+                        tcfs_crypto::decrypt_chunk(fk, idx as u64, &file_id_bytes, &chunk_bytes)?;
+                    assembled.extend_from_slice(&plaintext);
+                } else {
+                    assembled.extend_from_slice(&chunk_bytes);
+                }
             }
 
             tokio::fs::write(dest_str, &assembled).await?;
@@ -369,21 +428,39 @@ pub unsafe extern "C" fn tcfs_provider_upload(
             let data = tokio::fs::read(local_str).await?;
             let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data));
 
+            // Generate per-file encryption key if E2EE is enabled
+            let file_key = prov
+                .master_key
+                .as_ref()
+                .map(|_| tcfs_crypto::generate_file_key());
+            let file_id_bytes: [u8; 32] = {
+                let h = tcfs_chunks::hash_bytes(&data);
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(h.as_bytes());
+                arr
+            };
+
             let chunks = tcfs_chunks::chunk_data(&data, tcfs_chunks::ChunkSizes::SMALL);
             let mut chunk_hashes = Vec::new();
 
-            for chunk in &chunks {
+            for (idx, chunk) in chunks.iter().enumerate() {
                 let chunk_bytes =
                     &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
-                let hash = tcfs_chunks::hash_to_hex(&chunk.hash);
+
+                // Encrypt chunk if E2EE is enabled, otherwise upload plaintext
+                let upload_bytes = if let Some(ref fk) = file_key {
+                    tcfs_crypto::encrypt_chunk(fk, idx as u64, &file_id_bytes, chunk_bytes)?
+                } else {
+                    chunk_bytes.to_vec()
+                };
+
+                let hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&upload_bytes));
                 let chunk_key = format!(
                     "{}/chunks/{}",
                     prov.remote_prefix.trim_end_matches('/'),
                     hash
                 );
-                prov.operator
-                    .write(&chunk_key, chunk_bytes.to_vec())
-                    .await?;
+                prov.operator.write(&chunk_key, upload_bytes).await?;
                 chunk_hashes.push(hash);
             }
 
@@ -422,6 +499,15 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                 .unwrap_or_default()
                 .as_secs();
 
+            // Wrap file key with master key for storage in manifest
+            let encrypted_file_key = match (&prov.master_key, &file_key) {
+                (Some(mk), Some(fk)) => {
+                    let wrapped = tcfs_crypto::wrap_key(mk, fk)?;
+                    Some(base64::engine::general_purpose::STANDARD.encode(&wrapped))
+                }
+                _ => None,
+            };
+
             let manifest = tcfs_sync::manifest::SyncManifest {
                 version: 2,
                 file_hash: file_hash.clone(),
@@ -431,7 +517,7 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                 written_by: prov.device_id.clone(),
                 written_at,
                 rel_path: Some(remote_str.to_string()),
-                encrypted_file_key: None,
+                encrypted_file_key,
             };
 
             let manifest_json = serde_json::to_vec_pretty(&manifest)?;
