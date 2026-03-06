@@ -39,6 +39,7 @@ secrecy = { workspace = true }
 tempfile = { workspace = true }
 blake3 = { workspace = true }
 age = { workspace = true }
+tcfs-dbus = { path = "../tcfs-dbus", optional = true }
 
 [features]
 default = ["fuse"]
@@ -46,6 +47,8 @@ default = ["fuse"]
 fuse = ["tcfs-fuse/fuse"]
 # Enables NATS consumer worker mode (for K8s pods)
 k8s-worker = []
+# Enable D-Bus status interface (Linux only)
+dbus = ["dep:tcfs-dbus"]
 
 [package.metadata.deb]
 maintainer = "TummyCrypt Contributors <jess@sulliwood.org>"
