@@ -343,6 +343,71 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // Send systemd ready notification
     notify_ready();
 
+    // ── D-Bus status interface (Linux only) ──────────────────────────────
+    #[cfg(all(target_os = "linux", feature = "dbus"))]
+    let _dbus_conn = {
+        use tcfs_dbus::{StatusBackend, SyncStatus};
+
+        /// Real D-Bus backend backed by daemon state.
+        struct DaemonStatusBackend {
+            state_cache: Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+            operator: Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+            device_id: String,
+        }
+
+        impl StatusBackend for DaemonStatusBackend {
+            async fn get_status(&self, path: &str) -> SyncStatus {
+                let cache = self.state_cache.lock().await;
+                let p = std::path::Path::new(path);
+                match cache.get(p) {
+                    Some(_entry) => SyncStatus::Synced,
+                    None => {
+                        // Check if operator is available — if not, report unknown
+                        let op = self.operator.lock().await;
+                        if op.is_none() {
+                            SyncStatus::Unknown
+                        } else {
+                            SyncStatus::Placeholder
+                        }
+                    }
+                }
+            }
+
+            async fn sync(&self, path: &str) -> anyhow::Result<()> {
+                let op_guard = self.operator.lock().await;
+                let _op = op_guard
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no storage operator available"))?;
+                info!(path, device = %self.device_id, "D-Bus sync requested");
+                // TODO: wire to actual upload via sync engine
+                Ok(())
+            }
+
+            async fn unsync(&self, path: &str) -> anyhow::Result<()> {
+                info!(path, device = %self.device_id, "D-Bus unsync requested");
+                // TODO: wire to dehydration logic
+                Ok(())
+            }
+        }
+
+        let backend = DaemonStatusBackend {
+            state_cache: state_cache.clone(),
+            operator: operator.clone(),
+            device_id: device_id.clone(),
+        };
+
+        match tcfs_dbus::serve(backend).await {
+            Ok(conn) => {
+                info!("D-Bus service started on session bus");
+                Some(conn)
+            }
+            Err(e) => {
+                warn!("D-Bus service failed to start: {e}");
+                None
+            }
+        }
+    };
+
     // Start gRPC server
     let socket_path = config.daemon.socket.clone();
     let config = Arc::new(config);
