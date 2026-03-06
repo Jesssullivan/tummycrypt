@@ -12,6 +12,7 @@ service TcfsDaemon {
   rpc Hydrate(HydrateRequest) returns (stream HydrateProgress);
   rpc Unsync(UnsyncRequest) returns (UnsyncResponse);
   rpc SyncStatus(SyncStatusRequest) returns (SyncStatusResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
   rpc Watch(WatchRequest) returns (stream WatchEvent);
   rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
   rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
@@ -110,6 +111,21 @@ message SyncStatusResponse {
   string blake3 = 3;
   uint64 size = 4;
   int64 last_synced = 5;
+}
+
+message ListFilesRequest {
+  string prefix = 1;
+}
+message ListFilesResponse {
+  repeated FileEntry files = 1;
+}
+message FileEntry {
+  string path = 1;
+  string filename = 2;
+  uint64 size = 3;
+  int64 last_synced = 4;
+  bool is_directory = 5;
+  string blake3 = 6;
 }
 
 message WatchRequest {
