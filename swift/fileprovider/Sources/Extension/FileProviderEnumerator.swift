@@ -107,14 +107,77 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderChangeObserver,
         from anchor: NSFileProviderSyncAnchor
     ) {
-        // TODO: Wire to daemon Watch gRPC stream for incremental changes.
-        // For now, signal no changes — fileproviderd will re-enumerate periodically.
-        observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+        let accessor = providerAccessor
+        let containerId = containerIdentifier
+
+        // Re-enumerate all items and report them as updates.
+        // fileproviderd diffs against its internal database to detect actual changes.
+        // This is correct but not incremental — Watch gRPC stream will optimize later.
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let prov = accessor() else {
+                observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
+                return
+            }
+
+            let path: String
+            if containerId == .rootContainer {
+                path = ""
+            } else {
+                path = containerId.rawValue
+            }
+
+            var outItems: UnsafeMutablePointer<TcfsFileItem>?
+            var outCount: UInt = 0
+
+            let result = path.withCString { pathPtr in
+                tcfs_provider_enumerate(prov, pathPtr, &outItems, &outCount)
+            }
+
+            guard result == TCFS_ERROR_TCFS_ERROR_NONE, let items = outItems, outCount > 0 else {
+                let newAnchor = Self.makeAnchor()
+                observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
+                return
+            }
+
+            var providerItems: [NSFileProviderItem] = []
+            let count = Int(outCount)
+
+            for i in 0..<count {
+                let item = items[i]
+                let itemId = item.item_id.map { String(cString: $0) } ?? ""
+                let filename = item.filename.map { String(cString: $0) } ?? ""
+
+                providerItems.append(
+                    TCFSFileProviderItem(
+                        identifier: NSFileProviderItemIdentifier(itemId),
+                        parentIdentifier: containerId,
+                        filename: filename,
+                        isDirectory: item.is_directory,
+                        fileSize: item.file_size,
+                        downloaded: false,
+                        uploaded: true
+                    )
+                )
+            }
+
+            tcfs_file_items_free(outItems, outCount)
+
+            if !providerItems.isEmpty {
+                observer.didUpdate(providerItems)
+            }
+            let newAnchor = Self.makeAnchor()
+            observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
+        }
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        // Use timestamp as anchor — will be replaced with daemon event sequence
-        let data = "\(Date().timeIntervalSince1970)".data(using: .utf8)!
-        completionHandler(NSFileProviderSyncAnchor(data))
+        completionHandler(Self.makeAnchor())
+    }
+
+    /// Monotonic sync anchor from current timestamp.
+    private static func makeAnchor() -> NSFileProviderSyncAnchor {
+        var timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
+        let data = Data(bytes: &timestamp, count: MemoryLayout<UInt64>.size)
+        return NSFileProviderSyncAnchor(data)
     }
 }
