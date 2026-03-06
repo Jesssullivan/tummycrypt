@@ -15,6 +15,9 @@ service TcfsDaemon {
   rpc Watch(WatchRequest) returns (stream WatchEvent);
   rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
   rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
+  rpc AuthUnlock(AuthUnlockRequest) returns (AuthUnlockResponse);
+  rpc AuthLock(Empty) returns (AuthLockResponse);
+  rpc AuthStatus(Empty) returns (AuthStatusResponse);
 }
 
 message Empty {}
@@ -133,4 +136,23 @@ message ResolveConflictResponse {
   bool success = 1;
   string resolved_path = 2;
   string error = 3;
+}
+
+message AuthUnlockRequest {
+  // Raw 32-byte master key (loaded from file by the CLI)
+  bytes master_key = 1;
+}
+message AuthUnlockResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message AuthLockResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message AuthStatusResponse {
+  bool unlocked = 1;
+  bool crypto_enabled = 2;
 }

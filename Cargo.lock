@@ -4566,6 +4566,7 @@ name = "tcfs-cli"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "blake3",
  "clap",
  "fuse3",
@@ -4833,6 +4834,7 @@ dependencies = [
 name = "tcfsd"
 version = "0.5.0"
 dependencies = [
+ "age",
  "anyhow",
  "async-nats",
  "axum",
@@ -4846,6 +4848,7 @@ dependencies = [
  "serde",
  "service-manager",
  "tcfs-core",
+ "tcfs-crypto",
  "tcfs-fuse",
  "tcfs-secrets",
  "tcfs-storage",

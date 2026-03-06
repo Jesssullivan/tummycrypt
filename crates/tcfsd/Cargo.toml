@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 tcfs-core = { path = "../tcfs-core" }
+tcfs-crypto = { path = "../tcfs-crypto" }
 tcfs-secrets = { path = "../tcfs-secrets" }
 tcfs-storage = { path = "../tcfs-storage" }
 tcfs-sync = { path = "../tcfs-sync", features = ["nats"] }
@@ -37,6 +38,7 @@ notify = { workspace = true }
 secrecy = { workspace = true }
 tempfile = { workspace = true }
 blake3 = { workspace = true }
+age = { workspace = true }
 
 [features]
 default = ["fuse"]
