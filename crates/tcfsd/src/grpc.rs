@@ -743,6 +743,14 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let path = std::path::PathBuf::from(&req.path);
 
+        // Reload state from disk in case the CLI wrote new entries
+        {
+            let mut cache = self.state_cache.lock().await;
+            if let Err(e) = cache.reload_from_disk() {
+                tracing::warn!("failed to reload state cache: {e}");
+            }
+        }
+
         match resolution.as_str() {
             "defer" => {
                 info!(path = %req.path, "conflict deferred");
