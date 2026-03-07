@@ -1136,8 +1136,8 @@ async fn bind_uds(socket_path: &Path) -> Result<UnixListenerStream> {
 
 /// Start the gRPC server on a Unix domain socket with graceful shutdown support.
 ///
-/// If `fileprovider_socket` is provided, a second listener is bound there for
-/// sandboxed macOS FileProvider access (App Group container).
+/// If `fileprovider_socket` is provided, a second server is spawned on that socket
+/// for sandboxed macOS FileProvider access (App Group container).
 pub async fn serve(
     socket_path: &Path,
     fileprovider_socket: Option<&Path>,
@@ -1149,24 +1149,42 @@ pub async fn serve(
 
     let service = TcfsDaemonServer::new(impl_);
 
-    if let Some(fp_path) = fileprovider_socket {
+    // Spawn a second gRPC server on the FileProvider socket if configured.
+    // Uses a separate tokio task with a shared shutdown notify.
+    let fp_handle = if let Some(fp_path) = fileprovider_socket {
         let secondary = bind_uds(fp_path).await?;
         info!(socket = %fp_path.display(), "gRPC FileProvider socket ready");
 
-        // Merge both listener streams so the server accepts from either
-        use tokio_stream::StreamExt;
-        let merged = primary.merge(secondary);
+        let fp_service = service.clone();
+        let fp_shutdown = Arc::new(tokio::sync::Notify::new());
+        let fp_shutdown_clone = fp_shutdown.clone();
 
-        Server::builder()
-            .add_service(service)
-            .serve_with_incoming_shutdown(merged, shutdown)
-            .await
-            .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))
+        let handle = tokio::spawn(async move {
+            if let Err(e) = Server::builder()
+                .add_service(fp_service)
+                .serve_with_incoming_shutdown(secondary, fp_shutdown_clone.notified())
+                .await
+            {
+                tracing::warn!("FileProvider gRPC server error: {e}");
+            }
+        });
+
+        Some((handle, fp_shutdown))
     } else {
-        Server::builder()
-            .add_service(service)
-            .serve_with_incoming_shutdown(primary, shutdown)
-            .await
-            .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))
+        None
+    };
+
+    let result = Server::builder()
+        .add_service(service)
+        .serve_with_incoming_shutdown(primary, shutdown)
+        .await
+        .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"));
+
+    // Stop the FileProvider server when the primary shuts down
+    if let Some((handle, notify)) = fp_handle {
+        notify.notify_one();
+        let _ = handle.await;
     }
+
+    result
 }
