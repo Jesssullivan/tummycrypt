@@ -105,6 +105,7 @@ jobs:
             fuse: false
             deb: false
             rpm: false
+            sign: true
 
           # macOS aarch64 — no FUSE, CLI + unsync only
           - name: macos-aarch64
@@ -115,6 +116,7 @@ jobs:
             fuse: false
             deb: false
             rpm: false
+            sign: true
 
           # Windows x86_64 — no FUSE, CLI + unsync + cloudfilter skeleton
           - name: windows-x86_64
@@ -210,6 +212,74 @@ jobs:
             --target ${{ matrix.target }} \
             -p tcfs-mcp
 
+      # ── Sign macOS CLI binaries ──────────────────────────────────────────
+
+      - name: Import signing certificate (macOS)
+        if: matrix.sign
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_BASE64" ]; then
+            echo "::warning::APPLE_CERTIFICATE_BASE64 not set, skipping CLI signing"
+            echo "CLI_SIGNING_IDENTITY=" >> $GITHUB_ENV
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/cli-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          rm "$RUNNER_TEMP/cert.p12"
+
+          if [ -n "${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}" ]; then
+            echo "${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}" | base64 -d > "$RUNNER_TEMP/ca.cer"
+            security import "$RUNNER_TEMP/ca.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+            rm "$RUNNER_TEMP/ca.cer"
+          fi
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -1 \
+            | sed 's/.*"\(.*\)".*/\1/' || true)
+          if [ -n "$IDENTITY" ]; then
+            echo "CLI_SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+            echo "CLI_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          else
+            echo "::warning::No Developer ID found, skipping CLI signing"
+            echo "CLI_SIGNING_IDENTITY=" >> $GITHUB_ENV
+          fi
+
+      - name: Sign CLI binaries (macOS)
+        if: matrix.sign && env.CLI_SIGNING_IDENTITY != ''
+        run: |
+          BINDIR="target/${{ matrix.target }}/release"
+          for bin in tcfs tcfsd tcfs-tui tcfs-mcp; do
+            if [ -f "${BINDIR}/${bin}" ]; then
+              echo "Signing ${bin}..."
+              /usr/bin/codesign --force --options runtime \
+                --sign "$CLI_SIGNING_IDENTITY" \
+                --timestamp \
+                "${BINDIR}/${bin}"
+            fi
+          done
+          echo "Verifying signatures..."
+          for bin in tcfs tcfsd tcfs-tui tcfs-mcp; do
+            if [ -f "${BINDIR}/${bin}" ]; then
+              /usr/bin/codesign -dvv "${BINDIR}/${bin}" 2>&1 | head -3
+            fi
+          done
+
       # ── Package archive ──────────────────────────────────────────────────
 
       - name: Package archive (Unix)
@@ -234,6 +304,33 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/tcfs-tui.exe" "$dist/"
           Copy-Item "README.md" "$dist/" -ErrorAction SilentlyContinue
           Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip"
+
+      # ── Notarize macOS CLI tarball ────────────────────────────────────────
+
+      - name: Notarize CLI binaries (macOS)
+        if: matrix.sign && env.CLI_SIGNING_IDENTITY != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+        run: |
+          DIST="tcfs-${{ needs.plan.outputs.version }}-${{ matrix.name }}"
+          ZIP_PATH="${DIST}-notarize.zip"
+          /usr/bin/ditto -c -k "${DIST}" "${ZIP_PATH}"
+          echo "Submitting CLI binaries for notarization..."
+          xcrun notarytool submit "${ZIP_PATH}" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_NOTARIZE_PASSWORD" \
+            --wait || echo "::warning::CLI notarization failed (non-fatal)"
+          rm -f "${ZIP_PATH}"
+
+      - name: Cleanup signing keychain (macOS)
+        if: always() && matrix.sign
+        run: |
+          if [ -n "${CLI_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$CLI_KEYCHAIN_PATH" 2>/dev/null || true
+          fi
 
       # ── Build .deb package ────────────────────────────────────────────────
 
@@ -614,12 +711,198 @@ jobs:
             security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           fi
 
+  # ── Build macOS installer (.pkg) ──────────────────────────────────────────
+
+  build-pkg:
+    name: Build macOS installer (.pkg)
+    runs-on: macos-14
+    needs: [plan, build-binaries, build-fileprovider]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS CLI binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-macos-aarch64
+          path: cli-dist/
+
+      - name: Download FileProvider app
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-fileprovider
+          path: fp-dist/
+
+      - name: Import installer certificate
+        env:
+          APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_INSTALLER_CERTIFICATE_BASE64" ]; then
+            echo "::warning::No installer cert, building unsigned .pkg"
+            echo "PKG_SIGNING_IDENTITY=" >> $GITHUB_ENV
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/pkg-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$APPLE_INSTALLER_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/installer-cert.p12"
+          security import "$RUNNER_TEMP/installer-cert.p12" \
+            -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          rm "$RUNNER_TEMP/installer-cert.p12"
+
+          if [ -n "${{ secrets.APPLE_WWDR_CA_G2 }}" ]; then
+            echo "${{ secrets.APPLE_WWDR_CA_G2 }}" | base64 -d > "$RUNNER_TEMP/wwdr.cer"
+            security import "$RUNNER_TEMP/wwdr.cer" -k "$KEYCHAIN_PATH"
+            rm "$RUNNER_TEMP/wwdr.cer"
+          fi
+
+          security set-key-partition-list -S apple-tool:,apple:,productsign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          IDENTITY=$(security find-identity -v "$KEYCHAIN_PATH" \
+            | grep "Developer ID Installer" | head -1 \
+            | sed 's/.*"\(.*\)".*/\1/' || true)
+          if [ -n "$IDENTITY" ]; then
+            echo "PKG_SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+            echo "PKG_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          else
+            echo "::warning::No Developer ID Installer found"
+            echo "PKG_SIGNING_IDENTITY=" >> $GITHUB_ENV
+          fi
+
+      - name: Assemble .pkg payload
+        run: |
+          VERSION="${{ needs.plan.outputs.version }}"
+          PKG_ROOT="$RUNNER_TEMP/pkg-root"
+          mkdir -p "${PKG_ROOT}/usr/local/bin"
+          mkdir -p "${PKG_ROOT}/Applications"
+
+          # Extract CLI binaries
+          tar xzf cli-dist/tcfs-${VERSION}-macos-aarch64.tar.gz -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64/tcfs" "${PKG_ROOT}/usr/local/bin/"
+          cp "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64/tcfsd" "${PKG_ROOT}/usr/local/bin/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64/tcfs-tui" "${PKG_ROOT}/usr/local/bin/" 2>/dev/null || true
+          cp "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64/tcfs-mcp" "${PKG_ROOT}/usr/local/bin/" 2>/dev/null || true
+          chmod +x "${PKG_ROOT}/usr/local/bin/"*
+
+          # Extract FileProvider app
+          FP_ZIP=$(find fp-dist -name 'TCFSProvider-*.zip' | head -1)
+          /usr/bin/ditto -x -k "$FP_ZIP" "${PKG_ROOT}/Applications/"
+
+      - name: Create scripts
+        run: |
+          SCRIPTS="$RUNNER_TEMP/pkg-scripts"
+          mkdir -p "$SCRIPTS"
+
+          cat > "$SCRIPTS/postinstall" << 'SCRIPT'
+          #!/bin/bash
+          # Register FileProvider extension
+          if [ -d "/Applications/TCFSProvider.app" ]; then
+            /usr/bin/pluginkit -a "/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex" 2>/dev/null || true
+          fi
+
+          # Install launchd plist for daemon
+          PLIST_DIR="$HOME/Library/LaunchAgents"
+          PLIST_PATH="${PLIST_DIR}/io.tinyland.tcfsd.plist"
+          mkdir -p "$PLIST_DIR"
+          if [ ! -f "$PLIST_PATH" ]; then
+            cat > "$PLIST_PATH" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>io.tinyland.tcfsd</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/usr/local/bin/tcfsd</string>
+              <string>--mode</string>
+              <string>daemon</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <true/>
+            <key>StandardOutPath</key>
+            <string>/tmp/tcfsd.stdout.log</string>
+            <key>StandardErrorPath</key>
+            <string>/tmp/tcfsd.stderr.log</string>
+          </dict>
+          </plist>
+          PLIST
+          fi
+          exit 0
+          SCRIPT
+          chmod +x "$SCRIPTS/postinstall"
+
+      - name: Build .pkg
+        run: |
+          VERSION="${{ needs.plan.outputs.version }}"
+          PKG_ROOT="$RUNNER_TEMP/pkg-root"
+          SCRIPTS="$RUNNER_TEMP/pkg-scripts"
+          UNSIGNED_PKG="$RUNNER_TEMP/tcfs-${VERSION}-unsigned.pkg"
+          FINAL_PKG="tcfs-${VERSION}-macos-aarch64.pkg"
+
+          pkgbuild \
+            --root "$PKG_ROOT" \
+            --scripts "$SCRIPTS" \
+            --identifier io.tinyland.tcfs \
+            --version "$VERSION" \
+            --install-location / \
+            "$UNSIGNED_PKG"
+
+          if [ -n "$PKG_SIGNING_IDENTITY" ]; then
+            echo "Signing .pkg with: $PKG_SIGNING_IDENTITY"
+            productsign --sign "$PKG_SIGNING_IDENTITY" \
+              "$UNSIGNED_PKG" "$FINAL_PKG"
+          else
+            cp "$UNSIGNED_PKG" "$FINAL_PKG"
+          fi
+
+      - name: Notarize .pkg
+        if: env.PKG_SIGNING_IDENTITY != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+        run: |
+          VERSION="${{ needs.plan.outputs.version }}"
+          PKG="tcfs-${VERSION}-macos-aarch64.pkg"
+          echo "Submitting .pkg for notarization..."
+          xcrun notarytool submit "$PKG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_NOTARIZE_PASSWORD" \
+            --wait
+          xcrun stapler staple "$PKG"
+
+      - name: Upload .pkg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-pkg
+          path: "*.pkg"
+          retention-days: 7
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "${PKG_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$PKG_KEYCHAIN_PATH" 2>/dev/null || true
+          fi
+
   # ── Create GitHub Release ─────────────────────────────────────────────────
 
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [plan, build-binaries, build-image, generate-installers, build-fileprovider]
+    needs: [plan, build-binaries, build-image, generate-installers, build-fileprovider, build-pkg]
     if: startsWith(github.ref, 'refs/tags/v') && !cancelled()
 
     steps:
@@ -631,10 +914,23 @@ jobs:
       - name: Flatten artifacts and generate checksums
         run: |
           mkdir -p release
-          find dist/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.sh" -o -name "*.ps1" \) \
+          find dist/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.pkg" -o -name "*.sh" -o -name "*.ps1" \) \
             -exec cp {} release/ \;
+          # .sig and .pem are generated in-place by Cosign step below
           cd release
           sha256sum * > SHA256SUMS.txt
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums with Cosign (keyless)
+        run: |
+          cd release
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.txt.sig \
+            --output-certificate SHA256SUMS.txt.pem \
+            SHA256SUMS.txt
+          echo "Cosign signature created for SHA256SUMS.txt"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -647,7 +943,13 @@ jobs:
 
             ### Quick Install
 
-            **Linux / macOS:**
+            **macOS (.pkg installer — recommended):**
+            ```bash
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfs-${{ needs.plan.outputs.version }}-macos-aarch64.pkg
+            sudo installer -pkg tcfs-${{ needs.plan.outputs.version }}-macos-aarch64.pkg -target /
+            ```
+
+            **Linux / macOS (shell script):**
             ```bash
             curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/install.sh | sh
             ```
@@ -679,6 +981,22 @@ jobs:
             curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/SHA256SUMS.txt
             sha256sum -c SHA256SUMS.txt
             ```
+
+            ### Verify signature (Sigstore Cosign)
+            ```bash
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/SHA256SUMS.txt.sig
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/SHA256SUMS.txt.pem
+            cosign verify-blob \
+              --signature SHA256SUMS.txt.sig \
+              --certificate SHA256SUMS.txt.pem \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity-regexp 'github.com/tinyland-inc/tummycrypt' \
+              SHA256SUMS.txt
+            ```
+
+            ### macOS binaries
+            All macOS binaries are signed with Developer ID and notarized by Apple.
+            The FileProvider extension (`TCFSProvider.app`) is stapled for offline verification.
 
             ### Binaries included
             | Binary | Purpose |
