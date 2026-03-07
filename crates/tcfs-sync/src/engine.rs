@@ -166,77 +166,111 @@ pub async fn upload_file_with_device(
         .map(|s| s.vclock.clone())
         .unwrap_or_default();
 
-    // Check if remote manifest exists for conflict detection
+    // Conflict detection: find the current remote manifest for this rel_path.
+    // First try the index entry (covers different-content conflicts), then
+    // fall back to checking the same-hash manifest path.
     let mut outcome = None;
     if !device_id.is_empty() {
-        if let Ok(true) = op.exists(&remote_manifest).await {
-            if let Ok(remote_bytes) = op.read(&remote_manifest).await {
-                if let Ok(remote_manifest_obj) = SyncManifest::from_bytes(&remote_bytes.to_bytes())
-                {
-                    let local_hash = &file_hash_hex;
-                    let remote_hash = &remote_manifest_obj.file_hash;
-                    let rp = rel_path.unwrap_or("");
+        let remote_manifest_obj = if let Some(rp) = rel_path {
+            // Look up the index entry to find what manifest is currently stored
+            let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
+            let idx_manifest = if let Ok(idx_bytes) = op.read(&index_key).await {
+                let idx_raw = idx_bytes.to_bytes();
+                let idx_str = String::from_utf8_lossy(&idx_raw);
+                // Parse "manifest_hash=<hash>\nsize=...\n"
+                idx_str
+                    .lines()
+                    .find_map(|l| l.strip_prefix("manifest_hash="))
+                    .map(|h| format!("{}/manifests/{}", remote_prefix.trim_end_matches('/'), h))
+            } else {
+                None
+            };
+            // Read the manifest pointed to by the index entry
+            if let Some(ref manifest_path) = idx_manifest {
+                if let Ok(remote_bytes) = op.read(manifest_path).await {
+                    SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            // No rel_path — fall back to checking the same-hash manifest
+            if let Ok(true) = op.exists(&remote_manifest).await {
+                if let Ok(remote_bytes) = op.read(&remote_manifest).await {
+                    SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
 
-                    let sync_outcome = compare_clocks(
-                        &local_vclock,
-                        &remote_manifest_obj.vclock,
-                        local_hash,
-                        remote_hash,
-                        rp,
-                        device_id,
-                        &remote_manifest_obj.written_by,
-                    );
+        if let Some(remote_manifest_obj) = remote_manifest_obj {
+            let local_hash = &file_hash_hex;
+            let remote_hash = &remote_manifest_obj.file_hash;
+            let rp = rel_path.unwrap_or("");
 
-                    match &sync_outcome {
-                        SyncOutcome::RemoteNewer => {
-                            return Ok(UploadResult {
-                                path: local_path.to_path_buf(),
-                                remote_path: remote_manifest.clone(),
-                                hash: file_hash_hex,
-                                chunks: chunks.len(),
-                                bytes: file_size,
-                                skipped: true,
-                                outcome: Some(sync_outcome),
-                            });
-                        }
-                        SyncOutcome::Conflict(_) => {
-                            return Ok(UploadResult {
-                                path: local_path.to_path_buf(),
-                                remote_path: remote_manifest.clone(),
-                                hash: file_hash_hex,
-                                chunks: chunks.len(),
-                                bytes: file_size,
-                                skipped: true,
-                                outcome: Some(sync_outcome),
-                            });
-                        }
-                        SyncOutcome::UpToDate => {
-                            // Content dedup — already up to date
-                            let sync_state = make_sync_state_full(
-                                local_path,
-                                file_hash_hex.clone(),
-                                chunks.len(),
-                                remote_manifest.clone(),
-                                local_vclock,
-                                device_id.to_string(),
-                            )?;
-                            state.set(local_path, sync_state);
-                            return Ok(UploadResult {
-                                path: local_path.to_path_buf(),
-                                remote_path: remote_manifest,
-                                hash: file_hash_hex,
-                                chunks: chunks.len(),
-                                bytes: file_size,
-                                skipped: true,
-                                outcome: Some(sync_outcome),
-                            });
-                        }
-                        SyncOutcome::LocalNewer => {
-                            // Merge remote vclock into local before writing
-                            local_vclock.merge(&remote_manifest_obj.vclock);
-                            outcome = Some(SyncOutcome::LocalNewer);
-                        }
-                    }
+            let sync_outcome = compare_clocks(
+                &local_vclock,
+                &remote_manifest_obj.vclock,
+                local_hash,
+                remote_hash,
+                rp,
+                device_id,
+                &remote_manifest_obj.written_by,
+            );
+
+            match &sync_outcome {
+                SyncOutcome::RemoteNewer => {
+                    return Ok(UploadResult {
+                        path: local_path.to_path_buf(),
+                        remote_path: remote_manifest.clone(),
+                        hash: file_hash_hex,
+                        chunks: chunks.len(),
+                        bytes: file_size,
+                        skipped: true,
+                        outcome: Some(sync_outcome),
+                    });
+                }
+                SyncOutcome::Conflict(_) => {
+                    return Ok(UploadResult {
+                        path: local_path.to_path_buf(),
+                        remote_path: remote_manifest.clone(),
+                        hash: file_hash_hex,
+                        chunks: chunks.len(),
+                        bytes: file_size,
+                        skipped: true,
+                        outcome: Some(sync_outcome),
+                    });
+                }
+                SyncOutcome::UpToDate => {
+                    // Content dedup — already up to date
+                    let sync_state = make_sync_state_full(
+                        local_path,
+                        file_hash_hex.clone(),
+                        chunks.len(),
+                        remote_manifest.clone(),
+                        local_vclock,
+                        device_id.to_string(),
+                    )?;
+                    state.set(local_path, sync_state);
+                    return Ok(UploadResult {
+                        path: local_path.to_path_buf(),
+                        remote_path: remote_manifest,
+                        hash: file_hash_hex,
+                        chunks: chunks.len(),
+                        bytes: file_size,
+                        skipped: true,
+                        outcome: Some(sync_outcome),
+                    });
+                }
+                SyncOutcome::LocalNewer => {
+                    // Merge remote vclock into local before writing
+                    local_vclock.merge(&remote_manifest_obj.vclock);
+                    outcome = Some(SyncOutcome::LocalNewer);
                 }
             }
         }
