@@ -26,6 +26,10 @@ fn default_true() -> bool {
 pub struct DaemonConfig {
     /// Unix socket path for gRPC (default: /run/tcfsd/tcfsd.sock)
     pub socket: PathBuf,
+    /// Additional Unix socket inside macOS App Group container for FileProvider access.
+    /// The sandboxed FileProvider .appex cannot reach the primary socket, so the daemon
+    /// binds a second listener here (e.g. ~/Library/Group Containers/group.io.tinyland.tcfs/tcfsd.sock).
+    pub fileprovider_socket: Option<PathBuf>,
     /// TCP listen address for remote gRPC (optional)
     pub listen: Option<String>,
     /// Prometheus metrics endpoint (default: 127.0.0.1:9100)
@@ -174,6 +178,7 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             socket: PathBuf::from("/run/tcfsd/tcfsd.sock"),
+            fileprovider_socket: None,
             listen: None,
             metrics_addr: Some("127.0.0.1:9100".into()),
             log_level: "info".into(),

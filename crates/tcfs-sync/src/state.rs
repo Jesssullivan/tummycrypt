@@ -81,6 +81,22 @@ impl StateCache {
         })
     }
 
+    /// Reload entries from disk, merging any new entries written by other processes.
+    /// Existing in-memory entries are NOT overwritten (in-memory wins).
+    pub fn reload_from_disk(&mut self) -> Result<()> {
+        if !self.db_path.exists() {
+            return Ok(());
+        }
+        let content = std::fs::read_to_string(&self.db_path)
+            .with_context(|| format!("reloading state cache: {}", self.db_path.display()))?;
+        let disk_entries: HashMap<String, SyncState> = serde_json::from_str(&content)
+            .with_context(|| format!("parsing state cache: {}", self.db_path.display()))?;
+        for (key, state) in disk_entries {
+            self.entries.entry(key).or_insert(state);
+        }
+        Ok(())
+    }
+
     /// Look up the sync state for a local file path.
     pub fn get(&self, local_path: &Path) -> Option<&SyncState> {
         let key = path_key(local_path);
