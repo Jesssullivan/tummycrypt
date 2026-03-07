@@ -486,6 +486,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
     // Start gRPC server
     let socket_path = config.daemon.socket.clone();
+    let fp_socket_path = config.daemon.fileprovider_socket.clone();
     let config = Arc::new(config);
     let impl_ = TcfsDaemonImpl::new(
         cred_store,
@@ -593,11 +594,23 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     };
 
     info!(socket = %socket_path.display(), "gRPC: listening");
+    if let Some(ref fp) = fp_socket_path {
+        info!(socket = %fp.display(), "gRPC: FileProvider socket");
+    }
 
-    crate::grpc::serve(&socket_path, impl_, shutdown_signal).await?;
+    crate::grpc::serve(
+        &socket_path,
+        fp_socket_path.as_deref(),
+        impl_,
+        shutdown_signal,
+    )
+    .await?;
 
-    // Clean up socket file
+    // Clean up socket files
     let _ = tokio::fs::remove_file(&socket_path).await;
+    if let Some(ref fp) = fp_socket_path {
+        let _ = tokio::fs::remove_file(fp).await;
+    }
 
     Ok(())
 }

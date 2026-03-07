@@ -1122,30 +1122,51 @@ impl TcfsDaemon for TcfsDaemonImpl {
     }
 }
 
-/// Start the gRPC server on a Unix domain socket with graceful shutdown support.
-pub async fn serve(
-    socket_path: &Path,
-    impl_: TcfsDaemonImpl,
-    shutdown: impl std::future::Future<Output = ()>,
-) -> Result<()> {
-    // Remove stale socket if it exists
+/// Bind a Unix domain socket, removing any stale socket and creating parent dirs.
+async fn bind_uds(socket_path: &Path) -> Result<UnixListenerStream> {
     if socket_path.exists() {
         tokio::fs::remove_file(socket_path).await?;
     }
-
-    // Create parent directory if needed
     if let Some(parent) = socket_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-
     let listener = UnixListener::bind(socket_path)?;
-    let stream = UnixListenerStream::new(listener);
+    Ok(UnixListenerStream::new(listener))
+}
 
+/// Start the gRPC server on a Unix domain socket with graceful shutdown support.
+///
+/// If `fileprovider_socket` is provided, a second listener is bound there for
+/// sandboxed macOS FileProvider access (App Group container).
+pub async fn serve(
+    socket_path: &Path,
+    fileprovider_socket: Option<&Path>,
+    impl_: TcfsDaemonImpl,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    let primary = bind_uds(socket_path).await?;
     info!(socket = %socket_path.display(), "gRPC server ready");
 
-    Server::builder()
-        .add_service(TcfsDaemonServer::new(impl_))
-        .serve_with_incoming_shutdown(stream, shutdown)
-        .await
-        .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))
+    let service = TcfsDaemonServer::new(impl_);
+
+    if let Some(fp_path) = fileprovider_socket {
+        let secondary = bind_uds(fp_path).await?;
+        info!(socket = %fp_path.display(), "gRPC FileProvider socket ready");
+
+        // Merge both listener streams so the server accepts from either
+        use tokio_stream::StreamExt;
+        let merged = primary.merge(secondary);
+
+        Server::builder()
+            .add_service(service)
+            .serve_with_incoming_shutdown(merged, shutdown)
+            .await
+            .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))
+    } else {
+        Server::builder()
+            .add_service(service)
+            .serve_with_incoming_shutdown(primary, shutdown)
+            .await
+            .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))
+    }
 }
