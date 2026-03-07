@@ -36,8 +36,18 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
     // Auto-enroll this device on first run (with real age X25519 keypair)
     let device_id = if let Some(dev) = registry.find(&device_name) {
-        info!(device = %device_name, id = %dev.device_id, "device identity loaded");
-        dev.device_id.clone()
+        if dev.device_id.is_empty() {
+            // Backfill device_id for entries created before UUID generation was added
+            let new_id = registry.backfill_device_id(&device_name).unwrap();
+            if let Err(e) = registry.save(&registry_path) {
+                warn!("failed to save backfilled device registry: {e}");
+            }
+            info!(device = %device_name, id = %new_id, "backfilled missing device_id");
+            new_id
+        } else {
+            info!(device = %device_name, id = %dev.device_id, "device identity loaded");
+            dev.device_id.clone()
+        }
     } else {
         let identity = age::x25519::Identity::generate();
         let public_key = identity.to_public().to_string();

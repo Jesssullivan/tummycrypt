@@ -493,11 +493,29 @@ fn load_device_id(config: &tcfs_core::config::TcfsConfig) -> String {
         .unwrap_or_else(tcfs_secrets::device::default_registry_path);
 
     match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
-        Ok(registry) => registry
-            .find(&device_name)
-            .map(|d| d.device_id.clone())
-            .unwrap_or_default(),
-        Err(_) => String::new(),
+        Ok(mut registry) => {
+            match registry.find(&device_name) {
+                Some(d) if d.device_id.is_empty() => {
+                    // Backfill device_id for entries created before UUID generation
+                    let new_id = registry.backfill_device_id(&device_name).unwrap();
+                    if let Err(e) = registry.save(&registry_path) {
+                        eprintln!("warning: failed to save backfilled device registry: {e}");
+                    } else {
+                        eprintln!("Backfilled missing device_id for '{device_name}': {}", &new_id[..8]);
+                    }
+                    new_id
+                }
+                Some(d) => d.device_id.clone(),
+                None => {
+                    eprintln!("warning: device '{device_name}' not enrolled. Run 'tcfs init' or 'tcfs device enroll' for vclock tracking.");
+                    String::new()
+                }
+            }
+        }
+        Err(_) => {
+            eprintln!("warning: no device registry found. Run 'tcfs init' for vclock tracking.");
+            String::new()
+        }
     }
 }
 
