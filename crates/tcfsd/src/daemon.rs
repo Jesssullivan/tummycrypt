@@ -36,8 +36,18 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
     // Auto-enroll this device on first run (with real age X25519 keypair)
     let device_id = if let Some(dev) = registry.find(&device_name) {
-        info!(device = %device_name, id = %dev.device_id, "device identity loaded");
-        dev.device_id.clone()
+        if dev.device_id.is_empty() {
+            // Backfill device_id for entries created before UUID generation was added
+            let new_id = registry.backfill_device_id(&device_name).unwrap();
+            if let Err(e) = registry.save(&registry_path) {
+                warn!("failed to save backfilled device registry: {e}");
+            }
+            info!(device = %device_name, id = %new_id, "backfilled missing device_id");
+            new_id
+        } else {
+            info!(device = %device_name, id = %dev.device_id, "device identity loaded");
+            dev.device_id.clone()
+        }
     } else {
         let identity = age::x25519::Identity::generate();
         let public_key = identity.to_public().to_string();
@@ -152,8 +162,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     };
 
     // Open state cache (wrapped in Arc<Mutex> for shared access)
+    // Derive .json sibling from state_db path to match CLI convention
+    let state_json_path = config.sync.state_db.with_extension("json");
     let state_cache = Arc::new(tokio::sync::Mutex::new(
-        tcfs_sync::state::StateCache::open(&config.sync.state_db).unwrap_or_else(|e| {
+        tcfs_sync::state::StateCache::open(&state_json_path).unwrap_or_else(|e| {
             warn!("state cache open failed: {e}  (starting fresh)");
             tcfs_sync::state::StateCache::open(&std::path::PathBuf::from(
                 "/tmp/tcfsd-state.db.json",
@@ -486,6 +498,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
     // Start gRPC server
     let socket_path = config.daemon.socket.clone();
+    let fp_socket_path = config.daemon.fileprovider_socket.clone();
     let config = Arc::new(config);
     let impl_ = TcfsDaemonImpl::new(
         cred_store,
@@ -593,11 +606,23 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     };
 
     info!(socket = %socket_path.display(), "gRPC: listening");
+    if let Some(ref fp) = fp_socket_path {
+        info!(socket = %fp.display(), "gRPC: FileProvider socket");
+    }
 
-    crate::grpc::serve(&socket_path, impl_, shutdown_signal).await?;
+    crate::grpc::serve(
+        &socket_path,
+        fp_socket_path.as_deref(),
+        impl_,
+        shutdown_signal,
+    )
+    .await?;
 
-    // Clean up socket file
+    // Clean up socket files
     let _ = tokio::fs::remove_file(&socket_path).await;
+    if let Some(ref fp) = fp_socket_path {
+        let _ = tokio::fs::remove_file(fp).await;
+    }
 
     Ok(())
 }

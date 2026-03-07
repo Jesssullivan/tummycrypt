@@ -88,6 +88,23 @@ impl DeviceRegistry {
         self.devices.iter().find(|d| d.name == name)
     }
 
+    /// Backfill a missing device_id with a new UUID v4.
+    /// Returns the new device_id, or None if the device was not found.
+    pub fn backfill_device_id(&mut self, name: &str) -> Option<String> {
+        if let Some(device) = self.devices.iter_mut().find(|d| d.name == name) {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            device.device_id = new_id.clone();
+            // Also backfill signing_key_hash if missing
+            if device.signing_key_hash.is_empty() {
+                device.signing_key_hash =
+                    blake3::hash(device.public_key.as_bytes()).to_hex().as_str()[..16].to_string();
+            }
+            Some(new_id)
+        } else {
+            None
+        }
+    }
+
     /// Find a device by UUID
     pub fn find_by_id(&self, device_id: &str) -> Option<&DeviceIdentity> {
         self.devices.iter().find(|d| d.device_id == device_id)

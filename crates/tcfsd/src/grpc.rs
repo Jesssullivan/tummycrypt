@@ -743,6 +743,14 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let path = std::path::PathBuf::from(&req.path);
 
+        // Reload state from disk in case the CLI wrote new entries
+        {
+            let mut cache = self.state_cache.lock().await;
+            if let Err(e) = cache.reload_from_disk() {
+                tracing::warn!("failed to reload state cache: {e}");
+            }
+        }
+
         match resolution.as_str() {
             "defer" => {
                 info!(path = %req.path, "conflict deferred");
@@ -1122,30 +1130,69 @@ impl TcfsDaemon for TcfsDaemonImpl {
     }
 }
 
-/// Start the gRPC server on a Unix domain socket with graceful shutdown support.
-pub async fn serve(
-    socket_path: &Path,
-    impl_: TcfsDaemonImpl,
-    shutdown: impl std::future::Future<Output = ()>,
-) -> Result<()> {
-    // Remove stale socket if it exists
+/// Bind a Unix domain socket, removing any stale socket and creating parent dirs.
+async fn bind_uds(socket_path: &Path) -> Result<UnixListenerStream> {
     if socket_path.exists() {
         tokio::fs::remove_file(socket_path).await?;
     }
-
-    // Create parent directory if needed
     if let Some(parent) = socket_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-
     let listener = UnixListener::bind(socket_path)?;
-    let stream = UnixListenerStream::new(listener);
+    Ok(UnixListenerStream::new(listener))
+}
 
+/// Start the gRPC server on a Unix domain socket with graceful shutdown support.
+///
+/// If `fileprovider_socket` is provided, a second server is spawned on that socket
+/// for sandboxed macOS FileProvider access (App Group container).
+pub async fn serve(
+    socket_path: &Path,
+    fileprovider_socket: Option<&Path>,
+    impl_: TcfsDaemonImpl,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    let primary = bind_uds(socket_path).await?;
     info!(socket = %socket_path.display(), "gRPC server ready");
 
-    Server::builder()
-        .add_service(TcfsDaemonServer::new(impl_))
-        .serve_with_incoming_shutdown(stream, shutdown)
+    let service = TcfsDaemonServer::new(impl_);
+
+    // Spawn a second gRPC server on the FileProvider socket if configured.
+    // Uses a separate tokio task with a shared shutdown notify.
+    let fp_handle = if let Some(fp_path) = fileprovider_socket {
+        let secondary = bind_uds(fp_path).await?;
+        info!(socket = %fp_path.display(), "gRPC FileProvider socket ready");
+
+        let fp_service = service.clone();
+        let fp_shutdown = Arc::new(tokio::sync::Notify::new());
+        let fp_shutdown_clone = fp_shutdown.clone();
+
+        let handle = tokio::spawn(async move {
+            if let Err(e) = Server::builder()
+                .add_service(fp_service)
+                .serve_with_incoming_shutdown(secondary, fp_shutdown_clone.notified())
+                .await
+            {
+                tracing::warn!("FileProvider gRPC server error: {e}");
+            }
+        });
+
+        Some((handle, fp_shutdown))
+    } else {
+        None
+    };
+
+    let result = Server::builder()
+        .add_service(service)
+        .serve_with_incoming_shutdown(primary, shutdown)
         .await
-        .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))
+        .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"));
+
+    // Stop the FileProvider server when the primary shuts down
+    if let Some((handle, notify)) = fp_handle {
+        notify.notify_one();
+        let _ = handle.await;
+    }
+
+    result
 }
