@@ -235,7 +235,18 @@ pub async fn upload_file_with_device(
                         outcome: Some(sync_outcome),
                     });
                 }
-                SyncOutcome::Conflict(_) => {
+                SyncOutcome::Conflict(ref conflict_info) => {
+                    // Record local state with conflict info so `tcfs resolve` can find it
+                    let mut sync_state = make_sync_state_full(
+                        local_path,
+                        file_hash_hex.clone(),
+                        chunks.len(),
+                        remote_manifest.clone(),
+                        local_vclock,
+                        device_id.to_string(),
+                    )?;
+                    sync_state.conflict = Some(conflict_info.clone());
+                    state.set(local_path, sync_state);
                     return Ok(UploadResult {
                         path: local_path.to_path_buf(),
                         remote_path: remote_manifest.clone(),
