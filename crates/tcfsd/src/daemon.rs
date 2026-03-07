@@ -162,8 +162,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     };
 
     // Open state cache (wrapped in Arc<Mutex> for shared access)
+    // Derive .json sibling from state_db path to match CLI convention
+    let state_json_path = config.sync.state_db.with_extension("json");
     let state_cache = Arc::new(tokio::sync::Mutex::new(
-        tcfs_sync::state::StateCache::open(&config.sync.state_db).unwrap_or_else(|e| {
+        tcfs_sync::state::StateCache::open(&state_json_path).unwrap_or_else(|e| {
             warn!("state cache open failed: {e}  (starting fresh)");
             tcfs_sync::state::StateCache::open(&std::path::PathBuf::from(
                 "/tmp/tcfsd-state.db.json",
