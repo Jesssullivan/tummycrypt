@@ -6,8 +6,8 @@
 
 use opendal::Operator;
 use std::path::Path;
-use tempfile::TempDir;
 use tcfs_sync::conflict::SyncOutcome;
+use tempfile::TempDir;
 
 fn memory_operator() -> Operator {
     Operator::new(opendal::services::Memory::default())
@@ -34,8 +34,7 @@ async fn two_device_conflict_via_index() {
     // Device A pushes "hello.txt"
     let content_a = b"device A version";
     let src_a = write_test_file(tmp.path(), "a/hello.txt", content_a);
-    let mut state_a =
-        tcfs_sync::state::StateCache::open(&tmp.path().join("state_a.json")).unwrap();
+    let mut state_a = tcfs_sync::state::StateCache::open(&tmp.path().join("state_a.json")).unwrap();
 
     let upload_a = tcfs_sync::engine::upload_file_with_device(
         &op,
@@ -65,8 +64,7 @@ async fn two_device_conflict_via_index() {
 
     // Device B: first write old content, record state, then write new content
     let src_b = write_test_file(tmp.path(), "b/hello.txt", b"old B content");
-    let mut state_b =
-        tcfs_sync::state::StateCache::open(&tmp.path().join("state_b.json")).unwrap();
+    let mut state_b = tcfs_sync::state::StateCache::open(&tmp.path().join("state_b.json")).unwrap();
 
     // Record state with old content (simulate having previously pushed)
     let mut initial_b_state = tcfs_sync::state::make_sync_state(
@@ -117,8 +115,7 @@ async fn sequential_push_no_conflict() {
     // Device A pushes
     let content_a = b"first version from A";
     let src_a = write_test_file(tmp.path(), "a/doc.txt", content_a);
-    let mut state_a =
-        tcfs_sync::state::StateCache::open(&tmp.path().join("state_a.json")).unwrap();
+    let mut state_a = tcfs_sync::state::StateCache::open(&tmp.path().join("state_a.json")).unwrap();
 
     let upload_a = tcfs_sync::engine::upload_file_with_device(
         &op,
@@ -149,8 +146,7 @@ async fn sequential_push_no_conflict() {
     // Device B: pulls A's version, then edits locally.
     // After pull+edit, B's vclock should DOMINATE A's: B has A's clock PLUS B's tick.
     let src_b = write_test_file(tmp.path(), "b/doc.txt", content_a);
-    let mut state_b =
-        tcfs_sync::state::StateCache::open(&tmp.path().join("state_b.json")).unwrap();
+    let mut state_b = tcfs_sync::state::StateCache::open(&tmp.path().join("state_b.json")).unwrap();
 
     let a_state = state_a.get(&src_a).expect("A should have state");
     let mut initial_b_state = tcfs_sync::state::make_sync_state(
@@ -203,11 +199,17 @@ async fn conflict_records_state() {
 
     // Device A pushes
     let src_a = write_test_file(tmp.path(), "a/data.bin", b"alpha");
-    let mut state_a =
-        tcfs_sync::state::StateCache::open(&tmp.path().join("state_a.json")).unwrap();
+    let mut state_a = tcfs_sync::state::StateCache::open(&tmp.path().join("state_a.json")).unwrap();
 
     let upload_a = tcfs_sync::engine::upload_file_with_device(
-        &op, &src_a, prefix, &mut state_a, None, "dev-a", Some("data.bin"), None,
+        &op,
+        &src_a,
+        prefix,
+        &mut state_a,
+        None,
+        "dev-a",
+        Some("data.bin"),
+        None,
     )
     .await
     .expect("A upload");
@@ -225,13 +227,11 @@ async fn conflict_records_state() {
 
     // Device B: write old content, record state, then write new content
     let src_b = write_test_file(tmp.path(), "b/data.bin", b"old");
-    let mut state_b =
-        tcfs_sync::state::StateCache::open(&tmp.path().join("state_b.json")).unwrap();
+    let mut state_b = tcfs_sync::state::StateCache::open(&tmp.path().join("state_b.json")).unwrap();
 
-    let mut stale_state = tcfs_sync::state::make_sync_state(
-        &src_b, "stale".into(), 1, "stale/manifest".into(),
-    )
-    .unwrap();
+    let mut stale_state =
+        tcfs_sync::state::make_sync_state(&src_b, "stale".into(), 1, "stale/manifest".into())
+            .unwrap();
     stale_state.vclock.tick("dev-b");
     state_b.set(&src_b, stale_state);
 
@@ -239,7 +239,14 @@ async fn conflict_records_state() {
     std::fs::write(&src_b, b"bravo").unwrap();
 
     let upload_b = tcfs_sync::engine::upload_file_with_device(
-        &op, &src_b, prefix, &mut state_b, None, "dev-b", Some("data.bin"), None,
+        &op,
+        &src_b,
+        prefix,
+        &mut state_b,
+        None,
+        "dev-b",
+        Some("data.bin"),
+        None,
     )
     .await
     .expect("B upload");
@@ -248,7 +255,9 @@ async fn conflict_records_state() {
     assert!(matches!(upload_b.outcome, Some(SyncOutcome::Conflict(_))));
 
     // Verify conflict is recorded in state cache
-    let cached = state_b.get(&src_b).expect("state should exist after conflict");
+    let cached = state_b
+        .get(&src_b)
+        .expect("state should exist after conflict");
     assert!(
         cached.conflict.is_some(),
         "conflict info should be recorded in state"

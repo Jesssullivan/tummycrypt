@@ -501,7 +501,10 @@ fn load_device_id(config: &tcfs_core::config::TcfsConfig) -> String {
                     if let Err(e) = registry.save(&registry_path) {
                         eprintln!("warning: failed to save backfilled device registry: {e}");
                     } else {
-                        eprintln!("Backfilled missing device_id for '{device_name}': {}", &new_id[..8]);
+                        eprintln!(
+                            "Backfilled missing device_id for '{device_name}': {}",
+                            &new_id[..8]
+                        );
                     }
                     new_id
                 }

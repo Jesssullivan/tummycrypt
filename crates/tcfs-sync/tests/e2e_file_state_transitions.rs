@@ -194,10 +194,7 @@ async fn truncate_to_zero_bytes() {
     .await
     .expect("upload truncated");
 
-    assert!(
-        !upload2.skipped,
-        "truncated file should not be skipped"
-    );
+    assert!(!upload2.skipped, "truncated file should not be skipped");
     assert_eq!(upload2.bytes, 0, "truncated file should have 0 bytes");
 }
 
@@ -248,12 +245,18 @@ async fn unsync_then_modify_then_resync() {
     .expect("device-b download");
 
     assert_eq!(std::fs::read(&dst_b).unwrap(), original);
-    assert!(state_b.get(&dst_b).is_some(), "state_b should have entry after download");
+    assert!(
+        state_b.get(&dst_b).is_some(),
+        "state_b should have entry after download"
+    );
 
     // Device B removes from state cache (unsync)
     state_b.remove(&dst_b);
     state_b.flush().unwrap();
-    assert!(state_b.get(&dst_b).is_none(), "entry should be gone after unsync");
+    assert!(
+        state_b.get(&dst_b).is_none(),
+        "entry should be gone after unsync"
+    );
 
     // Device B modifies the local copy
     let modified = b"modified content by device-b after unsync";
@@ -273,7 +276,10 @@ async fn unsync_then_modify_then_resync() {
     .await
     .expect("device-b re-upload");
 
-    assert!(!upload_b.skipped, "re-upload after unsync+modify should not be skipped");
+    assert!(
+        !upload_b.skipped,
+        "re-upload after unsync+modify should not be skipped"
+    );
     assert_ne!(
         upload_b.hash, upload_a.hash,
         "hash should differ after modification"
@@ -387,7 +393,10 @@ async fn modify_does_not_change_device_id() {
 
     let cached1 = state.get(&src).expect("state entry after first upload");
     let vclock1_a = cached1.vclock.get("device-a");
-    assert!(vclock1_a > 0, "vclock for device-a should be > 0 after first upload");
+    assert!(
+        vclock1_a > 0,
+        "vclock for device-a should be > 0 after first upload"
+    );
     assert_eq!(cached1.device_id, "device-a");
 
     // Modify and re-upload as device-a
@@ -470,7 +479,9 @@ async fn state_cache_persistence_across_opens() {
     // Open a NEW StateCache from the same path
     let state2 = StateCache::open(&state_path).expect("reopen state");
 
-    let cached2 = state2.get(&src).expect("entry should persist across reopen");
+    let cached2 = state2
+        .get(&src)
+        .expect("entry should persist across reopen");
     assert_eq!(
         cached2.blake3, hash_before,
         "hash should match after reopen"

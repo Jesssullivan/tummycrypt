@@ -183,10 +183,7 @@ async fn push_tree_file_in_subdir_modified() {
         .await
         .expect("second push_tree");
 
-    assert_eq!(
-        uploaded2, 1,
-        "only the modified file should be re-uploaded"
-    );
+    assert_eq!(uploaded2, 1, "only the modified file should be re-uploaded");
     assert_eq!(skipped2, 2, "unmodified files should be skipped");
 }
 

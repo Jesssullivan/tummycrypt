@@ -247,11 +247,7 @@ async fn scheduler_processes_high_priority_first() {
 
     // Pre-enqueue directly into the priority queue
     scheduler
-        .enqueue(SyncTask::new(
-            "low.txt".into(),
-            SyncOp::Push,
-            Priority::Low,
-        ))
+        .enqueue(SyncTask::new("low.txt".into(), SyncOp::Push, Priority::Low))
         .await;
     scheduler
         .enqueue(SyncTask::new(
@@ -283,7 +279,8 @@ async fn scheduler_processes_high_priority_first() {
                 done.notify_one();
             }
             Ok(())
-        }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
     };
 
     // Spawn the scheduler run in background
@@ -347,7 +344,8 @@ async fn scheduler_retries_failed_task() {
             // Succeed on second attempt, signal done
             done.notify_one();
             Ok(())
-        }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
     };
 
     let sched_handle = tokio::spawn(async move {

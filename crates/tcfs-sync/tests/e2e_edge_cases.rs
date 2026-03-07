@@ -214,7 +214,9 @@ async fn deeply_nested_path() {
     assert_eq!(upload.bytes, original.len() as u64);
 
     // State cache should track the file
-    let cached = state.get(&src).expect("state cache should track deeply nested file");
+    let cached = state
+        .get(&src)
+        .expect("state cache should track deeply nested file");
     assert_eq!(cached.size, original.len() as u64);
     assert!(!cached.blake3.is_empty());
 }
@@ -365,7 +367,10 @@ async fn single_byte_file() {
 
     assert!(!upload.skipped);
     assert_eq!(upload.bytes, 1);
-    assert!(upload.chunks > 0, "even 1 byte should produce at least 1 chunk");
+    assert!(
+        upload.chunks > 0,
+        "even 1 byte should produce at least 1 chunk"
+    );
 
     let download = download_file_with_device(
         &op,
@@ -381,6 +386,9 @@ async fn single_byte_file() {
     .expect("download single byte file");
 
     let downloaded = std::fs::read(&dst).unwrap();
-    assert_eq!(downloaded, original, "single byte content must roundtrip exactly");
+    assert_eq!(
+        downloaded, original,
+        "single byte content must roundtrip exactly"
+    );
     assert_eq!(download.bytes, 1);
 }

@@ -66,10 +66,7 @@ async fn synced_to_modified_to_push_chain() {
 
     // Step 2: Verify state shows synced (needs_sync returns None for unmodified file)
     let needs = state.needs_sync(&src);
-    assert!(
-        needs.is_ok(),
-        "needs_sync should not error on synced file"
-    );
+    assert!(needs.is_ok(), "needs_sync should not error on synced file");
     assert!(
         needs.unwrap().is_none(),
         "synced file should not need sync (needs_sync should return None)"
@@ -191,7 +188,10 @@ async fn push_pull_modify_push_two_device_chain() {
     .await
     .expect("device-b upload");
 
-    assert!(!upload_b.skipped, "device-b modified upload should not be skipped");
+    assert!(
+        !upload_b.skipped,
+        "device-b modified upload should not be skipped"
+    );
 
     // Step 5: Device A pulls updated version
     let dst_a = tmp.path().join("dst_a/shared.txt");
@@ -558,7 +558,10 @@ async fn unsync_modify_resync_no_conflict() {
     .expect("initial upload");
 
     assert!(!upload1.skipped);
-    assert!(state.get(&src).is_some(), "state should have entry after upload");
+    assert!(
+        state.get(&src).is_some(),
+        "state should have entry after upload"
+    );
 
     // Step 2: Remove from state cache (simulate unsync/dehydration)
     state.remove(&src);

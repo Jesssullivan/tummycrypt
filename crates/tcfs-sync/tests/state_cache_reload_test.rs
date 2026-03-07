@@ -1,9 +1,9 @@
 //! Tests for StateCache::reload_from_disk — verifies that entries written
 //! by one process (CLI) are visible to another (daemon) after reload.
 
-use tempfile::TempDir;
 use tcfs_sync::conflict::VectorClock;
 use tcfs_sync::state::StateCache;
+use tempfile::TempDir;
 
 fn write_file(dir: &std::path::Path, name: &str, content: &[u8]) -> std::path::PathBuf {
     let p = dir.join(name);

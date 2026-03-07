@@ -225,8 +225,8 @@ async fn delete_vs_modify_cross_device_conflict() {
     let outcome = compare_clocks(
         &vclock_a_delete,
         &vclock_b,
-        "deleted",        // A's "hash" (file is gone)
-        &upload_b.hash,   // B's hash
+        "deleted",      // A's "hash" (file is gone)
+        &upload_b.hash, // B's hash
         "shared.txt",
         "device-a",
         "device-b",
@@ -314,19 +314,40 @@ async fn delete_one_of_multiple_files() {
     let src3 = write_test_file(tmp.path(), "src/file3.txt", b"content of file three");
 
     upload_file_with_device(
-        &op, &src1, prefix, &mut state, None, "device-a", Some("file1.txt"), None,
+        &op,
+        &src1,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        Some("file1.txt"),
+        None,
     )
     .await
     .expect("upload file1");
 
     upload_file_with_device(
-        &op, &src2, prefix, &mut state, None, "device-a", Some("file2.txt"), None,
+        &op,
+        &src2,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        Some("file2.txt"),
+        None,
     )
     .await
     .expect("upload file2");
 
     upload_file_with_device(
-        &op, &src3, prefix, &mut state, None, "device-a", Some("file3.txt"), None,
+        &op,
+        &src3,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        Some("file3.txt"),
+        None,
     )
     .await
     .expect("upload file3");
@@ -350,13 +371,27 @@ async fn delete_one_of_multiple_files() {
 
     // Re-upload #1 and #3 — both should be skipped (unchanged)
     let reupload1 = upload_file_with_device(
-        &op, &src1, prefix, &mut state, None, "device-a", Some("file1.txt"), None,
+        &op,
+        &src1,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        Some("file1.txt"),
+        None,
     )
     .await
     .expect("re-upload file1");
 
     let reupload3 = upload_file_with_device(
-        &op, &src3, prefix, &mut state, None, "device-a", Some("file3.txt"), None,
+        &op,
+        &src3,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        Some("file3.txt"),
+        None,
     )
     .await
     .expect("re-upload file3");
@@ -422,10 +457,7 @@ async fn recreate_deleted_file_with_different_size() {
     .expect("upload 10KB");
 
     assert!(!upload_10kb.skipped, "new 10KB file should not be skipped");
-    assert_eq!(
-        upload_10kb.bytes, 10240,
-        "upload should reflect 10KB size"
-    );
+    assert_eq!(upload_10kb.bytes, 10240, "upload should reflect 10KB size");
     assert_ne!(
         upload_10kb.hash, upload_1kb.hash,
         "different size/content should produce different hash"
