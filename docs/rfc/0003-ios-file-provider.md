@@ -198,14 +198,17 @@ enum ProviderError {
 - [x] Entitlements (shared Keychain access group `group.io.tinyland.tcfs`)
 - [x] `build-ios.sh` — cargo cross-compile + UniFFI bindgen + xcodebuild
 - [x] Verified: Rust staticlib builds for `aarch64-apple-ios-sim`
-- [ ] Xcode project (.xcodeproj) — requires Xcode GUI to create
-- [ ] Test on iOS Simulator
+- [x] `project.yml` — xcodegen spec for programmatic project generation
+- [x] CI job: `ios-typecheck` validates Swift against iOS SDK on every push
+- [ ] Xcode project (.xcodeproj) — generate via `xcodegen` or create in Xcode
+- [ ] Test on iOS Simulator (needs runtime download)
 
-### Phase 7c: E2E Encryption
+### Phase 7c: E2E Encryption (COMPLETE — shipped with 7a/7b)
 
-- Wire tcfs-crypto through UniFFI
-- Keychain credential storage (replacing env vars)
-- Encrypted hydration flow
+- [x] tcfs-crypto wired through UniFFI (XChaCha20-Poly1305 + Argon2id KDF)
+- [x] Keychain credential storage (encryption_passphrase + encryption_salt)
+- [x] Encrypted hydration flow (file key unwrap → chunk decrypt → decompress)
+- [x] Encrypted upload flow (chunk compress → encrypt → file key wrap)
 
 ### Phase 7d: Sync Engine
 
