@@ -74,6 +74,19 @@ mod grpc_backend;
 pub use grpc_backend::*;
 
 // ============================================================================
+// UniFFI bindings for iOS (proc-macro based, no UDL)
+// ============================================================================
+
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
+
+#[cfg(feature = "uniffi")]
+mod uniffi_bridge;
+
+#[cfg(feature = "uniffi")]
+pub use uniffi_bridge::*;
+
+// ============================================================================
 // Shared FFI helpers
 // ============================================================================
 
