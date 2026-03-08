@@ -1,0 +1,4 @@
+module tcfs_file_providerFFI {
+    header "tcfs_file_providerFFI.h"
+    export *
+}

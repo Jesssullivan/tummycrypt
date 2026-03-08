@@ -38,6 +38,11 @@ hyper-util = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
 uniffi = { workspace = true, features = ["cli"], optional = true }
 
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen/main.rs"
+required-features = ["uniffi"]
+
 [build-dependencies]
 cbindgen = "0.27"
 uniffi = { workspace = true, features = ["build"], optional = true }

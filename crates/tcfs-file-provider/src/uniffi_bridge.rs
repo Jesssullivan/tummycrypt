@@ -19,7 +19,7 @@ pub struct ProviderConfig {
     pub s3_endpoint: String,
     pub s3_bucket: String,
     pub access_key: String,
-    pub secret_key: String,
+    pub s3_secret: String,
     pub remote_prefix: String,
     pub device_id: String,
     /// Passphrase for E2EE (empty string = plaintext mode).
@@ -135,7 +135,7 @@ impl TcfsProviderHandle {
                 region: "us-east-1".to_string(),
                 bucket: config.s3_bucket,
                 access_key_id: config.access_key,
-                secret_access_key: config.secret_key,
+                secret_access_key: config.s3_secret,
             })
             .map_err(|e| ProviderError::Storage {
                 message: e.to_string(),
