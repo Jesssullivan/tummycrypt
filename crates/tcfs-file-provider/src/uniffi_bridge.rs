@@ -475,18 +475,13 @@ impl TcfsProviderHandle {
 
     /// Get sync status (connected check + file count from index).
     pub fn get_sync_status(&self) -> Result<SyncStatus, ProviderError> {
-        let index_prefix = format!(
-            "{}/index/",
-            self.remote_prefix.trim_end_matches('/')
-        );
+        let index_prefix = format!("{}/index/", self.remote_prefix.trim_end_matches('/'));
 
         self.runtime.block_on(async {
             match self.operator.list(&index_prefix).await {
                 Ok(entries) => {
-                    let file_count = entries
-                        .iter()
-                        .filter(|e| !e.path().ends_with('/'))
-                        .count() as u64;
+                    let file_count =
+                        entries.iter().filter(|e| !e.path().ends_with('/')).count() as u64;
                     Ok(SyncStatus {
                         connected: true,
                         files_synced: file_count,
