@@ -58,7 +58,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                         modifiedTimestamp: item.modifiedTimestamp,
                         downloaded: false,
                         uploaded: true,
-                        versionTag: item.contentHash
+                        versionTag: item.contentHash,
+                        conflictWith: item.conflictWith
                     )
                 }
 
@@ -98,7 +99,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                         modifiedTimestamp: item.modifiedTimestamp,
                         downloaded: false,
                         uploaded: true,
-                        versionTag: item.contentHash
+                        versionTag: item.contentHash,
+                        conflictWith: item.conflictWith
                     )
                 }
 

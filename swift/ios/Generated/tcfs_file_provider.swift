@@ -505,6 +505,13 @@ fileprivate struct FfiConverterString: FfiConverter {
 public protocol TcfsProviderHandleProtocol : AnyObject {
     
     /**
+     * Check if a file has a conflict (remote vclock diverged from ours).
+     *
+     * Returns the conflicting device ID if diverged, or None if clean.
+     */
+    func checkConflict(itemId: String) throws  -> String?
+    
+    /**
      * Create a directory under the given parent path.
      */
     func createDirectory(parentPath: String, dirName: String) throws 
@@ -609,6 +616,19 @@ public convenience init(config: ProviderConfig)throws  {
 
     
 
+    
+    /**
+     * Check if a file has a conflict (remote vclock diverged from ours).
+     *
+     * Returns the conflicting device ID if diverged, or None if clean.
+     */
+open func checkConflict(itemId: String)throws  -> String? {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
+    uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_check_conflict(self.uniffiClonePointer(),
+        FfiConverterString.lower(itemId),$0
+    )
+})
+}
     
     /**
      * Create a directory under the given parent path.
@@ -753,16 +773,24 @@ public struct FileItem {
     public var modifiedTimestamp: Int64
     public var isDirectory: Bool
     public var contentHash: String
+    /**
+     * If non-empty, this file has a conflict with the named device.
+     */
+    public var conflictWith: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(itemId: String, filename: String, fileSize: UInt64, modifiedTimestamp: Int64, isDirectory: Bool, contentHash: String) {
+    public init(itemId: String, filename: String, fileSize: UInt64, modifiedTimestamp: Int64, isDirectory: Bool, contentHash: String, 
+        /**
+         * If non-empty, this file has a conflict with the named device.
+         */conflictWith: String) {
         self.itemId = itemId
         self.filename = filename
         self.fileSize = fileSize
         self.modifiedTimestamp = modifiedTimestamp
         self.isDirectory = isDirectory
         self.contentHash = contentHash
+        self.conflictWith = conflictWith
     }
 }
 
@@ -788,6 +816,9 @@ extension FileItem: Equatable, Hashable {
         if lhs.contentHash != rhs.contentHash {
             return false
         }
+        if lhs.conflictWith != rhs.conflictWith {
+            return false
+        }
         return true
     }
 
@@ -798,6 +829,7 @@ extension FileItem: Equatable, Hashable {
         hasher.combine(modifiedTimestamp)
         hasher.combine(isDirectory)
         hasher.combine(contentHash)
+        hasher.combine(conflictWith)
     }
 }
 
@@ -814,7 +846,8 @@ public struct FfiConverterTypeFileItem: FfiConverterRustBuffer {
                 fileSize: FfiConverterUInt64.read(from: &buf), 
                 modifiedTimestamp: FfiConverterInt64.read(from: &buf), 
                 isDirectory: FfiConverterBool.read(from: &buf), 
-                contentHash: FfiConverterString.read(from: &buf)
+                contentHash: FfiConverterString.read(from: &buf), 
+                conflictWith: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -825,6 +858,7 @@ public struct FfiConverterTypeFileItem: FfiConverterRustBuffer {
         FfiConverterInt64.write(value.modifiedTimestamp, into: &buf)
         FfiConverterBool.write(value.isDirectory, into: &buf)
         FfiConverterString.write(value.contentHash, into: &buf)
+        FfiConverterString.write(value.conflictWith, into: &buf)
     }
 }
 
@@ -1345,6 +1379,9 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_tcfs_file_provider_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_check_conflict() != 53955) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_create_directory() != 53531) {
         return InitializationResult.apiChecksumMismatch
