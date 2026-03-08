@@ -19,6 +19,8 @@ struct TCFSApp: App {
 class TCFSViewModel: ObservableObject {
     @Published var status: String = "Not configured"
     @Published var isConfigured: Bool = false
+    @Published var syncFileCount: UInt64 = 0
+    @Published var syncLastError: String? = nil
 
     private let domain = NSFileProviderDomain(
         identifier: NSFileProviderDomainIdentifier("io.tinyland.tcfs"),
@@ -27,6 +29,69 @@ class TCFSViewModel: ObservableObject {
 
     init() {
         checkConfiguration()
+        refreshSyncStatus()
+    }
+
+    func refreshSyncStatus() {
+        guard isConfigured else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            guard let config = Self.loadConfigForStatus() else { return }
+
+            do {
+                let provider = try TcfsProviderHandle(config: config)
+                let syncStatus = try provider.getSyncStatus()
+                DispatchQueue.main.async {
+                    self.syncFileCount = syncStatus.filesSynced
+                    self.syncLastError = syncStatus.lastError
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.syncLastError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private static func loadConfigForStatus() -> ProviderConfig? {
+        func readKeychain(_ account: String) -> String? {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "io.tinyland.tcfs.config",
+                kSecAttrAccount as String: account,
+                kSecAttrAccessGroup as String: "group.io.tinyland.tcfs",
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ]
+            var item: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+                  let data = item as? Data,
+                  let value = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            return value
+        }
+
+        guard let endpoint = readKeychain("s3_endpoint"),
+              let bucket = readKeychain("s3_bucket"),
+              let accessKey = readKeychain("access_key"),
+              let secret = readKeychain("s3_secret"),
+              let prefix = readKeychain("remote_prefix"),
+              let deviceId = readKeychain("device_id") else {
+            return nil
+        }
+
+        return ProviderConfig(
+            s3Endpoint: endpoint,
+            s3Bucket: bucket,
+            accessKey: accessKey,
+            s3Secret: secret,
+            remotePrefix: prefix,
+            deviceId: deviceId,
+            encryptionPassphrase: readKeychain("encryption_passphrase") ?? "",
+            encryptionSalt: readKeychain("encryption_salt") ?? ""
+        )
     }
 
     func checkConfiguration() {
@@ -144,6 +209,24 @@ struct ContentView: View {
                         Text(viewModel.status)
                             .foregroundColor(viewModel.isConfigured ? .green : .secondary)
                     }
+                    if viewModel.isConfigured {
+                        HStack {
+                            Text("Files Synced")
+                            Spacer()
+                            Text("\(viewModel.syncFileCount)")
+                                .foregroundColor(.secondary)
+                        }
+                        if let error = viewModel.syncLastError {
+                            HStack {
+                                Text("Last Error")
+                                Spacer()
+                                Text(error)
+                                    .foregroundColor(.red)
+                                    .font(.caption)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
                 }
 
                 Section {
@@ -153,6 +236,11 @@ struct ContentView: View {
 
                     Button("Register FileProvider Domain") {
                         viewModel.registerDomain()
+                    }
+                    .disabled(!viewModel.isConfigured)
+
+                    Button("Refresh Sync Status") {
+                        viewModel.refreshSyncStatus()
                     }
                     .disabled(!viewModel.isConfigured)
                 }

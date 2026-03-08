@@ -505,6 +505,13 @@ fileprivate struct FfiConverterString: FfiConverter {
 public protocol TcfsProviderHandleProtocol : AnyObject {
     
     /**
+     * Check if a file has a conflict (remote vclock diverged from ours).
+     *
+     * Returns the conflicting device ID if diverged, or None if clean.
+     */
+    func checkConflict(itemId: String) throws  -> String?
+    
+    /**
      * Create a directory under the given parent path.
      */
     func createDirectory(parentPath: String, dirName: String) throws 
@@ -515,7 +522,7 @@ public protocol TcfsProviderHandleProtocol : AnyObject {
     func deleteItem(itemId: String) throws 
     
     /**
-     * Get sync status (connected check via health probe).
+     * Get sync status (connected check + file count from index).
      */
     func getSyncStatus() throws  -> SyncStatus
     
@@ -523,6 +530,13 @@ public protocol TcfsProviderHandleProtocol : AnyObject {
      * Hydrate (download + decrypt + reassemble) a file to a local path.
      */
     func hydrateFile(itemId: String, destinationPath: String) throws 
+    
+    /**
+     * Hydrate a file with progress reporting.
+     *
+     * Same as `hydrate_file` but calls the progress callback after each chunk.
+     */
+    func hydrateFileWithProgress(itemId: String, destinationPath: String, callback: ProgressCallback) throws 
     
     /**
      * List files at a given relative path.
@@ -604,6 +618,19 @@ public convenience init(config: ProviderConfig)throws  {
 
     
     /**
+     * Check if a file has a conflict (remote vclock diverged from ours).
+     *
+     * Returns the conflicting device ID if diverged, or None if clean.
+     */
+open func checkConflict(itemId: String)throws  -> String? {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
+    uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_check_conflict(self.uniffiClonePointer(),
+        FfiConverterString.lower(itemId),$0
+    )
+})
+}
+    
+    /**
      * Create a directory under the given parent path.
      */
 open func createDirectory(parentPath: String, dirName: String)throws  {try rustCallWithError(FfiConverterTypeProviderError.lift) {
@@ -625,7 +652,7 @@ open func deleteItem(itemId: String)throws  {try rustCallWithError(FfiConverterT
 }
     
     /**
-     * Get sync status (connected check via health probe).
+     * Get sync status (connected check + file count from index).
      */
 open func getSyncStatus()throws  -> SyncStatus {
     return try  FfiConverterTypeSyncStatus.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
@@ -641,6 +668,20 @@ open func hydrateFile(itemId: String, destinationPath: String)throws  {try rustC
     uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_hydrate_file(self.uniffiClonePointer(),
         FfiConverterString.lower(itemId),
         FfiConverterString.lower(destinationPath),$0
+    )
+}
+}
+    
+    /**
+     * Hydrate a file with progress reporting.
+     *
+     * Same as `hydrate_file` but calls the progress callback after each chunk.
+     */
+open func hydrateFileWithProgress(itemId: String, destinationPath: String, callback: ProgressCallback)throws  {try rustCallWithError(FfiConverterTypeProviderError.lift) {
+    uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_hydrate_file_with_progress(self.uniffiClonePointer(),
+        FfiConverterString.lower(itemId),
+        FfiConverterString.lower(destinationPath),
+        FfiConverterCallbackInterfaceProgressCallback.lower(callback),$0
     )
 }
 }
@@ -732,16 +773,24 @@ public struct FileItem {
     public var modifiedTimestamp: Int64
     public var isDirectory: Bool
     public var contentHash: String
+    /**
+     * If non-empty, this file has a conflict with the named device.
+     */
+    public var conflictWith: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(itemId: String, filename: String, fileSize: UInt64, modifiedTimestamp: Int64, isDirectory: Bool, contentHash: String) {
+    public init(itemId: String, filename: String, fileSize: UInt64, modifiedTimestamp: Int64, isDirectory: Bool, contentHash: String, 
+        /**
+         * If non-empty, this file has a conflict with the named device.
+         */conflictWith: String) {
         self.itemId = itemId
         self.filename = filename
         self.fileSize = fileSize
         self.modifiedTimestamp = modifiedTimestamp
         self.isDirectory = isDirectory
         self.contentHash = contentHash
+        self.conflictWith = conflictWith
     }
 }
 
@@ -767,6 +816,9 @@ extension FileItem: Equatable, Hashable {
         if lhs.contentHash != rhs.contentHash {
             return false
         }
+        if lhs.conflictWith != rhs.conflictWith {
+            return false
+        }
         return true
     }
 
@@ -777,6 +829,7 @@ extension FileItem: Equatable, Hashable {
         hasher.combine(modifiedTimestamp)
         hasher.combine(isDirectory)
         hasher.combine(contentHash)
+        hasher.combine(conflictWith)
     }
 }
 
@@ -793,7 +846,8 @@ public struct FfiConverterTypeFileItem: FfiConverterRustBuffer {
                 fileSize: FfiConverterUInt64.read(from: &buf), 
                 modifiedTimestamp: FfiConverterInt64.read(from: &buf), 
                 isDirectory: FfiConverterBool.read(from: &buf), 
-                contentHash: FfiConverterString.read(from: &buf)
+                contentHash: FfiConverterString.read(from: &buf), 
+                conflictWith: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -804,6 +858,7 @@ public struct FfiConverterTypeFileItem: FfiConverterRustBuffer {
         FfiConverterInt64.write(value.modifiedTimestamp, into: &buf)
         FfiConverterBool.write(value.isDirectory, into: &buf)
         FfiConverterString.write(value.contentHash, into: &buf)
+        FfiConverterString.write(value.conflictWith, into: &buf)
     }
 }
 
@@ -1146,6 +1201,121 @@ extension ProviderError: Foundation.LocalizedError {
     }
 }
 
+
+
+
+/**
+ * Progress callback for hydration/upload operations.
+ *
+ * Implemented by Swift to update `Progress.completedUnitCount`.
+ */
+public protocol ProgressCallback : AnyObject {
+    
+    /**
+     * Called when progress updates (completed out of total bytes).
+     */
+    func onProgress(completed: UInt64, total: UInt64) 
+    
+}
+
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceProgressCallback {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfaceProgressCallback = UniffiVTableCallbackInterfaceProgressCallback(
+        onProgress: { (
+            uniffiHandle: UInt64,
+            completed: UInt64,
+            total: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceProgressCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onProgress(
+                     completed: try FfiConverterUInt64.lift(completed),
+                     total: try FfiConverterUInt64.lift(total)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterCallbackInterfaceProgressCallback.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface ProgressCallback: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitProgressCallback() {
+    uniffi_tcfs_file_provider_fn_init_callback_vtable_progresscallback(&UniffiCallbackInterfaceProgressCallback.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceProgressCallback {
+    fileprivate static var handleMap = UniffiHandleMap<ProgressCallback>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceProgressCallback : FfiConverter {
+    typealias SwiftType = ProgressCallback
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1210,16 +1380,22 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_check_conflict() != 53955) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_create_directory() != 53531) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_delete_item() != 1611) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_get_sync_status() != 35673) {
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_get_sync_status() != 22662) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_hydrate_file() != 360) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_hydrate_file_with_progress() != 9551) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_list_items() != 37548) {
@@ -1231,7 +1407,11 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tcfs_file_provider_checksum_constructor_tcfsproviderhandle_new() != 51545) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_tcfs_file_provider_checksum_method_progresscallback_on_progress() != 3349) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
+    uniffiCallbackInitProgressCallback()
     return InitializationResult.ok
 }()
 

@@ -22,6 +22,9 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
     var isUploaded: Bool
     var isMostRecentVersionDownloaded: Bool
 
+    /// Non-empty if this file has a conflict with another device.
+    let conflictDevice: String
+
     init(
         identifier: NSFileProviderItemIdentifier,
         parentIdentifier: NSFileProviderItemIdentifier,
@@ -31,7 +34,8 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         modifiedTimestamp: Int64 = 0,
         downloaded: Bool = true,
         uploaded: Bool = true,
-        versionTag: String = "1"
+        versionTag: String = "1",
+        conflictWith: String = ""
     ) {
         self.itemIdentifier = identifier
         self.parentItemIdentifier = parentIdentifier
@@ -48,6 +52,17 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         self.isDownloaded = isDirectory ? true : downloaded
         self.isUploaded = uploaded
         self.isMostRecentVersionDownloaded = isDirectory ? true : downloaded
+        self.conflictDevice = conflictWith
+    }
+
+    /// Surface conflict as a user-visible error badge on the item.
+    var lastUsedDate: Date? {
+        return conflictDevice.isEmpty ? nil : Date()
+    }
+
+    var tagData: Data? {
+        guard !conflictDevice.isEmpty else { return nil }
+        return "conflict:\(conflictDevice)".data(using: .utf8)
     }
 
     var capabilities: NSFileProviderItemCapabilities {
