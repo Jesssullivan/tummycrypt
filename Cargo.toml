@@ -129,6 +129,9 @@ uuid = { version = "1", features = ["v4"] }
 # Glob patterns
 glob = { version = "0.3" }
 
+# UniFFI (iOS FFI bridge)
+uniffi = { version = "0.28" }
+
 # Testing
 proptest = { version = "1" }
 tempfile = { version = "3" }

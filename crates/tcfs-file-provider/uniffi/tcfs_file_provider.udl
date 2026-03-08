@@ -1,4 +1,8 @@
 // tcfs File Provider — UniFFI interface definition
-// Status: Skeleton — will be populated in Phase 7b
 //
-// See RFC 0002 for the planned interface.
+// NOTE: This UDL file is UNUSED. UniFFI bindings use proc macros instead.
+// See src/uniffi_bridge.rs for the actual interface definition.
+//
+// The proc-macro approach (#[uniffi::export], #[derive(uniffi::Object)])
+// is recommended over UDL as of UniFFI 0.28+ and generates bindings
+// directly from annotated Rust code.
