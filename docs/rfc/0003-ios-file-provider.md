@@ -1,9 +1,9 @@
 # RFC 0003: iOS File Provider Extension
 
-**Status**: Draft
+**Status**: Phase 7a Complete (UniFFI bindings)
 **Author**: xoxd
-**Date**: 2026-02-22
-**Tracking**: Phase 7 (Future)
+**Date**: 2026-02-22 (updated 2026-03-07)
+**Tracking**: Phase 7b next (iOS Xcode project)
 
 ---
 
@@ -177,12 +177,16 @@ enum ProviderError {
 
 ## Phase Roadmap
 
-### Phase 7a: Skeleton (This Sprint)
+### Phase 7a: UniFFI Bindings (COMPLETE)
 
 - RFC document (this file)
-- `tcfs-file-provider` crate with module stubs
-- UniFFI UDL file (minimal)
-- Added to workspace members
+- `tcfs-file-provider` crate with `uniffi` feature flag
+- UniFFI proc-macro bindings (`uniffi_bridge.rs`, ~300 LOC)
+- Exposes: `TcfsProviderHandle`, `list_items`, `hydrate_file`, `upload_file`, `delete_item`, `create_directory`, `get_sync_status`
+- Error types: `ProviderError` enum with Storage/Decryption/Network/NotFound/Conflict
+- Config: `ProviderConfig` record (S3 creds + E2EE passphrase)
+- Uses `direct` backend (no gRPC — iOS sandbox blocks UDS)
+- Compiles for host target; iOS cross-compilation next phase
 
 ### Phase 7b: Basic Hydration
 
