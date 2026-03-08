@@ -216,12 +216,14 @@ enum ProviderError {
 - Background refresh via `NSFileProviderManager.signalEnumerator`
 - Push notifications for real-time updates (APNs or polling)
 
-### Phase 7e: UI + Polish
+### Phase 7e: UI + Polish (PR #65, IN PROGRESS)
 
-- Progress reporting during hydration
-- Conflict resolution UI
-- Share extension for uploading
-- TestFlight beta
+- [x] Progress reporting during hydration (UniFFI callback interface → NSProgress)
+- [x] Conflict detection via vclock divergence (`check_conflict_async`)
+- [x] Sync status dashboard in host app (live file count + error display)
+- [x] Host app type-checks with UniFFI bindings
+- [ ] Share extension for uploading
+- [ ] TestFlight beta (requires Apple Developer Program enrollment)
 
 ## Technical Challenges
 

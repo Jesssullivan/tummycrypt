@@ -76,6 +76,8 @@ if $TYPECHECK_ONLY; then
         -framework FileProvider \
         -framework Foundation \
         -framework SwiftUI \
+        -import-objc-header "$IOS_DIR/Generated/tcfs_file_providerFFI.h" \
+        "$IOS_DIR/Generated/tcfs_file_provider.swift" \
         "$IOS_DIR/HostApp/"*.swift
 
     echo "==> Type-check passed"
@@ -142,6 +144,8 @@ echo "==> Type-checking Swift sources against iOS SDK..."
     -framework FileProvider \
     -framework Foundation \
     -framework SwiftUI \
+    -import-objc-header "$GENERATED_DIR/tcfs_file_providerFFI.h" \
+    "$GENERATED_DIR/tcfs_file_provider.swift" \
     "$IOS_DIR/HostApp/"*.swift
 
 echo "    Type-check passed"

@@ -37,6 +37,8 @@ pub struct FileItem {
     pub modified_timestamp: i64,
     pub is_directory: bool,
     pub content_hash: String,
+    /// If non-empty, this file has a conflict with the named device.
+    pub conflict_with: String,
 }
 
 /// Sync status summary.
@@ -46,6 +48,15 @@ pub struct SyncStatus {
     pub files_synced: u64,
     pub files_pending: u64,
     pub last_error: Option<String>,
+}
+
+/// Progress callback for hydration/upload operations.
+///
+/// Implemented by Swift to update `Progress.completedUnitCount`.
+#[uniffi::export(callback_interface)]
+pub trait ProgressCallback: Send + Sync {
+    /// Called when progress updates (completed out of total bytes).
+    fn on_progress(&self, completed: u64, total: u64);
 }
 
 /// Errors returned by provider operations.
@@ -152,49 +163,63 @@ impl TcfsProviderHandle {
 
     /// List files at a given relative path.
     pub fn list_items(&self, path: &str) -> Result<Vec<FileItem>, ProviderError> {
-        let prefix = format!(
-            "{}/index/{}",
-            self.remote_prefix.trim_end_matches('/'),
-            path.trim_start_matches('/')
-        );
+        self.runtime.block_on(async {
+            let prefix = format!(
+                "{}/index/{}",
+                self.remote_prefix.trim_end_matches('/'),
+                path.trim_start_matches('/')
+            );
 
-        let entries = self
-            .runtime
-            .block_on(self.operator.list(&prefix))
-            .map_err(ProviderError::from)?;
+            let entries = self
+                .operator
+                .list(&prefix)
+                .await
+                .map_err(ProviderError::from)?;
 
-        let mut items = Vec::new();
-        for entry in entries {
-            let entry_path = entry.path();
-            let name = entry_path
-                .strip_prefix(&prefix)
-                .unwrap_or(entry_path)
-                .trim_start_matches('/');
+            let mut items = Vec::new();
+            for entry in entries {
+                let entry_path = entry.path();
+                let name = entry_path
+                    .strip_prefix(&prefix)
+                    .unwrap_or(entry_path)
+                    .trim_start_matches('/');
 
-            if name.is_empty() {
-                continue;
+                if name.is_empty() {
+                    continue;
+                }
+
+                let is_dir = name.ends_with('/');
+                let display_name = name.trim_end_matches('/');
+
+                let modified_ts = entry
+                    .metadata()
+                    .last_modified()
+                    .map(|t| t.into_inner().as_second())
+                    .unwrap_or(0);
+
+                // Check for conflict via vclock divergence
+                let conflict_with = if !is_dir {
+                    self.check_conflict_async(entry_path)
+                        .await
+                        .unwrap_or(None)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                items.push(FileItem {
+                    item_id: entry_path.to_string(),
+                    filename: display_name.to_string(),
+                    file_size: entry.metadata().content_length(),
+                    modified_timestamp: modified_ts,
+                    is_directory: is_dir,
+                    content_hash: String::new(),
+                    conflict_with,
+                });
             }
 
-            let is_dir = name.ends_with('/');
-            let display_name = name.trim_end_matches('/');
-
-            let modified_ts = entry
-                .metadata()
-                .last_modified()
-                .map(|t| t.into_inner().as_second())
-                .unwrap_or(0);
-
-            items.push(FileItem {
-                item_id: entry_path.to_string(),
-                filename: display_name.to_string(),
-                file_size: entry.metadata().content_length(),
-                modified_timestamp: modified_ts,
-                is_directory: is_dir,
-                content_hash: String::new(),
-            });
-        }
-
-        Ok(items)
+            Ok(items)
+        })
     }
 
     /// Hydrate (download + decrypt + reassemble) a file to a local path.
@@ -286,6 +311,113 @@ impl TcfsProviderHandle {
                 } else {
                     assembled.extend_from_slice(&chunk_bytes);
                 }
+            }
+
+            tokio::fs::write(destination_path, &assembled)
+                .await
+                .map_err(|e| ProviderError::Storage {
+                    message: format!("write to {}: {}", destination_path, e),
+                })?;
+
+            Ok(())
+        })
+    }
+
+    /// Hydrate a file with progress reporting.
+    ///
+    /// Same as `hydrate_file` but calls the progress callback after each chunk.
+    pub fn hydrate_file_with_progress(
+        &self,
+        item_id: &str,
+        destination_path: &str,
+        callback: Box<dyn ProgressCallback>,
+    ) -> Result<(), ProviderError> {
+        self.runtime.block_on(async {
+            // Read index entry
+            let data = self.operator.read(item_id).await?;
+            let bytes = data.to_bytes();
+            let text = String::from_utf8_lossy(&bytes);
+
+            let mut manifest_hash = String::new();
+            for line in text.lines() {
+                if let Some(val) = line.strip_prefix("manifest_hash=") {
+                    manifest_hash = val.to_string();
+                }
+            }
+
+            if manifest_hash.is_empty() {
+                return Err(ProviderError::NotFound {
+                    path: item_id.to_string(),
+                });
+            }
+
+            // Fetch manifest
+            let manifest_path = format!(
+                "{}/manifests/{}",
+                self.remote_prefix.trim_end_matches('/'),
+                manifest_hash
+            );
+            let manifest_bytes = self.operator.read(&manifest_path).await?;
+            let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(
+                &manifest_bytes.to_bytes(),
+            )
+            .map_err(|e| ProviderError::Storage {
+                message: e.to_string(),
+            })?;
+
+            // Unwrap file key if encrypted
+            let file_key = match (&self.master_key, &manifest.encrypted_file_key) {
+                (Some(mk), Some(wrapped_b64)) => {
+                    let wrapped = base64::engine::general_purpose::STANDARD
+                        .decode(wrapped_b64)
+                        .map_err(|e| ProviderError::Decryption {
+                            message: e.to_string(),
+                        })?;
+                    Some(tcfs_crypto::unwrap_key(mk, &wrapped).map_err(|e| {
+                        ProviderError::Decryption {
+                            message: e.to_string(),
+                        }
+                    })?)
+                }
+                (None, Some(_)) => {
+                    return Err(ProviderError::Decryption {
+                        message: "file is encrypted but no master key configured".into(),
+                    });
+                }
+                _ => None,
+            };
+
+            let file_id_bytes: [u8; 32] = tcfs_chunks::hash_from_hex(&manifest.file_hash)
+                .map(|h| *h.as_bytes())
+                .unwrap_or([0u8; 32]);
+
+            let chunk_hashes = manifest.chunk_hashes();
+            let total_chunks = chunk_hashes.len() as u64;
+            let mut assembled = Vec::new();
+
+            callback.on_progress(0, total_chunks);
+
+            for (idx, hash) in chunk_hashes.iter().enumerate() {
+                let chunk_key = format!(
+                    "{}/chunks/{}",
+                    self.remote_prefix.trim_end_matches('/'),
+                    hash
+                );
+                let chunk_data = self.operator.read(&chunk_key).await?;
+                let chunk_bytes = chunk_data.to_bytes();
+
+                if let Some(ref fk) = file_key {
+                    let plaintext =
+                        tcfs_crypto::decrypt_chunk(fk, idx as u64, &file_id_bytes, &chunk_bytes)
+                            .map_err(|e| ProviderError::Decryption {
+                                message: e.to_string(),
+                            })?;
+                    assembled.extend_from_slice(&plaintext);
+                } else {
+                    assembled.extend_from_slice(&chunk_bytes);
+                }
+
+                callback.on_progress((idx + 1) as u64, total_chunks);
             }
 
             tokio::fs::write(destination_path, &assembled)
@@ -473,6 +605,13 @@ impl TcfsProviderHandle {
             .map_err(ProviderError::from)
     }
 
+    /// Check if a file has a conflict (remote vclock diverged from ours).
+    ///
+    /// Returns the conflicting device ID if diverged, or None if clean.
+    pub fn check_conflict(&self, item_id: &str) -> Result<Option<String>, ProviderError> {
+        self.runtime.block_on(self.check_conflict_async(item_id))
+    }
+
     /// Get sync status (connected check + file count from index).
     pub fn get_sync_status(&self) -> Result<SyncStatus, ProviderError> {
         let index_prefix = format!("{}/index/", self.remote_prefix.trim_end_matches('/'));
@@ -497,5 +636,54 @@ impl TcfsProviderHandle {
                 }),
             }
         })
+    }
+}
+
+impl TcfsProviderHandle {
+    /// Internal async conflict check — used by both `check_conflict` and `list_items`.
+    async fn check_conflict_async(&self, item_id: &str) -> Result<Option<String>, ProviderError> {
+        let data = match self.operator.read(item_id).await {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        let bytes = data.to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+
+        let mut manifest_hash = String::new();
+        for line in text.lines() {
+            if let Some(val) = line.strip_prefix("manifest_hash=") {
+                manifest_hash = val.to_string();
+            }
+        }
+
+        if manifest_hash.is_empty() {
+            return Ok(None);
+        }
+
+        let manifest_path = format!(
+            "{}/manifests/{}",
+            self.remote_prefix.trim_end_matches('/'),
+            manifest_hash
+        );
+
+        let manifest_bytes = match self.operator.read(&manifest_path).await {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+
+        let manifest =
+            match tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes()) {
+                Ok(m) => m,
+                Err(_) => return Ok(None),
+            };
+
+        // Conflict: written by another device and our device hasn't merged yet
+        if manifest.written_by != self.device_id
+            && !manifest.vclock.clocks.contains_key(&self.device_id)
+        {
+            return Ok(Some(manifest.written_by.clone()));
+        }
+
+        Ok(None)
     }
 }
