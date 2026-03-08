@@ -362,11 +362,21 @@ async fn main() -> Result<()> {
             DeviceAction::Revoke { name } => cmd_device_revoke(&name),
             DeviceAction::Status => cmd_device_status(),
         },
-        Commands::Auth { action } => match action {
-            AuthAction::Unlock { key_file } => cmd_auth_unlock(&config, key_file.as_deref()).await,
-            AuthAction::Lock => cmd_auth_lock(&config).await,
-            AuthAction::Status => cmd_auth_status(&config).await,
-        },
+        Commands::Auth { action } => {
+            #[cfg(unix)]
+            match action {
+                AuthAction::Unlock { key_file } => {
+                    cmd_auth_unlock(&config, key_file.as_deref()).await
+                }
+                AuthAction::Lock => cmd_auth_lock(&config).await,
+                AuthAction::Status => cmd_auth_status(&config).await,
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = action;
+                anyhow::bail!("auth commands require the daemon (not available on this platform)")
+            }
+        }
         Commands::RotateCredentials {
             cred_file,
             non_interactive,
@@ -377,7 +387,17 @@ async fn main() -> Result<()> {
             non_interactive,
         } => cmd_rotate_key(&config, old_key_file.as_deref(), password, non_interactive).await,
         Commands::Resolve { path, strategy } => {
-            cmd_resolve(&config, &path, strategy.as_deref()).await
+            #[cfg(unix)]
+            {
+                cmd_resolve(&config, &path, strategy.as_deref()).await
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (path, strategy);
+                anyhow::bail!(
+                    "resolve command requires the daemon (not available on this platform)"
+                )
+            }
         }
     }
 }
@@ -1623,6 +1643,7 @@ fn cmd_device_status() -> Result<()> {
 
 // ── `tcfs auth unlock` / `tcfs auth lock` ────────────────────────────────────
 
+#[cfg(unix)]
 async fn cmd_auth_unlock(
     config: &tcfs_core::config::TcfsConfig,
     key_file: Option<&Path>,
@@ -1669,6 +1690,7 @@ async fn cmd_auth_unlock(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn cmd_auth_lock(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     // Clear from daemon
     let mut client = connect_daemon(&config.daemon.socket).await?;
@@ -1690,6 +1712,7 @@ async fn cmd_auth_lock(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn cmd_auth_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     let mut client = connect_daemon(&config.daemon.socket).await?;
     let resp = client
@@ -1898,6 +1921,7 @@ async fn cmd_rotate_key(
     println!("  New master key: {}", key_path.display());
 
     // Step 5: Notify daemon to reload if running
+    #[cfg(unix)]
     if let Ok(mut client) = connect_daemon(&config.daemon.socket).await {
         let key_bytes = std::fs::read(&key_path)?;
         let _ = client
@@ -1993,6 +2017,7 @@ async fn cmd_rotate_credentials(
 
 // ── `tcfs resolve` ───────────────────────────────────────────────────────────
 
+#[cfg(unix)]
 async fn cmd_resolve(
     config: &tcfs_core::config::TcfsConfig,
     path: &Path,
@@ -2050,6 +2075,7 @@ async fn cmd_resolve(
 }
 
 /// Prompt the user to resolve a sync conflict interactively.
+#[cfg(unix)]
 fn resolve_conflict_interactive(
     info: &tcfs_sync::conflict::ConflictInfo,
 ) -> tcfs_sync::conflict::Resolution {
