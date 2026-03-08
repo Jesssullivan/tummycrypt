@@ -1,0 +1,50 @@
+name: TCFS
+options:
+  bundleIdPrefix: io.tinyland.tcfs
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Manual
+    SWIFT_VERSION: "5.10"
+
+targets:
+  TCFS:
+    type: application
+    platform: iOS
+    sources:
+      - path: HostApp
+    info:
+      path: Resources/HostApp-Info.plist
+    entitlements:
+      path: Resources/HostApp.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.tinyland.tcfs.ios
+        INFOPLIST_FILE: Resources/HostApp-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/HostApp.entitlements
+    dependencies:
+      - target: TCFSFileProvider
+
+  TCFSFileProvider:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Extension
+      - path: Generated
+    info:
+      path: Resources/Extension-Info.plist
+    entitlements:
+      path: Resources/Extension.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.tinyland.tcfs.ios.fileprovider
+        INFOPLIST_FILE: Resources/Extension-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/Extension.entitlements
+        LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../../target/aarch64-apple-ios/release $(SRCROOT)/../../target/aarch64-apple-ios-sim/debug"
+        OTHER_LDFLAGS: "-ltcfs_file_provider -lc++"
+        SWIFT_OBJC_BRIDGING_HEADER: Generated/tcfs_file_providerFFI.h
