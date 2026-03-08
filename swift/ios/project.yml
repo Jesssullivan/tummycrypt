@@ -18,6 +18,7 @@ targets:
     platform: iOS
     sources:
       - path: HostApp
+      - path: Generated
     info:
       path: Resources/HostApp-Info.plist
     entitlements:
@@ -27,6 +28,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.tinyland.tcfs.ios
         INFOPLIST_FILE: Resources/HostApp-Info.plist
         CODE_SIGN_ENTITLEMENTS: Resources/HostApp.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/Generated/tcfs_file_providerFFI.h"
+        LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../../target/aarch64-apple-ios/release $(SRCROOT)/../../target/aarch64-apple-ios-sim/debug"
+        OTHER_LDFLAGS: "-ltcfs_file_provider -lc++"
     dependencies:
       - target: TCFSFileProvider
 
@@ -38,6 +42,12 @@ targets:
       - path: Generated
     info:
       path: Resources/Extension-Info.plist
+      properties:
+        NSExtension:
+          NSExtensionFileProviderDocumentGroup: group.io.tinyland.tcfs
+          NSExtensionFileProviderSupportsDatalessFolders: true
+          NSExtensionPointIdentifier: com.apple.fileprovider-nonui
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).TCFSFileProviderExtension"
     entitlements:
       path: Resources/Extension.entitlements
     settings:
@@ -47,4 +57,4 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Resources/Extension.entitlements
         LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../../target/aarch64-apple-ios/release $(SRCROOT)/../../target/aarch64-apple-ios-sim/debug"
         OTHER_LDFLAGS: "-ltcfs_file_provider -lc++"
-        SWIFT_OBJC_BRIDGING_HEADER: Generated/tcfs_file_providerFFI.h
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/Generated/tcfs_file_providerFFI.h"
