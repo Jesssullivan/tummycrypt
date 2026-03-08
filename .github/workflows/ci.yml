@@ -98,6 +98,22 @@ jobs:
           grep -q "tcfs_provider_delete" "$HEADER"
           echo "header: $HEADER"
 
+  ios-typecheck:
+    name: iOS FileProvider typecheck
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build iOS staticlib + type-check Swift
+        run: bash swift/ios/Scripts/build-ios.sh --simulator
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
