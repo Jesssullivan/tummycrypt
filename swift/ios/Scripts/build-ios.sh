@@ -146,10 +146,9 @@ echo "==> Type-checking Swift sources against iOS SDK..."
 
 echo "    Type-check passed"
 
-# --- Step 5: Build with xcodebuild (if project exists) ---
+# --- Step 5: Generate Xcode project if needed ---
 XCODEPROJ="$IOS_DIR/TCFS.xcodeproj"
 if [ ! -d "$XCODEPROJ" ]; then
-    # Try xcodegen if available
     if command -v xcodegen &>/dev/null && [ -f "$IOS_DIR/project.yml" ]; then
         echo "==> Generating Xcode project with xcodegen..."
         cd "$IOS_DIR"
@@ -160,26 +159,43 @@ if [ ! -d "$XCODEPROJ" ]; then
         echo "      $GENERATED_DIR/"
         echo ""
         echo "    To generate project: brew install xcodegen && cd swift/ios && xcodegen"
-        echo "    Or create manually in Xcode."
         exit 0
     fi
 fi
 
+# --- Step 6: Build with xcodebuild ---
 echo "==> Building with xcodebuild..."
-XCODE_DEST="platform=iOS Simulator,name=iPhone 16,OS=latest"
-if ! $SIMULATOR; then
-    XCODE_DEST="generic/platform=iOS"
+XCODE_CONFIG="Debug"
+if [ "$PROFILE" = "release" ]; then
+    XCODE_CONFIG="Release"
 fi
 
 xcodebuild build \
     -project "$XCODEPROJ" \
-    -scheme "TCFS" \
+    -target "TCFSFileProvider" \
     -sdk "$XCODE_SDK" \
-    -destination "$XCODE_DEST" \
-    -configuration "$([ "$PROFILE" = "release" ] && echo Release || echo Debug)" \
+    -arch arm64 \
+    -configuration "$XCODE_CONFIG" \
     LIBRARY_SEARCH_PATHS="$RUST_LIB_DIR" \
     OTHER_LDFLAGS="-ltcfs_file_provider -lc++" \
-    SWIFT_INCLUDE_PATHS="$GENERATED_DIR" \
-    2>&1 | tail -20
+    SWIFT_OBJC_BRIDGING_HEADER="$GENERATED_DIR/tcfs_file_providerFFI.h" \
+    CODE_SIGN_IDENTITY="-" \
+    CODE_SIGNING_REQUIRED=NO \
+    ONLY_ACTIVE_ARCH=YES \
+    2>&1 | tail -5
 
-echo "==> Done"
+xcodebuild build \
+    -project "$XCODEPROJ" \
+    -target "TCFS" \
+    -sdk "$XCODE_SDK" \
+    -arch arm64 \
+    -configuration "$XCODE_CONFIG" \
+    LIBRARY_SEARCH_PATHS="$RUST_LIB_DIR" \
+    OTHER_LDFLAGS="-ltcfs_file_provider -lc++" \
+    SWIFT_OBJC_BRIDGING_HEADER="$GENERATED_DIR/tcfs_file_providerFFI.h" \
+    CODE_SIGN_IDENTITY="-" \
+    CODE_SIGNING_REQUIRED=NO \
+    ONLY_ACTIVE_ARCH=YES \
+    2>&1 | tail -5
+
+echo "==> Done: swift/ios/build/$XCODE_CONFIG-$XCODE_SDK/TCFS.app"
