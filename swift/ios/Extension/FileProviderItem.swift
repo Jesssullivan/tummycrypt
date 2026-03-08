@@ -15,6 +15,7 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
     let filename: String
     let contentType: UTType
     let documentSize: NSNumber?
+    let contentModificationDate: Date?
     let itemVersion: NSFileProviderItemVersion
 
     var isDownloaded: Bool
@@ -27,6 +28,7 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         filename: String,
         isDirectory: Bool,
         fileSize: UInt64,
+        modifiedTimestamp: Int64 = 0,
         downloaded: Bool = true,
         uploaded: Bool = true,
         versionTag: String = "1"
@@ -36,6 +38,9 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         self.filename = filename
         self.contentType = isDirectory ? .folder : (UTType(filenameExtension: (filename as NSString).pathExtension) ?? .data)
         self.documentSize = isDirectory ? nil : NSNumber(value: fileSize)
+        self.contentModificationDate = modifiedTimestamp > 0
+            ? Date(timeIntervalSince1970: TimeInterval(modifiedTimestamp))
+            : nil
         self.itemVersion = NSFileProviderItemVersion(
             contentVersion: versionTag.data(using: .utf8)!,
             metadataVersion: versionTag.data(using: .utf8)!

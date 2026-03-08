@@ -55,6 +55,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                         filename: item.filename,
                         isDirectory: item.isDirectory,
                         fileSize: item.fileSize,
+                        modifiedTimestamp: item.modifiedTimestamp,
                         downloaded: false,
                         uploaded: true,
                         versionTag: item.contentHash
@@ -94,6 +95,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                         filename: item.filename,
                         isDirectory: item.isDirectory,
                         fileSize: item.fileSize,
+                        modifiedTimestamp: item.modifiedTimestamp,
                         downloaded: false,
                         uploaded: true,
                         versionTag: item.contentHash
