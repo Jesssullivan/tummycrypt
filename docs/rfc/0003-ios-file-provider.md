@@ -1,9 +1,9 @@
 # RFC 0003: iOS File Provider Extension
 
-**Status**: Phase 7a Complete (UniFFI bindings)
+**Status**: Phase 7b In Progress (iOS project scaffold)
 **Author**: xoxd
 **Date**: 2026-02-22 (updated 2026-03-07)
-**Tracking**: Phase 7b next (iOS Xcode project)
+**Tracking**: Phase 7b — Swift sources + build script ready, needs Xcode project
 
 ---
 
@@ -188,12 +188,18 @@ enum ProviderError {
 - Uses `direct` backend (no gRPC — iOS sandbox blocks UDS)
 - Compiles for host target; iOS cross-compilation next phase
 
-### Phase 7b: Basic Hydration
+### Phase 7b: iOS Project Scaffold (IN PROGRESS)
 
-- Implement UniFFI bindings for `list_items` and `hydrate_file`
-- Swift FileProviderExtension with read-only enumeration
-- Xcode project with Rust build integration (cargo-xcode or manual)
-- Test on iOS Simulator
+- [x] `FileProviderExtension.swift` — full CRUD via UniFFI (item, fetchContents, createItem, modifyItem, deleteItem)
+- [x] `FileProviderEnumerator.swift` — directory listing via `provider.listItems(path:)`
+- [x] `FileProviderItem.swift` — NSFileProviderItem with placeholder support
+- [x] `HostApp.swift` — SwiftUI app with credential config + domain registration
+- [x] iOS plists (Extension-Info.plist, HostApp-Info.plist) targeting iOS 17+
+- [x] Entitlements (shared Keychain access group `group.io.tinyland.tcfs`)
+- [x] `build-ios.sh` — cargo cross-compile + UniFFI bindgen + xcodebuild
+- [x] Verified: Rust staticlib builds for `aarch64-apple-ios-sim`
+- [ ] Xcode project (.xcodeproj) — requires Xcode GUI to create
+- [ ] Test on iOS Simulator
 
 ### Phase 7c: E2E Encryption
 
