@@ -47,6 +47,13 @@ bin/
 out/
 /build/
 
+# Xcode (generated from project.yml via xcodegen)
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+swift/ios/build/
+
 # Generated at build time (contains credentials)
 EmbeddedConfig.generated.swift
 
