@@ -80,7 +80,12 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             let itemId = itemIdentifier.rawValue
 
             do {
-                try prov.hydrateFile(itemId: itemId, destinationPath: tempFile.path)
+                let progressAdapter = HydrationProgressCallback(progress: progress)
+                try prov.hydrateFileWithProgress(
+                    itemId: itemId,
+                    destinationPath: tempFile.path,
+                    callback: progressAdapter
+                )
                 let attrs = try? FileManager.default.attributesOfItem(atPath: tempFile.path)
                 let fileSize = (attrs?[.size] as? UInt64) ?? 0
 
@@ -357,5 +362,21 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             encryptionPassphrase: values["encryption_passphrase"]!,
             encryptionSalt: values["encryption_salt"]!
         )
+    }
+}
+
+/// Bridges UniFFI ProgressCallback to NSProgress for iOS Files app progress bars.
+class HydrationProgressCallback: ProgressCallback {
+    private let progress: Progress
+
+    init(progress: Progress) {
+        self.progress = progress
+    }
+
+    func onProgress(completed: UInt64, total: UInt64) {
+        guard total > 0 else { return }
+        // Map chunk progress to 0-95 range (leave 5% for final write)
+        let pct = Int64(Double(completed) / Double(total) * 95.0)
+        progress.completedUnitCount = pct
     }
 }

@@ -251,6 +251,21 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureStr
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROGRESS_CALLBACK_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROGRESS_CALLBACK_METHOD0
+typedef void (*UniffiCallbackInterfaceProgressCallbackMethod0)(uint64_t, uint64_t, uint64_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PROGRESS_CALLBACK
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PROGRESS_CALLBACK
+typedef struct UniffiVTableCallbackInterfaceProgressCallback {
+    UniffiCallbackInterfaceProgressCallbackMethod0 _Nonnull onProgress;
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+} UniffiVTableCallbackInterfaceProgressCallback;
+
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_CLONE_TCFSPROVIDERHANDLE
 #define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_CLONE_TCFSPROVIDERHANDLE
 void*_Nonnull uniffi_tcfs_file_provider_fn_clone_tcfsproviderhandle(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -286,6 +301,11 @@ RustBuffer uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_get_sync_statu
 void uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_hydrate_file(void*_Nonnull ptr, RustBuffer item_id, RustBuffer destination_path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_METHOD_TCFSPROVIDERHANDLE_HYDRATE_FILE_WITH_PROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_METHOD_TCFSPROVIDERHANDLE_HYDRATE_FILE_WITH_PROGRESS
+void uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_hydrate_file_with_progress(void*_Nonnull ptr, RustBuffer item_id, RustBuffer destination_path, uint64_t callback, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_METHOD_TCFSPROVIDERHANDLE_LIST_ITEMS
 #define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_METHOD_TCFSPROVIDERHANDLE_LIST_ITEMS
 RustBuffer uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_list_items(void*_Nonnull ptr, RustBuffer path, RustCallStatus *_Nonnull out_status
@@ -294,6 +314,11 @@ RustBuffer uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_list_items(voi
 #ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_METHOD_TCFSPROVIDERHANDLE_UPLOAD_FILE
 #define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_METHOD_TCFSPROVIDERHANDLE_UPLOAD_FILE
 void uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_upload_file(void*_Nonnull ptr, RustBuffer local_path, RustBuffer remote_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_INIT_CALLBACK_VTABLE_PROGRESSCALLBACK
+#define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_FN_INIT_CALLBACK_VTABLE_PROGRESSCALLBACK
+void uniffi_tcfs_file_provider_fn_init_callback_vtable_progresscallback(UniffiVTableCallbackInterfaceProgressCallback* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_TCFS_FILE_PROVIDER_RUSTBUFFER_ALLOC
@@ -600,6 +625,12 @@ uint16_t uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_hydrate_fi
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_CHECKSUM_METHOD_TCFSPROVIDERHANDLE_HYDRATE_FILE_WITH_PROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_CHECKSUM_METHOD_TCFSPROVIDERHANDLE_HYDRATE_FILE_WITH_PROGRESS
+uint16_t uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_hydrate_file_with_progress(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_CHECKSUM_METHOD_TCFSPROVIDERHANDLE_LIST_ITEMS
 #define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_CHECKSUM_METHOD_TCFSPROVIDERHANDLE_LIST_ITEMS
 uint16_t uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_list_items(void
@@ -615,6 +646,12 @@ uint16_t uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_upload_fil
 #ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_CHECKSUM_CONSTRUCTOR_TCFSPROVIDERHANDLE_NEW
 #define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_CHECKSUM_CONSTRUCTOR_TCFSPROVIDERHANDLE_NEW
 uint16_t uniffi_tcfs_file_provider_checksum_constructor_tcfsproviderhandle_new(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_CHECKSUM_METHOD_PROGRESSCALLBACK_ON_PROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_TCFS_FILE_PROVIDER_CHECKSUM_METHOD_PROGRESSCALLBACK_ON_PROGRESS
+uint16_t uniffi_tcfs_file_provider_checksum_method_progresscallback_on_progress(void
     
 );
 #endif

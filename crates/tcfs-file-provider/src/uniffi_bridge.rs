@@ -48,6 +48,15 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
 }
 
+/// Progress callback for hydration/upload operations.
+///
+/// Implemented by Swift to update `Progress.completedUnitCount`.
+#[uniffi::export(callback_interface)]
+pub trait ProgressCallback: Send + Sync {
+    /// Called when progress updates (completed out of total bytes).
+    fn on_progress(&self, completed: u64, total: u64);
+}
+
 /// Errors returned by provider operations.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ProviderError {
@@ -286,6 +295,113 @@ impl TcfsProviderHandle {
                 } else {
                     assembled.extend_from_slice(&chunk_bytes);
                 }
+            }
+
+            tokio::fs::write(destination_path, &assembled)
+                .await
+                .map_err(|e| ProviderError::Storage {
+                    message: format!("write to {}: {}", destination_path, e),
+                })?;
+
+            Ok(())
+        })
+    }
+
+    /// Hydrate a file with progress reporting.
+    ///
+    /// Same as `hydrate_file` but calls the progress callback after each chunk.
+    pub fn hydrate_file_with_progress(
+        &self,
+        item_id: &str,
+        destination_path: &str,
+        callback: Box<dyn ProgressCallback>,
+    ) -> Result<(), ProviderError> {
+        self.runtime.block_on(async {
+            // Read index entry
+            let data = self.operator.read(item_id).await?;
+            let bytes = data.to_bytes();
+            let text = String::from_utf8_lossy(&bytes);
+
+            let mut manifest_hash = String::new();
+            for line in text.lines() {
+                if let Some(val) = line.strip_prefix("manifest_hash=") {
+                    manifest_hash = val.to_string();
+                }
+            }
+
+            if manifest_hash.is_empty() {
+                return Err(ProviderError::NotFound {
+                    path: item_id.to_string(),
+                });
+            }
+
+            // Fetch manifest
+            let manifest_path = format!(
+                "{}/manifests/{}",
+                self.remote_prefix.trim_end_matches('/'),
+                manifest_hash
+            );
+            let manifest_bytes = self.operator.read(&manifest_path).await?;
+            let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(
+                &manifest_bytes.to_bytes(),
+            )
+            .map_err(|e| ProviderError::Storage {
+                message: e.to_string(),
+            })?;
+
+            // Unwrap file key if encrypted
+            let file_key = match (&self.master_key, &manifest.encrypted_file_key) {
+                (Some(mk), Some(wrapped_b64)) => {
+                    let wrapped = base64::engine::general_purpose::STANDARD
+                        .decode(wrapped_b64)
+                        .map_err(|e| ProviderError::Decryption {
+                            message: e.to_string(),
+                        })?;
+                    Some(tcfs_crypto::unwrap_key(mk, &wrapped).map_err(|e| {
+                        ProviderError::Decryption {
+                            message: e.to_string(),
+                        }
+                    })?)
+                }
+                (None, Some(_)) => {
+                    return Err(ProviderError::Decryption {
+                        message: "file is encrypted but no master key configured".into(),
+                    });
+                }
+                _ => None,
+            };
+
+            let file_id_bytes: [u8; 32] = tcfs_chunks::hash_from_hex(&manifest.file_hash)
+                .map(|h| *h.as_bytes())
+                .unwrap_or([0u8; 32]);
+
+            let chunk_hashes = manifest.chunk_hashes();
+            let total_chunks = chunk_hashes.len() as u64;
+            let mut assembled = Vec::new();
+
+            callback.on_progress(0, total_chunks);
+
+            for (idx, hash) in chunk_hashes.iter().enumerate() {
+                let chunk_key = format!(
+                    "{}/chunks/{}",
+                    self.remote_prefix.trim_end_matches('/'),
+                    hash
+                );
+                let chunk_data = self.operator.read(&chunk_key).await?;
+                let chunk_bytes = chunk_data.to_bytes();
+
+                if let Some(ref fk) = file_key {
+                    let plaintext =
+                        tcfs_crypto::decrypt_chunk(fk, idx as u64, &file_id_bytes, &chunk_bytes)
+                            .map_err(|e| ProviderError::Decryption {
+                                message: e.to_string(),
+                            })?;
+                    assembled.extend_from_slice(&plaintext);
+                } else {
+                    assembled.extend_from_slice(&chunk_bytes);
+                }
+
+                callback.on_progress((idx + 1) as u64, total_chunks);
             }
 
             tokio::fs::write(destination_path, &assembled)
