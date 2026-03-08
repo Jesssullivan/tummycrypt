@@ -178,11 +178,17 @@ impl TcfsProviderHandle {
             let is_dir = name.ends_with('/');
             let display_name = name.trim_end_matches('/');
 
+            let modified_ts = entry
+                .metadata()
+                .last_modified()
+                .map(|t| t.into_inner().as_second())
+                .unwrap_or(0);
+
             items.push(FileItem {
                 item_id: entry_path.to_string(),
                 filename: display_name.to_string(),
                 file_size: entry.metadata().content_length(),
-                modified_timestamp: 0,
+                modified_timestamp: modified_ts,
                 is_directory: is_dir,
                 content_hash: String::new(),
             });
@@ -467,18 +473,34 @@ impl TcfsProviderHandle {
             .map_err(ProviderError::from)
     }
 
-    /// Get sync status (connected check via health probe).
+    /// Get sync status (connected check + file count from index).
     pub fn get_sync_status(&self) -> Result<SyncStatus, ProviderError> {
-        let connected = self.runtime.block_on(async {
-            let prefix = format!("{}/", self.remote_prefix.trim_end_matches('/'));
-            self.operator.list(&prefix).await.is_ok()
-        });
+        let index_prefix = format!(
+            "{}/index/",
+            self.remote_prefix.trim_end_matches('/')
+        );
 
-        Ok(SyncStatus {
-            connected,
-            files_synced: 0,
-            files_pending: 0,
-            last_error: None,
+        self.runtime.block_on(async {
+            match self.operator.list(&index_prefix).await {
+                Ok(entries) => {
+                    let file_count = entries
+                        .iter()
+                        .filter(|e| !e.path().ends_with('/'))
+                        .count() as u64;
+                    Ok(SyncStatus {
+                        connected: true,
+                        files_synced: file_count,
+                        files_pending: 0,
+                        last_error: None,
+                    })
+                }
+                Err(e) => Ok(SyncStatus {
+                    connected: false,
+                    files_synced: 0,
+                    files_pending: 0,
+                    last_error: Some(e.to_string()),
+                }),
+            }
         })
     }
 }
