@@ -512,6 +512,23 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         master_key,
     );
 
+    // Load persisted auth credentials (best-effort)
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("tcfsd");
+    let totp_cred_path = data_dir.join("totp-credentials.json");
+    if totp_cred_path.exists() {
+        if let Err(e) = impl_.load_totp_credentials(&totp_cred_path).await {
+            warn!("failed to load TOTP credentials: {e}");
+        }
+    }
+    let session_path = data_dir.join("sessions.json");
+    if session_path.exists() {
+        if let Err(e) = impl_.load_sessions(&session_path).await {
+            warn!("failed to load sessions: {e}");
+        }
+    }
+
     // Connect to NATS for fleet state sync (non-blocking, best-effort)
     let nats_url = &config.sync.nats_url;
     if nats_url != "nats://localhost:4222" || std::env::var("TCFS_NATS_URL").is_ok() {
@@ -604,6 +621,31 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
         info!("shutdown complete");
     };
+
+    // Periodic session cleanup (every 5 minutes)
+    {
+        let store = impl_.session_store();
+        let cleanup_session_path = data_dir.join("sessions.json");
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let before = store.active_count().await;
+                store.cleanup_expired().await;
+                let after = store.active_count().await;
+                if before != after {
+                    info!(
+                        expired = before - after,
+                        remaining = after,
+                        "cleaned up expired sessions"
+                    );
+                    if let Err(e) = store.save_to_file(&cleanup_session_path).await {
+                        warn!("failed to persist sessions after cleanup: {e}");
+                    }
+                }
+            }
+        });
+    }
 
     info!(socket = %socket_path.display(), "gRPC: listening");
     if let Some(ref fp) = fp_socket_path {

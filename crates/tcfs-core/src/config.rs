@@ -12,9 +12,127 @@ pub struct TcfsConfig {
     pub fuse: FuseConfig,
     pub crypto: CryptoConfig,
     pub sops: SopsConfig,
+    pub auth: AuthConfig,
     /// Warn if the config file is world-readable (default: true)
     #[serde(default = "default_true")]
     pub config_file_mode_check: bool,
+}
+
+/// Authentication and session configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// Enable auth subsystem (default: false)
+    pub enabled: bool,
+    /// Require a valid session token for protected RPCs (push, pull, mount, unsync).
+    /// Default: false (alpha bypass — all local requests are trusted).
+    pub require_session: bool,
+    /// Session expiry in hours (default: 24)
+    pub session_expiry_hours: u64,
+    /// Enabled auth methods (default: ["master_key"])
+    pub methods: Vec<String>,
+    /// TOTP-specific configuration
+    pub totp: AuthTotpConfig,
+    /// WebAuthn-specific configuration
+    pub webauthn: AuthWebAuthnConfig,
+    /// Enrollment configuration
+    pub enrollment: AuthEnrollmentConfig,
+    /// Rate limiting configuration
+    pub rate_limit: AuthRateLimitConfig,
+}
+
+/// TOTP (RFC 6238) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthTotpConfig {
+    /// Issuer name shown in authenticator apps (default: "TummyCrypt")
+    pub issuer: String,
+    /// Number of digits in TOTP code (default: 6)
+    pub digits: u32,
+}
+
+impl Default for AuthTotpConfig {
+    fn default() -> Self {
+        Self {
+            issuer: "TummyCrypt".into(),
+            digits: 6,
+        }
+    }
+}
+
+/// WebAuthn / FIDO2 configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthWebAuthnConfig {
+    /// Relying party ID (domain)
+    pub relying_party_id: String,
+    /// Relying party display name
+    pub relying_party_name: String,
+}
+
+impl Default for AuthWebAuthnConfig {
+    fn default() -> Self {
+        Self {
+            relying_party_id: "tcfs.local".into(),
+            relying_party_name: "TummyCrypt".into(),
+        }
+    }
+}
+
+/// Device enrollment configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthEnrollmentConfig {
+    /// Enable QR code generation for enrollment invites
+    pub qr_code: bool,
+    /// Enable NATS-based device auto-discovery
+    pub auto_discovery: bool,
+}
+
+impl Default for AuthEnrollmentConfig {
+    fn default() -> Self {
+        Self {
+            qr_code: true,
+            auto_discovery: false,
+        }
+    }
+}
+
+/// Rate limiting for auth attempts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthRateLimitConfig {
+    /// Maximum failed attempts before lockout (default: 5)
+    pub max_attempts: u32,
+    /// Base lockout duration in seconds (default: 300 = 5 minutes)
+    pub lockout_secs: u64,
+    /// Backoff multiplier for consecutive lockouts (default: 2)
+    pub backoff_multiplier: u32,
+}
+
+impl Default for AuthRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            lockout_secs: 300,
+            backoff_multiplier: 2,
+        }
+    }
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_session: false,
+            session_expiry_hours: 24,
+            methods: vec!["master_key".into()],
+            totp: AuthTotpConfig::default(),
+            webauthn: AuthWebAuthnConfig::default(),
+            enrollment: AuthEnrollmentConfig::default(),
+            rate_limit: AuthRateLimitConfig::default(),
+        }
+    }
 }
 
 fn default_true() -> bool {

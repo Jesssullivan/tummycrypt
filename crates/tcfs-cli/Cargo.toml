@@ -16,8 +16,11 @@ tcfs-secrets = { path = "../tcfs-secrets" }
 tcfs-storage = { path = "../tcfs-storage" }
 tcfs-sync = { path = "../tcfs-sync" }
 tcfs-chunks = { path = "../tcfs-chunks" }
+tcfs-vfs = { path = "../tcfs-vfs" }
+tcfs-nfs = { path = "../tcfs-nfs" }
 tcfs-fuse = { path = "../tcfs-fuse" }
 tcfs-crypto = { path = "../tcfs-crypto" }
+tcfs-auth = { path = "../tcfs-auth" }
 secrecy = { workspace = true }
 rand = { workspace = true }
 base64 = { workspace = true }

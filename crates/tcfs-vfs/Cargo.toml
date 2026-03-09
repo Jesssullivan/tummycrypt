@@ -1,0 +1,23 @@
+[package]
+name = "tcfs-vfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs virtual filesystem trait, disk cache, stub formats, and hydration"
+
+[dependencies]
+tcfs-core = { path = "../tcfs-core" }
+tcfs-storage = { path = "../tcfs-storage" }
+opendal = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
