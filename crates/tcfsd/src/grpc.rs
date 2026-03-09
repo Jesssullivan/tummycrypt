@@ -85,18 +85,18 @@ impl TcfsDaemonImpl {
 
     /// Validate a session token from gRPC request metadata.
     ///
-    /// Returns Ok(device_id) if the session is valid, or a gRPC UNAUTHENTICATED
+    /// Returns Ok(Session) if the session is valid, or a gRPC UNAUTHENTICATED
     /// error if auth is required and the token is missing/invalid/expired.
     ///
     /// When `config.auth.require_session` is false (default for alpha), this
-    /// always returns Ok with the daemon's own device_id (bypass mode).
+    /// returns a synthetic session with full permissions (bypass mode).
     async fn require_session<T>(
         &self,
         request: &tonic::Request<T>,
-    ) -> Result<String, tonic::Status> {
-        // Alpha bypass: if auth is not required, allow all requests
+    ) -> Result<tcfs_auth::Session, tonic::Status> {
+        // Alpha bypass: if auth is not required, allow all requests with full permissions
         if !self.config.auth.require_session {
-            return Ok(self.device_id.clone());
+            return Ok(tcfs_auth::Session::new(&self.device_id, "local", "bypass"));
         }
 
         // Extract token from "authorization" metadata
@@ -108,7 +108,7 @@ impl TcfsDaemonImpl {
 
         match token {
             Some(t) => match self.session_store.validate(&t).await {
-                Some(session) => Ok(session.device_id.clone()),
+                Some(session) => Ok(session),
                 None => Err(tonic::Status::unauthenticated(
                     "invalid or expired session token",
                 )),
@@ -116,6 +116,29 @@ impl TcfsDaemonImpl {
             None => Err(tonic::Status::unauthenticated(
                 "session token required — run 'tcfs auth verify' first",
             )),
+        }
+    }
+
+    /// Check that the session has the required permission, returning
+    /// PERMISSION_DENIED if not.
+    fn check_permission(
+        session: &tcfs_auth::Session,
+        permission: &str,
+    ) -> Result<(), tonic::Status> {
+        let allowed = match permission {
+            "mount" => session.permissions.can_mount,
+            "push" => session.permissions.can_push,
+            "pull" => session.permissions.can_pull,
+            "admin" => session.permissions.can_admin,
+            _ => false,
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(tonic::Status::permission_denied(format!(
+                "device {} lacks '{}' permission",
+                session.device_id, permission
+            )))
         }
     }
 
@@ -217,7 +240,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<MountRequest>,
     ) -> Result<tonic::Response<MountResponse>, tonic::Status> {
-        self.require_session(&request).await?;
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "mount")?;
         let req = request.into_inner();
 
         if req.mountpoint.is_empty() || req.remote.is_empty() {
@@ -288,7 +312,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<UnmountRequest>,
     ) -> Result<tonic::Response<UnmountResponse>, tonic::Status> {
-        self.require_session(&request).await?;
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "mount")?;
         let req = request.into_inner();
         if req.mountpoint.is_empty() {
             return Ok(tonic::Response::new(UnmountResponse {
@@ -358,7 +383,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<tonic::Streaming<PushChunk>>,
     ) -> Result<tonic::Response<Self::PushStream>, tonic::Status> {
-        self.require_session(&request).await?;
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "push")?;
         use tokio_stream::StreamExt;
 
         let op = self.operator.lock().await;
@@ -511,7 +537,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<PullRequest>,
     ) -> Result<tonic::Response<Self::PullStream>, tonic::Status> {
-        self.require_session(&request).await?;
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "pull")?;
         let req = request.into_inner();
 
         let op = self.operator.lock().await;
@@ -575,7 +602,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<HydrateRequest>,
     ) -> Result<tonic::Response<Self::HydrateStream>, tonic::Status> {
-        self.require_session(&request).await?;
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "pull")?;
         let req = request.into_inner();
         let stub_path = std::path::PathBuf::from(&req.stub_path);
 
@@ -670,7 +698,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<UnsyncRequest>,
     ) -> Result<tonic::Response<UnsyncResponse>, tonic::Status> {
-        self.require_session(&request).await?;
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "mount")?;
         let req = request.into_inner();
         let path = std::path::PathBuf::from(&req.path);
 
@@ -786,7 +815,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<ResolveConflictRequest>,
     ) -> Result<tonic::Response<ResolveConflictResponse>, tonic::Status> {
-        self.require_session(&request).await?;
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "push")?;
         let req = request.into_inner();
 
         let resolution = match req.resolution.as_str() {

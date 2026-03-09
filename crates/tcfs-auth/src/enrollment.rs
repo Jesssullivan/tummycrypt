@@ -98,10 +98,11 @@ impl EnrollmentInvite {
     }
 
     /// Verify the invite signature against a master key.
+    ///
+    /// Uses constant-time comparison to prevent timing side-channel attacks.
     pub fn verify_signature(&self, master_key: &[u8; 32]) -> bool {
         let expected = self.compute_signature(master_key);
-        // Constant-time comparison
-        expected == self.signature
+        constant_time_eq(expected.as_bytes(), self.signature.as_bytes())
     }
 
     /// Check if the invite has expired.
@@ -173,6 +174,19 @@ mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
         bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
     }
+}
+
+/// Constant-time byte comparison to prevent timing side-channel attacks.
+/// Compares all bytes regardless of early mismatches.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[cfg(test)]
