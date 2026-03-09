@@ -95,6 +95,7 @@ jobs:
             fuse: false
             deb: true
             rpm: false  # cross-compiled RPM is complex
+            vendored-ssl: true
 
           # macOS x86_64 — no FUSE, CLI + unsync only (cross from aarch64)
           - name: macos-x86_64
@@ -106,6 +107,7 @@ jobs:
             deb: false
             rpm: false
             sign: true
+            vendored-ssl: true
 
           # macOS aarch64 — no FUSE, CLI + unsync only
           - name: macos-aarch64
@@ -149,7 +151,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
-            libc6-dev-arm64-cross
+            libc6-dev-arm64-cross \
+            perl make  # needed by openssl-src vendored build
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
@@ -167,12 +170,10 @@ jobs:
       - name: Install macOS build deps
         if: runner.os == 'macOS'
         run: |
-          brew install protobuf openssl@3
-          # For x86_64 cross-compilation, also install x86_64 OpenSSL
-          if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
-            arch -x86_64 /usr/local/bin/brew install openssl@3 2>/dev/null || true
-            echo "OPENSSL_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
-          else
+          brew install protobuf
+          # Native target uses system OpenSSL; cross targets use vendored (openssl-vendored feature)
+          if [[ "${{ matrix.vendored-ssl }}" != "true" ]]; then
+            brew install openssl@3
             echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
           fi
 
@@ -202,9 +203,15 @@ jobs:
           if [[ "${{ matrix.fuse }}" == "true" ]]; then
             FEATURES=""  # use default features (includes fuse)
           fi
+          # Vendor OpenSSL for cross-compilation targets (no system libssl available)
+          EXTRA_FEATURES=""
+          if [[ "${{ matrix.vendored-ssl }}" == "true" ]]; then
+            EXTRA_FEATURES="--features openssl-vendored"
+          fi
           cargo build --release \
             --target ${{ matrix.target }} \
             ${FEATURES} \
+            ${EXTRA_FEATURES} \
             -p tcfsd
 
       # ── Build tcfs-tui ────────────────────────────────────────────────────

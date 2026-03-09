@@ -46,6 +46,7 @@ chrono = { workspace = true }
 age = { workspace = true }
 uuid = { workspace = true }
 dirs = "6"
+openssl = { workspace = true, optional = true }
 tcfs-dbus = { path = "../tcfs-dbus", optional = true }
 
 [features]
@@ -60,6 +61,8 @@ nfs = []
 k8s-worker = []
 # Enable D-Bus status interface (Linux only)
 dbus = ["dep:tcfs-dbus"]
+# Vendor OpenSSL (for cross-compilation where system libssl is unavailable)
+openssl-vendored = ["openssl/vendored"]
 
 [package.metadata.deb]
 maintainer = "TummyCrypt Contributors <jess@sulliwood.org>"
