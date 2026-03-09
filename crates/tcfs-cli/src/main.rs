@@ -259,6 +259,15 @@ enum AuthAction {
         /// 6-digit TOTP code from authenticator app
         code: String,
     },
+    /// Revoke a session (by token or device)
+    Revoke {
+        /// Session token to revoke
+        #[arg(long)]
+        token: Option<String>,
+        /// Device ID to revoke all sessions for
+        #[arg(long)]
+        device: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -403,6 +412,9 @@ async fn main() -> Result<()> {
                 AuthAction::Status => cmd_auth_status(&config).await,
                 AuthAction::Enroll { method } => cmd_auth_enroll(&config, &method).await,
                 AuthAction::Verify { code } => cmd_auth_verify(&config, &code).await,
+                AuthAction::Revoke { token, device } => {
+                    cmd_auth_revoke(&config, token.as_deref(), device.as_deref()).await
+                }
             }
             #[cfg(not(unix))]
             {
@@ -1907,6 +1919,37 @@ async fn cmd_auth_verify(config: &tcfs_core::config::TcfsConfig, code: &str) -> 
         );
     } else {
         anyhow::bail!("verification failed: {}", resp.error);
+    }
+
+    Ok(())
+}
+
+// ── `tcfs auth revoke` ───────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_auth_revoke(
+    config: &tcfs_core::config::TcfsConfig,
+    token: Option<&str>,
+    device: Option<&str>,
+) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let resp = client
+        .auth_revoke(tcfs_core::proto::AuthRevokeRequest {
+            session_token: token.unwrap_or_default().to_string(),
+            device_id: device.unwrap_or_default().to_string(),
+        })
+        .await
+        .context("auth_revoke RPC failed")?
+        .into_inner();
+
+    if resp.success {
+        if let Some(t) = token {
+            println!("Session {}... revoked.", &t[..8.min(t.len())]);
+        } else if let Some(d) = device {
+            println!("All sessions for device '{d}' revoked.");
+        }
+    } else {
+        anyhow::bail!("revocation failed: {}", resp.error);
     }
 
     Ok(())
