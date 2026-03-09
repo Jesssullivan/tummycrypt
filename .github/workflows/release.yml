@@ -118,15 +118,16 @@ jobs:
             rpm: false
             sign: true
 
-          # Windows x86_64 — no FUSE, CLI + unsync + cloudfilter skeleton
-          - name: windows-x86_64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            features: "--no-default-features"
-            cross: false
-            fuse: false
-            deb: false
-            rpm: false
+          # Windows x86_64 — disabled until tcfs-cli compiles on Windows
+          # (connect_daemon uses Unix sockets, needs cfg(windows) TCP fallback)
+          # - name: windows-x86_64
+          #   os: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   features: "--no-default-features"
+          #   cross: false
+          #   fuse: false
+          #   deb: false
+          #   rpm: false
 
     steps:
       - uses: actions/checkout@v4
