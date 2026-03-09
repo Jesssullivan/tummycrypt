@@ -108,9 +108,8 @@ enum Commands {
         state: Option<PathBuf>,
     },
 
-    // ── Phase 3: FUSE mount + stub management ────────────────────────────────
-    /// Mount a remote as a local directory (requires FUSE)
-    #[cfg(feature = "fuse")]
+    // ── Phase 3: mount + stub management ──────────────────────────────────────
+    /// Mount a remote as a local directory
     Mount {
         /// Remote spec (e.g. seaweedfs://host/bucket[/prefix])
         remote: String,
@@ -119,10 +118,15 @@ enum Commands {
         /// Mount read-only
         #[arg(long)]
         read_only: bool,
+        /// Use NFS loopback instead of FUSE (no kernel modules required)
+        #[arg(long)]
+        nfs: bool,
+        /// NFS server port (0 = auto-assign, default 0)
+        #[arg(long, default_value = "0")]
+        nfs_port: u16,
     },
 
-    /// Unmount a tcfs mountpoint (requires FUSE)
-    #[cfg(feature = "fuse")]
+    /// Unmount a tcfs mountpoint
     Unmount {
         /// Local mountpoint to unmount
         mountpoint: PathBuf,
@@ -351,13 +355,13 @@ async fn main() -> Result<()> {
             CacheAction::Stats => cmd_cache_stats(&config).await,
             CacheAction::Clear => cmd_cache_clear(&config).await,
         },
-        #[cfg(feature = "fuse")]
         Commands::Mount {
             remote,
             mountpoint,
             read_only,
-        } => cmd_mount(&config, &remote, &mountpoint, read_only).await,
-        #[cfg(feature = "fuse")]
+            nfs,
+            nfs_port,
+        } => cmd_mount(&config, &remote, &mountpoint, read_only, nfs, nfs_port).await,
         Commands::Unmount { mountpoint } => cmd_unmount(&mountpoint),
         Commands::Unsync { path, force } => cmd_unsync(&config, &path, force).await,
         Commands::Init {
@@ -1186,48 +1190,50 @@ async fn cmd_cache_clear(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     Ok(())
 }
 
-// ── `tcfs mount` (requires fuse feature) ────────────────────────────────────
+// ── `tcfs mount` ─────────────────────────────────────────────────────────────
 
-#[cfg(feature = "fuse")]
 async fn cmd_mount(
     config: &tcfs_core::config::TcfsConfig,
     remote: &str,
     mountpoint: &std::path::Path,
     read_only: bool,
+    use_nfs: bool,
+    nfs_port: u16,
 ) -> Result<()> {
-    // Try daemon-managed mount first
-    let socket_path = expand_tilde(&config.daemon.socket);
-    if let Ok(mut client) = connect_daemon(&socket_path).await {
-        let resp = client
-            .mount(tonic::Request::new(tcfs_core::proto::MountRequest {
-                remote: remote.to_string(),
-                mountpoint: mountpoint.to_string_lossy().to_string(),
-                read_only,
-                options: vec![],
-            }))
-            .await;
+    // Try daemon-managed mount first (unless --nfs forces direct NFS)
+    if !use_nfs {
+        let socket_path = expand_tilde(&config.daemon.socket);
+        if let Ok(mut client) = connect_daemon(&socket_path).await {
+            let resp = client
+                .mount(tonic::Request::new(tcfs_core::proto::MountRequest {
+                    remote: remote.to_string(),
+                    mountpoint: mountpoint.to_string_lossy().to_string(),
+                    read_only,
+                    options: vec![],
+                }))
+                .await;
 
-        match resp {
-            Ok(r) if r.get_ref().success => {
-                println!("Mounted via daemon: {} → {}", remote, mountpoint.display());
-                return Ok(());
-            }
-            Ok(r) => {
-                eprintln!(
-                    "Daemon mount failed: {}, falling back to direct mount",
-                    r.into_inner().error
-                );
-            }
-            Err(e) => {
-                eprintln!("Daemon unavailable: {e}, falling back to direct mount");
+            match resp {
+                Ok(r) if r.get_ref().success => {
+                    println!("Mounted via daemon: {} → {}", remote, mountpoint.display());
+                    return Ok(());
+                }
+                Ok(r) => {
+                    eprintln!(
+                        "Daemon mount failed: {}, falling back to direct mount",
+                        r.into_inner().error
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Daemon unavailable: {e}, falling back to direct mount");
+                }
             }
         }
     }
 
-    // Fallback: direct FUSE mount
+    // Direct mount: build operator from remote spec + credentials
     let (endpoint, bucket, prefix) = tcfs_storage::parse_remote_spec(remote)?;
 
-    // Credentials
     let access_key = std::env::var("AWS_ACCESS_KEY_ID")
         .or_else(|_| std::env::var("TCFS_ACCESS_KEY_ID"))
         .context("S3 credentials not set — export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")?;
@@ -1244,47 +1250,69 @@ async fn cmd_mount(
     };
     let op = tcfs_storage::build_operator(&storage_cfg).context("building storage operator")?;
 
-    // Ensure mountpoint exists
-    tokio::fs::create_dir_all(mountpoint)
-        .await
-        .with_context(|| format!("creating mountpoint: {}", mountpoint.display()))?;
-
     let cache_dir = expand_tilde(&config.fuse.cache_dir);
     let neg_ttl = config.fuse.negative_cache_ttl_secs;
     let cache_max = config.fuse.cache_max_mb * 1024 * 1024;
 
+    let backend = if use_nfs { "NFS loopback" } else { "FUSE" };
     println!(
-        "Mounting {}:{} (prefix: {}) → {}",
+        "Mounting {}:{} (prefix: {}) → {} [{}]",
         endpoint,
         bucket,
         if prefix.is_empty() { "(root)" } else { &prefix },
-        mountpoint.display()
+        mountpoint.display(),
+        backend,
     );
     println!(
         "Press Ctrl-C or run `tcfs unmount {}` to stop.",
         mountpoint.display()
     );
 
-    tcfs_fuse::mount(tcfs_fuse::MountConfig {
-        op,
-        prefix,
-        mountpoint: mountpoint.to_path_buf(),
-        cache_dir,
-        cache_max_bytes: cache_max,
-        negative_ttl_secs: neg_ttl,
-        read_only,
-        allow_other: false,
-    })
-    .await
-    .context("FUSE mount failed")
+    if use_nfs {
+        // NFS loopback mount — no kernel modules required
+        tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
+            op,
+            prefix,
+            mountpoint: mountpoint.to_path_buf(),
+            cache_dir,
+            cache_max_bytes: cache_max,
+            negative_ttl_secs: neg_ttl,
+            port: nfs_port,
+        })
+        .await
+        .context("NFS mount failed")
+    } else {
+        // FUSE mount (legacy)
+        #[cfg(feature = "fuse")]
+        {
+            tcfs_fuse::mount(tcfs_fuse::MountConfig {
+                op,
+                prefix,
+                mountpoint: mountpoint.to_path_buf(),
+                cache_dir,
+                cache_max_bytes: cache_max,
+                negative_ttl_secs: neg_ttl,
+                read_only,
+                allow_other: false,
+            })
+            .await
+            .context("FUSE mount failed")
+        }
+        #[cfg(not(feature = "fuse"))]
+        {
+            anyhow::bail!(
+                "FUSE support not compiled. Use `--nfs` for FUSE-free NFS mount, \
+                 or rebuild with `--features fuse`."
+            );
+        }
+    }
 }
 
-// ── `tcfs unmount` (requires fuse feature) ──────────────────────────────────
+// ── `tcfs unmount` ───────────────────────────────────────────────────────────
 
-#[cfg(feature = "fuse")]
 fn cmd_unmount(mountpoint: &std::path::Path) -> Result<()> {
-    // macOS: use umount directly (works with FUSE-T and macFUSE)
-    // Linux: use fusermount3 first, fall back to umount
+    // macOS: use umount directly (works with FUSE, FUSE-T, and NFS mounts)
+    // Linux: try fusermount3 first (FUSE), fall back to umount (NFS + FUSE)
     #[cfg(target_os = "macos")]
     {
         let status = std::process::Command::new("umount")
