@@ -575,6 +575,35 @@ pub unsafe extern "C" fn tcfs_provider_create_dir(
     result.unwrap_or(TcfsError::TcfsErrorInternal)
 }
 
+/// Enumerate changes since a given timestamp.
+///
+/// The direct backend has no event stream (no daemon), so this always
+/// returns an empty change set.  The caller (FileProvider) falls back
+/// to a full re-enumerate when the list is empty.
+///
+/// # Safety
+///
+/// - `provider` must be a valid `TcfsProvider` pointer.
+/// - `path` must be a valid UTF-8 C string.
+/// - `out_events` and `out_count` must be valid, non-null pointers.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_enumerate_changes(
+    _provider: *mut TcfsProvider,
+    _path: *const c_char,
+    _since_timestamp: i64,
+    out_events: *mut *mut crate::TcfsChangeEvent,
+    out_count: *mut usize,
+) -> TcfsError {
+    if out_events.is_null() || out_count.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+    unsafe {
+        *out_events = ptr::null_mut();
+        *out_count = 0;
+    }
+    TcfsError::TcfsErrorNone
+}
+
 /// Free a provider handle.
 ///
 /// # Safety
