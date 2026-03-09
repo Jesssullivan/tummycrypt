@@ -75,6 +75,12 @@ impl TcfsDaemonImpl {
             }),
         );
 
+        let rate_limiter = tcfs_auth::RateLimiter::new(tcfs_auth::RateLimitConfig {
+            max_attempts: config.auth.rate_limit.max_attempts,
+            lockout_duration: chrono::Duration::seconds(config.auth.rate_limit.lockout_secs as i64),
+            backoff_multiplier: config.auth.rate_limit.backoff_multiplier,
+        });
+
         Self {
             cred_store,
             config,
@@ -92,7 +98,7 @@ impl TcfsDaemonImpl {
             session_store: tcfs_auth::SessionStore::new(),
             totp_provider,
             webauthn_provider,
-            rate_limiter: tcfs_auth::RateLimiter::new(tcfs_auth::RateLimitConfig::default()),
+            rate_limiter,
         }
     }
 

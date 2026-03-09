@@ -41,6 +41,7 @@ notify = { workspace = true }
 secrecy = { workspace = true }
 tempfile = { workspace = true }
 blake3 = { workspace = true }
+chrono = { workspace = true }
 age = { workspace = true }
 uuid = { workspace = true }
 dirs = "6"

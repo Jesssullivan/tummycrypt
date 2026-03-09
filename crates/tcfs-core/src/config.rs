@@ -37,6 +37,8 @@ pub struct AuthConfig {
     pub webauthn: AuthWebAuthnConfig,
     /// Enrollment configuration
     pub enrollment: AuthEnrollmentConfig,
+    /// Rate limiting configuration
+    pub rate_limit: AuthRateLimitConfig,
 }
 
 /// TOTP (RFC 6238) configuration
@@ -96,6 +98,28 @@ impl Default for AuthEnrollmentConfig {
     }
 }
 
+/// Rate limiting for auth attempts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthRateLimitConfig {
+    /// Maximum failed attempts before lockout (default: 5)
+    pub max_attempts: u32,
+    /// Base lockout duration in seconds (default: 300 = 5 minutes)
+    pub lockout_secs: u64,
+    /// Backoff multiplier for consecutive lockouts (default: 2)
+    pub backoff_multiplier: u32,
+}
+
+impl Default for AuthRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            lockout_secs: 300,
+            backoff_multiplier: 2,
+        }
+    }
+}
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
@@ -106,6 +130,7 @@ impl Default for AuthConfig {
             totp: AuthTotpConfig::default(),
             webauthn: AuthWebAuthnConfig::default(),
             enrollment: AuthEnrollmentConfig::default(),
+            rate_limit: AuthRateLimitConfig::default(),
         }
     }
 }
