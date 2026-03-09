@@ -374,9 +374,15 @@ struct AuthView: View {
                         Button {
                             viewModel.enrollTOTP()
                         } label: {
-                            Label("Enroll TOTP Authenticator", systemImage: "qrcode")
+                            Label("Enroll TOTP Authenticator", systemImage: "lock.shield")
                         }
                         .disabled(viewModel.isLoading)
+                    }
+
+                    NavigationLink {
+                        QRScannerView(authViewModel: viewModel)
+                    } label: {
+                        Label("Scan Enrollment QR Code", systemImage: "qrcode.viewfinder")
                     }
                 }
             }
