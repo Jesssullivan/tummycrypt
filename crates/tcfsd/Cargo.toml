@@ -16,6 +16,8 @@ tcfs-crypto = { path = "../tcfs-crypto" }
 tcfs-secrets = { path = "../tcfs-secrets" }
 tcfs-storage = { path = "../tcfs-storage" }
 tcfs-sync = { path = "../tcfs-sync", features = ["nats"] }
+tcfs-vfs = { path = "../tcfs-vfs" }
+tcfs-nfs = { path = "../tcfs-nfs" }
 tcfs-fuse = { path = "../tcfs-fuse" }
 opendal = { workspace = true }
 async-nats = { workspace = true }
@@ -47,6 +49,8 @@ default = ["fuse"]
 fuse = ["tcfs-fuse/fuse"]
 # FUSE-T: NFS-loopback FUSE for macOS (no kernel module, uses libfuse-t.dylib)
 fuse-t = ["tcfs-fuse/fuse-t"]
+# NFS loopback mount (no kernel modules required, works everywhere)
+nfs = []
 # Enables NATS consumer worker mode (for K8s pods)
 k8s-worker = []
 # Enable D-Bus status interface (Linux only)

@@ -16,6 +16,8 @@ tcfs-secrets = { path = "../tcfs-secrets" }
 tcfs-storage = { path = "../tcfs-storage" }
 tcfs-sync = { path = "../tcfs-sync" }
 tcfs-chunks = { path = "../tcfs-chunks" }
+tcfs-vfs = { path = "../tcfs-vfs" }
+tcfs-nfs = { path = "../tcfs-nfs" }
 tcfs-fuse = { path = "../tcfs-fuse" }
 tcfs-crypto = { path = "../tcfs-crypto" }
 secrecy = { workspace = true }

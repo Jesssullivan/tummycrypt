@@ -7,6 +7,8 @@ members = [
     "crates/tcfs-chunks",
     "crates/tcfs-crypto",
     "crates/tcfs-sync",
+    "crates/tcfs-vfs",
+    "crates/tcfs-nfs",
     "crates/tcfs-fuse",
     "crates/tcfs-cloudfilter",
     "crates/tcfs-sops",
