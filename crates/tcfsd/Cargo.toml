@@ -45,6 +45,8 @@ tcfs-dbus = { path = "../tcfs-dbus", optional = true }
 default = ["fuse"]
 # Enable FUSE mount support (requires fuse3 system library)
 fuse = ["tcfs-fuse/fuse"]
+# FUSE-T: NFS-loopback FUSE for macOS (no kernel module, uses libfuse-t.dylib)
+fuse-t = ["tcfs-fuse/fuse-t"]
 # Enables NATS consumer worker mode (for K8s pods)
 k8s-worker = []
 # Enable D-Bus status interface (Linux only)

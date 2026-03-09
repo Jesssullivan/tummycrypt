@@ -44,6 +44,8 @@ rpassword = { workspace = true }
 default = ["fuse"]
 # FUSE mount/unmount support (Linux, macOS with macFUSE/FUSE-T)
 fuse = ["dep:fuse3", "tcfs-fuse/fuse"]
+# FUSE-T: NFS-loopback FUSE for macOS (no kernel module, uses libfuse-t.dylib)
+fuse-t = ["tcfs-fuse/fuse-t"]
 
 [package.metadata.deb]
 maintainer = "TummyCrypt Contributors <jess@sulliwood.org>"

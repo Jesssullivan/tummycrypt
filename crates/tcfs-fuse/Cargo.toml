@@ -27,6 +27,9 @@ default = []
 # Enable with: cargo build --features tcfs-fuse/fuse
 fuse = ["dep:fuse3", "fuse3/unprivileged", "dep:libc", "dep:bytes", "dep:futures-util"]
 macos-fuse = ["fuse"]
+# FUSE-T: NFS-loopback FUSE for macOS (no kernel module needed)
+# Enable with: cargo build --features tcfs-fuse/fuse-t
+fuse-t = ["fuse", "fuse3/fuse-t"]
 erofs = []
 
 [dev-dependencies]
