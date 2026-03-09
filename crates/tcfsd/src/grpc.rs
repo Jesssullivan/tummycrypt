@@ -192,15 +192,23 @@ impl TcfsDaemon for TcfsDaemonImpl {
             })?;
         }
 
+        let use_nfs = req.options.iter().any(|o| o == "nfs");
+        let backend = if use_nfs { "NFS loopback" } else { "FUSE" };
+
         info!(
             mountpoint = %req.mountpoint,
             remote = %req.remote,
-            "spawning FUSE mount"
+            backend = %backend,
+            "spawning mount"
         );
 
         // Spawn tcfs mount as subprocess
-        let child = tokio::process::Command::new("tcfs")
-            .args(["mount", &req.remote, &req.mountpoint])
+        let mut cmd = tokio::process::Command::new("tcfs");
+        cmd.args(["mount", &req.remote, &req.mountpoint]);
+        if use_nfs {
+            cmd.arg("--nfs");
+        }
+        let child = cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())

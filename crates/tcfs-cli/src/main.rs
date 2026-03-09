@@ -1200,16 +1200,20 @@ async fn cmd_mount(
     use_nfs: bool,
     nfs_port: u16,
 ) -> Result<()> {
-    // Try daemon-managed mount first (unless --nfs forces direct NFS)
-    if !use_nfs {
+    // Try daemon-managed mount first
+    {
         let socket_path = expand_tilde(&config.daemon.socket);
+        let mut options = vec![];
+        if use_nfs {
+            options.push("nfs".to_string());
+        }
         if let Ok(mut client) = connect_daemon(&socket_path).await {
             let resp = client
                 .mount(tonic::Request::new(tcfs_core::proto::MountRequest {
                     remote: remote.to_string(),
                     mountpoint: mountpoint.to_string_lossy().to_string(),
                     read_only,
-                    options: vec![],
+                    options,
                 }))
                 .await;
 
