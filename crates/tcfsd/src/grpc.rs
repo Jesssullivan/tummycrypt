@@ -99,6 +99,21 @@ impl TcfsDaemonImpl {
         self.totp_provider.load_from_file(path).await
     }
 
+    /// Load persisted sessions from disk.
+    pub async fn load_sessions(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.session_store.load_from_file(path).await
+    }
+
+    /// Save sessions to disk (called after session changes).
+    async fn persist_sessions(&self) {
+        let path = dirs::data_dir()
+            .unwrap_or_default()
+            .join("tcfsd/sessions.json");
+        if let Err(e) = self.session_store.save_to_file(&path).await {
+            tracing::warn!("failed to persist sessions: {e}");
+        }
+    }
+
     /// Validate a session token from gRPC request metadata.
     ///
     /// Returns Ok(Session) if the session is valid, or a gRPC UNAUTHENTICATED
@@ -1571,6 +1586,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     .with_expiry(self.config.auth.session_expiry_hours);
                 let token = session.token.clone();
                 self.session_store.insert(session).await;
+                self.persist_sessions().await;
 
                 info!(device_id = %device_id, method = auth_method, "auth succeeded, session created");
                 Ok(tonic::Response::new(AuthVerifyResponse {

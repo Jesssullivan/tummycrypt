@@ -512,13 +512,20 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         master_key,
     );
 
-    // Load persisted TOTP credentials (best-effort)
-    let totp_cred_path = dirs::data_dir()
+    // Load persisted auth credentials (best-effort)
+    let data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("tcfsd/totp-credentials.json");
+        .join("tcfsd");
+    let totp_cred_path = data_dir.join("totp-credentials.json");
     if totp_cred_path.exists() {
         if let Err(e) = impl_.load_totp_credentials(&totp_cred_path).await {
             warn!("failed to load TOTP credentials: {e}");
+        }
+    }
+    let session_path = data_dir.join("sessions.json");
+    if session_path.exists() {
+        if let Err(e) = impl_.load_sessions(&session_path).await {
+            warn!("failed to load sessions: {e}");
         }
     }
 

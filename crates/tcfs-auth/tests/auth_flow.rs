@@ -304,3 +304,38 @@ async fn test_totp_credential_persistence() {
     let challenge = provider2.challenge("persist-device").await;
     assert!(challenge.is_ok());
 }
+
+/// Session persistence (save/load roundtrip across daemon restarts)
+#[tokio::test]
+async fn test_session_persistence() {
+    let store = SessionStore::new();
+
+    // Create sessions for two devices
+    let s1 = Session::new("device-a", "laptop", "totp").with_expiry(24);
+    let s2 = Session::new("device-b", "phone", "webauthn").with_expiry(24);
+    let t1 = s1.token.clone();
+    let t2 = s2.token.clone();
+    store.insert(s1).await;
+    store.insert(s2).await;
+    assert_eq!(store.active_count().await, 2);
+
+    // Save to disk
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+    store.save_to_file(&path).await.unwrap();
+
+    // Load into a fresh store (simulating daemon restart)
+    let store2 = SessionStore::new();
+    assert_eq!(store2.active_count().await, 0);
+    store2.load_from_file(&path).await.unwrap();
+    assert_eq!(store2.active_count().await, 2);
+
+    // Tokens should still be valid
+    let loaded = store2.validate(&t1).await.unwrap();
+    assert_eq!(loaded.device_id, "device-a");
+    assert_eq!(loaded.auth_method, "totp");
+
+    let loaded2 = store2.validate(&t2).await.unwrap();
+    assert_eq!(loaded2.device_id, "device-b");
+    assert_eq!(loaded2.auth_method, "webauthn");
+}

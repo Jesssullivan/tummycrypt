@@ -229,6 +229,42 @@ impl SessionStore {
     pub async fn has_active_session(&self) -> bool {
         self.active_count().await > 0
     }
+
+    /// Save active (non-expired) sessions to a JSON file.
+    pub async fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        // Only persist valid sessions
+        let sessions = self.sessions.read().await;
+        let valid: HashMap<String, Session> = sessions
+            .iter()
+            .filter(|(_, s)| s.is_valid())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let data = serde_json::to_string_pretty(&valid)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        tokio::fs::write(path, data).await?;
+        tracing::debug!(path = %path.display(), count = valid.len(), "saved sessions");
+        Ok(())
+    }
+
+    /// Load sessions from a JSON file, discarding any that have expired.
+    pub async fn load_from_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let data = tokio::fs::read_to_string(path).await?;
+        let loaded: HashMap<String, Session> = serde_json::from_str(&data)?;
+        let mut sessions = self.sessions.write().await;
+        let mut device_sessions = self.device_sessions.write().await;
+        let mut count = 0;
+        for (token, session) in loaded {
+            if session.is_valid() {
+                device_sessions.insert(session.device_id.clone(), token.clone());
+                sessions.insert(token, session);
+                count += 1;
+            }
+        }
+        tracing::info!(path = %path.display(), count, "loaded sessions");
+        Ok(())
+    }
 }
 
 impl Default for SessionStore {
