@@ -23,6 +23,8 @@ service TcfsDaemon {
   rpc AuthEnroll(AuthEnrollRequest) returns (AuthEnrollResponse);
   rpc AuthChallenge(AuthChallengeRequest) returns (AuthChallengeResponse);
   rpc AuthVerify(AuthVerifyRequest) returns (AuthVerifyResponse);
+  // Session management
+  rpc AuthRevoke(AuthRevokeRequest) returns (AuthRevokeResponse);
   // Device enrollment via invite
   rpc DeviceEnroll(DeviceEnrollRequest) returns (DeviceEnrollResponse);
 }
@@ -225,6 +227,16 @@ message AuthVerifyResponse {
   bool success = 1;
   string session_token = 2;
   string error = 3;
+}
+
+// Session revocation: revoke by token or device_id
+message AuthRevokeRequest {
+  string session_token = 1;   // Revoke specific session (if set)
+  string device_id = 2;       // Revoke all sessions for device (if set, token empty)
+}
+message AuthRevokeResponse {
+  bool success = 1;
+  string error = 2;
 }
 
 // Device enrollment via invite

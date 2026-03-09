@@ -37,6 +37,7 @@ pub struct TcfsDaemonImpl {
     session_store: tcfs_auth::SessionStore,
     totp_provider: Arc<tcfs_auth::totp::TotpProvider>,
     webauthn_provider: Arc<tcfs_auth::webauthn::WebAuthnProvider>,
+    rate_limiter: tcfs_auth::RateLimiter,
 }
 
 impl TcfsDaemonImpl {
@@ -91,6 +92,7 @@ impl TcfsDaemonImpl {
             session_store: tcfs_auth::SessionStore::new(),
             totp_provider,
             webauthn_provider,
+            rate_limiter: tcfs_auth::RateLimiter::new(tcfs_auth::RateLimitConfig::default()),
         }
     }
 
@@ -1512,8 +1514,6 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<AuthChallengeRequest>,
     ) -> Result<tonic::Response<AuthChallengeResponse>, tonic::Status> {
-        use tcfs_auth::AuthProvider;
-
         let req = request.into_inner();
         info!(device_id = %req.device_id, method = %req.method, "auth challenge requested");
 
@@ -1549,6 +1549,16 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let req = request.into_inner();
         info!(device_id = %req.device_id, "auth verify requested");
+
+        // Rate limit check — reject early if device is locked out
+        if let Some(remaining_secs) = self.rate_limiter.check(&req.device_id).await {
+            tracing::warn!(device_id = %req.device_id, remaining_secs, "auth attempt rejected: rate limited");
+            return Ok(tonic::Response::new(AuthVerifyResponse {
+                success: false,
+                session_token: String::new(),
+                error: format!("too many failed attempts, try again in {remaining_secs}s"),
+            }));
+        }
 
         let response = tcfs_auth::AuthResponse {
             challenge_id: req.challenge_id,
@@ -1587,6 +1597,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 let token = session.token.clone();
                 self.session_store.insert(session).await;
                 self.persist_sessions().await;
+                self.rate_limiter.clear(&device_id).await;
 
                 info!(device_id = %device_id, method = auth_method, "auth succeeded, session created");
                 Ok(tonic::Response::new(AuthVerifyResponse {
@@ -1596,23 +1607,63 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 }))
             }
             Ok(tcfs_auth::VerifyResult::Failure { reason }) => {
+                self.rate_limiter.record_failure(&req.device_id).await;
                 Ok(tonic::Response::new(AuthVerifyResponse {
                     success: false,
                     session_token: String::new(),
                     error: reason,
                 }))
             }
-            Ok(tcfs_auth::VerifyResult::Expired) => Ok(tonic::Response::new(AuthVerifyResponse {
-                success: false,
-                session_token: String::new(),
-                error: "challenge expired".into(),
-            })),
-            Err(e) => Ok(tonic::Response::new(AuthVerifyResponse {
-                success: false,
-                session_token: String::new(),
-                error: format!("verification error: {e}"),
-            })),
+            Ok(tcfs_auth::VerifyResult::Expired) => {
+                self.rate_limiter.record_failure(&req.device_id).await;
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: false,
+                    session_token: String::new(),
+                    error: "challenge expired".into(),
+                }))
+            }
+            Err(e) => {
+                self.rate_limiter.record_failure(&req.device_id).await;
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: false,
+                    session_token: String::new(),
+                    error: format!("verification error: {e}"),
+                }))
+            }
         }
+    }
+
+    // ── Session Revocation ────────────────────────────────────────────────
+
+    async fn auth_revoke(
+        &self,
+        request: tonic::Request<AuthRevokeRequest>,
+    ) -> Result<tonic::Response<AuthRevokeResponse>, tonic::Status> {
+        let req = request.into_inner();
+
+        if !req.session_token.is_empty() {
+            // Revoke specific session by token
+            info!(
+                token_prefix = &req.session_token[..8.min(req.session_token.len())],
+                "revoking session by token"
+            );
+            self.session_store.revoke(&req.session_token).await;
+        } else if !req.device_id.is_empty() {
+            // Revoke all sessions for device
+            info!(device_id = %req.device_id, "revoking all sessions for device");
+            self.session_store.revoke_device(&req.device_id).await;
+        } else {
+            return Ok(tonic::Response::new(AuthRevokeResponse {
+                success: false,
+                error: "must specify session_token or device_id".into(),
+            }));
+        }
+
+        self.persist_sessions().await;
+        Ok(tonic::Response::new(AuthRevokeResponse {
+            success: true,
+            error: String::new(),
+        }))
     }
 
     // ── Device Enrollment ────────────────────────────────────────────────

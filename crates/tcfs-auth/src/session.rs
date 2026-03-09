@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -63,6 +63,107 @@ impl DevicePermissions {
             return true; // No restrictions
         }
         self.allowed_prefixes.iter().any(|p| prefix.starts_with(p))
+    }
+}
+
+/// Rate limiting configuration.
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum failed attempts before lockout.
+    pub max_attempts: u32,
+    /// Base lockout duration after exceeding max_attempts.
+    pub lockout_duration: Duration,
+    /// Backoff multiplier (lockout doubles each successive breach).
+    pub backoff_multiplier: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            lockout_duration: Duration::minutes(5),
+            backoff_multiplier: 2,
+        }
+    }
+}
+
+/// Per-device attempt tracking for brute-force protection.
+#[derive(Debug, Clone)]
+struct DeviceAttempts {
+    failures: u32,
+    last_failure: DateTime<Utc>,
+    lockout_until: Option<DateTime<Utc>>,
+    consecutive_lockouts: u32,
+}
+
+/// Thread-safe rate limiter for auth attempts.
+#[derive(Clone)]
+pub struct RateLimiter {
+    config: RateLimitConfig,
+    attempts: Arc<RwLock<HashMap<String, DeviceAttempts>>>,
+}
+
+impl RateLimiter {
+    pub fn new(config: RateLimitConfig) -> Self {
+        Self {
+            config,
+            attempts: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Check if a device is currently rate-limited. Returns remaining lockout seconds if limited.
+    pub async fn check(&self, device_id: &str) -> Option<i64> {
+        let attempts = self.attempts.read().await;
+        if let Some(da) = attempts.get(device_id) {
+            if let Some(until) = da.lockout_until {
+                let remaining = (until - Utc::now()).num_seconds();
+                if remaining > 0 {
+                    return Some(remaining);
+                }
+            }
+        }
+        None
+    }
+
+    /// Record a failed auth attempt. Returns lockout seconds if the device is now locked out.
+    pub async fn record_failure(&self, device_id: &str) -> Option<i64> {
+        let mut attempts = self.attempts.write().await;
+        let da = attempts
+            .entry(device_id.to_string())
+            .or_insert(DeviceAttempts {
+                failures: 0,
+                last_failure: Utc::now(),
+                lockout_until: None,
+                consecutive_lockouts: 0,
+            });
+        da.failures += 1;
+        da.last_failure = Utc::now();
+
+        if da.failures >= self.config.max_attempts {
+            let multiplier = self.config.backoff_multiplier.pow(da.consecutive_lockouts);
+            let lockout = self.config.lockout_duration * multiplier as i32;
+            da.lockout_until = Some(Utc::now() + lockout);
+            da.consecutive_lockouts += 1;
+            tracing::warn!(
+                device_id,
+                failures = da.failures,
+                lockout_secs = lockout.num_seconds(),
+                "device locked out due to failed auth attempts"
+            );
+            Some(lockout.num_seconds())
+        } else {
+            None
+        }
+    }
+
+    /// Clear attempt tracking for a device (call on successful auth).
+    pub async fn clear(&self, device_id: &str) {
+        self.attempts.write().await.remove(device_id);
+    }
+
+    /// Number of devices currently tracked.
+    pub async fn tracked_count(&self) -> usize {
+        self.attempts.read().await.len()
     }
 }
 
@@ -337,5 +438,66 @@ mod tests {
         };
         assert!(restricted.can_access_prefix("git/crush-dots"));
         assert!(!restricted.can_access_prefix("secrets/keys"));
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_allows_under_threshold() {
+        let limiter = RateLimiter::new(RateLimitConfig::default());
+        // 4 failures (under default max of 5) should not lock out
+        for _ in 0..4 {
+            assert!(limiter.record_failure("device-1").await.is_none());
+        }
+        assert!(limiter.check("device-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_locks_at_threshold() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            max_attempts: 3,
+            lockout_duration: Duration::minutes(1),
+            backoff_multiplier: 2,
+        });
+        // 3 failures should trigger lockout
+        assert!(limiter.record_failure("device-1").await.is_none());
+        assert!(limiter.record_failure("device-1").await.is_none());
+        let lockout = limiter.record_failure("device-1").await;
+        assert!(lockout.is_some());
+        assert!(lockout.unwrap() > 0);
+
+        // Should be locked out
+        assert!(limiter.check("device-1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_clear_resets() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            max_attempts: 2,
+            lockout_duration: Duration::minutes(1),
+            backoff_multiplier: 2,
+        });
+        limiter.record_failure("device-1").await;
+        limiter.record_failure("device-1").await;
+        assert!(limiter.check("device-1").await.is_some());
+
+        // Clear on successful auth
+        limiter.clear("device-1").await;
+        assert!(limiter.check("device-1").await.is_none());
+        assert_eq!(limiter.tracked_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_independent_devices() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            max_attempts: 2,
+            lockout_duration: Duration::minutes(1),
+            backoff_multiplier: 2,
+        });
+        // Lock out device-1
+        limiter.record_failure("device-1").await;
+        limiter.record_failure("device-1").await;
+        assert!(limiter.check("device-1").await.is_some());
+
+        // device-2 should be unaffected
+        assert!(limiter.check("device-2").await.is_none());
     }
 }

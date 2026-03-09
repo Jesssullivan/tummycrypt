@@ -39,4 +39,4 @@ pub mod certificate;
 // Re-exports
 pub use enrollment::{EnrollmentInvite, EnrollmentRequest, EnrollmentResult};
 pub use provider::{AuthChallenge, AuthProvider, AuthResponse, VerifyResult};
-pub use session::{DevicePermissions, Session, SessionStore};
+pub use session::{DevicePermissions, RateLimitConfig, RateLimiter, Session, SessionStore};

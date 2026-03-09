@@ -3,7 +3,7 @@
 
 use tcfs_auth::enrollment::EnrollmentInvite;
 use tcfs_auth::provider::{AuthProvider, AuthResponse, VerifyResult};
-use tcfs_auth::session::{DevicePermissions, Session, SessionStore};
+use tcfs_auth::session::{DevicePermissions, RateLimitConfig, RateLimiter, Session, SessionStore};
 use tcfs_auth::totp::{TotpConfig, TotpProvider};
 
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -338,4 +338,52 @@ async fn test_session_persistence() {
     let loaded2 = store2.validate(&t2).await.unwrap();
     assert_eq!(loaded2.device_id, "device-b");
     assert_eq!(loaded2.auth_method, "webauthn");
+}
+
+/// Rate limiter blocks brute-force TOTP attempts
+#[tokio::test]
+async fn test_rate_limiter_blocks_brute_force() {
+    let provider = TotpProvider::new(TotpConfig::default());
+    let limiter = RateLimiter::new(RateLimitConfig {
+        max_attempts: 3,
+        lockout_duration: chrono::Duration::minutes(5),
+        backoff_multiplier: 2,
+    });
+    let device_id = "brute-force-device";
+
+    // Enroll the device
+    provider.register(device_id).await.unwrap();
+
+    // Simulate 3 failed auth attempts with wrong codes
+    for i in 0..3 {
+        // Not rate limited yet (first two)
+        if i < 2 {
+            assert!(limiter.check(device_id).await.is_none());
+        }
+
+        let response = AuthResponse {
+            challenge_id: String::new(),
+            data: b"000000".to_vec(), // wrong code
+            device_id: device_id.to_string(),
+        };
+        let result = provider.verify(&response).await.unwrap();
+        assert!(matches!(result, VerifyResult::Failure { .. }));
+        limiter.record_failure(device_id).await;
+    }
+
+    // Should now be locked out
+    let remaining = limiter.check(device_id).await;
+    assert!(
+        remaining.is_some(),
+        "device should be locked out after 3 failures"
+    );
+    assert!(remaining.unwrap() > 0);
+
+    // Even a valid code should be rejected at the rate limiter level
+    // (in real daemon, we check rate_limiter.check() before calling verify)
+    assert!(limiter.check(device_id).await.is_some());
+
+    // Clear on successful auth (simulating correct code after lockout expires)
+    limiter.clear(device_id).await;
+    assert!(limiter.check(device_id).await.is_none());
 }
