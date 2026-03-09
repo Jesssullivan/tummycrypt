@@ -505,6 +505,24 @@ fileprivate struct FfiConverterString: FfiConverter {
 public protocol TcfsProviderHandleProtocol : AnyObject {
     
     /**
+     * Enroll a TOTP authenticator for this device.
+     *
+     * Returns the shared secret and otpauth URI for the user to add
+     * to their authenticator app.
+     */
+    func authEnrollTotp() throws  -> TotpEnrollment
+    
+    /**
+     * Check if there's an active authenticated session.
+     */
+    func authIsAuthenticated()  -> Bool
+    
+    /**
+     * Verify a TOTP code and create a session.
+     */
+    func authVerifyTotp(code: String) throws  -> AuthResult
+    
+    /**
      * Check if a file has a conflict (remote vclock diverged from ours).
      *
      * Returns the conflicting device ID if diverged, or None if clean.
@@ -542,6 +560,11 @@ public protocol TcfsProviderHandleProtocol : AnyObject {
      * List files at a given relative path.
      */
     func listItems(path: String) throws  -> [FileItem]
+    
+    /**
+     * Process a device enrollment invite (from QR code or deep link).
+     */
+    func processEnrollmentInvite(inviteData: String) throws  -> AuthResult
     
     /**
      * Upload a local file to remote storage.
@@ -616,6 +639,40 @@ public convenience init(config: ProviderConfig)throws  {
 
     
 
+    
+    /**
+     * Enroll a TOTP authenticator for this device.
+     *
+     * Returns the shared secret and otpauth URI for the user to add
+     * to their authenticator app.
+     */
+open func authEnrollTotp()throws  -> TotpEnrollment {
+    return try  FfiConverterTypeTotpEnrollment.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
+    uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_auth_enroll_totp(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Check if there's an active authenticated session.
+     */
+open func authIsAuthenticated() -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_auth_is_authenticated(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Verify a TOTP code and create a session.
+     */
+open func authVerifyTotp(code: String)throws  -> AuthResult {
+    return try  FfiConverterTypeAuthResult.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
+    uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_auth_verify_totp(self.uniffiClonePointer(),
+        FfiConverterString.lower(code),$0
+    )
+})
+}
     
     /**
      * Check if a file has a conflict (remote vclock diverged from ours).
@@ -698,6 +755,17 @@ open func listItems(path: String)throws  -> [FileItem] {
 }
     
     /**
+     * Process a device enrollment invite (from QR code or deep link).
+     */
+open func processEnrollmentInvite(inviteData: String)throws  -> AuthResult {
+    return try  FfiConverterTypeAuthResult.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
+    uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_process_enrollment_invite(self.uniffiClonePointer(),
+        FfiConverterString.lower(inviteData),$0
+    )
+})
+}
+    
+    /**
      * Upload a local file to remote storage.
      */
 open func uploadFile(localPath: String, remotePath: String)throws  {try rustCallWithError(FfiConverterTypeProviderError.lift) {
@@ -760,6 +828,83 @@ public func FfiConverterTypeTcfsProviderHandle_lift(_ pointer: UnsafeMutableRawP
 #endif
 public func FfiConverterTypeTcfsProviderHandle_lower(_ value: TcfsProviderHandle) -> UnsafeMutableRawPointer {
     return FfiConverterTypeTcfsProviderHandle.lower(value)
+}
+
+
+/**
+ * Result of an authentication attempt.
+ */
+public struct AuthResult {
+    public var success: Bool
+    public var sessionToken: String
+    public var errorMessage: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(success: Bool, sessionToken: String, errorMessage: String) {
+        self.success = success
+        self.sessionToken = sessionToken
+        self.errorMessage = errorMessage
+    }
+}
+
+
+
+extension AuthResult: Equatable, Hashable {
+    public static func ==(lhs: AuthResult, rhs: AuthResult) -> Bool {
+        if lhs.success != rhs.success {
+            return false
+        }
+        if lhs.sessionToken != rhs.sessionToken {
+            return false
+        }
+        if lhs.errorMessage != rhs.errorMessage {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(success)
+        hasher.combine(sessionToken)
+        hasher.combine(errorMessage)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAuthResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AuthResult {
+        return
+            try AuthResult(
+                success: FfiConverterBool.read(from: &buf), 
+                sessionToken: FfiConverterString.read(from: &buf), 
+                errorMessage: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AuthResult, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.success, into: &buf)
+        FfiConverterString.write(value.sessionToken, into: &buf)
+        FfiConverterString.write(value.errorMessage, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAuthResult_lift(_ buf: RustBuffer) throws -> AuthResult {
+    return try FfiConverterTypeAuthResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAuthResult_lower(_ value: AuthResult) -> RustBuffer {
+    return FfiConverterTypeAuthResult.lower(value)
 }
 
 
@@ -1095,6 +1240,101 @@ public func FfiConverterTypeSyncStatus_lower(_ value: SyncStatus) -> RustBuffer 
 
 
 /**
+ * Result of a TOTP enrollment.
+ */
+public struct TotpEnrollment {
+    /**
+     * Base32-encoded shared secret.
+     */
+    public var secret: String
+    /**
+     * otpauth:// URI for authenticator apps.
+     */
+    public var qrUri: String
+    /**
+     * Human-readable instructions.
+     */
+    public var instructions: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Base32-encoded shared secret.
+         */secret: String, 
+        /**
+         * otpauth:// URI for authenticator apps.
+         */qrUri: String, 
+        /**
+         * Human-readable instructions.
+         */instructions: String) {
+        self.secret = secret
+        self.qrUri = qrUri
+        self.instructions = instructions
+    }
+}
+
+
+
+extension TotpEnrollment: Equatable, Hashable {
+    public static func ==(lhs: TotpEnrollment, rhs: TotpEnrollment) -> Bool {
+        if lhs.secret != rhs.secret {
+            return false
+        }
+        if lhs.qrUri != rhs.qrUri {
+            return false
+        }
+        if lhs.instructions != rhs.instructions {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(secret)
+        hasher.combine(qrUri)
+        hasher.combine(instructions)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTotpEnrollment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TotpEnrollment {
+        return
+            try TotpEnrollment(
+                secret: FfiConverterString.read(from: &buf), 
+                qrUri: FfiConverterString.read(from: &buf), 
+                instructions: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TotpEnrollment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.secret, into: &buf)
+        FfiConverterString.write(value.qrUri, into: &buf)
+        FfiConverterString.write(value.instructions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTotpEnrollment_lift(_ buf: RustBuffer) throws -> TotpEnrollment {
+    return try FfiConverterTypeTotpEnrollment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTotpEnrollment_lower(_ value: TotpEnrollment) -> RustBuffer {
+    return FfiConverterTypeTotpEnrollment.lower(value)
+}
+
+
+/**
  * Errors returned by provider operations.
  */
 public enum ProviderError {
@@ -1112,6 +1352,8 @@ public enum ProviderError {
     case InvalidArgument(message: String
     )
     case Conflict(path: String
+    )
+    case Auth(message: String
     )
 }
 
@@ -1146,6 +1388,9 @@ public struct FfiConverterTypeProviderError: FfiConverterRustBuffer {
             )
         case 6: return .Conflict(
             path: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .Auth(
+            message: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -1187,6 +1432,11 @@ public struct FfiConverterTypeProviderError: FfiConverterRustBuffer {
         case let .Conflict(path):
             writeInt(&buf, Int32(6))
             FfiConverterString.write(path, into: &buf)
+            
+        
+        case let .Auth(message):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(message, into: &buf)
             
         }
     }
@@ -1380,6 +1630,15 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_auth_enroll_totp() != 30310) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_auth_is_authenticated() != 54197) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_auth_verify_totp() != 15839) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_check_conflict() != 53955) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1399,6 +1658,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_list_items() != 37548) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_process_enrollment_invite() != 12693) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_upload_file() != 28793) {
