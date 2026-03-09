@@ -14,7 +14,7 @@ use tcfs_core::proto::tcfs_daemon_client::TcfsDaemonClient;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
-use crate::{to_c_string, TcfsError, TcfsFileItem};
+use crate::{to_c_string, TcfsChangeEvent, TcfsError, TcfsFileItem};
 
 /// Opaque provider handle wrapping a tokio runtime + gRPC client.
 ///
@@ -234,6 +234,100 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
             }
             Err(e) => {
                 tracing::error!("enumerate failed: {}, attempting reconnect", e);
+                prov.try_reconnect();
+                TcfsError::TcfsErrorStorage
+            }
+        }
+    }));
+
+    result.unwrap_or(TcfsError::TcfsErrorInternal)
+}
+
+/// Enumerate changes since a timestamp anchor via the daemon's Watch RPC.
+///
+/// Returns only items that changed since `since_timestamp`, enabling
+/// incremental `enumerateChanges` in FileProvider instead of full re-enumerate.
+///
+/// # Safety
+///
+/// - `provider` must be a valid `TcfsProvider` pointer.
+/// - `path` must be a valid UTF-8 C string.
+/// - `out_events` and `out_count` must be valid, non-null pointers.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_enumerate_changes(
+    provider: *mut TcfsProvider,
+    path: *const c_char,
+    since_timestamp: i64,
+    out_events: *mut *mut TcfsChangeEvent,
+    out_count: *mut usize,
+) -> TcfsError {
+    if provider.is_null() || path.is_null() || out_events.is_null() || out_count.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let prov = unsafe { &mut *provider };
+        let c_path = unsafe { CStr::from_ptr(path) };
+        let rel_path = match c_path.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+
+        let changes_result = prov.runtime.block_on(async {
+            use tokio::time::{timeout, Duration};
+
+            // Call Watch RPC with since_timestamp to get catch-up events
+            let resp = prov
+                .client
+                .watch(tonic::Request::new(tcfs_core::proto::WatchRequest {
+                    paths: vec![rel_path.to_string()],
+                    since_timestamp,
+                }))
+                .await?;
+
+            let mut stream = resp.into_inner();
+            let mut events = Vec::new();
+
+            // Collect catch-up events (daemon sends them immediately).
+            // Use a short timeout: after the initial burst, stop collecting.
+            loop {
+                match timeout(Duration::from_millis(500), stream.message()).await {
+                    Ok(Ok(Some(watch_event))) => {
+                        events.push(TcfsChangeEvent {
+                            path: to_c_string(&watch_event.path),
+                            filename: to_c_string(&watch_event.filename),
+                            event_type: to_c_string(&watch_event.event_type),
+                            timestamp: watch_event.timestamp,
+                            file_size: watch_event.size,
+                            content_hash: to_c_string(&watch_event.blake3),
+                            is_directory: watch_event.is_directory,
+                        });
+                    }
+                    Ok(Ok(None)) => break,       // Stream ended
+                    Ok(Err(e)) => {
+                        tracing::warn!("enumerate_changes stream error: {e}");
+                        break;
+                    }
+                    Err(_) => break,              // Timeout — initial burst done
+                }
+            }
+
+            Ok::<Vec<TcfsChangeEvent>, tonic::Status>(events)
+        });
+
+        match changes_result {
+            Ok(events) => {
+                let count = events.len();
+                let boxed = events.into_boxed_slice();
+                let ptr = Box::into_raw(boxed) as *mut TcfsChangeEvent;
+                unsafe {
+                    *out_events = ptr;
+                    *out_count = count;
+                }
+                TcfsError::TcfsErrorNone
+            }
+            Err(e) => {
+                tracing::error!("enumerate_changes failed: {}, attempting reconnect", e);
                 prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }

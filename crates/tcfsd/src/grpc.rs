@@ -998,6 +998,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         request: tonic::Request<WatchRequest>,
     ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
         use notify::{RecursiveMode, Watcher};
+        use tracing::{debug, warn};
 
         let req = request.into_inner();
         if req.paths.is_empty() {
@@ -1006,9 +1007,44 @@ impl TcfsDaemon for TcfsDaemonImpl {
             ));
         }
 
-        info!(paths = ?req.paths, "watch requested");
+        let since = req.since_timestamp;
+        info!(paths = ?req.paths, since, "watch requested");
 
+        let (async_tx, async_rx) = tokio::sync::mpsc::channel(256);
+
+        // ── Emit initial deltas from state cache (catch-up since anchor) ────
+        if since > 0 {
+            let cache = self.state_cache.lock().await;
+            let all = cache.all_entries();
+            for (path, state) in &all {
+                let last = state.last_synced as i64;
+                if last > since {
+                    let filename = std::path::Path::new(path.as_str())
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let event = WatchEvent {
+                        path: path.clone(),
+                        event_type: "modified".into(),
+                        timestamp: last,
+                        filename,
+                        size: state.size,
+                        blake3: state.blake3.clone(),
+                        is_directory: false,
+                        device_id: state.device_id.clone(),
+                    };
+                    if async_tx.send(Ok(event)).await.is_err() {
+                        // Client already disconnected
+                        let stream = tokio_stream::wrappers::ReceiverStream::new(async_rx);
+                        return Ok(tonic::Response::new(Box::pin(stream)));
+                    }
+                }
+            }
+        }
+
+        // ── Live local filesystem events via notify ─────────────────────────
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
+        let state_cache_for_notify = self.state_cache.clone();
 
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let _ = sync_tx.send(res);
@@ -1027,11 +1063,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 .map_err(|e| tonic::Status::internal(format!("watch {path_str}: {e}")))?;
         }
 
-        let (async_tx, async_rx) = tokio::sync::mpsc::channel(256);
-
-        // Bridge sync watcher events to async channel
+        let notify_tx = async_tx.clone();
         tokio::task::spawn_blocking(move || {
-            // Keep watcher alive while client is connected
             let _watcher = watcher;
             while let Ok(result) = sync_rx.recv() {
                 let event = match result {
@@ -1049,24 +1082,147 @@ impl TcfsDaemon for TcfsDaemonImpl {
                             .first()
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_default();
+                        let filename = event
+                            .paths
+                            .first()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs() as i64;
+
+                        // Enrich with state cache metadata (best-effort)
+                        let (size, blake3) = {
+                            let path_buf = std::path::PathBuf::from(&path);
+                            let cache = state_cache_for_notify.blocking_lock();
+                            cache
+                                .get(&path_buf)
+                                .map(|s| (s.size, s.blake3.clone()))
+                                .unwrap_or((0, String::new()))
+                        };
+
                         WatchEvent {
                             path,
                             event_type: event_type.to_string(),
                             timestamp,
+                            filename,
+                            size,
+                            blake3,
+                            is_directory: false,
+                            device_id: String::new(), // local event
                         }
                     }
                     Err(e) => WatchEvent {
                         path: String::new(),
                         event_type: format!("error: {e}"),
                         timestamp: 0,
+                        ..Default::default()
                     },
                 };
-                if async_tx.blocking_send(Ok(event)).is_err() {
+                if notify_tx.blocking_send(Ok(event)).is_err() {
                     break; // Client disconnected
+                }
+            }
+        });
+
+        // ── Live remote events via NATS STATE_UPDATES ───────────────────────
+        let nats_tx = async_tx;
+        let nats_client = self.nats.clone();
+        let device_id = self.device_id.clone();
+        tokio::spawn(async move {
+            let client = nats_client.lock().await;
+            let Some(nats) = client.as_ref() else {
+                debug!("watch: NATS not connected, skipping remote events");
+                return;
+            };
+            match nats.state_consumer(&device_id).await {
+                Ok(mut consumer) => {
+                    use futures::StreamExt;
+                    while let Some(msg_result) = consumer.next().await {
+                        match msg_result {
+                            Ok(state_msg) => {
+                                let event = state_msg.event.clone();
+                                // Ack before processing (at-most-once for watch events is fine)
+                                let _ = state_msg.ack().await;
+
+                                let watch_event = match event {
+                                    tcfs_sync::StateEvent::FileSynced {
+                                        device_id: dev,
+                                        rel_path,
+                                        blake3,
+                                        size,
+                                        timestamp,
+                                        ..
+                                    } => {
+                                        let filename = std::path::Path::new(&rel_path)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        WatchEvent {
+                                            path: rel_path,
+                                            event_type: "modified".into(),
+                                            timestamp: timestamp as i64,
+                                            filename,
+                                            size,
+                                            blake3,
+                                            is_directory: false,
+                                            device_id: dev,
+                                        }
+                                    }
+                                    tcfs_sync::StateEvent::FileDeleted {
+                                        device_id: dev,
+                                        rel_path,
+                                        timestamp,
+                                        ..
+                                    } => {
+                                        let filename = std::path::Path::new(&rel_path)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        WatchEvent {
+                                            path: rel_path,
+                                            event_type: "deleted".into(),
+                                            timestamp: timestamp as i64,
+                                            filename,
+                                            device_id: dev,
+                                            ..Default::default()
+                                        }
+                                    }
+                                    tcfs_sync::StateEvent::FileRenamed {
+                                        device_id: dev,
+                                        new_path,
+                                        timestamp,
+                                        ..
+                                    } => {
+                                        let filename = std::path::Path::new(&new_path)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        WatchEvent {
+                                            path: new_path,
+                                            event_type: "renamed".into(),
+                                            timestamp: timestamp as i64,
+                                            filename,
+                                            device_id: dev,
+                                            ..Default::default()
+                                        }
+                                    }
+                                    _ => continue, // Skip DeviceOnline/Offline etc
+                                };
+                                if nats_tx.send(Ok(watch_event)).await.is_err() {
+                                    break; // Client disconnected
+                                }
+                            }
+                            Err(e) => {
+                                warn!("watch: NATS state consumer error: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("watch: failed to create NATS state consumer: {e}");
                 }
             }
         });

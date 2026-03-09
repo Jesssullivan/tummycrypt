@@ -130,11 +130,20 @@ message FileEntry {
 
 message WatchRequest {
   repeated string paths = 1;
+  // Only return events newer than this timestamp (0 = all events).
+  // Maps to FileProvider sync anchor for incremental enumeration.
+  int64 since_timestamp = 2;
 }
 message WatchEvent {
   string path = 1;
-  string event_type = 2;
+  string event_type = 2;      // "created", "modified", "deleted", "renamed"
   int64 timestamp = 3;
+  // Enriched metadata (populated from state cache when available)
+  string filename = 4;
+  uint64 size = 5;
+  string blake3 = 6;
+  bool is_directory = 7;
+  string device_id = 8;       // Origin device for remote (NATS) events
 }
 
 message CredentialStatusResponse {

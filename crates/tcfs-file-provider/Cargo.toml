@@ -14,7 +14,7 @@ default = ["direct"]
 ## Direct S3/OpenDAL backend (current, no daemon needed)
 direct = ["dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:opendal", "dep:secrecy", "dep:base64"]
 ## gRPC backend — delegates all operations to tcfsd daemon
-grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream"]
+grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream", "dep:futures"]
 ## UniFFI bindings for iOS (proc-macro based, no UDL needed)
 uniffi = ["direct", "dep:uniffi"]
 
@@ -36,6 +36,7 @@ tonic = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 uniffi = { workspace = true, features = ["cli"], optional = true }
 
 [[bin]]
