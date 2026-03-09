@@ -286,6 +286,15 @@ enum KdbxAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing subscriber (respects RUST_LOG env var, default: info)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
     let config = load_config(&cli.config).await?;
 
