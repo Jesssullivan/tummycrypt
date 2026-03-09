@@ -12,9 +12,39 @@ pub struct TcfsConfig {
     pub fuse: FuseConfig,
     pub crypto: CryptoConfig,
     pub sops: SopsConfig,
+    pub auth: AuthConfig,
     /// Warn if the config file is world-readable (default: true)
     #[serde(default = "default_true")]
     pub config_file_mode_check: bool,
+}
+
+/// Authentication and session configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// Require a valid session token for protected RPCs (push, pull, mount, unsync).
+    /// Default: false (alpha bypass — all local requests are trusted).
+    pub require_session: bool,
+    /// Session expiry in hours (default: 24)
+    pub session_expiry_hours: u64,
+    /// Enabled auth methods (default: ["master_key"])
+    pub methods: Vec<String>,
+    /// WebAuthn relying party ID (default: "tcfs.local")
+    pub webauthn_rp_id: String,
+    /// WebAuthn relying party origin (default: "https://tcfs.local")
+    pub webauthn_rp_origin: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            require_session: false,
+            session_expiry_hours: 24,
+            methods: vec!["master_key".into()],
+            webauthn_rp_id: "tcfs.local".into(),
+            webauthn_rp_origin: "https://tcfs.local".into(),
+        }
+    }
 }
 
 fn default_true() -> bool {

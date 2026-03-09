@@ -1792,6 +1792,25 @@ async fn cmd_auth_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     } else {
         println!("Encryption: DISABLED (crypto.enabled = false in config)");
     }
+
+    // Show auth method and available methods
+    if !resp.auth_method.is_empty() {
+        println!("Auth method: {}", resp.auth_method);
+    }
+    if !resp.available_methods.is_empty() {
+        println!("Available methods: {}", resp.available_methods.join(", "));
+    }
+    if !resp.session_device_id.is_empty() {
+        println!("Device: {}", resp.session_device_id);
+    }
+
+    // Show session requirement from config
+    if config.auth.require_session {
+        println!("Session required: YES (protected RPCs need 'tcfs auth verify')");
+    } else {
+        println!("Session required: no (alpha bypass mode)");
+    }
+
     Ok(())
 }
 
