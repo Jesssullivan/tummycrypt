@@ -20,6 +20,7 @@ tcfs-vfs = { path = "../tcfs-vfs" }
 tcfs-nfs = { path = "../tcfs-nfs" }
 tcfs-fuse = { path = "../tcfs-fuse" }
 tcfs-crypto = { path = "../tcfs-crypto" }
+tcfs-auth = { path = "../tcfs-auth" }
 secrecy = { workspace = true }
 rand = { workspace = true }
 base64 = { workspace = true }

@@ -5181,6 +5181,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "tcfs-auth",
  "tcfs-chunks",
  "tcfs-core",
  "tcfs-crypto",

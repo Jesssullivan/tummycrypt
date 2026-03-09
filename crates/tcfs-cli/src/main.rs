@@ -228,6 +228,12 @@ enum DeviceAction {
     },
     /// Show this device's identity and status
     Status,
+    /// Generate a device enrollment invite (QR code or deep link)
+    Invite {
+        /// Expiry in hours (default: 24)
+        #[arg(long, default_value = "24")]
+        expiry_hours: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -242,6 +248,17 @@ enum AuthAction {
     Lock,
     /// Show encryption session status
     Status,
+    /// Enroll a TOTP authenticator for this device
+    Enroll {
+        /// Auth method to enroll (default: totp)
+        #[arg(long, default_value = "totp")]
+        method: String,
+    },
+    /// Verify a TOTP code to authenticate
+    Verify {
+        /// 6-digit TOTP code from authenticator app
+        code: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -374,6 +391,7 @@ async fn main() -> Result<()> {
             DeviceAction::List => cmd_device_list(),
             DeviceAction::Revoke { name } => cmd_device_revoke(&name),
             DeviceAction::Status => cmd_device_status(),
+            DeviceAction::Invite { expiry_hours } => cmd_device_invite(&config, expiry_hours).await,
         },
         Commands::Auth { action } => {
             #[cfg(unix)]
@@ -383,6 +401,8 @@ async fn main() -> Result<()> {
                 }
                 AuthAction::Lock => cmd_auth_lock(&config).await,
                 AuthAction::Status => cmd_auth_status(&config).await,
+                AuthAction::Enroll { method } => cmd_auth_enroll(&config, &method).await,
+                AuthAction::Verify { code } => cmd_auth_verify(&config, &code).await,
             }
             #[cfg(not(unix))]
             {
@@ -1772,6 +1792,144 @@ async fn cmd_auth_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     } else {
         println!("Encryption: DISABLED (crypto.enabled = false in config)");
     }
+    Ok(())
+}
+
+// ── `tcfs auth enroll` ────────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_auth_enroll(config: &tcfs_core::config::TcfsConfig, method: &str) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+
+    // Get device ID from daemon status
+    let status = client
+        .status(tonic::Request::new(tcfs_core::proto::StatusRequest {}))
+        .await
+        .context("status RPC failed")?
+        .into_inner();
+
+    let resp = client
+        .auth_enroll(tcfs_core::proto::AuthEnrollRequest {
+            device_id: status.device_id.clone(),
+            method: method.to_string(),
+        })
+        .await
+        .context("auth_enroll RPC failed")?
+        .into_inner();
+
+    if !resp.success {
+        anyhow::bail!("enrollment failed: {}", resp.error);
+    }
+
+    // Parse registration data (JSON with secret, qr_uri, qr_svg)
+    if let Ok(reg) = serde_json::from_slice::<serde_json::Value>(&resp.registration_data) {
+        if let Some(uri) = reg.get("qr_uri").and_then(|v| v.as_str()) {
+            println!("TOTP enrolled for device '{}'", status.device_id);
+            println!();
+            println!("Scan this URI with your authenticator app:");
+            println!("  {uri}");
+            println!();
+            println!("Or add the secret manually:");
+            if let Some(secret) = reg.get("secret").and_then(|v| v.as_str()) {
+                println!("  Secret: {secret}");
+            }
+        }
+    }
+
+    if !resp.instructions.is_empty() {
+        println!();
+        println!("{}", resp.instructions);
+    }
+
+    println!();
+    println!("Verify enrollment: tcfs auth verify <6-digit-code>");
+    Ok(())
+}
+
+// ── `tcfs auth verify` ───────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_auth_verify(config: &tcfs_core::config::TcfsConfig, code: &str) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+
+    // Get device ID
+    let status = client
+        .status(tonic::Request::new(tcfs_core::proto::StatusRequest {}))
+        .await
+        .context("status RPC failed")?
+        .into_inner();
+
+    // Request challenge (TOTP challenges are time-based, so data is empty)
+    let challenge = client
+        .auth_challenge(tcfs_core::proto::AuthChallengeRequest {
+            device_id: status.device_id.clone(),
+            method: "totp".into(),
+        })
+        .await
+        .context("auth_challenge RPC failed")?
+        .into_inner();
+
+    // Submit verification
+    let resp = client
+        .auth_verify(tcfs_core::proto::AuthVerifyRequest {
+            challenge_id: challenge.challenge_id,
+            device_id: status.device_id.clone(),
+            data: code.as_bytes().to_vec(),
+        })
+        .await
+        .context("auth_verify RPC failed")?
+        .into_inner();
+
+    if resp.success {
+        println!("Authentication successful.");
+        println!("Session token: {}...", &resp.session_token[..8.min(resp.session_token.len())]);
+    } else {
+        anyhow::bail!("verification failed: {}", resp.error);
+    }
+
+    Ok(())
+}
+
+// ── `tcfs device invite` ─────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_device_invite(config: &tcfs_core::config::TcfsConfig, expiry_hours: u64) -> Result<()> {
+    use tcfs_auth::enrollment::EnrollmentInvite;
+    use tcfs_auth::session::DevicePermissions;
+
+    // Get device ID from daemon
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let status = client
+        .status(tonic::Request::new(tcfs_core::proto::StatusRequest {}))
+        .await
+        .context("status RPC failed")?
+        .into_inner();
+
+    // TODO: derive signing key from master key instead of placeholder
+    let signing_key = blake3::hash(b"tcfs-fleet-invite-key");
+    let invite = EnrollmentInvite::new(
+        &status.device_id,
+        signing_key.as_bytes(),
+        expiry_hours,
+        DevicePermissions::default(),
+    );
+
+    let encoded = invite.encode().context("failed to encode invite")?;
+    let deep_link = format!("tcfs://enroll?data={encoded}");
+
+    println!("Device enrollment invite created");
+    println!();
+    println!("Expires: {} hours from now", expiry_hours);
+    println!();
+    println!("Share this invite data with the new device:");
+    println!("  {encoded}");
+    println!();
+    println!("Or use this deep link (iOS/macOS):");
+    println!("  {deep_link}");
+    println!();
+    println!("On the new device, run:");
+    println!("  tcfs device enroll --invite <invite-data>");
+
     Ok(())
 }
 
