@@ -263,8 +263,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_expiry() {
-        let session = Session::new("device-1", "laptop", "totp").with_expiry(0);
-        // Expires immediately (0 hours)
+        let mut session = Session::new("device-1", "laptop", "totp");
+        // Set expiry to the past to guarantee expired state
+        session.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
         assert!(session.is_expired());
     }
 

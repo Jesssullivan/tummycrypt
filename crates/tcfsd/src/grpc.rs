@@ -9,8 +9,6 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tracing::info;
 
-use tcfs_auth::AuthProvider as _;
-
 use crate::cred_store::SharedCredStore;
 
 use tcfs_core::config::TcfsConfig;
@@ -38,6 +36,7 @@ pub struct TcfsDaemonImpl {
     // Auth infrastructure
     session_store: tcfs_auth::SessionStore,
     totp_provider: Arc<tcfs_auth::totp::TotpProvider>,
+    webauthn_provider: Arc<tcfs_auth::webauthn::WebAuthnProvider>,
 }
 
 impl TcfsDaemonImpl {
@@ -59,6 +58,22 @@ impl TcfsDaemonImpl {
             ..tcfs_auth::totp::TotpConfig::default()
         };
         let totp_provider = Arc::new(tcfs_auth::totp::TotpProvider::new(totp_config));
+
+        let webauthn_config = tcfs_auth::webauthn::WebAuthnConfig {
+            rp_name: config.auth.webauthn.relying_party_name.clone(),
+            rp_id: config.auth.webauthn.relying_party_id.clone(),
+            rp_origin: format!("https://{}", config.auth.webauthn.relying_party_id),
+        };
+        let webauthn_provider = Arc::new(
+            tcfs_auth::webauthn::WebAuthnProvider::new(webauthn_config).unwrap_or_else(|e| {
+                tracing::warn!("WebAuthn provider init failed: {e}, using defaults");
+                tcfs_auth::webauthn::WebAuthnProvider::new(
+                    tcfs_auth::webauthn::WebAuthnConfig::default(),
+                )
+                .expect("default WebAuthn config should always work")
+            }),
+        );
+
         Self {
             cred_store,
             config,
@@ -75,6 +90,7 @@ impl TcfsDaemonImpl {
             active_mounts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
             session_store: tcfs_auth::SessionStore::new(),
             totp_provider,
+            webauthn_provider,
         }
     }
 
@@ -1377,12 +1393,16 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         _request: tonic::Request<Empty>,
     ) -> Result<tonic::Response<AuthStatusResponse>, tonic::Status> {
+        use tcfs_auth::AuthProvider;
         let guard = self.master_key.lock().await;
 
         // Build available methods dynamically
         let mut methods = vec!["master_key".into()];
         if self.totp_provider.is_available() {
             methods.push("totp".into());
+        }
+        if self.webauthn_provider.is_available() {
+            methods.push("webauthn".into());
         }
 
         // Check active session count
@@ -1440,6 +1460,30 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     error: format!("TOTP enrollment failed: {e}"),
                 })),
             },
+            "webauthn" => match self.webauthn_provider.register(&req.device_id).await {
+                Ok(reg) => {
+                    // Persist WebAuthn credentials
+                    let cred_path = std::path::PathBuf::from(&format!(
+                        "{}/tcfsd/webauthn-credentials.json",
+                        dirs::data_dir().unwrap_or_default().display()
+                    ));
+                    if let Err(e) = self.webauthn_provider.save_to_file(&cred_path).await {
+                        tracing::warn!("failed to persist WebAuthn credentials: {e}");
+                    }
+                    Ok(tonic::Response::new(AuthEnrollResponse {
+                        success: true,
+                        registration_data: reg.data,
+                        instructions: reg.instructions,
+                        error: String::new(),
+                    }))
+                }
+                Err(e) => Ok(tonic::Response::new(AuthEnrollResponse {
+                    success: false,
+                    registration_data: Vec::new(),
+                    instructions: String::new(),
+                    error: format!("WebAuthn enrollment failed: {e}"),
+                })),
+            },
             other => Ok(tonic::Response::new(AuthEnrollResponse {
                 success: false,
                 registration_data: Vec::new(),
@@ -1458,20 +1502,26 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let req = request.into_inner();
         info!(device_id = %req.device_id, method = %req.method, "auth challenge requested");
 
-        match req.method.as_str() {
-            "totp" => match self.totp_provider.challenge(&req.device_id).await {
-                Ok(challenge) => Ok(tonic::Response::new(AuthChallengeResponse {
-                    challenge_id: challenge.challenge_id,
-                    data: challenge.data,
-                    prompt: challenge.prompt,
-                    expires_at: challenge.expires_at,
-                })),
-                Err(e) => Err(tonic::Status::failed_precondition(format!(
-                    "TOTP challenge failed: {e}"
-                ))),
-            },
-            other => Err(tonic::Status::invalid_argument(format!(
-                "unsupported auth method: {other}"
+        let provider: &dyn tcfs_auth::AuthProvider = match req.method.as_str() {
+            "totp" => self.totp_provider.as_ref(),
+            "webauthn" => self.webauthn_provider.as_ref(),
+            other => {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "unsupported auth method: {other}"
+                )));
+            }
+        };
+
+        match provider.challenge(&req.device_id).await {
+            Ok(challenge) => Ok(tonic::Response::new(AuthChallengeResponse {
+                challenge_id: challenge.challenge_id,
+                data: challenge.data,
+                prompt: challenge.prompt,
+                expires_at: challenge.expires_at,
+            })),
+            Err(e) => Err(tonic::Status::failed_precondition(format!(
+                "{} challenge failed: {e}",
+                req.method
             ))),
         }
     }
@@ -1491,18 +1541,38 @@ impl TcfsDaemon for TcfsDaemonImpl {
             device_id: req.device_id.clone(),
         };
 
-        match self.totp_provider.verify(&response).await {
+        // Try TOTP first, then WebAuthn (method is implicit in the response data)
+        let verify_result = match self.totp_provider.verify(&response).await {
+            Ok(r @ tcfs_auth::VerifyResult::Success { .. }) => Ok(r),
+            _ => self.webauthn_provider.verify(&response).await,
+        };
+
+        match verify_result {
             Ok(tcfs_auth::VerifyResult::Success {
                 session_token: _,
                 device_id,
             }) => {
                 // Create and store session
-                let session =
-                    tcfs_auth::Session::new(&device_id, &device_id, "totp").with_expiry(24); // 24-hour sessions
+                let auth_method = if self
+                    .totp_provider
+                    .verify(&tcfs_auth::AuthResponse {
+                        challenge_id: String::new(),
+                        data: response.data.clone(),
+                        device_id: device_id.clone(),
+                    })
+                    .await
+                    .is_ok_and(|r| matches!(r, tcfs_auth::VerifyResult::Success { .. }))
+                {
+                    "totp"
+                } else {
+                    "webauthn"
+                };
+                let session = tcfs_auth::Session::new(&device_id, &device_id, auth_method)
+                    .with_expiry(self.config.auth.session_expiry_hours);
                 let token = session.token.clone();
                 self.session_store.insert(session).await;
 
-                info!(device_id = %device_id, "TOTP auth succeeded, session created");
+                info!(device_id = %device_id, method = auth_method, "auth succeeded, session created");
                 Ok(tonic::Response::new(AuthVerifyResponse {
                     success: true,
                     session_token: token,
@@ -1548,6 +1618,23 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 error: "invite has expired".into(),
                 ..Default::default()
             }));
+        }
+
+        // Validate invite signature against master key
+        if let Some(mk) = self.master_key.lock().await.as_ref() {
+            let signing_key: [u8; 32] = *blake3::hash(mk.as_bytes()).as_bytes();
+            if !invite.verify_signature(&signing_key) {
+                return Ok(tonic::Response::new(DeviceEnrollResponse {
+                    success: false,
+                    error: "invalid invite signature".into(),
+                    ..Default::default()
+                }));
+            }
+        } else {
+            // No master key loaded — cannot verify invite
+            return Err(tonic::Status::failed_precondition(
+                "daemon master key not loaded — cannot verify invite signature",
+            ));
         }
 
         // Enroll device in the local registry
