@@ -133,6 +133,9 @@ uuid = { version = "1", features = ["v4"] }
 async-trait = { version = "0.1" }
 chrono = { version = "0.4", features = ["serde"] }
 
+# OpenSSL (transitive via webauthn-rs; vendored feature for cross-compilation)
+openssl = { version = "0.10" }
+
 # Glob patterns
 glob = { version = "0.3" }
 
