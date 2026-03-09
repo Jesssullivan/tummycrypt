@@ -21,6 +21,7 @@ service TcfsDaemon {
   rpc AuthStatus(Empty) returns (AuthStatusResponse);
   // MFA enrollment and verification
   rpc AuthEnroll(AuthEnrollRequest) returns (AuthEnrollResponse);
+  rpc AuthCompleteEnroll(AuthCompleteEnrollRequest) returns (AuthCompleteEnrollResponse);
   rpc AuthChallenge(AuthChallengeRequest) returns (AuthChallengeResponse);
   rpc AuthVerify(AuthVerifyRequest) returns (AuthVerifyResponse);
   // Session management
@@ -203,6 +204,17 @@ message AuthEnrollResponse {
   bytes registration_data = 2; // JSON: { secret, qr_uri, qr_svg } for TOTP
   string instructions = 3;
   string error = 4;
+}
+
+// MFA enrollment completion (WebAuthn second step: attestation → credential)
+message AuthCompleteEnrollRequest {
+  string device_id = 1;
+  string method = 2;             // "webauthn"
+  bytes attestation_data = 3;    // RegisterPublicKeyCredential JSON
+}
+message AuthCompleteEnrollResponse {
+  bool success = 1;
+  string error = 2;
 }
 
 // MFA challenge: request a challenge for authentication

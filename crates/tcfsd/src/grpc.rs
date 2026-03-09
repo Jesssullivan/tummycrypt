@@ -1516,6 +1516,54 @@ impl TcfsDaemon for TcfsDaemonImpl {
         }
     }
 
+    async fn auth_complete_enroll(
+        &self,
+        request: tonic::Request<AuthCompleteEnrollRequest>,
+    ) -> Result<tonic::Response<AuthCompleteEnrollResponse>, tonic::Status> {
+        let req = request.into_inner();
+        info!(device_id = %req.device_id, method = %req.method, "auth complete enroll requested");
+
+        match req.method.as_str() {
+            "webauthn" => {
+                match self
+                    .webauthn_provider
+                    .complete_registration_from_bytes(&req.device_id, &req.attestation_data)
+                    .await
+                {
+                    Ok(()) => {
+                        // Persist updated credentials
+                        let cred_path = std::path::PathBuf::from(&format!(
+                            "{}/tcfsd/webauthn-credentials.json",
+                            dirs::data_dir().unwrap_or_default().display()
+                        ));
+                        if let Err(e) = self.webauthn_provider.save_to_file(&cred_path).await {
+                            tracing::warn!("failed to persist WebAuthn credentials: {e}");
+                        }
+                        Ok(tonic::Response::new(AuthCompleteEnrollResponse {
+                            success: true,
+                            error: String::new(),
+                        }))
+                    }
+                    Err(e) => Ok(tonic::Response::new(AuthCompleteEnrollResponse {
+                        success: false,
+                        error: format!("registration completion failed: {e}"),
+                    })),
+                }
+            }
+            "totp" => {
+                // TOTP doesn't have a second step — enroll + first verify completes it
+                Ok(tonic::Response::new(AuthCompleteEnrollResponse {
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            other => Ok(tonic::Response::new(AuthCompleteEnrollResponse {
+                success: false,
+                error: format!("unsupported method for complete_enroll: {other}"),
+            })),
+        }
+    }
+
     async fn auth_challenge(
         &self,
         request: tonic::Request<AuthChallengeRequest>,

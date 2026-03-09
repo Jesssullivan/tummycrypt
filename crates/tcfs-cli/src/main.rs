@@ -254,6 +254,16 @@ enum AuthAction {
         #[arg(long, default_value = "totp")]
         method: String,
     },
+    /// Complete a WebAuthn enrollment (submit attestation from authenticator)
+    #[command(name = "complete-enroll")]
+    CompleteEnroll {
+        /// Auth method (default: webauthn)
+        #[arg(long, default_value = "webauthn")]
+        method: String,
+        /// Path to JSON file containing attestation data
+        #[arg(long)]
+        attestation_file: std::path::PathBuf,
+    },
     /// Verify a TOTP code to authenticate
     Verify {
         /// 6-digit TOTP code from authenticator app
@@ -411,6 +421,10 @@ async fn main() -> Result<()> {
                 AuthAction::Lock => cmd_auth_lock(&config).await,
                 AuthAction::Status => cmd_auth_status(&config).await,
                 AuthAction::Enroll { method } => cmd_auth_enroll(&config, &method).await,
+                AuthAction::CompleteEnroll {
+                    method,
+                    attestation_file,
+                } => cmd_auth_complete_enroll(&config, &method, &attestation_file).await,
                 AuthAction::Verify { code } => cmd_auth_verify(&config, &code).await,
                 AuthAction::Revoke { token, device } => {
                     cmd_auth_revoke(&config, token.as_deref(), device.as_deref()).await
@@ -1874,6 +1888,41 @@ async fn cmd_auth_enroll(config: &tcfs_core::config::TcfsConfig, method: &str) -
 
     println!();
     println!("Verify enrollment: tcfs auth verify <6-digit-code>");
+    Ok(())
+}
+
+// ── `tcfs auth complete-enroll` ───────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_auth_complete_enroll(
+    config: &tcfs_core::config::TcfsConfig,
+    method: &str,
+    attestation_file: &std::path::Path,
+) -> Result<()> {
+    let attestation_data = std::fs::read(attestation_file).with_context(|| {
+        format!(
+            "failed to read attestation file: {}",
+            attestation_file.display()
+        )
+    })?;
+
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let resp = client
+        .auth_complete_enroll(tcfs_core::proto::AuthCompleteEnrollRequest {
+            device_id: String::new(), // daemon uses its own device_id
+            method: method.to_string(),
+            attestation_data,
+        })
+        .await
+        .context("auth_complete_enroll RPC failed")?
+        .into_inner();
+
+    if resp.success {
+        println!("Enrollment completed successfully for method '{method}'.");
+    } else {
+        anyhow::bail!("enrollment completion failed: {}", resp.error);
+    }
+
     Ok(())
 }
 

@@ -135,6 +135,17 @@ impl WebAuthnProvider {
         Ok(())
     }
 
+    /// Complete a registration ceremony from raw JSON bytes (for gRPC callers).
+    pub async fn complete_registration_from_bytes(
+        &self,
+        device_id: &str,
+        attestation_json: &[u8],
+    ) -> anyhow::Result<()> {
+        let attestation: RegisterPublicKeyCredential = serde_json::from_slice(attestation_json)
+            .map_err(|e| anyhow::anyhow!("invalid attestation JSON: {e}"))?;
+        self.complete_registration(device_id, &attestation).await
+    }
+
     /// Load credentials from a JSON file.
     pub async fn load_from_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let data = tokio::fs::read_to_string(path).await?;
