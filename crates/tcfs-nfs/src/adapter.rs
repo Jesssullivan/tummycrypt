@@ -91,9 +91,9 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
                 if path == "/" {
                     return Ok(ROOT_FILEID);
                 }
-                if let Some(parent) =
-                    path.rsplit_once('/')
-                        .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                if let Some(parent) = path
+                    .rsplit_once('/')
+                    .map(|(p, _)| if p.is_empty() { "/" } else { p })
                 {
                     return Ok(self.inodes.get_or_insert(parent));
                 }

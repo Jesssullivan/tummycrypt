@@ -707,8 +707,8 @@ impl TcfsProviderHandle {
                     session_token: _,
                     device_id,
                 }) => {
-                    let session = tcfs_auth::Session::new(&device_id, &device_id, "totp")
-                        .with_expiry(24);
+                    let session =
+                        tcfs_auth::Session::new(&device_id, &device_id, "totp").with_expiry(24);
                     let token = session.token.clone();
                     self.session_store.insert(session).await;
 
@@ -744,7 +744,10 @@ impl TcfsProviderHandle {
 
     /// Process a device enrollment invite (from QR code or deep link).
     #[cfg(feature = "uniffi")]
-    pub fn process_enrollment_invite(&self, invite_data: &str) -> Result<AuthResult, ProviderError> {
+    pub fn process_enrollment_invite(
+        &self,
+        invite_data: &str,
+    ) -> Result<AuthResult, ProviderError> {
         let invite = tcfs_auth::enrollment::EnrollmentInvite::decode(invite_data).map_err(|e| {
             ProviderError::Auth {
                 message: format!("invalid invite: {e}"),
@@ -760,8 +763,8 @@ impl TcfsProviderHandle {
         }
 
         // Create a session from the enrollment
-        let session = tcfs_auth::Session::new(&self.device_id, &self.device_id, "enrollment")
-            .with_expiry(24);
+        let session =
+            tcfs_auth::Session::new(&self.device_id, &self.device_id, "enrollment").with_expiry(24);
         let token = session.token.clone();
         self.runtime.block_on(self.session_store.insert(session));
 
