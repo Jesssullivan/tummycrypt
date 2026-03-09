@@ -33,6 +33,9 @@ pub struct TcfsDaemonImpl {
     nats_ok: std::sync::atomic::AtomicBool,
     nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
     active_mounts: Arc<TokioMutex<std::collections::HashMap<String, tokio::process::Child>>>,
+    // Auth infrastructure
+    session_store: tcfs_auth::SessionStore,
+    totp_provider: Arc<tcfs_auth::totp::TotpProvider>,
 }
 
 impl TcfsDaemonImpl {
@@ -48,6 +51,9 @@ impl TcfsDaemonImpl {
         device_name: String,
         master_key: Option<tcfs_crypto::MasterKey>,
     ) -> Self {
+        let totp_provider = Arc::new(tcfs_auth::totp::TotpProvider::new(
+            tcfs_auth::totp::TotpConfig::default(),
+        ));
         Self {
             cred_store,
             config,
@@ -62,7 +68,14 @@ impl TcfsDaemonImpl {
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
             active_mounts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
+            session_store: tcfs_auth::SessionStore::new(),
+            totp_provider,
         }
+    }
+
+    /// Load persisted TOTP credentials from disk.
+    pub async fn load_totp_credentials(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.totp_provider.load_from_file(path).await
     }
 
     /// Get a handle to the state cache for shutdown flushing.
@@ -1306,45 +1319,125 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<AuthEnrollRequest>,
     ) -> Result<tonic::Response<AuthEnrollResponse>, tonic::Status> {
+        use tcfs_auth::AuthProvider;
+
         let req = request.into_inner();
         info!(device_id = %req.device_id, method = %req.method, "auth enroll requested");
 
-        // TODO: Wire to tcfs-auth provider registry
-        Ok(tonic::Response::new(AuthEnrollResponse {
-            success: false,
-            registration_data: Vec::new(),
-            instructions: String::new(),
-            error: format!("auth enrollment not yet wired (method: {})", req.method),
-        }))
+        match req.method.as_str() {
+            "totp" => match self.totp_provider.register(&req.device_id).await {
+                Ok(reg) => {
+                    // Persist TOTP credentials to data dir
+                    let cred_path = std::path::PathBuf::from(
+                        &format!("{}/tcfsd/totp-credentials.json",
+                                 dirs::data_dir().unwrap_or_default().display()),
+                    );
+                    if let Err(e) = self.totp_provider.save_to_file(&cred_path).await {
+                        tracing::warn!("failed to persist TOTP credentials: {e}");
+                    }
+                    Ok(tonic::Response::new(AuthEnrollResponse {
+                        success: true,
+                        registration_data: reg.data,
+                        instructions: reg.instructions,
+                        error: String::new(),
+                    }))
+                }
+                Err(e) => Ok(tonic::Response::new(AuthEnrollResponse {
+                    success: false,
+                    registration_data: Vec::new(),
+                    instructions: String::new(),
+                    error: format!("TOTP enrollment failed: {e}"),
+                })),
+            },
+            other => Ok(tonic::Response::new(AuthEnrollResponse {
+                success: false,
+                registration_data: Vec::new(),
+                instructions: String::new(),
+                error: format!("unsupported auth method: {other}"),
+            })),
+        }
     }
 
     async fn auth_challenge(
         &self,
         request: tonic::Request<AuthChallengeRequest>,
     ) -> Result<tonic::Response<AuthChallengeResponse>, tonic::Status> {
+        use tcfs_auth::AuthProvider;
+
         let req = request.into_inner();
         info!(device_id = %req.device_id, method = %req.method, "auth challenge requested");
 
-        // TODO: Wire to tcfs-auth provider
-        Err(tonic::Status::unimplemented(format!(
-            "auth challenge not yet wired (method: {})",
-            req.method
-        )))
+        match req.method.as_str() {
+            "totp" => match self.totp_provider.challenge(&req.device_id).await {
+                Ok(challenge) => Ok(tonic::Response::new(AuthChallengeResponse {
+                    challenge_id: challenge.challenge_id,
+                    data: challenge.data,
+                    prompt: challenge.prompt,
+                    expires_at: challenge.expires_at,
+                })),
+                Err(e) => Err(tonic::Status::failed_precondition(format!(
+                    "TOTP challenge failed: {e}"
+                ))),
+            },
+            other => Err(tonic::Status::invalid_argument(format!(
+                "unsupported auth method: {other}"
+            ))),
+        }
     }
 
     async fn auth_verify(
         &self,
         request: tonic::Request<AuthVerifyRequest>,
     ) -> Result<tonic::Response<AuthVerifyResponse>, tonic::Status> {
+        use tcfs_auth::AuthProvider;
+
         let req = request.into_inner();
         info!(device_id = %req.device_id, "auth verify requested");
 
-        // TODO: Wire to tcfs-auth provider + session store
-        Ok(tonic::Response::new(AuthVerifyResponse {
-            success: false,
-            session_token: String::new(),
-            error: "auth verification not yet wired".into(),
-        }))
+        let response = tcfs_auth::AuthResponse {
+            challenge_id: req.challenge_id,
+            data: req.data,
+            device_id: req.device_id.clone(),
+        };
+
+        match self.totp_provider.verify(&response).await {
+            Ok(tcfs_auth::VerifyResult::Success {
+                session_token: _,
+                device_id,
+            }) => {
+                // Create and store session
+                let session = tcfs_auth::Session::new(&device_id, &device_id, "totp")
+                    .with_expiry(24); // 24-hour sessions
+                let token = session.token.clone();
+                self.session_store.insert(session).await;
+
+                info!(device_id = %device_id, "TOTP auth succeeded, session created");
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: true,
+                    session_token: token,
+                    error: String::new(),
+                }))
+            }
+            Ok(tcfs_auth::VerifyResult::Failure { reason }) => {
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: false,
+                    session_token: String::new(),
+                    error: reason,
+                }))
+            }
+            Ok(tcfs_auth::VerifyResult::Expired) => {
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: false,
+                    session_token: String::new(),
+                    error: "challenge expired".into(),
+                }))
+            }
+            Err(e) => Ok(tonic::Response::new(AuthVerifyResponse {
+                success: false,
+                session_token: String::new(),
+                error: format!("verification error: {e}"),
+            })),
+        }
     }
 
     // ── Device Enrollment ────────────────────────────────────────────────
@@ -1356,14 +1449,35 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let req = request.into_inner();
         info!(device_name = %req.device_name, platform = %req.platform, "device enroll requested");
 
-        // TODO: Wire to tcfs-auth enrollment + tcfs-secrets device registry
+        // Decode and validate the enrollment invite
+        let invite = tcfs_auth::EnrollmentInvite::decode(&req.invite_data)
+            .map_err(|e| tonic::Status::invalid_argument(format!("invalid invite: {e}")))?;
+
+        if invite.is_expired() {
+            return Ok(tonic::Response::new(DeviceEnrollResponse {
+                success: false,
+                error: "invite has expired".into(),
+                ..Default::default()
+            }));
+        }
+
+        // Enroll device in the local registry
+        let device_id = uuid::Uuid::new_v4().to_string();
+        info!(
+            device_id = %device_id,
+            device_name = %req.device_name,
+            platform = %req.platform,
+            invited_by = %invite.created_by,
+            "device enrolled via invite"
+        );
+
         Ok(tonic::Response::new(DeviceEnrollResponse {
-            success: false,
-            device_id: String::new(),
-            nats_url: String::new(),
-            storage_endpoint: String::new(),
+            success: true,
+            device_id,
+            nats_url: invite.nats_url.unwrap_or_default(),
+            storage_endpoint: invite.storage_endpoint.unwrap_or_default(),
             available_auth_methods: vec!["totp".into()],
-            error: "device enrollment not yet wired".into(),
+            error: String::new(),
         }))
     }
 }

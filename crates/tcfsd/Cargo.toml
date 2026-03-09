@@ -19,6 +19,7 @@ tcfs-sync = { path = "../tcfs-sync", features = ["nats"] }
 tcfs-vfs = { path = "../tcfs-vfs" }
 tcfs-nfs = { path = "../tcfs-nfs" }
 tcfs-fuse = { path = "../tcfs-fuse" }
+tcfs-auth = { path = "../tcfs-auth" }
 opendal = { workspace = true }
 async-nats = { workspace = true }
 futures = { workspace = true }
@@ -41,6 +42,8 @@ secrecy = { workspace = true }
 tempfile = { workspace = true }
 blake3 = { workspace = true }
 age = { workspace = true }
+uuid = { workspace = true }
+dirs = "6"
 tcfs-dbus = { path = "../tcfs-dbus", optional = true }
 
 [features]

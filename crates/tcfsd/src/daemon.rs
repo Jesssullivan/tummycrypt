@@ -512,6 +512,16 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         master_key,
     );
 
+    // Load persisted TOTP credentials (best-effort)
+    let totp_cred_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("tcfsd/totp-credentials.json");
+    if totp_cred_path.exists() {
+        if let Err(e) = impl_.load_totp_credentials(&totp_cred_path).await {
+            warn!("failed to load TOTP credentials: {e}");
+        }
+    }
+
     // Connect to NATS for fleet state sync (non-blocking, best-effort)
     let nats_url = &config.sync.nats_url;
     if nats_url != "nats://localhost:4222" || std::env::var("TCFS_NATS_URL").is_ok() {
