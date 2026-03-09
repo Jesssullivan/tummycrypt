@@ -1328,10 +1328,10 @@ impl TcfsDaemon for TcfsDaemonImpl {
             "totp" => match self.totp_provider.register(&req.device_id).await {
                 Ok(reg) => {
                     // Persist TOTP credentials to data dir
-                    let cred_path = std::path::PathBuf::from(
-                        &format!("{}/tcfsd/totp-credentials.json",
-                                 dirs::data_dir().unwrap_or_default().display()),
-                    );
+                    let cred_path = std::path::PathBuf::from(&format!(
+                        "{}/tcfsd/totp-credentials.json",
+                        dirs::data_dir().unwrap_or_default().display()
+                    ));
                     if let Err(e) = self.totp_provider.save_to_file(&cred_path).await {
                         tracing::warn!("failed to persist TOTP credentials: {e}");
                     }
@@ -1406,8 +1406,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 device_id,
             }) => {
                 // Create and store session
-                let session = tcfs_auth::Session::new(&device_id, &device_id, "totp")
-                    .with_expiry(24); // 24-hour sessions
+                let session =
+                    tcfs_auth::Session::new(&device_id, &device_id, "totp").with_expiry(24); // 24-hour sessions
                 let token = session.token.clone();
                 self.session_store.insert(session).await;
 
@@ -1425,13 +1425,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     error: reason,
                 }))
             }
-            Ok(tcfs_auth::VerifyResult::Expired) => {
-                Ok(tonic::Response::new(AuthVerifyResponse {
-                    success: false,
-                    session_token: String::new(),
-                    error: "challenge expired".into(),
-                }))
-            }
+            Ok(tcfs_auth::VerifyResult::Expired) => Ok(tonic::Response::new(AuthVerifyResponse {
+                success: false,
+                session_token: String::new(),
+                error: "challenge expired".into(),
+            })),
             Err(e) => Ok(tonic::Response::new(AuthVerifyResponse {
                 success: false,
                 session_token: String::new(),

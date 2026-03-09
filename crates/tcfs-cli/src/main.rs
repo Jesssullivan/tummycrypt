@@ -1882,7 +1882,10 @@ async fn cmd_auth_verify(config: &tcfs_core::config::TcfsConfig, code: &str) -> 
 
     if resp.success {
         println!("Authentication successful.");
-        println!("Session token: {}...", &resp.session_token[..8.min(resp.session_token.len())]);
+        println!(
+            "Session token: {}...",
+            &resp.session_token[..8.min(resp.session_token.len())]
+        );
     } else {
         anyhow::bail!("verification failed: {}", resp.error);
     }
@@ -1893,7 +1896,10 @@ async fn cmd_auth_verify(config: &tcfs_core::config::TcfsConfig, code: &str) -> 
 // ── `tcfs device invite` ─────────────────────────────────────────────────
 
 #[cfg(unix)]
-async fn cmd_device_invite(config: &tcfs_core::config::TcfsConfig, expiry_hours: u64) -> Result<()> {
+async fn cmd_device_invite(
+    config: &tcfs_core::config::TcfsConfig,
+    expiry_hours: u64,
+) -> Result<()> {
     use tcfs_auth::enrollment::EnrollmentInvite;
     use tcfs_auth::session::DevicePermissions;
 

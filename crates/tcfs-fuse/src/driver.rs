@@ -205,7 +205,9 @@ mod inner {
                 .getattr("/")
                 .await
                 .map(|a| to_fuse_attr(&a))
-                .unwrap_or_else(|_| to_fuse_attr(&VfsAttr::dir(0, 0, std::time::SystemTime::now())));
+                .unwrap_or_else(|_| {
+                    to_fuse_attr(&VfsAttr::dir(0, 0, std::time::SystemTime::now()))
+                });
 
             let mut entries: Vec<fuse3::Result<DirectoryEntryPlus>> = Vec::new();
 
@@ -266,7 +268,11 @@ mod inner {
         async fn open(&self, _req: Request, path: &OsStr, _flags: u32) -> fuse3::Result<ReplyOpen> {
             let path_str = path.to_str().ok_or(Errno::from(libc::ENOENT))?;
 
-            let (fh, _data) = self.vfs.open(path_str).await.map_err(|_| Errno::from(libc::ENOENT))?;
+            let (fh, _data) = self
+                .vfs
+                .open(path_str)
+                .await
+                .map_err(|_| Errno::from(libc::ENOENT))?;
 
             Ok(ReplyOpen { fh, flags: 0 })
         }
@@ -299,7 +305,10 @@ mod inner {
             _lock_owner: u64,
             _flush: bool,
         ) -> fuse3::Result<()> {
-            self.vfs.release(fh).await.map_err(|_| Errno::from(libc::EIO))
+            self.vfs
+                .release(fh)
+                .await
+                .map_err(|_| Errno::from(libc::EIO))
         }
 
         async fn flush(

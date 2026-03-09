@@ -52,7 +52,10 @@ impl InodeTable {
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         p2i.insert(path.to_string(), id);
-        self.id_to_path.write().unwrap().insert(id, path.to_string());
+        self.id_to_path
+            .write()
+            .unwrap()
+            .insert(id, path.to_string());
         id
     }
 

@@ -61,9 +61,7 @@ impl<V: VirtualFilesystem> NfsAdapter<V> {
 }
 
 fn system_time_to_nfstime(t: &std::time::SystemTime) -> nfsserve::nfs::nfstime3 {
-    let d = t
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     nfsserve::nfs::nfstime3 {
         seconds: d.as_secs() as u32,
         nseconds: d.subsec_nanos(),
@@ -93,9 +91,10 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
                 if path == "/" {
                     return Ok(ROOT_FILEID);
                 }
-                if let Some(parent) = path.rsplit_once('/').map(|(p, _)| {
-                    if p.is_empty() { "/" } else { p }
-                }) {
+                if let Some(parent) =
+                    path.rsplit_once('/')
+                        .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                {
                     return Ok(self.inodes.get_or_insert(parent));
                 }
             }
@@ -107,10 +106,7 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
             .child_path(dirid, name_str)
             .ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let parent_path = self
-            .inodes
-            .get_path(dirid)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let parent_path = self.inodes.get_path(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
         // Verify the entry exists via VFS
         self.vfs
@@ -124,10 +120,7 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
-        let path = self
-            .inodes
-            .get_path(id)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let path = self.inodes.get_path(id).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
         let attr = self
             .vfs
@@ -148,20 +141,13 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
         offset: u64,
         count: u32,
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
-        let path = self
-            .inodes
-            .get_path(id)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let path = self.inodes.get_path(id).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
         // Open + read pattern: open the file, read the requested range, release
-        let (fh, data) = self
-            .vfs
-            .open(&path)
-            .await
-            .map_err(|e| {
-                warn!(path = %path, error = %e, "NFS READ open failed");
-                nfsstat3::NFS3ERR_IO
-            })?;
+        let (fh, data) = self.vfs.open(&path).await.map_err(|e| {
+            warn!(path = %path, error = %e, "NFS READ open failed");
+            nfsstat3::NFS3ERR_IO
+        })?;
 
         let start = offset as usize;
         let result = if start >= data.len() {
@@ -178,12 +164,7 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
         Ok(result)
     }
 
-    async fn write(
-        &self,
-        _id: fileid3,
-        _offset: u64,
-        _data: &[u8],
-    ) -> Result<fattr3, nfsstat3> {
+    async fn write(&self, _id: fileid3, _offset: u64, _data: &[u8]) -> Result<fattr3, nfsstat3> {
         Err(nfsstat3::NFS3ERR_ROFS) // read-only
     }
 
@@ -212,11 +193,7 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
         Err(nfsstat3::NFS3ERR_ROFS)
     }
 
-    async fn remove(
-        &self,
-        _dirid: fileid3,
-        _filename: &filename3,
-    ) -> Result<(), nfsstat3> {
+    async fn remove(&self, _dirid: fileid3, _filename: &filename3) -> Result<(), nfsstat3> {
         Err(nfsstat3::NFS3ERR_ROFS)
     }
 
@@ -236,19 +213,12 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
         start_after: fileid3,
         max_entries: usize,
     ) -> Result<ReadDirResult, nfsstat3> {
-        let path = self
-            .inodes
-            .get_path(dirid)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let path = self.inodes.get_path(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let vfs_entries = self
-            .vfs
-            .readdirplus(&path)
-            .await
-            .map_err(|e| {
-                warn!(path = %path, error = %e, "NFS READDIR failed");
-                nfsstat3::NFS3ERR_IO
-            })?;
+        let vfs_entries = self.vfs.readdirplus(&path).await.map_err(|e| {
+            warn!(path = %path, error = %e, "NFS READDIR failed");
+            nfsstat3::NFS3ERR_IO
+        })?;
 
         // Assign inodes to all entries and convert
         let mut entries: Vec<DirEntry> = Vec::new();
@@ -294,10 +264,7 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
             });
         }
 
-        Ok(ReadDirResult {
-            entries,
-            end: true,
-        })
+        Ok(ReadDirResult { entries, end: true })
     }
 
     async fn symlink(

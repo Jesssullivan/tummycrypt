@@ -6,6 +6,17 @@
 	<string>app-store-connect</string>
 	<key>teamID</key>
 	<string>QP994XQKNH</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>signingCertificate</key>
+	<string>Apple Distribution</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>io.tinyland.tcfs.ios</key>
+		<string>TCFS iOS App Store</string>
+		<key>io.tinyland.tcfs.ios.fileprovider</key>
+		<string>TCFS FileProvider App Store</string>
+	</dict>
 	<key>uploadSymbols</key>
 	<true/>
 	<key>destination</key>

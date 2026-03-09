@@ -125,10 +125,8 @@ impl EnrollmentInvite {
 
     /// Decode an invite from a base64 JSON string.
     pub fn decode(encoded: &str) -> anyhow::Result<Self> {
-        let json = base64::Engine::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            encoded,
-        )?;
+        let json =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, encoded)?;
         Ok(serde_json::from_slice(&json)?)
     }
 
@@ -173,11 +171,7 @@ pub struct EnrollmentResult {
 // Need hex for nonce encoding
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -207,12 +201,8 @@ mod tests {
     #[test]
     fn test_invite_encode_decode_roundtrip() {
         let master_key = [42u8; 32];
-        let invite = EnrollmentInvite::new(
-            "admin-device",
-            &master_key,
-            24,
-            DevicePermissions::admin(),
-        );
+        let invite =
+            EnrollmentInvite::new("admin-device", &master_key, 24, DevicePermissions::admin());
 
         let encoded = invite.encode().unwrap();
         let decoded = EnrollmentInvite::decode(&encoded).unwrap();

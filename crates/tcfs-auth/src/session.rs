@@ -62,9 +62,7 @@ impl DevicePermissions {
         if self.allowed_prefixes.is_empty() {
             return true; // No restrictions
         }
-        self.allowed_prefixes
-            .iter()
-            .any(|p| prefix.starts_with(p))
+        self.allowed_prefixes.iter().any(|p| prefix.starts_with(p))
     }
 }
 
@@ -163,10 +161,7 @@ impl SessionStore {
         }
 
         self.sessions.write().await.insert(token.clone(), session);
-        self.device_sessions
-            .write()
-            .await
-            .insert(device_id, token);
+        self.device_sessions.write().await.insert(device_id, token);
     }
 
     /// Validate a session token — returns the session if valid.

@@ -298,9 +298,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn lookup(&self, parent: &str, name: &OsStr) -> Result<VfsAttr> {
-        let name_str = name
-            .to_str()
-            .context("non-UTF-8 filename")?;
+        let name_str = name.to_str().context("non-UTF-8 filename")?;
 
         let full_path = if parent == "/" {
             format!("/{}", name_str)
@@ -340,7 +338,10 @@ impl VirtualFilesystem for TcfsVfs {
             .with_context(|| format!("hydration failed: {}", path))?;
 
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-        self.handles.lock().await.insert(fh, FileHandle { data: data.clone() });
+        self.handles
+            .lock()
+            .await
+            .insert(fh, FileHandle { data: data.clone() });
 
         Ok((fh, data))
     }

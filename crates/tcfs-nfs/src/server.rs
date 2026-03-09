@@ -160,10 +160,7 @@ async fn mount_nfs(port: u16, mountpoint: &Path) -> Result<()> {
         // macOS: mount_nfs with resvport for localhost
         Command::new("mount_nfs")
             .arg("-o")
-            .arg(format!(
-                "tcp,vers=3,resvport,locallocks,port={}",
-                port
-            ))
+            .arg(format!("tcp,vers=3,resvport,locallocks,port={}", port))
             .arg(format!("127.0.0.1:/"))
             .arg(mountpoint)
             .status()
@@ -175,10 +172,7 @@ async fn mount_nfs(port: u16, mountpoint: &Path) -> Result<()> {
             .arg("-t")
             .arg("nfs")
             .arg("-o")
-            .arg(format!(
-                "tcp,vers=3,noacl,nolock,port={}",
-                port
-            ))
+            .arg(format!("tcp,vers=3,noacl,nolock,port={}", port))
             .arg(format!("127.0.0.1:/"))
             .arg(mountpoint)
             .status()
@@ -187,10 +181,7 @@ async fn mount_nfs(port: u16, mountpoint: &Path) -> Result<()> {
     };
 
     if !status.success() {
-        anyhow::bail!(
-            "mount command failed with exit code: {:?}",
-            status.code()
-        );
+        anyhow::bail!("mount command failed with exit code: {:?}", status.code());
     }
 
     Ok(())
@@ -198,15 +189,15 @@ async fn mount_nfs(port: u16, mountpoint: &Path) -> Result<()> {
 
 /// Check if a path is an active NFS mount.
 pub async fn is_mounted(mountpoint: &Path) -> bool {
-    let output = Command::new("mount")
-        .output()
-        .await;
+    let output = Command::new("mount").output().await;
 
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let mp_str = mountpoint.to_string_lossy();
-            stdout.lines().any(|line| line.contains(&*mp_str) && line.contains("nfs"))
+            stdout
+                .lines()
+                .any(|line| line.contains(&*mp_str) && line.contains("nfs"))
         }
         Err(_) => false,
     }

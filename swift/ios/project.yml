@@ -9,7 +9,8 @@ options:
 settings:
   base:
     DEVELOPMENT_TEAM: QP994XQKNH
-    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Apple Distribution: John Sullivan (QP994XQKNH)"
     SWIFT_VERSION: "5.10"
 
 targets:
@@ -19,15 +20,34 @@ targets:
     sources:
       - path: HostApp
       - path: Generated
+      - path: Resources/Assets.xcassets
     info:
       path: Resources/HostApp-Info.plist
+      properties:
+        CFBundleDisplayName: TCFS
+        CFBundleIconName: AppIcon
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
     entitlements:
       path: Resources/HostApp.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.io.tinyland.tcfs
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.tinyland.tcfs.ios
         INFOPLIST_FILE: Resources/HostApp-Info.plist
         CODE_SIGN_ENTITLEMENTS: Resources/HostApp.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: "TCFS iOS App Store"
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/Generated/tcfs_file_providerFFI.h"
         LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../../target/aarch64-apple-ios/release $(SRCROOT)/../../target/aarch64-apple-ios-sim/debug"
         OTHER_LDFLAGS: "-ltcfs_file_provider -lc++"
@@ -43,6 +63,7 @@ targets:
     info:
       path: Resources/Extension-Info.plist
       properties:
+        CFBundleDisplayName: TCFS FileProvider
         NSExtension:
           NSExtensionFileProviderDocumentGroup: group.io.tinyland.tcfs
           NSExtensionFileProviderSupportsDatalessFolders: true
@@ -50,11 +71,15 @@ targets:
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).TCFSFileProviderExtension"
     entitlements:
       path: Resources/Extension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.io.tinyland.tcfs
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.tinyland.tcfs.ios.fileprovider
         INFOPLIST_FILE: Resources/Extension-Info.plist
         CODE_SIGN_ENTITLEMENTS: Resources/Extension.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: "TCFS FileProvider App Store"
         LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../../target/aarch64-apple-ios/release $(SRCROOT)/../../target/aarch64-apple-ios-sim/debug"
         OTHER_LDFLAGS: "-ltcfs_file_provider -lc++"
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/Generated/tcfs_file_providerFFI.h"

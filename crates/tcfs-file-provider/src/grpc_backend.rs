@@ -303,12 +303,12 @@ pub unsafe extern "C" fn tcfs_provider_enumerate_changes(
                             is_directory: watch_event.is_directory,
                         });
                     }
-                    Ok(Ok(None)) => break,       // Stream ended
+                    Ok(Ok(None)) => break, // Stream ended
                     Ok(Err(e)) => {
                         tracing::warn!("enumerate_changes stream error: {e}");
                         break;
                     }
-                    Err(_) => break,              // Timeout — initial burst done
+                    Err(_) => break, // Timeout — initial burst done
                 }
             }
 

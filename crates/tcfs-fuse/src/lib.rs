@@ -23,11 +23,9 @@ pub use tcfs_vfs::stub;
 
 // Direct type re-exports
 pub use tcfs_vfs::{
-    cache_key_for_path, fetch_cached, fetch_content, is_stub_path,
-    real_to_stub_name, stub_to_real_name,
-    CacheStats, DiskCache, IndexEntry, NegativeCache, StubMeta,
-    TcfsVfs, VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs,
-    VirtualFilesystem,
+    cache_key_for_path, fetch_cached, fetch_content, is_stub_path, real_to_stub_name,
+    stub_to_real_name, CacheStats, DiskCache, IndexEntry, NegativeCache, StubMeta, TcfsVfs,
+    VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs, VirtualFilesystem,
 };
 
 // Re-export the mount API when the fuse feature is enabled

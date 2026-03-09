@@ -155,7 +155,10 @@ impl AuthProvider for TotpProvider {
         Ok(AuthChallenge {
             challenge_id: uuid::Uuid::new_v4().to_string(),
             data: Vec::new(),
-            prompt: format!("Enter {}-digit code from your authenticator app", self.config.digits),
+            prompt: format!(
+                "Enter {}-digit code from your authenticator app",
+                self.config.digits
+            ),
             expires_at: {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -283,7 +286,10 @@ mod tests {
 
         let reg_json: serde_json::Value = serde_json::from_slice(&reg.data).unwrap();
         assert!(reg_json["secret"].is_string());
-        assert!(reg_json["qr_uri"].as_str().unwrap().starts_with("otpauth://totp/"));
+        assert!(reg_json["qr_uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/"));
         assert_eq!(reg_json["digits"], 6);
         assert_eq!(reg_json["period"], 30);
 

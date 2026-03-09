@@ -215,12 +215,7 @@ impl AuthProvider for WebAuthnProvider {
         {
             Ok(result) => {
                 // Update credential counter to prevent replay
-                if let Some(cred) = self
-                    .credentials
-                    .write()
-                    .await
-                    .get_mut(&pending.device_id)
-                {
+                if let Some(cred) = self.credentials.write().await.get_mut(&pending.device_id) {
                     cred.passkey.update_credential(&result);
                 }
 
@@ -246,9 +241,7 @@ impl AuthProvider for WebAuthnProvider {
         let (ccr, reg_state) = self
             .webauthn
             .start_passkey_registration(
-                user_id,
-                &user_name,
-                &user_name,
+                user_id, &user_name, &user_name,
                 // Exclude existing credentials for this device
                 None,
             )
