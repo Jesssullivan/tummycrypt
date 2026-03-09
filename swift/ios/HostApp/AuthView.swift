@@ -80,21 +80,29 @@ class AuthViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // In production, this calls the daemon's AuthEnroll RPC.
-        // For now, store enrollment state locally for the UI flow.
-        // The actual TOTP secret is managed by the daemon.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // TODO: Call daemon AuthEnroll via UniFFI bridge
-            // let result = try provider.authEnroll(method: "totp")
-            // self.totpSecret = result.secret
-            // self.totpURI = result.qrUri
+            guard let self = self else { return }
 
-            DispatchQueue.main.async {
-                self?.isLoading = false
-                self?.authState = .totpPrompt
-                // Placeholder until UniFFI bridge is wired
-                self?.totpURI = "otpauth://totp/TCFS?secret=PLACEHOLDER&issuer=TummyCrypt"
-                self?.totpSecret = "PLACEHOLDER"
+            do {
+                guard let provider = self.loadProvider() else {
+                    throw NSError(domain: "tcfs", code: -1, userInfo: [NSLocalizedDescriptionKey: "Provider not configured"])
+                }
+                let enrollment = try provider.authEnrollTotp()
+
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.authState = .totpPrompt
+                    self.totpSecret = enrollment.secret
+                    self.totpURI = enrollment.qrUri
+                    authLogger.info("TOTP enrollment started")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.errorMessage = error.localizedDescription
+                    self.authState = .locked
+                    authLogger.error("TOTP enrollment failed: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -110,16 +118,32 @@ class AuthViewModel: ObservableObject {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            // TODO: Call daemon AuthVerify via UniFFI bridge
-            // let result = try provider.authVerify(code: self.verifyCode)
 
-            DispatchQueue.main.async {
-                self.isLoading = false
-                // For now, mark as enrolled after first verify
-                self.saveKeychain("totp_enrolled", value: "true")
-                self.totpEnrolled = true
-                self.authState = .authenticated
-                authLogger.info("TOTP verification completed")
+            do {
+                guard let provider = self.loadProvider() else {
+                    throw NSError(domain: "tcfs", code: -1, userInfo: [NSLocalizedDescriptionKey: "Provider not configured"])
+                }
+                let result = try provider.authVerifyTotp(code: self.verifyCode)
+
+                DispatchQueue.main.async {
+                    if result.success {
+                        self.saveKeychain("totp_enrolled", value: "true")
+                        self.saveKeychain("session_token", value: result.sessionToken)
+                        self.totpEnrolled = true
+                        self.authState = .authenticated
+                        authLogger.info("TOTP verification succeeded")
+                    } else {
+                        self.errorMessage = result.errorMessage
+                        authLogger.warning("TOTP verification failed: \(result.errorMessage)")
+                    }
+                    self.isLoading = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.errorMessage = error.localizedDescription
+                    authLogger.error("TOTP verify error: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -131,12 +155,30 @@ class AuthViewModel: ObservableObject {
         errorMessage = nil
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // TODO: Call daemon DeviceEnroll via UniFFI bridge
-            // Decode base64 invite, send to daemon
+            guard let self = self else { return }
 
-            DispatchQueue.main.async {
-                self?.isLoading = false
-                authLogger.info("Invite processed: \(data.prefix(20))...")
+            do {
+                guard let provider = self.loadProvider() else {
+                    throw NSError(domain: "tcfs", code: -1, userInfo: [NSLocalizedDescriptionKey: "Provider not configured"])
+                }
+                let result = try provider.processEnrollmentInvite(inviteData: data)
+
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    if result.success {
+                        self.saveKeychain("session_token", value: result.sessionToken)
+                        self.authState = .authenticated
+                        authLogger.info("Device enrolled via invite")
+                    } else {
+                        self.errorMessage = result.errorMessage
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.errorMessage = error.localizedDescription
+                    authLogger.error("Invite processing failed: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -158,6 +200,50 @@ class AuthViewModel: ObservableObject {
         authState = .locked
         errorMessage = nil
         authLogger.info("Session locked")
+    }
+
+    // MARK: - Provider
+
+    private func loadProvider() -> TcfsProviderHandle? {
+        func readConfig(_ account: String) -> String? {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "io.tinyland.tcfs.config",
+                kSecAttrAccount as String: account,
+                kSecAttrAccessGroup as String: keychainGroup,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ]
+            var item: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+                  let data = item as? Data,
+                  let value = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            return value
+        }
+
+        guard let endpoint = readConfig("s3_endpoint"),
+              let bucket = readConfig("s3_bucket"),
+              let accessKey = readConfig("access_key"),
+              let secret = readConfig("s3_secret"),
+              let prefix = readConfig("remote_prefix"),
+              let deviceId = readConfig("device_id") else {
+            return nil
+        }
+
+        let config = ProviderConfig(
+            s3Endpoint: endpoint,
+            s3Bucket: bucket,
+            accessKey: accessKey,
+            s3Secret: secret,
+            remotePrefix: prefix,
+            deviceId: deviceId,
+            encryptionPassphrase: readConfig("encryption_passphrase") ?? "",
+            encryptionSalt: readConfig("encryption_salt") ?? ""
+        )
+
+        return try? TcfsProviderHandle(config: config)
     }
 
     // MARK: - Keychain Helpers

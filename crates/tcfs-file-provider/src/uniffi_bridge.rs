@@ -59,6 +59,25 @@ pub trait ProgressCallback: Send + Sync {
     fn on_progress(&self, completed: u64, total: u64);
 }
 
+/// Result of a TOTP enrollment.
+#[derive(uniffi::Record)]
+pub struct TotpEnrollment {
+    /// Base32-encoded shared secret.
+    pub secret: String,
+    /// otpauth:// URI for authenticator apps.
+    pub qr_uri: String,
+    /// Human-readable instructions.
+    pub instructions: String,
+}
+
+/// Result of an authentication attempt.
+#[derive(uniffi::Record)]
+pub struct AuthResult {
+    pub success: bool,
+    pub session_token: String,
+    pub error_message: String,
+}
+
 /// Errors returned by provider operations.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ProviderError {
@@ -74,6 +93,8 @@ pub enum ProviderError {
     InvalidArgument { message: String },
     #[error("Conflict detected: {path}")]
     Conflict { path: String },
+    #[error("Authentication error: {message}")]
+    Auth { message: String },
 }
 
 impl From<anyhow::Error> for ProviderError {
@@ -103,6 +124,10 @@ pub struct TcfsProviderHandle {
     remote_prefix: String,
     device_id: String,
     master_key: Option<tcfs_crypto::MasterKey>,
+    #[cfg(feature = "uniffi")]
+    totp_provider: Arc<tcfs_auth::totp::TotpProvider>,
+    #[cfg(feature = "uniffi")]
+    session_store: tcfs_auth::SessionStore,
 }
 
 #[uniffi::export]
@@ -158,6 +183,12 @@ impl TcfsProviderHandle {
             remote_prefix: config.remote_prefix,
             device_id: config.device_id,
             master_key,
+            #[cfg(feature = "uniffi")]
+            totp_provider: Arc::new(tcfs_auth::totp::TotpProvider::new(
+                tcfs_auth::totp::TotpConfig::default(),
+            )),
+            #[cfg(feature = "uniffi")]
+            session_store: tcfs_auth::SessionStore::new(),
         }))
     }
 
@@ -610,6 +641,135 @@ impl TcfsProviderHandle {
     /// Returns the conflicting device ID if diverged, or None if clean.
     pub fn check_conflict(&self, item_id: &str) -> Result<Option<String>, ProviderError> {
         self.runtime.block_on(self.check_conflict_async(item_id))
+    }
+
+    /// Enroll a TOTP authenticator for this device.
+    ///
+    /// Returns the shared secret and otpauth URI for the user to add
+    /// to their authenticator app.
+    #[cfg(feature = "uniffi")]
+    pub fn auth_enroll_totp(&self) -> Result<TotpEnrollment, ProviderError> {
+        use tcfs_auth::AuthProvider;
+
+        self.runtime.block_on(async {
+            let reg = self
+                .totp_provider
+                .register(&self.device_id)
+                .await
+                .map_err(|e| ProviderError::Auth {
+                    message: e.to_string(),
+                })?;
+
+            // Parse the registration data JSON
+            let json: serde_json::Value =
+                serde_json::from_slice(&reg.data).map_err(|e| ProviderError::Auth {
+                    message: format!("invalid registration data: {e}"),
+                })?;
+
+            Ok(TotpEnrollment {
+                secret: json
+                    .get("secret")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                qr_uri: json
+                    .get("qr_uri")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                instructions: reg.instructions,
+            })
+        })
+    }
+
+    /// Verify a TOTP code and create a session.
+    #[cfg(feature = "uniffi")]
+    pub fn auth_verify_totp(&self, code: &str) -> Result<AuthResult, ProviderError> {
+        use tcfs_auth::AuthProvider;
+
+        self.runtime.block_on(async {
+            let challenge = self
+                .totp_provider
+                .challenge(&self.device_id)
+                .await
+                .map_err(|e| ProviderError::Auth {
+                    message: e.to_string(),
+                })?;
+
+            let response = tcfs_auth::AuthResponse {
+                challenge_id: challenge.challenge_id,
+                data: code.as_bytes().to_vec(),
+                device_id: self.device_id.clone(),
+            };
+
+            match self.totp_provider.verify(&response).await {
+                Ok(tcfs_auth::VerifyResult::Success {
+                    session_token: _,
+                    device_id,
+                }) => {
+                    let session = tcfs_auth::Session::new(&device_id, &device_id, "totp")
+                        .with_expiry(24);
+                    let token = session.token.clone();
+                    self.session_store.insert(session).await;
+
+                    Ok(AuthResult {
+                        success: true,
+                        session_token: token,
+                        error_message: String::new(),
+                    })
+                }
+                Ok(tcfs_auth::VerifyResult::Failure { reason }) => Ok(AuthResult {
+                    success: false,
+                    session_token: String::new(),
+                    error_message: reason,
+                }),
+                Ok(tcfs_auth::VerifyResult::Expired) => Ok(AuthResult {
+                    success: false,
+                    session_token: String::new(),
+                    error_message: "challenge expired".into(),
+                }),
+                Err(e) => Err(ProviderError::Auth {
+                    message: e.to_string(),
+                }),
+            }
+        })
+    }
+
+    /// Check if there's an active authenticated session.
+    #[cfg(feature = "uniffi")]
+    pub fn auth_is_authenticated(&self) -> bool {
+        self.runtime
+            .block_on(self.session_store.has_active_session())
+    }
+
+    /// Process a device enrollment invite (from QR code or deep link).
+    #[cfg(feature = "uniffi")]
+    pub fn process_enrollment_invite(&self, invite_data: &str) -> Result<AuthResult, ProviderError> {
+        let invite = tcfs_auth::enrollment::EnrollmentInvite::decode(invite_data).map_err(|e| {
+            ProviderError::Auth {
+                message: format!("invalid invite: {e}"),
+            }
+        })?;
+
+        if invite.is_expired() {
+            return Ok(AuthResult {
+                success: false,
+                session_token: String::new(),
+                error_message: "invite has expired".into(),
+            });
+        }
+
+        // Create a session from the enrollment
+        let session = tcfs_auth::Session::new(&self.device_id, &self.device_id, "enrollment")
+            .with_expiry(24);
+        let token = session.token.clone();
+        self.runtime.block_on(self.session_store.insert(session));
+
+        Ok(AuthResult {
+            success: true,
+            session_token: token,
+            error_message: String::new(),
+        })
     }
 
     /// Get sync status (connected check + file count from index).
