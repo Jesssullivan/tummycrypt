@@ -22,6 +22,8 @@ pub struct TcfsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
+    /// Enable auth subsystem (default: false)
+    pub enabled: bool,
     /// Require a valid session token for protected RPCs (push, pull, mount, unsync).
     /// Default: false (alpha bypass — all local requests are trusted).
     pub require_session: bool,
@@ -29,20 +31,81 @@ pub struct AuthConfig {
     pub session_expiry_hours: u64,
     /// Enabled auth methods (default: ["master_key"])
     pub methods: Vec<String>,
-    /// WebAuthn relying party ID (default: "tcfs.local")
-    pub webauthn_rp_id: String,
-    /// WebAuthn relying party origin (default: "https://tcfs.local")
-    pub webauthn_rp_origin: String,
+    /// TOTP-specific configuration
+    pub totp: AuthTotpConfig,
+    /// WebAuthn-specific configuration
+    pub webauthn: AuthWebAuthnConfig,
+    /// Enrollment configuration
+    pub enrollment: AuthEnrollmentConfig,
+}
+
+/// TOTP (RFC 6238) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthTotpConfig {
+    /// Issuer name shown in authenticator apps (default: "TummyCrypt")
+    pub issuer: String,
+    /// Number of digits in TOTP code (default: 6)
+    pub digits: u32,
+}
+
+impl Default for AuthTotpConfig {
+    fn default() -> Self {
+        Self {
+            issuer: "TummyCrypt".into(),
+            digits: 6,
+        }
+    }
+}
+
+/// WebAuthn / FIDO2 configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthWebAuthnConfig {
+    /// Relying party ID (domain)
+    pub relying_party_id: String,
+    /// Relying party display name
+    pub relying_party_name: String,
+}
+
+impl Default for AuthWebAuthnConfig {
+    fn default() -> Self {
+        Self {
+            relying_party_id: "tcfs.local".into(),
+            relying_party_name: "TummyCrypt".into(),
+        }
+    }
+}
+
+/// Device enrollment configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthEnrollmentConfig {
+    /// Enable QR code generation for enrollment invites
+    pub qr_code: bool,
+    /// Enable NATS-based device auto-discovery
+    pub auto_discovery: bool,
+}
+
+impl Default for AuthEnrollmentConfig {
+    fn default() -> Self {
+        Self {
+            qr_code: true,
+            auto_discovery: false,
+        }
+    }
 }
 
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             require_session: false,
             session_expiry_hours: 24,
             methods: vec!["master_key".into()],
-            webauthn_rp_id: "tcfs.local".into(),
-            webauthn_rp_origin: "https://tcfs.local".into(),
+            totp: AuthTotpConfig::default(),
+            webauthn: AuthWebAuthnConfig::default(),
+            enrollment: AuthEnrollmentConfig::default(),
         }
     }
 }

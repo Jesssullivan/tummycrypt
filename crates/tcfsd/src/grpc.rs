@@ -53,9 +53,12 @@ impl TcfsDaemonImpl {
         device_name: String,
         master_key: Option<tcfs_crypto::MasterKey>,
     ) -> Self {
-        let totp_provider = Arc::new(tcfs_auth::totp::TotpProvider::new(
-            tcfs_auth::totp::TotpConfig::default(),
-        ));
+        let totp_config = tcfs_auth::totp::TotpConfig {
+            issuer: config.auth.totp.issuer.clone(),
+            digits: config.auth.totp.digits as usize,
+            ..tcfs_auth::totp::TotpConfig::default()
+        };
+        let totp_provider = Arc::new(tcfs_auth::totp::TotpProvider::new(totp_config));
         Self {
             cred_store,
             config,
