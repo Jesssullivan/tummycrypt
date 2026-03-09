@@ -53,6 +53,28 @@ pub struct TcfsFileItem {
     pub content_hash: *mut c_char,
 }
 
+/// A change event returned by `tcfs_provider_enumerate_changes`.
+///
+/// Represents a single file change since a given timestamp anchor.
+/// The Swift layer uses this for incremental `enumerateChanges`.
+#[repr(C)]
+pub struct TcfsChangeEvent {
+    /// File path (relative to mount root, UTF-8 C string).
+    pub path: *mut c_char,
+    /// Display filename (UTF-8 C string).
+    pub filename: *mut c_char,
+    /// Event type: "created", "modified", "deleted", "renamed" (UTF-8 C string).
+    pub event_type: *mut c_char,
+    /// Timestamp of the change (Unix epoch seconds).
+    pub timestamp: i64,
+    /// File size in bytes (0 for deleted items).
+    pub file_size: u64,
+    /// Content hash (BLAKE3 hex, UTF-8 C string, empty for deleted items).
+    pub content_hash: *mut c_char,
+    /// Whether this item is a directory.
+    pub is_directory: bool,
+}
+
 // ============================================================================
 // Direct backend (default): S3 via OpenDAL
 // ============================================================================
@@ -89,6 +111,30 @@ pub use uniffi_bridge::*;
 // ============================================================================
 // Shared FFI helpers
 // ============================================================================
+
+/// Free an array of `TcfsChangeEvent` returned by `tcfs_provider_enumerate_changes`.
+///
+/// # Safety
+///
+/// - `events` must be a pointer returned by `tcfs_provider_enumerate_changes`, or null.
+/// - `count` must match the count returned by the same call.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_change_events_free(events: *mut TcfsChangeEvent, count: usize) {
+    if events.is_null() || count == 0 {
+        return;
+    }
+
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(events, count);
+        for event in slice.iter_mut() {
+            free_c_string(event.path);
+            free_c_string(event.filename);
+            free_c_string(event.event_type);
+            free_c_string(event.content_hash);
+        }
+        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(events, count));
+    }
+}
 
 /// Free an array of `TcfsFileItem` returned by `tcfs_provider_enumerate`.
 ///

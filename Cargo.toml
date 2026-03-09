@@ -7,6 +7,8 @@ members = [
     "crates/tcfs-chunks",
     "crates/tcfs-crypto",
     "crates/tcfs-sync",
+    "crates/tcfs-vfs",
+    "crates/tcfs-nfs",
     "crates/tcfs-fuse",
     "crates/tcfs-cloudfilter",
     "crates/tcfs-sops",
@@ -16,6 +18,7 @@ members = [
     "crates/tcfs-mcp",
     "crates/tcfs-file-provider",
     "crates/tcfs-dbus",
+    "crates/tcfs-auth",
 ]
 
 [workspace.package]
@@ -125,6 +128,10 @@ rayon = { version = "1" }
 
 # UUID
 uuid = { version = "1", features = ["v4"] }
+
+# Auth
+async-trait = { version = "0.1" }
+chrono = { version = "0.4", features = ["serde"] }
 
 # Glob patterns
 glob = { version = "0.3" }

@@ -108,9 +108,8 @@ enum Commands {
         state: Option<PathBuf>,
     },
 
-    // ── Phase 3: FUSE mount + stub management ────────────────────────────────
-    /// Mount a remote as a local directory (requires FUSE)
-    #[cfg(feature = "fuse")]
+    // ── Phase 3: mount + stub management ──────────────────────────────────────
+    /// Mount a remote as a local directory
     Mount {
         /// Remote spec (e.g. seaweedfs://host/bucket[/prefix])
         remote: String,
@@ -119,10 +118,15 @@ enum Commands {
         /// Mount read-only
         #[arg(long)]
         read_only: bool,
+        /// Use NFS loopback instead of FUSE (no kernel modules required)
+        #[arg(long)]
+        nfs: bool,
+        /// NFS server port (0 = auto-assign, default 0)
+        #[arg(long, default_value = "0")]
+        nfs_port: u16,
     },
 
-    /// Unmount a tcfs mountpoint (requires FUSE)
-    #[cfg(feature = "fuse")]
+    /// Unmount a tcfs mountpoint
     Unmount {
         /// Local mountpoint to unmount
         mountpoint: PathBuf,
@@ -224,6 +228,12 @@ enum DeviceAction {
     },
     /// Show this device's identity and status
     Status,
+    /// Generate a device enrollment invite (QR code or deep link)
+    Invite {
+        /// Expiry in hours (default: 24)
+        #[arg(long, default_value = "24")]
+        expiry_hours: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -238,6 +248,36 @@ enum AuthAction {
     Lock,
     /// Show encryption session status
     Status,
+    /// Enroll a TOTP authenticator for this device
+    Enroll {
+        /// Auth method to enroll (default: totp)
+        #[arg(long, default_value = "totp")]
+        method: String,
+    },
+    /// Complete a WebAuthn enrollment (submit attestation from authenticator)
+    #[command(name = "complete-enroll")]
+    CompleteEnroll {
+        /// Auth method (default: webauthn)
+        #[arg(long, default_value = "webauthn")]
+        method: String,
+        /// Path to JSON file containing attestation data
+        #[arg(long)]
+        attestation_file: std::path::PathBuf,
+    },
+    /// Verify a TOTP code to authenticate
+    Verify {
+        /// 6-digit TOTP code from authenticator app
+        code: String,
+    },
+    /// Revoke a session (by token or device)
+    Revoke {
+        /// Session token to revoke
+        #[arg(long)]
+        token: Option<String>,
+        /// Device ID to revoke all sessions for
+        #[arg(long)]
+        device: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -351,13 +391,13 @@ async fn main() -> Result<()> {
             CacheAction::Stats => cmd_cache_stats(&config).await,
             CacheAction::Clear => cmd_cache_clear(&config).await,
         },
-        #[cfg(feature = "fuse")]
         Commands::Mount {
             remote,
             mountpoint,
             read_only,
-        } => cmd_mount(&config, &remote, &mountpoint, read_only).await,
-        #[cfg(feature = "fuse")]
+            nfs,
+            nfs_port,
+        } => cmd_mount(&config, &remote, &mountpoint, read_only, nfs, nfs_port).await,
         Commands::Unmount { mountpoint } => cmd_unmount(&mountpoint),
         Commands::Unsync { path, force } => cmd_unsync(&config, &path, force).await,
         Commands::Init {
@@ -370,6 +410,7 @@ async fn main() -> Result<()> {
             DeviceAction::List => cmd_device_list(),
             DeviceAction::Revoke { name } => cmd_device_revoke(&name),
             DeviceAction::Status => cmd_device_status(),
+            DeviceAction::Invite { expiry_hours } => cmd_device_invite(&config, expiry_hours).await,
         },
         Commands::Auth { action } => {
             #[cfg(unix)]
@@ -379,6 +420,15 @@ async fn main() -> Result<()> {
                 }
                 AuthAction::Lock => cmd_auth_lock(&config).await,
                 AuthAction::Status => cmd_auth_status(&config).await,
+                AuthAction::Enroll { method } => cmd_auth_enroll(&config, &method).await,
+                AuthAction::CompleteEnroll {
+                    method,
+                    attestation_file,
+                } => cmd_auth_complete_enroll(&config, &method, &attestation_file).await,
+                AuthAction::Verify { code } => cmd_auth_verify(&config, &code).await,
+                AuthAction::Revoke { token, device } => {
+                    cmd_auth_revoke(&config, token.as_deref(), device.as_deref()).await
+                }
             }
             #[cfg(not(unix))]
             {
@@ -1186,48 +1236,54 @@ async fn cmd_cache_clear(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     Ok(())
 }
 
-// ── `tcfs mount` (requires fuse feature) ────────────────────────────────────
+// ── `tcfs mount` ─────────────────────────────────────────────────────────────
 
-#[cfg(feature = "fuse")]
 async fn cmd_mount(
     config: &tcfs_core::config::TcfsConfig,
     remote: &str,
     mountpoint: &std::path::Path,
     read_only: bool,
+    use_nfs: bool,
+    nfs_port: u16,
 ) -> Result<()> {
     // Try daemon-managed mount first
-    let socket_path = expand_tilde(&config.daemon.socket);
-    if let Ok(mut client) = connect_daemon(&socket_path).await {
-        let resp = client
-            .mount(tonic::Request::new(tcfs_core::proto::MountRequest {
-                remote: remote.to_string(),
-                mountpoint: mountpoint.to_string_lossy().to_string(),
-                read_only,
-                options: vec![],
-            }))
-            .await;
+    {
+        let socket_path = expand_tilde(&config.daemon.socket);
+        let mut options = vec![];
+        if use_nfs {
+            options.push("nfs".to_string());
+        }
+        if let Ok(mut client) = connect_daemon(&socket_path).await {
+            let resp = client
+                .mount(tonic::Request::new(tcfs_core::proto::MountRequest {
+                    remote: remote.to_string(),
+                    mountpoint: mountpoint.to_string_lossy().to_string(),
+                    read_only,
+                    options,
+                }))
+                .await;
 
-        match resp {
-            Ok(r) if r.get_ref().success => {
-                println!("Mounted via daemon: {} → {}", remote, mountpoint.display());
-                return Ok(());
-            }
-            Ok(r) => {
-                eprintln!(
-                    "Daemon mount failed: {}, falling back to direct mount",
-                    r.into_inner().error
-                );
-            }
-            Err(e) => {
-                eprintln!("Daemon unavailable: {e}, falling back to direct mount");
+            match resp {
+                Ok(r) if r.get_ref().success => {
+                    println!("Mounted via daemon: {} → {}", remote, mountpoint.display());
+                    return Ok(());
+                }
+                Ok(r) => {
+                    eprintln!(
+                        "Daemon mount failed: {}, falling back to direct mount",
+                        r.into_inner().error
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Daemon unavailable: {e}, falling back to direct mount");
+                }
             }
         }
     }
 
-    // Fallback: direct FUSE mount
+    // Direct mount: build operator from remote spec + credentials
     let (endpoint, bucket, prefix) = tcfs_storage::parse_remote_spec(remote)?;
 
-    // Credentials
     let access_key = std::env::var("AWS_ACCESS_KEY_ID")
         .or_else(|_| std::env::var("TCFS_ACCESS_KEY_ID"))
         .context("S3 credentials not set — export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")?;
@@ -1244,47 +1300,69 @@ async fn cmd_mount(
     };
     let op = tcfs_storage::build_operator(&storage_cfg).context("building storage operator")?;
 
-    // Ensure mountpoint exists
-    tokio::fs::create_dir_all(mountpoint)
-        .await
-        .with_context(|| format!("creating mountpoint: {}", mountpoint.display()))?;
-
     let cache_dir = expand_tilde(&config.fuse.cache_dir);
     let neg_ttl = config.fuse.negative_cache_ttl_secs;
     let cache_max = config.fuse.cache_max_mb * 1024 * 1024;
 
+    let backend = if use_nfs { "NFS loopback" } else { "FUSE" };
     println!(
-        "Mounting {}:{} (prefix: {}) → {}",
+        "Mounting {}:{} (prefix: {}) → {} [{}]",
         endpoint,
         bucket,
         if prefix.is_empty() { "(root)" } else { &prefix },
-        mountpoint.display()
+        mountpoint.display(),
+        backend,
     );
     println!(
         "Press Ctrl-C or run `tcfs unmount {}` to stop.",
         mountpoint.display()
     );
 
-    tcfs_fuse::mount(tcfs_fuse::MountConfig {
-        op,
-        prefix,
-        mountpoint: mountpoint.to_path_buf(),
-        cache_dir,
-        cache_max_bytes: cache_max,
-        negative_ttl_secs: neg_ttl,
-        read_only,
-        allow_other: false,
-    })
-    .await
-    .context("FUSE mount failed")
+    if use_nfs {
+        // NFS loopback mount — no kernel modules required
+        tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
+            op,
+            prefix,
+            mountpoint: mountpoint.to_path_buf(),
+            cache_dir,
+            cache_max_bytes: cache_max,
+            negative_ttl_secs: neg_ttl,
+            port: nfs_port,
+        })
+        .await
+        .context("NFS mount failed")
+    } else {
+        // FUSE mount (legacy)
+        #[cfg(feature = "fuse")]
+        {
+            tcfs_fuse::mount(tcfs_fuse::MountConfig {
+                op,
+                prefix,
+                mountpoint: mountpoint.to_path_buf(),
+                cache_dir,
+                cache_max_bytes: cache_max,
+                negative_ttl_secs: neg_ttl,
+                read_only,
+                allow_other: false,
+            })
+            .await
+            .context("FUSE mount failed")
+        }
+        #[cfg(not(feature = "fuse"))]
+        {
+            anyhow::bail!(
+                "FUSE support not compiled. Use `--nfs` for FUSE-free NFS mount, \
+                 or rebuild with `--features fuse`."
+            );
+        }
+    }
 }
 
-// ── `tcfs unmount` (requires fuse feature) ──────────────────────────────────
+// ── `tcfs unmount` ───────────────────────────────────────────────────────────
 
-#[cfg(feature = "fuse")]
 fn cmd_unmount(mountpoint: &std::path::Path) -> Result<()> {
-    // macOS: use umount directly (works with FUSE-T and macFUSE)
-    // Linux: use fusermount3 first, fall back to umount
+    // macOS: use umount directly (works with FUSE, FUSE-T, and NFS mounts)
+    // Linux: try fusermount3 first (FUSE), fall back to umount (NFS + FUSE)
     #[cfg(target_os = "macos")]
     {
         let status = std::process::Command::new("umount")
@@ -1740,6 +1818,235 @@ async fn cmd_auth_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     } else {
         println!("Encryption: DISABLED (crypto.enabled = false in config)");
     }
+
+    // Show auth method and available methods
+    if !resp.auth_method.is_empty() {
+        println!("Auth method: {}", resp.auth_method);
+    }
+    if !resp.available_methods.is_empty() {
+        println!("Available methods: {}", resp.available_methods.join(", "));
+    }
+    if !resp.session_device_id.is_empty() {
+        println!("Device: {}", resp.session_device_id);
+    }
+
+    // Show session requirement from config
+    if config.auth.require_session {
+        println!("Session required: YES (protected RPCs need 'tcfs auth verify')");
+    } else {
+        println!("Session required: no (alpha bypass mode)");
+    }
+
+    Ok(())
+}
+
+// ── `tcfs auth enroll` ────────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_auth_enroll(config: &tcfs_core::config::TcfsConfig, method: &str) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+
+    // Get device ID from daemon status
+    let status = client
+        .status(tonic::Request::new(tcfs_core::proto::StatusRequest {}))
+        .await
+        .context("status RPC failed")?
+        .into_inner();
+
+    let resp = client
+        .auth_enroll(tcfs_core::proto::AuthEnrollRequest {
+            device_id: status.device_id.clone(),
+            method: method.to_string(),
+        })
+        .await
+        .context("auth_enroll RPC failed")?
+        .into_inner();
+
+    if !resp.success {
+        anyhow::bail!("enrollment failed: {}", resp.error);
+    }
+
+    // Parse registration data (JSON with secret, qr_uri, qr_svg)
+    if let Ok(reg) = serde_json::from_slice::<serde_json::Value>(&resp.registration_data) {
+        if let Some(uri) = reg.get("qr_uri").and_then(|v| v.as_str()) {
+            println!("TOTP enrolled for device '{}'", status.device_id);
+            println!();
+            println!("Scan this URI with your authenticator app:");
+            println!("  {uri}");
+            println!();
+            println!("Or add the secret manually:");
+            if let Some(secret) = reg.get("secret").and_then(|v| v.as_str()) {
+                println!("  Secret: {secret}");
+            }
+        }
+    }
+
+    if !resp.instructions.is_empty() {
+        println!();
+        println!("{}", resp.instructions);
+    }
+
+    println!();
+    println!("Verify enrollment: tcfs auth verify <6-digit-code>");
+    Ok(())
+}
+
+// ── `tcfs auth complete-enroll` ───────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_auth_complete_enroll(
+    config: &tcfs_core::config::TcfsConfig,
+    method: &str,
+    attestation_file: &std::path::Path,
+) -> Result<()> {
+    let attestation_data = std::fs::read(attestation_file).with_context(|| {
+        format!(
+            "failed to read attestation file: {}",
+            attestation_file.display()
+        )
+    })?;
+
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let resp = client
+        .auth_complete_enroll(tcfs_core::proto::AuthCompleteEnrollRequest {
+            device_id: String::new(), // daemon uses its own device_id
+            method: method.to_string(),
+            attestation_data,
+        })
+        .await
+        .context("auth_complete_enroll RPC failed")?
+        .into_inner();
+
+    if resp.success {
+        println!("Enrollment completed successfully for method '{method}'.");
+    } else {
+        anyhow::bail!("enrollment completion failed: {}", resp.error);
+    }
+
+    Ok(())
+}
+
+// ── `tcfs auth verify` ───────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_auth_verify(config: &tcfs_core::config::TcfsConfig, code: &str) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+
+    // Get device ID
+    let status = client
+        .status(tonic::Request::new(tcfs_core::proto::StatusRequest {}))
+        .await
+        .context("status RPC failed")?
+        .into_inner();
+
+    // Request challenge (TOTP challenges are time-based, so data is empty)
+    let challenge = client
+        .auth_challenge(tcfs_core::proto::AuthChallengeRequest {
+            device_id: status.device_id.clone(),
+            method: "totp".into(),
+        })
+        .await
+        .context("auth_challenge RPC failed")?
+        .into_inner();
+
+    // Submit verification
+    let resp = client
+        .auth_verify(tcfs_core::proto::AuthVerifyRequest {
+            challenge_id: challenge.challenge_id,
+            device_id: status.device_id.clone(),
+            data: code.as_bytes().to_vec(),
+        })
+        .await
+        .context("auth_verify RPC failed")?
+        .into_inner();
+
+    if resp.success {
+        println!("Authentication successful.");
+        println!(
+            "Session token: {}...",
+            &resp.session_token[..8.min(resp.session_token.len())]
+        );
+    } else {
+        anyhow::bail!("verification failed: {}", resp.error);
+    }
+
+    Ok(())
+}
+
+// ── `tcfs auth revoke` ───────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_auth_revoke(
+    config: &tcfs_core::config::TcfsConfig,
+    token: Option<&str>,
+    device: Option<&str>,
+) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let resp = client
+        .auth_revoke(tcfs_core::proto::AuthRevokeRequest {
+            session_token: token.unwrap_or_default().to_string(),
+            device_id: device.unwrap_or_default().to_string(),
+        })
+        .await
+        .context("auth_revoke RPC failed")?
+        .into_inner();
+
+    if resp.success {
+        if let Some(t) = token {
+            println!("Session {}... revoked.", &t[..8.min(t.len())]);
+        } else if let Some(d) = device {
+            println!("All sessions for device '{d}' revoked.");
+        }
+    } else {
+        anyhow::bail!("revocation failed: {}", resp.error);
+    }
+
+    Ok(())
+}
+
+// ── `tcfs device invite` ─────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn cmd_device_invite(
+    config: &tcfs_core::config::TcfsConfig,
+    expiry_hours: u64,
+) -> Result<()> {
+    use tcfs_auth::enrollment::EnrollmentInvite;
+    use tcfs_auth::session::DevicePermissions;
+
+    // Get device ID from daemon
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let status = client
+        .status(tonic::Request::new(tcfs_core::proto::StatusRequest {}))
+        .await
+        .context("status RPC failed")?
+        .into_inner();
+
+    // TODO: derive signing key from master key instead of placeholder
+    let signing_key = blake3::hash(b"tcfs-fleet-invite-key");
+    let invite = EnrollmentInvite::new(
+        &status.device_id,
+        signing_key.as_bytes(),
+        expiry_hours,
+        DevicePermissions::default(),
+    );
+
+    let encoded = invite.encode().context("failed to encode invite")?;
+    let deep_link = format!("tcfs://enroll?data={encoded}");
+
+    println!("Device enrollment invite created");
+    println!();
+    println!("Expires: {} hours from now", expiry_hours);
+    println!();
+    println!("Share this invite data with the new device:");
+    println!("  {encoded}");
+    println!();
+    println!("Or use this deep link (iOS/macOS):");
+    println!("  {deep_link}");
+    println!();
+    println!("On the new device, run:");
+    println!("  tcfs device enroll --invite <invite-data>");
+
     Ok(())
 }
 

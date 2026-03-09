@@ -1,236 +1,72 @@
-//! FUSE filesystem driver: mounts a SeaweedFS prefix as a local directory.
+//! FUSE mount adapter: translates fuse3 `PathFilesystem` calls to
+//! `tcfs_vfs::VirtualFilesystem`.
 //!
-//! ## Virtual filesystem layout
-//!
-//! The driver maps SeaweedFS index entries to a virtual directory tree:
-//!
-//! ```text
-//! SeaweedFS:
-//!   {prefix}/index/src/main.rs     → size, hash
-//!   {prefix}/index/src/lib.rs      → size, hash
-//!   {prefix}/index/README.md       → size, hash
-//!
-//! FUSE mountpoint /mnt/tcfs:
-//!   /mnt/tcfs/
-//!     src/
-//!       main.rs.tc   (0-byte stub shown as real size from index)
-//!       lib.rs.tc
-//!     README.md.tc
-//! ```
-//!
-//! On `open()` of a `.tc` file, the content is fetched from SeaweedFS (via
-//! the manifest) and served transparently. Fetched content is cached in `DiskCache`.
+//! This is a thin protocol adapter. All filesystem logic lives in `tcfs-vfs`.
 
 #[cfg(feature = "fuse")]
 mod inner {
-    use std::collections::HashMap;
     use std::ffi::OsStr;
     use std::num::NonZeroU32;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use bytes::Bytes;
     use fuse3::path::prelude::*;
     use fuse3::{Errno, FileType, MountOptions};
     use futures_util::stream;
     use opendal::Operator;
-    use tokio::sync::Mutex;
-    use tracing::{debug, info, warn};
+    use tracing::{debug, info};
 
-    use crate::cache::DiskCache;
-    use crate::hydrate::fetch_cached;
-    use crate::negative_cache::NegativeCache;
-    use crate::stub::IndexEntry;
+    use tcfs_vfs::types::VfsFileType;
+    use tcfs_vfs::{TcfsVfs, VfsAttr, VirtualFilesystem};
 
     // ── Configuration ─────────────────────────────────────────────────────────
 
     /// TTL for positive dentry/attr cache entries (FUSE kernel cache)
     const ATTR_TTL: Duration = Duration::from_secs(5);
 
-    /// Fake uid/gid used for all files (real process uid/gid set at mount)
-    const PERM_FILE: u16 = 0o444; // r--r--r--
-    const PERM_DIR: u16 = 0o555; // r-xr-xr-x
-
-    // ── File handle table ─────────────────────────────────────────────────────
-
-    /// An open file handle — holds hydrated content in memory.
-    struct FileHandle {
-        data: Vec<u8>,
-    }
-
     // ── TcfsFs ────────────────────────────────────────────────────────────────
 
-    /// The FUSE filesystem driver.
+    /// The FUSE filesystem driver — thin wrapper around `TcfsVfs`.
     pub struct TcfsFs {
-        op: Operator,
-        prefix: String,
-        uid: u32,
-        gid: u32,
-        negative_cache: Arc<NegativeCache>,
-        disk_cache: Arc<DiskCache>,
-        /// Open file handles: fh → hydrated bytes
-        handles: Arc<Mutex<HashMap<u64, FileHandle>>>,
-        /// Monotonically increasing file-handle counter
-        next_fh: Arc<AtomicU64>,
-        /// Mount timestamp (used as atime/mtime for all synthetic entries)
-        mount_time: SystemTime,
+        vfs: Arc<TcfsVfs>,
     }
 
     impl TcfsFs {
-        /// Create a new FUSE filesystem driver.
-        ///
-        /// - `op` — OpenDAL operator for the SeaweedFS bucket
-        /// - `prefix` — remote prefix (e.g. `mydata`)
-        /// - `cache_dir` — local dir for hydrated file cache
-        /// - `cache_max_bytes` — max disk cache size
-        /// - `negative_ttl` — TTL for negative dentry cache
-        pub fn new(
-            op: Operator,
-            prefix: String,
-            cache_dir: std::path::PathBuf,
-            cache_max_bytes: u64,
-            negative_ttl: Duration,
-        ) -> Self {
-            let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-            TcfsFs {
-                op,
-                prefix,
-                uid,
-                gid,
-                negative_cache: Arc::new(NegativeCache::new(negative_ttl)),
-                disk_cache: Arc::new(DiskCache::new(cache_dir, cache_max_bytes)),
-                handles: Arc::new(Mutex::new(HashMap::new())),
-                next_fh: Arc::new(AtomicU64::new(1)),
-                mount_time: SystemTime::now(),
-            }
+        pub fn new(vfs: Arc<TcfsVfs>) -> Self {
+            TcfsFs { vfs }
         }
+    }
 
-        /// Build the index path for a virtual FS path.
-        ///
-        /// `/src/main.rs.tc` → `{prefix}/index/src/main.rs`
-        ///
-        /// Handles empty prefix correctly: `""` prefix + `/file.txt.tc` → `index/file.txt`
-        fn index_key_for(&self, vpath: &str) -> Option<String> {
-            // Strip leading slash
-            let rel = vpath.trim_start_matches('/');
-            if rel.is_empty() {
-                return None; // root directory — no index key
-            }
-            // Strip .tc suffix to get the real filename
-            let real = rel
-                .strip_suffix(".tc")
-                .or_else(|| rel.strip_suffix(".tcf"))
-                .unwrap_or(rel);
-            let prefix = self.prefix.trim_end_matches('/');
-            if prefix.is_empty() {
-                Some(format!("index/{}", real))
-            } else {
-                Some(format!("{}/index/{}", prefix, real))
-            }
+    /// Convert VfsAttr to fuse3 FileAttr.
+    fn to_fuse_attr(attr: &VfsAttr) -> FileAttr {
+        FileAttr {
+            size: attr.size,
+            blocks: attr.blocks,
+            atime: attr.atime,
+            mtime: attr.mtime,
+            ctime: attr.ctime,
+            #[cfg(target_os = "macos")]
+            crtime: attr.mtime,
+            kind: match attr.kind {
+                VfsFileType::RegularFile => FileType::RegularFile,
+                VfsFileType::Directory => FileType::Directory,
+            },
+            perm: attr.perm,
+            nlink: attr.nlink,
+            uid: attr.uid,
+            gid: attr.gid,
+            rdev: 0,
+            blksize: 4096,
+            #[cfg(target_os = "macos")]
+            flags: 0,
         }
+    }
 
-        /// The index prefix for directory listing: `{prefix}/index/{rel_dir}/`
-        ///
-        /// Handles empty prefix correctly: `""` prefix + `/` → `index/`
-        fn index_prefix_for_dir(&self, vdir: &str) -> String {
-            let rel = vdir.trim_start_matches('/').trim_end_matches('/');
-            let prefix = self.prefix.trim_end_matches('/');
-            match (prefix.is_empty(), rel.is_empty()) {
-                (true, true) => "index/".to_string(),
-                (true, false) => format!("index/{}/", rel),
-                (false, true) => format!("{}/index/", prefix),
-                (false, false) => format!("{}/index/{}/", prefix, rel),
-            }
-        }
-
-        /// Discover prefixes that have index entries (bucket root scan).
-        ///
-        /// Returns a list of prefix strings (e.g. `["data", "backup"]`) that
-        /// contain `index/` subdirectories. Used as a fallback when readdir("/")`
-        /// returns empty with an empty configured prefix.
-        async fn discover_prefixes(&self) -> Vec<String> {
-            let entries = match self.op.list("/").await {
-                Ok(e) => e,
-                Err(_) => match self.op.list("").await {
-                    Ok(e) => e,
-                    Err(_) => return vec![],
-                },
-            };
-            entries
-                .into_iter()
-                .filter_map(|e| {
-                    let p = e.path().trim_end_matches('/').to_string();
-                    if !p.is_empty() && !p.contains('/') {
-                        Some(p)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        }
-
-        /// Fetch and parse an IndexEntry for a virtual path.
-        async fn get_index_entry(&self, vpath: &str) -> Option<IndexEntry> {
-            let key = self.index_key_for(vpath)?;
-            let data = self.op.read(&key).await.ok()?;
-            let text = String::from_utf8(data.to_bytes().to_vec()).ok()?;
-            IndexEntry::parse(&text).ok()
-        }
-
-        /// Fetch the real file size from an index entry by its S3 key.
-        async fn read_index_entry_size(&self, index_key: &str) -> u64 {
-            match self.op.read(index_key).await {
-                Ok(data) => {
-                    let text = String::from_utf8(data.to_bytes().to_vec()).unwrap_or_default();
-                    IndexEntry::parse(&text).map(|e| e.size).unwrap_or(0)
-                }
-                Err(_) => 0,
-            }
-        }
-
-        /// Synthesize a `FileAttr` for a stub file given its size.
-        fn file_attr(&self, size: u64) -> FileAttr {
-            FileAttr {
-                size,
-                blocks: size.div_ceil(512),
-                atime: self.mount_time,
-                mtime: self.mount_time,
-                ctime: self.mount_time,
-                #[cfg(target_os = "macos")]
-                crtime: self.mount_time,
-                kind: FileType::RegularFile,
-                perm: PERM_FILE,
-                nlink: 1,
-                uid: self.uid,
-                gid: self.gid,
-                rdev: 0,
-                blksize: 4096,
-                #[cfg(target_os = "macos")]
-                flags: 0,
-            }
-        }
-
-        /// Synthesize a `FileAttr` for a directory.
-        fn dir_attr(&self) -> FileAttr {
-            FileAttr {
-                size: 0,
-                blocks: 0,
-                atime: self.mount_time,
-                mtime: self.mount_time,
-                ctime: self.mount_time,
-                #[cfg(target_os = "macos")]
-                crtime: self.mount_time,
-                kind: FileType::Directory,
-                perm: PERM_DIR,
-                nlink: 2,
-                uid: self.uid,
-                gid: self.gid,
-                rdev: 0,
-                blksize: 4096,
-                #[cfg(target_os = "macos")]
-                flags: 0,
-            }
+    fn to_fuse_file_type(kind: VfsFileType) -> FileType {
+        match kind {
+            VfsFileType::RegularFile => FileType::RegularFile,
+            VfsFileType::Directory => FileType::Directory,
         }
     }
 
@@ -238,7 +74,7 @@ mod inner {
 
     impl PathFilesystem for TcfsFs {
         async fn init(&self, _req: Request) -> fuse3::Result<ReplyInit> {
-            debug!(prefix = %self.prefix, "tcfs-fuse init");
+            debug!("tcfs-fuse init (delegating to tcfs-vfs)");
             Ok(ReplyInit {
                 max_write: NonZeroU32::new(128 * 1024).unwrap(),
             })
@@ -260,46 +96,12 @@ mod inner {
                 None => return Err(Errno::from(libc::ENOENT)),
             };
 
-            // Root directory
-            if path_str == "/" {
-                return Ok(ReplyAttr {
+            match self.vfs.getattr(path_str).await {
+                Ok(attr) => Ok(ReplyAttr {
                     ttl: ATTR_TTL,
-                    attr: self.dir_attr(),
-                });
-            }
-
-            // Negative cache short-circuit
-            if self.negative_cache.is_negative(path_str) {
-                return Err(Errno::from(libc::ENOENT));
-            }
-
-            // Check if it's a stub file (.tc)
-            if path_str.ends_with(".tc") || path_str.ends_with(".tcf") {
-                match self.get_index_entry(path_str).await {
-                    Some(entry) => {
-                        return Ok(ReplyAttr {
-                            ttl: ATTR_TTL,
-                            attr: self.file_attr(entry.size),
-                        });
-                    }
-                    None => {
-                        self.negative_cache.insert(path_str);
-                        return Err(Errno::from(libc::ENOENT));
-                    }
-                }
-            }
-
-            // Otherwise treat as a directory: check if any index entries exist under it
-            let dir_prefix = self.index_prefix_for_dir(path_str);
-            match self.op.list(&dir_prefix).await {
-                Ok(entries) if !entries.is_empty() => Ok(ReplyAttr {
-                    ttl: ATTR_TTL,
-                    attr: self.dir_attr(),
+                    attr: to_fuse_attr(&attr),
                 }),
-                _ => {
-                    self.negative_cache.insert(path_str);
-                    Err(Errno::from(libc::ENOENT))
-                }
+                Err(_) => Err(Errno::from(libc::ENOENT)),
             }
         }
 
@@ -310,46 +112,13 @@ mod inner {
             name: &OsStr,
         ) -> fuse3::Result<ReplyEntry> {
             let parent_str = parent.to_str().unwrap_or("/");
-            let name_str = name.to_str().ok_or(Errno::from(libc::ENOENT))?;
 
-            let full_path = if parent_str == "/" {
-                format!("/{}", name_str)
-            } else {
-                format!("{}/{}", parent_str.trim_end_matches('/'), name_str)
-            };
-
-            // Negative cache
-            if self.negative_cache.is_negative(&full_path) {
-                return Err(Errno::from(libc::ENOENT));
-            }
-
-            // Stub file lookup
-            if name_str.ends_with(".tc") || name_str.ends_with(".tcf") {
-                match self.get_index_entry(&full_path).await {
-                    Some(entry) => {
-                        return Ok(ReplyEntry {
-                            ttl: ATTR_TTL,
-                            attr: self.file_attr(entry.size),
-                        });
-                    }
-                    None => {
-                        self.negative_cache.insert(&full_path);
-                        return Err(Errno::from(libc::ENOENT));
-                    }
-                }
-            }
-
-            // Directory lookup
-            let dir_prefix = self.index_prefix_for_dir(&full_path);
-            match self.op.list(&dir_prefix).await {
-                Ok(entries) if !entries.is_empty() => Ok(ReplyEntry {
+            match self.vfs.lookup(parent_str, name).await {
+                Ok(attr) => Ok(ReplyEntry {
                     ttl: ATTR_TTL,
-                    attr: self.dir_attr(),
+                    attr: to_fuse_attr(&attr),
                 }),
-                _ => {
-                    self.negative_cache.insert(&full_path);
-                    Err(Errno::from(libc::ENOENT))
-                }
+                Err(_) => Err(Errno::from(libc::ENOENT)),
             }
         }
 
@@ -372,15 +141,13 @@ mod inner {
             offset: i64,
         ) -> fuse3::Result<ReplyDirectory<Self::DirEntryStream<'a>>> {
             let path_str = path.to_str().unwrap_or("/");
-            let index_prefix = self.index_prefix_for_dir(path_str);
 
-            let raw_entries = self
-                .op
-                .list(&index_prefix)
+            let vfs_entries = self
+                .vfs
+                .readdir(path_str)
                 .await
                 .map_err(|_| Errno::from(libc::EIO))?;
 
-            let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut entries: Vec<fuse3::Result<DirectoryEntry>> = Vec::new();
 
             if offset == 0 {
@@ -399,57 +166,15 @@ mod inner {
             }
 
             let mut next_offset = 3i64;
-            for entry in raw_entries {
-                let full_path = entry.path();
-                let rel = full_path
-                    .trim_start_matches(&index_prefix)
-                    .trim_start_matches('/');
-                if rel.is_empty() {
-                    continue;
-                }
-
-                let first_component = rel.split('/').next().unwrap_or(rel);
-                let is_dir = rel.contains('/') || rel.ends_with('/');
-
-                let (dir_entry_name, kind) = if is_dir {
-                    let dir_name = first_component.trim_end_matches('/').to_string();
-                    if seen_dirs.contains(&dir_name) {
-                        continue;
-                    }
-                    seen_dirs.insert(dir_name.clone());
-                    (dir_name, FileType::Directory)
-                } else {
-                    let stub_name = format!("{}.tc", first_component);
-                    (stub_name, FileType::RegularFile)
-                };
-
+            for vfs_entry in vfs_entries {
                 if next_offset > offset {
                     entries.push(Ok(DirectoryEntry {
-                        kind,
-                        name: dir_entry_name.into(),
+                        kind: to_fuse_file_type(vfs_entry.kind),
+                        name: vfs_entry.name.into(),
                         offset: next_offset,
                     }));
                 }
                 next_offset += 1;
-            }
-
-            // Fallback: if root dir is empty and prefix is empty, discover prefixes
-            if path_str == "/" && self.prefix.is_empty() && entries.len() <= 2 {
-                let prefixes = self.discover_prefixes().await;
-                for pfx in prefixes {
-                    let probe = format!("{}/index/", pfx);
-                    if let Ok(idx_entries) = self.op.list(&probe).await {
-                        if !idx_entries.is_empty() && !seen_dirs.contains(&pfx) {
-                            seen_dirs.insert(pfx.clone());
-                            entries.push(Ok(DirectoryEntry {
-                                kind: FileType::Directory,
-                                name: pfx.into(),
-                                offset: next_offset,
-                            }));
-                            next_offset += 1;
-                        }
-                    }
-                }
             }
 
             Ok(ReplyDirectory {
@@ -466,24 +191,32 @@ mod inner {
             _lock_owner: u64,
         ) -> fuse3::Result<ReplyDirectoryPlus<Self::DirEntryPlusStream<'a>>> {
             let path_str = path.to_str().unwrap_or("/");
-            let index_prefix = self.index_prefix_for_dir(path_str);
+            let offset = offset as i64;
 
-            let raw_entries = self
-                .op
-                .list(&index_prefix)
+            let vfs_entries = self
+                .vfs
+                .readdirplus(path_str)
                 .await
                 .map_err(|_| Errno::from(libc::EIO))?;
 
-            let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // We need a fallback attr for . and ..
+            let dir_attr = self
+                .vfs
+                .getattr("/")
+                .await
+                .map(|a| to_fuse_attr(&a))
+                .unwrap_or_else(|_| {
+                    to_fuse_attr(&VfsAttr::dir(0, 0, std::time::SystemTime::now()))
+                });
+
             let mut entries: Vec<fuse3::Result<DirectoryEntryPlus>> = Vec::new();
-            let offset = offset as i64;
 
             if offset == 0 {
                 entries.push(Ok(DirectoryEntryPlus {
                     kind: FileType::Directory,
                     name: ".".into(),
                     offset: 1,
-                    attr: self.dir_attr(),
+                    attr: dir_attr,
                     entry_ttl: ATTR_TTL,
                     attr_ttl: ATTR_TTL,
                 }));
@@ -493,43 +226,22 @@ mod inner {
                     kind: FileType::Directory,
                     name: "..".into(),
                     offset: 2,
-                    attr: self.dir_attr(),
+                    attr: dir_attr,
                     entry_ttl: ATTR_TTL,
                     attr_ttl: ATTR_TTL,
                 }));
             }
 
             let mut next_offset = 3i64;
-            for entry in raw_entries {
-                let full_path = entry.path().to_string();
-                let rel = full_path
-                    .trim_start_matches(&index_prefix)
-                    .trim_start_matches('/');
-                if rel.is_empty() {
-                    continue;
-                }
-
-                let first_component = rel.split('/').next().unwrap_or(rel);
-                let is_dir = rel.contains('/') || rel.ends_with('/');
-
-                let (dir_entry_name, kind, attr) = if is_dir {
-                    let dir_name = first_component.trim_end_matches('/').to_string();
-                    if seen_dirs.contains(&dir_name) {
-                        continue;
-                    }
-                    seen_dirs.insert(dir_name.clone());
-                    (dir_name, FileType::Directory, self.dir_attr())
-                } else {
-                    let stub_name = format!("{}.tc", first_component);
-                    // Read actual file size from the index entry content
-                    let size = self.read_index_entry_size(&full_path).await;
-                    (stub_name, FileType::RegularFile, self.file_attr(size))
-                };
-
+            for vfs_entry in vfs_entries {
                 if next_offset > offset {
+                    let attr = match vfs_entry.attr {
+                        Some(ref a) => to_fuse_attr(a),
+                        None => dir_attr, // fallback
+                    };
                     entries.push(Ok(DirectoryEntryPlus {
-                        kind,
-                        name: dir_entry_name.into(),
+                        kind: to_fuse_file_type(vfs_entry.kind),
+                        name: vfs_entry.name.into(),
                         offset: next_offset,
                         attr,
                         entry_ttl: ATTR_TTL,
@@ -537,28 +249,6 @@ mod inner {
                     }));
                 }
                 next_offset += 1;
-            }
-
-            // Fallback: if root dir is empty and prefix is empty, discover prefixes
-            if path_str == "/" && self.prefix.is_empty() && entries.len() <= 2 {
-                let prefixes = self.discover_prefixes().await;
-                for pfx in prefixes {
-                    let probe = format!("{}/index/", pfx);
-                    if let Ok(idx_entries) = self.op.list(&probe).await {
-                        if !idx_entries.is_empty() && !seen_dirs.contains(&pfx) {
-                            seen_dirs.insert(pfx.clone());
-                            entries.push(Ok(DirectoryEntryPlus {
-                                kind: FileType::Directory,
-                                name: pfx.into(),
-                                offset: next_offset,
-                                attr: self.dir_attr(),
-                                entry_ttl: ATTR_TTL,
-                                attr_ttl: ATTR_TTL,
-                            }));
-                            next_offset += 1;
-                        }
-                    }
-                }
             }
 
             Ok(ReplyDirectoryPlus {
@@ -578,32 +268,11 @@ mod inner {
         async fn open(&self, _req: Request, path: &OsStr, _flags: u32) -> fuse3::Result<ReplyOpen> {
             let path_str = path.to_str().ok_or(Errno::from(libc::ENOENT))?;
 
-            // Only handle .tc stub files
-            if !path_str.ends_with(".tc") && !path_str.ends_with(".tcf") {
-                return Err(Errno::from(libc::ENOENT));
-            }
-
-            let entry = self
-                .get_index_entry(path_str)
+            let (fh, _data) = self
+                .vfs
+                .open(path_str)
                 .await
-                .ok_or(Errno::from(libc::ENOENT))?;
-
-            let manifest_path = entry.manifest_path(&self.prefix);
-            let prefix = self.prefix.trim_end_matches('/');
-
-            debug!(path = %path_str, manifest = %manifest_path, "hydrating on open");
-
-            // Fetch content (disk-cache backed)
-            let data = fetch_cached(&self.op, &manifest_path, prefix, &self.disk_cache)
-                .await
-                .map_err(|e| {
-                    warn!(path = %path_str, "hydration failed: {e}");
-                    Errno::from(libc::EIO)
-                })?;
-
-            // Store in handle table
-            let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-            self.handles.lock().await.insert(fh, FileHandle { data });
+                .map_err(|_| Errno::from(libc::ENOENT))?;
 
             Ok(ReplyOpen { fh, flags: 0 })
         }
@@ -616,18 +285,15 @@ mod inner {
             offset: u64,
             size: u32,
         ) -> fuse3::Result<ReplyData> {
-            let handles = self.handles.lock().await;
-            let handle = handles.get(&fh).ok_or(Errno::from(libc::EBADF))?;
+            let data = self
+                .vfs
+                .read(fh, offset, size)
+                .await
+                .map_err(|_| Errno::from(libc::EBADF))?;
 
-            let data = &handle.data;
-            let start = offset as usize;
-            if start >= data.len() {
-                return Ok(ReplyData { data: Bytes::new() });
-            }
-            let end = (start + size as usize).min(data.len());
-            let slice = Bytes::copy_from_slice(&data[start..end]);
-
-            Ok(ReplyData { data: slice })
+            Ok(ReplyData {
+                data: Bytes::from(data),
+            })
         }
 
         async fn release(
@@ -639,8 +305,10 @@ mod inner {
             _lock_owner: u64,
             _flush: bool,
         ) -> fuse3::Result<()> {
-            self.handles.lock().await.remove(&fh);
-            Ok(())
+            self.vfs
+                .release(fh)
+                .await
+                .map_err(|_| Errno::from(libc::EIO))
         }
 
         async fn flush(
@@ -654,15 +322,21 @@ mod inner {
         }
 
         async fn statfs(&self, _req: Request, _path: &OsStr) -> fuse3::Result<ReplyStatFs> {
+            let stats = self
+                .vfs
+                .statfs()
+                .await
+                .map_err(|_| Errno::from(libc::EIO))?;
+
             Ok(ReplyStatFs {
-                blocks: 1 << 30, // fake 1T blocks
-                bfree: 1 << 29,
-                bavail: 1 << 29,
-                files: 1 << 20,
-                ffree: 1 << 19,
-                bsize: 4096,
-                namelen: 255,
-                frsize: 4096,
+                blocks: stats.blocks,
+                bfree: stats.bfree,
+                bavail: stats.bavail,
+                files: stats.files,
+                ffree: stats.ffree,
+                bsize: stats.bsize,
+                namelen: stats.namelen,
+                frsize: stats.frsize,
             })
         }
     }
@@ -683,16 +357,17 @@ mod inner {
 
     /// Mount the FUSE filesystem and block until unmounted.
     ///
-    /// Call from an async context. Returns when the filesystem is unmounted
-    /// (e.g. via `fusermount3 -u <mountpoint>` or `tcfs unmount`).
+    /// Creates a `TcfsVfs` and wraps it with the FUSE `PathFilesystem` adapter.
     pub async fn mount(cfg: MountConfig) -> std::io::Result<()> {
-        let fs = TcfsFs::new(
+        let vfs = Arc::new(TcfsVfs::new(
             cfg.op,
             cfg.prefix,
             cfg.cache_dir,
             cfg.cache_max_bytes,
             Duration::from_secs(cfg.negative_ttl_secs),
-        );
+        ));
+
+        let fs = TcfsFs::new(vfs);
 
         let mut opts = MountOptions::default();
         opts.fs_name("tcfs");
@@ -702,101 +377,13 @@ mod inner {
             opts.allow_other(true);
         }
 
-        info!(mountpoint = %cfg.mountpoint.display(), "mounting tcfs (unprivileged via fusermount3)");
+        info!(mountpoint = %cfg.mountpoint.display(), "mounting tcfs-fuse (via tcfs-vfs)");
 
         let handle = Session::new(opts)
             .mount_with_unprivileged(fs, &cfg.mountpoint)
             .await?;
 
         handle.await
-    }
-
-    // ── Unit tests ───────────────────────────────────────────────────────────
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        /// Helper to create a TcfsFs with a given prefix (no real operator needed for key tests)
-        fn make_fs(prefix: &str) -> TcfsFs {
-            // Build a minimal in-memory operator for testing
-            let op = Operator::new(opendal::services::Memory::default())
-                .unwrap()
-                .finish();
-            TcfsFs::new(
-                op,
-                prefix.to_string(),
-                std::path::PathBuf::from("/tmp/tcfs-test-cache"),
-                64 * 1024 * 1024,
-                Duration::from_secs(30),
-            )
-        }
-
-        #[test]
-        fn test_index_prefix_empty_prefix_root() {
-            let fs = make_fs("");
-            assert_eq!(fs.index_prefix_for_dir("/"), "index/");
-        }
-
-        #[test]
-        fn test_index_prefix_empty_prefix_subdir() {
-            let fs = make_fs("");
-            assert_eq!(fs.index_prefix_for_dir("/src"), "index/src/");
-        }
-
-        #[test]
-        fn test_index_prefix_with_prefix_root() {
-            let fs = make_fs("data");
-            assert_eq!(fs.index_prefix_for_dir("/"), "data/index/");
-        }
-
-        #[test]
-        fn test_index_prefix_with_prefix_subdir() {
-            let fs = make_fs("data");
-            assert_eq!(fs.index_prefix_for_dir("/src"), "data/index/src/");
-        }
-
-        #[test]
-        fn test_index_key_empty_prefix() {
-            let fs = make_fs("");
-            assert_eq!(
-                fs.index_key_for("/file.txt.tc"),
-                Some("index/file.txt".to_string())
-            );
-        }
-
-        #[test]
-        fn test_index_key_with_prefix() {
-            let fs = make_fs("data");
-            assert_eq!(
-                fs.index_key_for("/file.txt.tc"),
-                Some("data/index/file.txt".to_string())
-            );
-        }
-
-        #[test]
-        fn test_index_key_strips_tc_suffix() {
-            let fs = make_fs("data");
-            assert_eq!(
-                fs.index_key_for("/src/main.rs.tc"),
-                Some("data/index/src/main.rs".to_string())
-            );
-        }
-
-        #[test]
-        fn test_index_key_strips_tcf_suffix() {
-            let fs = make_fs("data");
-            assert_eq!(
-                fs.index_key_for("/doc.pdf.tcf"),
-                Some("data/index/doc.pdf".to_string())
-            );
-        }
-
-        #[test]
-        fn test_index_key_root_returns_none() {
-            let fs = make_fs("data");
-            assert_eq!(fs.index_key_for("/"), None);
-        }
     }
 }
 

@@ -8,6 +8,7 @@ description = "tcfs FUSE filesystem driver (Linux + macOS)"
 
 [dependencies]
 tcfs-core = { path = "../tcfs-core" }
+tcfs-vfs = { path = "../tcfs-vfs" }
 tcfs-storage = { path = "../tcfs-storage" }
 opendal = { workspace = true }
 # fuse3 is only compiled when the fuse feature is enabled

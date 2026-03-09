@@ -19,6 +19,15 @@ service TcfsDaemon {
   rpc AuthUnlock(AuthUnlockRequest) returns (AuthUnlockResponse);
   rpc AuthLock(Empty) returns (AuthLockResponse);
   rpc AuthStatus(Empty) returns (AuthStatusResponse);
+  // MFA enrollment and verification
+  rpc AuthEnroll(AuthEnrollRequest) returns (AuthEnrollResponse);
+  rpc AuthCompleteEnroll(AuthCompleteEnrollRequest) returns (AuthCompleteEnrollResponse);
+  rpc AuthChallenge(AuthChallengeRequest) returns (AuthChallengeResponse);
+  rpc AuthVerify(AuthVerifyRequest) returns (AuthVerifyResponse);
+  // Session management
+  rpc AuthRevoke(AuthRevokeRequest) returns (AuthRevokeResponse);
+  // Device enrollment via invite
+  rpc DeviceEnroll(DeviceEnrollRequest) returns (DeviceEnrollResponse);
 }
 
 message Empty {}
@@ -130,11 +139,20 @@ message FileEntry {
 
 message WatchRequest {
   repeated string paths = 1;
+  // Only return events newer than this timestamp (0 = all events).
+  // Maps to FileProvider sync anchor for incremental enumeration.
+  int64 since_timestamp = 2;
 }
 message WatchEvent {
   string path = 1;
-  string event_type = 2;
+  string event_type = 2;      // "created", "modified", "deleted", "renamed"
   int64 timestamp = 3;
+  // Enriched metadata (populated from state cache when available)
+  string filename = 4;
+  uint64 size = 5;
+  string blake3 = 6;
+  bool is_directory = 7;
+  string device_id = 8;       // Origin device for remote (NATS) events
 }
 
 message CredentialStatusResponse {
@@ -171,4 +189,80 @@ message AuthLockResponse {
 message AuthStatusResponse {
   bool unlocked = 1;
   bool crypto_enabled = 2;
+  string session_device_id = 3;
+  string auth_method = 4;
+  repeated string available_methods = 5;
+}
+
+// MFA enrollment: register a new auth credential (TOTP secret, WebAuthn key)
+message AuthEnrollRequest {
+  string device_id = 1;
+  string method = 2;           // "totp", "webauthn"
+}
+message AuthEnrollResponse {
+  bool success = 1;
+  bytes registration_data = 2; // JSON: { secret, qr_uri, qr_svg } for TOTP
+  string instructions = 3;
+  string error = 4;
+}
+
+// MFA enrollment completion (WebAuthn second step: attestation → credential)
+message AuthCompleteEnrollRequest {
+  string device_id = 1;
+  string method = 2;             // "webauthn"
+  bytes attestation_data = 3;    // RegisterPublicKeyCredential JSON
+}
+message AuthCompleteEnrollResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// MFA challenge: request a challenge for authentication
+message AuthChallengeRequest {
+  string device_id = 1;
+  string method = 2;           // "totp", "webauthn"
+}
+message AuthChallengeResponse {
+  string challenge_id = 1;
+  bytes data = 2;              // Provider-specific challenge data
+  string prompt = 3;
+  uint64 expires_at = 4;
+}
+
+// MFA verify: submit response to a challenge
+message AuthVerifyRequest {
+  string challenge_id = 1;
+  string device_id = 2;
+  bytes data = 3;              // TOTP: 6-digit code, WebAuthn: assertion JSON
+}
+message AuthVerifyResponse {
+  bool success = 1;
+  string session_token = 2;
+  string error = 3;
+}
+
+// Session revocation: revoke by token or device_id
+message AuthRevokeRequest {
+  string session_token = 1;   // Revoke specific session (if set)
+  string device_id = 2;       // Revoke all sessions for device (if set, token empty)
+}
+message AuthRevokeResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Device enrollment via invite
+message DeviceEnrollRequest {
+  string invite_data = 1;      // Base64-encoded EnrollmentInvite
+  string device_name = 2;
+  string public_key = 3;       // age X25519 public key
+  string platform = 4;         // "macos-aarch64", "ios", "linux-x86_64"
+}
+message DeviceEnrollResponse {
+  bool success = 1;
+  string device_id = 2;
+  string nats_url = 3;
+  string storage_endpoint = 4;
+  repeated string available_auth_methods = 5;
+  string error = 6;
 }

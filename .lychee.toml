@@ -1,5 +1,6 @@
 exclude = [
   "^https://github.com/tinyland-inc/tummycrypt/compare",
+  "^https://github.com/tinyland-inc/remote-juggler",
   "^https://nix-cache.fuzzy-dev.tinyland.dev",
   "^https://docs.tummycrypt.io",
   "your-org",

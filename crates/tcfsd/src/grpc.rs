@@ -33,6 +33,11 @@ pub struct TcfsDaemonImpl {
     nats_ok: std::sync::atomic::AtomicBool,
     nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
     active_mounts: Arc<TokioMutex<std::collections::HashMap<String, tokio::process::Child>>>,
+    // Auth infrastructure
+    session_store: tcfs_auth::SessionStore,
+    totp_provider: Arc<tcfs_auth::totp::TotpProvider>,
+    webauthn_provider: Arc<tcfs_auth::webauthn::WebAuthnProvider>,
+    rate_limiter: tcfs_auth::RateLimiter,
 }
 
 impl TcfsDaemonImpl {
@@ -48,6 +53,34 @@ impl TcfsDaemonImpl {
         device_name: String,
         master_key: Option<tcfs_crypto::MasterKey>,
     ) -> Self {
+        let totp_config = tcfs_auth::totp::TotpConfig {
+            issuer: config.auth.totp.issuer.clone(),
+            digits: config.auth.totp.digits as usize,
+            ..tcfs_auth::totp::TotpConfig::default()
+        };
+        let totp_provider = Arc::new(tcfs_auth::totp::TotpProvider::new(totp_config));
+
+        let webauthn_config = tcfs_auth::webauthn::WebAuthnConfig {
+            rp_name: config.auth.webauthn.relying_party_name.clone(),
+            rp_id: config.auth.webauthn.relying_party_id.clone(),
+            rp_origin: format!("https://{}", config.auth.webauthn.relying_party_id),
+        };
+        let webauthn_provider = Arc::new(
+            tcfs_auth::webauthn::WebAuthnProvider::new(webauthn_config).unwrap_or_else(|e| {
+                tracing::warn!("WebAuthn provider init failed: {e}, using defaults");
+                tcfs_auth::webauthn::WebAuthnProvider::new(
+                    tcfs_auth::webauthn::WebAuthnConfig::default(),
+                )
+                .expect("default WebAuthn config should always work")
+            }),
+        );
+
+        let rate_limiter = tcfs_auth::RateLimiter::new(tcfs_auth::RateLimitConfig {
+            max_attempts: config.auth.rate_limit.max_attempts,
+            lockout_duration: chrono::Duration::seconds(config.auth.rate_limit.lockout_secs as i64),
+            backoff_multiplier: config.auth.rate_limit.backoff_multiplier,
+        });
+
         Self {
             cred_store,
             config,
@@ -62,6 +95,94 @@ impl TcfsDaemonImpl {
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
             active_mounts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
+            session_store: tcfs_auth::SessionStore::new(),
+            totp_provider,
+            webauthn_provider,
+            rate_limiter,
+        }
+    }
+
+    /// Get a clone of the session store (for background tasks).
+    pub fn session_store(&self) -> tcfs_auth::SessionStore {
+        self.session_store.clone()
+    }
+
+    /// Load persisted TOTP credentials from disk.
+    pub async fn load_totp_credentials(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.totp_provider.load_from_file(path).await
+    }
+
+    /// Load persisted sessions from disk.
+    pub async fn load_sessions(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.session_store.load_from_file(path).await
+    }
+
+    /// Save sessions to disk (called after session changes).
+    async fn persist_sessions(&self) {
+        let path = dirs::data_dir()
+            .unwrap_or_default()
+            .join("tcfsd/sessions.json");
+        if let Err(e) = self.session_store.save_to_file(&path).await {
+            tracing::warn!("failed to persist sessions: {e}");
+        }
+    }
+
+    /// Validate a session token from gRPC request metadata.
+    ///
+    /// Returns Ok(Session) if the session is valid, or a gRPC UNAUTHENTICATED
+    /// error if auth is required and the token is missing/invalid/expired.
+    ///
+    /// When `config.auth.require_session` is false (default for alpha), this
+    /// returns a synthetic session with full permissions (bypass mode).
+    async fn require_session<T>(
+        &self,
+        request: &tonic::Request<T>,
+    ) -> Result<tcfs_auth::Session, tonic::Status> {
+        // Alpha bypass: if auth is not required, allow all requests with full permissions
+        if !self.config.auth.require_session {
+            return Ok(tcfs_auth::Session::new(&self.device_id, "local", "bypass"));
+        }
+
+        // Extract token from "authorization" metadata
+        let token = request
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).to_string());
+
+        match token {
+            Some(t) => match self.session_store.validate(&t).await {
+                Some(session) => Ok(session),
+                None => Err(tonic::Status::unauthenticated(
+                    "invalid or expired session token",
+                )),
+            },
+            None => Err(tonic::Status::unauthenticated(
+                "session token required — run 'tcfs auth verify' first",
+            )),
+        }
+    }
+
+    /// Check that the session has the required permission, returning
+    /// PERMISSION_DENIED if not.
+    fn check_permission(
+        session: &tcfs_auth::Session,
+        permission: &str,
+    ) -> Result<(), tonic::Status> {
+        let allowed = match permission {
+            "mount" => session.permissions.can_mount,
+            "push" => session.permissions.can_push,
+            "pull" => session.permissions.can_pull,
+            "admin" => session.permissions.can_admin,
+            _ => false,
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(tonic::Status::permission_denied(format!(
+                "device {} lacks '{}' permission",
+                session.device_id, permission
+            )))
         }
     }
 
@@ -163,6 +284,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<MountRequest>,
     ) -> Result<tonic::Response<MountResponse>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "mount")?;
         let req = request.into_inner();
 
         if req.mountpoint.is_empty() || req.remote.is_empty() {
@@ -192,15 +315,23 @@ impl TcfsDaemon for TcfsDaemonImpl {
             })?;
         }
 
+        let use_nfs = req.options.iter().any(|o| o == "nfs");
+        let backend = if use_nfs { "NFS loopback" } else { "FUSE" };
+
         info!(
             mountpoint = %req.mountpoint,
             remote = %req.remote,
-            "spawning FUSE mount"
+            backend = %backend,
+            "spawning mount"
         );
 
         // Spawn tcfs mount as subprocess
-        let child = tokio::process::Command::new("tcfs")
-            .args(["mount", &req.remote, &req.mountpoint])
+        let mut cmd = tokio::process::Command::new("tcfs");
+        cmd.args(["mount", &req.remote, &req.mountpoint]);
+        if use_nfs {
+            cmd.arg("--nfs");
+        }
+        let child = cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -225,6 +356,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<UnmountRequest>,
     ) -> Result<tonic::Response<UnmountResponse>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "mount")?;
         let req = request.into_inner();
         if req.mountpoint.is_empty() {
             return Ok(tonic::Response::new(UnmountResponse {
@@ -294,6 +427,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<tonic::Streaming<PushChunk>>,
     ) -> Result<tonic::Response<Self::PushStream>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "push")?;
         use tokio_stream::StreamExt;
 
         let op = self.operator.lock().await;
@@ -446,6 +581,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<PullRequest>,
     ) -> Result<tonic::Response<Self::PullStream>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "pull")?;
         let req = request.into_inner();
 
         let op = self.operator.lock().await;
@@ -509,6 +646,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<HydrateRequest>,
     ) -> Result<tonic::Response<Self::HydrateStream>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "pull")?;
         let req = request.into_inner();
         let stub_path = std::path::PathBuf::from(&req.stub_path);
 
@@ -603,6 +742,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<UnsyncRequest>,
     ) -> Result<tonic::Response<UnsyncResponse>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "mount")?;
         let req = request.into_inner();
         let path = std::path::PathBuf::from(&req.path);
 
@@ -718,6 +859,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<ResolveConflictRequest>,
     ) -> Result<tonic::Response<ResolveConflictResponse>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "push")?;
         let req = request.into_inner();
 
         let resolution = match req.resolution.as_str() {
@@ -990,6 +1133,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         request: tonic::Request<WatchRequest>,
     ) -> Result<tonic::Response<Self::WatchStream>, tonic::Status> {
         use notify::{RecursiveMode, Watcher};
+        use tracing::{debug, warn};
 
         let req = request.into_inner();
         if req.paths.is_empty() {
@@ -998,9 +1142,44 @@ impl TcfsDaemon for TcfsDaemonImpl {
             ));
         }
 
-        info!(paths = ?req.paths, "watch requested");
+        let since = req.since_timestamp;
+        info!(paths = ?req.paths, since, "watch requested");
 
+        let (async_tx, async_rx) = tokio::sync::mpsc::channel(256);
+
+        // ── Emit initial deltas from state cache (catch-up since anchor) ────
+        if since > 0 {
+            let cache = self.state_cache.lock().await;
+            let all = cache.all_entries();
+            for (path, state) in &all {
+                let last = state.last_synced as i64;
+                if last > since {
+                    let filename = std::path::Path::new(path.as_str())
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let event = WatchEvent {
+                        path: path.clone(),
+                        event_type: "modified".into(),
+                        timestamp: last,
+                        filename,
+                        size: state.size,
+                        blake3: state.blake3.clone(),
+                        is_directory: false,
+                        device_id: state.device_id.clone(),
+                    };
+                    if async_tx.send(Ok(event)).await.is_err() {
+                        // Client already disconnected
+                        let stream = tokio_stream::wrappers::ReceiverStream::new(async_rx);
+                        return Ok(tonic::Response::new(Box::pin(stream)));
+                    }
+                }
+            }
+        }
+
+        // ── Live local filesystem events via notify ─────────────────────────
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
+        let state_cache_for_notify = self.state_cache.clone();
 
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let _ = sync_tx.send(res);
@@ -1019,11 +1198,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 .map_err(|e| tonic::Status::internal(format!("watch {path_str}: {e}")))?;
         }
 
-        let (async_tx, async_rx) = tokio::sync::mpsc::channel(256);
-
-        // Bridge sync watcher events to async channel
+        let notify_tx = async_tx.clone();
         tokio::task::spawn_blocking(move || {
-            // Keep watcher alive while client is connected
             let _watcher = watcher;
             while let Ok(result) = sync_rx.recv() {
                 let event = match result {
@@ -1041,24 +1217,147 @@ impl TcfsDaemon for TcfsDaemonImpl {
                             .first()
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_default();
+                        let filename = event
+                            .paths
+                            .first()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs() as i64;
+
+                        // Enrich with state cache metadata (best-effort)
+                        let (size, blake3) = {
+                            let path_buf = std::path::PathBuf::from(&path);
+                            let cache = state_cache_for_notify.blocking_lock();
+                            cache
+                                .get(&path_buf)
+                                .map(|s| (s.size, s.blake3.clone()))
+                                .unwrap_or((0, String::new()))
+                        };
+
                         WatchEvent {
                             path,
                             event_type: event_type.to_string(),
                             timestamp,
+                            filename,
+                            size,
+                            blake3,
+                            is_directory: false,
+                            device_id: String::new(), // local event
                         }
                     }
                     Err(e) => WatchEvent {
                         path: String::new(),
                         event_type: format!("error: {e}"),
                         timestamp: 0,
+                        ..Default::default()
                     },
                 };
-                if async_tx.blocking_send(Ok(event)).is_err() {
+                if notify_tx.blocking_send(Ok(event)).is_err() {
                     break; // Client disconnected
+                }
+            }
+        });
+
+        // ── Live remote events via NATS STATE_UPDATES ───────────────────────
+        let nats_tx = async_tx;
+        let nats_client = self.nats.clone();
+        let device_id = self.device_id.clone();
+        tokio::spawn(async move {
+            let client = nats_client.lock().await;
+            let Some(nats) = client.as_ref() else {
+                debug!("watch: NATS not connected, skipping remote events");
+                return;
+            };
+            match nats.state_consumer(&device_id).await {
+                Ok(mut consumer) => {
+                    use futures::StreamExt;
+                    while let Some(msg_result) = consumer.next().await {
+                        match msg_result {
+                            Ok(state_msg) => {
+                                let event = state_msg.event.clone();
+                                // Ack before processing (at-most-once for watch events is fine)
+                                let _ = state_msg.ack().await;
+
+                                let watch_event = match event {
+                                    tcfs_sync::StateEvent::FileSynced {
+                                        device_id: dev,
+                                        rel_path,
+                                        blake3,
+                                        size,
+                                        timestamp,
+                                        ..
+                                    } => {
+                                        let filename = std::path::Path::new(&rel_path)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        WatchEvent {
+                                            path: rel_path,
+                                            event_type: "modified".into(),
+                                            timestamp: timestamp as i64,
+                                            filename,
+                                            size,
+                                            blake3,
+                                            is_directory: false,
+                                            device_id: dev,
+                                        }
+                                    }
+                                    tcfs_sync::StateEvent::FileDeleted {
+                                        device_id: dev,
+                                        rel_path,
+                                        timestamp,
+                                        ..
+                                    } => {
+                                        let filename = std::path::Path::new(&rel_path)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        WatchEvent {
+                                            path: rel_path,
+                                            event_type: "deleted".into(),
+                                            timestamp: timestamp as i64,
+                                            filename,
+                                            device_id: dev,
+                                            ..Default::default()
+                                        }
+                                    }
+                                    tcfs_sync::StateEvent::FileRenamed {
+                                        device_id: dev,
+                                        new_path,
+                                        timestamp,
+                                        ..
+                                    } => {
+                                        let filename = std::path::Path::new(&new_path)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        WatchEvent {
+                                            path: new_path,
+                                            event_type: "renamed".into(),
+                                            timestamp: timestamp as i64,
+                                            filename,
+                                            device_id: dev,
+                                            ..Default::default()
+                                        }
+                                    }
+                                    _ => continue, // Skip DeviceOnline/Offline etc
+                                };
+                                if nats_tx.send(Ok(watch_event)).await.is_err() {
+                                    break; // Client disconnected
+                                }
+                            }
+                            Err(e) => {
+                                warn!("watch: NATS state consumer error: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("watch: failed to create NATS state consumer: {e}");
                 }
             }
         });
@@ -1122,10 +1421,365 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         _request: tonic::Request<Empty>,
     ) -> Result<tonic::Response<AuthStatusResponse>, tonic::Status> {
+        use tcfs_auth::AuthProvider;
         let guard = self.master_key.lock().await;
+
+        // Build available methods dynamically
+        let mut methods = vec!["master_key".into()];
+        if self.totp_provider.is_available() {
+            methods.push("totp".into());
+        }
+        if self.webauthn_provider.is_available() {
+            methods.push("webauthn".into());
+        }
+
+        // Check active session count
+        self.session_store.cleanup_expired().await;
+        let active_sessions = self.session_store.active_count().await;
+
         Ok(tonic::Response::new(AuthStatusResponse {
             unlocked: guard.is_some(),
             crypto_enabled: self.config.crypto.enabled,
+            session_device_id: self.device_id.clone(),
+            auth_method: if active_sessions > 0 {
+                "session".into()
+            } else if guard.is_some() {
+                "master_key".into()
+            } else {
+                String::new()
+            },
+            available_methods: methods,
+        }))
+    }
+
+    // ── MFA Enrollment ───────────────────────────────────────────────────
+
+    async fn auth_enroll(
+        &self,
+        request: tonic::Request<AuthEnrollRequest>,
+    ) -> Result<tonic::Response<AuthEnrollResponse>, tonic::Status> {
+        use tcfs_auth::AuthProvider;
+
+        let req = request.into_inner();
+        info!(device_id = %req.device_id, method = %req.method, "auth enroll requested");
+
+        match req.method.as_str() {
+            "totp" => match self.totp_provider.register(&req.device_id).await {
+                Ok(reg) => {
+                    // Persist TOTP credentials to data dir
+                    let cred_path = std::path::PathBuf::from(&format!(
+                        "{}/tcfsd/totp-credentials.json",
+                        dirs::data_dir().unwrap_or_default().display()
+                    ));
+                    if let Err(e) = self.totp_provider.save_to_file(&cred_path).await {
+                        tracing::warn!("failed to persist TOTP credentials: {e}");
+                    }
+                    Ok(tonic::Response::new(AuthEnrollResponse {
+                        success: true,
+                        registration_data: reg.data,
+                        instructions: reg.instructions,
+                        error: String::new(),
+                    }))
+                }
+                Err(e) => Ok(tonic::Response::new(AuthEnrollResponse {
+                    success: false,
+                    registration_data: Vec::new(),
+                    instructions: String::new(),
+                    error: format!("TOTP enrollment failed: {e}"),
+                })),
+            },
+            "webauthn" => match self.webauthn_provider.register(&req.device_id).await {
+                Ok(reg) => {
+                    // Persist WebAuthn credentials
+                    let cred_path = std::path::PathBuf::from(&format!(
+                        "{}/tcfsd/webauthn-credentials.json",
+                        dirs::data_dir().unwrap_or_default().display()
+                    ));
+                    if let Err(e) = self.webauthn_provider.save_to_file(&cred_path).await {
+                        tracing::warn!("failed to persist WebAuthn credentials: {e}");
+                    }
+                    Ok(tonic::Response::new(AuthEnrollResponse {
+                        success: true,
+                        registration_data: reg.data,
+                        instructions: reg.instructions,
+                        error: String::new(),
+                    }))
+                }
+                Err(e) => Ok(tonic::Response::new(AuthEnrollResponse {
+                    success: false,
+                    registration_data: Vec::new(),
+                    instructions: String::new(),
+                    error: format!("WebAuthn enrollment failed: {e}"),
+                })),
+            },
+            other => Ok(tonic::Response::new(AuthEnrollResponse {
+                success: false,
+                registration_data: Vec::new(),
+                instructions: String::new(),
+                error: format!("unsupported auth method: {other}"),
+            })),
+        }
+    }
+
+    async fn auth_complete_enroll(
+        &self,
+        request: tonic::Request<AuthCompleteEnrollRequest>,
+    ) -> Result<tonic::Response<AuthCompleteEnrollResponse>, tonic::Status> {
+        let req = request.into_inner();
+        info!(device_id = %req.device_id, method = %req.method, "auth complete enroll requested");
+
+        match req.method.as_str() {
+            "webauthn" => {
+                match self
+                    .webauthn_provider
+                    .complete_registration_from_bytes(&req.device_id, &req.attestation_data)
+                    .await
+                {
+                    Ok(()) => {
+                        // Persist updated credentials
+                        let cred_path = std::path::PathBuf::from(&format!(
+                            "{}/tcfsd/webauthn-credentials.json",
+                            dirs::data_dir().unwrap_or_default().display()
+                        ));
+                        if let Err(e) = self.webauthn_provider.save_to_file(&cred_path).await {
+                            tracing::warn!("failed to persist WebAuthn credentials: {e}");
+                        }
+                        Ok(tonic::Response::new(AuthCompleteEnrollResponse {
+                            success: true,
+                            error: String::new(),
+                        }))
+                    }
+                    Err(e) => Ok(tonic::Response::new(AuthCompleteEnrollResponse {
+                        success: false,
+                        error: format!("registration completion failed: {e}"),
+                    })),
+                }
+            }
+            "totp" => {
+                // TOTP doesn't have a second step — enroll + first verify completes it
+                Ok(tonic::Response::new(AuthCompleteEnrollResponse {
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            other => Ok(tonic::Response::new(AuthCompleteEnrollResponse {
+                success: false,
+                error: format!("unsupported method for complete_enroll: {other}"),
+            })),
+        }
+    }
+
+    async fn auth_challenge(
+        &self,
+        request: tonic::Request<AuthChallengeRequest>,
+    ) -> Result<tonic::Response<AuthChallengeResponse>, tonic::Status> {
+        let req = request.into_inner();
+        info!(device_id = %req.device_id, method = %req.method, "auth challenge requested");
+
+        let provider: &dyn tcfs_auth::AuthProvider = match req.method.as_str() {
+            "totp" => self.totp_provider.as_ref(),
+            "webauthn" => self.webauthn_provider.as_ref(),
+            other => {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "unsupported auth method: {other}"
+                )));
+            }
+        };
+
+        match provider.challenge(&req.device_id).await {
+            Ok(challenge) => Ok(tonic::Response::new(AuthChallengeResponse {
+                challenge_id: challenge.challenge_id,
+                data: challenge.data,
+                prompt: challenge.prompt,
+                expires_at: challenge.expires_at,
+            })),
+            Err(e) => Err(tonic::Status::failed_precondition(format!(
+                "{} challenge failed: {e}",
+                req.method
+            ))),
+        }
+    }
+
+    async fn auth_verify(
+        &self,
+        request: tonic::Request<AuthVerifyRequest>,
+    ) -> Result<tonic::Response<AuthVerifyResponse>, tonic::Status> {
+        use tcfs_auth::AuthProvider;
+
+        let req = request.into_inner();
+        info!(device_id = %req.device_id, "auth verify requested");
+
+        // Rate limit check — reject early if device is locked out
+        if let Some(remaining_secs) = self.rate_limiter.check(&req.device_id).await {
+            tracing::warn!(device_id = %req.device_id, remaining_secs, "auth attempt rejected: rate limited");
+            return Ok(tonic::Response::new(AuthVerifyResponse {
+                success: false,
+                session_token: String::new(),
+                error: format!("too many failed attempts, try again in {remaining_secs}s"),
+            }));
+        }
+
+        let response = tcfs_auth::AuthResponse {
+            challenge_id: req.challenge_id,
+            data: req.data,
+            device_id: req.device_id.clone(),
+        };
+
+        // Try TOTP first, then WebAuthn (method is implicit in the response data)
+        let verify_result = match self.totp_provider.verify(&response).await {
+            Ok(r @ tcfs_auth::VerifyResult::Success { .. }) => Ok(r),
+            _ => self.webauthn_provider.verify(&response).await,
+        };
+
+        match verify_result {
+            Ok(tcfs_auth::VerifyResult::Success {
+                session_token: _,
+                device_id,
+            }) => {
+                // Create and store session
+                let auth_method = if self
+                    .totp_provider
+                    .verify(&tcfs_auth::AuthResponse {
+                        challenge_id: String::new(),
+                        data: response.data.clone(),
+                        device_id: device_id.clone(),
+                    })
+                    .await
+                    .is_ok_and(|r| matches!(r, tcfs_auth::VerifyResult::Success { .. }))
+                {
+                    "totp"
+                } else {
+                    "webauthn"
+                };
+                let session = tcfs_auth::Session::new(&device_id, &device_id, auth_method)
+                    .with_expiry(self.config.auth.session_expiry_hours);
+                let token = session.token.clone();
+                self.session_store.insert(session).await;
+                self.persist_sessions().await;
+                self.rate_limiter.clear(&device_id).await;
+
+                info!(device_id = %device_id, method = auth_method, "auth succeeded, session created");
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: true,
+                    session_token: token,
+                    error: String::new(),
+                }))
+            }
+            Ok(tcfs_auth::VerifyResult::Failure { reason }) => {
+                self.rate_limiter.record_failure(&req.device_id).await;
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: false,
+                    session_token: String::new(),
+                    error: reason,
+                }))
+            }
+            Ok(tcfs_auth::VerifyResult::Expired) => {
+                self.rate_limiter.record_failure(&req.device_id).await;
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: false,
+                    session_token: String::new(),
+                    error: "challenge expired".into(),
+                }))
+            }
+            Err(e) => {
+                self.rate_limiter.record_failure(&req.device_id).await;
+                Ok(tonic::Response::new(AuthVerifyResponse {
+                    success: false,
+                    session_token: String::new(),
+                    error: format!("verification error: {e}"),
+                }))
+            }
+        }
+    }
+
+    // ── Session Revocation ────────────────────────────────────────────────
+
+    async fn auth_revoke(
+        &self,
+        request: tonic::Request<AuthRevokeRequest>,
+    ) -> Result<tonic::Response<AuthRevokeResponse>, tonic::Status> {
+        let req = request.into_inner();
+
+        if !req.session_token.is_empty() {
+            // Revoke specific session by token
+            info!(
+                token_prefix = &req.session_token[..8.min(req.session_token.len())],
+                "revoking session by token"
+            );
+            self.session_store.revoke(&req.session_token).await;
+        } else if !req.device_id.is_empty() {
+            // Revoke all sessions for device
+            info!(device_id = %req.device_id, "revoking all sessions for device");
+            self.session_store.revoke_device(&req.device_id).await;
+        } else {
+            return Ok(tonic::Response::new(AuthRevokeResponse {
+                success: false,
+                error: "must specify session_token or device_id".into(),
+            }));
+        }
+
+        self.persist_sessions().await;
+        Ok(tonic::Response::new(AuthRevokeResponse {
+            success: true,
+            error: String::new(),
+        }))
+    }
+
+    // ── Device Enrollment ────────────────────────────────────────────────
+
+    async fn device_enroll(
+        &self,
+        request: tonic::Request<DeviceEnrollRequest>,
+    ) -> Result<tonic::Response<DeviceEnrollResponse>, tonic::Status> {
+        let req = request.into_inner();
+        info!(device_name = %req.device_name, platform = %req.platform, "device enroll requested");
+
+        // Decode and validate the enrollment invite
+        let invite = tcfs_auth::EnrollmentInvite::decode(&req.invite_data)
+            .map_err(|e| tonic::Status::invalid_argument(format!("invalid invite: {e}")))?;
+
+        if invite.is_expired() {
+            return Ok(tonic::Response::new(DeviceEnrollResponse {
+                success: false,
+                error: "invite has expired".into(),
+                ..Default::default()
+            }));
+        }
+
+        // Validate invite signature against master key
+        if let Some(mk) = self.master_key.lock().await.as_ref() {
+            let signing_key: [u8; 32] = *blake3::hash(mk.as_bytes()).as_bytes();
+            if !invite.verify_signature(&signing_key) {
+                return Ok(tonic::Response::new(DeviceEnrollResponse {
+                    success: false,
+                    error: "invalid invite signature".into(),
+                    ..Default::default()
+                }));
+            }
+        } else {
+            // No master key loaded — cannot verify invite
+            return Err(tonic::Status::failed_precondition(
+                "daemon master key not loaded — cannot verify invite signature",
+            ));
+        }
+
+        // Enroll device in the local registry
+        let device_id = uuid::Uuid::new_v4().to_string();
+        info!(
+            device_id = %device_id,
+            device_name = %req.device_name,
+            platform = %req.platform,
+            invited_by = %invite.created_by,
+            "device enrolled via invite"
+        );
+
+        Ok(tonic::Response::new(DeviceEnrollResponse {
+            success: true,
+            device_id,
+            nats_url: invite.nats_url.unwrap_or_default(),
+            storage_endpoint: invite.storage_endpoint.unwrap_or_default(),
+            available_auth_methods: vec!["totp".into()],
+            error: String::new(),
         }))
     }
 }

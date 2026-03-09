@@ -112,9 +112,9 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         let accessor = providerAccessor
         let containerId = containerIdentifier
 
-        // Re-enumerate all items and report them as updates.
-        // fileproviderd diffs against its internal database to detect actual changes.
-        // This is correct but not incremental — Watch gRPC stream will optimize later.
+        // Incremental enumeration: only fetch items changed since the anchor timestamp.
+        // The daemon's Watch RPC returns catch-up events from the state cache,
+        // reducing O(N) full re-enumerate to O(K) where K = actual changes.
         DispatchQueue.global(qos: .userInitiated).async {
             guard let prov = accessor() else {
                 observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
@@ -128,46 +128,63 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 path = containerId.rawValue
             }
 
-            var outItems: UnsafeMutablePointer<TcfsFileItem>?
+            // Extract timestamp from anchor (milliseconds since epoch → seconds)
+            let sinceTimestamp: Int64 = Self.anchorToTimestamp(anchor)
+
+            var outEvents: UnsafeMutablePointer<TcfsChangeEvent>?
             var outCount: UInt = 0
 
             let result = path.withCString { pathPtr in
-                tcfs_provider_enumerate(prov, pathPtr, &outItems, &outCount)
+                tcfs_provider_enumerate_changes(prov, pathPtr, sinceTimestamp, &outEvents, &outCount)
             }
 
-            guard result == TCFS_ERROR_TCFS_ERROR_NONE, let items = outItems, outCount > 0 else {
+            guard result == TCFS_ERROR_TCFS_ERROR_NONE else {
+                // Fallback: if incremental fails, signal full re-enumerate
+                enumLogger.warning("enumerateChanges: incremental failed (\(result.rawValue)), requesting full re-enumerate")
                 let newAnchor = Self.makeAnchor()
                 observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
                 return
             }
 
-            var providerItems: [NSFileProviderItem] = []
-            let count = Int(outCount)
+            var updatedItems: [NSFileProviderItem] = []
+            var deletedIds: [NSFileProviderItemIdentifier] = []
 
-            for i in 0..<count {
-                let item = items[i]
-                let itemId = item.item_id.map { String(cString: $0) } ?? ""
-                let filename = item.filename.map { String(cString: $0) } ?? ""
-                let contentHash = item.content_hash.map { String(cString: $0) } ?? "1"
+            if let events = outEvents, outCount > 0 {
+                let count = Int(outCount)
+                for i in 0..<count {
+                    let event = events[i]
+                    let itemPath = event.path.map { String(cString: $0) } ?? ""
+                    let filename = event.filename.map { String(cString: $0) } ?? ""
+                    let eventType = event.event_type.map { String(cString: $0) } ?? ""
+                    let contentHash = event.content_hash.map { String(cString: $0) } ?? "1"
 
-                providerItems.append(
-                    TCFSFileProviderItem(
-                        identifier: NSFileProviderItemIdentifier(itemId),
-                        parentIdentifier: containerId,
-                        filename: filename,
-                        isDirectory: item.is_directory,
-                        fileSize: item.file_size,
-                        downloaded: false,
-                        uploaded: true,
-                        versionTag: contentHash
-                    )
-                )
+                    if eventType == "deleted" {
+                        deletedIds.append(NSFileProviderItemIdentifier(itemPath))
+                    } else {
+                        updatedItems.append(
+                            TCFSFileProviderItem(
+                                identifier: NSFileProviderItemIdentifier(itemPath),
+                                parentIdentifier: containerId,
+                                filename: filename,
+                                isDirectory: event.is_directory,
+                                fileSize: event.file_size,
+                                downloaded: false,
+                                uploaded: true,
+                                versionTag: contentHash
+                            )
+                        )
+                    }
+                }
+                tcfs_change_events_free(outEvents, outCount)
             }
 
-            tcfs_file_items_free(outItems, outCount)
+            enumLogger.info("enumerateChanges: \(updatedItems.count) updated, \(deletedIds.count) deleted (since \(sinceTimestamp))")
 
-            if !providerItems.isEmpty {
-                observer.didUpdate(providerItems)
+            if !updatedItems.isEmpty {
+                observer.didUpdate(updatedItems)
+            }
+            if !deletedIds.isEmpty {
+                observer.didDeleteItems(withIdentifiers: deletedIds)
             }
             let newAnchor = Self.makeAnchor()
             observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
@@ -178,10 +195,18 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         completionHandler(Self.makeAnchor())
     }
 
-    /// Monotonic sync anchor from current timestamp.
+    /// Monotonic sync anchor from current timestamp (milliseconds since epoch).
     private static func makeAnchor() -> NSFileProviderSyncAnchor {
         var timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
         let data = Data(bytes: &timestamp, count: MemoryLayout<UInt64>.size)
         return NSFileProviderSyncAnchor(data)
+    }
+
+    /// Extract Unix timestamp (seconds) from a sync anchor.
+    private static func anchorToTimestamp(_ anchor: NSFileProviderSyncAnchor) -> Int64 {
+        let data = anchor.rawValue
+        guard data.count == MemoryLayout<UInt64>.size else { return 0 }
+        let millis = data.withUnsafeBytes { $0.load(as: UInt64.self) }
+        return Int64(millis / 1000)
     }
 }
