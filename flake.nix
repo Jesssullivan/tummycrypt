@@ -35,6 +35,8 @@
             "aarch64-unknown-linux-gnu"
             "x86_64-apple-darwin"
             "aarch64-apple-darwin"
+            "aarch64-apple-ios"
+            "aarch64-apple-ios-sim"
           ];
         };
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
@@ -78,7 +80,8 @@
         tcfsd = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tcfsd";
-          cargoExtraArgs = "-p tcfsd";
+          cargoExtraArgs = "-p tcfsd"
+            + pkgs.lib.optionalString pkgs.stdenv.isDarwin " --features fuse-t";
           meta.mainProgram = "tcfsd";
         });
 
