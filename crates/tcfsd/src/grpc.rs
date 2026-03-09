@@ -102,6 +102,11 @@ impl TcfsDaemonImpl {
         }
     }
 
+    /// Get a clone of the session store (for background tasks).
+    pub fn session_store(&self) -> tcfs_auth::SessionStore {
+        self.session_store.clone()
+    }
+
     /// Load persisted TOTP credentials from disk.
     pub async fn load_totp_credentials(&self, path: &std::path::Path) -> anyhow::Result<()> {
         self.totp_provider.load_from_file(path).await
