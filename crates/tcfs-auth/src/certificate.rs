@@ -245,7 +245,10 @@ impl AuthProvider for CertificateProvider {
         };
 
         // Check fingerprint against stored identity
-        if !self.verify_fingerprint(&response.device_id, fingerprint).await {
+        if !self
+            .verify_fingerprint(&response.device_id, fingerprint)
+            .await
+        {
             warn!(
                 device_id = %response.device_id,
                 "certificate fingerprint mismatch"

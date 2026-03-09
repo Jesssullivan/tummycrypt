@@ -259,12 +259,8 @@ async fn test_reauth_replaces_session() {
 fn test_expired_invite_rejected() {
     let master_key = [42u8; 32];
     // Create invite with 0 hours TTL (immediately expired)
-    let invite = EnrollmentInvite::new(
-        "admin-device",
-        &master_key,
-        0,
-        DevicePermissions::default(),
-    );
+    let invite =
+        EnrollmentInvite::new("admin-device", &master_key, 0, DevicePermissions::default());
 
     assert!(invite.is_expired());
     assert!(!invite.is_valid(&master_key));
@@ -277,12 +273,7 @@ fn test_invite_wrong_key_rejected() {
     let real_key = [42u8; 32];
     let wrong_key = [0u8; 32];
 
-    let invite = EnrollmentInvite::new(
-        "admin-device",
-        &real_key,
-        24,
-        DevicePermissions::default(),
-    );
+    let invite = EnrollmentInvite::new("admin-device", &real_key, 24, DevicePermissions::default());
 
     assert!(invite.verify_signature(&real_key));
     assert!(!invite.verify_signature(&wrong_key));
