@@ -601,7 +601,7 @@ pub unsafe extern "C" fn tcfs_provider_enumerate_changes(
         *out_events = ptr::null_mut();
         *out_count = 0;
     }
-    TcfsError::TcfsOk
+    TcfsError::TcfsErrorNone
 }
 
 /// Free a provider handle.
