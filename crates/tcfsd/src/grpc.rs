@@ -1290,6 +1290,80 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Ok(tonic::Response::new(AuthStatusResponse {
             unlocked: guard.is_some(),
             crypto_enabled: self.config.crypto.enabled,
+            session_device_id: self.device_id.clone(),
+            auth_method: if guard.is_some() {
+                "master_key".into()
+            } else {
+                String::new()
+            },
+            available_methods: vec!["master_key".into(), "totp".into()],
+        }))
+    }
+
+    // ── MFA Enrollment ───────────────────────────────────────────────────
+
+    async fn auth_enroll(
+        &self,
+        request: tonic::Request<AuthEnrollRequest>,
+    ) -> Result<tonic::Response<AuthEnrollResponse>, tonic::Status> {
+        let req = request.into_inner();
+        info!(device_id = %req.device_id, method = %req.method, "auth enroll requested");
+
+        // TODO: Wire to tcfs-auth provider registry
+        Ok(tonic::Response::new(AuthEnrollResponse {
+            success: false,
+            registration_data: Vec::new(),
+            instructions: String::new(),
+            error: format!("auth enrollment not yet wired (method: {})", req.method),
+        }))
+    }
+
+    async fn auth_challenge(
+        &self,
+        request: tonic::Request<AuthChallengeRequest>,
+    ) -> Result<tonic::Response<AuthChallengeResponse>, tonic::Status> {
+        let req = request.into_inner();
+        info!(device_id = %req.device_id, method = %req.method, "auth challenge requested");
+
+        // TODO: Wire to tcfs-auth provider
+        Err(tonic::Status::unimplemented(format!(
+            "auth challenge not yet wired (method: {})",
+            req.method
+        )))
+    }
+
+    async fn auth_verify(
+        &self,
+        request: tonic::Request<AuthVerifyRequest>,
+    ) -> Result<tonic::Response<AuthVerifyResponse>, tonic::Status> {
+        let req = request.into_inner();
+        info!(device_id = %req.device_id, "auth verify requested");
+
+        // TODO: Wire to tcfs-auth provider + session store
+        Ok(tonic::Response::new(AuthVerifyResponse {
+            success: false,
+            session_token: String::new(),
+            error: "auth verification not yet wired".into(),
+        }))
+    }
+
+    // ── Device Enrollment ────────────────────────────────────────────────
+
+    async fn device_enroll(
+        &self,
+        request: tonic::Request<DeviceEnrollRequest>,
+    ) -> Result<tonic::Response<DeviceEnrollResponse>, tonic::Status> {
+        let req = request.into_inner();
+        info!(device_name = %req.device_name, platform = %req.platform, "device enroll requested");
+
+        // TODO: Wire to tcfs-auth enrollment + tcfs-secrets device registry
+        Ok(tonic::Response::new(DeviceEnrollResponse {
+            success: false,
+            device_id: String::new(),
+            nats_url: String::new(),
+            storage_endpoint: String::new(),
+            available_auth_methods: vec!["totp".into()],
+            error: "device enrollment not yet wired".into(),
         }))
     }
 }

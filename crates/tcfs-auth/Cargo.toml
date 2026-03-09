@@ -1,0 +1,51 @@
+[package]
+name = "tcfs-auth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Authentication and authorization providers for tcfs"
+
+[features]
+default = ["totp"]
+# Time-based One-Time Password (RFC 6238)
+totp = ["dep:totp-rs", "dep:qrcode"]
+# WebAuthn / FIDO2 / passkey support
+webauthn = ["dep:webauthn-rs", "dep:webauthn-rs-proto"]
+# PAM integration (Linux only)
+pam = []
+
+[dependencies]
+tcfs-crypto = { path = "../tcfs-crypto" }
+tcfs-secrets = { path = "../tcfs-secrets" }
+
+# Core
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = "0.1"
+
+# Cryptography
+rand = { workspace = true }
+blake3 = { workspace = true }
+secrecy = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+
+# TOTP (RFC 6238)
+totp-rs = { version = "5", features = ["gen_secret", "serde_support", "otpauth"], optional = true }
+qrcode = { version = "0.14", optional = true }
+
+# WebAuthn / FIDO2
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"], optional = true }
+webauthn-rs-proto = { version = "0.5", optional = true }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
