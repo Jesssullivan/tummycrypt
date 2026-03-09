@@ -14,6 +14,8 @@ totp = ["dep:totp-rs", "dep:qrcode"]
 webauthn = ["dep:webauthn-rs", "dep:webauthn-rs-proto"]
 # PAM integration (Linux only)
 pam = []
+# X.509 certificate-based auth
+certificate = []
 
 [dependencies]
 tcfs-crypto = { path = "../tcfs-crypto" }

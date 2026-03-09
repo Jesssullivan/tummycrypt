@@ -33,6 +33,9 @@ pub mod webauthn;
 #[cfg(feature = "pam")]
 pub mod pam;
 
+#[cfg(feature = "certificate")]
+pub mod certificate;
+
 // Re-exports
 pub use enrollment::{EnrollmentInvite, EnrollmentRequest, EnrollmentResult};
 pub use provider::{AuthChallenge, AuthProvider, AuthResponse, VerifyResult};
