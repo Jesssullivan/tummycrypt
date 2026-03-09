@@ -30,6 +30,9 @@ pub mod totp;
 #[cfg(feature = "webauthn")]
 pub mod webauthn;
 
+#[cfg(feature = "pam")]
+pub mod pam;
+
 // Re-exports
 pub use enrollment::{EnrollmentInvite, EnrollmentRequest, EnrollmentResult};
 pub use provider::{AuthChallenge, AuthProvider, AuthResponse, VerifyResult};
