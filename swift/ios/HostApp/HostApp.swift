@@ -8,10 +8,11 @@ private let hostLogger = Logger(subsystem: "io.tinyland.tcfs.ios", category: "ho
 @main
 struct TCFSApp: App {
     @StateObject private var viewModel = TCFSViewModel()
+    @StateObject private var authViewModel = AuthViewModel()
 
     var body: some Scene {
         WindowGroup {
-            ContentView(viewModel: viewModel)
+            ContentView(viewModel: viewModel, authViewModel: authViewModel)
         }
     }
 }
@@ -188,6 +189,7 @@ class TCFSViewModel: ObservableObject {
 
 struct ContentView: View {
     @ObservedObject var viewModel: TCFSViewModel
+    @ObservedObject var authViewModel: AuthViewModel
 
     @State private var endpoint = ""
     @State private var bucket = ""
@@ -243,6 +245,20 @@ struct ContentView: View {
                         viewModel.refreshSyncStatus()
                     }
                     .disabled(!viewModel.isConfigured)
+                }
+
+                Section("Security") {
+                    NavigationLink {
+                        AuthView(viewModel: authViewModel)
+                    } label: {
+                        HStack {
+                            Label("Authentication", systemImage: "lock.shield")
+                            Spacer()
+                            Text(authViewModel.authState.rawValue)
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                    }
                 }
             }
             .navigationTitle("TCFS")
