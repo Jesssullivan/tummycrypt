@@ -51,6 +51,13 @@ fi
 # ── Step 1: Generate Xcode project ───────────────────────────────────────
 if ! $SKIP_ARCHIVE; then
     echo ""
+    echo "==> Stamping git SHA..."
+    GIT_SHA=$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    # Patch GIT_COMMIT_SHA in project.yml so xcodegen bakes it into the build settings
+    sed -i '' "s/GIT_COMMIT_SHA: .*/GIT_COMMIT_SHA: \"$GIT_SHA\"/" "$IOS_DIR/project.yml"
+    echo "    SHA: $GIT_SHA"
+
+    echo ""
     echo "==> Generating Xcode project..."
     cd "$IOS_DIR"
     clean_exec /opt/homebrew/bin/xcodegen generate

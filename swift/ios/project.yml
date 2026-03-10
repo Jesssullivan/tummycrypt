@@ -12,8 +12,9 @@ settings:
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "Apple Distribution: John Sullivan (QP994XQKNH)"
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "0.9.3"
-    CURRENT_PROJECT_VERSION: "7"
+    MARKETING_VERSION: "0.9.4"
+    CURRENT_PROJECT_VERSION: "8"
+    GIT_COMMIT_SHA: "dev"
 
 targets:
   TCFS:
@@ -32,6 +33,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         ITSAppUsesNonExemptEncryption: false
+        GITCommitSHA: "$(GIT_COMMIT_SHA)"
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSAllowsArbitraryLoads: true

@@ -563,8 +563,10 @@ public protocol TcfsProviderHandleProtocol : AnyObject {
     
     /**
      * Process a device enrollment invite (from QR code or deep link).
+     *
+     * Returns credentials extracted from the invite for auto-configuration.
      */
-    func processEnrollmentInvite(inviteData: String) throws  -> AuthResult
+    func processEnrollmentInvite(inviteData: String) throws  -> EnrollmentResult
     
     /**
      * Upload a local file to remote storage.
@@ -756,9 +758,11 @@ open func listItems(path: String)throws  -> [FileItem] {
     
     /**
      * Process a device enrollment invite (from QR code or deep link).
+     *
+     * Returns credentials extracted from the invite for auto-configuration.
      */
-open func processEnrollmentInvite(inviteData: String)throws  -> AuthResult {
-    return try  FfiConverterTypeAuthResult.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
+open func processEnrollmentInvite(inviteData: String)throws  -> EnrollmentResult {
+    return try  FfiConverterTypeEnrollmentResult.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
     uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_process_enrollment_invite(self.uniffiClonePointer(),
         FfiConverterString.lower(inviteData),$0
     )
@@ -905,6 +909,149 @@ public func FfiConverterTypeAuthResult_lift(_ buf: RustBuffer) throws -> AuthRes
 #endif
 public func FfiConverterTypeAuthResult_lower(_ value: AuthResult) -> RustBuffer {
     return FfiConverterTypeAuthResult.lower(value)
+}
+
+
+/**
+ * Result of a device enrollment via invite.
+ *
+ * Contains all credentials needed to configure the new device.
+ */
+public struct EnrollmentResult {
+    public var success: Bool
+    public var errorMessage: String
+    public var deviceId: String
+    public var storageEndpoint: String
+    public var storageBucket: String
+    public var accessKey: String
+    public var s3Secret: String
+    public var remotePrefix: String
+    public var encryptionPassphrase: String
+    public var encryptionSalt: String
+    public var sessionToken: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(success: Bool, errorMessage: String, deviceId: String, storageEndpoint: String, storageBucket: String, accessKey: String, s3Secret: String, remotePrefix: String, encryptionPassphrase: String, encryptionSalt: String, sessionToken: String) {
+        self.success = success
+        self.errorMessage = errorMessage
+        self.deviceId = deviceId
+        self.storageEndpoint = storageEndpoint
+        self.storageBucket = storageBucket
+        self.accessKey = accessKey
+        self.s3Secret = s3Secret
+        self.remotePrefix = remotePrefix
+        self.encryptionPassphrase = encryptionPassphrase
+        self.encryptionSalt = encryptionSalt
+        self.sessionToken = sessionToken
+    }
+}
+
+
+
+extension EnrollmentResult: Equatable, Hashable {
+    public static func ==(lhs: EnrollmentResult, rhs: EnrollmentResult) -> Bool {
+        if lhs.success != rhs.success {
+            return false
+        }
+        if lhs.errorMessage != rhs.errorMessage {
+            return false
+        }
+        if lhs.deviceId != rhs.deviceId {
+            return false
+        }
+        if lhs.storageEndpoint != rhs.storageEndpoint {
+            return false
+        }
+        if lhs.storageBucket != rhs.storageBucket {
+            return false
+        }
+        if lhs.accessKey != rhs.accessKey {
+            return false
+        }
+        if lhs.s3Secret != rhs.s3Secret {
+            return false
+        }
+        if lhs.remotePrefix != rhs.remotePrefix {
+            return false
+        }
+        if lhs.encryptionPassphrase != rhs.encryptionPassphrase {
+            return false
+        }
+        if lhs.encryptionSalt != rhs.encryptionSalt {
+            return false
+        }
+        if lhs.sessionToken != rhs.sessionToken {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(success)
+        hasher.combine(errorMessage)
+        hasher.combine(deviceId)
+        hasher.combine(storageEndpoint)
+        hasher.combine(storageBucket)
+        hasher.combine(accessKey)
+        hasher.combine(s3Secret)
+        hasher.combine(remotePrefix)
+        hasher.combine(encryptionPassphrase)
+        hasher.combine(encryptionSalt)
+        hasher.combine(sessionToken)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEnrollmentResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EnrollmentResult {
+        return
+            try EnrollmentResult(
+                success: FfiConverterBool.read(from: &buf), 
+                errorMessage: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf), 
+                storageEndpoint: FfiConverterString.read(from: &buf), 
+                storageBucket: FfiConverterString.read(from: &buf), 
+                accessKey: FfiConverterString.read(from: &buf), 
+                s3Secret: FfiConverterString.read(from: &buf), 
+                remotePrefix: FfiConverterString.read(from: &buf), 
+                encryptionPassphrase: FfiConverterString.read(from: &buf), 
+                encryptionSalt: FfiConverterString.read(from: &buf), 
+                sessionToken: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EnrollmentResult, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.success, into: &buf)
+        FfiConverterString.write(value.errorMessage, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.storageEndpoint, into: &buf)
+        FfiConverterString.write(value.storageBucket, into: &buf)
+        FfiConverterString.write(value.accessKey, into: &buf)
+        FfiConverterString.write(value.s3Secret, into: &buf)
+        FfiConverterString.write(value.remotePrefix, into: &buf)
+        FfiConverterString.write(value.encryptionPassphrase, into: &buf)
+        FfiConverterString.write(value.encryptionSalt, into: &buf)
+        FfiConverterString.write(value.sessionToken, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnrollmentResult_lift(_ buf: RustBuffer) throws -> EnrollmentResult {
+    return try FfiConverterTypeEnrollmentResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnrollmentResult_lower(_ value: EnrollmentResult) -> RustBuffer {
+    return FfiConverterTypeEnrollmentResult.lower(value)
 }
 
 
@@ -1679,7 +1826,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_list_items() != 37548) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_process_enrollment_invite() != 12693) {
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_process_enrollment_invite() != 53679) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_upload_file() != 28793) {
