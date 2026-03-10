@@ -69,7 +69,7 @@ struct TCFSApp: App {
             return
         }
 
-        authViewModel.processInviteData(dataParam)
+        authViewModel.processInviteData(dataParam, tcfsViewModel: viewModel)
         hostLogger.info("Enrollment invite processed via deep link")
     }
 }

@@ -1780,6 +1780,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
             storage_endpoint: invite.storage_endpoint.unwrap_or_default(),
             available_auth_methods: vec!["totp".into()],
             error: String::new(),
+            storage_bucket: invite.storage_bucket.unwrap_or_default(),
+            storage_access_key: invite.storage_access_key.unwrap_or_default(),
+            storage_secret: invite.storage_secret_key.unwrap_or_default(),
+            remote_prefix: invite.remote_prefix.unwrap_or_default(),
+            encryption_passphrase: invite.encryption_passphrase.unwrap_or_default(),
+            encryption_salt: invite.encryption_salt.unwrap_or_default(),
         }))
     }
 }

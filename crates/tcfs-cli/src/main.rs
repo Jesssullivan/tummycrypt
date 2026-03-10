@@ -2027,14 +2027,75 @@ async fn cmd_device_invite(
         .context("status RPC failed")?
         .into_inner();
 
-    // TODO: derive signing key from master key instead of placeholder
-    let signing_key = blake3::hash(b"tcfs-fleet-invite-key");
-    let invite = EnrollmentInvite::new(
+    // Load master key for signing
+    let key_path = config
+        .crypto
+        .master_key_file
+        .clone()
+        .unwrap_or_else(|| {
+            tcfs_secrets::device::default_registry_path()
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("master.key")
+        });
+
+    let signing_key = if key_path.exists() {
+        let key_bytes = std::fs::read(&key_path)
+            .with_context(|| format!("reading master key: {}", key_path.display()))?;
+        if key_bytes.len() != tcfs_crypto::KEY_SIZE {
+            anyhow::bail!(
+                "master key has wrong size: {} bytes (expected {})",
+                key_bytes.len(),
+                tcfs_crypto::KEY_SIZE,
+            );
+        }
+        *blake3::hash(&key_bytes).as_bytes()
+    } else {
+        eprintln!(
+            "Warning: master key not found at {}, using placeholder signing key",
+            key_path.display()
+        );
+        *blake3::hash(b"tcfs-fleet-invite-key").as_bytes()
+    };
+
+    let mut invite = EnrollmentInvite::new(
         &status.device_id,
-        signing_key.as_bytes(),
+        &signing_key,
         expiry_hours,
         DevicePermissions::default(),
     );
+
+    // Include storage credentials for credential brokering
+    invite.storage_endpoint = Some(config.storage.endpoint.clone());
+    invite.storage_bucket = Some(config.storage.bucket.clone());
+    invite.remote_prefix = Some(String::from("default"));
+
+    // Load S3 credentials from environment (sops-nix populates these)
+    if let Ok(access_key) = std::env::var("AWS_ACCESS_KEY_ID")
+        .or_else(|_| {
+            std::env::var("TCFS_S3_ACCESS_KEY_FILE")
+                .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
+        })
+    {
+        invite.storage_access_key = Some(access_key);
+    }
+    if let Ok(secret_key) = std::env::var("AWS_SECRET_ACCESS_KEY")
+        .or_else(|_| {
+            std::env::var("TCFS_S3_SECRET_KEY_FILE")
+                .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
+        })
+    {
+        invite.storage_secret_key = Some(secret_key);
+    }
+
+    // Include encryption config if enabled
+    if config.crypto.enabled {
+        if let Ok(passphrase) = std::env::var("TCFS_ENCRYPTION_KEY_FILE")
+            .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
+        {
+            invite.encryption_passphrase = Some(passphrase);
+        }
+    }
 
     let encoded = invite.encode().context("failed to encode invite")?;
     let deep_link = format!("tcfs://enroll?data={encoded}");
@@ -2042,6 +2103,12 @@ async fn cmd_device_invite(
     println!("Device enrollment invite created");
     println!();
     println!("Expires: {} hours from now", expiry_hours);
+    println!("Storage: {} (bucket: {})", config.storage.endpoint, config.storage.bucket);
+    if invite.storage_access_key.is_some() {
+        println!("Credentials: included (S3 access key brokered)");
+    } else {
+        println!("Credentials: NOT included (set AWS_ACCESS_KEY_ID or TCFS_S3_ACCESS_KEY_FILE)");
+    }
     println!();
     println!("Share this invite data with the new device:");
     println!("  {encoded}");

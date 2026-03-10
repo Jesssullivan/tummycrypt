@@ -78,6 +78,24 @@ pub struct AuthResult {
     pub error_message: String,
 }
 
+/// Result of a device enrollment via invite.
+///
+/// Contains all credentials needed to configure the new device.
+#[derive(uniffi::Record)]
+pub struct EnrollmentResult {
+    pub success: bool,
+    pub error_message: String,
+    pub device_id: String,
+    pub storage_endpoint: String,
+    pub storage_bucket: String,
+    pub access_key: String,
+    pub s3_secret: String,
+    pub remote_prefix: String,
+    pub encryption_passphrase: String,
+    pub encryption_salt: String,
+    pub session_token: String,
+}
+
 /// Errors returned by provider operations.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ProviderError {
@@ -743,11 +761,13 @@ impl TcfsProviderHandle {
     }
 
     /// Process a device enrollment invite (from QR code or deep link).
+    ///
+    /// Returns credentials extracted from the invite for auto-configuration.
     #[cfg(feature = "uniffi")]
     pub fn process_enrollment_invite(
         &self,
         invite_data: &str,
-    ) -> Result<AuthResult, ProviderError> {
+    ) -> Result<EnrollmentResult, ProviderError> {
         let invite = tcfs_auth::enrollment::EnrollmentInvite::decode(invite_data).map_err(|e| {
             ProviderError::Auth {
                 message: format!("invalid invite: {e}"),
@@ -755,10 +775,18 @@ impl TcfsProviderHandle {
         })?;
 
         if invite.is_expired() {
-            return Ok(AuthResult {
+            return Ok(EnrollmentResult {
                 success: false,
-                session_token: String::new(),
                 error_message: "invite has expired".into(),
+                device_id: String::new(),
+                storage_endpoint: String::new(),
+                storage_bucket: String::new(),
+                access_key: String::new(),
+                s3_secret: String::new(),
+                remote_prefix: String::new(),
+                encryption_passphrase: String::new(),
+                encryption_salt: String::new(),
+                session_token: String::new(),
             });
         }
 
@@ -768,10 +796,18 @@ impl TcfsProviderHandle {
         let token = session.token.clone();
         self.runtime.block_on(self.session_store.insert(session));
 
-        Ok(AuthResult {
+        Ok(EnrollmentResult {
             success: true,
-            session_token: token,
             error_message: String::new(),
+            device_id: invite.created_by.clone(),
+            storage_endpoint: invite.storage_endpoint.unwrap_or_default(),
+            storage_bucket: invite.storage_bucket.unwrap_or_default(),
+            access_key: invite.storage_access_key.unwrap_or_default(),
+            s3_secret: invite.storage_secret_key.unwrap_or_default(),
+            remote_prefix: invite.remote_prefix.unwrap_or_else(|| "default".into()),
+            encryption_passphrase: invite.encryption_passphrase.unwrap_or_default(),
+            encryption_salt: invite.encryption_salt.unwrap_or_default(),
+            session_token: token,
         })
     }
 

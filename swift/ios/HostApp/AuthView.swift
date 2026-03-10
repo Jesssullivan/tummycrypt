@@ -150,22 +150,43 @@ class AuthViewModel: ObservableObject {
 
     // MARK: - QR Code Enrollment (device invite)
 
-    func processInviteData(_ data: String) {
+    func processInviteData(_ data: String, tcfsViewModel: TCFSViewModel? = nil) {
         isLoading = true
         errorMessage = nil
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
+            // Decode invite directly — no provider needed (credentials come FROM the invite)
+            let config = ProviderConfig(
+                s3Endpoint: "", s3Bucket: "", accessKey: "", s3Secret: "",
+                remotePrefix: "default", deviceId: "pending",
+                encryptionPassphrase: "", encryptionSalt: ""
+            )
+
             do {
-                guard let provider = self.loadProvider() else {
-                    throw NSError(domain: "tcfs", code: -1, userInfo: [NSLocalizedDescriptionKey: "Provider not configured"])
-                }
+                let provider = try TcfsProviderHandle(config: config)
                 let result = try provider.processEnrollmentInvite(inviteData: data)
 
                 DispatchQueue.main.async {
                     self.isLoading = false
                     if result.success {
+                        // Auto-configure: save brokered credentials to keychain
+                        if !result.storageEndpoint.isEmpty, let vm = tcfsViewModel {
+                            vm.saveConfig(
+                                endpoint: result.storageEndpoint,
+                                bucket: result.storageBucket,
+                                accessKey: result.accessKey,
+                                s3Secret: result.s3Secret,
+                                remotePrefix: result.remotePrefix.isEmpty ? "default" : result.remotePrefix,
+                                deviceId: result.deviceId.isEmpty
+                                    ? "ios-\(UIDevice.current.name.lowercased().replacingOccurrences(of: " ", with: "-"))"
+                                    : result.deviceId,
+                                passphrase: result.encryptionPassphrase,
+                                salt: result.encryptionSalt
+                            )
+                            authLogger.info("Credentials auto-configured from invite")
+                        }
                         self.saveKeychain("session_token", value: result.sessionToken)
                         self.authState = .authenticated
                         authLogger.info("Device enrolled via invite")
