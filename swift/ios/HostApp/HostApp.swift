@@ -203,6 +203,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationView {
+            Group {
             if !viewModel.isConfigured {
                 // --- Onboarding: unconfigured device ---
                 VStack(spacing: 24) {
@@ -300,6 +301,7 @@ struct ContentView: View {
                 }
                 .navigationTitle("TCFS")
             }
+            } // Group
             .sheet(isPresented: $showingConfig) {
                 NavigationView {
                     Form {
