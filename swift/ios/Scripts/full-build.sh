@@ -2,6 +2,7 @@
 # Full TCFS iOS build + sign + export pipeline
 # Must run from Terminal.app (needs keychain entitlements)
 set -euo pipefail
+trap 'echo "==> FAILED at line $LINENO (exit $?): $(sed -n "${LINENO}p" "$0")" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -40,12 +41,12 @@ fi
 security import /tmp/tcfs-dist-3des.p12 -k "$KEYCHAIN" -P "tcfs" -T /usr/bin/codesign -A
 security import /tmp/AppleWWDRCAG3.cer -k "$KEYCHAIN" -T /usr/bin/codesign -A 2>/dev/null || true
 [ -f /tmp/AppleRootCA.cer ] && security import /tmp/AppleRootCA.cer -k "$KEYCHAIN" -T /usr/bin/codesign -A 2>/dev/null || true
-security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "$KC_PASS" "$KEYCHAIN"
+security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "$KC_PASS" "$KEYCHAIN" >/dev/null 2>&1
 
 # Also import to login keychain for SecItem API visibility
 security import /tmp/tcfs-dist-3des.p12 -k ~/Library/Keychains/login.keychain-db -P "tcfs" -T /usr/bin/codesign -T /usr/bin/security -A 2>/dev/null || true
 security import /tmp/AppleWWDRCAG3.cer -k ~/Library/Keychains/login.keychain-db -T /usr/bin/codesign -A 2>/dev/null || true
-security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "" ~/Library/Keychains/login.keychain-db 2>/dev/null || true
+security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "" ~/Library/Keychains/login.keychain-db >/dev/null 2>&1 || true
 
 # Update search list
 EXISTING=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
@@ -102,10 +103,12 @@ GENERATED_DIR="$IOS_DIR/Generated"
 if [ ! -f "$STATICLIB" ]; then
   echo "==> Step 2: Building Rust staticlib ($RUST_TARGET)..."
 
-  # Resolve paths OUTSIDE nix develop (xcrun needs Xcode, not nix toolchain)
-  IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-  XCODE_CLANG=$(xcrun --find clang)
-  AR_PATH=$(xcrun --find ar)
+  # Resolve paths using system xcrun with Xcode's DEVELOPER_DIR
+  # (Nix devShell sets DEVELOPER_DIR to a Nix store path that has no iOS SDK)
+  XCRUN="env -u SDKROOT DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer /usr/bin/xcrun"
+  IOS_SDK=$($XCRUN --sdk iphoneos --show-sdk-path)
+  XCODE_CLANG=$($XCRUN --find clang)
+  AR_PATH=$($XCRUN --find ar)
 
   echo "    iOS SDK: $IOS_SDK"
   echo "    Clang:   $XCODE_CLANG"
@@ -113,13 +116,18 @@ if [ ! -f "$STATICLIB" ]; then
   cd "$REPO_ROOT"
 
   # Build staticlib (release)
-  nix develop -c bash -c "
+  echo "    Running: nix develop -c cargo build -p tcfs-file-provider --target $RUST_TARGET --features uniffi --release"
+  if ! nix develop -c bash -c "
+    set -euo pipefail
     export SDKROOT='$IOS_SDK'
     export CC_aarch64_apple_ios='$XCODE_CLANG'
     export AR_aarch64_apple_ios='$AR_PATH'
     export CFLAGS_aarch64_apple_ios='--target=arm64-apple-ios -isysroot $IOS_SDK'
-    cargo build -p tcfs-file-provider --target $RUST_TARGET --features uniffi --release
-  "
+    cargo build -p tcfs-file-provider --target $RUST_TARGET --features uniffi --release 2>&1
+  "; then
+    echo "ERROR: Rust build failed (exit $?)" >&2
+    exit 1
+  fi
 
   if [ ! -f "$STATICLIB" ]; then
     echo "ERROR: Staticlib not found after build at $STATICLIB" >&2
@@ -145,6 +153,15 @@ else
   fi
 fi
 
+# --- Sanitize environment for Xcode tooling ---
+# Nix devShell sets NIX_CC, NIX_LDFLAGS, NIX_CFLAGS_COMPILE, DEVELOPER_DIR, SDKROOT
+# which corrupt xcodebuild's linker invocation. Strip ALL Nix vars.
+for var in $(env | grep -oE '^NIX_[^=]+'); do unset "$var"; done
+unset SDKROOT buildInputs nativeBuildInputs
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+# Restore clean PATH (system + Homebrew, no Nix wrappers for xcode steps)
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.nix-profile/bin"
+
 # --- Step 3: Generate Xcode project ---
 echo "==> Step 3: Generating Xcode project..."
 cd "$IOS_DIR"
@@ -155,6 +172,10 @@ echo "==> Step 4: Archiving..."
 ARCHIVE_PATH="$IOS_DIR/build/TCFS.xcarchive"
 rm -rf "$ARCHIVE_PATH"
 
+env -i \
+  HOME="$HOME" \
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" \
+  DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 xcodebuild archive \
   -project "$IOS_DIR/TCFS.xcodeproj" \
   -scheme "TCFS" \
@@ -174,13 +195,11 @@ echo "==> Step 5: Exporting IPA..."
 EXPORT_DIR="$IOS_DIR/build/export"
 rm -rf "$EXPORT_DIR"
 
-# Ensure Apple's rsync is used (Homebrew rsync lacks -E/--extended-attributes)
-if [ -f /opt/homebrew/bin/rsync ] && [ -f /usr/bin/rsync ]; then
-  export PATH="/usr/bin:$(echo "$PATH" | tr ':' '\n' | grep -v homebrew | tr '\n' ':')"
-  echo "    Using rsync: $(which rsync)"
-fi
-
-if ! xcodebuild -exportArchive \
+if ! env -i \
+  HOME="$HOME" \
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" \
+  DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+xcodebuild -exportArchive \
   -archivePath "$ARCHIVE_PATH" \
   -exportPath "$EXPORT_DIR" \
   -exportOptionsPlist "$IOS_DIR/Scripts/ExportOptions.plist" \
@@ -203,7 +222,7 @@ echo "    IPA: $IPA_FILE ($(du -h "$IPA_FILE" | cut -f1))"
 
 # --- Step 6: Upload to TestFlight ---
 echo "==> Step 6: Uploading to TestFlight..."
-xcrun altool --upload-app \
+/usr/bin/xcrun altool --upload-app \
   -f "$IPA_FILE" \
   -t ios \
   --apiKey ZV65L9B864 \
