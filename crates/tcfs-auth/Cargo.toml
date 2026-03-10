@@ -45,6 +45,9 @@ qrcode = { version = "0.14", optional = true }
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"], optional = true }
 webauthn-rs-proto = { version = "0.5", optional = true }
 
+# Compression (compact QR encoding)
+zstd = { workspace = true }
+
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 

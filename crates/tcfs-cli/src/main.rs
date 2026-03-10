@@ -233,6 +233,9 @@ enum DeviceAction {
         /// Expiry in hours (default: 24)
         #[arg(long, default_value = "24")]
         expiry_hours: u64,
+        /// Render QR code in terminal (compact encoding for phone scanning)
+        #[arg(long)]
+        qr: bool,
     },
 }
 
@@ -410,7 +413,7 @@ async fn main() -> Result<()> {
             DeviceAction::List => cmd_device_list(),
             DeviceAction::Revoke { name } => cmd_device_revoke(&name),
             DeviceAction::Status => cmd_device_status(),
-            DeviceAction::Invite { expiry_hours } => cmd_device_invite(&config, expiry_hours).await,
+            DeviceAction::Invite { expiry_hours, qr } => cmd_device_invite(&config, expiry_hours, qr).await,
         },
         Commands::Auth { action } => {
             #[cfg(unix)]
@@ -2015,6 +2018,7 @@ async fn cmd_auth_revoke(
 async fn cmd_device_invite(
     config: &tcfs_core::config::TcfsConfig,
     expiry_hours: u64,
+    render_qr: bool,
 ) -> Result<()> {
     use tcfs_auth::enrollment::EnrollmentInvite;
     use tcfs_auth::session::DevicePermissions;
@@ -2097,8 +2101,10 @@ async fn cmd_device_invite(
         }
     }
 
-    let encoded = invite.encode().context("failed to encode invite")?;
-    let deep_link = format!("tcfs://enroll?data={encoded}");
+    // Use compact encoding (short keys + zstd) for QR-friendly payloads
+    let compact = invite.encode_compact().context("failed to compact-encode invite")?;
+    let full = invite.encode().context("failed to encode invite")?;
+    let deep_link = format!("tcfs://enroll?data={compact}");
 
     println!("Device enrollment invite created");
     println!();
@@ -2109,12 +2115,31 @@ async fn cmd_device_invite(
     } else {
         println!("Credentials: NOT included (set AWS_ACCESS_KEY_ID or TCFS_S3_ACCESS_KEY_FILE)");
     }
+    println!("Payload: {} bytes compact, {} bytes full", compact.len(), full.len());
     println!();
-    println!("Share this invite data with the new device:");
-    println!("  {encoded}");
-    println!();
-    println!("Or use this deep link (iOS/macOS):");
-    println!("  {deep_link}");
+
+    if render_qr {
+        use qrcode::{QrCode, render::unicode::Dense1x2};
+        let code = QrCode::new(deep_link.as_bytes())
+            .context("QR code generation failed (payload may still be too large)")?;
+        let qr_string = code
+            .render::<Dense1x2>()
+            .dark_color(Dense1x2::Light)
+            .light_color(Dense1x2::Dark)
+            .build();
+        println!("{qr_string}");
+        println!();
+        println!("Scan the QR code above with the TCFS iOS app.");
+        println!("Deep link: {deep_link}");
+    } else {
+        println!("Share this invite data with the new device:");
+        println!("  {compact}");
+        println!();
+        println!("Or use this deep link (iOS/macOS):");
+        println!("  {deep_link}");
+        println!();
+        println!("Tip: use --qr to render a scannable QR code in the terminal.");
+    }
     println!();
     println!("On the new device, run:");
     println!("  tcfs device enroll --invite <invite-data>");
