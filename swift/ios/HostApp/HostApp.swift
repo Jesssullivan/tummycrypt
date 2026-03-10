@@ -203,15 +203,55 @@ struct ContentView: View {
 
     var body: some View {
         NavigationView {
-            List {
-                Section("Status") {
-                    HStack {
-                        Text("FileProvider")
-                        Spacer()
-                        Text(viewModel.status)
-                            .foregroundColor(viewModel.isConfigured ? .green : .secondary)
+            if !viewModel.isConfigured {
+                // --- Onboarding: unconfigured device ---
+                VStack(spacing: 24) {
+                    Spacer()
+
+                    Image(systemName: "externaldrive.badge.icloud")
+                        .font(.system(size: 64))
+                        .foregroundColor(.accentColor)
+
+                    Text("Welcome to TCFS")
+                        .font(.title2.bold())
+
+                    Text("Scan an enrollment QR code from an existing device to get started.")
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 32)
+
+                    NavigationLink {
+                        QREnrollmentView(viewModel: viewModel, authViewModel: authViewModel)
+                    } label: {
+                        Label("Scan QR Code", systemImage: "qrcode.viewfinder")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
                     }
-                    if viewModel.isConfigured {
+                    .padding(.horizontal, 32)
+
+                    Button("Configure Manually") {
+                        showingConfig = true
+                    }
+                    .foregroundColor(.secondary)
+                    .font(.subheadline)
+
+                    Spacer()
+                }
+                .navigationTitle("TCFS")
+            } else {
+                // --- Configured: main dashboard ---
+                List {
+                    Section("Status") {
+                        HStack {
+                            Text("FileProvider")
+                            Spacer()
+                            Text(viewModel.status)
+                                .foregroundColor(viewModel.isConfigured ? .green : .secondary)
+                        }
                         HStack {
                             Text("Files Synced")
                             Spacer()
@@ -229,39 +269,37 @@ struct ContentView: View {
                             }
                         }
                     }
-                }
 
-                Section {
-                    Button("Configure Credentials") {
-                        showingConfig = true
+                    Section {
+                        Button("Configure Credentials") {
+                            showingConfig = true
+                        }
+
+                        Button("Register FileProvider Domain") {
+                            viewModel.registerDomain()
+                        }
+
+                        Button("Refresh Sync Status") {
+                            viewModel.refreshSyncStatus()
+                        }
                     }
 
-                    Button("Register FileProvider Domain") {
-                        viewModel.registerDomain()
-                    }
-                    .disabled(!viewModel.isConfigured)
-
-                    Button("Refresh Sync Status") {
-                        viewModel.refreshSyncStatus()
-                    }
-                    .disabled(!viewModel.isConfigured)
-                }
-
-                Section("Security") {
-                    NavigationLink {
-                        AuthView(viewModel: authViewModel)
-                    } label: {
-                        HStack {
-                            Label("Authentication", systemImage: "lock.shield")
-                            Spacer()
-                            Text(authViewModel.authState.rawValue)
-                                .foregroundColor(.secondary)
-                                .font(.caption)
+                    Section("Security") {
+                        NavigationLink {
+                            AuthView(viewModel: authViewModel)
+                        } label: {
+                            HStack {
+                                Label("Authentication", systemImage: "lock.shield")
+                                Spacer()
+                                Text(authViewModel.authState.rawValue)
+                                    .foregroundColor(.secondary)
+                                    .font(.caption)
+                            }
                         }
                     }
                 }
+                .navigationTitle("TCFS")
             }
-            .navigationTitle("TCFS")
             .sheet(isPresented: $showingConfig) {
                 NavigationView {
                     Form {
