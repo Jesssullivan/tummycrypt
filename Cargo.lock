@@ -5290,6 +5290,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
  "cbindgen",
  "futures",
  "hyper-util",

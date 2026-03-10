@@ -29,6 +29,10 @@ targets:
         CFBundleDisplayName: TCFS
         CFBundleIconName: AppIcon
         UILaunchScreen: {}
+        CFBundleURLTypes:
+          - CFBundleURLName: "io.tinyland.tcfs"
+            CFBundleURLSchemes:
+              - tcfs
         NSCameraUsageDescription: "TCFS needs camera access to scan device enrollment QR codes."
         NSFaceIDUsageDescription: "TCFS uses Face ID to unlock your encrypted files."
         UISupportedInterfaceOrientations:

@@ -14,6 +14,63 @@ struct TCFSApp: App {
         WindowGroup {
             ContentView(viewModel: viewModel, authViewModel: authViewModel)
         }
+        .onOpenURL { url in
+            handleDeepLink(url)
+        }
+    }
+
+    private func handleDeepLink(_ url: URL) {
+        guard url.scheme == "tcfs" else {
+            hostLogger.warning("Ignoring URL with unknown scheme: \(url.absoluteString)")
+            return
+        }
+
+        let host = url.host()
+
+        switch host {
+        case "bootstrap":
+            handleBootstrapLink(url)
+        case "enroll":
+            handleEnrollLink(url)
+        default:
+            hostLogger.warning("Unrecognized deep link host: \(host ?? "nil") in \(url.absoluteString)")
+        }
+    }
+
+    private func handleBootstrapLink(_ url: URL) {
+        // BootstrapConfig.parse() already handles tcfs://bootstrap?data=<base64>
+        guard let config = BootstrapConfig.parse(url.absoluteString) else {
+            hostLogger.error("Failed to parse bootstrap deep link: \(url.absoluteString)")
+            return
+        }
+
+        let deviceId = config.device_id
+            ?? "ios-\(UIDevice.current.name.lowercased().replacingOccurrences(of: " ", with: "-"))"
+
+        viewModel.saveConfig(
+            endpoint: config.s3_endpoint,
+            bucket: config.s3_bucket,
+            accessKey: config.access_key,
+            s3Secret: config.s3_secret,
+            remotePrefix: config.remote_prefix ?? "default",
+            deviceId: deviceId,
+            passphrase: config.encryption_passphrase ?? "",
+            salt: config.encryption_salt ?? ""
+        )
+
+        hostLogger.info("Bootstrap config saved via deep link (endpoint=\(config.s3_endpoint))")
+    }
+
+    private func handleEnrollLink(_ url: URL) {
+        // Extract the data query parameter, matching QRScannerView's parsing
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let dataParam = components.queryItems?.first(where: { $0.name == "data" })?.value else {
+            hostLogger.error("Enroll deep link missing 'data' parameter: \(url.absoluteString)")
+            return
+        }
+
+        authViewModel.processInviteData(dataParam)
+        hostLogger.info("Enrollment invite processed via deep link")
     }
 }
 
@@ -287,7 +344,7 @@ struct ContentView: View {
 
                     Section("Security") {
                         NavigationLink {
-                            AuthView(viewModel: authViewModel)
+                            AuthView(viewModel: authViewModel, tcfsViewModel: viewModel)
                         } label: {
                             HStack {
                                 Label("Authentication", systemImage: "lock.shield")
