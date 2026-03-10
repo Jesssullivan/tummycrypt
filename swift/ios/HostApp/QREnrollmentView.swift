@@ -16,7 +16,12 @@ private let enrollLogger = Logger(subsystem: "io.tinyland.tcfs.ios", category: "
 ///   "access_key": "...",
 ///   "s3_secret": "...",
 ///   "remote_prefix": "default",
-///   "device_id": "iphone-jess"
+///   "device_id": "iphone-jess",
+///   "created_at": 1741654800,         // optional — Unix timestamp
+///   "expires_at": 1741658400,         // optional — Unix timestamp (1h default)
+///   "encryption_passphrase": "...",   // optional — enables E2EE
+///   "encryption_salt": "...",         // optional — Argon2id KDF salt
+///   "signature": "abcdef012345..."    // optional — BLAKE3-keyed-MAC (64 hex chars)
 /// }
 /// ```
 struct BootstrapConfig: Codable {
@@ -29,6 +34,35 @@ struct BootstrapConfig: Codable {
     let device_id: String?
     let encryption_passphrase: String?
     let encryption_salt: String?
+    let created_at: Int?
+    let expires_at: Int?
+    let signature: String?
+
+    /// Check if this config has expired (if expiry is set).
+    var isExpired: Bool {
+        guard let expiresAt = expires_at else { return false }
+        return Int(Date().timeIntervalSince1970) > expiresAt
+    }
+
+    /// Reconstruct the signable payload (JSON without the signature field).
+    /// Must match the exact format produced by gen-bootstrap-qr.sh.
+    func signablePayload() -> String? {
+        var parts: [String] = []
+        parts.append("\"type\":\"\(type ?? "tcfs-bootstrap")\"")
+        parts.append("\"s3_endpoint\":\"\(s3_endpoint)\"")
+        parts.append("\"s3_bucket\":\"\(s3_bucket)\"")
+        parts.append("\"access_key\":\"\(access_key)\"")
+        parts.append("\"s3_secret\":\"\(s3_secret)\"")
+        parts.append("\"remote_prefix\":\"\(remote_prefix ?? "default")\"")
+        parts.append("\"device_id\":\"\(device_id ?? "")\"")
+        if let ca = created_at { parts.append("\"created_at\":\(ca)") }
+        if let ea = expires_at { parts.append("\"expires_at\":\(ea)") }
+        if let ep = encryption_passphrase, !ep.isEmpty {
+            parts.append("\"encryption_passphrase\":\"\(ep)\"")
+            parts.append("\"encryption_salt\":\"\(encryption_salt ?? "")\"")
+        }
+        return "{\(parts.joined(separator: ","))}"
+    }
 
     /// Try to parse from a scanned QR string.
     /// Supports: raw JSON, base64-encoded JSON, or `tcfs://bootstrap?data=<base64>` deep link.
@@ -297,6 +331,37 @@ struct QREnrollmentView: View {
                 errorMessage = "QR code is not a valid TCFS bootstrap config.\n\nExpected JSON with s3_endpoint, s3_bucket, access_key, s3_secret."
             }
             return
+        }
+
+        // Check expiry
+        if config.isExpired {
+            DispatchQueue.main.async {
+                isProcessing = false
+                errorMessage = "This bootstrap QR code has expired. Please generate a new one."
+            }
+            return
+        }
+
+        // Verify signature if present (unsigned configs are accepted with a warning)
+        if let sig = config.signature, !sig.isEmpty {
+            if let payload = config.signablePayload() {
+                do {
+                    let valid = try verifyBootstrapSignature(
+                        payload: payload,
+                        signature: sig,
+                        signingKeyHex: "" // iOS doesn't have the signing key yet — see note below
+                    )
+                    if !valid {
+                        enrollLogger.warning("Bootstrap config signature verification failed")
+                        // Don't reject — iOS doesn't have the signing key for verification yet.
+                        // Signature is validated server-side when the device registers.
+                    }
+                } catch {
+                    enrollLogger.warning("Signature verification error: \(error.localizedDescription)")
+                }
+            }
+        } else if config.created_at != nil {
+            enrollLogger.info("Bootstrap config is unsigned (no b3sum on generating host)")
         }
 
         // Generate device ID if not provided

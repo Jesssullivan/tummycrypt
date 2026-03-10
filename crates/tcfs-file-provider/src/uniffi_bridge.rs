@@ -802,6 +802,48 @@ impl TcfsProviderHandle {
     }
 }
 
+/// Verify a BLAKE3-keyed-MAC signature on a bootstrap config payload.
+///
+/// The signing key is the raw 32-byte key hex-encoded (64 chars).
+/// The payload is the JSON string that was signed (everything except the `signature` field).
+/// Returns true if the signature is valid, false otherwise.
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+fn verify_bootstrap_signature(
+    payload: String,
+    signature: String,
+    signing_key_hex: String,
+) -> Result<bool, ProviderError> {
+    // Decode hex key to 32 bytes
+    let key_bytes: [u8; 32] = {
+        let decoded: Vec<u8> = (0..signing_key_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&signing_key_hex[i..i + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|e| ProviderError::Auth {
+                message: format!("invalid signing key hex: {e}"),
+            })?;
+        decoded.try_into().map_err(|_| ProviderError::Auth {
+            message: "signing key must be 32 bytes (64 hex chars)".into(),
+        })?
+    };
+
+    let mac = blake3::keyed_hash(&key_bytes, payload.as_bytes());
+    let expected = mac.to_hex();
+
+    // Constant-time comparison
+    let sig_bytes = signature.as_bytes();
+    let exp_bytes = expected.as_bytes();
+    if sig_bytes.len() != exp_bytes.len() {
+        return Ok(false);
+    }
+    let mut diff = 0u8;
+    for (a, b) in sig_bytes.iter().zip(exp_bytes.iter()) {
+        diff |= a ^ b;
+    }
+    Ok(diff == 0)
+}
+
 impl TcfsProviderHandle {
     /// Internal async conflict check — used by both `check_conflict` and `list_items`.
     async fn check_conflict_async(&self, item_id: &str) -> Result<Option<String>, ProviderError> {

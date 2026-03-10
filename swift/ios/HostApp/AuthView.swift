@@ -292,6 +292,7 @@ class AuthViewModel: ObservableObject {
 
 struct AuthView: View {
     @ObservedObject var viewModel: AuthViewModel
+    var tcfsViewModel: TCFSViewModel?
 
     var body: some View {
         List {
@@ -380,7 +381,7 @@ struct AuthView: View {
                     }
 
                     NavigationLink {
-                        QRScannerView(authViewModel: viewModel)
+                        QRScannerView(authViewModel: viewModel, viewModel: tcfsViewModel)
                     } label: {
                         Label("Scan Enrollment QR Code", systemImage: "qrcode.viewfinder")
                     }
