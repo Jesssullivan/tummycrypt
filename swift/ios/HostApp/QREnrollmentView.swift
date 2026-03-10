@@ -16,7 +16,9 @@ private let enrollLogger = Logger(subsystem: "io.tinyland.tcfs.ios", category: "
 ///   "access_key": "...",
 ///   "s3_secret": "...",
 ///   "remote_prefix": "default",
-///   "device_id": "iphone-jess"
+///   "device_id": "iphone-jess",
+///   "encryption_passphrase": "...",   // optional — enables E2EE
+///   "encryption_salt": "..."          // optional — Argon2id KDF salt
 /// }
 /// ```
 struct BootstrapConfig: Codable {

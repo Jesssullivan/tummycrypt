@@ -42,15 +42,39 @@ else
     BUCKET="tcfs"
 fi
 
+# Read encryption passphrase from sops-nix secret file (optional — plaintext mode if absent)
+ENCRYPTION_PASSPHRASE=""
+if [ -n "${TCFS_ENCRYPTION_KEY_FILE:-}" ] && [ -f "${TCFS_ENCRYPTION_KEY_FILE:-}" ]; then
+    ENCRYPTION_PASSPHRASE="$(cat "$TCFS_ENCRYPTION_KEY_FILE")"
+fi
+
+# Read encryption salt: env var > config.toml [crypto] section > empty (plaintext mode)
+ENCRYPTION_SALT="${TCFS_ENCRYPTION_SALT:-}"
+if [ -z "$ENCRYPTION_SALT" ] && [ -f "$CONFIG" ]; then
+    ENCRYPTION_SALT=$(grep '^salt' "$CONFIG" | head -1 | sed 's/.*= *"//;s/".*//')
+fi
+
+# Build encryption JSON fields (omitted entirely if passphrase is empty)
+ENCRYPTION_JSON=""
+if [ -n "$ENCRYPTION_PASSPHRASE" ]; then
+    ENCRYPTION_JSON=$(printf ',"encryption_passphrase":"%s","encryption_salt":"%s"' "$ENCRYPTION_PASSPHRASE" "$ENCRYPTION_SALT")
+fi
+
 # Build JSON payload
 JSON=$(cat <<EOF
-{"type":"tcfs-bootstrap","s3_endpoint":"${ENDPOINT}","s3_bucket":"${BUCKET}","access_key":"${ACCESS_KEY}","s3_secret":"${S3_SECRET}","remote_prefix":"default","device_id":"${DEVICE_ID}"}
+{"type":"tcfs-bootstrap","s3_endpoint":"${ENDPOINT}","s3_bucket":"${BUCKET}","access_key":"${ACCESS_KEY}","s3_secret":"${S3_SECRET}","remote_prefix":"default","device_id":"${DEVICE_ID}"${ENCRYPTION_JSON}}
 EOF
 )
 
 echo "==> Bootstrap config for device: $DEVICE_ID"
 echo "    Endpoint: $ENDPOINT"
 echo "    Bucket:   $BUCKET"
+if [ -n "$ENCRYPTION_PASSPHRASE" ]; then
+    echo "    Encryption: enabled (passphrase from TCFS_ENCRYPTION_KEY_FILE)"
+    echo "    Salt:     ${ENCRYPTION_SALT:-(empty)}"
+else
+    echo "    Encryption: disabled (no TCFS_ENCRYPTION_KEY_FILE)"
+fi
 echo ""
 
 if command -v qrencode &>/dev/null; then
