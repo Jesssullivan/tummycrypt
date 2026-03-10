@@ -63,6 +63,16 @@ if ! $SKIP_ARCHIVE; then
     clean_exec /opt/homebrew/bin/xcodegen generate
 fi
 
+# ── Keychain: unlock tcfs-build for codesigning from SSH ─────────────────
+TCFS_KEYCHAIN="$HOME/Library/Keychains/tcfs-build.keychain-db"
+if [ -f "$TCFS_KEYCHAIN" ]; then
+    echo "==> Unlocking tcfs-build keychain..."
+    security unlock-keychain -p "tcfs-build" "$TCFS_KEYCHAIN"
+    security set-key-partition-list -S "apple-tool:,apple:,codesign:" -s -k "tcfs-build" "$TCFS_KEYCHAIN" >/dev/null 2>&1 || true
+    security list-keychains -d user -s "$TCFS_KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
+    security set-keychain-settings "$TCFS_KEYCHAIN"  # disable auto-lock
+fi
+
 # ── Step 2: Archive ──────────────────────────────────────────────────────
 if $SKIP_ARCHIVE; then
     if [ ! -d "$ARCHIVE_PATH" ]; then
