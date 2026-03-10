@@ -1614,6 +1614,22 @@ fileprivate struct FfiConverterSequenceTypeFileItem: FfiConverterRustBuffer {
         return seq
     }
 }
+/**
+ * Verify a BLAKE3-keyed-MAC signature on a bootstrap config payload.
+ *
+ * The signing key is the raw 32-byte key hex-encoded (64 chars).
+ * The payload is the JSON string that was signed (everything except the `signature` field).
+ * Returns true if the signature is valid, false otherwise.
+ */
+public func verifyBootstrapSignature(payload: String, signature: String, signingKeyHex: String)throws  -> Bool {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
+    uniffi_tcfs_file_provider_fn_func_verify_bootstrap_signature(
+        FfiConverterString.lower(payload),
+        FfiConverterString.lower(signature),
+        FfiConverterString.lower(signingKeyHex),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -1629,6 +1645,9 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_tcfs_file_provider_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_tcfs_file_provider_checksum_func_verify_bootstrap_signature() != 37951) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_auth_enroll_totp() != 30310) {
         return InitializationResult.apiChecksumMismatch
