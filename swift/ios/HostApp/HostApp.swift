@@ -258,6 +258,35 @@ struct ContentView: View {
     @State private var salt = ""
     @State private var showingConfig = false
 
+    /// Load current keychain values into the form fields when the sheet opens.
+    private func loadKeychainIntoForm() {
+        func read(_ account: String) -> String {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "io.tinyland.tcfs.config",
+                kSecAttrAccount as String: account,
+                kSecAttrAccessGroup as String: "group.io.tinyland.tcfs",
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ]
+            var item: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+                  let data = item as? Data,
+                  let value = String(data: data, encoding: .utf8) else {
+                return ""
+            }
+            return value
+        }
+        endpoint = read("s3_endpoint")
+        bucket = read("s3_bucket")
+        accessKey = read("access_key")
+        s3Secret = read("s3_secret")
+        remotePrefix = read("remote_prefix")
+        deviceId = read("device_id")
+        passphrase = read("encryption_passphrase")
+        salt = read("encryption_salt")
+    }
+
     var body: some View {
         NavigationView {
             Group {
@@ -359,7 +388,7 @@ struct ContentView: View {
                 .navigationTitle("TCFS")
             }
             } // Group
-            .sheet(isPresented: $showingConfig) {
+            .sheet(isPresented: $showingConfig, onDismiss: nil) {
                 NavigationView {
                     Form {
                         Section("S3 Storage") {
@@ -404,6 +433,9 @@ struct ContentView: View {
                     .navigationBarItems(trailing: Button("Cancel") {
                         showingConfig = false
                     })
+                    .onAppear {
+                        loadKeychainIntoForm()
+                    }
                 }
             }
         }

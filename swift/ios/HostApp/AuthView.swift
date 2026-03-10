@@ -410,6 +410,14 @@ struct AuthView: View {
                         .foregroundColor(.secondary)
                         .lineLimit(3)
 
+                    if let otpauthURL = URL(string: uri) {
+                        Button {
+                            UIApplication.shared.open(otpauthURL)
+                        } label: {
+                            Label("Open in Authenticator App", systemImage: "arrow.up.forward.app")
+                        }
+                    }
+
                     Button {
                         UIPasteboard.general.string = uri
                     } label: {
