@@ -60,20 +60,58 @@ if [ -n "$ENCRYPTION_PASSPHRASE" ]; then
     ENCRYPTION_JSON=$(printf ',"encryption_passphrase":"%s","encryption_salt":"%s"' "$ENCRYPTION_PASSPHRASE" "$ENCRYPTION_SALT")
 fi
 
-# Build JSON payload
+# Expiry: 1 hour from now (Unix timestamp)
+CREATED_AT=$(date +%s)
+EXPIRES_AT=$((CREATED_AT + 3600))
+
+# Build the signable payload (everything except signature itself)
+PAYLOAD=$(cat <<EOF
+{"type":"tcfs-bootstrap","s3_endpoint":"${ENDPOINT}","s3_bucket":"${BUCKET}","access_key":"${ACCESS_KEY}","s3_secret":"${S3_SECRET}","remote_prefix":"default","device_id":"${DEVICE_ID}","created_at":${CREATED_AT},"expires_at":${EXPIRES_AT}${ENCRYPTION_JSON}}
+EOF
+)
+
+# Sign with BLAKE3-keyed-MAC if signing key is available
+SIGNATURE=""
+SIGNING_KEY=""
+# Derive signing key from master key file or sops-nix secret
+if [ -f "${HOME}/.config/tcfs/master.key" ] && command -v b3sum &>/dev/null; then
+    # master.key is 32 raw bytes; hex-encode for b3sum --keyed
+    SIGNING_KEY=$(xxd -p -c 64 "${HOME}/.config/tcfs/master.key")
+elif [ -n "${TCFS_ENCRYPTION_KEY_FILE:-}" ] && [ -f "${TCFS_ENCRYPTION_KEY_FILE:-}" ] && command -v b3sum &>/dev/null; then
+    # Derive signing key from encryption passphrase via BLAKE3 hash (deterministic 32 bytes)
+    SIGNING_KEY=$(printf '%s' "tcfs-bootstrap-signing" | b3sum --derive-key "$(cat "$TCFS_ENCRYPTION_KEY_FILE")" | cut -d' ' -f1)
+fi
+
+if [ -n "$SIGNING_KEY" ]; then
+    SIGNATURE=$(printf '%s' "$PAYLOAD" | b3sum --keyed <<< "$SIGNING_KEY" | cut -d' ' -f1)
+fi
+
+# Build final JSON with signature
+SIGNATURE_JSON=""
+if [ -n "$SIGNATURE" ]; then
+    SIGNATURE_JSON=$(printf ',"signature":"%s"' "$SIGNATURE")
+fi
+
 JSON=$(cat <<EOF
-{"type":"tcfs-bootstrap","s3_endpoint":"${ENDPOINT}","s3_bucket":"${BUCKET}","access_key":"${ACCESS_KEY}","s3_secret":"${S3_SECRET}","remote_prefix":"default","device_id":"${DEVICE_ID}"${ENCRYPTION_JSON}}
+{"type":"tcfs-bootstrap","s3_endpoint":"${ENDPOINT}","s3_bucket":"${BUCKET}","access_key":"${ACCESS_KEY}","s3_secret":"${S3_SECRET}","remote_prefix":"default","device_id":"${DEVICE_ID}","created_at":${CREATED_AT},"expires_at":${EXPIRES_AT}${ENCRYPTION_JSON}${SIGNATURE_JSON}}
 EOF
 )
 
 echo "==> Bootstrap config for device: $DEVICE_ID"
 echo "    Endpoint: $ENDPOINT"
 echo "    Bucket:   $BUCKET"
+echo "    Created:  $(date -r "$CREATED_AT" 2>/dev/null || date -d "@$CREATED_AT" 2>/dev/null || echo "$CREATED_AT")"
+echo "    Expires:  $(date -r "$EXPIRES_AT" 2>/dev/null || date -d "@$EXPIRES_AT" 2>/dev/null || echo "$EXPIRES_AT")"
 if [ -n "$ENCRYPTION_PASSPHRASE" ]; then
     echo "    Encryption: enabled (passphrase from TCFS_ENCRYPTION_KEY_FILE)"
     echo "    Salt:     ${ENCRYPTION_SALT:-(empty)}"
 else
     echo "    Encryption: disabled (no TCFS_ENCRYPTION_KEY_FILE)"
+fi
+if [ -n "$SIGNATURE" ]; then
+    echo "    Signature: ${SIGNATURE:0:16}..."
+else
+    echo "    Signature: unsigned (b3sum or master key not available)"
 fi
 echo ""
 

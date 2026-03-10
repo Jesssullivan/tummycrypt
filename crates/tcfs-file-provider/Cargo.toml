@@ -16,7 +16,7 @@ direct = ["dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:opendal
 ## gRPC backend — delegates all operations to tcfsd daemon
 grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream", "dep:futures"]
 ## UniFFI bindings for iOS (proc-macro based, no UDL needed)
-uniffi = ["direct", "dep:uniffi", "dep:tcfs-auth"]
+uniffi = ["direct", "dep:uniffi", "dep:tcfs-auth", "dep:blake3"]
 
 [dependencies]
 tcfs-core = { path = "../tcfs-core" }
@@ -39,6 +39,7 @@ tokio-stream = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 uniffi = { workspace = true, features = ["cli"], optional = true }
 tcfs-auth = { path = "../tcfs-auth", optional = true }
+blake3 = { workspace = true, optional = true }
 
 [[bin]]
 name = "uniffi-bindgen"
