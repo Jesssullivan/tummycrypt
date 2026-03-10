@@ -28,7 +28,12 @@ targets:
       properties:
         CFBundleDisplayName: TCFS
         CFBundleIconName: AppIcon
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
         CFBundleURLTypes:
           - CFBundleURLName: "io.tinyland.tcfs"
             CFBundleURLSchemes:
@@ -72,6 +77,11 @@ targets:
       path: Resources/Extension-Info.plist
       properties:
         CFBundleDisplayName: TCFS FileProvider
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
         NSExtension:
           NSExtensionFileProviderDocumentGroup: group.io.tinyland.tcfs
           NSExtensionFileProviderSupportsDatalessFolders: true
