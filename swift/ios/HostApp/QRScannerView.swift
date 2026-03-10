@@ -110,7 +110,7 @@ struct QRScannerView: View {
                     }
                 }
                 .padding()
-            } else if let data = scannedData {
+            } else if let _ = scannedData {
                 VStack(spacing: 16) {
                     if isProcessing {
                         ProgressView("Processing invite...")

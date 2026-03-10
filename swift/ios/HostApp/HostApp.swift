@@ -13,9 +13,9 @@ struct TCFSApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(viewModel: viewModel, authViewModel: authViewModel)
-        }
-        .onOpenURL { url in
-            handleDeepLink(url)
+                .onOpenURL { url in
+                    handleDeepLink(url)
+                }
         }
     }
 
