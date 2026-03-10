@@ -59,6 +59,7 @@ struct CameraPreview: UIViewRepresentable {
 
 struct QRScannerView: View {
     @ObservedObject var authViewModel: AuthViewModel
+    var viewModel: TCFSViewModel?
     @Environment(\.dismiss) private var dismiss
 
     @State private var session = AVCaptureSession()
@@ -217,25 +218,102 @@ struct QRScannerView: View {
         scannedData = value
         isProcessing = true
 
-        scannerLogger.info("QR scanned: \(value.prefix(30))...")
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        scannerLogger.info("QR scanned: \(trimmed.prefix(30))...")
 
-        // Extract invite data from deep link or raw base64
-        let inviteData: String
-        if value.hasPrefix("tcfs://enroll?data=") {
-            inviteData = String(value.dropFirst("tcfs://enroll?data=".count))
-        } else {
-            inviteData = value
+        // Route based on payload type to avoid sending raw JSON to base64 decoder.
+        // Bootstrap configs (raw JSON or tcfs://bootstrap deep links) must be parsed
+        // as BootstrapConfig, not as enrollment invites.
+
+        // 1. Bootstrap deep link
+        if trimmed.hasPrefix("tcfs://bootstrap") {
+            handleBootstrapPayload(trimmed)
+            return
         }
 
+        // 2. Raw JSON — try bootstrap config parse first
+        if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
+            if let config = BootstrapConfig.parse(trimmed) {
+                handleBootstrapConfig(config)
+            } else {
+                DispatchQueue.main.async {
+                    self.isProcessing = false
+                    self.errorMessage = "QR contains JSON but is not a valid TCFS bootstrap config or enrollment invite.\n\nExpected fields: s3_endpoint, s3_bucket, access_key, s3_secret."
+                }
+            }
+            return
+        }
+
+        // 3. Enrollment invite deep link
+        if trimmed.hasPrefix("tcfs://enroll?data=") {
+            let inviteData = String(trimmed.dropFirst("tcfs://enroll?data=".count))
+            processEnrollmentInvite(inviteData)
+            return
+        }
+
+        // 4. Opaque string — could be base64 enrollment invite or base64 bootstrap config.
+        //    Try bootstrap first (non-destructive), then enrollment invite.
+        if let config = BootstrapConfig.parse(trimmed) {
+            handleBootstrapConfig(config)
+            return
+        }
+
+        // Fall through to enrollment invite processing
+        processEnrollmentInvite(trimmed)
+    }
+
+    private func handleBootstrapPayload(_ value: String) {
+        if let config = BootstrapConfig.parse(value) {
+            handleBootstrapConfig(config)
+        } else {
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                self.errorMessage = "Invalid bootstrap QR code. Could not decode configuration data."
+            }
+        }
+    }
+
+    private func handleBootstrapConfig(_ config: BootstrapConfig) {
+        guard let vm = viewModel else {
+            scannerLogger.warning("Bootstrap config scanned but no TCFSViewModel available — use the enrollment screen instead")
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                self.errorMessage = "This is a bootstrap QR code. Please use the enrollment screen on the main page to scan it."
+            }
+            return
+        }
+
+        let deviceId = config.device_id ?? "ios-\(UIDevice.current.name.lowercased().replacingOccurrences(of: " ", with: "-"))"
+
+        vm.saveConfig(
+            endpoint: config.s3_endpoint,
+            bucket: config.s3_bucket,
+            accessKey: config.access_key,
+            s3Secret: config.s3_secret,
+            remotePrefix: config.remote_prefix ?? "default",
+            deviceId: deviceId,
+            passphrase: config.encryption_passphrase ?? "",
+            salt: config.encryption_salt ?? ""
+        )
+
+        scannerLogger.info("Bootstrap config saved via scanner (endpoint=\(config.s3_endpoint))")
+
+        DispatchQueue.main.async {
+            self.isProcessing = false
+            self.errorMessage = nil
+        }
+    }
+
+    private func processEnrollmentInvite(_ inviteData: String) {
         authViewModel.processInviteData(inviteData)
 
         // Check result after a brief delay for processing
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            isProcessing = false
-            if authViewModel.authState == .authenticated {
-                errorMessage = nil
+            self.isProcessing = false
+            if self.authViewModel.authState == .authenticated {
+                self.errorMessage = nil
             } else {
-                errorMessage = authViewModel.errorMessage ?? "Unknown enrollment error"
+                self.errorMessage = self.authViewModel.errorMessage ?? "Unknown enrollment error"
             }
         }
     }
