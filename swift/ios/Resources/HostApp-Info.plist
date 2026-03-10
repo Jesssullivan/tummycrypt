@@ -20,8 +20,26 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>io.tinyland.tcfs</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tcfs</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>TCFS needs camera access to scan device enrollment QR codes.</string>
 	<key>NSFaceIDUsageDescription</key>

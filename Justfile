@@ -119,6 +119,56 @@ lint:
 deny:
     ~/.cargo/bin/cargo deny check
 
+# ── iOS (TestFlight) ─────────────────────────────────────────────────────
+# Pipeline: Rust staticlib → xcodegen → archive → export IPA → TestFlight
+# All ios-* recipes must run on PZM from Terminal.app (keychain access).
+
+# Full iOS release: build Rust, archive, export, upload
+ios-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "==> TCFS iOS Release Pipeline"
+    echo ""
+    echo "==> [1/3] Rust staticlib + UniFFI..."
+    nix develop -c bash swift/ios/Scripts/build-rust.sh --clean
+    echo ""
+    echo "==> [2/3] Xcode archive + export..."
+    bash swift/ios/Scripts/xcode-pipeline.sh
+    echo ""
+    echo "==> [3/3] TestFlight upload..."
+    bash swift/ios/Scripts/upload.sh
+    echo ""
+    echo "==> Release pipeline complete!"
+
+# Build Rust staticlib + UniFFI bindings (inside nix devshell)
+ios-rust *FLAGS:
+    nix develop -c bash swift/ios/Scripts/build-rust.sh {{FLAGS}}
+
+# Archive + export IPA (must NOT be inside nix devshell)
+ios-archive *FLAGS:
+    bash swift/ios/Scripts/xcode-pipeline.sh {{FLAGS}}
+
+# Export from existing archive + upload (resume after archive succeeded)
+ios-upload:
+    bash swift/ios/Scripts/xcode-pipeline.sh --skip-archive
+    bash swift/ios/Scripts/upload.sh
+
+# Upload an existing IPA to TestFlight
+ios-upload-ipa ipa="swift/ios/build/export/TCFS.ipa":
+    bash swift/ios/Scripts/upload.sh {{ipa}}
+
+# Setup signing certs (one-time, from Terminal.app)
+ios-signing:
+    bash swift/ios/Scripts/setup-signing.sh
+
+# Clean iOS build artifacts
+ios-clean:
+    rm -rf swift/ios/build swift/ios/TCFS.xcodeproj
+
+# Clean everything including Rust iOS target
+ios-clean-all: ios-clean
+    rm -rf target/aarch64-apple-ios
+
 # ── FileProvider (Darwin) ──────────────────────────────────────────────────
 
 # Build FileProvider .appex bundle (macOS only, requires Xcode CLT)
