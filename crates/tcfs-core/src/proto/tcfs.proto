@@ -265,4 +265,11 @@ message DeviceEnrollResponse {
   string storage_endpoint = 4;
   repeated string available_auth_methods = 5;
   string error = 6;
+  // Credential broker fields (populated from invite)
+  string storage_bucket = 7;
+  string storage_access_key = 8;
+  string storage_secret = 9;
+  string remote_prefix = 10;
+  string encryption_passphrase = 11;
+  string encryption_salt = 12;
 }

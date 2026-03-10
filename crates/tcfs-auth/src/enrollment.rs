@@ -43,6 +43,18 @@ pub struct EnrollmentInvite {
     pub nats_url: Option<String>,
     /// Optional: S3/SeaweedFS endpoint for storage.
     pub storage_endpoint: Option<String>,
+    /// Optional: S3 bucket name.
+    pub storage_bucket: Option<String>,
+    /// Optional: S3 access key (credential brokering).
+    pub storage_access_key: Option<String>,
+    /// Optional: S3 secret key (credential brokering).
+    pub storage_secret_key: Option<String>,
+    /// Optional: remote prefix for file sync.
+    pub remote_prefix: Option<String>,
+    /// Optional: encryption passphrase for E2EE.
+    pub encryption_passphrase: Option<String>,
+    /// Optional: encryption salt for KDF.
+    pub encryption_salt: Option<String>,
     /// Optional: human-readable description of the invite.
     pub description: Option<String>,
 }
@@ -76,6 +88,12 @@ impl EnrollmentInvite {
             signature: String::new(),
             nats_url: None,
             storage_endpoint: None,
+            storage_bucket: None,
+            storage_access_key: None,
+            storage_secret_key: None,
+            remote_prefix: None,
+            encryption_passphrase: None,
+            encryption_salt: None,
             description: None,
         };
 
@@ -165,6 +183,18 @@ pub struct EnrollmentResult {
     pub nats_url: Option<String>,
     /// Storage endpoint URL.
     pub storage_endpoint: Option<String>,
+    /// S3 bucket name.
+    pub storage_bucket: Option<String>,
+    /// S3 access key (brokered from invite).
+    pub storage_access_key: Option<String>,
+    /// S3 secret key (brokered from invite).
+    pub storage_secret_key: Option<String>,
+    /// Remote prefix for file sync.
+    pub remote_prefix: Option<String>,
+    /// Encryption passphrase (if E2EE enabled).
+    pub encryption_passphrase: Option<String>,
+    /// Encryption salt (if E2EE enabled).
+    pub encryption_salt: Option<String>,
     /// Auth methods available (e.g., ["totp", "webauthn"]).
     pub available_auth_methods: Vec<String>,
 }
