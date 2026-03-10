@@ -153,6 +153,150 @@ impl EnrollmentInvite {
     pub fn to_deep_link(&self) -> anyhow::Result<String> {
         Ok(format!("tcfs://enroll?data={}", self.encode()?))
     }
+
+    /// Encode as a compact representation for QR codes.
+    ///
+    /// Uses short JSON keys, omits null fields, and applies zstd compression.
+    /// Typically produces ~200-300 bytes encoded vs ~1200 for the full format.
+    pub fn encode_compact(&self) -> anyhow::Result<String> {
+        let compact = CompactInvite::from_full(self);
+        let json = serde_json::to_vec(&compact)?;
+        // zstd compress at level 3 (fast, good ratio for small payloads)
+        let compressed = zstd::encode_all(json.as_slice(), 3)
+            .map_err(|e| anyhow::anyhow!("zstd compress failed: {e}"))?;
+        Ok(base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            &compressed,
+        ))
+    }
+
+    /// Decode from compact representation.
+    pub fn decode_compact(encoded: &str) -> anyhow::Result<Self> {
+        let compressed = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            encoded,
+        )?;
+        let json = zstd::decode_all(compressed.as_slice())
+            .map_err(|e| anyhow::anyhow!("zstd decompress failed: {e}"))?;
+        let compact: CompactInvite = serde_json::from_slice(&json)?;
+        Ok(compact.to_full())
+    }
+
+    /// Decode from either compact or full format (auto-detect).
+    ///
+    /// Compact payloads start with a zstd magic number (0x28B52FFD) after
+    /// base64 decoding. Full payloads start with `{` (0x7B) as JSON.
+    pub fn decode_any(encoded: &str) -> anyhow::Result<Self> {
+        let raw = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            encoded,
+        )?;
+        // zstd magic: 0xFD2FB528 (little-endian: 28 B5 2F FD)
+        if raw.len() >= 4 && raw[0] == 0x28 && raw[1] == 0xB5 && raw[2] == 0x2F && raw[3] == 0xFD
+        {
+            let json = zstd::decode_all(raw.as_slice())
+                .map_err(|e| anyhow::anyhow!("zstd decompress failed: {e}"))?;
+            let compact: CompactInvite = serde_json::from_slice(&json)?;
+            Ok(compact.to_full())
+        } else {
+            Ok(serde_json::from_slice(&raw)?)
+        }
+    }
+
+    /// Generate a compact `tcfs://enroll?data=...` deep link URI.
+    pub fn to_compact_deep_link(&self) -> anyhow::Result<String> {
+        Ok(format!("tcfs://enroll?data={}", self.encode_compact()?))
+    }
+}
+
+/// Compact invite representation with short keys for QR-friendly encoding.
+///
+/// Field mapping:
+/// - `i` = invite_id, `n` = nonce, `b` = created_by
+/// - `c` = created_at (unix ts), `x` = expires_at (unix ts)
+/// - `p` = permissions (bitfield: mount=1, push=2, pull=4, admin=8)
+/// - `g` = signature
+/// - `e` = storage_endpoint, `k` = storage_bucket
+/// - `a` = storage_access_key, `s` = storage_secret_key
+/// - `r` = remote_prefix, `w` = encryption_passphrase
+/// - `t` = encryption_salt
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompactInvite {
+    i: String,
+    n: String,
+    b: String,
+    c: i64,
+    x: i64,
+    p: u8,
+    g: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    e: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    k: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    a: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    s: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    w: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    t: Option<String>,
+}
+
+impl CompactInvite {
+    fn from_full(inv: &EnrollmentInvite) -> Self {
+        let perms = (inv.permissions.can_mount as u8)
+            | ((inv.permissions.can_push as u8) << 1)
+            | ((inv.permissions.can_pull as u8) << 2)
+            | ((inv.permissions.can_admin as u8) << 3);
+        Self {
+            i: inv.invite_id.clone(),
+            n: inv.nonce.clone(),
+            b: inv.created_by.clone(),
+            c: inv.created_at.timestamp(),
+            x: inv.expires_at.timestamp(),
+            p: perms,
+            g: inv.signature.clone(),
+            e: inv.storage_endpoint.clone(),
+            k: inv.storage_bucket.clone(),
+            a: inv.storage_access_key.clone(),
+            s: inv.storage_secret_key.clone(),
+            r: inv.remote_prefix.clone(),
+            w: inv.encryption_passphrase.clone(),
+            t: inv.encryption_salt.clone(),
+        }
+    }
+
+    fn to_full(&self) -> EnrollmentInvite {
+        EnrollmentInvite {
+            invite_id: self.i.clone(),
+            nonce: self.n.clone(),
+            created_by: self.b.clone(),
+            created_at: chrono::DateTime::from_timestamp(self.c, 0)
+                .unwrap_or_else(Utc::now),
+            expires_at: chrono::DateTime::from_timestamp(self.x, 0)
+                .unwrap_or_else(Utc::now),
+            permissions: DevicePermissions {
+                can_mount: self.p & 1 != 0,
+                can_push: self.p & 2 != 0,
+                can_pull: self.p & 4 != 0,
+                can_admin: self.p & 8 != 0,
+                allowed_prefixes: vec![],
+            },
+            signature: self.g.clone(),
+            nats_url: None,
+            storage_endpoint: self.e.clone(),
+            storage_bucket: self.k.clone(),
+            storage_access_key: self.a.clone(),
+            storage_secret_key: self.s.clone(),
+            remote_prefix: self.r.clone(),
+            encryption_passphrase: self.w.clone(),
+            encryption_salt: self.t.clone(),
+            description: None,
+        }
+    }
 }
 
 /// A request from a new device to enroll using an invite.
@@ -275,5 +419,74 @@ mod tests {
         let data = link.strip_prefix("tcfs://enroll?data=").unwrap();
         let decoded = EnrollmentInvite::decode(data).unwrap();
         assert_eq!(invite.invite_id, decoded.invite_id);
+    }
+
+    #[test]
+    fn test_compact_encode_decode_roundtrip() {
+        let master_key = [42u8; 32];
+        let mut invite =
+            EnrollmentInvite::new("admin-device", &master_key, 24, DevicePermissions::admin());
+        invite.storage_endpoint = Some("http://s3.example.com:8333".into());
+        invite.storage_bucket = Some("tcfs".into());
+        invite.storage_access_key = Some("AKIAIOSFODNN7EXAMPLE".into());
+        invite.storage_secret_key = Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into());
+        invite.remote_prefix = Some("default".into());
+
+        let compact = invite.encode_compact().unwrap();
+        let full = invite.encode().unwrap();
+
+        // Compact should be significantly smaller
+        assert!(
+            compact.len() < full.len(),
+            "compact ({}) should be smaller than full ({})",
+            compact.len(),
+            full.len()
+        );
+
+        // Roundtrip via decode_compact
+        let decoded = EnrollmentInvite::decode_compact(&compact).unwrap();
+        assert_eq!(invite.invite_id, decoded.invite_id);
+        assert_eq!(invite.storage_endpoint, decoded.storage_endpoint);
+        assert_eq!(invite.storage_access_key, decoded.storage_access_key);
+        assert!(decoded.verify_signature(&master_key));
+
+        // Roundtrip via decode_any (auto-detect compact)
+        let decoded2 = EnrollmentInvite::decode_any(&compact).unwrap();
+        assert_eq!(invite.invite_id, decoded2.invite_id);
+
+        // decode_any also handles full format
+        let decoded3 = EnrollmentInvite::decode_any(&full).unwrap();
+        assert_eq!(invite.invite_id, decoded3.invite_id);
+    }
+
+    #[test]
+    fn test_compact_deep_link() {
+        let master_key = [42u8; 32];
+        let mut invite = EnrollmentInvite::new(
+            "admin-device",
+            &master_key,
+            1,
+            DevicePermissions::read_only(),
+        );
+        invite.storage_endpoint = Some("http://212.2.245.145:8333".into());
+        invite.storage_bucket = Some("tcfs".into());
+        invite.storage_access_key = Some("TESTKEY123".into());
+        invite.storage_secret_key = Some("TESTSECRET456".into());
+
+        let link = invite.to_compact_deep_link().unwrap();
+        assert!(link.starts_with("tcfs://enroll?data="));
+
+        let data = link.strip_prefix("tcfs://enroll?data=").unwrap();
+        // Should be decodable via decode_any
+        let decoded = EnrollmentInvite::decode_any(data).unwrap();
+        assert_eq!(invite.invite_id, decoded.invite_id);
+        assert_eq!(invite.storage_endpoint, decoded.storage_endpoint);
+
+        // Payload should be small enough for QR (~500 chars max for reliable scanning)
+        assert!(
+            data.len() < 500,
+            "compact payload {} bytes, should be under 500 for QR",
+            data.len()
+        );
     }
 }

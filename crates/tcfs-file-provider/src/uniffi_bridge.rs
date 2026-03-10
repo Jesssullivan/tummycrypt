@@ -768,7 +768,7 @@ impl TcfsProviderHandle {
         &self,
         invite_data: &str,
     ) -> Result<EnrollmentResult, ProviderError> {
-        let invite = tcfs_auth::enrollment::EnrollmentInvite::decode(invite_data).map_err(|e| {
+        let invite = tcfs_auth::enrollment::EnrollmentInvite::decode_any(invite_data).map_err(|e| {
             ProviderError::Auth {
                 message: format!("invalid invite: {e}"),
             }

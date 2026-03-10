@@ -21,6 +21,7 @@ tcfs-nfs = { path = "../tcfs-nfs" }
 tcfs-fuse = { path = "../tcfs-fuse" }
 tcfs-crypto = { path = "../tcfs-crypto" }
 tcfs-auth = { path = "../tcfs-auth" }
+qrcode = "0.14"
 secrecy = { workspace = true }
 rand = { workspace = true }
 base64 = { workspace = true }
