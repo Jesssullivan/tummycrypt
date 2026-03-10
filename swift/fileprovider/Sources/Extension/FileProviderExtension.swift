@@ -58,14 +58,16 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return progress
         }
 
-        // For non-root items, return the item from its identifier path
+        // For non-root items, return the item as a placeholder (not downloaded).
+        // This tells fileproviderd the content needs to be fetched via fetchContents.
         completionHandler(
             TCFSFileProviderItem(
                 identifier: identifier,
                 parentIdentifier: .rootContainer,
                 filename: identifier.rawValue.components(separatedBy: "/").last ?? identifier.rawValue,
                 isDirectory: false,
-                fileSize: 0
+                fileSize: 0,
+                downloaded: false
             ),
             nil
         )

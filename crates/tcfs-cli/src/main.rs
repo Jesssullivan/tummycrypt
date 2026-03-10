@@ -789,15 +789,20 @@ async fn cmd_pull(
     let device_id = load_device_id(config);
 
     // Derive the remote prefix from the manifest path if not provided
-    // e.g. "mydata/manifests/abc123" → prefix = "mydata"
+    // e.g. "devices/A29247/manifests/abc123" → prefix = "devices/A29247"
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_else(|| {
             manifest_path
-                .split('/')
-                .next()
-                .unwrap_or("tcfs")
-                .to_string()
+                .rsplit_once("/manifests/")
+                .map(|(pfx, _)| pfx.to_string())
+                .unwrap_or_else(|| {
+                    manifest_path
+                        .split('/')
+                        .next()
+                        .unwrap_or("tcfs")
+                        .to_string()
+                })
         });
 
     // Default local path: current dir + manifest hash (last path component)
