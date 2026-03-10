@@ -384,6 +384,30 @@ struct ContentView: View {
                             }
                         }
                     }
+
+                    Section("Build") {
+                        HStack {
+                            Text("Version")
+                            Spacer()
+                            Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")
+                                .foregroundColor(.secondary)
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                        HStack {
+                            Text("Build")
+                            Spacer()
+                            Text(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")
+                                .foregroundColor(.secondary)
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                        HStack {
+                            Text("Commit")
+                            Spacer()
+                            Text(Bundle.main.infoDictionary?["GITCommitSHA"] as? String ?? "dev")
+                                .foregroundColor(.secondary)
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                    }
                 }
                 .navigationTitle("TCFS")
             }
