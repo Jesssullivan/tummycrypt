@@ -345,17 +345,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-notify"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63273b0e33b8941a02eabc1684f0230d3011ea45117351beb94c69253065a194"
-dependencies = [
- "event-listener",
- "futures-core",
- "pin-project-lite",
-]
-
-[[package]]
 name = "async-recursion"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1748,25 +1737,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "fuse3"
-version = "0.8.1"
-dependencies = [
- "async-notify",
- "bincode",
- "bytes",
- "futures-channel",
- "futures-util",
- "libc",
- "nix",
- "serde",
- "slab",
- "tokio",
- "tracing",
- "trait-make",
- "which 6.0.3",
 ]
 
 [[package]]
@@ -4892,7 +4862,7 @@ dependencies = [
  "encoding_rs",
  "log",
  "plist",
- "which 4.4.2",
+ "which",
  "xml-rs 0.8.28",
 ]
 
@@ -5183,7 +5153,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "clap",
- "fuse3",
  "hyper-util",
  "indicatif",
  "opendal",
@@ -5197,7 +5166,6 @@ dependencies = [
  "tcfs-chunks",
  "tcfs-core",
  "tcfs-crypto",
- "tcfs-fuse",
  "tcfs-nfs",
  "tcfs-secrets",
  "tcfs-storage",
@@ -5312,28 +5280,6 @@ dependencies = [
  "tower",
  "tracing",
  "uniffi",
-]
-
-[[package]]
-name = "tcfs-fuse"
-version = "0.9.0"
-dependencies = [
- "anyhow",
- "bytes",
- "fuse3",
- "futures-util",
- "libc",
- "opendal",
- "serde",
- "tcfs-core",
- "tcfs-storage",
- "tcfs-vfs",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-test",
- "tonic",
- "tracing",
 ]
 
 [[package]]
@@ -5528,7 +5474,6 @@ dependencies = [
  "tcfs-core",
  "tcfs-crypto",
  "tcfs-dbus",
- "tcfs-fuse",
  "tcfs-nfs",
  "tcfs-secrets",
  "tcfs-storage",
@@ -6140,17 +6085,6 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
-]
-
-[[package]]
-name = "trait-make"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96cbd06a7b648f1603e60d75d9ed295d096b340d30e9f9324f4b512b5d40cd92"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -6866,18 +6800,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "which"
-version = "6.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
-dependencies = [
- "either",
- "home",
- "rustix 0.38.44",
- "winsafe",
-]
-
-[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7191,12 +7113,6 @@ checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
 ]
-
-[[package]]
-name = "winsafe"
-version = "0.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wit-bindgen"

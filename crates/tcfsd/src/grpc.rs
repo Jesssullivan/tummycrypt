@@ -656,12 +656,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
         // Read and parse stub file
         let stub_content = std::fs::read_to_string(&stub_path)
             .map_err(|e| tonic::Status::not_found(format!("read stub: {e}")))?;
-        let meta = tcfs_fuse::stub::StubMeta::parse(&stub_content)
+        let meta = tcfs_vfs::StubMeta::parse(&stub_content)
             .map_err(|e| tonic::Status::invalid_argument(format!("parse stub: {e}")))?;
 
         // Derive real file path from stub path
         let real_path =
-            tcfs_fuse::stub::stub_to_real_name(stub_path.as_os_str()).ok_or_else(|| {
+            tcfs_vfs::stub_to_real_name(stub_path.as_os_str()).ok_or_else(|| {
                 tonic::Status::invalid_argument(format!(
                     "cannot derive real name from stub: {}",
                     req.stub_path

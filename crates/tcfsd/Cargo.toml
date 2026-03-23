@@ -18,7 +18,6 @@ tcfs-storage = { path = "../tcfs-storage" }
 tcfs-sync = { path = "../tcfs-sync", features = ["nats"] }
 tcfs-vfs = { path = "../tcfs-vfs" }
 tcfs-nfs = { path = "../tcfs-nfs" }
-tcfs-fuse = { path = "../tcfs-fuse" }
 tcfs-auth = { path = "../tcfs-auth", features = ["totp", "webauthn"] }
 opendal = { workspace = true }
 async-nats = { workspace = true }
@@ -50,11 +49,7 @@ openssl = { workspace = true, optional = true }
 tcfs-dbus = { path = "../tcfs-dbus", optional = true }
 
 [features]
-default = ["fuse"]
-# Enable FUSE mount support (requires fuse3 system library)
-fuse = ["tcfs-fuse/fuse"]
-# FUSE-T: NFS-loopback FUSE for macOS (no kernel module, uses libfuse-t.dylib)
-fuse-t = ["tcfs-fuse/fuse-t"]
+default = []
 # NFS loopback mount (no kernel modules required, works everywhere)
 nfs = []
 # Enables NATS consumer worker mode (for K8s pods)
@@ -69,12 +64,12 @@ maintainer = "TummyCrypt Contributors <jess@sulliwood.org>"
 copyright = "2026 TummyCrypt Contributors"
 license-file = ["../../LICENSE-MIT", "0"]
 extended-description = """\
-tcfsd is the TummyCrypt filesystem daemon — a FUSE-based, SeaweedFS-backed \
-file sync service with content-defined chunking, age encryption, \
-and on-demand hydration via .tc stub files."""
+tcfsd is the TummyCrypt filesystem daemon — a SeaweedFS-backed \
+file sync service with NFS loopback mount, content-defined chunking, \
+age encryption, and on-demand hydration via .tc stub files."""
 section = "utils"
 priority = "optional"
-depends = "$auto, fuse3"
+depends = "$auto"
 assets = [
     ["target/release/tcfsd", "usr/bin/tcfsd", "755"],
 ]
@@ -87,4 +82,3 @@ assets = [
 ]
 
 [package.metadata.generate-rpm.requires]
-fuse3 = "*"

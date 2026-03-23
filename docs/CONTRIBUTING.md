@@ -67,11 +67,10 @@ The workspace is split into 14 crates under `crates/`:
 | `tcfs-storage` | lib | OpenDAL-based S3/SeaweedFS operator |
 | `tcfs-chunks` | lib | FastCDC chunking, BLAKE3 hashing, zstd compression |
 | `tcfs-sync` | lib | Sync engine, state cache, NATS JetStream |
-| `tcfs-fuse` | lib | Linux FUSE driver (fuse3 crate) |
 | `tcfs-cloudfilter` | lib | Windows Cloud Files API (skeleton) |
 | `tcfs-sops` | lib | SOPS+age fleet secret propagation |
 | `tcfs-file-provider` | lib | macOS/iOS FileProvider FFI (RFC 0002) |
-| `tcfsd` | bin | Daemon: gRPC, FUSE, metrics, systemd notify |
+| `tcfsd` | bin | Daemon: gRPC, NFS, metrics, systemd notify |
 | `tcfs-cli` | bin | CLI: push, pull, mount, unmount, status, device management |
 | `tcfs-tui` | bin | Interactive terminal UI (ratatui) |
 | `tcfs-mcp` | bin | MCP server for AI agent integration |
