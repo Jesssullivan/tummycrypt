@@ -1201,7 +1201,7 @@ fn format_uptime(secs: i64) -> String {
 async fn cmd_cache_stats(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     let cache_dir = expand_tilde(&config.fuse.cache_dir);
     let cache_max = config.fuse.cache_max_mb * 1024 * 1024;
-    let cache = tcfs_fuse::DiskCache::new(cache_dir.clone(), cache_max);
+    let cache = tcfs_vfs::DiskCache::new(cache_dir.clone(), cache_max);
 
     let stats = cache.stats().await.context("reading cache stats")?;
 
@@ -1224,7 +1224,7 @@ async fn cmd_cache_stats(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
 async fn cmd_cache_clear(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     let cache_dir = expand_tilde(&config.fuse.cache_dir);
     if cache_dir.exists() {
-        let before = tcfs_fuse::DiskCache::new(cache_dir.clone(), 0)
+        let before = tcfs_vfs::DiskCache::new(cache_dir.clone(), 0)
             .stats()
             .await?;
         tokio::fs::remove_dir_all(&cache_dir)
@@ -1340,29 +1340,19 @@ async fn cmd_mount(
         .await
         .context("NFS mount failed")
     } else {
-        // FUSE mount (legacy)
-        #[cfg(feature = "fuse")]
-        {
-            tcfs_fuse::mount(tcfs_fuse::MountConfig {
-                op,
-                prefix,
-                mountpoint: mountpoint.to_path_buf(),
-                cache_dir,
-                cache_max_bytes: cache_max,
-                negative_ttl_secs: neg_ttl,
-                read_only,
-                allow_other: false,
-            })
-            .await
-            .context("FUSE mount failed")
-        }
-        #[cfg(not(feature = "fuse"))]
-        {
-            anyhow::bail!(
-                "FUSE support not compiled. Use `--nfs` for FUSE-free NFS mount, \
-                 or rebuild with `--features fuse`."
-            );
-        }
+        // FUSE has been retired — NFS is the only mount backend.
+        // Use NFS mount for all cases.
+        tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
+            op,
+            prefix,
+            mountpoint: mountpoint.to_path_buf(),
+            cache_dir,
+            cache_max_bytes: cache_max,
+            negative_ttl_secs: neg_ttl,
+            port: nfs_port,
+        })
+        .await
+        .context("NFS mount failed")
     }
 }
 
@@ -1438,7 +1428,7 @@ async fn cmd_unsync(
     if !path.exists() {
         anyhow::bail!("path not found: {}", path.display());
     }
-    if tcfs_fuse::is_stub_path(path) {
+    if tcfs_vfs::is_stub_path(path) {
         println!("{} is already a stub — nothing to do.", path.display());
         return Ok(());
     }
@@ -1471,13 +1461,13 @@ async fn cmd_unsync(
     }
 
     // Build stub at path.tc
-    let stub_path = tcfs_fuse::real_to_stub_name(path.file_name().context("path has no filename")?);
+    let stub_path = tcfs_vfs::real_to_stub_name(path.file_name().context("path has no filename")?);
     let stub_full = path
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join(stub_path);
 
-    let stub = tcfs_fuse::StubMeta {
+    let stub = tcfs_vfs::StubMeta {
         chunks: 0, // unknown without state — leave as 0
         compressed: false,
         fetched: false,

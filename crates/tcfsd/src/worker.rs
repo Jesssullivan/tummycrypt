@@ -286,7 +286,7 @@ mod inner {
                 // Basic unsync: if file exists and is not already a stub, remove it
                 // (stub creation is a CLI concern; worker just evicts the local copy)
                 let path = std::path::Path::new(local_path);
-                if path.exists() && !tcfs_fuse::is_stub_path(path) {
+                if path.exists() && !tcfs_vfs::is_stub_path(path) {
                     tokio::fs::remove_file(path)
                         .await
                         .with_context(|| format!("removing file: {local_path}"))?;

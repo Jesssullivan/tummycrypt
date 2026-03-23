@@ -12,8 +12,7 @@
 //!
 //! | Backend | Crate | Protocol |
 //! |---------|-------|----------|
-//! | FUSE | `tcfs-fuse` | fuse3 PathFilesystem -> VirtualFilesystem |
-//! | NFS | `tcfs-nfs` (planned) | NFSv3 RPC -> VirtualFilesystem |
+//! | NFS | `tcfs-nfs` | NFSv3 RPC -> VirtualFilesystem |
 //! | FileProvider | `tcfs-file-provider` | Apple FileProvider -> direct S3 |
 
 pub mod cache;

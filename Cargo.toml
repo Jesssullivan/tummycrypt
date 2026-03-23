@@ -9,7 +9,6 @@ members = [
     "crates/tcfs-sync",
     "crates/tcfs-vfs",
     "crates/tcfs-nfs",
-    "crates/tcfs-fuse",
     "crates/tcfs-cloudfilter",
     "crates/tcfs-sops",
     "crates/tcfsd",
@@ -44,9 +43,6 @@ prost = { version = "0.14" }
 
 # Storage abstraction
 opendal = { version = "0.55", features = ["services-s3"] }
-
-# FUSE (optional, Phase 3) — patched for FUSE-T support on macOS
-fuse3 = { version = "0.8", features = ["tokio-runtime", "unprivileged"] }
 
 # Cryptography / secrets
 age = { version = "0.11", features = ["armor"] }
@@ -147,9 +143,6 @@ proptest = { version = "1" }
 tempfile = { version = "3" }
 tokio-test = { version = "0.4" }
 divan = { version = "0.1" }
-
-[patch.crates-io]
-fuse3 = { path = "crates/fuse3-patched" }
 
 [profile.release]
 opt-level = 3

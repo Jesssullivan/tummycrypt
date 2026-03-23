@@ -177,11 +177,21 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // Wrap operator in Arc<Mutex> for shared access
     let operator = Arc::new(tokio::sync::Mutex::new(operator));
 
+    // Shared NATS handle — created early so the watcher scheduler can publish events.
+    // Starts as None; populated later when NATS connects (see set_nats call below).
+    let shared_nats: Arc<tokio::sync::Mutex<Option<tcfs_sync::NatsClient>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // Start Prometheus metrics + health check endpoint
+    // Prometheus metrics — create registry + counters before starting server
+    let mut metrics_registry = crate::metrics::Registry::default();
+    let daemon_metrics = crate::metrics::DaemonMetrics::new(&mut metrics_registry);
+    let metrics_registry = Arc::new(metrics_registry);
+
     let metrics_addr = config.daemon.metrics_addr.clone();
     if let Some(addr) = metrics_addr {
         let health_state = crate::metrics::HealthState {
-            registry: Arc::new(crate::metrics::Registry::default()),
+            registry: metrics_registry.clone(),
             operator: operator.clone(),
         };
         tokio::spawn(async move {
@@ -189,6 +199,11 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 error!("metrics server failed: {e}");
             }
         });
+    }
+
+    // Set initial storage health
+    if storage_ok {
+        daemon_metrics.storage_health.set(1);
     }
 
     // Start credential file watcher (if a credentials_file is configured)
@@ -275,6 +290,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sched_device = device_id.clone();
                     let sched_sync_root = sync_root.clone();
                     let sched_status_tx = status_tx.clone();
+                    let sched_nats = shared_nats.clone();
+                    let sched_metrics = daemon_metrics.clone();
 
                     tokio::spawn({
                         let scheduler = scheduler.clone();
@@ -287,6 +304,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     let device = sched_device.clone();
                                     let root = sched_sync_root.clone();
                                     let status_tx = sched_status_tx.clone();
+                                    let nats = sched_nats.clone();
+                                    let metrics = sched_metrics.clone();
 
                                     Box::pin(async move {
                                         match task.op {
@@ -329,6 +348,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                         remote_device = %info.remote_device,
                                                         "watcher: conflict detected"
                                                     );
+                                                    metrics.sync_conflicts.inc();
                                                     if let Some(entry) =
                                                         cache.get(&task.path).cloned()
                                                     {
@@ -350,6 +370,40 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     path = %task.path.display(),
                                                     "watcher: auto-pushed"
                                                 );
+                                                metrics.files_pushed.inc();
+
+                                                // Publish NATS event so other hosts learn about the change
+                                                let rel_path = task
+                                                    .path
+                                                    .strip_prefix(&root)
+                                                    .unwrap_or(&task.path)
+                                                    .to_string_lossy()
+                                                    .to_string();
+                                                let nats_device = device.clone();
+                                                let nats_hash = upload_result.hash.clone();
+                                                let nats_size = upload_result.bytes;
+                                                let nats_remote = upload_result.remote_path.clone();
+                                                let nats_handle = nats.clone();
+                                                let pub_metrics = metrics.clone();
+                                                tokio::spawn(async move {
+                                                    if let Some(client) = nats_handle.lock().await.as_ref() {
+                                                        let event = tcfs_sync::StateEvent::FileSynced {
+                                                            device_id: nats_device,
+                                                            rel_path,
+                                                            blake3: nats_hash,
+                                                            size: nats_size,
+                                                            vclock: Default::default(),
+                                                            manifest_path: nats_remote,
+                                                            timestamp: tcfs_sync::StateEvent::now(),
+                                                        };
+                                                        if let Err(e) = client.publish_state_event(&event).await {
+                                                            tracing::warn!("watcher: failed to publish NATS event: {e}");
+                                                        } else {
+                                                            pub_metrics.nats_events_published.inc();
+                                                        }
+                                                    }
+                                                });
+
                                                 Ok(())
                                             }
                                             tcfs_sync::scheduler::SyncOp::Delete => {
@@ -361,6 +415,33 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     path = %task.path.display(),
                                                     "watcher: removed from state"
                                                 );
+
+                                                // Publish NATS delete event
+                                                let rel_path = task
+                                                    .path
+                                                    .strip_prefix(&root)
+                                                    .unwrap_or(&task.path)
+                                                    .to_string_lossy()
+                                                    .to_string();
+                                                let nats_device = device.clone();
+                                                let nats_handle = nats.clone();
+                                                let del_metrics = metrics.clone();
+                                                tokio::spawn(async move {
+                                                    if let Some(client) = nats_handle.lock().await.as_ref() {
+                                                        let event = tcfs_sync::StateEvent::FileDeleted {
+                                                            device_id: nats_device,
+                                                            rel_path,
+                                                            vclock: Default::default(),
+                                                            timestamp: tcfs_sync::StateEvent::now(),
+                                                        };
+                                                        if let Err(e) = client.publish_state_event(&event).await {
+                                                            tracing::warn!("watcher: failed to publish delete event: {e}");
+                                                        } else {
+                                                            del_metrics.nats_events_published.inc();
+                                                        }
+                                                    }
+                                                });
+
                                                 Ok(())
                                             }
                                             tcfs_sync::scheduler::SyncOp::Pull => {
@@ -566,6 +647,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     )
                     .await;
 
+                    // Populate shared NATS handle for watcher scheduler
+                    *shared_nats.lock().await = Some(nats.clone());
                     impl_.set_nats(nats);
                 }
             }

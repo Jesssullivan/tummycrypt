@@ -192,6 +192,7 @@ mod inner {
     // ── NatsClient ────────────────────────────────────────────────────────────
 
     /// Thin wrapper around an async-nats JetStream context.
+    #[derive(Clone)]
     pub struct NatsClient {
         js: jetstream::Context,
     }
