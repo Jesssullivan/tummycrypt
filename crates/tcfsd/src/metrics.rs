@@ -7,11 +7,75 @@
 
 use anyhow::Result;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
-use prometheus_client::{encoding::text::encode, registry::Registry as PRegistry};
+use prometheus_client::{
+    encoding::text::encode,
+    metrics::{counter::Counter, gauge::Gauge},
+    registry::Registry as PRegistry,
+};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
 pub type Registry = PRegistry;
+
+/// Daemon-wide Prometheus metrics.
+///
+/// All fields are atomic — safe to clone and increment from any async task.
+#[derive(Clone)]
+pub struct DaemonMetrics {
+    pub files_pushed: Counter,
+    pub files_pulled: Counter,
+    pub sync_conflicts: Counter,
+    pub nats_events_published: Counter,
+    pub nats_events_received: Counter,
+    pub storage_health: Gauge,
+}
+
+impl DaemonMetrics {
+    /// Create a new metrics set and register all counters with the given registry.
+    pub fn new(registry: &mut Registry) -> Self {
+        let metrics = Self {
+            files_pushed: Counter::default(),
+            files_pulled: Counter::default(),
+            sync_conflicts: Counter::default(),
+            nats_events_published: Counter::default(),
+            nats_events_received: Counter::default(),
+            storage_health: Gauge::default(),
+        };
+
+        registry.register(
+            "tcfsd_files_pushed_total",
+            "Total files pushed to remote storage",
+            metrics.files_pushed.clone(),
+        );
+        registry.register(
+            "tcfsd_files_pulled_total",
+            "Total files pulled from remote storage",
+            metrics.files_pulled.clone(),
+        );
+        registry.register(
+            "tcfsd_sync_conflicts_total",
+            "Total sync conflicts detected",
+            metrics.sync_conflicts.clone(),
+        );
+        registry.register(
+            "tcfsd_nats_events_published_total",
+            "Total NATS state events published",
+            metrics.nats_events_published.clone(),
+        );
+        registry.register(
+            "tcfsd_nats_events_received_total",
+            "Total NATS state events received",
+            metrics.nats_events_received.clone(),
+        );
+        registry.register(
+            "tcfsd_storage_health",
+            "Storage backend health (1=healthy, 0=unreachable)",
+            metrics.storage_health.clone(),
+        );
+
+        metrics
+    }
+}
 
 /// Shared health state updated by the daemon
 #[derive(Clone)]
