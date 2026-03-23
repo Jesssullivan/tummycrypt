@@ -115,7 +115,6 @@ tummycrypt/
 │   ├── tcfs-storage/       # OpenDAL + SeaweedFS operator
 │   ├── tcfs-chunks/        # FastCDC chunking, BLAKE3, zstd compression
 │   ├── tcfs-sync/          # Sync engine, vector clocks, NATS JetStream
-│   ├── tcfs-fuse/          # FUSE driver (Linux)
 │   ├── tcfs-cloudfilter/   # Windows CFAPI (skeleton)
 │   ├── tcfs-sops/          # SOPS+age fleet secret propagation
 │   ├── tcfs-file-provider/ # macOS/iOS FileProvider FFI (RFC 0002)
