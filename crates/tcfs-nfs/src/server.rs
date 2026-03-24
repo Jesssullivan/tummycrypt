@@ -167,8 +167,12 @@ async fn mount_nfs(port: u16, mountpoint: &Path) -> Result<()> {
             .await
             .context("executing mount_nfs")?
     } else {
-        // Linux: mount -t nfs
-        Command::new("mount")
+        // Linux: sudo mount -t nfs (requires sudoers rule for NFS loopback)
+        // Unprivileged users cannot call mount(2) directly; the sudoers rule
+        // in crush-dots/roles/common/tasks/system.yml grants NOPASSWD access
+        // for localhost NFS mounts only.
+        Command::new("sudo")
+            .arg("mount")
             .arg("-t")
             .arg("nfs")
             .arg("-o")
@@ -177,7 +181,7 @@ async fn mount_nfs(port: u16, mountpoint: &Path) -> Result<()> {
             .arg(mountpoint)
             .status()
             .await
-            .context("executing mount -t nfs")?
+            .context("executing sudo mount -t nfs")?
     };
 
     if !status.success() {
