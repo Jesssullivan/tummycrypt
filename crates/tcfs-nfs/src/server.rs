@@ -115,7 +115,16 @@ pub async fn serve_and_mount(cfg: NfsMountConfig) -> Result<()> {
     });
 
     // Block forever serving NFS requests
-    listener.handle_forever().await?;
+    info!("NFS server entering handle_forever loop");
+    match listener.handle_forever().await {
+        Ok(()) => {
+            warn!("NFS handle_forever returned Ok (unexpected — should loop forever)");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "NFS handle_forever exited with error");
+            return Err(anyhow::anyhow!("NFS server loop exited: {}", e));
+        }
+    }
 
     Ok(())
 }

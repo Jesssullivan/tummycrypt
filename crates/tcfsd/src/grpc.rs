@@ -349,7 +349,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         // loss, and the process dying before the wrapper can sudo-retry the
         // mount command.
         tokio::spawn(async move {
-            if let Err(e) = tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
+            tracing::info!("NFS mount task starting (prefix={prefix})");
+            match tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
                 op,
                 prefix,
                 mountpoint: mp,
@@ -360,11 +361,16 @@ impl TcfsDaemon for TcfsDaemonImpl {
             })
             .await
             {
-                tracing::error!(error = %e, "in-process NFS mount failed");
-                // Remove from active mounts on failure
-                let mut mounts = active_mounts.lock().await;
-                mounts.remove(&mountpoint_key);
+                Ok(()) => {
+                    tracing::warn!("NFS serve_and_mount returned Ok (server stopped)");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, error_debug = ?e, "in-process NFS mount failed");
+                }
             }
+            // Remove from active mounts on exit
+            let mut mounts = active_mounts.lock().await;
+            mounts.remove(&mountpoint_key);
         });
 
         // Give the NFS server a moment to bind + mount
