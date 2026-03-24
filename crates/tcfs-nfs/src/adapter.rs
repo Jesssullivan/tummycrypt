@@ -7,10 +7,17 @@
 
 use std::ffi::OsStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nfsserve::nfs::{fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfsstring, sattr3};
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 use tracing::{debug, warn};
+
+/// Timeout for VFS/S3 operations.  mount.nfs sends GETATTR/READDIR during
+/// the mount handshake and hangs until the NFS server responds.  If the S3
+/// backend is slow or unreachable the whole mount blocks indefinitely.
+/// Returning NFS3ERR_IO on timeout lets the mount fail fast instead of hanging.
+const VFS_TIMEOUT: Duration = Duration::from_secs(10);
 
 use tcfs_vfs::types::{VfsAttr, VfsFileType};
 use tcfs_vfs::VirtualFilesystem;
@@ -108,10 +115,13 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
 
         let parent_path = self.inodes.get_path(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        // Verify the entry exists via VFS
-        self.vfs
-            .lookup(&parent_path, OsStr::new(name_str))
+        // Verify the entry exists via VFS (with timeout to avoid mount hangs)
+        tokio::time::timeout(VFS_TIMEOUT, self.vfs.lookup(&parent_path, OsStr::new(name_str)))
             .await
+            .map_err(|_| {
+                warn!(path = %parent_path, name = %name_str, "NFS LOOKUP timed out");
+                nfsstat3::NFS3ERR_IO
+            })?
             .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
 
         let id = self.inodes.get_or_insert(&child_path);
@@ -122,10 +132,12 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
         let path = self.inodes.get_path(id).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let attr = self
-            .vfs
-            .getattr(&path)
+        let attr = tokio::time::timeout(VFS_TIMEOUT, self.vfs.getattr(&path))
             .await
+            .map_err(|_| {
+                warn!(path = %path, "NFS GETATTR timed out");
+                nfsstat3::NFS3ERR_IO
+            })?
             .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
 
         Ok(self.to_fattr3(id, &attr))
@@ -144,10 +156,16 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
         let path = self.inodes.get_path(id).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
         // Open + read pattern: open the file, read the requested range, release
-        let (fh, data) = self.vfs.open(&path).await.map_err(|e| {
-            warn!(path = %path, error = %e, "NFS READ open failed");
-            nfsstat3::NFS3ERR_IO
-        })?;
+        let (fh, data) = tokio::time::timeout(VFS_TIMEOUT, self.vfs.open(&path))
+            .await
+            .map_err(|_| {
+                warn!(path = %path, "NFS READ open timed out");
+                nfsstat3::NFS3ERR_IO
+            })?
+            .map_err(|e| {
+                warn!(path = %path, error = %e, "NFS READ open failed");
+                nfsstat3::NFS3ERR_IO
+            })?;
 
         let start = offset as usize;
         let result = if start >= data.len() {
@@ -215,10 +233,16 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
     ) -> Result<ReadDirResult, nfsstat3> {
         let path = self.inodes.get_path(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
-        let vfs_entries = self.vfs.readdirplus(&path).await.map_err(|e| {
-            warn!(path = %path, error = %e, "NFS READDIR failed");
-            nfsstat3::NFS3ERR_IO
-        })?;
+        let vfs_entries = tokio::time::timeout(VFS_TIMEOUT, self.vfs.readdirplus(&path))
+            .await
+            .map_err(|_| {
+                warn!(path = %path, "NFS READDIR timed out");
+                nfsstat3::NFS3ERR_IO
+            })?
+            .map_err(|e| {
+                warn!(path = %path, error = %e, "NFS READDIR failed");
+                nfsstat3::NFS3ERR_IO
+            })?;
 
         // Assign inodes to all entries and convert
         let mut entries: Vec<DirEntry> = Vec::new();
