@@ -310,6 +310,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     Box::pin(async move {
                                         match task.op {
                                             tcfs_sync::scheduler::SyncOp::Push => {
+                                                // Skip directories — only push regular files
+                                                if task.path.is_dir() {
+                                                    return Ok(());
+                                                }
                                                 let op_guard = op.lock().await;
                                                 let op_ref =
                                                     op_guard.as_ref().ok_or_else(|| {
