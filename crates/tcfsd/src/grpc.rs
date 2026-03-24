@@ -325,25 +325,67 @@ impl TcfsDaemon for TcfsDaemonImpl {
             "spawning mount"
         );
 
-        // Spawn tcfs mount as subprocess
-        let mut cmd = tokio::process::Command::new("tcfs");
-        cmd.args(["mount", &req.remote, &req.mountpoint]);
-        if use_nfs {
-            cmd.arg("--nfs");
-        }
-        let child = cmd
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| tonic::Status::internal(format!("spawn tcfs mount: {e}")))?;
+        // Get the storage operator from daemon state
+        let op = {
+            let guard = self.operator.lock().await;
+            guard
+                .clone()
+                .ok_or_else(|| tonic::Status::unavailable("storage operator not initialized"))?
+        };
 
-        // Give the mount a moment to start
+        // Parse prefix from remote spec
+        let (_endpoint, _bucket, prefix) = tcfs_storage::parse_remote_spec(&req.remote)
+            .map_err(|e| tonic::Status::invalid_argument(format!("bad remote spec: {e}")))?;
+
+        let mp = mountpoint.clone();
+        let cache_dir = self.config.fuse.cache_dir.clone();
+        let cache_max = self.config.fuse.cache_max_mb as u64 * 1024 * 1024;
+        let neg_ttl = self.config.fuse.negative_cache_ttl_secs;
+        let mountpoint_key = req.mountpoint.clone();
+        let active_mounts = self.active_mounts.clone();
+
+        // Start NFS server in-process (tokio task) instead of spawning a
+        // subprocess.  This avoids the recursive gRPC mount call, credential
+        // loss, and the process dying before the wrapper can sudo-retry the
+        // mount command.
+        tokio::spawn(async move {
+            if let Err(e) = tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
+                op,
+                prefix,
+                mountpoint: mp,
+                port: 0, // auto-assign
+                cache_dir: std::path::PathBuf::from(&cache_dir),
+                cache_max_bytes: cache_max,
+                negative_ttl_secs: neg_ttl,
+            })
+            .await
+            {
+                tracing::error!(error = %e, "in-process NFS mount failed");
+                // Remove from active mounts on failure
+                let mut mounts = active_mounts.lock().await;
+                mounts.remove(&mountpoint_key);
+            }
+        });
+
+        // Give the NFS server a moment to bind + mount
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
+        // Record as active (no Child to track — it's an in-process task)
         {
+            // Use a dummy Child (PID 0) since we're in-process now.
+            // The active_mounts map is only used for "already mounted" checks.
             let mut mounts = self.active_mounts.lock().await;
-            mounts.insert(req.mountpoint.clone(), child);
+            // Only insert if not already there (the spawned task may have failed fast)
+            mounts.entry(req.mountpoint.clone()).or_insert_with(|| {
+                // Dummy process — `cat` exits immediately, we just need a Child value
+                tokio::process::Command::new("sleep")
+                    .arg("infinity")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("spawn sleep sentinel")
+            });
         }
 
         Ok(tonic::Response::new(MountResponse {
