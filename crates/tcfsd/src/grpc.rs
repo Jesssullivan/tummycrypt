@@ -348,7 +348,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         // subprocess.  This avoids the recursive gRPC mount call, credential
         // loss, and the process dying before the wrapper can sudo-retry the
         // mount command.
-        tokio::spawn(async move {
+        let nfs_handle = tokio::spawn(async move {
             tracing::info!("NFS mount task starting (prefix={prefix})");
             match tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
                 op,
@@ -368,9 +368,22 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     tracing::error!(error = %e, error_debug = ?e, "in-process NFS mount failed");
                 }
             }
-            // Remove from active mounts on exit
-            let mut mounts = active_mounts.lock().await;
-            mounts.remove(&mountpoint_key);
+        });
+
+        // Monitor the NFS task in a separate watcher so we detect panics
+        let active_mounts_watcher = self.active_mounts.clone();
+        let mountpoint_key_watcher = req.mountpoint.clone();
+        tokio::spawn(async move {
+            match nfs_handle.await {
+                Ok(()) => {
+                    tracing::warn!("NFS task exited normally");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "NFS task PANICKED: {e}");
+                }
+            }
+            let mut mounts = active_mounts_watcher.lock().await;
+            mounts.remove(&mountpoint_key_watcher);
         });
 
         // Give the NFS server a moment to bind + mount
