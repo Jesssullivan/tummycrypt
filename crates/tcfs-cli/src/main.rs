@@ -413,7 +413,9 @@ async fn main() -> Result<()> {
             DeviceAction::List => cmd_device_list(),
             DeviceAction::Revoke { name } => cmd_device_revoke(&name),
             DeviceAction::Status => cmd_device_status(),
-            DeviceAction::Invite { expiry_hours, qr } => cmd_device_invite(&config, expiry_hours, qr).await,
+            DeviceAction::Invite { expiry_hours, qr } => {
+                cmd_device_invite(&config, expiry_hours, qr).await
+            }
         },
         Commands::Auth { action } => {
             #[cfg(unix)]
@@ -2022,16 +2024,12 @@ async fn cmd_device_invite(
         .into_inner();
 
     // Load master key for signing
-    let key_path = config
-        .crypto
-        .master_key_file
-        .clone()
-        .unwrap_or_else(|| {
-            tcfs_secrets::device::default_registry_path()
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("master.key")
-        });
+    let key_path = config.crypto.master_key_file.clone().unwrap_or_else(|| {
+        tcfs_secrets::device::default_registry_path()
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("master.key")
+    });
 
     let signing_key = if key_path.exists() {
         let key_bytes = std::fs::read(&key_path)
@@ -2065,20 +2063,16 @@ async fn cmd_device_invite(
     invite.remote_prefix = Some(String::from("default"));
 
     // Load S3 credentials from environment (sops-nix populates these)
-    if let Ok(access_key) = std::env::var("AWS_ACCESS_KEY_ID")
-        .or_else(|_| {
-            std::env::var("TCFS_S3_ACCESS_KEY_FILE")
-                .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
-        })
-    {
+    if let Ok(access_key) = std::env::var("AWS_ACCESS_KEY_ID").or_else(|_| {
+        std::env::var("TCFS_S3_ACCESS_KEY_FILE")
+            .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
+    }) {
         invite.storage_access_key = Some(access_key);
     }
-    if let Ok(secret_key) = std::env::var("AWS_SECRET_ACCESS_KEY")
-        .or_else(|_| {
-            std::env::var("TCFS_S3_SECRET_KEY_FILE")
-                .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
-        })
-    {
+    if let Ok(secret_key) = std::env::var("AWS_SECRET_ACCESS_KEY").or_else(|_| {
+        std::env::var("TCFS_S3_SECRET_KEY_FILE")
+            .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
+    }) {
         invite.storage_secret_key = Some(secret_key);
     }
 
@@ -2092,24 +2086,33 @@ async fn cmd_device_invite(
     }
 
     // Use compact encoding (short keys + zstd) for QR-friendly payloads
-    let compact = invite.encode_compact().context("failed to compact-encode invite")?;
+    let compact = invite
+        .encode_compact()
+        .context("failed to compact-encode invite")?;
     let full = invite.encode().context("failed to encode invite")?;
     let deep_link = format!("tcfs://enroll?data={compact}");
 
     println!("Device enrollment invite created");
     println!();
     println!("Expires: {} hours from now", expiry_hours);
-    println!("Storage: {} (bucket: {})", config.storage.endpoint, config.storage.bucket);
+    println!(
+        "Storage: {} (bucket: {})",
+        config.storage.endpoint, config.storage.bucket
+    );
     if invite.storage_access_key.is_some() {
         println!("Credentials: included (S3 access key brokered)");
     } else {
         println!("Credentials: NOT included (set AWS_ACCESS_KEY_ID or TCFS_S3_ACCESS_KEY_FILE)");
     }
-    println!("Payload: {} bytes compact, {} bytes full", compact.len(), full.len());
+    println!(
+        "Payload: {} bytes compact, {} bytes full",
+        compact.len(),
+        full.len()
+    );
     println!();
 
     if render_qr {
-        use qrcode::{QrCode, render::unicode::Dense1x2};
+        use qrcode::{render::unicode::Dense1x2, QrCode};
         let code = QrCode::new(deep_link.as_bytes())
             .context("QR code generation failed (payload may still be too large)")?;
         let qr_string = code
