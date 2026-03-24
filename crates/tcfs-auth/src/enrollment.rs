@@ -172,10 +172,8 @@ impl EnrollmentInvite {
 
     /// Decode from compact representation.
     pub fn decode_compact(encoded: &str) -> anyhow::Result<Self> {
-        let compressed = base64::Engine::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            encoded,
-        )?;
+        let compressed =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, encoded)?;
         let json = zstd::decode_all(compressed.as_slice())
             .map_err(|e| anyhow::anyhow!("zstd decompress failed: {e}"))?;
         let compact: CompactInvite = serde_json::from_slice(&json)?;
@@ -187,13 +185,10 @@ impl EnrollmentInvite {
     /// Compact payloads start with a zstd magic number (0x28B52FFD) after
     /// base64 decoding. Full payloads start with `{` (0x7B) as JSON.
     pub fn decode_any(encoded: &str) -> anyhow::Result<Self> {
-        let raw = base64::Engine::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            encoded,
-        )?;
+        let raw =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, encoded)?;
         // zstd magic: 0xFD2FB528 (little-endian: 28 B5 2F FD)
-        if raw.len() >= 4 && raw[0] == 0x28 && raw[1] == 0xB5 && raw[2] == 0x2F && raw[3] == 0xFD
-        {
+        if raw.len() >= 4 && raw[0] == 0x28 && raw[1] == 0xB5 && raw[2] == 0x2F && raw[3] == 0xFD {
             let json = zstd::decode_all(raw.as_slice())
                 .map_err(|e| anyhow::anyhow!("zstd decompress failed: {e}"))?;
             let compact: CompactInvite = serde_json::from_slice(&json)?;
@@ -274,10 +269,8 @@ impl CompactInvite {
             invite_id: self.i.clone(),
             nonce: self.n.clone(),
             created_by: self.b.clone(),
-            created_at: chrono::DateTime::from_timestamp(self.c, 0)
-                .unwrap_or_else(Utc::now),
-            expires_at: chrono::DateTime::from_timestamp(self.x, 0)
-                .unwrap_or_else(Utc::now),
+            created_at: chrono::DateTime::from_timestamp(self.c, 0).unwrap_or_else(Utc::now),
+            expires_at: chrono::DateTime::from_timestamp(self.x, 0).unwrap_or_else(Utc::now),
             permissions: DevicePermissions {
                 can_mount: self.p & 1 != 0,
                 can_push: self.p & 2 != 0,
