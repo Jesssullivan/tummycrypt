@@ -342,68 +342,75 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let cache_max = self.config.fuse.cache_max_mb as u64 * 1024 * 1024;
         let neg_ttl = self.config.fuse.negative_cache_ttl_secs;
         let mountpoint_key = req.mountpoint.clone();
-        let active_mounts = self.active_mounts.clone();
-
-        // Start NFS server in-process (tokio task) instead of spawning a
-        // subprocess.  This avoids the recursive gRPC mount call, credential
-        // loss, and the process dying before the wrapper can sudo-retry the
-        // mount command.
-        let nfs_handle = tokio::spawn(async move {
-            tracing::info!("NFS mount task starting (prefix={prefix})");
-            match tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
-                op,
-                prefix,
-                mountpoint: mp,
-                port: 0, // auto-assign
-                cache_dir: std::path::PathBuf::from(&cache_dir),
-                cache_max_bytes: cache_max,
-                negative_ttl_secs: neg_ttl,
-            })
-            .await
-            {
-                Ok(()) => {
-                    tracing::warn!("NFS serve_and_mount returned Ok (server stopped)");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, error_debug = ?e, "in-process NFS mount failed");
-                }
-            }
-        });
-
-        // Monitor the NFS task in a separate watcher so we detect panics
         let active_mounts_watcher = self.active_mounts.clone();
-        let mountpoint_key_watcher = req.mountpoint.clone();
-        tokio::spawn(async move {
-            match nfs_handle.await {
-                Ok(()) => {
-                    tracing::warn!("NFS task exited normally");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "NFS task PANICKED: {e}");
-                }
-            }
-            let mut mounts = active_mounts_watcher.lock().await;
-            mounts.remove(&mountpoint_key_watcher);
-        });
 
-        // Give the NFS server a moment to bind + mount
+        if use_nfs {
+            // NFS loopback (fallback — use --nfs flag or "nfs" option)
+            let mount_handle = tokio::spawn(async move {
+                tracing::info!("NFS mount task starting (prefix={prefix})");
+                match tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
+                    op,
+                    prefix,
+                    mountpoint: mp,
+                    port: 0,
+                    cache_dir: std::path::PathBuf::from(&cache_dir),
+                    cache_max_bytes: cache_max,
+                    negative_ttl_secs: neg_ttl,
+                })
+                .await
+                {
+                    Ok(()) => tracing::warn!("NFS serve_and_mount returned Ok"),
+                    Err(e) => tracing::error!(error = %e, "NFS mount failed"),
+                }
+            });
+
+            let mk = mountpoint_key.clone();
+            tokio::spawn(async move {
+                let _ = mount_handle.await;
+                active_mounts_watcher.lock().await.remove(&mk);
+            });
+        } else {
+            // FUSE3 (default — unprivileged mount via fusermount3)
+            let mount_handle = tokio::spawn(async move {
+                tracing::info!("FUSE mount task starting (prefix={prefix})");
+                match tcfs_fuse::mount(tcfs_fuse::MountConfig {
+                    op,
+                    prefix,
+                    mountpoint: mp,
+                    cache_dir: std::path::PathBuf::from(&cache_dir),
+                    cache_max_bytes: cache_max,
+                    negative_ttl_secs: neg_ttl,
+                    read_only: true,
+                    allow_other: false,
+                })
+                .await
+                {
+                    Ok(()) => tracing::info!("FUSE mount unmounted cleanly"),
+                    Err(e) => tracing::error!(error = %e, "FUSE mount failed"),
+                }
+            });
+
+            let mk = mountpoint_key.clone();
+            tokio::spawn(async move {
+                let _ = mount_handle.await;
+                active_mounts_watcher.lock().await.remove(&mk);
+            });
+        }
+
+        // Give the mount a moment to establish
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // Record as active (no Child to track — it's an in-process task)
+        // Record as active
         {
-            // Use a dummy Child (PID 0) since we're in-process now.
-            // The active_mounts map is only used for "already mounted" checks.
             let mut mounts = self.active_mounts.lock().await;
-            // Only insert if not already there (the spawned task may have failed fast)
             mounts.entry(req.mountpoint.clone()).or_insert_with(|| {
-                // Dummy process — `cat` exits immediately, we just need a Child value
                 tokio::process::Command::new("sleep")
                     .arg("infinity")
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn()
-                    .expect("spawn sleep sentinel")
+                    .expect("spawn sentinel")
             });
         }
 
