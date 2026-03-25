@@ -1329,7 +1329,7 @@ async fn cmd_mount(
     );
 
     if use_nfs {
-        // NFS loopback mount — no kernel modules required
+        // NFS loopback mount (fallback — use --nfs flag)
         tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
             op,
             prefix,
@@ -1342,19 +1342,19 @@ async fn cmd_mount(
         .await
         .context("NFS mount failed")
     } else {
-        // FUSE has been retired — NFS is the only mount backend.
-        // Use NFS mount for all cases.
-        tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
+        // FUSE3 mount (default — unprivileged via fusermount3)
+        tcfs_fuse::mount(tcfs_fuse::MountConfig {
             op,
             prefix,
             mountpoint: mountpoint.to_path_buf(),
             cache_dir,
             cache_max_bytes: cache_max,
             negative_ttl_secs: neg_ttl,
-            port: nfs_port,
+            read_only: read_only,
+            allow_other: false,
         })
         .await
-        .context("NFS mount failed")
+        .context("FUSE mount failed")
     }
 }
 

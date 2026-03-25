@@ -1,0 +1,22 @@
+[package]
+name = "tcfs-fuse"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "tcfs FUSE filesystem driver (Linux)"
+
+[dependencies]
+tcfs-vfs = { path = "../tcfs-vfs" }
+opendal = { workspace = true }
+fuse3 = { version = "0.8", features = ["tokio-runtime", "unprivileged"], optional = true }
+libc = { version = "0.2", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+fuse = ["dep:fuse3", "dep:libc", "dep:bytes", "dep:futures-util"]
