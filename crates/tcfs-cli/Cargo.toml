@@ -18,6 +18,7 @@ tcfs-sync = { path = "../tcfs-sync" }
 tcfs-chunks = { path = "../tcfs-chunks" }
 tcfs-vfs = { path = "../tcfs-vfs" }
 tcfs-nfs = { path = "../tcfs-nfs" }
+tcfs-fuse = { path = "../tcfs-fuse", features = ["fuse"] }
 tcfs-crypto = { path = "../tcfs-crypto" }
 tcfs-auth = { path = "../tcfs-auth" }
 qrcode = "0.14"

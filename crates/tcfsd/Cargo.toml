@@ -18,6 +18,7 @@ tcfs-storage = { path = "../tcfs-storage" }
 tcfs-sync = { path = "../tcfs-sync", features = ["nats"] }
 tcfs-vfs = { path = "../tcfs-vfs" }
 tcfs-nfs = { path = "../tcfs-nfs" }
+tcfs-fuse = { path = "../tcfs-fuse", features = ["fuse"] }
 tcfs-auth = { path = "../tcfs-auth", features = ["totp", "webauthn"] }
 opendal = { workspace = true }
 async-nats = { workspace = true }
