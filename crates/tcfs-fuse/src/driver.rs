@@ -279,7 +279,10 @@ impl PathFilesystem for TcfsFs {
                 warn!(path = %path_str, "FUSE OPEN timed out");
                 Errno::from(libc::EIO)
             })?
-            .map_err(|_| Errno::from(libc::ENOENT))?;
+            .map_err(|e| {
+                warn!(path = %path_str, error = %e, "FUSE OPEN failed");
+                Errno::from(libc::ENOENT)
+            })?;
 
         Ok(ReplyOpen { fh, flags: 0 })
     }
