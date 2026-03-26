@@ -62,10 +62,80 @@ pub trait VirtualFilesystem: Send + Sync {
     async fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>>;
 
     /// Release (close) a file handle.
+    ///
+    /// For writable filesystems, this flushes any buffered writes to
+    /// remote storage before releasing the handle.
     async fn release(&self, fh: u64) -> Result<()>;
 
     /// Filesystem statistics (statfs equivalent).
     async fn statfs(&self) -> Result<VfsStatFs> {
         Ok(VfsStatFs::default())
+    }
+
+    // ── Write operations ──────────────────────────────────────────────
+    //
+    // Default implementations return ENOSYS (not supported). Override in
+    // backends that support writes (e.g., TcfsVfs with sync engine).
+
+    /// Create a new file in a parent directory.
+    ///
+    /// Returns a file handle and attributes for the new file.
+    /// The file starts empty; use `write()` to add content.
+    async fn create(&self, _parent: &str, _name: &OsStr, _mode: u32) -> Result<(u64, VfsAttr)> {
+        anyhow::bail!("ENOSYS: create not supported")
+    }
+
+    /// Write bytes to an open file handle at the given offset.
+    ///
+    /// Writes are buffered in memory until `release()` or `fsync()`.
+    /// Returns the number of bytes written.
+    async fn write(&self, _fh: u64, _offset: u64, _data: &[u8]) -> Result<u32> {
+        anyhow::bail!("ENOSYS: write not supported")
+    }
+
+    /// Flush buffered writes to remote storage.
+    ///
+    /// Called on fsync(). For SeaweedFS-backed VFS, this chunks the file,
+    /// uploads to S3, creates a manifest, and updates the index entry.
+    async fn fsync(&self, _fh: u64, _datasync: bool) -> Result<()> {
+        anyhow::bail!("ENOSYS: fsync not supported")
+    }
+
+    /// Create a directory.
+    ///
+    /// For SeaweedFS-backed VFS, directories are implicit (derived from
+    /// index entry paths). This creates a placeholder index entry.
+    async fn mkdir(&self, _parent: &str, _name: &OsStr, _mode: u32) -> Result<VfsAttr> {
+        anyhow::bail!("ENOSYS: mkdir not supported")
+    }
+
+    /// Remove a file from a directory.
+    ///
+    /// Deletes the index entry, manifest, and chunks from remote storage.
+    async fn unlink(&self, _parent: &str, _name: &OsStr) -> Result<()> {
+        anyhow::bail!("ENOSYS: unlink not supported")
+    }
+
+    /// Remove an empty directory.
+    async fn rmdir(&self, _parent: &str, _name: &OsStr) -> Result<()> {
+        anyhow::bail!("ENOSYS: rmdir not supported")
+    }
+
+    /// Rename a file or directory.
+    async fn rename(
+        &self,
+        _from_parent: &str,
+        _from_name: &OsStr,
+        _to_parent: &str,
+        _to_name: &OsStr,
+    ) -> Result<()> {
+        anyhow::bail!("ENOSYS: rename not supported")
+    }
+
+    /// Set file attributes (permissions, timestamps, size).
+    ///
+    /// Supports truncate (setting size), chmod, and utimensat.
+    async fn setattr(&self, _path: &str, _attr: &VfsAttr) -> Result<VfsAttr> {
+        anyhow::bail!("ENOSYS: setattr not supported")
     }
 }

@@ -331,6 +331,98 @@ impl PathFilesystem for TcfsFs {
         Ok(())
     }
 
+    // ── Write handlers ─────────────────────────────────────────────────
+
+    async fn write(
+        &self,
+        _req: Request,
+        _path: Option<&OsStr>,
+        fh: u64,
+        offset: u64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: u32,
+    ) -> fuse3::Result<ReplyWrite> {
+        let written = tokio::time::timeout(VFS_TIMEOUT, self.vfs.write(fh, offset, data))
+            .await
+            .map_err(|_| {
+                warn!("FUSE WRITE timed out");
+                Errno::from(libc::EIO)
+            })?
+            .map_err(|e| {
+                warn!(error = %e, "FUSE WRITE failed");
+                Errno::from(libc::EIO)
+            })?;
+
+        Ok(ReplyWrite { written })
+    }
+
+    async fn create(
+        &self,
+        _req: Request,
+        parent: &OsStr,
+        name: &OsStr,
+        mode: u32,
+        _flags: u32,
+    ) -> fuse3::Result<ReplyCreated> {
+        let parent_str = parent.to_str().unwrap_or("/");
+
+        let (fh, attr) = tokio::time::timeout(VFS_TIMEOUT, self.vfs.create(parent_str, name, mode))
+            .await
+            .map_err(|_| {
+                warn!(parent = %parent_str, name = ?name, "FUSE CREATE timed out");
+                Errno::from(libc::EIO)
+            })?
+            .map_err(|e| {
+                warn!(parent = %parent_str, name = ?name, error = %e, "FUSE CREATE failed");
+                Errno::from(libc::EIO)
+            })?;
+
+        Ok(ReplyCreated {
+            ttl: ATTR_TTL,
+            attr: to_fuse_attr(&attr),
+            generation: 0,
+            fh,
+            flags: 0,
+        })
+    }
+
+    async fn unlink(&self, _req: Request, parent: &OsStr, name: &OsStr) -> fuse3::Result<()> {
+        let parent_str = parent.to_str().unwrap_or("/");
+
+        tokio::time::timeout(VFS_TIMEOUT, self.vfs.unlink(parent_str, name))
+            .await
+            .map_err(|_| Errno::from(libc::EIO))?
+            .map_err(|e| {
+                warn!(parent = %parent_str, name = ?name, error = %e, "FUSE UNLINK failed");
+                Errno::from(libc::EIO)
+            })
+    }
+
+    async fn mkdir(
+        &self,
+        _req: Request,
+        parent: &OsStr,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+    ) -> fuse3::Result<ReplyEntry> {
+        let parent_str = parent.to_str().unwrap_or("/");
+
+        let attr = tokio::time::timeout(VFS_TIMEOUT, self.vfs.mkdir(parent_str, name, mode))
+            .await
+            .map_err(|_| Errno::from(libc::EIO))?
+            .map_err(|e| {
+                warn!(parent = %parent_str, name = ?name, error = %e, "FUSE MKDIR failed");
+                Errno::from(libc::EIO)
+            })?;
+
+        Ok(ReplyEntry {
+            ttl: ATTR_TTL,
+            attr: to_fuse_attr(&attr),
+        })
+    }
+
     async fn statfs(&self, _req: Request, _path: &OsStr) -> fuse3::Result<ReplyStatFs> {
         let stats = tokio::time::timeout(VFS_TIMEOUT, self.vfs.statfs())
             .await
