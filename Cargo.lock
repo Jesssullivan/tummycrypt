@@ -5139,7 +5139,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-auth"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5167,7 +5167,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-chunks"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5185,7 +5185,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-cli"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5222,7 +5222,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-cloudfilter"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "opendal",
@@ -5242,7 +5242,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "prost",
@@ -5259,7 +5259,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-crypto"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes-siv",
  "anyhow",
@@ -5284,7 +5284,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-dbus"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -5295,7 +5295,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-file-provider"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5323,7 +5323,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-fuse"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5338,7 +5338,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-mcp"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "hyper-util",
@@ -5359,7 +5359,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-nfs"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5376,7 +5376,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-secrets"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes-gcm",
  "age",
@@ -5406,7 +5406,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-sops"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5425,7 +5425,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-storage"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "opendal",
@@ -5439,7 +5439,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-sync"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -5468,7 +5468,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-tui"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -5487,7 +5487,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-vfs"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5505,7 +5505,7 @@ dependencies = [
 
 [[package]]
 name = "tcfsd"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "age",
  "anyhow",
@@ -6258,9 +6258,9 @@ dependencies = [
 
 [[package]]
 name = "unicode-segmentation"
-version = "1.13.1"
+version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da36089a805484bcccfffe0739803392c8298778a2d2f09febf76fac5ad9025b"
+checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
 
 [[package]]
 name = "unicode-truncate"
