@@ -26,7 +26,7 @@ pub async fn fetch_content(
 ) -> Result<Vec<u8>> {
     debug!(manifest = %manifest_path, "hydrating");
 
-    // Read manifest: newline-separated chunk hashes
+    // Read manifest (supports both JSON v2 and legacy plaintext)
     let manifest_bytes = op
         .read(manifest_path)
         .await
@@ -35,7 +35,26 @@ pub async fn fetch_content(
     let manifest_str = String::from_utf8(manifest_bytes.to_bytes().to_vec())
         .context("manifest is not valid UTF-8")?;
 
-    let chunk_hashes: Vec<&str> = manifest_str.lines().filter(|l| !l.is_empty()).collect();
+    // Parse chunk hashes: JSON v2 manifests have a "chunks" array;
+    // legacy v1 manifests are plain newline-separated chunk hashes.
+    let chunk_hashes: Vec<String> = if manifest_str.trim_start().starts_with('{') {
+        // JSON v2 manifest
+        let parsed: serde_json::Value =
+            serde_json::from_str(&manifest_str).context("parsing JSON manifest")?;
+        parsed["chunks"]
+            .as_array()
+            .context("manifest missing 'chunks' array")?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    } else {
+        // Legacy plaintext: one chunk hash per line
+        manifest_str
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    };
 
     if chunk_hashes.is_empty() {
         anyhow::bail!("empty manifest: {}", manifest_path);
