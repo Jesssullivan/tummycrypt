@@ -154,9 +154,29 @@ impl TcfsVfs {
     /// Fetch and parse an IndexEntry for a virtual path.
     async fn get_index_entry(&self, vpath: &str) -> Option<IndexEntry> {
         let key = self.index_key_for(vpath)?;
-        let data = self.op.read(&key).await.ok()?;
-        let text = String::from_utf8(data.to_bytes().to_vec()).ok()?;
-        IndexEntry::parse(&text).ok()
+        debug!(vpath = %vpath, key = %key, "get_index_entry: reading S3 key");
+        let data = match self.op.read(&key).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(vpath = %vpath, key = %key, error = %e, "get_index_entry: S3 read failed");
+                return None;
+            }
+        };
+        let text = match String::from_utf8(data.to_bytes().to_vec()) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(vpath = %vpath, key = %key, error = %e, "get_index_entry: non-UTF8 data");
+                return None;
+            }
+        };
+        debug!(vpath = %vpath, key = %key, text_len = text.len(), "get_index_entry: parsing");
+        match IndexEntry::parse(&text) {
+            Ok(entry) => Some(entry),
+            Err(e) => {
+                tracing::warn!(vpath = %vpath, key = %key, error = %e, text = %text, "get_index_entry: parse failed");
+                None
+            }
+        }
     }
 
     /// Fetch the real file size from an index entry by its S3 key.
