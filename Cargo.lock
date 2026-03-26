@@ -5494,6 +5494,7 @@ dependencies = [
  "libc",
  "opendal",
  "serde",
+ "serde_json",
  "tcfs-core",
  "tcfs-storage",
  "tempfile",
