@@ -1,14 +1,17 @@
 {
   description = "tummycrypt/tcfs - FOSS self-hosted odrive replacement";
 
-  nixConfig = {
-    extra-substituters = [
-      "https://nix-cache.fuzzy-dev.tinyland.dev/main"
-    ];
-    extra-trusted-public-keys = [
-      "main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE="
-    ];
-  };
+  # Attic binary cache disabled — was serving stale cargoArtifacts that
+  # didn't include fuse3, causing "no matching package found" errors.
+  # Re-enable after purging stale artifacts from the cache.
+  # nixConfig = {
+  #   extra-substituters = [
+  #     "https://nix-cache.fuzzy-dev.tinyland.dev/main"
+  #   ];
+  #   extra-trusted-public-keys = [
+  #     "main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE="
+  #   ];
+  # };
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
