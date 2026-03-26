@@ -380,7 +380,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     cache_dir: std::path::PathBuf::from(&cache_dir),
                     cache_max_bytes: cache_max,
                     negative_ttl_secs: neg_ttl,
-                    read_only: true,
+                    read_only: req.read_only,
                     allow_other: false,
                 })
                 .await

@@ -36,9 +36,14 @@ use crate::stub::IndexEntry;
 use crate::types::{VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs};
 use crate::vfs::VirtualFilesystem;
 
-/// An open file handle — holds hydrated content in memory.
+/// An open file handle — holds content in memory, tracks write state.
 struct FileHandle {
+    /// Virtual path (e.g., "/src/main.rs.tc")
+    path: String,
+    /// File content in memory (hydrated on open, modified on write)
     data: Vec<u8>,
+    /// True if data has been modified since open (needs flush on release)
+    modified: bool,
 }
 
 /// The tcfs virtual filesystem driver.
@@ -95,6 +100,67 @@ impl TcfsVfs {
     /// Access the underlying disk cache (for stats, inspection).
     pub fn disk_cache(&self) -> &DiskCache {
         &self.disk_cache
+    }
+
+    /// Flush modified file content to SeaweedFS (index + manifest + chunks).
+    ///
+    /// This is the reverse of hydration: takes in-memory bytes, chunks them,
+    /// uploads to S3, creates a JSON v2 manifest, and updates the index entry.
+    async fn flush_to_remote(&self, vpath: &str, data: &[u8]) -> Result<()> {
+        use tracing::info;
+
+        let prefix = self.prefix.trim_end_matches('/');
+
+        // 1. Compute BLAKE3 content hash (matches sync engine)
+        let chunk_hash = blake3::hash(data).to_hex().to_string();
+        let chunk_key = format!("{}/chunks/{}", prefix, chunk_hash);
+        self.op
+            .write(&chunk_key, data.to_vec())
+            .await
+            .context("uploading chunk")?;
+
+        // 3. Create JSON v2 manifest
+        let manifest = serde_json::json!({
+            "version": 2,
+            "file_hash": chunk_hash,
+            "file_size": data.len(),
+            "chunks": [chunk_hash],
+            "written_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+        let manifest_key = format!("{}/manifests/{}", prefix, chunk_hash);
+        self.op
+            .write(&manifest_key, manifest.to_string().into_bytes())
+            .await
+            .context("uploading manifest")?;
+
+        // 4. Update index entry
+        let index_key = self
+            .index_key_for(vpath)
+            .context("cannot compute index key")?;
+        let index_content = format!(
+            "manifest_hash={}\nsize={}\nchunks=1\n",
+            chunk_hash,
+            data.len()
+        );
+        self.op
+            .write(&index_key, index_content.into_bytes())
+            .await
+            .context("writing index entry")?;
+
+        info!(
+            path = %vpath,
+            bytes = data.len(),
+            manifest = %manifest_key,
+            "flushed to SeaweedFS"
+        );
+
+        // 5. Invalidate negative cache
+        self.negative_cache.remove(vpath);
+
+        Ok(())
     }
 
     /// Build the index path for a virtual FS path.
@@ -358,10 +424,14 @@ impl VirtualFilesystem for TcfsVfs {
             .with_context(|| format!("hydration failed: {}", path))?;
 
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-        self.handles
-            .lock()
-            .await
-            .insert(fh, FileHandle { data: data.clone() });
+        self.handles.lock().await.insert(
+            fh,
+            FileHandle {
+                path: path.to_string(),
+                data: data.clone(),
+                modified: false,
+            },
+        );
 
         Ok((fh, data))
     }
@@ -382,7 +452,78 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn release(&self, fh: u64) -> Result<()> {
-        self.handles.lock().await.remove(&fh);
+        let handle = self.handles.lock().await.remove(&fh);
+
+        if let Some(h) = handle {
+            if h.modified {
+                // Flush modified content to SeaweedFS
+                debug!(path = %h.path, bytes = h.data.len(), "flushing modified file to S3");
+                self.flush_to_remote(&h.path, &h.data).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32> {
+        let mut handles = self.handles.lock().await;
+        let handle = handles
+            .get_mut(&fh)
+            .context(format!("bad file handle: {}", fh))?;
+
+        // Extend buffer if write extends past current end
+        let end = offset as usize + data.len();
+        if end > handle.data.len() {
+            handle.data.resize(end, 0);
+        }
+
+        handle.data[offset as usize..end].copy_from_slice(data);
+        handle.modified = true;
+
+        Ok(data.len() as u32)
+    }
+
+    async fn create(&self, parent: &str, name: &OsStr, _mode: u32) -> Result<(u64, VfsAttr)> {
+        let name_str = name.to_str().context("non-UTF-8 filename")?;
+        let vpath = if parent == "/" {
+            format!("/{}.tc", name_str)
+        } else {
+            format!("{}/{}.tc", parent.trim_end_matches('/'), name_str)
+        };
+
+        debug!(path = %vpath, "creating new file");
+
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+        self.handles.lock().await.insert(
+            fh,
+            FileHandle {
+                path: vpath,
+                data: Vec::new(),
+                modified: true, // new file = modified (needs flush)
+            },
+        );
+
+        // Clear negative cache for this path
+        self.negative_cache.remove(name_str);
+
+        let attr = self.file_attr(0);
+        Ok((fh, attr))
+    }
+
+    async fn unlink(&self, parent: &str, name: &OsStr) -> Result<()> {
+        let name_str = name.to_str().context("non-UTF-8 filename")?;
+        let vpath = if parent == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent.trim_end_matches('/'), name_str)
+        };
+
+        // Delete index entry from S3
+        if let Some(key) = self.index_key_for(&vpath) {
+            debug!(path = %vpath, key = %key, "deleting index entry");
+            self.op.delete(&key).await.context("deleting index entry")?;
+        }
+
         Ok(())
     }
 
