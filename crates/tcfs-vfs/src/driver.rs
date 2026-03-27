@@ -338,7 +338,7 @@ impl TcfsVfs {
                     },
                 });
             } else {
-                let stub_name = format!("{}.tc", first_component);
+                let stub_name = first_component.to_string();
                 let attr = if with_attrs {
                     let size = self.read_index_entry_size(&full_path).await;
                     Some(self.file_attr(size))
@@ -392,15 +392,14 @@ impl VirtualFilesystem for TcfsVfs {
             anyhow::bail!("ENOENT (negative cache): {}", path);
         }
 
-        // Stub file (.tc / .tcf)
-        if path.ends_with(".tc") || path.ends_with(".tcf") {
-            match self.get_index_entry(path).await {
-                Some(entry) => return Ok(self.file_attr(entry.size)),
-                None => {
-                    self.negative_cache.insert(path);
-                    anyhow::bail!("ENOENT: {}", path);
-                }
-            }
+        // File: try index lookup (with and without .tc for backward compat)
+        if let Some(entry) = self.get_index_entry(path).await {
+            return Ok(self.file_attr(entry.size));
+        }
+        // Try with .tc suffix (old index entries)
+        let with_tc = format!("{}.tc", path.trim_end_matches('/'));
+        if let Some(entry) = self.get_index_entry(&with_tc).await {
+            return Ok(self.file_attr(entry.size));
         }
 
         // Directory: check if any index entries exist under it
@@ -435,15 +434,16 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn open(&self, path: &str) -> Result<(u64, Vec<u8>)> {
-        // Only handle .tc stub files
-        if !path.ends_with(".tc") && !path.ends_with(".tcf") {
-            anyhow::bail!("not a stub file: {}", path);
-        }
-
-        let entry = self
-            .get_index_entry(path)
-            .await
-            .context(format!("index entry not found: {}", path))?;
+        // Try index lookup as-is, then with .tc suffix for backward compat
+        let entry = match self.get_index_entry(path).await {
+            Some(e) => e,
+            None => {
+                let with_tc = format!("{}.tc", path.trim_end_matches('/'));
+                self.get_index_entry(&with_tc)
+                    .await
+                    .context(format!("index entry not found: {}", path))?
+            }
+        };
 
         let manifest_path = entry.manifest_path(&self.prefix);
         let prefix = self.prefix.trim_end_matches('/');
@@ -517,9 +517,9 @@ impl VirtualFilesystem for TcfsVfs {
     async fn create(&self, parent: &str, name: &OsStr, _mode: u32) -> Result<(u64, VfsAttr)> {
         let name_str = name.to_str().context("non-UTF-8 filename")?;
         let vpath = if parent == "/" {
-            format!("/{}.tc", name_str)
+            format!("/{}", name_str)
         } else {
-            format!("{}/{}.tc", parent.trim_end_matches('/'), name_str)
+            format!("{}/{}", parent.trim_end_matches('/'), name_str)
         };
 
         debug!(path = %vpath, "creating new file");
