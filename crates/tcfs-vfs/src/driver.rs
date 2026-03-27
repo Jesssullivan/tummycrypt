@@ -36,6 +36,13 @@ use crate::stub::IndexEntry;
 use crate::types::{VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs};
 use crate::vfs::VirtualFilesystem;
 
+/// Sentinel filename written under empty directories so they appear
+/// in S3 `list()` results. Filtered out of readdir output.
+const DIR_MARKER: &str = ".tcfs_dir";
+
+/// Content stored in directory marker index entries.
+const DIR_MARKER_CONTENT: &[u8] = b"type=directory\n";
+
 /// An open file handle — holds content in memory, tracks write state.
 struct FileHandle {
     /// Virtual path (e.g., "/src/main.rs.tc")
@@ -226,6 +233,19 @@ impl TcfsVfs {
         }
     }
 
+    /// Build the S3 key for a directory marker.
+    /// `/newdir` -> `{prefix}/index/newdir/.tcfs_dir`
+    fn dir_marker_key(&self, vpath: &str) -> String {
+        let rel = vpath.trim_start_matches('/').trim_end_matches('/');
+        let prefix = self.prefix.trim_end_matches('/');
+        match (prefix.is_empty(), rel.is_empty()) {
+            (true, true) => format!("index/{}", DIR_MARKER),
+            (true, false) => format!("index/{}/{}", rel, DIR_MARKER),
+            (false, true) => format!("{}/index/{}", prefix, DIR_MARKER),
+            (false, false) => format!("{}/index/{}/{}", prefix, rel, DIR_MARKER),
+        }
+    }
+
     /// Discover prefixes that have index entries (bucket root scan).
     async fn discover_prefixes(&self) -> Vec<String> {
         let entries = match self.op.list("/").await {
@@ -320,6 +340,12 @@ impl TcfsVfs {
             }
 
             let first_component = rel.split('/').next().unwrap_or(rel);
+
+            // Skip directory marker sentinel entries
+            if first_component == DIR_MARKER {
+                continue;
+            }
+
             let is_dir = rel.contains('/') || rel.ends_with('/');
 
             if is_dir {
@@ -554,6 +580,133 @@ impl VirtualFilesystem for TcfsVfs {
             debug!(path = %vpath, key = %key, "deleting index entry");
             self.op.delete(&key).await.context("deleting index entry")?;
         }
+
+        Ok(())
+    }
+
+    async fn mkdir(&self, parent: &str, name: &OsStr, _mode: u32) -> Result<VfsAttr> {
+        let name_str = name.to_str().context("non-UTF-8 directory name")?;
+        let vpath = if parent == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent.trim_end_matches('/'), name_str)
+        };
+
+        debug!(path = %vpath, "creating directory");
+
+        // Write directory marker so getattr/readdir can find empty directories
+        let marker_key = self.dir_marker_key(&vpath);
+        self.op
+            .write(&marker_key, DIR_MARKER_CONTENT.to_vec())
+            .await
+            .context("writing directory marker")?;
+
+        // Clear negative cache for this path and parent
+        self.negative_cache.remove(&vpath);
+        self.negative_cache.remove(parent);
+
+        Ok(self.dir_attr())
+    }
+
+    async fn rename(
+        &self,
+        from_parent: &str,
+        from_name: &OsStr,
+        to_parent: &str,
+        to_name: &OsStr,
+    ) -> Result<()> {
+        let from_str = from_name.to_str().context("non-UTF-8 source name")?;
+        let to_str = to_name.to_str().context("non-UTF-8 target name")?;
+
+        let from_path = if from_parent == "/" {
+            format!("/{}", from_str)
+        } else {
+            format!("{}/{}", from_parent.trim_end_matches('/'), from_str)
+        };
+        let to_path = if to_parent == "/" {
+            format!("/{}", to_str)
+        } else {
+            format!("{}/{}", to_parent.trim_end_matches('/'), to_str)
+        };
+
+        debug!(from = %from_path, to = %to_path, "renaming");
+
+        // Copy-then-delete (S3 has no native rename)
+        let from_key = self
+            .index_key_for(&from_path)
+            .context("cannot compute source index key")?;
+        let to_key = self
+            .index_key_for(&to_path)
+            .context("cannot compute target index key")?;
+
+        let data = self
+            .op
+            .read(&from_key)
+            .await
+            .with_context(|| format!("reading source index: {}", from_key))?;
+
+        self.op
+            .write(&to_key, data.to_vec())
+            .await
+            .with_context(|| format!("writing target index: {}", to_key))?;
+
+        self.op
+            .delete(&from_key)
+            .await
+            .with_context(|| format!("deleting source index: {}", from_key))?;
+
+        // Update any open file handles pointing to the old path
+        {
+            let mut handles = self.handles.lock().await;
+            for h in handles.values_mut() {
+                if h.path == from_path {
+                    h.path = to_path.clone();
+                }
+            }
+        }
+
+        self.negative_cache.remove(&from_path);
+        self.negative_cache.remove(&to_path);
+
+        Ok(())
+    }
+
+    async fn rmdir(&self, parent: &str, name: &OsStr) -> Result<()> {
+        let name_str = name.to_str().context("non-UTF-8 directory name")?;
+        let vpath = if parent == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent.trim_end_matches('/'), name_str)
+        };
+
+        debug!(path = %vpath, "removing directory");
+
+        // Check that directory is empty (only the marker should exist)
+        let dir_prefix = self.index_prefix_for_dir(&vpath);
+        let entries = self
+            .op
+            .list(&dir_prefix)
+            .await
+            .context("listing directory for rmdir")?;
+
+        let real_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                let rel = e.path().trim_start_matches(&dir_prefix);
+                !rel.is_empty() && rel.trim_end_matches('/') != DIR_MARKER
+            })
+            .collect();
+
+        if !real_entries.is_empty() {
+            anyhow::bail!("ENOTEMPTY: directory not empty: {}", vpath);
+        }
+
+        // Delete the directory marker
+        let marker_key = self.dir_marker_key(&vpath);
+        self.op
+            .delete(&marker_key)
+            .await
+            .context("deleting directory marker")?;
 
         Ok(())
     }
