@@ -423,6 +423,49 @@ impl PathFilesystem for TcfsFs {
         })
     }
 
+    async fn rename(
+        &self,
+        _req: Request,
+        origin_parent: &OsStr,
+        origin_name: &OsStr,
+        parent: &OsStr,
+        name: &OsStr,
+    ) -> fuse3::Result<()> {
+        let from_parent = origin_parent.to_str().unwrap_or("/");
+        let to_parent = parent.to_str().unwrap_or("/");
+
+        tokio::time::timeout(
+            VFS_TIMEOUT,
+            self.vfs.rename(from_parent, origin_name, to_parent, name),
+        )
+        .await
+        .map_err(|_| {
+            warn!(from = %from_parent, "FUSE RENAME timed out");
+            Errno::from(libc::EIO)
+        })?
+        .map_err(|e| {
+            warn!(from = %from_parent, error = %e, "FUSE RENAME failed");
+            Errno::from(libc::EIO)
+        })
+    }
+
+    async fn rmdir(&self, _req: Request, parent: &OsStr, name: &OsStr) -> fuse3::Result<()> {
+        let parent_str = parent.to_str().unwrap_or("/");
+
+        tokio::time::timeout(VFS_TIMEOUT, self.vfs.rmdir(parent_str, name))
+            .await
+            .map_err(|_| Errno::from(libc::EIO))?
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("ENOTEMPTY") {
+                    Errno::from(libc::ENOTEMPTY)
+                } else {
+                    warn!(parent = %parent_str, name = ?name, error = %e, "FUSE RMDIR failed");
+                    Errno::from(libc::EIO)
+                }
+            })
+    }
+
     async fn statfs(&self, _req: Request, _path: &OsStr) -> fuse3::Result<ReplyStatFs> {
         let stats = tokio::time::timeout(VFS_TIMEOUT, self.vfs.statfs())
             .await
