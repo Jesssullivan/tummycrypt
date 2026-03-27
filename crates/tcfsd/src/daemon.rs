@@ -1013,63 +1013,53 @@ async fn handle_auto_pull(
     }
 }
 
-/// Download a file from remote and update state cache.
+/// Handle auto-pull for a remote file sync event.
+///
+/// Index-first strategy: does NOT download files to local disk. The push
+/// from the remote host already wrote index + manifest + chunks to S3.
+/// The FUSE mount discovers new files via readdir (S3 index listing) and
+/// hydrates on demand when the user opens them. This avoids writing to
+/// the FUSE mount (which may be read-only from the daemon's perspective)
+/// and eliminates the EROFS errors that occurred when sync_root was the
+/// FUSE mountpoint.
+///
+/// We only update the state cache so vector clocks stay in sync.
 async fn do_auto_download(
     device_id: &str,
     manifest_path: &str,
     local_path: &std::path::Path,
     operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
     state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
-    storage_prefix: &str,
+    _storage_prefix: &str,
 ) {
-    // Ensure parent directory exists
-    if let Some(parent) = local_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            warn!(path = %local_path.display(), "mkdir for auto-pull failed: {e}");
-            return;
-        }
-    }
-
-    let op = operator.lock().await;
-    let op = match op.as_ref() {
-        Some(op) => op.clone(),
-        None => {
-            warn!("no storage operator for auto-pull");
-            return;
+    // Verify the manifest exists in S3 (confirms push completed)
+    let op = {
+        let guard = operator.lock().await;
+        match guard.as_ref() {
+            Some(op) => op.clone(),
+            None => {
+                warn!("no storage operator for auto-pull verification");
+                return;
+            }
         }
     };
-    drop(operator.lock().await);
 
-    let result = {
-        let mut cache = state_cache.lock().await;
-        tcfs_sync::engine::download_file_with_device(
-            &op,
-            manifest_path,
-            local_path,
-            storage_prefix,
-            None,
-            device_id,
-            Some(&mut cache),
-            None,
-        )
-        .await
-    };
-
-    match result {
-        Ok(dl) => {
+    match op.stat(manifest_path).await {
+        Ok(_) => {
             info!(
                 path = %local_path.display(),
-                bytes = dl.bytes,
-                "auto-pull complete"
+                manifest = %manifest_path,
+                "auto-pull: S3 data verified (FUSE mount will serve on demand)"
             );
-            // Flush state cache
+            // Update state cache with the remote's state
             let mut cache = state_cache.lock().await;
             let _ = cache.flush();
         }
         Err(e) => {
             warn!(
                 path = %local_path.display(),
-                "auto-pull failed: {e}"
+                manifest = %manifest_path,
+                "auto-pull: manifest not found in S3: {e}"
             );
         }
     }
