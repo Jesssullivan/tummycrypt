@@ -83,8 +83,7 @@
         tcfsd = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tcfsd";
-          cargoExtraArgs = "-p tcfsd"
-            + pkgs.lib.optionalString pkgs.stdenv.isDarwin " --features fuse-t";
+          cargoExtraArgs = "-p tcfsd";
           meta.mainProgram = "tcfsd";
         });
 
