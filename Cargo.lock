@@ -5496,6 +5496,7 @@ dependencies = [
  "opendal",
  "serde",
  "serde_json",
+ "tcfs-chunks",
  "tcfs-core",
  "tcfs-storage",
  "tempfile",

@@ -104,33 +104,44 @@ impl TcfsVfs {
 
     /// Flush modified file content to SeaweedFS (index + manifest + chunks).
     ///
-    /// This is the reverse of hydration: takes in-memory bytes, chunks them,
-    /// uploads to S3, creates a JSON v2 manifest, and updates the index entry.
+    /// Uses FastCDC content-defined chunking for deduplication. Small files
+    /// (<4KB) produce a single chunk; larger files are split at content
+    /// boundaries for efficient cross-file dedup.
     async fn flush_to_remote(&self, vpath: &str, data: &[u8]) -> Result<()> {
         use tracing::info;
 
         let prefix = self.prefix.trim_end_matches('/');
 
-        // 1. Compute BLAKE3 content hash (matches sync engine)
-        let chunk_hash = blake3::hash(data).to_hex().to_string();
-        let chunk_key = format!("{}/chunks/{}", prefix, chunk_hash);
-        self.op
-            .write(&chunk_key, data.to_vec())
-            .await
-            .context("uploading chunk")?;
+        // 1. Chunk the data using FastCDC (content-defined boundaries)
+        let sizes = tcfs_chunks::ChunkSizes::for_path(std::path::Path::new(vpath));
+        let chunks = tcfs_chunks::chunk_data(data, sizes);
+        let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(data));
+
+        // 2. Upload each chunk (dedup: same content hash = same chunk)
+        let mut chunk_hashes = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
+            let chunk_hex = tcfs_chunks::hash_to_hex(&chunk.hash);
+            let chunk_key = format!("{}/chunks/{}", prefix, chunk_hex);
+            self.op
+                .write(&chunk_key, chunk_data.to_vec())
+                .await
+                .with_context(|| format!("uploading chunk {}", chunk_hex))?;
+            chunk_hashes.push(chunk_hex);
+        }
 
         // 3. Create JSON v2 manifest
         let manifest = serde_json::json!({
             "version": 2,
-            "file_hash": chunk_hash,
+            "file_hash": file_hash,
             "file_size": data.len(),
-            "chunks": [chunk_hash],
+            "chunks": chunk_hashes,
             "written_at": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
         });
-        let manifest_key = format!("{}/manifests/{}", prefix, chunk_hash);
+        let manifest_key = format!("{}/manifests/{}", prefix, file_hash);
         self.op
             .write(&manifest_key, manifest.to_string().into_bytes())
             .await
@@ -141,9 +152,10 @@ impl TcfsVfs {
             .index_key_for(vpath)
             .context("cannot compute index key")?;
         let index_content = format!(
-            "manifest_hash={}\nsize={}\nchunks=1\n",
-            chunk_hash,
-            data.len()
+            "manifest_hash={}\nsize={}\nchunks={}\n",
+            file_hash,
+            data.len(),
+            chunk_hashes.len()
         );
         self.op
             .write(&index_key, index_content.into_bytes())
@@ -153,6 +165,7 @@ impl TcfsVfs {
         info!(
             path = %vpath,
             bytes = data.len(),
+            chunks = chunk_hashes.len(),
             manifest = %manifest_key,
             "flushed to SeaweedFS"
         );
