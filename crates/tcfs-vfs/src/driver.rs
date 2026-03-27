@@ -46,6 +46,10 @@ struct FileHandle {
     modified: bool,
 }
 
+/// Callback invoked after a file is flushed to remote storage.
+/// Parameters: (virtual_path, file_hash, size_bytes, chunk_count)
+pub type OnFlushCallback = Arc<dyn Fn(&str, &str, u64, usize) + Send + Sync + 'static>;
+
 /// The tcfs virtual filesystem driver.
 ///
 /// Protocol-agnostic: implements `VirtualFilesystem` for use by FUSE, NFS,
@@ -63,6 +67,8 @@ pub struct TcfsVfs {
     next_fh: Arc<AtomicU64>,
     /// Mount timestamp (used as atime/mtime for all synthetic entries)
     mount_time: SystemTime,
+    /// Optional callback after flush_to_remote (e.g., NATS publish)
+    on_flush: Option<OnFlushCallback>,
 }
 
 impl TcfsVfs {
@@ -94,7 +100,14 @@ impl TcfsVfs {
             handles: Arc::new(Mutex::new(HashMap::new())),
             next_fh: Arc::new(AtomicU64::new(1)),
             mount_time: SystemTime::now(),
+            on_flush: None,
         }
+    }
+
+    /// Set a callback invoked after each flush_to_remote.
+    /// Used by the daemon to publish NATS FileSynced events.
+    pub fn set_on_flush(&mut self, callback: OnFlushCallback) {
+        self.on_flush = Some(callback);
     }
 
     /// Access the underlying disk cache (for stats, inspection).
@@ -172,6 +185,11 @@ impl TcfsVfs {
 
         // 5. Invalidate negative cache
         self.negative_cache.remove(vpath);
+
+        // 6. Notify listeners (e.g., NATS FileSynced publish)
+        if let Some(ref cb) = self.on_flush {
+            cb(vpath, &file_hash, data.len() as u64, chunk_hashes.len());
+        }
 
         Ok(())
     }
