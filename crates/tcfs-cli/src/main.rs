@@ -1352,6 +1352,7 @@ async fn cmd_mount(
             negative_ttl_secs: neg_ttl,
             read_only: read_only,
             allow_other: false,
+            on_flush: None,
         })
         .await
         .context("FUSE mount failed")
