@@ -371,6 +371,41 @@ impl TcfsDaemon for TcfsDaemonImpl {
             });
         } else {
             // FUSE3 (default — unprivileged mount via fusermount3)
+            //
+            // Wire NATS publish callback: when a file is flushed to S3 via
+            // FUSE write, notify other hosts so their FUSE mounts pick it up.
+            let nats_handle = self.nats.clone();
+            let flush_device_id = self.device_id.clone();
+            let on_flush: Option<tcfs_vfs::OnFlushCallback> = Some(std::sync::Arc::new(
+                move |vpath: &str, hash: &str, size: u64, chunks: usize| {
+                    let nats = nats_handle.clone();
+                    let device = flush_device_id.clone();
+                    let path = vpath.to_string();
+                    let hash = hash.to_string();
+                    tokio::spawn(async move {
+                        if let Some(ref client) = *nats.lock().await {
+                            let event = tcfs_sync::StateEvent::FileSynced {
+                                device_id: device,
+                                rel_path: path.clone(),
+                                blake3: hash,
+                                size,
+                                vclock: tcfs_sync::conflict::VectorClock::default(),
+                                manifest_path: String::new(),
+                                timestamp: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            };
+                            if let Err(e) = client.publish_state_event(&event).await {
+                                tracing::warn!(path = %path, "NATS publish on FUSE flush failed: {e}");
+                            } else {
+                                tracing::debug!(path = %path, "NATS FileSynced published from FUSE write");
+                            }
+                        }
+                    });
+                },
+            ));
+
             let mount_handle = tokio::spawn(async move {
                 tracing::info!("FUSE mount task starting (prefix={prefix})");
                 match tcfs_fuse::mount(tcfs_fuse::MountConfig {
@@ -382,6 +417,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     negative_ttl_secs: neg_ttl,
                     read_only: req.read_only,
                     allow_other: false,
+                    on_flush,
                 })
                 .await
                 {

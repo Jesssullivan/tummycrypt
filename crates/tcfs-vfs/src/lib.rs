@@ -29,7 +29,7 @@ pub mod vfs;
 pub use vfs::VirtualFilesystem;
 
 // Concrete implementation
-pub use driver::TcfsVfs;
+pub use driver::{OnFlushCallback, TcfsVfs};
 
 // Types
 pub use types::{VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs};

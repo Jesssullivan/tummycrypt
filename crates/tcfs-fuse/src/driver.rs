@@ -18,7 +18,7 @@ use opendal::Operator;
 use tracing::{debug, info, warn};
 
 use tcfs_vfs::types::VfsFileType;
-use tcfs_vfs::{TcfsVfs, VfsAttr, VirtualFilesystem};
+use tcfs_vfs::{OnFlushCallback, TcfsVfs, VfsAttr, VirtualFilesystem};
 
 // ── Configuration ─────────────────────────────────────────────────────────
 
@@ -457,6 +457,8 @@ pub struct MountConfig {
     pub negative_ttl_secs: u64,
     pub read_only: bool,
     pub allow_other: bool,
+    /// Optional callback after file flush (e.g., NATS publish)
+    pub on_flush: Option<tcfs_vfs::OnFlushCallback>,
 }
 
 /// Mount the FUSE filesystem and block until unmounted.
@@ -464,13 +466,17 @@ pub struct MountConfig {
 /// Creates a `TcfsVfs` and wraps it with the FUSE `PathFilesystem` adapter.
 /// Uses `mount_with_unprivileged` which invokes `fusermount3` — no root needed.
 pub async fn mount(cfg: MountConfig) -> std::io::Result<()> {
-    let vfs = Arc::new(TcfsVfs::new(
+    let mut vfs = TcfsVfs::new(
         cfg.op,
         cfg.prefix,
         cfg.cache_dir,
         cfg.cache_max_bytes,
         Duration::from_secs(cfg.negative_ttl_secs),
-    ));
+    );
+    if let Some(cb) = cfg.on_flush {
+        vfs.set_on_flush(cb);
+    }
+    let vfs = Arc::new(vfs);
 
     let fs = TcfsFs::new(vfs);
 
