@@ -702,20 +702,21 @@ pub async fn push_tree_with_device(
         .await
         {
             Ok(result) => {
-                // Write index entry: maps relative path → manifest hash + metadata.
-                // This allows the FUSE driver to list files by original name.
-                let index_key = format!("{}/index/{}", remote_path_prefix(remote_prefix), rel_str);
-                let index_entry = format!(
-                    "manifest_hash={}\nsize={}\nchunks={}\n",
-                    result.hash, result.bytes, result.chunks
-                );
-                if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
-                    warn!(path = %path.display(), "failed to write index entry: {e}");
-                }
-
                 if result.skipped {
                     skipped += 1;
                 } else {
+                    // Write index entry only when the manifest was actually uploaded.
+                    // Skipped files (RemoteNewer, UpToDate, Conflict) already have
+                    // a valid index entry, and writing one with the local hash would
+                    // create an orphan pointing to a non-existent manifest.
+                    let index_key = format!("{}/index/{}", remote_path_prefix(remote_prefix), rel_str);
+                    let index_entry = format!(
+                        "manifest_hash={}\nsize={}\nchunks={}\n",
+                        result.hash, result.bytes, result.chunks
+                    );
+                    if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
+                        warn!(path = %path.display(), "failed to write index entry: {e}");
+                    }
                     uploaded += 1;
                     bytes += result.bytes;
                 }
