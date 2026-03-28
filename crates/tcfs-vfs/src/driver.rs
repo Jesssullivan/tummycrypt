@@ -29,6 +29,9 @@ use opendal::Operator;
 use tokio::sync::Mutex;
 use tracing::debug;
 
+use tcfs_sync::conflict::VectorClock;
+use tcfs_sync::manifest::SyncManifest;
+
 use crate::cache::DiskCache;
 use crate::hydrate::fetch_cached;
 use crate::negative_cache::NegativeCache;
@@ -54,8 +57,9 @@ struct FileHandle {
 }
 
 /// Callback invoked after a file is flushed to remote storage.
-/// Parameters: (virtual_path, file_hash, size_bytes, chunk_count)
-pub type OnFlushCallback = Arc<dyn Fn(&str, &str, u64, usize) + Send + Sync + 'static>;
+/// Parameters: (virtual_path, file_hash, size_bytes, chunk_count, vclock)
+pub type OnFlushCallback =
+    Arc<dyn Fn(&str, &str, u64, usize, &VectorClock) + Send + Sync + 'static>;
 
 /// The tcfs virtual filesystem driver.
 ///
@@ -76,6 +80,10 @@ pub struct TcfsVfs {
     mount_time: SystemTime,
     /// Optional callback after flush_to_remote (e.g., NATS publish)
     on_flush: Option<OnFlushCallback>,
+    /// Device identifier for vector clock tracking (e.g., hostname)
+    device_id: String,
+    /// Per-file vector clocks for conflict detection
+    vclocks: Arc<Mutex<HashMap<String, VectorClock>>>,
 }
 
 impl TcfsVfs {
@@ -92,6 +100,7 @@ impl TcfsVfs {
         cache_dir: std::path::PathBuf,
         cache_max_bytes: u64,
         negative_ttl: Duration,
+        device_id: String,
     ) -> Self {
         #[cfg(unix)]
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -108,6 +117,8 @@ impl TcfsVfs {
             next_fh: Arc::new(AtomicU64::new(1)),
             mount_time: SystemTime::now(),
             on_flush: None,
+            device_id,
+            vclocks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -150,22 +161,42 @@ impl TcfsVfs {
             chunk_hashes.push(chunk_hex);
         }
 
-        // 3. Create JSON v2 manifest
-        let manifest = serde_json::json!({
-            "version": 2,
-            "file_hash": file_hash,
-            "file_size": data.len(),
-            "chunks": chunk_hashes,
-            "written_at": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        });
+        // 3. Build vector clock and create v2 manifest with conflict metadata
+        let mut vclock = {
+            let vclocks = self.vclocks.lock().await;
+            vclocks.get(vpath).cloned().unwrap_or_default()
+        };
+        if !self.device_id.is_empty() {
+            vclock.tick(&self.device_id);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: file_hash.clone(),
+            file_size: data.len() as u64,
+            chunks: chunk_hashes.clone(),
+            vclock: vclock.clone(),
+            written_by: self.device_id.clone(),
+            written_at: now,
+            rel_path: Some(vpath.to_string()),
+            encrypted_file_key: None,
+        };
         let manifest_key = format!("{}/manifests/{}", prefix, file_hash);
         self.op
-            .write(&manifest_key, manifest.to_string().into_bytes())
+            .write(
+                &manifest_key,
+                manifest.to_bytes().context("serializing manifest")?,
+            )
             .await
             .context("uploading manifest")?;
+        // Store updated vclock for future writes to this path
+        {
+            let mut vclocks = self.vclocks.lock().await;
+            vclocks.insert(vpath.to_string(), vclock.clone());
+        }
 
         // 4. Update index entry
         let index_key = self
@@ -195,7 +226,7 @@ impl TcfsVfs {
 
         // 6. Notify listeners (e.g., NATS FileSynced publish)
         if let Some(ref cb) = self.on_flush {
-            cb(vpath, &file_hash, data.len() as u64, chunk_hashes.len());
+            cb(vpath, &file_hash, data.len() as u64, chunk_hashes.len(), &vclock);
         }
 
         Ok(())
@@ -733,6 +764,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/tcfs-test-cache"),
             64 * 1024 * 1024,
             Duration::from_secs(30),
+            "test-host".to_string(),
         )
     }
 
