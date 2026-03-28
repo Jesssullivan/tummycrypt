@@ -502,6 +502,8 @@ pub struct MountConfig {
     pub allow_other: bool,
     /// Optional callback after file flush (e.g., NATS publish)
     pub on_flush: Option<tcfs_vfs::OnFlushCallback>,
+    /// Device identifier for vector clock tracking (e.g., hostname)
+    pub device_id: String,
 }
 
 /// Mount the FUSE filesystem and block until unmounted.
@@ -515,6 +517,7 @@ pub async fn mount(cfg: MountConfig) -> std::io::Result<()> {
         cfg.cache_dir,
         cfg.cache_max_bytes,
         Duration::from_secs(cfg.negative_ttl_secs),
+        cfg.device_id,
     );
     if let Some(cb) = cfg.on_flush {
         vfs.set_on_flush(cb);

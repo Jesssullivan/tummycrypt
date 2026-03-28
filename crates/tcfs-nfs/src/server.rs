@@ -87,6 +87,7 @@ pub async fn serve_and_mount(cfg: NfsMountConfig) -> Result<()> {
         cfg.cache_dir,
         cfg.cache_max_bytes,
         Duration::from_secs(cfg.negative_ttl_secs),
+        String::new(), // NFS adapter: no vclock tracking yet
     ));
 
     let adapter = NfsAdapter::new(vfs);
@@ -137,6 +138,7 @@ pub async fn serve_only(cfg: NfsMountConfig) -> Result<u16> {
         cfg.cache_dir,
         cfg.cache_max_bytes,
         Duration::from_secs(cfg.negative_ttl_secs),
+        String::new(), // NFS adapter: no vclock tracking yet
     ));
 
     let adapter = NfsAdapter::new(vfs);
