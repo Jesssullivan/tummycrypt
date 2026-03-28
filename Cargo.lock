@@ -5499,6 +5499,7 @@ dependencies = [
  "tcfs-chunks",
  "tcfs-core",
  "tcfs-storage",
+ "tcfs-sync",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

@@ -9,6 +9,7 @@ description = "tcfs virtual filesystem trait, disk cache, stub formats, and hydr
 [dependencies]
 tcfs-core = { path = "../tcfs-core" }
 tcfs-storage = { path = "../tcfs-storage" }
+tcfs-sync = { path = "../tcfs-sync", default-features = false }
 opendal = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

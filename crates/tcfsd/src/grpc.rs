@@ -376,21 +376,23 @@ impl TcfsDaemon for TcfsDaemonImpl {
             // FUSE write, notify other hosts so their FUSE mounts pick it up.
             let nats_handle = self.nats.clone();
             let flush_device_id = self.device_id.clone();
+            let mount_device_id = self.device_id.clone();
             let on_flush: Option<tcfs_vfs::OnFlushCallback> = Some(std::sync::Arc::new(
-                move |vpath: &str, hash: &str, size: u64, chunks: usize| {
+                move |vpath: &str, hash: &str, size: u64, _chunks: usize, vclock: &tcfs_sync::conflict::VectorClock| {
                     let nats = nats_handle.clone();
                     let device = flush_device_id.clone();
                     let path = vpath.to_string();
                     let hash = hash.to_string();
+                    let vclock = vclock.clone();
                     tokio::spawn(async move {
                         if let Some(ref client) = *nats.lock().await {
                             let event = tcfs_sync::StateEvent::FileSynced {
                                 device_id: device,
                                 rel_path: path.clone(),
-                                blake3: hash,
+                                blake3: hash.clone(),
                                 size,
-                                vclock: tcfs_sync::conflict::VectorClock::default(),
-                                manifest_path: String::new(),
+                                vclock,
+                                manifest_path: format!("manifests/{}", hash),
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -418,6 +420,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     read_only: req.read_only,
                     allow_other: false,
                     on_flush,
+                    device_id: mount_device_id,
                 })
                 .await
                 {
