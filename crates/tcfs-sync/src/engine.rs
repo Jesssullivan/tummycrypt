@@ -709,7 +709,8 @@ pub async fn push_tree_with_device(
                     // Skipped files (RemoteNewer, UpToDate, Conflict) already have
                     // a valid index entry, and writing one with the local hash would
                     // create an orphan pointing to a non-existent manifest.
-                    let index_key = format!("{}/index/{}", remote_path_prefix(remote_prefix), rel_str);
+                    let index_key =
+                        format!("{}/index/{}", remote_path_prefix(remote_prefix), rel_str);
                     let index_entry = format!(
                         "manifest_hash={}\nsize={}\nchunks={}\n",
                         result.hash, result.bytes, result.chunks

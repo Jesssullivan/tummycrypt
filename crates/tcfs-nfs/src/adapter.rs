@@ -116,13 +116,16 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
         let parent_path = self.inodes.get_path(dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
 
         // Verify the entry exists via VFS (with timeout to avoid mount hangs)
-        tokio::time::timeout(VFS_TIMEOUT, self.vfs.lookup(&parent_path, OsStr::new(name_str)))
-            .await
-            .map_err(|_| {
-                warn!(path = %parent_path, name = %name_str, "NFS LOOKUP timed out");
-                nfsstat3::NFS3ERR_IO
-            })?
-            .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
+        tokio::time::timeout(
+            VFS_TIMEOUT,
+            self.vfs.lookup(&parent_path, OsStr::new(name_str)),
+        )
+        .await
+        .map_err(|_| {
+            warn!(path = %parent_path, name = %name_str, "NFS LOOKUP timed out");
+            nfsstat3::NFS3ERR_IO
+        })?
+        .map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
 
         let id = self.inodes.get_or_insert(&child_path);
         debug!(parent = %parent_path, name = %name_str, fileid = id, "NFS LOOKUP");
