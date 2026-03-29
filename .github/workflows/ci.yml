@@ -33,6 +33,9 @@ jobs:
             pkg-config \
             libssl-dev
 
+      - name: Verify Cargo.lock is up-to-date
+        run: cargo generate-lockfile && git diff --exit-code Cargo.lock
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
