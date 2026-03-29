@@ -123,27 +123,27 @@ fn build_rotated_yaml(
     new_secret_key: &str,
 ) -> Result<String> {
     // Parse the current YAML (may be SOPS-encrypted, but we only need the structure)
-    let mut doc: serde_yml::Value =
-        serde_yml::from_str(current_content).context("parsing current credential YAML")?;
+    let mut doc: serde_norway::Value =
+        serde_norway::from_str(current_content).context("parsing current credential YAML")?;
 
     // Strip the sops metadata block (we'll re-encrypt from plaintext)
-    if let serde_yml::Value::Mapping(ref mut map) = doc {
-        map.remove(serde_yml::Value::String("sops".into()));
+    if let serde_norway::Value::Mapping(ref mut map) = doc {
+        map.remove(serde_norway::Value::String("sops".into()));
     }
 
     // Update the credential fields
-    if let serde_yml::Value::Mapping(ref mut map) = doc {
+    if let serde_norway::Value::Mapping(ref mut map) = doc {
         map.insert(
-            serde_yml::Value::String("access_key_id".into()),
-            serde_yml::Value::String(new_access_key.into()),
+            serde_norway::Value::String("access_key_id".into()),
+            serde_norway::Value::String(new_access_key.into()),
         );
         map.insert(
-            serde_yml::Value::String("secret_access_key".into()),
-            serde_yml::Value::String(new_secret_key.into()),
+            serde_norway::Value::String("secret_access_key".into()),
+            serde_norway::Value::String(new_secret_key.into()),
         );
     }
 
-    serde_yml::to_string(&doc).context("serializing updated YAML")
+    serde_norway::to_string(&doc).context("serializing updated YAML")
 }
 
 /// Encrypt a plaintext YAML string using the `sops` CLI.
