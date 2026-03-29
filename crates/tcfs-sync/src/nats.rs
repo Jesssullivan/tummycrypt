@@ -208,10 +208,15 @@ mod inner {
             Ok(NatsClient { js })
         }
 
-        /// Ensure all required JetStream streams exist (idempotent via CreateOrUpdate).
+        /// Ensure all required JetStream streams exist.
+        ///
+        /// Uses `create_or_update_stream` (not `get_or_create_stream`) so that
+        /// config changes — especially subject filter updates — are applied to
+        /// existing streams. Without this, a stream created by an older binary
+        /// with different subjects would never get its filter updated.
         pub async fn ensure_streams(&self) -> Result<()> {
             self.js
-                .get_or_create_stream(stream::Config {
+                .create_or_update_stream(stream::Config {
                     name: STREAM_SYNC_TASKS.to_string(),
                     subjects: vec![STREAM_SYNC_TASKS.to_string()],
                     max_messages: 1_000_000,
@@ -223,7 +228,7 @@ mod inner {
                 .map_err(|e| anyhow::anyhow!("ensuring SYNC_TASKS stream: {e}"))?;
 
             self.js
-                .get_or_create_stream(stream::Config {
+                .create_or_update_stream(stream::Config {
                     name: STREAM_HYDRATION.to_string(),
                     subjects: vec![STREAM_HYDRATION.to_string()],
                     max_messages: 100_000,
@@ -235,7 +240,7 @@ mod inner {
 
             // STATE_UPDATES: fan-out (Limits retention), hierarchical subjects, 7-day TTL
             self.js
-                .get_or_create_stream(stream::Config {
+                .create_or_update_stream(stream::Config {
                     name: STREAM_STATE.to_string(),
                     subjects: vec!["STATE.>".to_string()],
                     max_messages: 500_000,
@@ -247,6 +252,20 @@ mod inner {
                 .await
                 .map_err(|e| anyhow::anyhow!("ensuring STATE_UPDATES stream: {e}"))?;
 
+            // Verify STATE_UPDATES stream config by reading it back
+            match self.js.get_stream(STREAM_STATE).await {
+                Ok(mut stream) => {
+                    let info = stream.info().await;
+                    if let Ok(info) = info {
+                        info!(
+                            subjects = ?info.config.subjects,
+                            messages = info.state.messages,
+                            "NATS: STATE_UPDATES stream config"
+                        );
+                    }
+                }
+                Err(e) => warn!("NATS: could not read STATE_UPDATES config: {e}"),
+            }
             info!("NATS: streams verified (SYNC_TASKS, HYDRATION_EVENTS, STATE_UPDATES)");
             Ok(())
         }
