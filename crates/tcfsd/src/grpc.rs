@@ -377,6 +377,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let nats_handle = self.nats.clone();
             let flush_device_id = self.device_id.clone();
             let mount_device_id = self.device_id.clone();
+            let flush_prefix = prefix.clone();
             let on_flush: Option<tcfs_vfs::OnFlushCallback> = Some(std::sync::Arc::new(
                 move |vpath: &str, hash: &str, size: u64, _chunks: usize, vclock: &tcfs_sync::conflict::VectorClock| {
                     let nats = nats_handle.clone();
@@ -384,6 +385,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     let path = vpath.to_string();
                     let hash = hash.to_string();
                     let vclock = vclock.clone();
+                    let pfx = flush_prefix.clone();
                     tokio::spawn(async move {
                         if let Some(ref client) = *nats.lock().await {
                             let event = tcfs_sync::StateEvent::FileSynced {
@@ -392,7 +394,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                                 blake3: hash.clone(),
                                 size,
                                 vclock,
-                                manifest_path: format!("manifests/{}", hash),
+                                manifest_path: format!("{}/manifests/{}", pfx, hash),
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
