@@ -226,7 +226,13 @@ impl TcfsVfs {
 
         // 6. Notify listeners (e.g., NATS FileSynced publish)
         if let Some(ref cb) = self.on_flush {
-            cb(vpath, &file_hash, data.len() as u64, chunk_hashes.len(), &vclock);
+            cb(
+                vpath,
+                &file_hash,
+                data.len() as u64,
+                chunk_hashes.len(),
+                &vclock,
+            );
         }
 
         Ok(())

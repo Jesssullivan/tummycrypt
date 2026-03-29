@@ -1353,8 +1353,7 @@ async fn cmd_mount(
             read_only: read_only,
             allow_other: false,
             on_flush: None,
-            device_id: std::env::var("HOSTNAME")
-                .unwrap_or_else(|_| "cli".to_string()),
+            device_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "cli".to_string()),
         })
         .await
         .context("FUSE mount failed")

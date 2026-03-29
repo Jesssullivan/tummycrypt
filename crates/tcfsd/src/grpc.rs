@@ -379,7 +379,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let mount_device_id = self.device_id.clone();
             let flush_prefix = prefix.clone();
             let on_flush: Option<tcfs_vfs::OnFlushCallback> = Some(std::sync::Arc::new(
-                move |vpath: &str, hash: &str, size: u64, _chunks: usize, vclock: &tcfs_sync::conflict::VectorClock| {
+                move |vpath: &str,
+                      hash: &str,
+                      size: u64,
+                      _chunks: usize,
+                      vclock: &tcfs_sync::conflict::VectorClock| {
                     let nats = nats_handle.clone();
                     let device = flush_device_id.clone();
                     let path = vpath.to_string();
