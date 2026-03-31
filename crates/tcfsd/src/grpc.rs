@@ -587,6 +587,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let total_bytes = data.len() as u64;
         let device_id = self.device_id.clone();
 
+        // Normalize the path for consistent S3 index keys (matches pull's resolve_manifest_path)
+        let sync_root = self.config.sync.sync_root.as_deref();
+        let normalized_rel =
+            tcfs_sync::engine::normalize_rel_path(std::path::Path::new(&path), sync_root);
+
         let result = {
             let mut cache = state_cache.lock().await;
             tcfs_sync::engine::upload_file_with_device(
@@ -596,7 +601,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 &mut cache,
                 None,
                 &device_id,
-                Some(&path),
+                Some(&normalized_rel),
                 None,
             )
             .await
@@ -620,6 +625,19 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         };
                         cache.set(&local_path, updated);
                         let _ = cache.flush();
+                    }
+                }
+
+                // Write index entry for discoverability (same as CLI push)
+                if !upload.skipped {
+                    let index_key =
+                        format!("{}/index/{}", prefix.trim_end_matches('/'), &normalized_rel);
+                    let index_entry = format!(
+                        "manifest_hash={}\nsize={}\nchunks={}\n",
+                        upload.hash, total_bytes, upload.chunks
+                    );
+                    if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
+                        tracing::warn!("failed to write index entry: {e}");
                     }
                 }
 
