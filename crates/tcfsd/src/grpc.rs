@@ -708,11 +708,18 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let local_path = std::path::PathBuf::from(&req.local_path);
         let state_cache = self.state_cache.clone();
 
+        let sync_root = self.config.sync.sync_root.as_deref();
+
+        let resolved_manifest =
+            tcfs_sync::engine::resolve_manifest_path(&op, &req.remote_path, &prefix, sync_root)
+                .await
+                .map_err(|e| tonic::Status::not_found(format!("resolve manifest: {e}")))?;
+
         let result = {
             let mut cache = state_cache.lock().await;
             tcfs_sync::engine::download_file_with_device(
                 &op,
-                &req.remote_path,
+                &resolved_manifest,
                 &local_path,
                 &prefix,
                 None,
