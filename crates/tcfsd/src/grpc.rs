@@ -710,14 +710,10 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let sync_root = self.config.sync.sync_root.as_deref();
 
-        let resolved_manifest = tcfs_sync::engine::resolve_manifest_path(
-            &op,
-            &req.remote_path,
-            &prefix,
-            sync_root,
-        )
-        .await
-        .map_err(|e| tonic::Status::not_found(format!("resolve manifest: {e}")))?;
+        let resolved_manifest =
+            tcfs_sync::engine::resolve_manifest_path(&op, &req.remote_path, &prefix, sync_root)
+                .await
+                .map_err(|e| tonic::Status::not_found(format!("resolve manifest: {e}")))?;
 
         let result = {
             let mut cache = state_cache.lock().await;

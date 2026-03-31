@@ -823,17 +823,16 @@ async fn cmd_pull(
 
     // Resolve file paths to manifest paths via the S3 index
     let sync_root = config.sync.sync_root.as_deref();
-    let resolved_manifest = tcfs_sync::engine::resolve_manifest_path(
-        &op,
-        manifest_path,
-        &remote_prefix,
-        sync_root,
-    )
-    .await
-    .with_context(|| format!("resolving manifest for: {manifest_path}"))?;
+    let resolved_manifest =
+        tcfs_sync::engine::resolve_manifest_path(&op, manifest_path, &remote_prefix, sync_root)
+            .await
+            .with_context(|| format!("resolving manifest for: {manifest_path}"))?;
 
     // Default local path: current dir + manifest hash (last path component)
-    let hash_basename = resolved_manifest.split('/').next_back().unwrap_or("downloaded");
+    let hash_basename = resolved_manifest
+        .split('/')
+        .next_back()
+        .unwrap_or("downloaded");
     let local_path = local
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from(hash_basename));
