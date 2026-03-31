@@ -669,10 +669,8 @@ async fn cmd_push(
             pb_clone.set_message(msg.to_string());
         });
 
-        let rel = local
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let sync_root = config.sync.sync_root.as_deref();
+        let rel = tcfs_sync::engine::normalize_rel_path(local, sync_root);
 
         let result = tcfs_sync::engine::upload_file_with_device(
             &op,
@@ -793,25 +791,49 @@ async fn cmd_pull(
     let op = build_operator_from_env(config)?;
     let device_id = load_device_id(config);
 
+    // Detect whether input looks like a file path vs a manifest path
+    let is_file_path = manifest_path.starts_with('/')
+        || manifest_path.starts_with('.')
+        || std::path::Path::new(manifest_path).exists();
+
     // Derive the remote prefix from the manifest path if not provided
     // e.g. "devices/A29247/manifests/abc123" → prefix = "devices/A29247"
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_else(|| {
-            manifest_path
-                .rsplit_once("/manifests/")
-                .map(|(pfx, _)| pfx.to_string())
-                .unwrap_or_else(|| {
-                    manifest_path
-                        .split('/')
-                        .next()
-                        .unwrap_or("tcfs")
-                        .to_string()
-                })
+            if is_file_path {
+                // Derive prefix the same way push does: from file_name()
+                std::path::Path::new(manifest_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "tcfs".to_string())
+            } else {
+                manifest_path
+                    .rsplit_once("/manifests/")
+                    .map(|(pfx, _)| pfx.to_string())
+                    .unwrap_or_else(|| {
+                        manifest_path
+                            .split('/')
+                            .next()
+                            .unwrap_or("tcfs")
+                            .to_string()
+                    })
+            }
         });
 
+    // Resolve file paths to manifest paths via the S3 index
+    let sync_root = config.sync.sync_root.as_deref();
+    let resolved_manifest = tcfs_sync::engine::resolve_manifest_path(
+        &op,
+        manifest_path,
+        &remote_prefix,
+        sync_root,
+    )
+    .await
+    .with_context(|| format!("resolving manifest for: {manifest_path}"))?;
+
     // Default local path: current dir + manifest hash (last path component)
-    let hash_basename = manifest_path.split('/').next_back().unwrap_or("downloaded");
+    let hash_basename = resolved_manifest.split('/').next_back().unwrap_or("downloaded");
     let local_path = local
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from(hash_basename));
@@ -835,7 +857,7 @@ async fn cmd_pull(
 
     let result = tcfs_sync::engine::download_file_with_device(
         &op,
-        manifest_path,
+        &resolved_manifest,
         &local_path,
         &remote_prefix,
         Some(&progress),

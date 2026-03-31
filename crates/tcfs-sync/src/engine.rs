@@ -812,6 +812,70 @@ fn collect_files_inner(
     Ok(())
 }
 
+/// Normalize a filesystem path into a stable S3 index key component.
+///
+/// - If `sync_root` is provided and the path is under it, returns the relative path.
+/// - Otherwise strips the leading `/` from absolute paths, or returns relative paths as-is.
+/// - Replaces `\` with `/` for cross-platform consistency.
+pub fn normalize_rel_path(path: &Path, sync_root: Option<&Path>) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    let rel = if let Some(root) = sync_root {
+        let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        canonical
+            .strip_prefix(&canonical_root)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| {
+                let s = canonical.to_string_lossy();
+                PathBuf::from(s.trim_start_matches('/'))
+            })
+    } else if canonical.is_absolute() {
+        let s = canonical.to_string_lossy();
+        PathBuf::from(s.trim_start_matches('/'))
+    } else {
+        canonical
+    };
+
+    rel.to_string_lossy().replace('\\', "/")
+}
+
+/// Resolve a file path or manifest path to the actual S3 manifest path.
+///
+/// If the input contains `/manifests/`, it is returned as-is (assumed to be a manifest path).
+/// Otherwise, treat it as a file path: normalize it, look up the index entry,
+/// and construct the manifest path from the stored hash.
+pub async fn resolve_manifest_path(
+    op: &Operator,
+    input: &str,
+    remote_prefix: &str,
+    sync_root: Option<&Path>,
+) -> Result<String> {
+    // If it already looks like a manifest path, use it directly
+    if input.contains("/manifests/") {
+        return Ok(input.to_string());
+    }
+
+    let prefix = remote_prefix.trim_end_matches('/');
+
+    // Normalize the input path to derive the index key
+    let rel = normalize_rel_path(Path::new(input), sync_root);
+    let index_key = format!("{prefix}/index/{rel}");
+
+    let idx_bytes = op
+        .read(&index_key)
+        .await
+        .with_context(|| format!("reading index entry: {index_key}"))?;
+
+    let idx_raw = idx_bytes.to_bytes();
+    let idx_str = String::from_utf8_lossy(&idx_raw);
+    let manifest_hash = idx_str
+        .lines()
+        .find_map(|l| l.strip_prefix("manifest_hash="))
+        .ok_or_else(|| anyhow::anyhow!("index entry missing manifest_hash: {index_key}"))?;
+
+    Ok(format!("{prefix}/manifests/{manifest_hash}"))
+}
+
 /// Normalize a remote prefix: ensure it doesn't have trailing slash
 fn remote_path_prefix(prefix: &str) -> String {
     prefix.trim_end_matches('/').to_string()
