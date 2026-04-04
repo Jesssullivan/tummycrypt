@@ -1044,16 +1044,52 @@ async fn do_auto_download(
         }
     };
 
-    match op.stat(manifest_path).await {
-        Ok(_) => {
-            info!(
-                path = %local_path.display(),
-                manifest = %manifest_path,
-                "auto-pull: S3 data verified (FUSE mount will serve on demand)"
-            );
-            // Update state cache with the remote's state
-            let mut cache = state_cache.lock().await;
-            let _ = cache.flush();
+    match op.read(manifest_path).await {
+        Ok(manifest_data) => {
+            // Parse manifest to extract file hash and vclock for state cache
+            let manifest_bytes = manifest_data.to_bytes();
+            match tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes) {
+                Ok(manifest) => {
+                    info!(
+                        path = %local_path.display(),
+                        manifest = %manifest_path,
+                        hash = %manifest.file_hash,
+                        written_by = %manifest.written_by,
+                        "auto-pull: S3 data verified, updating state cache"
+                    );
+                    // Update state cache with the remote's metadata so
+                    // vector clocks stay in sync for future conflict detection.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let mut cache = state_cache.lock().await;
+                    cache.set(
+                        local_path,
+                        tcfs_sync::state::SyncState {
+                            blake3: manifest.file_hash.clone(),
+                            size: manifest.file_size,
+                            mtime: manifest.written_at,
+                            chunk_count: manifest.chunks.len(),
+                            remote_path: manifest_path.to_string(),
+                            last_synced: now,
+                            vclock: manifest.vclock.clone(),
+                            device_id: manifest.written_by.clone(),
+                            conflict: None,
+                        },
+                    );
+                    let _ = cache.flush();
+                }
+                Err(e) => {
+                    warn!(
+                        manifest = %manifest_path,
+                        "auto-pull: failed to parse manifest: {e}"
+                    );
+                    // Still mark as verified even if parse fails
+                    let mut cache = state_cache.lock().await;
+                    let _ = cache.flush();
+                }
+            }
         }
         Err(e) => {
             warn!(
