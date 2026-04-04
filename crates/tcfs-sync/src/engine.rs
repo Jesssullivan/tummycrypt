@@ -844,6 +844,10 @@ pub fn normalize_rel_path(path: &Path, sync_root: Option<&Path>) -> String {
 /// If the input contains `/manifests/`, it is returned as-is (assumed to be a manifest path).
 /// Otherwise, treat it as a file path: normalize it, look up the index entry,
 /// and construct the manifest path from the stored hash.
+///
+/// Falls back to searching the index prefix for a matching filename if the
+/// normalized path doesn't match (e.g., pulling on a different host where
+/// `canonicalize()` produces a different absolute path than the push host).
 pub async fn resolve_manifest_path(
     op: &Operator,
     input: &str,
@@ -857,23 +861,49 @@ pub async fn resolve_manifest_path(
 
     let prefix = remote_prefix.trim_end_matches('/');
 
-    // Normalize the input path to derive the index key
+    // Try 1: Normalize the input path to derive the index key
     let rel = normalize_rel_path(Path::new(input), sync_root);
     let index_key = format!("{prefix}/index/{rel}");
 
-    let idx_bytes = op
-        .read(&index_key)
+    if let Ok(idx_bytes) = op.read(&index_key).await {
+        let idx_raw = idx_bytes.to_bytes();
+        let idx_str = String::from_utf8_lossy(&idx_raw);
+        if let Some(manifest_hash) = idx_str.lines().find_map(|l| l.strip_prefix("manifest_hash="))
+        {
+            return Ok(format!("{prefix}/manifests/{manifest_hash}"));
+        }
+    }
+
+    // Try 2: Search index entries for a matching filename.
+    // This handles cross-host pull where the pushing host's canonicalized path
+    // differs from the pulling host's (e.g., /tmp → /private/tmp on macOS).
+    let filename = Path::new(input)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| input.to_string());
+
+    let index_prefix = format!("{prefix}/index/");
+    let entries = op
+        .list(&index_prefix)
         .await
-        .with_context(|| format!("reading index entry: {index_key}"))?;
+        .with_context(|| format!("listing index prefix: {index_prefix}"))?;
 
-    let idx_raw = idx_bytes.to_bytes();
-    let idx_str = String::from_utf8_lossy(&idx_raw);
-    let manifest_hash = idx_str
-        .lines()
-        .find_map(|l| l.strip_prefix("manifest_hash="))
-        .ok_or_else(|| anyhow::anyhow!("index entry missing manifest_hash: {index_key}"))?;
+    for entry in entries {
+        let entry_path = entry.path();
+        if entry_path.ends_with(&format!("/{filename}")) || entry_path.ends_with(&filename) {
+            if let Ok(idx_bytes) = op.read(entry_path).await {
+                let idx_raw = idx_bytes.to_bytes();
+                let idx_str = String::from_utf8_lossy(&idx_raw);
+                if let Some(manifest_hash) =
+                    idx_str.lines().find_map(|l| l.strip_prefix("manifest_hash="))
+                {
+                    return Ok(format!("{prefix}/manifests/{manifest_hash}"));
+                }
+            }
+        }
+    }
 
-    Ok(format!("{prefix}/manifests/{manifest_hash}"))
+    anyhow::bail!("no index entry found for '{}' (tried: {index_key}, filename search: {filename})", input)
 }
 
 /// Normalize a remote prefix: ensure it doesn't have trailing slash
