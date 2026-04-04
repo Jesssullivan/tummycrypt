@@ -146,36 +146,71 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
 
-        let prefix = format!(
-            "{}/index/{}",
-            prov.remote_prefix.trim_end_matches('/'),
-            rel_path.trim_start_matches('/')
-        );
+        // Build S3 prefix with trailing slash for correct prefix matching.
+        // Without trailing slash, listing "data/index/ansible" would also
+        // match "data/index/ansible-lint" — the slash ensures we only get
+        // children of the target directory.
+        let prefix = if rel_path.is_empty() {
+            format!("{}/index/", prov.remote_prefix.trim_end_matches('/'))
+        } else {
+            format!(
+                "{}/index/{}/",
+                prov.remote_prefix.trim_end_matches('/'),
+                rel_path.trim_matches('/')
+            )
+        };
 
         let entries = match prov.runtime.block_on(prov.operator.list(&prefix)) {
             Ok(e) => e,
             Err(_) => return TcfsError::TcfsErrorStorage,
         };
 
+        // Collect immediate children only. S3 list returns all descendants
+        // recursively, so we extract the first path segment after the prefix
+        // and deduplicate to get directories and files at this level.
+        let mut seen = std::collections::HashSet::new();
         let mut items: Vec<TcfsFileItem> = Vec::new();
+
         for entry in entries {
             let entry_path = entry.path();
-            let name = entry_path
+            let remainder = entry_path
                 .strip_prefix(&prefix)
                 .unwrap_or(entry_path)
                 .trim_start_matches('/');
 
-            if name.is_empty() {
+            if remainder.is_empty() {
                 continue;
             }
 
-            let is_dir = name.ends_with('/');
-            let display_name = name.trim_end_matches('/');
+            // Extract the immediate child name:
+            // "roles/common/tasks/main.yml" → "roles"  (directory)
+            // "README.md"                   → "README.md" (file)
+            let (child_name, is_dir) = match remainder.find('/') {
+                Some(slash_pos) => (&remainder[..slash_pos], true),
+                None => (remainder, entry.metadata().is_dir()),
+            };
 
+            if child_name.is_empty() || !seen.insert(child_name.to_string()) {
+                continue;
+            }
+
+            // For directories, the item_id is the full path relative to the
+            // remote prefix (used by Swift as containerIdentifier.rawValue
+            // when the user drills into the directory).
+            let item_id = if rel_path.is_empty() {
+                child_name.to_string()
+            } else {
+                format!("{}/{}", rel_path.trim_matches('/'), child_name)
+            };
+
+            // item_id is the relative path (e.g. "ansible/roles") — NOT the
+            // full S3 key. Swift uses item_id as containerIdentifier.rawValue
+            // which becomes rel_path on the next enumerate call. Using the
+            // full S3 key would cause double-prefixing.
             items.push(TcfsFileItem {
-                item_id: to_c_string(entry_path),
-                filename: to_c_string(display_name),
-                file_size: entry.metadata().content_length(),
+                item_id: to_c_string(&item_id),
+                filename: to_c_string(child_name),
+                file_size: if is_dir { 0 } else { entry.metadata().content_length() },
                 modified_timestamp: 0,
                 is_directory: is_dir,
                 content_hash: to_c_string(""),
@@ -228,8 +263,14 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
         };
 
         let fetch_result = prov.runtime.block_on(async {
+            // Reconstruct full S3 key from relative item_id
+            let index_key = format!(
+                "{}/index/{}",
+                prov.remote_prefix.trim_end_matches('/'),
+                item_str.trim_start_matches('/')
+            );
             // Read the index entry to get manifest hash
-            let data = prov.operator.read(item_str).await?;
+            let data = prov.operator.read(&index_key).await?;
             let bytes = data.to_bytes();
             let text = String::from_utf8_lossy(&bytes);
 
@@ -492,7 +533,13 @@ pub unsafe extern "C" fn tcfs_provider_delete(
         };
 
         let delete_result = prov.runtime.block_on(async {
-            let index_data = prov.operator.read(item_str).await;
+            // Reconstruct full S3 key from relative item_id
+            let index_key = format!(
+                "{}/index/{}",
+                prov.remote_prefix.trim_end_matches('/'),
+                item_str.trim_start_matches('/')
+            );
+            let index_data = prov.operator.read(&index_key).await;
             if let Ok(data) = index_data {
                 let bytes = data.to_bytes();
                 let text = String::from_utf8_lossy(&bytes);
@@ -508,7 +555,7 @@ pub unsafe extern "C" fn tcfs_provider_delete(
                 }
             }
 
-            prov.operator.delete(item_str).await?;
+            prov.operator.delete(&index_key).await?;
             Ok::<(), anyhow::Error>(())
         });
 
