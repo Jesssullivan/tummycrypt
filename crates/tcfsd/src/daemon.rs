@@ -292,6 +292,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sched_status_tx = status_tx.clone();
                     let sched_nats = shared_nats.clone();
                     let sched_metrics = daemon_metrics.clone();
+                    let sched_master_key = master_key.clone();
 
                     tokio::spawn({
                         let scheduler = scheduler.clone();
@@ -306,6 +307,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     let status_tx = sched_status_tx.clone();
                                     let nats = sched_nats.clone();
                                     let metrics = sched_metrics.clone();
+                                    let mk = sched_master_key.clone();
 
                                     Box::pin(async move {
                                         match task.op {
@@ -326,6 +328,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     .to_string_lossy()
                                                     .to_string();
                                                 let mut cache = state.lock().await;
+                                                let enc_ctx = mk.as_ref().map(|k| tcfs_sync::engine::EncryptionContext {
+                                                    master_key: k.clone(),
+                                                });
                                                 let upload_result =
                                                     tcfs_sync::engine::upload_file_with_device(
                                                         op_ref,
@@ -335,7 +340,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                         None,
                                                         &device,
                                                         Some(&rel_path),
-                                                        None,
+                                                        enc_ctx.as_ref(),
                                                     )
                                                     .await?;
 
