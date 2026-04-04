@@ -5491,6 +5491,7 @@ version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "libc",
  "opendal",
@@ -5498,6 +5499,7 @@ dependencies = [
  "serde_json",
  "tcfs-chunks",
  "tcfs-core",
+ "tcfs-crypto",
  "tcfs-storage",
  "tcfs-sync",
  "tempfile",
