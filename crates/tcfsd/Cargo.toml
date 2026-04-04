@@ -15,7 +15,7 @@ tcfs-core = { path = "../tcfs-core" }
 tcfs-crypto = { path = "../tcfs-crypto" }
 tcfs-secrets = { path = "../tcfs-secrets" }
 tcfs-storage = { path = "../tcfs-storage" }
-tcfs-sync = { path = "../tcfs-sync", features = ["nats"] }
+tcfs-sync = { path = "../tcfs-sync", features = ["nats", "crypto"] }
 tcfs-vfs = { path = "../tcfs-vfs" }
 tcfs-nfs = { path = "../tcfs-nfs" }
 tcfs-fuse = { path = "../tcfs-fuse", features = ["fuse"] }

@@ -9,13 +9,15 @@ description = "tcfs virtual filesystem trait, disk cache, stub formats, and hydr
 [dependencies]
 tcfs-core = { path = "../tcfs-core" }
 tcfs-storage = { path = "../tcfs-storage" }
-tcfs-sync = { path = "../tcfs-sync", default-features = false }
+tcfs-sync = { path = "../tcfs-sync", features = ["crypto"] }
 opendal = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 blake3 = { workspace = true }
 tcfs-chunks = { path = "../tcfs-chunks" }
+tcfs-crypto = { path = "../tcfs-crypto" }
+base64 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

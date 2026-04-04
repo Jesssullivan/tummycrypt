@@ -672,6 +672,19 @@ async fn cmd_push(
         let sync_root = config.sync.sync_root.as_deref();
         let rel = tcfs_sync::engine::normalize_rel_path(local, sync_root);
 
+        // Load master key for E2E encryption if configured
+        let master_key = config.crypto.master_key_file.as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .filter(|k| k.len() == 32)
+            .map(|bytes| {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                tcfs_crypto::MasterKey::from_bytes(arr)
+            });
+        let enc_ctx = master_key.as_ref().map(|mk| tcfs_sync::engine::EncryptionContext {
+            master_key: mk.clone(),
+        });
+
         let result = tcfs_sync::engine::upload_file_with_device(
             &op,
             local,
@@ -680,7 +693,7 @@ async fn cmd_push(
             Some(&progress),
             &device_id,
             Some(&rel),
-            None,
+            enc_ctx.as_ref(),
         )
         .await
         .with_context(|| format!("uploading {}", local.display()))?;

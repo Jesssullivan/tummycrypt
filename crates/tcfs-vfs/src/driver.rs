@@ -84,6 +84,8 @@ pub struct TcfsVfs {
     device_id: String,
     /// Per-file vector clocks for conflict detection
     vclocks: Arc<Mutex<HashMap<String, VectorClock>>>,
+    /// Master key for E2E chunk encryption (None = plaintext mode)
+    master_key: Option<tcfs_crypto::MasterKey>,
 }
 
 impl TcfsVfs {
@@ -119,6 +121,7 @@ impl TcfsVfs {
             on_flush: None,
             device_id,
             vclocks: Arc::new(Mutex::new(HashMap::new())),
+            master_key: None,
         }
     }
 
@@ -126,6 +129,12 @@ impl TcfsVfs {
     /// Used by the daemon to publish NATS FileSynced events.
     pub fn set_on_flush(&mut self, callback: OnFlushCallback) {
         self.on_flush = Some(callback);
+    }
+
+    /// Set the master key for E2E chunk encryption.
+    /// When set, flush_to_remote encrypts chunks with XChaCha20-Poly1305.
+    pub fn set_master_key(&mut self, key: tcfs_crypto::MasterKey) {
+        self.master_key = Some(key);
     }
 
     /// Access the underlying disk cache (for stats, inspection).
@@ -148,20 +157,46 @@ impl TcfsVfs {
         let chunks = tcfs_chunks::chunk_data(data, sizes);
         let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(data));
 
-        // 2. Upload each chunk (dedup: same content hash = same chunk)
+        // 2. Generate per-file encryption key if master key is available
+        let file_key = self.master_key.as_ref().map(|_| tcfs_crypto::generate_file_key());
+        let file_id_bytes: [u8; 32] = {
+            let h = tcfs_chunks::hash_bytes(data);
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(h.as_bytes());
+            arr
+        };
+
+        // 3. Upload each chunk (encrypt if master key available)
         let mut chunk_hashes = Vec::with_capacity(chunks.len());
-        for chunk in &chunks {
+        for (idx, chunk) in chunks.iter().enumerate() {
             let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
-            let chunk_hex = tcfs_chunks::hash_to_hex(&chunk.hash);
+
+            let upload_data = if let Some(ref fk) = file_key {
+                tcfs_crypto::encrypt_chunk(fk, idx as u64, &file_id_bytes, chunk_data)
+                    .context("encrypting chunk")?
+            } else {
+                chunk_data.to_vec()
+            };
+
+            let chunk_hex = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&upload_data));
             let chunk_key = format!("{}/chunks/{}", prefix, chunk_hex);
             self.op
-                .write(&chunk_key, chunk_data.to_vec())
+                .write(&chunk_key, upload_data)
                 .await
                 .with_context(|| format!("uploading chunk {}", chunk_hex))?;
             chunk_hashes.push(chunk_hex);
         }
 
-        // 3. Build vector clock and create v2 manifest with conflict metadata
+        // 4. Wrap file key with master key for manifest storage
+        let encrypted_file_key = match (&self.master_key, &file_key) {
+            (Some(mk), Some(fk)) => {
+                let wrapped = tcfs_crypto::wrap_key(mk, fk).context("wrapping file key")?;
+                Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wrapped))
+            }
+            _ => None,
+        };
+
+        // 5. Build vector clock and create v2 manifest with conflict metadata
         let mut vclock = {
             let vclocks = self.vclocks.lock().await;
             vclocks.get(vpath).cloned().unwrap_or_default()
@@ -182,7 +217,7 @@ impl TcfsVfs {
             written_by: self.device_id.clone(),
             written_at: now,
             rel_path: Some(vpath.to_string()),
-            encrypted_file_key: None,
+            encrypted_file_key,
         };
         let manifest_key = format!("{}/manifests/{}", prefix, file_hash);
         self.op

@@ -594,6 +594,10 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let result = {
             let mut cache = state_cache.lock().await;
+            let mk_guard = self.master_key.lock().await;
+            let enc_ctx = mk_guard.as_ref().map(|mk| tcfs_sync::engine::EncryptionContext {
+                master_key: mk.clone(),
+            });
             tcfs_sync::engine::upload_file_with_device(
                 &op,
                 &local_path,
@@ -602,7 +606,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 None,
                 &device_id,
                 Some(&normalized_rel),
-                None,
+                enc_ctx.as_ref(),
             )
             .await
         };
