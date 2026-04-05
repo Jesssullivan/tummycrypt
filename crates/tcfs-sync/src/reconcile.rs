@@ -18,7 +18,7 @@ use crate::blacklist::Blacklist;
 use crate::conflict::{compare_clocks, ConflictInfo};
 use crate::engine::{self, OptionalEncryption, ProgressFn};
 use crate::manifest::SyncManifest;
-use crate::state::{StateCacheBackend, StateCache, SyncState};
+use crate::state::{StateCache, StateCacheBackend, SyncState};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -377,7 +377,6 @@ async fn classify_path(
         (None, None, None) => ReconcileAction::UpToDate {
             rel_path: rel_path.to_string(),
         },
-
         // Local exists, not remote, but was tracked — local is newer
         // (This case is covered above, but the compiler needs exhaustive matching
         //  for the tracked_opt variations. The (Some, None, None) case above handles it.)
@@ -406,9 +405,7 @@ async fn compare_both_exist(
     };
 
     // Get local vector clock from tracked state
-    let local_vclock = tracked
-        .map(|s| s.vclock.clone())
-        .unwrap_or_default();
+    let local_vclock = tracked.map(|s| s.vclock.clone()).unwrap_or_default();
 
     // Fetch remote manifest for its vector clock and hash
     let manifest_path = format!(
@@ -583,11 +580,8 @@ pub async fn execute_plan(
             },
 
             ReconcileAction::DeleteRemote { rel_path } => {
-                let index_key = format!(
-                    "{}/index/{}",
-                    remote_prefix.trim_end_matches('/'),
-                    rel_path
-                );
+                let index_key =
+                    format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rel_path);
                 match op.delete(&index_key).await {
                     Ok(()) => {
                         result.deleted_remote += 1;
@@ -635,10 +629,7 @@ pub async fn execute_plan(
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Collect local files into a `rel_path → PathBuf` map, applying the blacklist.
-fn collect_local_set(
-    local_root: &Path,
-    blacklist: &Blacklist,
-) -> Result<HashMap<String, PathBuf>> {
+fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap<String, PathBuf>> {
     let config = crate::engine::CollectConfig {
         sync_git_dirs: blacklist.allows_git_dirs(),
         git_sync_mode: blacklist.git_sync_mode().to_string(),
@@ -671,7 +662,6 @@ fn extract_rel_path_from_state(state_key: &str, local_root: &Path) -> Option<Str
         })
         .map(|rel| rel.to_string_lossy().replace('\\', "/"))
 }
-
 
 #[cfg(test)]
 mod tests {
