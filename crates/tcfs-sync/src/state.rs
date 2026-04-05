@@ -14,9 +14,139 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::conflict::VectorClock;
+
+// ── FileSyncStatus ──────────────────────────────────────────────────────────
+
+/// Per-file sync status, modeled after odrive's FileSyncState.
+///
+/// Unlike `SyncState` (which is persisted), this is a transient runtime status
+/// that reflects what is happening to a file *right now*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSyncStatus {
+    /// File exists only as a stub/placeholder (not hydrated).
+    NotSynced,
+    /// File content matches remote — fully synchronized.
+    Synced,
+    /// File is actively being uploaded or downloaded.
+    Active,
+    /// File is locked by another operation and cannot be modified.
+    Locked,
+    /// Local and remote versions diverged (vector clock conflict).
+    Conflict,
+}
+
+impl std::fmt::Display for FileSyncStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileSyncStatus::NotSynced => write!(f, "not_synced"),
+            FileSyncStatus::Synced => write!(f, "synced"),
+            FileSyncStatus::Active => write!(f, "active"),
+            FileSyncStatus::Locked => write!(f, "locked"),
+            FileSyncStatus::Conflict => write!(f, "conflict"),
+        }
+    }
+}
+
+// ── PathLocks ───────────────────────────────────────────────────────────────
+
+/// Per-path locking to prevent concurrent operations on the same file.
+///
+/// Multiple files can be processed concurrently, but a single file cannot
+/// be pushed + pulled + unsynced simultaneously.
+#[derive(Debug, Clone)]
+pub struct PathLocks {
+    inner: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+impl Default for PathLocks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PathLocks {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Acquire a lock for the given path. Returns a guard that releases on drop.
+    ///
+    /// If the path is already locked by another task, this will wait.
+    pub async fn lock(&self, path: &Path) -> PathLockGuard {
+        let key = path_key(path);
+        let mutex = {
+            let mut map = self.inner.lock().await;
+            map.entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let guard = mutex.lock_owned().await;
+        PathLockGuard {
+            _guard: guard,
+            key,
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Try to acquire a lock without waiting. Returns None if already locked.
+    pub async fn try_lock(&self, path: &Path) -> Option<PathLockGuard> {
+        let key = path_key(path);
+        let mutex = {
+            let mut map = self.inner.lock().await;
+            map.entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        match mutex.try_lock_owned() {
+            Ok(guard) => Some(PathLockGuard {
+                _guard: guard,
+                key,
+                inner: self.inner.clone(),
+            }),
+            Err(_) => None,
+        }
+    }
+
+    /// Check if a path is currently locked (non-blocking).
+    pub async fn is_locked(&self, path: &Path) -> bool {
+        let key = path_key(path);
+        let map = self.inner.lock().await;
+        if let Some(mutex) = map.get(&key) {
+            mutex.try_lock().is_err()
+        } else {
+            false
+        }
+    }
+}
+
+/// RAII guard for a per-path lock. Cleans up the lock entry when no other
+/// references exist to avoid unbounded memory growth.
+pub struct PathLockGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    key: String,
+    inner: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+impl Drop for PathLockGuard {
+    fn drop(&mut self) {
+        // Best-effort cleanup: remove the entry if we're the last holder.
+        if let Ok(mut map) = self.inner.try_lock() {
+            if let Some(mutex) = map.get(&self.key) {
+                // strong_count == 2: the map entry + this guard's clone.
+                if Arc::strong_count(mutex) <= 2 {
+                    map.remove(&self.key);
+                }
+            }
+        }
+    }
+}
 
 /// Sync state for a single local file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +294,21 @@ impl StateCache {
         Ok(())
     }
 
+    /// Find all entries whose key starts with the given directory prefix.
+    pub fn children_with_prefix(&self, dir_path: &Path) -> Vec<(String, &SyncState)> {
+        let prefix = path_key(dir_path);
+        let prefix_slash = if prefix.ends_with('/') {
+            prefix
+        } else {
+            format!("{}/", prefix)
+        };
+        self.entries
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix_slash))
+            .map(|(k, v)| (k.clone(), v))
+            .collect()
+    }
+
     /// Check if a file needs to be synced by comparing stat + hash.
     ///
     /// Returns `None` if the file is up to date (unchanged since last sync).
@@ -232,6 +377,9 @@ pub trait StateCacheBackend {
     fn len(&self) -> usize;
     /// Whether the cache is empty.
     fn is_empty(&self) -> bool;
+    /// Find all entries whose path starts with the given directory prefix.
+    /// Used for dirty-child checks before folder unsync.
+    fn children_with_prefix(&self, dir_path: &Path) -> Vec<(String, &SyncState)>;
 }
 
 impl StateCacheBackend for StateCache {
@@ -261,6 +409,9 @@ impl StateCacheBackend for StateCache {
     }
     fn is_empty(&self) -> bool {
         self.is_empty()
+    }
+    fn children_with_prefix(&self, dir_path: &Path) -> Vec<(String, &SyncState)> {
+        self.children_with_prefix(dir_path)
     }
 }
 
@@ -394,6 +545,20 @@ mod rocksdb_backend {
 
         fn is_empty(&self) -> bool {
             self.entries.is_empty()
+        }
+
+        fn children_with_prefix(&self, dir_path: &Path) -> Vec<(String, &SyncState)> {
+            let prefix = super::path_key(dir_path);
+            let prefix_slash = if prefix.ends_with('/') {
+                prefix
+            } else {
+                format!("{}/", prefix)
+            };
+            self.entries
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix_slash))
+                .map(|(k, v)| (k.clone(), v))
+                .collect()
         }
     }
 }
@@ -534,6 +699,13 @@ impl StateCacheBackend for StateBackend {
             StateBackend::Json(c) => StateCacheBackend::is_empty(c),
             #[cfg(feature = "full")]
             StateBackend::Rocks(c) => c.is_empty(),
+        }
+    }
+    fn children_with_prefix(&self, dir_path: &Path) -> Vec<(String, &SyncState)> {
+        match self {
+            StateBackend::Json(c) => StateCacheBackend::children_with_prefix(c, dir_path),
+            #[cfg(feature = "full")]
+            StateBackend::Rocks(c) => c.children_with_prefix(dir_path),
         }
     }
 }
@@ -733,5 +905,88 @@ mod tests {
         cache.flush().unwrap();
         // Flush again — no-op
         cache.flush().unwrap();
+    }
+
+    #[test]
+    fn test_file_sync_status_display() {
+        assert_eq!(FileSyncStatus::NotSynced.to_string(), "not_synced");
+        assert_eq!(FileSyncStatus::Synced.to_string(), "synced");
+        assert_eq!(FileSyncStatus::Active.to_string(), "active");
+        assert_eq!(FileSyncStatus::Locked.to_string(), "locked");
+        assert_eq!(FileSyncStatus::Conflict.to_string(), "conflict");
+    }
+
+    #[test]
+    fn test_file_sync_status_serde() {
+        let status = FileSyncStatus::Conflict;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"conflict\"");
+        let parsed: FileSyncStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, status);
+    }
+
+    #[test]
+    fn test_children_with_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        // Create a directory structure
+        let sub = dir.path().join("project");
+        std::fs::create_dir_all(&sub).unwrap();
+        let f1 = sub.join("a.txt");
+        let f2 = sub.join("b.txt");
+        let f3 = dir.path().join("root.txt");
+        std::fs::write(&f1, b"a").unwrap();
+        std::fs::write(&f2, b"b").unwrap();
+        std::fs::write(&f3, b"r").unwrap();
+
+        let make = |name: &str| SyncState {
+            blake3: format!("hash_{name}"),
+            size: 1,
+            mtime: 1000,
+            chunk_count: 1,
+            remote_path: format!("bucket/{name}"),
+            last_synced: 9999,
+            vclock: VectorClock::new(),
+            device_id: String::new(),
+            conflict: None,
+        };
+
+        cache.set(&f1, make("a"));
+        cache.set(&f2, make("b"));
+        cache.set(&f3, make("root"));
+
+        let children = cache.children_with_prefix(&sub);
+        assert_eq!(children.len(), 2);
+
+        let children_root = cache.children_with_prefix(dir.path());
+        // All 3 files are children of dir (sub/a.txt, sub/b.txt, root.txt)
+        assert_eq!(children_root.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_path_locks_concurrent() {
+        let locks = PathLocks::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, b"data").unwrap();
+
+        // Acquire lock
+        let guard = locks.lock(&path).await;
+        assert!(locks.is_locked(&path).await);
+
+        // try_lock should fail while held
+        assert!(locks.try_lock(&path).await.is_none());
+
+        // Different path should be lockable
+        let other = dir.path().join("other.txt");
+        std::fs::write(&other, b"data").unwrap();
+        assert!(!locks.is_locked(&other).await);
+        let _other_guard = locks.lock(&other).await;
+
+        // Drop first guard, should unlock
+        drop(guard);
+        assert!(!locks.is_locked(&path).await);
     }
 }
