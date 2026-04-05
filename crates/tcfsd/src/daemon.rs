@@ -739,6 +739,49 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         });
     }
 
+    // Auto-unsync sweep (if configured)
+    if config.sync.auto_unsync_max_age_secs > 0 {
+        let unsync_state = impl_.state_cache_handle();
+        let unsync_interval = config.sync.auto_unsync_interval_secs;
+        let unsync_max_age = config.sync.auto_unsync_max_age_secs;
+        let unsync_dry_run = config.sync.auto_unsync_dry_run;
+        let unsync_policy_path = data_dir.join("folder-policies.json");
+
+        info!(
+            max_age_secs = unsync_max_age,
+            interval_secs = unsync_interval,
+            dry_run = unsync_dry_run,
+            "auto-unsync enabled"
+        );
+
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(unsync_interval));
+            loop {
+                interval.tick().await;
+                let policy_store =
+                    tcfs_sync::policy::PolicyStore::open(&unsync_policy_path).unwrap_or_default();
+                let mut cache = unsync_state.lock().await;
+                let result = tcfs_sync::auto_unsync::sweep(
+                    &mut cache,
+                    &policy_store,
+                    unsync_max_age,
+                    unsync_dry_run,
+                );
+                if result.unsynced > 0 || result.skipped_dirty > 0 {
+                    info!(
+                        scanned = result.scanned,
+                        unsynced = result.unsynced,
+                        skipped_exempt = result.skipped_exempt,
+                        skipped_dirty = result.skipped_dirty,
+                        bytes_reclaimed = result.bytes_reclaimed,
+                        "auto-unsync sweep complete"
+                    );
+                }
+            }
+        });
+    }
+
     info!(socket = %socket_path.display(), "gRPC: listening");
     if let Some(ref fp) = fp_socket_path {
         info!(socket = %fp.display(), "gRPC: FileProvider socket");

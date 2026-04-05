@@ -599,9 +599,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let result = {
             let mut cache = state_cache.lock().await;
             let mk_guard = self.master_key.lock().await;
-            let enc_ctx = mk_guard.as_ref().map(|mk| tcfs_sync::engine::EncryptionContext {
-                master_key: mk.clone(),
-            });
+            let enc_ctx = mk_guard
+                .as_ref()
+                .map(|mk| tcfs_sync::engine::EncryptionContext {
+                    master_key: mk.clone(),
+                });
             tcfs_sync::engine::upload_file_with_device(
                 &op,
                 &local_path,
@@ -901,6 +903,43 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 stub_path: String::new(),
                 error: format!("path not in sync state: {}", req.path),
             }));
+        }
+
+        // Dirty-child safety check: if this is a directory, verify no children
+        // have unsynced local modifications before removing from state cache.
+        if path.is_dir() && !req.force {
+            let children = cache.children_with_prefix(&path);
+            let mut dirty_paths = Vec::new();
+            for (child_key, _child_state) in &children {
+                let child_path = std::path::Path::new(child_key);
+                if child_path.exists() {
+                    if let Ok(Some(reason)) = cache.needs_sync(child_path) {
+                        dirty_paths.push(format!("{}: {reason}", child_key));
+                    }
+                }
+            }
+            if !dirty_paths.is_empty() {
+                let count = dirty_paths.len();
+                let detail = dirty_paths
+                    .into_iter()
+                    .take(10)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Ok(tonic::Response::new(UnsyncResponse {
+                    success: false,
+                    stub_path: String::new(),
+                    error: format!(
+                        "{count} dirty child(ren) with unsynced changes (use force=true to override): {detail}"
+                    ),
+                }));
+            }
+
+            // Remove all children from state cache too
+            let child_keys: Vec<String> = children.into_iter().map(|(k, _)| k).collect();
+            for child_key in &child_keys {
+                let child_path = std::path::PathBuf::from(child_key);
+                cache.remove(&child_path);
+            }
         }
 
         cache.remove(&path);
@@ -1931,6 +1970,50 @@ impl TcfsDaemon for TcfsDaemonImpl {
             remote_prefix: invite.remote_prefix.unwrap_or_default(),
             encryption_passphrase: invite.encryption_passphrase.unwrap_or_default(),
             encryption_salt: invite.encryption_salt.unwrap_or_default(),
+        }))
+    }
+
+    // ── Diagnostics ──────────────────────────────────────────────────────
+
+    async fn diagnostics(
+        &self,
+        _request: tonic::Request<DiagnosticsRequest>,
+    ) -> Result<tonic::Response<DiagnosticsResponse>, tonic::Status> {
+        let cache = self.state_cache.lock().await;
+
+        // Count conflicts
+        let mut conflict_count = 0i32;
+        for (_key, state) in StateCacheBackend::all_entries(&*cache) {
+            if state.conflict.is_some() {
+                conflict_count += 1;
+            }
+        }
+
+        // Count auto-unsync eligible files
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let max_age = self.config.sync.auto_unsync_max_age_secs;
+        let eligible = if max_age > 0 {
+            StateCacheBackend::all_entries(&*cache)
+                .iter()
+                .filter(|(_, s)| now.saturating_sub(s.last_synced) > max_age)
+                .count() as i32
+        } else {
+            0
+        };
+
+        Ok(tonic::Response::new(DiagnosticsResponse {
+            state_cache_entries: StateCacheBackend::len(&*cache) as i32,
+            conflict_count,
+            last_nats_seq: cache.last_nats_seq as i64,
+            nats_connected: self.nats_ok.load(std::sync::atomic::Ordering::Relaxed),
+            auto_unsync_eligible: eligible,
+            auto_unsync_max_age_secs: max_age as i64,
+            storage_reachable: self.storage_ok,
+            uptime_secs: self.start_time.elapsed().as_secs() as i64,
+            device_id: self.device_id.clone(),
         }))
     }
 }

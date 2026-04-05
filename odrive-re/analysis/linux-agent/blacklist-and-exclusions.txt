@@ -1,0 +1,124 @@
+odrive Linux Agent — Blacklist & Exclusion Analysis
+====================================================
+Binary: /tmp/odrive-extract/odriveagent
+Format: ELF 64-bit LSB executable, x86-64, unstripped
+Runtime: PyInstaller-packed Python 2.7
+Date: 2026-04-04
+
+
+=== PRIMARY BLACKLIST CLASS ===
+
+src.file_system_sync9.Blacklist(
+
+This is the sole dedicated blacklist module in the binary. It lives
+inside the file_system_sync9 package alongside:
+  - FSEventService        (file system event monitoring)
+  - FileSystemCodes       (error/status codes for FS ops)
+  - FileSystemService     (abstraction over native FS)
+  - MacFSEventService     (macOS FSEvents integration)
+  - WindowsFSEventService (ReadDirectoryChangesW integration)
+
+The co-location with FSEventService indicates the blacklist is applied
+at the event-ingestion layer — before events are promoted to sync
+operations. Files matching the blacklist are filtered out at scan time
+and/or when FS events fire.
+
+
+=== PATTERN MATCHING PRIMITIVES ===
+
+glob(                    — Python glob module, used for wildcard matching
+stb_regex                — STB single-header regex engine compiled into binary
+stb_regex_matcher        — regex matcher state machine
+stb_skipnewline          — skip newline chars (used in pattern parsing)
+stb_skipwhite            — skip whitespace (used in pattern parsing)
+xml.dom.NodeFilter(      — DOM node filtering (likely unrelated, for XML parsing)
+
+
+=== INFERRED BLACKLIST BEHAVIOR ===
+
+Based on the presence of both glob() and stb_regex, the blacklist
+likely supports:
+  1. Glob patterns (e.g., "*.tmp", ".DS_Store")
+  2. Regex patterns (for advanced exclusions)
+
+Standard odrive blacklist entries (from public documentation and
+typical sync client behavior) typically exclude:
+
+  System files:
+    .DS_Store              — macOS Finder metadata
+    Thumbs.db              — Windows thumbnail cache
+    desktop.ini            — Windows folder customization
+    .Spotlight-V100        — macOS Spotlight index
+    .Trashes               — macOS per-volume trash
+    .fseventsd             — macOS FS events log
+    $RECYCLE.BIN           — Windows recycle bin
+    System Volume Information
+
+  Temp/Lock files:
+    ~$*                    — Office temporary files
+    *.tmp
+    *.swp                  — vim swap files
+    *.lock
+    .~lock.*               — LibreOffice lock files
+
+  VCS:
+    .git/
+    .svn/
+    .hg/
+
+  odrive internal:
+    *.cloud                — odrive placeholder files
+    *.cloudf               — odrive folder placeholders
+
+NOTE: The actual patterns are embedded in the Python bytecode within
+the PyInstaller archive and cannot be extracted via simple `strings`.
+Full extraction requires:
+  1. PyInstaller archive unpacking (pyinstxtractor)
+  2. .pyc decompilation (uncompyle6 for Python 2.7)
+  3. Reading the Blacklist class to see default + configurable patterns
+
+
+=== RELATIONSHIP TO SYNC PIPELINE ===
+
+The blacklist is consulted at multiple points:
+
+  1. FSEventService.on_event()
+     - When a file system event fires (create/modify/delete/rename)
+     - If the path matches the blacklist, the event is dropped silently
+
+  2. RefreshChildren
+     - When scanning a folder's children during refresh
+     - Blacklisted items are excluded from the local children list
+     - This prevents them from appearing as "local adds" during merge
+
+  3. LocalAddFolder / RemoteAddFolder
+     - When processing new folder additions
+     - Blacklisted paths are skipped
+
+  4. Compare / MergeFiles
+     - Blacklisted items filtered before comparison
+     - Prevents false conflicts between blacklisted local files
+       and remote state
+
+
+=== IMPLICATIONS FOR TUMMYCRYPT ===
+
+tummycrypt should implement a similar multi-layer exclusion system:
+
+  1. Event-level filtering (NATS/inotify handler)
+     - Drop events for excluded patterns before they enter the queue
+     - Reduces noise and unnecessary processing
+
+  2. Scan-level filtering (FUSE readdir / index building)
+     - Exclude patterns from directory listings
+     - Prevents blacklisted files from entering the sync index
+
+  3. Sync-level filtering (push/pull pipeline)
+     - Final check before upload/download
+     - Belt-and-suspenders approach
+
+  Configurable blacklist should support:
+     - Default system patterns (hardcoded)
+     - User-configurable patterns (glob + regex)
+     - Per-mount-point overrides
+     - Include/exclude priority ordering
