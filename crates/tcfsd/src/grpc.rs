@@ -386,7 +386,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
                       vclock: &tcfs_sync::conflict::VectorClock| {
                     let nats = nats_handle.clone();
                     let device = flush_device_id.clone();
-                    let path = vpath.to_string();
+                    // Strip leading '/' from FUSE virtual path to produce a
+                    // relative path matching the S3 index key format. Without
+                    // this, receiving hosts get `/file.txt` instead of `file.txt`
+                    // and sync_root.join() produces malformed local paths.
+                    let path = vpath.trim_start_matches('/').to_string();
                     let hash = hash.to_string();
                     let vclock = vclock.clone();
                     let pfx = flush_prefix.clone();
