@@ -1,0 +1,170 @@
+================================================================================
+odrive Linux Agent (odriveagent) - Filesystem Event & Scanning Strings
+================================================================================
+Binary: /tmp/odrive-extract/odriveagent
+Type: ELF 64-bit LSB executable, x86-64, Python 2.7 PyInstaller
+Build: GCC 4.3.4 (SUSE Linux), GNU/Linux 2.6.32
+Extracted: 2026-04-04
+================================================================================
+
+=== FS EVENT DETECTION ===
+src.file_system_sync9.FSEventService(
+src.file_system_sync9.MacFSEventService(
+src.file_system_sync9.WindowsFSEventService(
+
+=== FS EVENT SERVICE HIERARCHY ===
+src.file_system_sync9(
+src.file_system_sync9.Blacklist(
+src.file_system_sync9.FSEventService(
+src.file_system_sync9.FileSystemCodes(
+src.file_system_sync9.FileSystemService(
+src.file_system_sync9.MacFSEventService(
+src.file_system_sync9.WindowsFSEventService(
+
+=== NATIVE FS ABSTRACTION ===
+src.file_system(
+src.file_system.implementation(
+src.file_system.implementation.NativeFileSystemService(
+src.file_system.interface(
+src.file_system.interface.AbstractFileSystemService(
+
+=== DIRECTORY SCANNING ===
+closedir
+closedir@@GLIBC_2.2.5
+opendir
+opendir@@GLIBC_2.2.5
+readdir
+readdir@@GLIBC_2.2.5
+readdir_raw
+__stat
+__xstat
+__xstat@@GLIBC_2.2.5
+stat
+stat(
+stat.h
+stb_readdir_files
+stb_readdir_files_mask
+stb_readdir_free
+stb_readdir_rec
+stb_readdir_recursive
+stb_readdir_subdirs
+stb_readdir_subdirs_mask
+shutil(
+
+=== SCAN CONTROLLERS ===
+src.odrive_app.controllers.LocalScanController(
+src.odrive_app.controllers.RemoteScanController(
+
+=== EVENT CONTROLLERS ===
+src.odrive_app.controllers.LocalEventController(
+src.odrive_app.controllers.RemoteEventController(
+src.odrive_app.controllers.TrackedEventController(
+
+=== EVENT DISPATCHING ===
+src.odrive_app.dispatchers(
+src.odrive_app.dispatchers.EventDispatcher(
+src.odrive_app.dispatchers.ProtocolRequestDispatcher(
+src.odrive_app.servers.EventServer(
+
+=== REFRESH JOB (INCREMENTAL SYNC) ===
+src.odrive_app.controllers.RefreshController(
+src.odrive_app.controllers.refresh_job(
+src.odrive_app.controllers.refresh_job.RefreshJobController(
+src.odrive_app.controllers.refresh_job.internals(
+src.odrive_app.controllers.refresh_job.internals.Compare(
+src.odrive_app.controllers.refresh_job.internals.FileFormats(
+src.odrive_app.controllers.refresh_job.internals.GroupByPosition(
+src.odrive_app.controllers.refresh_job.internals.LocalAddFolder(
+src.odrive_app.controllers.refresh_job.internals.MergeFiles(
+src.odrive_app.controllers.refresh_job.internals.Operations(
+src.odrive_app.controllers.refresh_job.internals.Refresh(
+src.odrive_app.controllers.refresh_job.internals.RefreshChildren(
+src.odrive_app.controllers.refresh_job.internals.RemoteAddFolder(
+
+=== SYNC CONTROLLER INTERNALS ===
+src.odrive_app.controllers.sync(
+src.odrive_app.controllers.sync.SyncController(
+src.odrive_app.controllers.sync.internals(
+src.odrive_app.controllers.sync.internals.AddCloudChildren(
+src.odrive_app.controllers.sync.internals.Expand(
+src.odrive_app.controllers.sync.internals.QueuedExpand(
+src.odrive_app.controllers.sync.internals.Sync(
+src.odrive_app.controllers.sync.internals.Unsync(
+
+=== SYNC TRACKING SERVICE (DATABASE LAYER) ===
+src.sync9.sync_tracking_service(
+src.sync9.sync_tracking_service.SyncTrackingDBDump(
+src.sync9.sync_tracking_service.SyncTrackingNode(
+src.sync9.sync_tracking_service.SyncTrackingService(
+src.sync9.sync_tracking_service.internals(
+src.sync9.sync_tracking_service.internals.SyncTrackingValuesV0(
+src.sync9.sync_tracking_service.internals.db(
+src.sync9.sync_tracking_service.internals.db.SyncTrackingDBConnection(
+src.sync9.sync_tracking_service.internals.db.SyncTrackingDBService(
+src.sync9.sync_tracking_service.internals.db.tables(
+src.sync9.sync_tracking_service.internals.db.tables.SyncTrackingTable(
+
+=== FILE SYNC STATE ===
+src.sync_api_common(
+src.sync_api_common.FileSyncState(
+src.sync_api_common.O2Path(
+src.sync_api_common.StopStatus(
+
+=== BACKOFF / RATE LIMITING ===
+src.integrations.clouddrive.BackoffChecker(
+src.integrations.dropbox.BackoffChecker(
+src.integrations.googledrive.GoogleDriveBackoffChecker(
+src.integrations.onedrive.BackoffChecker(
+src.integrations.procore.BackoffChecker(
+src.integrations.slack.SlackBackoffChecker(
+
+=== BLACKLIST / FILTERING ===
+src.file_system_sync9.Blacklist(
+fnmatch(
+glob(
+regexp_cache.8639
+regexps.8638
+stb_regex
+stb_regex_matcher
+
+=== FILESYSTEM METADATA ===
+fchmod
+fchmod@@GLIBC_2.2.5
+encodings.aliases(
+src.common.FileAttributes(
+src.integrations_sub.utility.ServiceFileAttributes(
+
+=== THREADING / CONCURRENCY ===
+src.utility.ThreadPoolExecutor(
+concurrent(
+concurrent.futures(
+concurrent.futures._base(
+concurrent.futures._compat(
+concurrent.futures.process(
+concurrent.futures.thread(
+threading(
+multiprocessing(
+multiprocessing.pool(
+multiprocessing.process(
+multiprocessing.queues(
+multiprocessing.synchronize(
+fork
+fork@@GLIBC_2.2.5
+signal
+signal@@GLIBC_2.2.5
+
+=== DIAGNOSTICS / DUMPS ===
+src.exception_handling(
+src.exception_handling.Exceptions(
+src.exception_handling.diagnostics(
+src.exception_handling.diagnostics.DetailedThreadDump(
+src.exception_handling.diagnostics.DiagnosticDump(
+src.exception_handling.diagnostics.ExceptionDump(
+src.exception_handling.diagnostics.SyncActivityDump(
+src.exception_handling.diagnostics.ThreadsDump(
+src.common.SendThreadsDump(
+
+=== BADGE / UI REFRESH ===
+src.common.services.badge(
+src.common.services.badge.BadgeRefreshService(
+src.odrive_app.controllers.utility.Badging(
