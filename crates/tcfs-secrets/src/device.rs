@@ -60,7 +60,14 @@ impl DeviceRegistry {
         }
         let json = serde_json::to_string_pretty(self).context("serializing device registry")?;
         std::fs::write(path, json)
-            .with_context(|| format!("writing device registry: {}", path.display()))
+            .with_context(|| format!("writing device registry: {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("chmod device registry: {}", path.display()))?;
+        }
+        Ok(())
     }
 
     /// Add a new device

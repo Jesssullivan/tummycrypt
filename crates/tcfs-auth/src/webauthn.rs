@@ -163,7 +163,12 @@ impl WebAuthnProvider {
         let creds = self.credentials.read().await;
         let json = serde_json::to_string_pretty(&*creds)?;
         tokio::fs::write(path, json).await?;
-        debug!(path = %path.display(), "saved WebAuthn credentials");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        debug!(path = %path.display(), "saved WebAuthn credentials (mode 0600)");
         Ok(())
     }
 }

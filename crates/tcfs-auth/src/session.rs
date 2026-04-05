@@ -345,7 +345,12 @@ impl SessionStore {
             tokio::fs::create_dir_all(parent).await.ok();
         }
         tokio::fs::write(path, data).await?;
-        tracing::debug!(path = %path.display(), count = valid.len(), "saved sessions");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        tracing::debug!(path = %path.display(), count = valid.len(), "saved sessions (mode 0600)");
         Ok(())
     }
 
