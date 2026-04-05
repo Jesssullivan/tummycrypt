@@ -634,15 +634,10 @@ async fn cmd_push(
     let device_id = load_device_id(config);
     let collect_cfg = collect_config_from_sync(config);
 
-    // Default prefix: local directory/file name
+    // Default prefix: storage bucket from config (matches daemon behavior).
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| {
-            local
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "tcfs".to_string())
-        });
+        .unwrap_or_else(|| config.storage.bucket.clone());
 
     println!(
         "Pushing {} → {}:{} (endpoint: {}{})",
