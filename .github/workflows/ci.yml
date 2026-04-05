@@ -45,6 +45,9 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: cargo test tcfs-sync (nats + crypto features)
+        run: cargo test -p tcfs-sync --features nats,crypto
+
       - name: Build workspace (default features)
         run: cargo build --workspace
 

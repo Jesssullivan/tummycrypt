@@ -110,7 +110,12 @@ impl TotpProvider {
         let creds = self.credentials.read().await;
         let data = serde_json::to_string_pretty(&*creds)?;
         tokio::fs::write(path, data).await?;
-        debug!(path = %path.display(), "saved TOTP credentials");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        debug!(path = %path.display(), "saved TOTP credentials (mode 0600)");
         Ok(())
     }
 
