@@ -42,14 +42,14 @@ pub struct SopsCredentials {
 #[derive(Debug)]
 pub struct SopsFile {
     /// Raw YAML parsed structure
-    data: serde_yml::Value,
+    data: serde_norway::Value,
     /// The encrypted data key for age recipients
     age_enc: String,
 }
 
 impl SopsFile {
     pub fn parse(yaml_str: &str) -> Result<Self> {
-        let data: serde_yml::Value = serde_yml::from_str(yaml_str).context("parsing SOPS YAML")?;
+        let data: serde_norway::Value = serde_norway::from_str(yaml_str).context("parsing SOPS YAML")?;
 
         let age_enc = extract_age_enc(&data)?;
 
@@ -85,7 +85,7 @@ pub async fn decrypt_sops_file(
 }
 
 /// Extract the age-encrypted data key from the sops block
-fn extract_age_enc(data: &serde_yml::Value) -> Result<String> {
+fn extract_age_enc(data: &serde_norway::Value) -> Result<String> {
     let sops = data
         .get("sops")
         .ok_or_else(|| anyhow::anyhow!("no 'sops' block in file (is this a SOPS file?)"))?;
@@ -109,13 +109,13 @@ fn extract_age_enc(data: &serde_yml::Value) -> Result<String> {
 
 /// Walk the YAML value tree, decrypting ENC[...] strings and populating creds
 fn decrypt_yaml_value(
-    value: &serde_yml::Value,
+    value: &serde_norway::Value,
     data_key: &[u8; 32],
     creds: &mut SopsCredentials,
     key_path: &str,
 ) -> Result<()> {
     match value {
-        serde_yml::Value::Mapping(map) => {
+        serde_norway::Value::Mapping(map) => {
             for (k, v) in map {
                 let key = k.as_str().unwrap_or("");
                 // Skip the sops metadata block
@@ -130,7 +130,7 @@ fn decrypt_yaml_value(
                 decrypt_yaml_value(v, data_key, creds, &path)?;
             }
         }
-        serde_yml::Value::String(s) => {
+        serde_norway::Value::String(s) => {
             let decrypted = if s.starts_with("ENC[AES256_GCM,") {
                 decrypt_enc_value(s, data_key)
                     .with_context(|| format!("decrypting field '{key_path}'"))?
