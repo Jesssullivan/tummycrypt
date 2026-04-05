@@ -243,9 +243,12 @@ enum DeviceAction {
 enum AuthAction {
     /// Unlock the encryption session (load master key into daemon)
     Unlock {
-        /// Path to master key file (default: ~/.config/tcfs/master.key)
+        /// Path to raw 32-byte master key file (default: ~/.config/tcfs/master.key)
         #[arg(long)]
         key_file: Option<PathBuf>,
+        /// Path to passphrase or BIP-39 mnemonic file (derives key via Argon2id)
+        #[arg(long, conflicts_with = "key_file")]
+        passphrase_file: Option<PathBuf>,
     },
     /// Lock the encryption session (clear master key from daemon memory)
     Lock,
@@ -420,8 +423,11 @@ async fn main() -> Result<()> {
         Commands::Auth { action } => {
             #[cfg(unix)]
             match action {
-                AuthAction::Unlock { key_file } => {
-                    cmd_auth_unlock(&config, key_file.as_deref()).await
+                AuthAction::Unlock {
+                    key_file,
+                    passphrase_file,
+                } => {
+                    cmd_auth_unlock(&config, key_file.as_deref(), passphrase_file.as_deref()).await
                 }
                 AuthAction::Lock => cmd_auth_lock(&config).await,
                 AuthAction::Status => cmd_auth_status(&config).await,
@@ -1771,28 +1777,56 @@ fn cmd_device_status() -> Result<()> {
 async fn cmd_auth_unlock(
     config: &tcfs_core::config::TcfsConfig,
     key_file: Option<&Path>,
+    passphrase_file: Option<&Path>,
 ) -> Result<()> {
-    // Resolve master key file path
-    let key_path = key_file
-        .map(|p| p.to_path_buf())
-        .or_else(|| config.crypto.master_key_file.clone())
-        .unwrap_or_else(|| {
-            tcfs_secrets::device::default_registry_path()
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("master.key")
-        });
+    let key_bytes = if let Some(pp_path) = passphrase_file {
+        // Derive master key from passphrase/mnemonic file via KDF
+        let passphrase = std::fs::read_to_string(pp_path)
+            .with_context(|| format!("reading passphrase file: {}", pp_path.display()))?;
+        let passphrase = passphrase.trim();
 
-    let key_bytes = std::fs::read(&key_path)
-        .with_context(|| format!("reading master key: {}", key_path.display()))?;
+        // Try BIP-39 mnemonic first (24 words), fall back to arbitrary passphrase
+        let master = if passphrase.split_whitespace().count() >= 12 {
+            println!("Deriving key from BIP-39 mnemonic...");
+            tcfs_crypto::recovery::mnemonic_to_master_key(passphrase)
+                .context("BIP-39 key derivation failed")?
+        } else {
+            println!("Deriving key from passphrase (Argon2id)...");
+            let salt: [u8; 16] = *b"tcfs-recovery-v1";
+            let params = tcfs_crypto::kdf::KdfParams::default();
+            tcfs_crypto::kdf::derive_master_key(
+                &secrecy::SecretString::from(passphrase.to_string()),
+                &salt,
+                &params,
+            )
+            .context("Argon2id key derivation failed")?
+        };
+        master.as_bytes().to_vec()
+    } else {
+        // Read raw 32-byte key file
+        let key_path = key_file
+            .map(|p| p.to_path_buf())
+            .or_else(|| config.crypto.master_key_file.clone())
+            .unwrap_or_else(|| {
+                tcfs_secrets::device::default_registry_path()
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("master.key")
+            });
 
-    if key_bytes.len() != tcfs_crypto::KEY_SIZE {
-        anyhow::bail!(
-            "master key file has wrong size: {} bytes (expected {})",
-            key_bytes.len(),
-            tcfs_crypto::KEY_SIZE
-        );
-    }
+        let raw = std::fs::read(&key_path)
+            .with_context(|| format!("reading master key: {}", key_path.display()))?;
+
+        if raw.len() != tcfs_crypto::KEY_SIZE {
+            anyhow::bail!(
+                "master key file has wrong size: {} bytes (expected {}). \
+                 For BIP-39 mnemonics or passphrases, use --passphrase-file instead.",
+                raw.len(),
+                tcfs_crypto::KEY_SIZE
+            );
+        }
+        raw
+    };
 
     // Send to daemon via gRPC
     let mut client = connect_daemon(&config.daemon.socket).await?;
