@@ -63,7 +63,7 @@ bip39 = { version = "2" }
 keyring = { version = "3" }
 
 # SOPS decryption deps
-serde_yml = { version = "0.0" }
+serde_norway = { version = "0.9" }
 aes-gcm = { version = "0.10" }
 base64 = { version = "0.22" }
 
