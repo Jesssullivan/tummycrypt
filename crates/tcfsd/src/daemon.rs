@@ -623,7 +623,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     let nats_url = &config.sync.nats_url;
     if nats_url != "nats://localhost:4222" || std::env::var("TCFS_NATS_URL").is_ok() {
         let url = std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| nats_url.clone());
-        match tcfs_sync::NatsClient::connect(&url).await {
+        match tcfs_sync::NatsClient::connect(&url, config.sync.nats_tls).await {
             Ok(nats) => {
                 if let Err(e) = nats.ensure_streams().await {
                     warn!("NATS stream setup failed: {e}");
