@@ -1,0 +1,188 @@
+# odrive Linux Agent - Cryptography & Security Libraries
+# Date extracted: 2026-04-04
+
+## ============================================================
+## PyCrypto (Crypto.*)
+## ============================================================
+
+### Cipher modules
+Crypto.Cipher(
+Crypto.Cipher.AES(
+Crypto.Cipher.ARC4(
+Crypto.Cipher.Blowfish(
+Crypto.Cipher.DES(
+Crypto.Cipher.DES3(
+Crypto.Cipher.blockalgo(
+
+### Hash modules
+Crypto.Hash(
+Crypto.Hash.HMAC(
+Crypto.Hash.MD5(
+Crypto.Hash.SHA(
+Crypto.Hash.SHA256(
+Crypto.Hash.hashalgo(
+
+### Protocol modules
+Crypto.Protocol(
+Crypto.Protocol.KDF(
+
+### Public key modules
+Crypto.PublicKey(
+Crypto.PublicKey.DSA(
+Crypto.PublicKey.RSA(
+Crypto.PublicKey._DSA(
+Crypto.PublicKey._RSA(
+Crypto.PublicKey._slowmath(
+Crypto.PublicKey.pubkey(
+
+### Random modules
+Crypto.Random(
+Crypto.Random.Fortuna(
+Crypto.Random.Fortuna.FortunaAccumulator(
+Crypto.Random.Fortuna.FortunaGenerator(
+Crypto.Random.Fortuna.SHAd256(
+Crypto.Random.OSRNG(
+Crypto.Random.OSRNG.fallback(
+Crypto.Random.OSRNG.nt(
+Crypto.Random.OSRNG.posix(
+Crypto.Random.OSRNG.rng_base(
+Crypto.Random._UserFriendlyRNG(
+Crypto.Random.random(
+
+### Utility modules
+Crypto.Util(
+Crypto.Util.Counter(
+Crypto.Util._number_new(
+Crypto.Util.asn1(
+Crypto.Util.number(
+Crypto.Util.py21compat(
+Crypto.Util.py3compat(
+Crypto.pct_warnings(
+
+### Native .so modules (compiled C extensions)
+bCrypto.Cipher._AES.so
+bCrypto.Cipher._ARC4.so
+bCrypto.Cipher._Blowfish.so
+bCrypto.Cipher._DES.so
+bCrypto.Cipher._DES3.so
+bCrypto.Hash._SHA256.so
+bCrypto.Util._counter.so
+bCrypto.Util.strxor.so
+b_hashlib.so
+
+## ============================================================
+## ECDSA (python-ecdsa)
+## ============================================================
+ecdsa._compat(
+ecdsa._rwlock(
+ecdsa._version(
+ecdsa.curves(
+ecdsa.der(
+ecdsa.ecdh(
+ecdsa.ecdsa(
+ecdsa.ellipticcurve(
+ecdsa.keys(
+ecdsa.numbertheory(
+ecdsa.rfc6979(
+ecdsa.util(
+
+## ============================================================
+## Paramiko (SSH/SFTP transport)
+## ============================================================
+paramiko(
+paramiko._version(
+paramiko._winapi(
+paramiko.agent(
+paramiko.auth_handler(
+paramiko.ber(
+paramiko.buffered_pipe(
+paramiko.channel(
+paramiko.client(
+paramiko.common(
+paramiko.compress(
+paramiko.config(
+paramiko.dsskey(
+paramiko.ecdsakey(
+paramiko.file(
+paramiko.hostkeys(
+paramiko.kex_gex(
+paramiko.kex_group1(
+paramiko.kex_group14(
+paramiko.kex_gss(
+paramiko.message(
+paramiko.packet(
+paramiko.pipe(
+paramiko.pkey(
+paramiko.primes(
+paramiko.proxy(
+paramiko.py3compat(
+paramiko.rsakey(
+paramiko.server(
+paramiko.sftp(
+paramiko.sftp_attr(
+paramiko.sftp_client(
+paramiko.sftp_file(
+paramiko.sftp_handle(
+paramiko.sftp_server(
+paramiko.sftp_si(
+paramiko.ssh_exception(
+paramiko.ssh_gss(
+paramiko.transport(
+paramiko.util(
+paramiko.win_pageant(
+
+## ============================================================
+## Keyring (credential storage)
+## ============================================================
+keyring(
+keyring.backend(
+keyring.backends(
+keyring.backends.Gnome(
+keyring.backends.Google(
+keyring.backends.OS_X(
+keyring.backends.SecretService(
+keyring.backends.Windows(
+keyring.backends._win_crypto(
+keyring.backends.file(
+keyring.backends.keyczar(
+keyring.backends.kwallet(
+keyring.backends.multi(
+keyring.backends.pyfs(
+keyring.core(
+keyring.credentials(
+keyring.errors(
+keyring.getpassbackend(
+keyring.py27compat(
+keyring.util(
+keyring.util.XDG(
+keyring.util.escape(
+keyring.util.platform_(
+keyring.util.properties(
+
+## ============================================================
+## odrive encryption modules
+## ============================================================
+src.integrations.encryption(
+src.integrations.encryption.EncryptionSync9Adapter(
+src.odrive_app.controllers.EncryptionController(
+src.odrive_app.controllers.EncryptorController(
+src.odrive_app.controllers.utility.EncryptorConfiguration(
+src.odrive_app.services.db.tables.EncryptionEntryTable(
+src.utility.EncryptionUtility(
+src.utility.HashCalculator(
+
+## ============================================================
+## SSL/TLS
+## ============================================================
+ssl(
+b_ssl.so
+backports.ssl_match_hostname(
+requests.packages.urllib3.util.ssl_(
+requests.packages.urllib3.packages.ssl_match_hostname(
+requests.packages.urllib3.packages.ssl_match_hostname._implementation(
+
+## ============================================================
+## Standard library crypto
+## ============================================================
+hashlib(
+hmac(

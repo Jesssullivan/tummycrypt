@@ -1,0 +1,174 @@
+# odrive Linux Agent - Third-Party Dependencies
+# Extracted from PyInstaller-packed ELF binary
+# Date extracted: 2026-04-04
+
+## ============================================================
+## HTTP / REST
+## ============================================================
+requests(
+requests.adapters(
+requests.api(
+requests.auth(
+requests.certs(
+requests.compat(
+requests.cookies(
+requests.exceptions(
+requests.hooks(
+requests.models(
+requests.packages(
+requests.sessions(
+requests.status_codes(
+requests.structures(
+requests.uploadstream(
+requests.utils(
+# bundled: chardet, urllib3
+
+## ============================================================
+## FTP
+## ============================================================
+ftplib(
+ftputil(
+ftputil.compat(
+ftputil.error(
+ftputil.file(
+ftputil.file_transfer(
+ftputil.host(
+ftputil.lrucache(
+ftputil.path(
+ftputil.socket_file_adapter(
+ftputil.stat(
+ftputil.stat_cache(
+ftputil.tool(
+ftputil.version(
+
+## ============================================================
+## SSH / SFTP
+## ============================================================
+paramiko(
+paramiko.agent(
+paramiko.auth_handler(
+paramiko.channel(
+paramiko.client(
+paramiko.common(
+paramiko.compress(
+paramiko.config(
+paramiko.sftp(
+paramiko.sftp_attr(
+paramiko.sftp_client(
+paramiko.sftp_file(
+paramiko.sftp_handle(
+paramiko.sftp_server(
+paramiko.transport(
+# + crypto keys: dsskey, ecdsakey, rsakey
+
+## ============================================================
+## DATE/TIME
+## ============================================================
+arrow(
+arrow.api(
+arrow.arrow(
+arrow.factory(
+arrow.formatter(
+arrow.locales(
+arrow.parser(
+arrow.util(
+dateutil(
+dateutil.easter(
+dateutil.parser(
+dateutil.relativedelta(
+dateutil.rrule(
+dateutil.tz(
+dateutil.tzwin(
+dateutil.zoneinfo(
+
+## ============================================================
+## PROCESS MONITORING
+## ============================================================
+psutil(
+psutil._common(
+psutil._compat(
+psutil._psbsd(
+psutil._pslinux(
+psutil._psosx(
+psutil._psposix(
+psutil._pssunos(
+psutil._pswindows(
+
+## ============================================================
+## CRYPTO (see linux-agent-crypto-libs.txt for full detail)
+## ============================================================
+# PyCrypto (Crypto.*) - AES, Blowfish, DES, DES3, ARC4, SHA256, HMAC, RSA, DSA
+# ecdsa - ECDSA signing/verification
+# keyring - OS credential storage
+# hashlib, hmac, ssl
+
+## ============================================================
+## NATIVE .so EXTENSIONS (embedded)
+## ============================================================
+bCrypto.Cipher._AES.so
+bCrypto.Cipher._ARC4.so
+bCrypto.Cipher._Blowfish.so
+bCrypto.Cipher._DES.so
+bCrypto.Cipher._DES3.so
+bCrypto.Hash._SHA256.so
+bCrypto.Util._counter.so
+bCrypto.Util.strxor.so
+b_bisect.so
+b_codecs_cn.so
+b_codecs_hk.so
+b_codecs_iso2022.so
+b_codecs_jp.so
+b_codecs_kr.so
+b_codecs_tw.so
+b_collections.so
+b_csv.so
+b_ctypes.so
+b_elementtree.so
+b_functools.so
+b_hashlib.so
+b_heapq.so
+b_io.so
+b_json.so
+b_locale.so
+b_lsprof.so
+b_multibytecodec.so
+b_multiprocessing.so
+b_random.so
+b_socket.so
+b_ssl.so
+b_struct.so
+bapsw.so
+barray.so
+baudioop.so
+bbinascii.so
+bbz2.so
+bcPickle.so
+bcStringIO.so
+bdatetime.so
+bfcntl.so
+bgrp.so
+bitertools.so
+bmath.so
+bmmap.so
+boperator.so
+bpsutil._psutil_linux.so
+bpsutil._psutil_posix.so
+bpyexpat.so
+breadline.so
+bresource.so
+bselect.so
+bstrop.so
+btermios.so
+btime.so
+bunicodedata.so
+bzlib.so
+
+## ============================================================
+## NOTABLE OBSERVATIONS
+## ============================================================
+# - Built with Python 2.7 (cPickle, cStringIO, copy_reg, strop)
+# - Uses PyCrypto (not cryptography) - older crypto library
+# - Bundled apsw.so suggests SQLite via APSW (Another Python SQLite Wrapper)
+# - Cross-platform code included (win_util, MacOSUtil, WindowsFSEventService)
+# - requests.uploadstream present - streaming upload support
+# - pyi_crypto present - PyInstaller bytecode encryption

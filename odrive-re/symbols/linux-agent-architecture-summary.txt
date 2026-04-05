@@ -1,0 +1,138 @@
+# odrive Linux Agent - Architecture Summary (from binary analysis)
+# Date: 2026-04-04
+
+## Binary Info
+- File: odriveagent (11MB ELF 64-bit LSB, x86-64, not stripped, debug_info)
+- Packer: PyInstaller (pyi_* bootloader symbols present)
+- Runtime: Python 2.7 (cPickle, cStringIO, copy_reg, PI_PyString_*)
+- Client binary: odrive (7MB, same PyInstaller bootstrap, thin CLI wrapper)
+
+## Architecture Layers (top to bottom)
+
+```
++------------------------------------------------------------------+
+|                    OdriveSyncAgent (entry point)                  |
+|                    src.odrive_app.OdriveSyncAgent                 |
++------------------------------------------------------------------+
+|  Servers                    |  Dispatchers                       |
+|  - ProtocolServer           |  - ProtocolRequestDispatcher       |
+|  - EventServer              |  - EventDispatcher                 |
+|  - ProtocolCommands         |                                    |
+|  - Commands                 |                                    |
++------------------------------------------------------------------+
+|                        Controllers                                |
+|  Sync:     SyncController, Expand, Unsync, AddCloudChildren      |
+|  Refresh:  RefreshJobController, Compare, MergeFiles, Operations  |
+|  Auth:     AuthKeyLoginController, AuthorizedUserController       |
+|  Feature:  EncryptionController, EncryptorController              |
+|            MountController, BackupJobController, TrashController  |
+|            PlaceholderThresholdController, PolicyController        |
+|            AutoUnsyncController, StreamingController              |
+|  Events:   LocalEventController, RemoteEventController            |
+|  State:    AgentSyncStateController, SystemStatusController       |
++------------------------------------------------------------------+
+|                        Services                                   |
+|  - OdriveSyncService          - PlaceholderService                |
+|  - PolicyService              - AgentUIService / UIService        |
+|  - odriveService              - LogUIService                      |
++------------------------------------------------------------------+
+|                     Database (APSW/SQLite)                         |
+|  PropertyDB:                                                      |
+|    - PropertyTable            - SyncModeTable                     |
+|    - StickySyncTable          - ProSyncFolderTable                |
+|    - BackupJobTable           - EncryptionEntryTable              |
+|  SyncTrackingDB:                                                  |
+|    - SyncTrackingTable                                            |
+|  IntegrationCacheDB:                                              |
+|    - IntegrationCacheTable                                        |
++------------------------------------------------------------------+
+|                   Sync9 Engine (core sync)                         |
+|  - Sync9Adapter (base class)                                      |
+|  - Sync9Service                                                   |
+|  - SyncThresholdInfinite                                          |
+|  - SyncTrackingService -> SyncTrackingNode                        |
+|  - FileSyncState, O2Path, StopStatus                              |
++------------------------------------------------------------------+
+|             File System Layer                                      |
+|  - AbstractFileSystemService (interface)                           |
+|  - NativeFileSystemService (implementation)                        |
+|  - OdriveFSService + SyncAdapterFactory                            |
+|  - FSEventService (Mac/Windows variants)                           |
+|  - Blacklist, FileSystemCodes                                      |
++------------------------------------------------------------------+
+|            Cloud Integrations (Sync9Adapter per provider)          |
+|                                                                    |
+|  Adapter Layer (src.integrations.*Sync9Adapter):                   |
+|    autodesk, b2, box, clouddrive, dropbox, dropboxteams,           |
+|    encryption(!), facebook, ftp, googlecloud, googledrive,         |
+|    hipchat, instagram, odrive, odrivegateway, onedrive,            |
+|    procore, s3, s3compat, sftp, slack, webDAV                      |
+|                                                                    |
+|  Service Layer (src.integrations_sub.*Service):                    |
+|    AutodeskService, B2Service, BoxService, CloudDriveService,      |
+|    DropboxService, FacebookService, FTPService, GoogleService,     |
+|    GoogleCloudService, GoogleDriveV3Service, InstagramService,     |
+|    OdriveGatewayService, OneDriveService, ProcoreService,          |
+|    S3Service, S3xService, SFTPService, SlackService, WebDAVService |
++------------------------------------------------------------------+
+|             Shared Utilities                                       |
+|  - EncryptionUtility, HashCalculator                               |
+|  - KeyChainService, Singleton, ThreadPoolExecutor                  |
+|  - DBConnection, DBConnectionManager                               |
+|  - EnvironmentContext, StopStatus                                   |
+|  - SystemAlertService (HipChat notifications, S3 storage)          |
+|  - MixpanelUtil (analytics/telemetry)                               |
++------------------------------------------------------------------+
+```
+
+## Key Design Patterns
+
+1. **Adapter Pattern**: Each cloud provider has a `Sync9Adapter` (integration layer)
+   and a `*Service` (API-specific implementation). `SyncAdapterFactory` selects the right one.
+
+2. **Encryption as Integration**: Encryption is implemented as a Sync9Adapter
+   (`EncryptionSync9Adapter`), not as a transport layer. This means encryption
+   is a "virtual storage provider" that wraps another provider.
+
+3. **Sync9 Engine**: The core sync engine is versioned ("sync9"), with
+   `SyncTrackingService` maintaining per-node sync state via `SyncTrackingNode`.
+
+4. **Refresh/Merge Pipeline**: The refresh_job controller has a multi-stage
+   pipeline: Compare -> GroupByPosition -> MergeFiles -> Operations,
+   with separate LocalAddFolder/RemoteAddFolder handlers.
+
+5. **Event-Driven**: Dual event system with LocalEventController (FS events)
+   and RemoteEventController (cloud-side changes).
+
+6. **Protocol Server**: Agent exposes a ProtocolServer for CLI/UI communication,
+   with ProtocolCommands defining the command set. The CLI binary (`odrive`)
+   connects to this server.
+
+## Supported Cloud Providers (21 adapters)
+1.  Autodesk (BIM 360)
+2.  Backblaze B2
+3.  Box
+4.  CloudDrive (Amazon Drive)
+5.  Dropbox
+6.  Dropbox Teams
+7.  Encryption (virtual provider)
+8.  Facebook
+9.  FTP
+10. Google Cloud Storage
+11. Google Cloud Storage (extended: "x" variant)
+12. Google Drive
+13. HipChat (notification only, not sync)
+14. Instagram
+15. odrive (native)
+16. odrive Gateway
+17. OneDrive
+18. OneDrive for Business
+19. SharePoint
+20. Procore
+21. S3 (AWS)
+22. S3 (extended: "x" variant)
+23. S3 Compatible
+24. S3 Compatible (extended: "x" variant)
+25. SFTP
+26. Slack
+27. WebDAV
