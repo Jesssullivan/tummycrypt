@@ -1,0 +1,738 @@
+# odrive Windows Client - Categorized String Extraction
+# Source: odrivesync.7513.exe (67,822,896 bytes)
+# Date: 2026-04-05T02:41:38Z
+
+## ============================================================
+## SHELL INTEGRATION
+## ============================================================
+
+### Explorer Shell Extension DLLs
+SyncedOverlay.dll  -- synced file icon overlay (COM)
+ActiveOverlay.dll  -- syncing file icon overlay (COM)
+LockedOverlay.dll  -- locked/encrypted file icon overlay (COM)
+ContextMenu.dll    -- right-click context menu handler (COM)
+
+### COM CLSIDs (from CU_Uninstall.ps1)
+{102986AF-0728-447D-83B4-C3CD4F70F273}  -- Explorer namespace extension
+{4585263E-BEF5-4A39-A2E8-8F69E0054F0C}  -- SyncedOverlay handler
+{679ADC87-66BB-43BF-9DC3-3DE2E4A32B8C}  -- ActiveOverlay handler
+{E07BCA71-E88B-4A5E-BA46-69A52D6B9B20}  -- LockedOverlay handler
+{35B08E96-DA1F-4321-BF80-D6B53C20F3CF}  -- ContextMenu handler
+
+## ============================================================
+## REGISTRY KEYS
+## ============================================================
+
+### Installer registry searches
+HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\PROCESSOR_ARCHITECTURE
+HKLM\SOFTWARE\Microsoft\Net Framework Setup\NDP4\Full\Release
+
+### Application registry keys (cleaned on uninstall)
+HKCU\Software\odrive*
+HKCU\Software\Classes\odrive.*
+HKCU\Software\Classes\.cloud*
+HKCU\Software\Classes\.lockd*
+HKCU\Software\Classes\.gdocx
+HKCU\Software\Classes\.space
+HKCU\Software\Classes\.gsheetx
+HKCU\Software\Classes\.gformx
+HKCU\Software\Classes\.gslidesx
+HKCU\Software\Classes\.gdrawx
+HKCU\Software\Classes\.gmapx
+HKCU\Software\Classes\.onotex
+HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{102986AF-...}
+HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager\odrive*
+
+## ============================================================
+## FILE ASSOCIATIONS
+## ============================================================
+
+.cloud   -- cloud file placeholder
+.cloudf  -- cloud folder placeholder
+.gdocx   -- Google Docs placeholder
+.gsheetx -- Google Sheets placeholder
+.gformx  -- Google Forms placeholder
+.gslidesx -- Google Slides placeholder
+.gdrawx  -- Google Drawings placeholder
+.gmapx   -- Google Maps placeholder
+.onotex  -- OneNote notebook placeholder
+.lockd   -- locked (encrypted) file
+.cloudl  -- locked cloud file
+.cloudfl -- locked cloud folder
+.lockdr  -- encrypted-name locked file
+.cloudlr -- encrypted-name locked cloud file
+.cloudflr -- encrypted-name locked cloud folder
+.space   -- mount point / space file
+
+## ============================================================
+## IPC COMMANDS (from .NET decompilation)
+## ============================================================
+
+CLICKED = 0
+GOOGLE_OPEN = 24
+ONEDRIVE_OPEN = 26
+LOGIN = 2000
+AUTH = 2001
+FORCE_UNSYNC = 2002
+EMPTY_TRASH = 2003
+SYNC_DELETE = 2004
+RESTORE_DELETE = 2005
+DISCARD_SYNC_ERROR = 2006
+SEND_DIAGNOSTICS = 2007
+UPDATE_AND_RESTART = 2008
+ADD_MOUNT = 2010
+GET_STARTED = 2011
+GET_SYSTEM_STATUS_ITEMS = 2012
+GET_SYSTEM_STATUS_ICON_IDENTIFIER = 2013
+GET_DEV_SYSTEM_STATUS_ITEMS = 2014
+ADD_LINK = 2015
+QUIT = 2016
+REPAIR_MOUNT = 2017
+OPEN_FOLDER = 2018
+MOVE_ODRIVE_FOLDER = 2019
+CANCEL_SYNC = 2020
+REVEAL_IN_FILE_BROWSER = 2021
+RENDER_NOT_ALLOWED_ITEM_DIALOG = 2022
+STOP_SYNC = 2023
+START_SYNC = 2024
+SET_PLACEHOLDER_THRESHOLD = 2026
+RENDER_SYNC_DELETE_DIALOG = 2027
+LOGOUT = 2028
+RENDER_SEND_DIAGNOSTICS_DIALOG = 2029
+START_APP_IGNORING_OS_VERSION_SUPPORT = 2030
+SET_ODRIVE_FOLDER_PATH = 2031
+RENDER_EMPTY_TRASH_DIALOG = 2032
+CANCEL_EXPAND_REQUEST = 2033
+CANCEL_SYNC_REQUEST = 2034
+RENDER_CANCEL_SYNC_DIALOG = 2035
+RENDER_CANCEL_EXPAND_DIALOG = 2036
+RENDER_SETUP_ODRIVE_UI = 2037
+SYNC_FOLDER_WITH_PARAMETERS = 2038
+UPDATE_BG_SYNC_PREFERENCES = 2039
+RENDER_BG_SYNC_PREFERENCES = 2040
+MANAGE_LINKS = 2043
+RENDER_CANCEL_BACKGROUND_SYNC_DIALOG = 2044
+CANCEL_BACKGROUND_SYNC_OPERATION = 2045
+RENDER_CANCEL_NOT_ALLOWED_ITEM_DIALOG = 2048
+CANCEL_NOT_ALLOWED_ITEM = 2049
+SET_ENCRYPTOR_PASSWORD = 2050
+TEST_ENCRYPTOR_PASSWORD = 2051
+SET_PRO_SYNC_FOLDER_PATH = 2052
+RENDER_ODRIVE_FOLDER_CHOOSER = 2053
+RENDER_PRO_SYNC_FOLDER_CHOOSER = 2054
+OPEN_ODRIVE_FOLDER = 2055
+OPEN_PRO_SYNC_FOLDER = 2056
+REMOVE_PRO_SYNC_FOLDER = 2059
+RENDER_DEAUTHORIZE_USER_DIALOG = 2060
+DEAUTHORIZE_USER = 2061
+SET_AUTO_UNSYNC_THRESHOLD = 2062
+SET_DOWNLOAD_THROTTLING_THRESHOLD = 2063
+SET_UPLOAD_THROTTLING_THRESHOLD = 2064
+SET_AUTO_TRASH_THRESHOLD = 2065
+PURCHASE_PREMIUM = 2066
+REFRESH_POLICY = 2067
+FORUM_ANNOUNCEMENT = 2068
+SELECT_BACKUP_DESTINATION = 2069
+CONFIRM_BACKUP_DESTINATION = 2070
+RENDER_BACKUP_INFO_DIALOG = 2071
+PAUSE_BACKUPS = 2072
+BACKUP_NOW = 2073
+OPEN_BACKUP_ACTIVITY_LOG = 2074
+FORGET_BACKUP_JOB = 2075
+TEST_ENCRYPTION_PASSWORD = 2076
+ENABLE_ENCRYPTION_WITH_PASSWORD = 2077
+SET_XL_FILE_THRESHOLD = 2078
+ADD_BACKUP = 2079
+ADD_BACKUP_WITH_PATH = 2080
+OPEN_USAGE_GUIDE = 2081
+SET_UI_SERVER_PORT = 2082
+DISABLE_REMOTE_SCAN = 2083
+ENABLE_REMOTE_SCAN = 2084
+RENDER_AUTO_UNSYNC_DIALOG = 2085
+RENDER_AUTO_TRASH_DIALOG = 2086
+RESTORE_TRASH = 2087
+RENDER_RESTORE_TRASH_DIALOG = 2088
+OPEN_SYNC_ACTIVITY_LOG = 2089
+RENDER_WAITING_ITEM_DIALOG = 2090
+CREATE_DETAILED_ODRIVE_STATUS = 2091
+CHAT_WITH_AGENT = 2092
+
+## ============================================================
+## UI RENDER COMMANDS (odriveapp -> odrive.exe)
+## ============================================================
+
+renderSignInDialog
+renderAuthDialog
+renderAlertDialog
+renderWelcomeDialog
+renderSyncDialog
+renderSyncDeleteDialog
+renderUnsyncDirtyDialog
+renderSyncErrorDialog
+renderEmptyTrashDialog
+renderRestoreTrashDialog
+renderAutoUnsyncDialog
+renderCancelSyncRequestDialog
+renderCancelExpandRequestDialog
+renderCancelBackgroundSyncDialog
+renderCancelNotAllowedItemDialog
+renderSendDiagnosticsDialog
+renderMajorUpdateDialog
+renderOSNotSupportedDialog
+renderOdriveFolderChooser
+renderProSyncFolderChooser
+renderBGSyncPreferences
+renderEncryptorInitializePasswordDialog
+renderEncryptorEnterPasswordDialog
+renderEncryptionInitializePasswordDialog
+renderEncryptionEnterPasswordDialog
+renderOdriveFolderMissingDialog
+renderProSyncFolderMissingDialog
+renderOdriveFolderInvalidDialog
+renderProSyncFolderInvalidDialog
+renderDeauthorizeUserDialog
+renderPremiumRequiredDialog
+renderCreateBackupDialog
+renderConfirmBackupSettingsDialog
+renderBackupInfoDialog
+renderBackupFolderChooser
+deliverUserNotification
+
+## ============================================================
+## EMBEDDED PYTHON MODULES (.pyo in shell DLLs)
+## ============================================================
+
+ContextMenu.pyo
+SyncedOverlay.pyo
+ActiveOverlay.pyo
+LockedOverlay.pyo
+ntpath.pyo
+os.pyo
+socket.pyo
+sre_compile.pyo
+sre_parse.pyo
+ssl.pyo
+stat.pyo
+string.pyo
+tarfile.pyo
+tempfile.pyo
+win32com/__init__.pyo
+win32com/client/genpy.pyo
+win32com/client/makepy.pyo
+win32traceutil.pyo
+zipfile.pyo
+
+## ============================================================
+## APPLICATION FILES (from app.tar.gz)
+## ============================================================
+
+bin/7513/ActiveOverlay.dll
+bin/7513/CRYPT32.DLL
+bin/7513/ContextMenu.dll
+bin/7513/Crypto.Cipher._AES.pyd
+bin/7513/Crypto.Cipher._ARC4.pyd
+bin/7513/Crypto.Cipher._Blowfish.pyd
+bin/7513/Crypto.Cipher._DES.pyd
+bin/7513/Crypto.Cipher._DES3.pyd
+bin/7513/Crypto.Hash._SHA256.pyd
+bin/7513/Crypto.Random.OSRNG.winrandom.pyd
+bin/7513/Crypto.Util._counter.pyd
+bin/7513/Crypto.Util.strxor.pyd
+bin/7513/LockedOverlay.dll
+bin/7513/MSVCP100.dll
+bin/7513/MSVCR100.dll
+bin/7513/OdriveExplorerHelper.exe
+bin/7513/SyncedOverlay.dll
+bin/7513/_bsddb.pyd
+bin/7513/_ctypes.pyd
+bin/7513/_elementtree.pyd
+bin/7513/_hashlib.pyd
+bin/7513/_multiprocessing.pyd
+bin/7513/_socket.pyd
+bin/7513/_ssl.pyd
+bin/7513/_win32sysloader.pyd
+bin/7513/apsw.pyd
+bin/7513/assets/Active.ico
+bin/7513/assets/CloudFile.ico
+bin/7513/assets/CloudFolder.ico
+bin/7513/assets/ExpandedOdriveFolder.ico
+bin/7513/assets/ExpandedSpaceFolder.ico
+bin/7513/assets/Locked.ico
+bin/7513/assets/Synced.ico
+bin/7513/assets/blacktrayicon/01.png
+bin/7513/assets/blacktrayicon/02.png
+bin/7513/assets/blacktrayicon/03.png
+bin/7513/assets/blacktrayicon/04.png
+bin/7513/assets/blacktrayicon/05.png
+bin/7513/assets/blacktrayicon/06.png
+bin/7513/assets/blacktrayicon/07.png
+bin/7513/assets/blacktrayicon/08.png
+bin/7513/assets/blacktrayicon/09.png
+bin/7513/assets/blacktrayicon/10.png
+bin/7513/assets/blacktrayicon/11.png
+bin/7513/assets/blacktrayicon/12.png
+bin/7513/assets/blacktrayicon/13.png
+bin/7513/assets/blacktrayicon/14.png
+bin/7513/assets/blacktrayicon/15.png
+bin/7513/assets/blacktrayicon/16.png
+bin/7513/assets/cloudfl.ico
+bin/7513/assets/cloudl.ico
+bin/7513/assets/common/cacert.pem
+bin/7513/assets/common/odrive.png
+bin/7513/assets/common/views/addExternalMount.html
+bin/7513/assets/common/views/enterEncryptionPasswordView.html
+bin/7513/assets/common/views/enterEncryptorPasswordView.html
+bin/7513/assets/common/views/img/folder-grey.png
+bin/7513/assets/common/views/img/folder-pink.png
+bin/7513/assets/common/views/img/grid-both.png
+bin/7513/assets/common/views/img/grid-horz.png
+bin/7513/assets/common/views/img/grid-vert.png
+bin/7513/assets/common/views/img/odrive-icon-slice1.png
+bin/7513/assets/common/views/img/odrive-macfolder.png
+bin/7513/assets/common/views/img/odrive-winfolder.png
+bin/7513/assets/common/views/img/syncactive.png
+bin/7513/assets/common/views/img/syncbutton.png
+bin/7513/assets/common/views/img/synchover.png
+bin/7513/assets/common/views/initializeEncryptionPasswordView.html
+bin/7513/assets/common/views/initializeEncryptorPasswordView.html
+bin/7513/assets/common/views/js/async.js
+bin/7513/assets/common/views/js/dialogUtility.js
+bin/7513/assets/common/views/js/sync/alertView.js
+bin/7513/assets/common/views/js/util.js
+bin/7513/assets/common/views/js/welcomeView.js
+bin/7513/assets/common/views/roboto-light-webfont.ttf
+bin/7513/assets/common/views/roboto-medium-webfont.ttf
+bin/7513/assets/common/views/stylesheets/menu.css
+bin/7513/assets/common/views/stylesheets/style.css
+bin/7513/assets/common/views/sync/alertView.html
+bin/7513/assets/common/views/syncView.html
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/css/bootstrap-theme.css
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/css/bootstrap-theme.min.css
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/css/bootstrap.css
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/css/bootstrap.min.css
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/fonts/glyphicons-halflings-regular.eot
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/fonts/glyphicons-halflings-regular.svg
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/fonts/glyphicons-halflings-regular.ttf
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/fonts/glyphicons-halflings-regular.woff
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/js/bootstrap.js
+bin/7513/assets/common/views/vendor/bootstrap-3.0.2/js/bootstrap.min.js
+bin/7513/assets/common/views/vendor/bootstrap/css/bootstrap-glyphicon.min.css
+bin/7513/assets/common/views/vendor/bootstrap/css/bootstrap-responsive.min.css
+bin/7513/assets/common/views/vendor/bootstrap/css/bootstrap.min.css
+bin/7513/assets/common/views/vendor/bootstrap/fonts/glyphicons-halflings-regular.eot
+bin/7513/assets/common/views/vendor/bootstrap/fonts/glyphicons-halflings-regular.svg
+bin/7513/assets/common/views/vendor/bootstrap/fonts/glyphicons-halflings-regular.ttf
+bin/7513/assets/common/views/vendor/bootstrap/fonts/glyphicons-halflings-regular.woff
+bin/7513/assets/common/views/vendor/bootstrap/img/glyphicons-halflings-white.png
+bin/7513/assets/common/views/vendor/bootstrap/img/glyphicons-halflings.png
+bin/7513/assets/common/views/vendor/bootstrap/js/bootstrap.min.js
+bin/7513/assets/common/views/vendor/jquery-2.0.3.min.js
+bin/7513/assets/common/views/vendor/underscore-min.js
+bin/7513/assets/common/views/welcomeViewMac.html
+bin/7513/assets/common/views/welcomeViewWin.html
+bin/7513/assets/gdoc.ico
+bin/7513/assets/gdraw.ico
+bin/7513/assets/gform.ico
+bin/7513/assets/gmap.ico
+bin/7513/assets/gsheet.ico
+bin/7513/assets/gslides.ico
+bin/7513/assets/lockd.ico
+bin/7513/assets/odrive.ico
+bin/7513/assets/odriveblack.png
+bin/7513/assets/odrivewhite.png
+bin/7513/assets/onenote.ico
+bin/7513/assets/pinktrayicon/01.png
+bin/7513/assets/pinktrayicon/02.png
+bin/7513/assets/pinktrayicon/03.png
+bin/7513/assets/pinktrayicon/04.png
+bin/7513/assets/pinktrayicon/05.png
+bin/7513/assets/pinktrayicon/06.png
+bin/7513/assets/pinktrayicon/07.png
+bin/7513/assets/pinktrayicon/08.png
+bin/7513/assets/pinktrayicon/09.png
+bin/7513/assets/pinktrayicon/10.png
+bin/7513/assets/pinktrayicon/11.png
+bin/7513/assets/pinktrayicon/12.png
+bin/7513/assets/pinktrayicon/13.png
+bin/7513/assets/pinktrayicon/14.png
+bin/7513/assets/pinktrayicon/15.png
+bin/7513/assets/pinktrayicon/16.png
+bin/7513/assets/syncedbadge.png
+bin/7513/assets/syncingbadge.png
+bin/7513/assets/whitetrayicon/01.png
+bin/7513/assets/whitetrayicon/02.png
+bin/7513/assets/whitetrayicon/03.png
+bin/7513/assets/whitetrayicon/04.png
+bin/7513/assets/whitetrayicon/05.png
+bin/7513/assets/whitetrayicon/06.png
+bin/7513/assets/whitetrayicon/07.png
+bin/7513/assets/whitetrayicon/08.png
+bin/7513/assets/whitetrayicon/09.png
+bin/7513/assets/whitetrayicon/10.png
+bin/7513/assets/whitetrayicon/11.png
+bin/7513/assets/whitetrayicon/12.png
+bin/7513/assets/whitetrayicon/13.png
+bin/7513/assets/whitetrayicon/14.png
+bin/7513/assets/whitetrayicon/15.png
+bin/7513/assets/whitetrayicon/16.png
+bin/7513/bz2.pyd
+bin/7513/cli/odrive.py
+bin/7513/cryptography.hazmat.bindings._constant_time.pyd
+bin/7513/cryptography.hazmat.bindings._openssl.pyd
+bin/7513/include/pyconfig.h
+bin/7513/msvcp90.dll
+bin/7513/odrive.exe
+bin/7513/odriveapp.exe
+bin/7513/odriveapp.exe.manifest
+bin/7513/psutil._psutil_windows.pyd
+bin/7513/pyexpat.pyd
+bin/7513/python27.dll
+bin/7513/pythoncom27.dll
+bin/7513/pywintypes27.dll
+bin/7513/requests/cacert.pem
+bin/7513/select.pyd
+bin/7513/sip.pyd
+bin/7513/unicodedata.pyd
+bin/7513/version
+bin/7513/win32api.pyd
+bin/7513/win32com.shell.shell.pyd
+bin/7513/win32cred.pyd
+bin/7513/win32event.pyd
+bin/7513/win32evtlog.pyd
+bin/7513/win32file.pyd
+bin/7513/win32gui.pyd
+bin/7513/win32pipe.pyd
+bin/7513/win32process.pyd
+bin/7513/win32security.pyd
+bin/7513/win32trace.pyd
+bin/7513/win32ui.pyd
+bin/7513/win32wnet.pyd
+bin/7513/winxpgui.pyd
+bin/7513/x64/ActiveOverlay.dll
+bin/7513/x64/ContextMenu.dll
+bin/7513/x64/LockedOverlay.dll
+bin/7513/x64/SyncedOverlay.dll
+bin/7513/x64/_ctypes.pyd
+bin/7513/x64/_hashlib.pyd
+bin/7513/x64/_socket.pyd
+bin/7513/x64/_win32sysloader.pyd
+bin/7513/x64/bz2.pyd
+bin/7513/x64/python27.dll
+bin/7513/x64/pythoncom27.dll
+bin/7513/x64/pywintypes27.dll
+bin/7513/x64/select.pyd
+bin/7513/x64/unicodedata.pyd
+bin/7513/x64/win32api.pyd
+bin/7513/x64/win32com.shell.shell.pyd
+bin/7513/x64/win32event.pyd
+bin/7513/x64/win32gui.pyd
+bin/7513/x64/win32process.pyd
+bin/7513/x64/win32trace.pyd
+bin/7513/x64/win32ui.pyd
+bin/7513/x64/winxpgui.pyd
+
+## ============================================================
+## MISC BUNDLE FILES (from misc.tar.gz -- PyQt5/Qt5 runtime)
+## ============================================================
+
+PyQt5.Qt.pyd
+PyQt5.QtCore.pyd
+PyQt5.QtGui.pyd
+PyQt5.QtNetwork.pyd
+PyQt5.QtOpenGL.pyd
+PyQt5.QtPrintSupport.pyd
+PyQt5.QtQml.pyd
+PyQt5.QtQuick.pyd
+PyQt5.QtSensors.pyd
+PyQt5.QtSerialPort.pyd
+PyQt5.QtSql.pyd
+PyQt5.QtSvg.pyd
+PyQt5.QtTest.pyd
+PyQt5.QtWebKit.pyd
+PyQt5.QtWebKitWidgets.pyd
+PyQt5.QtWidgets.pyd
+Qt5Core.dll
+Qt5Gui.dll
+Qt5Multimedia.dll
+Qt5MultimediaWidgets.dll
+Qt5Network.dll
+Qt5OpenGL.dll
+Qt5Positioning.dll
+Qt5PrintSupport.dll
+Qt5Qml.dll
+Qt5Quick.dll
+Qt5QuickParticles.dll
+Qt5Sensors.dll
+Qt5SerialPort.dll
+Qt5Sql.dll
+Qt5Svg.dll
+Qt5Test.dll
+Qt5WebKit.dll
+Qt5WebKitWidgets.dll
+Qt5Widgets.dll
+Qt5XmlPatterns.dll
+icudt52.dll
+icuin52.dll
+icuuc52.dll
+libeay32.dll
+libssl32.dll
+qml/
+qml/QtQml/
+qml/QtQml/Models.2/
+qml/QtQml/Models.2/modelsplugin.dll
+qml/QtQml/Models.2/qmldir
+qml/QtQuick.2/
+qml/QtQuick.2/plugins.qmltypes
+qml/QtQuick.2/qmldir
+qml/QtQuick.2/qtquick2plugin.dll
+qml/QtQuick/
+qml/QtQuick/Controls/
+qml/QtQuick/Controls/ApplicationWindow.qml
+qml/QtQuick/Controls/BusyIndicator.qml
+qml/QtQuick/Controls/Button.qml
+qml/QtQuick/Controls/Calendar.qml
+qml/QtQuick/Controls/CheckBox.qml
+qml/QtQuick/Controls/ComboBox.qml
+qml/QtQuick/Controls/GroupBox.qml
+qml/QtQuick/Controls/Label.qml
+qml/QtQuick/Controls/Menu.qml
+qml/QtQuick/Controls/MenuBar.qml
+qml/QtQuick/Controls/Private/
+qml/QtQuick/Controls/Private/AbstractCheckable.qml
+qml/QtQuick/Controls/Private/BasicButton.qml
+qml/QtQuick/Controls/Private/CalendarHeaderModel.qml
+qml/QtQuick/Controls/Private/CalendarUtils.js
+qml/QtQuick/Controls/Private/ColumnMenuContent.qml
+qml/QtQuick/Controls/Private/ContentItem.qml
+qml/QtQuick/Controls/Private/Control.qml
+qml/QtQuick/Controls/Private/FastGlow.qml
+qml/QtQuick/Controls/Private/FocusFrame.qml
+qml/QtQuick/Controls/Private/HoverButton.qml
+qml/QtQuick/Controls/Private/MenuContentItem.qml
+qml/QtQuick/Controls/Private/MenuContentScroller.qml
+qml/QtQuick/Controls/Private/MenuItemSubControls.qml
+qml/QtQuick/Controls/Private/ModalPopupBehavior.qml
+qml/QtQuick/Controls/Private/ScrollBar.qml
+qml/QtQuick/Controls/Private/ScrollViewHelper.qml
+qml/QtQuick/Controls/Private/SourceProxy.qml
+qml/QtQuick/Controls/Private/StackView.js
+qml/QtQuick/Controls/Private/StackViewSlideDelegate.qml
+qml/QtQuick/Controls/Private/Style.qml
+qml/QtQuick/Controls/Private/TabBar.qml
+qml/QtQuick/Controls/Private/TableViewSelection.qml
+qml/QtQuick/Controls/Private/TextSingleton.qml
+qml/QtQuick/Controls/Private/qmldir
+qml/QtQuick/Controls/Private/style.js
+qml/QtQuick/Controls/ProgressBar.qml
+qml/QtQuick/Controls/RadioButton.qml
+qml/QtQuick/Controls/ScrollView.qml
+qml/QtQuick/Controls/Slider.qml
+qml/QtQuick/Controls/SpinBox.qml
+qml/QtQuick/Controls/SplitView.qml
+qml/QtQuick/Controls/StackView.qml
+qml/QtQuick/Controls/StackViewDelegate.qml
+qml/QtQuick/Controls/StackViewTransition.qml
+qml/QtQuick/Controls/StatusBar.qml
+qml/QtQuick/Controls/Styles/
+qml/QtQuick/Controls/Styles/Base/
+qml/QtQuick/Controls/Styles/Base/BusyIndicatorStyle.qml
+qml/QtQuick/Controls/Styles/Base/ButtonStyle.qml
+qml/QtQuick/Controls/Styles/Base/CalendarStyle.qml
+qml/QtQuick/Controls/Styles/Base/CheckBoxStyle.qml
+qml/QtQuick/Controls/Styles/Base/ComboBoxStyle.qml
+qml/QtQuick/Controls/Styles/Base/FocusFrameStyle.qml
+qml/QtQuick/Controls/Styles/Base/GroupBoxStyle.qml
+qml/QtQuick/Controls/Styles/Base/MenuBarStyle.qml
+qml/QtQuick/Controls/Styles/Base/MenuStyle.qml
+qml/QtQuick/Controls/Styles/Base/ProgressBarStyle.qml
+qml/QtQuick/Controls/Styles/Base/RadioButtonStyle.qml
+qml/QtQuick/Controls/Styles/Base/ScrollViewStyle.qml
+qml/QtQuick/Controls/Styles/Base/SliderStyle.qml
+qml/QtQuick/Controls/Styles/Base/SpinBoxStyle.qml
+qml/QtQuick/Controls/Styles/Base/StatusBarStyle.qml
+qml/QtQuick/Controls/Styles/Base/SwitchStyle.qml
+qml/QtQuick/Controls/Styles/Base/TabViewStyle.qml
+qml/QtQuick/Controls/Styles/Base/TableViewStyle.qml
+qml/QtQuick/Controls/Styles/Base/TextAreaStyle.qml
+qml/QtQuick/Controls/Styles/Base/TextFieldStyle.qml
+qml/QtQuick/Controls/Styles/Base/ToolBarStyle.qml
+qml/QtQuick/Controls/Styles/Base/ToolButtonStyle.qml
+qml/QtQuick/Controls/Styles/Base/images/
+qml/QtQuick/Controls/Styles/Base/images/arrow-down.png
+qml/QtQuick/Controls/Styles/Base/images/arrow-down@2x.png
+qml/QtQuick/Controls/Styles/Base/images/arrow-left.png
+qml/QtQuick/Controls/Styles/Base/images/arrow-left@2x.png
+qml/QtQuick/Controls/Styles/Base/images/arrow-right.png
+qml/QtQuick/Controls/Styles/Base/images/arrow-right@2x.png
+qml/QtQuick/Controls/Styles/Base/images/arrow-up.png
+qml/QtQuick/Controls/Styles/Base/images/arrow-up@2x.png
+qml/QtQuick/Controls/Styles/Base/images/button.png
+qml/QtQuick/Controls/Styles/Base/images/button_down.png
+qml/QtQuick/Controls/Styles/Base/images/check.png
+qml/QtQuick/Controls/Styles/Base/images/check@2x.png
+qml/QtQuick/Controls/Styles/Base/images/editbox.png
+qml/QtQuick/Controls/Styles/Base/images/focusframe.png
+qml/QtQuick/Controls/Styles/Base/images/groupbox.png
+qml/QtQuick/Controls/Styles/Base/images/header.png
+qml/QtQuick/Controls/Styles/Base/images/leftanglearrow.png
+qml/QtQuick/Controls/Styles/Base/images/progress-indeterminate.png
+qml/QtQuick/Controls/Styles/Base/images/rightanglearrow.png
+qml/QtQuick/Controls/Styles/Base/images/scrollbar-handle-horizontal.png
+qml/QtQuick/Controls/Styles/Base/images/scrollbar-handle-transient.png
+qml/QtQuick/Controls/Styles/Base/images/scrollbar-handle-vertical.png
+qml/QtQuick/Controls/Styles/Base/images/slider-groove.png
+qml/QtQuick/Controls/Styles/Base/images/slider-handle.png
+qml/QtQuick/Controls/Styles/Base/images/spinner_large.png
+qml/QtQuick/Controls/Styles/Base/images/spinner_medium.png
+qml/QtQuick/Controls/Styles/Base/images/spinner_small.png
+qml/QtQuick/Controls/Styles/Base/images/tab.png
+qml/QtQuick/Controls/Styles/Base/images/tab_selected.png
+qml/QtQuick/Controls/Styles/Desktop/
+qml/QtQuick/Controls/Styles/Desktop/BusyIndicatorStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/ButtonStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/CalendarStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/CheckBoxStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/ComboBoxStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/FocusFrameStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/GroupBoxStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/MenuBarStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/MenuStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/ProgressBarStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/RadioButtonStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/RowItemSingleton.qml
+qml/QtQuick/Controls/Styles/Desktop/ScrollViewStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/SliderStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/SpinBoxStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/StatusBarStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/SwitchStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/TabViewStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/TableViewStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/TextAreaStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/TextFieldStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/ToolBarStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/ToolButtonStyle.qml
+qml/QtQuick/Controls/Styles/Desktop/qmldir
+qml/QtQuick/Controls/Styles/qmldir
+qml/QtQuick/Controls/Switch.qml
+qml/QtQuick/Controls/Tab.qml
+qml/QtQuick/Controls/TabView.qml
+qml/QtQuick/Controls/TableView.qml
+qml/QtQuick/Controls/TableViewColumn.qml
+qml/QtQuick/Controls/TextArea.qml
+qml/QtQuick/Controls/TextField.qml
+qml/QtQuick/Controls/ToolBar.qml
+qml/QtQuick/Controls/ToolButton.qml
+qml/QtQuick/Controls/plugins.qmltypes
+qml/QtQuick/Controls/qmldir
+qml/QtQuick/Controls/qtquickcontrolsplugin.dll
+qml/QtQuick/Dialogs/
+qml/QtQuick/Dialogs/DefaultColorDialog.qml
+qml/QtQuick/Dialogs/DefaultDialogWrapper.qml
+qml/QtQuick/Dialogs/DefaultFileDialog.qml
+qml/QtQuick/Dialogs/DefaultFontDialog.qml
+qml/QtQuick/Dialogs/DefaultMessageDialog.qml
+qml/QtQuick/Dialogs/Private/
+qml/QtQuick/Dialogs/Private/dialogsprivateplugin.dll
+qml/QtQuick/Dialogs/Private/dialogsprivateplugind.dll
+qml/QtQuick/Dialogs/Private/dialogsprivateplugind.pdb
+qml/QtQuick/Dialogs/Private/qmldir
+qml/QtQuick/Dialogs/WidgetColorDialog.qml
+qml/QtQuick/Dialogs/WidgetFileDialog.qml
+qml/QtQuick/Dialogs/WidgetFontDialog.qml
+qml/QtQuick/Dialogs/WidgetMessageDialog.qml
+qml/QtQuick/Dialogs/dialogplugin.dll
+qml/QtQuick/Dialogs/images/
+qml/QtQuick/Dialogs/images/checkers.png
+qml/QtQuick/Dialogs/images/checkmark.png
+qml/QtQuick/Dialogs/images/copy.png
+qml/QtQuick/Dialogs/images/critical.png
+qml/QtQuick/Dialogs/images/crosshairs.png
+qml/QtQuick/Dialogs/images/folder.png
+qml/QtQuick/Dialogs/images/information.png
+qml/QtQuick/Dialogs/images/question.png
+qml/QtQuick/Dialogs/images/slider_handle.png
+qml/QtQuick/Dialogs/images/sunken_frame.png
+qml/QtQuick/Dialogs/images/up.png
+qml/QtQuick/Dialogs/images/warning.png
+qml/QtQuick/Dialogs/images/window_border.png
+qml/QtQuick/Dialogs/plugins.qmltypes
+qml/QtQuick/Dialogs/qml/
+qml/QtQuick/Dialogs/qml/ColorSlider.qml
+qml/QtQuick/Dialogs/qml/DefaultWindowDecoration.qml
+qml/QtQuick/Dialogs/qml/qmldir
+qml/QtQuick/Dialogs/qmldir
+qml/QtQuick/Layouts/
+qml/QtQuick/Layouts/plugins.qmltypes
+qml/QtQuick/Layouts/qmldir
+qml/QtQuick/Layouts/qquicklayoutsplugin.dll
+qml/QtQuick/LocalStorage/
+qml/QtQuick/LocalStorage/plugins.qmltypes
+qml/QtQuick/LocalStorage/qmldir
+qml/QtQuick/LocalStorage/qmllocalstorageplugin.dll
+qml/QtQuick/Particles.2/
+qml/QtQuick/Particles.2/particlesplugin.dll
+qml/QtQuick/Particles.2/plugins.qmltypes
+qml/QtQuick/Particles.2/qmldir
+qml/QtQuick/PrivateWidgets/
+qml/QtQuick/PrivateWidgets/plugins.qmltypes
+qml/QtQuick/PrivateWidgets/qmldir
+qml/QtQuick/PrivateWidgets/widgetsplugin.dll
+qml/QtQuick/Window.2/
+qml/QtQuick/Window.2/plugins.qmltypes
+qml/QtQuick/Window.2/qmldir
+qml/QtQuick/Window.2/windowplugin.dll
+qml/QtQuick/XmlListModel/
+qml/QtQuick/XmlListModel/plugins.qmltypes
+qml/QtQuick/XmlListModel/qmldir
+qml/QtQuick/XmlListModel/qmlxmllistmodelplugin.dll
+qt5_plugins/
+qt5_plugins/accessible/
+qt5_plugins/accessible/qtaccessiblequick.dll
+qt5_plugins/accessible/qtaccessiblewidgets.dll
+qt5_plugins/iconengines/
+qt5_plugins/iconengines/qsvgicon.dll
+qt5_plugins/imageformats/
+qt5_plugins/imageformats/qdds.dll
+qt5_plugins/imageformats/qgif.dll
+qt5_plugins/imageformats/qicns.dll
+qt5_plugins/imageformats/qico.dll
+qt5_plugins/imageformats/qjp2.dll
+qt5_plugins/imageformats/qjpeg.dll
+qt5_plugins/imageformats/qmng.dll
+qt5_plugins/imageformats/qsvg.dll
+qt5_plugins/imageformats/qtga.dll
+qt5_plugins/imageformats/qtiff.dll
+qt5_plugins/imageformats/qwbmp.dll
+qt5_plugins/imageformats/qwebp.dll
+qt5_plugins/platforms/
+qt5_plugins/platforms/qminimal.dll
+qt5_plugins/platforms/qoffscreen.dll
+qt5_plugins/platforms/qwindows.dll
+qt5_plugins/printsupport/
+qt5_plugins/printsupport/windowsprintersupport.dll
+qt5_plugins/sqldrivers/
+qt5_plugins/sqldrivers/qsqlite.dll
+qt5_plugins/sqldrivers/qsqlmysql.dll
+qt5_plugins/sqldrivers/qsqlodbc.dll
+qt5_plugins/sqldrivers/qsqlpsql.dll
+ssleay32.dll
+
+## ============================================================
+## SIGNING CERTIFICATES
+## ============================================================
+
+Code signing: Sectigo Public Code Signing CA R36
+Root: Sectigo Public Code Signing Root R46
+Timestamping: DigiCert Trusted G4 TimeStamping RSA4096 SHA256 2025 CA1
+Issuer identity: Oxygen Cloud, Inc.
+
+## ============================================================
+## WIX BUNDLE IDENTIFIERS
+## ============================================================
+
+BundleId: {b4682a69-b335-4514-87f9-d717f6a9fd51}
+UpgradeCode: {D74FBC41-F53D-4A05-93D4-BB5EBA90D383}
+x86 ProductCode: {59A33B45-D172-4372-BEDD-E96D9E7EDC33}
+x64 ProductCode: {CFBCAAE9-4262-4F5E-8A01-3E8A5A5294B9}
+MSI UpgradeCode: {7E242AB3-0F67-4127-9659-CFB7CD432E43}

@@ -1,0 +1,167 @@
+# odrive Linux Agent - Sync/Conflict/Merge/Placeholder/Encrypt Related Strings
+# Filtered from: strings odriveagent | grep sync|conflict|merge|placeholder|trash|encrypt|mount|backup|refresh|event|protocol|adapter
+# Date extracted: 2026-04-04
+
+## ============================================================
+## SYNC ENGINE MODULES
+## ============================================================
+src.sync9(
+src.sync9.Exceptions(
+src.sync9.Sync9Adapter(
+src.sync9.Sync9Service(
+src.sync9.SyncThresholdInfinite(
+src.sync9.sync_tracking_service(
+src.sync9.sync_tracking_service.SyncTrackingDBDump(
+src.sync9.sync_tracking_service.SyncTrackingNode(
+src.sync9.sync_tracking_service.SyncTrackingService(
+src.sync9.sync_tracking_service.internals(
+src.sync9.sync_tracking_service.internals.SyncTrackingValuesV0(
+src.sync9.sync_tracking_service.internals.db(
+src.sync9.sync_tracking_service.internals.db.SyncTrackingDBConnection(
+src.sync9.sync_tracking_service.internals.db.SyncTrackingDBService(
+src.sync9.sync_tracking_service.internals.db.tables(
+src.sync9.sync_tracking_service.internals.db.tables.SyncTrackingTable(
+src.sync_api_common(
+src.sync_api_common.FileSyncState(
+src.sync_api_common.O2Path(
+src.sync_api_common.StopStatus(
+
+## ============================================================
+## SYNC CONTROLLERS
+## ============================================================
+src.odrive_app.controllers.sync(
+src.odrive_app.controllers.sync.SyncController(
+src.odrive_app.controllers.sync.internals(
+src.odrive_app.controllers.sync.internals.AddCloudChildren(
+src.odrive_app.controllers.sync.internals.Expand(
+src.odrive_app.controllers.sync.internals.QueuedExpand(
+src.odrive_app.controllers.sync.internals.Sync(
+src.odrive_app.controllers.sync.internals.Unsync(
+src.odrive_app.controllers.AgentSyncStateController(
+src.odrive_app.controllers.AgentProSyncFolderController(
+src.odrive_app.controllers.AutoUnsyncController(
+src.odrive_app.controllers.utility.SyncAdapters(
+src.odrive_app.controllers.utility.LocalSyncAdapter(
+src.odrive_fs_service.SyncAdapterFactory(
+
+## ============================================================
+## REFRESH/MERGE PIPELINE
+## ============================================================
+src.odrive_app.controllers.RefreshController(
+src.odrive_app.controllers.refresh_job(
+src.odrive_app.controllers.refresh_job.RefreshJobController(
+src.odrive_app.controllers.refresh_job.internals(
+src.odrive_app.controllers.refresh_job.internals.Compare(
+src.odrive_app.controllers.refresh_job.internals.FileFormats(
+src.odrive_app.controllers.refresh_job.internals.GroupByPosition(
+src.odrive_app.controllers.refresh_job.internals.LocalAddFolder(
+src.odrive_app.controllers.refresh_job.internals.MergeFiles(
+src.odrive_app.controllers.refresh_job.internals.Operations(
+src.odrive_app.controllers.refresh_job.internals.Refresh(
+src.odrive_app.controllers.refresh_job.internals.RefreshChildren(
+src.odrive_app.controllers.refresh_job.internals.RemoteAddFolder(
+src.common.services.badge.BadgeRefreshService(
+
+## ============================================================
+## PLACEHOLDER SERVICE
+## ============================================================
+src.odrive_app.services.PlaceholderService(
+src.odrive_app.controllers.PlaceholderThresholdController(
+
+## ============================================================
+## TRASH
+## ============================================================
+src.odrive_app.controllers.TrashController(
+
+## ============================================================
+## ENCRYPTION
+## ============================================================
+src.integrations.encryption(
+src.integrations.encryption.EncryptionSync9Adapter(
+src.odrive_app.controllers.EncryptionController(
+src.odrive_app.controllers.EncryptorController(
+src.odrive_app.controllers.utility.EncryptorConfiguration(
+src.odrive_app.services.db.tables.EncryptionEntryTable(
+src.utility.EncryptionUtility(
+Crypto.Protocol(
+Crypto.Protocol.KDF(
+
+## ============================================================
+## MOUNT
+## ============================================================
+src.odrive_app.controllers.MountController(
+
+## ============================================================
+## BACKUP
+## ============================================================
+src.odrive_app.controllers.BackupJobController(
+src.odrive_app.services.db.tables.BackupJobTable(
+
+## ============================================================
+## EVENT HANDLING
+## ============================================================
+src.file_system_sync9.FSEventService(
+src.file_system_sync9.MacFSEventService(
+src.file_system_sync9.WindowsFSEventService(
+src.odrive_app.controllers.LocalEventController(
+src.odrive_app.controllers.RemoteEventController(
+src.odrive_app.controllers.TrackedEventController(
+src.odrive_app.dispatchers.EventDispatcher(
+src.odrive_app.servers.EventServer(
+src.exception_handling.diagnostics.SyncActivityDump(
+
+## ============================================================
+## PROTOCOL / ADAPTER
+## ============================================================
+src.odrive_app.dispatchers.ProtocolRequestDispatcher(
+src.odrive_app.servers.ProtocolCommands(
+src.odrive_app.servers.ProtocolServer(
+requests.adapters(
+ftputil.socket_file_adapter(
+multiprocessing.synchronize(
+
+## ============================================================
+## SYNC ADAPTERS (per cloud provider)
+## ============================================================
+src.integrations.autodesk.AutodeskSync9Adapter(
+src.integrations.b2.B2Sync9Adapter(
+src.integrations.box.BoxSync9Adapter(
+src.integrations.clouddrive.CloudDriveSync9Adapter(
+src.integrations.dropbox.DropboxSync9Adapter(
+src.integrations.dropboxteams.DropboxTeamsSync9Adapter(
+src.integrations.encryption.EncryptionSync9Adapter(
+src.integrations.facebook.FacebookSync9Adapter(
+src.integrations.ftp.FTPSync9Adapter(
+src.integrations.googlecloud.GoogleCloudSync9Adapter(
+src.integrations.googlecloud.GoogleCloudxSync9Adapter(
+src.integrations.googledrive.GoogleDriveSync9Adapter(
+src.integrations.instagram.InstagramSync9Adapter(
+src.integrations.odrive.odriveSync9Adapter(
+src.integrations.odrivegateway.OdriveGatewaySync9Adapter(
+src.integrations.onedrive.OneDriveForBusinessSync9Adapter(
+src.integrations.onedrive.OneDriveSync9Adapter(
+src.integrations.onedrive.SharepointSync9Adapter(
+src.integrations.procore.ProcoreSync9Adapter(
+src.integrations.s3.S3Sync9Adapter(
+src.integrations.s3.S3xSync9Adapter(
+src.integrations.s3compat.S3Sync9Adapter(
+src.integrations.s3compat.S3xSync9Adapter(
+src.integrations.sftp.SFTPSync9Adapter(
+src.integrations.slack.SlackSync9Adapter(
+src.integrations.webDAV.WebDAVSync9Adapter(
+
+## ============================================================
+## SYNC-RELATED DB TABLES
+## ============================================================
+src.odrive_app.services.db.tables.SyncModeTable(
+src.odrive_app.services.db.tables.StickySyncTable(
+src.odrive_app.services.db.tables.ProSyncFolderTable(
+src.odrive_app.services.db.tables.EncryptionEntryTable(
+src.odrive_app.services.db.tables.BackupJobTable(
+
+## ============================================================
+## SYNC SERVICES
+## ============================================================
+src.odrive_app.OdriveSyncAgent(
+src.odrive_app.services.OdriveSyncService(
+src.odrive_app.services.PolicyService(

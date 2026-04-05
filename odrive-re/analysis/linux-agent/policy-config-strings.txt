@@ -1,0 +1,253 @@
+================================================================================
+odrive Linux Agent (odriveagent) - Policy, Config, & Credential Strings
+================================================================================
+Binary: /tmp/odrive-extract/odriveagent
+Type: ELF 64-bit LSB executable, x86-64, Python 2.7 PyInstaller
+Extracted: 2026-04-04
+================================================================================
+
+=== POLICY ENGINE ===
+src.odrive_app.controllers.PolicyController(
+src.odrive_app.services.PolicyService(
+
+=== AUTO-UNSYNC ===
+src.odrive_app.controllers.AutoUnsyncController(
+
+=== PLACEHOLDER / THRESHOLD ===
+src.odrive_app.controllers.PlaceholderThresholdController(
+src.odrive_app.services.PlaceholderService(
+src.sync9.SyncThresholdInfinite(
+
+=== STICKY SYNC ===
+src.odrive_app.services.db.tables.StickySyncTable(
+
+=== SYNC MODE ===
+src.odrive_app.services.db.tables.SyncModeTable(
+
+=== PRO SYNC FOLDER ===
+src.odrive_app.controllers.AgentProSyncFolderController(
+src.odrive_app.services.db.tables.ProSyncFolderTable(
+
+=== BACKUP JOBS ===
+src.odrive_app.controllers.BackupJobController(
+src.odrive_app.services.db.tables.BackupJobTable(
+
+=== ENCRYPTION ===
+src.odrive_app.controllers.EncryptionController(
+src.odrive_app.controllers.EncryptorController(
+src.odrive_app.controllers.utility.EncryptorConfiguration(
+src.odrive_app.services.db.tables.EncryptionEntryTable(
+src.integrations.encryption(
+src.integrations.encryption.EncryptionSync9Adapter(
+src.utility.EncryptionUtility(
+src.utility.HashCalculator(
+Crypto.Cipher(
+Crypto.Cipher.AES(
+Crypto.Cipher.ARC4(
+Crypto.Cipher.Blowfish(
+Crypto.Cipher.DES(
+Crypto.Cipher.DES3(
+Crypto.Hash(
+Crypto.Hash.HMAC(
+Crypto.Hash.MD5(
+Crypto.Hash.SHA(
+Crypto.Hash.SHA256(
+Crypto.PublicKey.RSA(
+hashlib(
+hmac(
+
+=== PROPERTY DATABASE (CONFIG PERSISTENCE) ===
+src.odrive_app.services.db(
+src.odrive_app.services.db.PropertyDBConnection(
+src.odrive_app.services.db.PropertyDBService(
+src.odrive_app.services.db.tables(
+src.odrive_app.services.db.tables.PropertyTable(
+
+=== DB TABLES (FULL LIST) ===
+src.odrive_app.services.db.tables.BackupJobTable(
+src.odrive_app.services.db.tables.EncryptionEntryTable(
+src.odrive_app.services.db.tables.ProSyncFolderTable(
+src.odrive_app.services.db.tables.PropertyTable(
+src.odrive_app.services.db.tables.StickySyncTable(
+src.odrive_app.services.db.tables.SyncModeTable(
+
+=== GENERIC DB INFRASTRUCTURE ===
+src.utility.db(
+src.utility.db.DBConnection(
+src.utility.db.DBConnectionManager(
+
+=== CONFIGURATION CONTROLLERS ===
+src.odrive_app.controllers.AdvancedSettingsController(
+ConfigParser(
+
+=== APP STATE ===
+src.odrive_app.AppState(
+src.odrive_app.AppStateDump(
+src.odrive_app.OdriveStringTable(
+src.odrive_app.OdriveSyncAgent(
+
+=== CREDENTIAL MANAGEMENT ===
+src.utility.KeyChainService(
+keyring(
+keyring.backend(
+keyring.backends(
+keyring.backends.Gnome(
+keyring.backends.Google(
+keyring.backends.OS_X(
+keyring.backends.SecretService(
+keyring.backends.Windows(
+keyring.backends._win_crypto(
+keyring.backends.file(
+keyring.backends.keyczar(
+keyring.backends.kwallet(
+keyring.backends.multi(
+keyring.backends.pyfs(
+keyring.core(
+keyring.credentials(
+keyring.errors(
+keyring.util(
+keyring.util.XDG(
+keyring.util.escape(
+keyring.util.platform_(
+cookielib(
+Cookie(
+_LWPCookieJar(
+_MozillaCookieJar(
+
+=== AUTH CONTROLLERS ===
+src.odrive_app.controllers.AuthKeyLoginController(
+src.odrive_app.controllers.AuthorizedUserController(
+src.integrations_sub.s3.S3AuthActuator(
+requests.auth(
+requests.cookies(
+requests.sessions(
+
+=== HEARTBEAT ===
+src.odrive_app.controllers.HeartbeatController(
+
+=== SYSTEM STATUS ===
+src.odrive_app.controllers.SystemStatusController(
+src.odrive_app.controllers.AgentSyncStateController(
+
+=== MOUNT / LINK ===
+src.odrive_app.controllers.MountController(
+src.odrive_app.controllers.AddLinkController(
+src.odrive_app.controllers.ShareLinkController(
+
+=== TRASH ===
+src.odrive_app.controllers.TrashController(
+
+=== STREAMING ===
+src.odrive_app.controllers.StreamingController(
+
+=== VALID ACTIONS ===
+src.odrive_app.controllers.ValidActionController(
+src.odrive_app.controllers.NotAllowedController(
+
+=== ANALYTICS / TELEMETRY ===
+src.common.mixpanel(
+src.common.mixpanel.MixpanelUtil(
+src.common.services.TrackingFileService(
+
+=== SYSTEM ALERTS ===
+src.system_alert(
+src.system_alert.NotificationProvider(
+src.system_alert.StorageProvider(
+src.system_alert.SystemAlertService(
+src.system_alert.notification_providers(
+src.system_alert.notification_providers.HipChatNotificationProvider(
+src.system_alert.storage_providers(
+src.system_alert.storage_providers.S3StorageProvider(
+
+=== STARTUP / REGISTRY ===
+src.common.startup(
+src.common.startup.RegistryFileService(
+
+=== OS SHELL INTEGRATION ===
+src.common.services.shell(
+src.common.services.shell.OSShellService(
+plistlib(
+
+=== OS-SPECIFIC UTILITIES ===
+src.utility.mac_os_util(
+src.utility.mac_os_util.MacOSUtil(
+src.utility.win32con(
+src.utility.win32util(
+src.utility.win_util(
+src.utility.win_util.WinUtil(
+
+=== SERVERS / PROTOCOL ===
+src.odrive_app.servers(
+src.odrive_app.servers.Commands(
+src.odrive_app.servers.EventServer(
+src.odrive_app.servers.ProtocolCommands(
+src.odrive_app.servers.ProtocolServer(
+
+=== SERVICES ===
+src.odrive_app.services.AgentUIService(
+src.odrive_app.services.LogUIService(
+src.odrive_app.services.MacPackageService(
+src.odrive_app.services.OdriveSyncService(
+src.odrive_app.services.UIService(
+src.odrive_app.services.odriveService(
+src.odrive_app.services.odriveService.odriveService(
+src.odrive_fs_service(
+src.odrive_fs_service.OdriveFSService(
+src.odrive_fs_service.SyncAdapterFactory(
+
+=== INTEGRATION CACHE ===
+src.integrations.IntegrationCacheDBConnection(
+src.integrations.IntegrationCacheDBService(
+src.integrations.IntegrationCacheTable(
+
+=== CLOUD STORAGE INTEGRATIONS (Sync9Adapter per provider) ===
+src.integrations.autodesk.AutodeskSync9Adapter(
+src.integrations.b2.B2Sync9Adapter(
+src.integrations.box.BoxSync9Adapter(
+src.integrations.clouddrive.CloudDriveSync9Adapter(
+src.integrations.dropbox.DropboxSync9Adapter(
+src.integrations.dropboxteams.DropboxTeamsSync9Adapter(
+src.integrations.encryption.EncryptionSync9Adapter(
+src.integrations.facebook.FacebookSync9Adapter(
+src.integrations.ftp.FTPSync9Adapter(
+src.integrations.googlecloud.GoogleCloudSync9Adapter(
+src.integrations.googlecloud.GoogleCloudxSync9Adapter(
+src.integrations.googledrive.GoogleDriveSync9Adapter(
+src.integrations.instagram.InstagramSync9Adapter(
+src.integrations.odrive.odriveSync9Adapter(
+src.integrations.odrivegateway.OdriveGatewaySync9Adapter(
+src.integrations.onedrive.OneDriveForBusinessSync9Adapter(
+src.integrations.onedrive.OneDriveSync9Adapter(
+src.integrations.onedrive.SharepointSync9Adapter(
+src.integrations.procore.ProcoreSync9Adapter(
+src.integrations.s3.S3Sync9Adapter(
+src.integrations.s3.S3xSync9Adapter(
+src.integrations.s3compat.S3Sync9Adapter(
+src.integrations.s3compat.S3xSync9Adapter(
+src.integrations.sftp.SFTPSync9Adapter(
+src.integrations.slack.SlackSync9Adapter(
+src.integrations.webDAV.WebDAVSync9Adapter(
+
+=== NETWORKING ===
+paramiko (full SFTP/SSH stack)
+requests (HTTP client)
+ssl(
+socket(
+httplib(
+BaseHTTPServer(
+SocketServer(
+
+=== UTILITY ===
+src.utility.EmptyStream(
+src.utility.EnvironmentContext(
+src.utility.Singleton(
+src.utility.StopStatus(
+src.utility.StringUtility(
+src.utility.Utility(
+src.utility.datastructure(
+src.odrive_app.controllers.utility.Apply(
+src.odrive_app.controllers.utility.LocalSyncAdapter(
+src.odrive_app.controllers.utility.LockedItem(
+src.odrive_app.controllers.utility.RemoteCloudFileFormat(
+src.odrive_app.controllers.utility.SyncAdapters(
+src.odrive_app.controllers.utility.Utility(

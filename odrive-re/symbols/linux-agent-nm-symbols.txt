@@ -1,0 +1,131 @@
+# odrive Linux Agent - ELF Symbol Table (nm output)
+# Binary: odriveagent (ELF 64-bit LSB, x86-64, not stripped, with debug_info)
+# PyInstaller bootloader symbols + Python API trampolines
+# Date extracted: 2026-04-04
+
+## ============================================================
+## PyInstaller Bootloader Functions (T = text/code)
+## ============================================================
+00000000004023b0 T pyi_getenv
+00000000004023e0 T pyi_setenv
+00000000004023f0 T pyi_unsetenv
+0000000000402400 T pyi_test_temp_path
+0000000000402450 T pyi_create_temp_path
+0000000000402510 T pyi_remove_temp_path
+0000000000402670 T pyi_open_target
+0000000000402780 T pyi_copy_file
+0000000000402880 T pyi_utils_dlopen
+0000000000402890 T pyi_utils_set_environment
+00000000004028d0 T pyi_utils_create_child
+0000000000402e20 T pyi_launch_need_to_extract_binaries
+0000000000402e70 T pyi_launch_extract_binaries
+0000000000402f50 T pyi_pylib_run_scripts
+0000000000403130 T pyi_launch_initialize
+0000000000403140 T pyi_launch_execute
+00000000004031d0 T pyi_launch_finalize
+00000000004031e0 T pyi_arch_increment_toc_ptr
+0000000000403230 T pyi_arch_extract
+00000000004033e0 T pyi_arch_extract2fs
+00000000004034a0 T pyi_arch_open
+0000000000403610 T pyi_arch_set_paths
+0000000000403680 T pyi_arch_setup
+0000000000403700 T pyi_arch_get_pyversion
+0000000000403710 T pyi_arch_status_free_memory
+0000000000403740 T pyi_python_map_names
+0000000000403e20 T pyi_path_dirname
+0000000000403e80 T pyi_path_basename
+0000000000403ec0 T pyi_path_join
+0000000000403fe0 T pyi_path_normalize
+0000000000403ff0 T pyi_path_executable
+0000000000404040 T pyi_path_homepath
+0000000000404050 T pyi_path_archivefile
+0000000000413c80 T pyi_pylib_load
+0000000000413d00 T pyi_pylib_attach
+0000000000413d10 T pyi_pylib_start_python
+0000000000414000 T pyi_pylib_import_modules
+00000000004140f0 T pyi_pylib_install_zlib
+00000000004141a0 T pyi_pylib_install_zlibs
+00000000004141f0 T pyi_pylib_finalize
+
+## ============================================================
+## Python API Trampolines (PI_* = PyInstaller wrappers)
+## ============================================================
+00000000004145c0 T PI_SetProgramName
+00000000004145e0 T PI_GetProgramName
+00000000004145f0 T PI_GetPath
+0000000000414620 T PI_GetPrefix
+0000000000414650 T PI_GetExecPrefix
+0000000000414680 T PI_GetProgramFullPath
+
+## ============================================================
+## Python C API Bindings (B = BSS, loaded at runtime via dlsym)
+## ============================================================
+000000000061b608 B PI_PySys_SetObject
+000000000061b610 B PI_PyInt_AsLong
+000000000061b618 B PI_Py_EndInterpreter
+000000000061b620 B PI_Py_NewInterpreter
+000000000061b628 B PI_PyThreadState_Swap
+000000000061b630 B PI_PyEval_ReleaseThread
+000000000061b638 B PI_PyEval_AcquireThread
+000000000061b640 B PI_PyEval_InitThreads
+000000000061b648 B PI_PySys_AddWarnOption
+000000000061b650 B PI_PyObject_CallMethod
+000000000061b658 B PI_PyObject_CallObject
+000000000061b660 B PI_PyErr_Print
+000000000061b668 B PI_PyErr_Occurred
+000000000061b670 B PI_PyErr_Clear
+000000000061b678 B PI_PyDict_GetItemString
+000000000061b680 B PI_PyModule_GetDict
+000000000061b688 B PI_PyObject_CallFunction
+000000000061b690 B PI_PyString_AsString
+000000000061b698 B PI_PyFile_FromString
+000000000061b6a0 B PI_PyString_FromStringAndSize
+000000000061b6a8 B PI_Py_BuildValue
+000000000061b6b0 B PI_PyList_Append
+000000000061b6b8 B PI_PyList_New
+000000000061b6c0 B PI_PyObject_SetAttrString
+000000000061b6c8 B PI_PyImport_AddModule
+000000000061b6d0 B PI_PyImport_ImportModule
+000000000061b6d8 B PI_Py_SetProgramName
+000000000061b6e0 B PI_PySys_SetArgv
+000000000061b6e8 B PI_PyRun_SimpleString
+000000000061b6f0 B PI_PyImport_ExecCodeModule
+000000000061b6f8 B PI_Py_SetPythonHome
+000000000061b700 B PI_Py_DecRef
+000000000061b708 B PI_Py_IncRef
+000000000061b710 B PI_Py_Finalize
+000000000061b718 B PI_Py_Initialize
+000000000061b720 B PI_Py_VerboseFlag
+000000000061b728 B PI_Py_OptimizeFlag
+000000000061b730 B PI_Py_NoSiteFlag
+000000000061b738 B PI_Py_FrozenFlag
+
+## ============================================================
+## Key Application Entry Points
+## ============================================================
+0000000000402090 T main
+0000000000403030 T callSimpleEntryPoint
+00000000004023a0 t _signal_handler
+00000000004146a4 T _lsb_init
+00000000004029c0 t checkFile
+0000000000402a90 t _extract_dependency
+0000000000402650 T cleanUp
+
+## ============================================================
+## External Dependencies (U = undefined, resolved at runtime)
+## ============================================================
+# GLIBC functions: malloc, free, fopen, fread, fwrite, fclose, fork, execv, etc.
+# zlib: inflate, inflateEnd, inflateInit_
+# dlopen/dlsym: dynamic library loading (for Python .so)
+# Standard POSIX: open, close, mkdir, mkdtemp, mkstemp, kill, getenv, getpid
+
+## ============================================================
+## Notable Data Symbols
+## ============================================================
+000000000061b5d0 D lsb_linker_path
+000000000061b5d8 D native_linker_path
+000000000061b5c8 d progname
+000000000061b604 B child_pid
+0000000000621ea0 b module_search_path
+000000000061fbe8 b matchers.8637
+000000000061fbe0 b mapping.8640

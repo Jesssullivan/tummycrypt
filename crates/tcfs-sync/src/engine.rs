@@ -868,7 +868,9 @@ pub async fn resolve_manifest_path(
     if let Ok(idx_bytes) = op.read(&index_key).await {
         let idx_raw = idx_bytes.to_bytes();
         let idx_str = String::from_utf8_lossy(&idx_raw);
-        if let Some(manifest_hash) = idx_str.lines().find_map(|l| l.strip_prefix("manifest_hash="))
+        if let Some(manifest_hash) = idx_str
+            .lines()
+            .find_map(|l| l.strip_prefix("manifest_hash="))
         {
             return Ok(format!("{prefix}/manifests/{manifest_hash}"));
         }
@@ -894,8 +896,9 @@ pub async fn resolve_manifest_path(
             if let Ok(idx_bytes) = op.read(entry_path).await {
                 let idx_raw = idx_bytes.to_bytes();
                 let idx_str = String::from_utf8_lossy(&idx_raw);
-                if let Some(manifest_hash) =
-                    idx_str.lines().find_map(|l| l.strip_prefix("manifest_hash="))
+                if let Some(manifest_hash) = idx_str
+                    .lines()
+                    .find_map(|l| l.strip_prefix("manifest_hash="))
                 {
                     return Ok(format!("{prefix}/manifests/{manifest_hash}"));
                 }
@@ -903,7 +906,10 @@ pub async fn resolve_manifest_path(
         }
     }
 
-    anyhow::bail!("no index entry found for '{}' (tried: {index_key}, filename search: {filename})", input)
+    anyhow::bail!(
+        "no index entry found for '{}' (tried: {index_key}, filename search: {filename})",
+        input
+    )
 }
 
 /// Normalize a remote prefix: ensure it doesn't have trailing slash
