@@ -124,7 +124,7 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            require_session: true,
+            require_session: false,
             session_expiry_hours: 24,
             methods: vec!["master_key".into()],
             totp: AuthTotpConfig::default(),
@@ -217,13 +217,6 @@ pub struct SyncConfig {
     pub exclude_patterns: Vec<String>,
     /// Local directory root for synced files (used by auto-pull)
     pub sync_root: Option<PathBuf>,
-    /// Maximum file age (seconds) before eligible for auto-unsync.
-    /// 0 = disabled. Default: 0 (disabled).
-    pub auto_unsync_max_age_secs: u64,
-    /// How often to run the auto-unsync sweep (seconds). Default: 3600 (hourly).
-    pub auto_unsync_interval_secs: u64,
-    /// If true, log auto-unsync candidates but don't actually remove them.
-    pub auto_unsync_dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +246,9 @@ pub struct CryptoConfig {
     pub master_key_file: Option<PathBuf>,
     /// Path to the device identity file
     pub device_identity: Option<PathBuf>,
+    /// Path to passphrase/mnemonic file for auto-unlock on daemon start.
+    /// If set, daemon derives master key via Argon2id KDF at startup.
+    pub passphrase_file: Option<PathBuf>,
 }
 
 impl Default for CryptoConfig {
@@ -264,6 +260,7 @@ impl Default for CryptoConfig {
             argon2_parallelism: 4,
             master_key_file: None,
             device_identity: None,
+            passphrase_file: None,
         }
     }
 }
@@ -342,9 +339,6 @@ impl Default for SyncConfig {
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
             sync_root: None,
-            auto_unsync_max_age_secs: 0,
-            auto_unsync_interval_secs: 3600,
-            auto_unsync_dry_run: false,
         }
     }
 }

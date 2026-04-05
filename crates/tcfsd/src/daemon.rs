@@ -5,7 +5,7 @@ use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tcfs_core::config::TcfsConfig;
 use tcfs_sync::conflict::ConflictResolver;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use tcfs_crypto::MasterKey;
 
@@ -100,7 +100,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 Ok(bytes) if bytes.len() == tcfs_crypto::KEY_SIZE => {
                     let mut key_bytes = [0u8; tcfs_crypto::KEY_SIZE];
                     key_bytes.copy_from_slice(&bytes);
-                    info!(path = %key_path.display(), "master key loaded");
+                    info!(path = %key_path.display(), "master key loaded from file");
                     Some(MasterKey::from_bytes(key_bytes))
                 }
                 Ok(bytes) => {
@@ -108,22 +108,62 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         path = %key_path.display(),
                         size = bytes.len(),
                         expected = tcfs_crypto::KEY_SIZE,
-                        "master key file has wrong size, encryption disabled"
+                        "master key file has wrong size, trying passphrase_file"
                     );
                     None
                 }
                 Err(e) => {
                     warn!(
                         path = %key_path.display(),
-                        "failed to read master key file: {e} (encryption disabled)"
+                        "failed to read master key file: {e}"
                     );
                     None
                 }
             }
         } else {
-            warn!("crypto.enabled = true but no master_key_file configured");
             None
         }
+        // Auto-unlock via passphrase/mnemonic file if master_key_file didn't work
+        .or_else(|| {
+            config.crypto.passphrase_file.as_ref().and_then(|pp_path| {
+                match std::fs::read_to_string(pp_path) {
+                    Ok(passphrase) => {
+                        let passphrase = passphrase.trim();
+                        let result = if passphrase.split_whitespace().count() >= 12 {
+                            info!(path = %pp_path.display(), "deriving key from BIP-39 mnemonic");
+                            tcfs_crypto::recovery::mnemonic_to_master_key(passphrase)
+                        } else {
+                            info!(path = %pp_path.display(), "deriving key from passphrase (Argon2id)");
+                            let salt: [u8; 16] = *b"tcfs-recovery-v1";
+                            let params = tcfs_crypto::kdf::KdfParams {
+                                mem_cost_kib: config.crypto.argon2_mem_cost_kib,
+                                time_cost: config.crypto.argon2_time_cost,
+                                parallelism: config.crypto.argon2_parallelism,
+                            };
+                            tcfs_crypto::kdf::derive_master_key(
+                                &secrecy::SecretString::from(passphrase.to_string()),
+                                &salt,
+                                &params,
+                            )
+                        };
+                        match result {
+                            Ok(key) => {
+                                info!("master key derived from passphrase file");
+                                Some(key)
+                            }
+                            Err(e) => {
+                                warn!("passphrase KDF failed: {e}");
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(path = %pp_path.display(), "failed to read passphrase file: {e}");
+                        None
+                    }
+                }
+            })
+        })
     } else {
         None
     };
@@ -292,7 +332,6 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sched_status_tx = status_tx.clone();
                     let sched_nats = shared_nats.clone();
                     let sched_metrics = daemon_metrics.clone();
-                    let sched_master_key = master_key.clone();
 
                     tokio::spawn({
                         let scheduler = scheduler.clone();
@@ -307,7 +346,6 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     let status_tx = sched_status_tx.clone();
                                     let nats = sched_nats.clone();
                                     let metrics = sched_metrics.clone();
-                                    let mk = sched_master_key.clone();
 
                                     Box::pin(async move {
                                         match task.op {
@@ -328,9 +366,6 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     .to_string_lossy()
                                                     .to_string();
                                                 let mut cache = state.lock().await;
-                                                let enc_ctx = mk.as_ref().map(|k| tcfs_sync::engine::EncryptionContext {
-                                                    master_key: k.clone(),
-                                                });
                                                 let upload_result =
                                                     tcfs_sync::engine::upload_file_with_device(
                                                         op_ref,
@@ -340,7 +375,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                         None,
                                                         &device,
                                                         Some(&rel_path),
-                                                        enc_ctx.as_ref(),
+                                                        None,
                                                     )
                                                     .await?;
 
@@ -623,7 +658,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     let nats_url = &config.sync.nats_url;
     if nats_url != "nats://localhost:4222" || std::env::var("TCFS_NATS_URL").is_ok() {
         let url = std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| nats_url.clone());
-        match tcfs_sync::NatsClient::connect(&url, config.sync.nats_tls).await {
+        match tcfs_sync::NatsClient::connect(&url).await {
             Ok(nats) => {
                 if let Err(e) = nats.ensure_streams().await {
                     warn!("NATS stream setup failed: {e}");
@@ -734,49 +769,6 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     if let Err(e) = store.save_to_file(&cleanup_session_path).await {
                         warn!("failed to persist sessions after cleanup: {e}");
                     }
-                }
-            }
-        });
-    }
-
-    // Auto-unsync sweep (if configured)
-    if config.sync.auto_unsync_max_age_secs > 0 {
-        let unsync_state = impl_.state_cache_handle();
-        let unsync_interval = config.sync.auto_unsync_interval_secs;
-        let unsync_max_age = config.sync.auto_unsync_max_age_secs;
-        let unsync_dry_run = config.sync.auto_unsync_dry_run;
-        let unsync_policy_path = data_dir.join("folder-policies.json");
-
-        info!(
-            max_age_secs = unsync_max_age,
-            interval_secs = unsync_interval,
-            dry_run = unsync_dry_run,
-            "auto-unsync enabled"
-        );
-
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(unsync_interval));
-            loop {
-                interval.tick().await;
-                let policy_store =
-                    tcfs_sync::policy::PolicyStore::open(&unsync_policy_path).unwrap_or_default();
-                let mut cache = unsync_state.lock().await;
-                let result = tcfs_sync::auto_unsync::sweep(
-                    &mut cache,
-                    &policy_store,
-                    unsync_max_age,
-                    unsync_dry_run,
-                );
-                if result.unsynced > 0 || result.skipped_dirty > 0 {
-                    info!(
-                        scanned = result.scanned,
-                        unsynced = result.unsynced,
-                        skipped_exempt = result.skipped_exempt,
-                        skipped_dirty = result.skipped_dirty,
-                        bytes_reclaimed = result.bytes_reclaimed,
-                        "auto-unsync sweep complete"
-                    );
                 }
             }
         });
@@ -1061,94 +1053,63 @@ async fn handle_auto_pull(
     }
 }
 
-/// Handle auto-pull for a remote file sync event.
-///
-/// Index-first strategy: does NOT download files to local disk. The push
-/// from the remote host already wrote index + manifest + chunks to S3.
-/// The FUSE mount discovers new files via readdir (S3 index listing) and
-/// hydrates on demand when the user opens them. This avoids writing to
-/// the FUSE mount (which may be read-only from the daemon's perspective)
-/// and eliminates the EROFS errors that occurred when sync_root was the
-/// FUSE mountpoint.
-///
-/// We only update the state cache so vector clocks stay in sync.
+/// Download a file from remote and update state cache.
 async fn do_auto_download(
     device_id: &str,
     manifest_path: &str,
     local_path: &std::path::Path,
     operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
     state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
-    _storage_prefix: &str,
+    storage_prefix: &str,
 ) {
-    // Verify the manifest exists in S3 (confirms push completed)
-    let op = {
-        let guard = operator.lock().await;
-        match guard.as_ref() {
-            Some(op) => op.clone(),
-            None => {
-                warn!("no storage operator for auto-pull verification");
-                return;
-            }
+    // Ensure parent directory exists
+    if let Some(parent) = local_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(path = %local_path.display(), "mkdir for auto-pull failed: {e}");
+            return;
+        }
+    }
+
+    let op = operator.lock().await;
+    let op = match op.as_ref() {
+        Some(op) => op.clone(),
+        None => {
+            warn!("no storage operator for auto-pull");
+            return;
         }
     };
+    drop(operator.lock().await);
 
-    match op.read(manifest_path).await {
-        Ok(manifest_data) => {
-            // Parse manifest to extract file hash and vclock for state cache
-            let manifest_bytes = manifest_data.to_bytes();
-            match tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes) {
-                Ok(manifest) => {
-                    info!(
-                        path = %local_path.display(),
-                        manifest = %manifest_path,
-                        hash = %manifest.file_hash,
-                        written_by = %manifest.written_by,
-                        "auto-pull: S3 data verified, updating state cache"
-                    );
-                    // Update state cache with the remote's metadata so
-                    // vector clocks stay in sync for future conflict detection.
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let mut cache = state_cache.lock().await;
-                    cache.set(
-                        local_path,
-                        tcfs_sync::state::SyncState {
-                            blake3: manifest.file_hash.clone(),
-                            size: manifest.file_size,
-                            mtime: manifest.written_at,
-                            chunk_count: manifest.chunks.len(),
-                            remote_path: manifest_path.to_string(),
-                            last_synced: now,
-                            vclock: manifest.vclock.clone(),
-                            device_id: manifest.written_by.clone(),
-                            conflict: None,
-                        },
-                    );
-                    let _ = cache.flush();
-                    debug!(
-                        key = %local_path.display(),
-                        hash = %manifest.file_hash,
-                        "auto-pull: state cache updated with remote metadata"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        manifest = %manifest_path,
-                        "auto-pull: failed to parse manifest: {e}"
-                    );
-                    // Still mark as verified even if parse fails
-                    let mut cache = state_cache.lock().await;
-                    let _ = cache.flush();
-                }
-            }
+    let result = {
+        let mut cache = state_cache.lock().await;
+        tcfs_sync::engine::download_file_with_device(
+            &op,
+            manifest_path,
+            local_path,
+            storage_prefix,
+            None,
+            device_id,
+            Some(&mut cache),
+            None,
+        )
+        .await
+    };
+
+    match result {
+        Ok(dl) => {
+            info!(
+                path = %local_path.display(),
+                bytes = dl.bytes,
+                "auto-pull complete"
+            );
+            // Flush state cache
+            let mut cache = state_cache.lock().await;
+            let _ = cache.flush();
         }
         Err(e) => {
             warn!(
                 path = %local_path.display(),
-                manifest = %manifest_path,
-                "auto-pull: manifest not found in S3: {e}"
+                "auto-pull failed: {e}"
             );
         }
     }

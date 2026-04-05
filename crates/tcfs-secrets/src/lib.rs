@@ -187,10 +187,15 @@ impl CredStore {
         let access_key = std::env::var("TCFS_S3_ACCESS")
             .or_else(|_| std::env::var("AWS_ACCESS_KEY_ID"))
             .or_else(|_| std::env::var("SEAWEED_ACCESS_KEY"))
+            // *_FILE env vars: read credential from file path
+            .or_else(|_| read_env_file("TCFS_S3_ACCESS_FILE"))
+            .or_else(|_| read_env_file("TCFS_S3_ACCESS_KEY_FILE"))
             .unwrap_or_default();
         let mut secret_key = std::env::var("TCFS_S3_SECRET")
             .or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY"))
             .or_else(|_| std::env::var("SEAWEED_SECRET_KEY"))
+            .or_else(|_| read_env_file("TCFS_S3_SECRET_FILE"))
+            .or_else(|_| read_env_file("TCFS_S3_SECRET_KEY_FILE"))
             .unwrap_or_default();
 
         let s3 = if !access_key.is_empty() {
@@ -211,4 +216,15 @@ impl CredStore {
             source: "env".into(),
         })
     }
+}
+
+/// Read a credential value from a file pointed to by an environment variable.
+///
+/// Used for `*_FILE` env vars (e.g., `TCFS_S3_ACCESS_FILE=/run/secrets/access-key`).
+/// Returns the trimmed file contents, or VarError if env var is unset or file unreadable.
+fn read_env_file(env_var: &str) -> Result<String, std::env::VarError> {
+    let path = std::env::var(env_var)?;
+    std::fs::read_to_string(path.trim())
+        .map(|s| s.trim().to_string())
+        .map_err(|_| std::env::VarError::NotPresent)
 }
