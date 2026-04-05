@@ -158,7 +158,10 @@ impl TcfsVfs {
         let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(data));
 
         // 2. Generate per-file encryption key if master key is available
-        let file_key = self.master_key.as_ref().map(|_| tcfs_crypto::generate_file_key());
+        let file_key = self
+            .master_key
+            .as_ref()
+            .map(|_| tcfs_crypto::generate_file_key());
         let file_id_bytes: [u8; 32] = {
             let h = tcfs_chunks::hash_bytes(data);
             let mut arr = [0u8; 32];
@@ -191,7 +194,10 @@ impl TcfsVfs {
         let encrypted_file_key = match (&self.master_key, &file_key) {
             (Some(mk), Some(fk)) => {
                 let wrapped = tcfs_crypto::wrap_key(mk, fk).context("wrapping file key")?;
-                Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wrapped))
+                Some(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &wrapped,
+                ))
             }
             _ => None,
         };

@@ -210,7 +210,11 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
             items.push(TcfsFileItem {
                 item_id: to_c_string(&item_id),
                 filename: to_c_string(child_name),
-                file_size: if is_dir { 0 } else { entry.metadata().content_length() },
+                file_size: if is_dir {
+                    0
+                } else {
+                    entry.metadata().content_length()
+                },
                 modified_timestamp: 0,
                 is_directory: is_dir,
                 content_hash: to_c_string(""),
