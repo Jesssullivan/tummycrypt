@@ -1,0 +1,265 @@
+# odrive Linux Agent - Complete SQL Schemas
+# Extracted from PyInstaller PYZ bytecode constants
+# DB engine: APSW (Another Python SQLite Wrapper) - bundled as apsw.so
+# Build: /home/ubuntu/hudson/workspace/Odrive_Lnx_Agent_64/
+
+## ============================================================
+## 1. SyncTrackingTable (PRIMARY sync state persistence)
+##    Module: src.sync9.sync_tracking_service.internals.db.tables.SyncTrackingTable
+##    DB Connection: SyncTrackingDBConnection -> SyncTrackingDBService
+## ============================================================
+
+CREATE TABLE IF NOT EXISTS SyncTracking (
+    oid TEXT PRIMARY KEY UNIQUE NOT NULL,
+    LocalUri TEXT,
+    LocalId TEXT,
+    LocalName TEXT,
+    LocalIsFolder INTEGER,
+    LocalModTime INTEGER,
+    LocalSize INTEGER,
+    LocalParentId TEXT,
+    RemoteUri TEXT,
+    RemoteId TEXT,
+    RemoteName TEXT,
+    RemoteIsFolder INTEGER,
+    RemoteModTime INTEGER,
+    RemoteSize INTEGER,
+    RemoteParentId TEXT
+);
+
+-- Added via ALTER TABLE (schema evolution):
+ALTER TABLE SyncTracking ADD COLUMN ParentOid TEXT;
+ALTER TABLE SyncTracking ADD COLUMN LocalContentTag TEXT;
+ALTER TABLE SyncTracking ADD COLUMN RemoteContentTag TEXT;
+ALTER TABLE SyncTracking ADD COLUMN NodeTimestamp INTEGER;
+
+-- Indexes:
+CREATE INDEX IF NOT EXISTS SyncTrackingOidIndex ON SyncTracking(oid);
+CREATE INDEX IF NOT EXISTS SyncTrackingParentOidIndex ON SyncTracking(ParentOid);
+CREATE INDEX IF NOT EXISTS SyncTrackingNodeLocalIdIndex ON SyncTracking(LocalId);
+CREATE INDEX IF NOT EXISTS SyncTrackingNodeRemoteIdIndex ON SyncTracking(RemoteId);
+CREATE INDEX IF NOT EXISTS SyncTrackingNodeParentOidAndLocalNameIndex ON SyncTracking(ParentOid, LocalName);
+CREATE INDEX IF NOT EXISTS SyncTrackingNodeLocalUriIndex ON SyncTracking(LocalUri);
+CREATE INDEX IF NOT EXISTS SyncTrackingNodeRemoteUriIndex ON SyncTracking(RemoteUri);
+CREATE INDEX IF NOT EXISTS SyncTrackingNodeTimestamp ON SyncTracking(NodeTimestamp);
+
+-- QUERIES:
+SELECT * FROM SyncTracking WHERE oid = ?;
+SELECT * FROM SyncTracking WHERE LocalId = ?;
+SELECT * FROM SyncTracking WHERE RemoteId = ?;
+SELECT * FROM SyncTracking WHERE LocalUri = ?;
+SELECT * FROM SyncTracking WHERE RemoteUri = ?;
+SELECT * FROM SyncTracking WHERE ParentOid = ?;
+SELECT * FROM SyncTracking WHERE ParentOid = ? AND LocalName = ?;
+SELECT * FROM SyncTracking WHERE NodeTimestamp < ?;
+SELECT * FROM SyncTracking WHERE LocalName LIKE ? OR LocalName LIKE ? LIMIT 1;
+-- (used with '%.cloudx' and '%.cloudfx')
+SELECT * FROM SyncTracking;
+
+-- MUTATIONS:
+INSERT INTO SyncTracking (oid, LocalUri, LocalId, LocalName, LocalIsFolder, LocalModTime,
+    LocalSize, LocalParentId, RemoteUri, RemoteId, RemoteName, RemoteIsFolder, RemoteModTime,
+    RemoteSize, RemoteParentId, ParentOid, LocalContentTag, RemoteContentTag, NodeTimestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+UPDATE SyncTracking SET LocalUri = ?, LocalId = ?, LocalName = ?, LocalIsFolder = ?,
+    LocalModTime = ?, LocalSize = ?, LocalParentId = ?, RemoteUri = ?, RemoteId = ?,
+    RemoteName = ?, RemoteIsFolder = ?, RemoteModTime = ?, RemoteSize = ?, RemoteParentId = ?,
+    ParentOid = ?, LocalContentTag = ?, RemoteContentTag = ?, NodeTimestamp = ?
+    WHERE oid = ?;
+
+DELETE FROM SyncTracking WHERE oid = ?;
+DELETE FROM SyncTracking WHERE oid in
+    (SELECT oid FROM SyncTracking WHERE LocalName LIKE ? OR LocalName LIKE ? LIMIT 1000);
+-- ^ purge_cloudx_and_cloudfx: used with '%.cloudx' and '%.cloudfx'
+
+DROP TABLE IF EXISTS SyncTracking;
+
+-- Schema evolution check:
+PRAGMA table_info(SyncTracking);
+
+
+## ============================================================
+## 2. SyncModeTable
+##    Module: src.odrive_app.services.db.tables.SyncModeTable
+##    Key: local URI path  |  Value: JSON sync mode string
+## ============================================================
+
+CREATE TABLE IF NOT EXISTS SyncModeTable (
+    key TEXT PRIMARY KEY UNIQUE NOT NULL,
+    value TEXT
+);
+
+SELECT value FROM SyncModeTable WHERE key = ?;
+SELECT * from SyncModeTable where key = ?;
+REPLACE INTO SyncModeTable(key, value) VALUES(?, ?);
+INSERT OR REPLACE INTO SyncModeTable(key, value) VALUES (?, ?);
+DELETE FROM SyncModeTable WHERE key = ?;
+DELETE FROM SyncModeTable;
+SELECT * FROM SyncModeTable;
+DROP TABLE IF EXISTS SyncModeTable;
+
+
+## ============================================================
+## 3. StickySyncTable
+##    Module: src.odrive_app.services.db.tables.StickySyncTable
+##    Key: path string  |  Value: JSON {downloadThreshold, expandSubfolders}
+## ============================================================
+
+CREATE TABLE IF NOT EXISTS StickySyncTable (
+    key TEXT PRIMARY KEY UNIQUE NOT NULL,
+    value TEXT
+);
+
+SELECT value FROM StickySyncTable WHERE key = ?;
+REPLACE INTO StickySyncTable(key, value) VALUES(?, ?);
+INSERT OR REPLACE INTO StickySyncTable(key, value) VALUES (?, ?);
+DELETE FROM StickySyncTable WHERE key = ?;
+DELETE FROM StickySyncTable;
+SELECT * FROM StickySyncTable;
+DROP TABLE IF EXISTS StickySyncTable;
+
+
+## ============================================================
+## 4. PropertyTable (general key-value settings)
+##    Module: src.odrive_app.services.db.tables.PropertyTable
+## ============================================================
+
+CREATE TABLE IF NOT EXISTS PropertyTable (
+    key TEXT PRIMARY KEY UNIQUE NOT NULL,
+    value TEXT
+);
+
+SELECT value FROM PropertyTable WHERE key = ?;
+SELECT * from PropertyTable where key = ?;
+REPLACE INTO PropertyTable(key, value) VALUES(?, ?);
+INSERT OR REPLACE INTO PropertyTable(key, value) VALUES (?, ?);
+DELETE FROM PropertyTable WHERE key = ?;
+DELETE FROM PropertyTable;
+DROP TABLE IF EXISTS PropertyTable;
+
+
+## ============================================================
+## 5. EncryptionEntryTable
+##    Module: src.odrive_app.services.db.tables.EncryptionEntryTable
+##    Maps encrypted <-> decrypted names per parent URI
+## ============================================================
+
+CREATE TABLE IF NOT EXISTS EncryptionEntryTable (
+    localParentUri TEXT,
+    decryptedName TEXT,
+    encryptedName TEXT,
+    passphrase TEXT,
+    enabled BOOL
+);
+
+REPLACE INTO EncryptionEntryTable(localParentUri, decryptedName, encryptedName,
+    passphrase, enabled) VALUES(?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO EncryptionEntryTable(localParentUri, decryptedName,
+    encryptedName, passphrase, enabled) VALUES (?, ?, ?, ?, ?);
+UPDATE EncryptionEntryTable SET enabled = ? WHERE localParentUri = ? AND decryptedName = ?;
+UPDATE EncryptionEntryTable SET encryptedName = ? WHERE localParentUri = ? AND decryptedName = ?;
+DELETE FROM EncryptionEntryTable WHERE localParentUri = ? AND decryptedName = ?;
+DELETE FROM EncryptionEntryTable;
+SELECT * FROM EncryptionEntryTable;
+DROP TABLE IF EXISTS EncryptionEntryTable;
+
+
+## ============================================================
+## 6. BackupJobTable
+##    Module: src.odrive_app.services.db.tables.BackupJobTable
+## ============================================================
+
+CREATE TABLE IF NOT EXISTS BackupJobTable (
+    jobId TEXT PRIMARY KEY UNIQUE NOT NULL,
+    localUri TEXT,
+    remoteUri TEXT,
+    remotePathUri TEXT,
+    settings TEXT
+);
+
+SELECT * FROM BackupJobTable WHERE jobId = ?;
+SELECT * from BackupJobTable where jobId = ?;
+REPLACE INTO BackupJobTable(jobId, localUri, remoteUri, remotePathUri, settings)
+    VALUES(?, ?, ?, ?, ?);
+INSERT OR REPLACE INTO BackupJobTable(jobId, localUri, remoteUri, remotePathUri, settings)
+    VALUES (?, ?, ?, ?, ?);
+DELETE FROM BackupJobTable WHERE jobId = ?;
+DELETE FROM BackupJobTable;
+SELECT * FROM BackupJobTable;
+DROP TABLE IF EXISTS BackupJobTable;
+
+
+## ============================================================
+## 7. ProSyncFolderTable
+##    Module: src.odrive_app.services.db.tables.ProSyncFolderTable
+##    Key: local folder path  |  Value: remote URI
+## ============================================================
+
+CREATE TABLE IF NOT EXISTS ProSyncFolderTable (
+    key TEXT PRIMARY KEY UNIQUE NOT NULL,
+    value TEXT
+);
+
+SELECT value FROM ProSyncFolderTable WHERE key = ?;
+SELECT * from ProSyncFolderTable where key = ?;
+REPLACE INTO ProSyncFolderTable(key, value) VALUES(?, ?);
+INSERT OR REPLACE INTO ProSyncFolderTable(key, value) VALUES (?, ?);
+DELETE FROM ProSyncFolderTable WHERE key = ?;
+DELETE FROM ProSyncFolderTable;
+SELECT * FROM ProSyncFolderTable;
+DROP TABLE IF EXISTS ProSyncFolderTable;
+
+
+## ============================================================
+## 8. IntegrationCacheTable
+##    Module: src.integrations.IntegrationCacheTable
+##    Caches remote folder listings per integration
+## ============================================================
+
+CREATE TABLE IF NOT EXISTS IntegrationCache (
+    oid TEXT PRIMARY KEY UNIQUE NOT NULL,
+    uri TEXT NOT NULL,
+    userLinkId TEXT,
+    parentUri TEXT,
+    attributes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS IntegrationCacheUriIndex ON IntegrationCache(uri);
+CREATE INDEX IF NOT EXISTS IntegrationCacheParentUriIndex ON IntegrationCache(parentUri);
+
+SELECT * FROM IntegrationCache WHERE uri = ?;
+SELECT * FROM IntegrationCache WHERE parentUri = ?;
+UPDATE IntegrationCache SET attributes = ? WHERE uri =?;
+INSERT INTO IntegrationCache (oid, uri, userLinkId, parentUri, attributes) VALUES (?, ?, ?, ?, ?);
+SELECT * FROM IntegrationCache;
+DROP TABLE IF EXISTS IntegrationCache;
+
+
+## ============================================================
+## DB Architecture Notes
+## ============================================================
+
+# Two separate database files with independent connection managers:
+#
+# 1. SyncTrackingDB (sync9.sync_tracking_service.internals.db)
+#    - SyncTrackingDBConnection
+#    - SyncTrackingDBService
+#    - Contains: SyncTrackingTable
+#    - Purpose: Stores the entire local<->remote node tree
+#
+# 2. PropertyDB (odrive_app.services.db)
+#    - PropertyDBConnection
+#    - PropertyDBService
+#    - Contains: PropertyTable, SyncModeTable, StickySyncTable,
+#                EncryptionEntryTable, BackupJobTable, ProSyncFolderTable
+#    - Purpose: Application settings and configuration
+#
+# 3. IntegrationCacheDB (integrations)
+#    - IntegrationCacheDBConnection
+#    - IntegrationCacheDBService
+#    - Contains: IntegrationCacheTable
+#    - Purpose: Cached remote listing data
+#
+# All use APSW (Another Python SQLite Wrapper) for thread-safe access.
+# DBConnectionManager handles per-thread connection pooling.

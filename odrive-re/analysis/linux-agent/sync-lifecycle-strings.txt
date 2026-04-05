@@ -1,0 +1,379 @@
+# odrive Linux Agent - Sync Lifecycle Strings
+# Extracted from: /tmp/odrive-extract/odriveagent (ELF 64-bit, PyInstaller 2.1+, Python 2.7)
+# Build path: /home/ubuntu/hudson/workspace/Odrive_Lnx_Agent_64/
+# Date: 2026-04-04
+
+## ============================================================
+## 1. COMPLETE MODULE MAP (src.* namespace)
+## ============================================================
+
+# Core application
+src.odrive_app.OdriveSyncAgent
+src.odrive_app.AppState
+src.odrive_app.AppStateDump
+src.odrive_app.OdriveStringTable
+
+# Sync controllers
+src.odrive_app.controllers.sync.SyncController
+src.odrive_app.controllers.sync.internals.Expand
+src.odrive_app.controllers.sync.internals.QueuedExpand
+src.odrive_app.controllers.sync.internals.Unsync
+src.odrive_app.controllers.sync.internals.Sync
+src.odrive_app.controllers.sync.internals.AddCloudChildren
+src.odrive_app.controllers.AgentSyncStateController
+src.odrive_app.controllers.AutoUnsyncController
+src.odrive_app.controllers.PlaceholderThresholdController
+
+# Refresh/merge controllers
+src.odrive_app.controllers.RefreshController
+src.odrive_app.controllers.refresh_job.RefreshJobController
+src.odrive_app.controllers.refresh_job.internals.Compare
+src.odrive_app.controllers.refresh_job.internals.FileFormats
+src.odrive_app.controllers.refresh_job.internals.GroupByPosition
+src.odrive_app.controllers.refresh_job.internals.LocalAddFolder
+src.odrive_app.controllers.refresh_job.internals.MergeFiles
+src.odrive_app.controllers.refresh_job.internals.Operations
+src.odrive_app.controllers.refresh_job.internals.Refresh
+src.odrive_app.controllers.refresh_job.internals.RefreshChildren
+src.odrive_app.controllers.refresh_job.internals.RemoteAddFolder
+
+# Event controllers
+src.odrive_app.controllers.LocalEventController
+src.odrive_app.controllers.RemoteEventController
+src.odrive_app.controllers.TrackedEventController
+src.odrive_app.controllers.LocalScanController
+src.odrive_app.controllers.RemoteScanController
+
+# Other controllers
+src.odrive_app.controllers.AddLinkController
+src.odrive_app.controllers.AdvancedSettingsController
+src.odrive_app.controllers.AgentProSyncFolderController
+src.odrive_app.controllers.AppController
+src.odrive_app.controllers.AuthKeyLoginController
+src.odrive_app.controllers.AuthorizedUserController
+src.odrive_app.controllers.BackupJobController
+src.odrive_app.controllers.EncryptionController
+src.odrive_app.controllers.EncryptorController
+src.odrive_app.controllers.HeartbeatController
+src.odrive_app.controllers.MountController
+src.odrive_app.controllers.NotAllowedController
+src.odrive_app.controllers.OpenInWebController
+src.odrive_app.controllers.OpenWebPageController
+src.odrive_app.controllers.PolicyController
+src.odrive_app.controllers.ShareLinkController
+src.odrive_app.controllers.StreamingController
+src.odrive_app.controllers.SystemStatusController
+src.odrive_app.controllers.TrashController
+src.odrive_app.controllers.ValidActionController
+
+# Controller utilities
+src.odrive_app.controllers.utility.Apply
+src.odrive_app.controllers.utility.Badging
+src.odrive_app.controllers.utility.EncryptorConfiguration
+src.odrive_app.controllers.utility.LocalSyncAdapter
+src.odrive_app.controllers.utility.LockedItem
+src.odrive_app.controllers.utility.RemoteCloudFileFormat
+src.odrive_app.controllers.utility.SyncAdapters
+src.odrive_app.controllers.utility.Utility
+
+# Services
+src.odrive_app.services.AgentUIService
+src.odrive_app.services.LogUIService
+src.odrive_app.services.MacPackageService
+src.odrive_app.services.OdriveSyncService
+src.odrive_app.services.PlaceholderService
+src.odrive_app.services.PolicyService
+src.odrive_app.services.UIService
+src.odrive_app.services.odriveService.odriveService
+
+# DB layer
+src.odrive_app.services.db.PropertyDBConnection
+src.odrive_app.services.db.PropertyDBService
+src.odrive_app.services.db.tables.BackupJobTable
+src.odrive_app.services.db.tables.EncryptionEntryTable
+src.odrive_app.services.db.tables.ProSyncFolderTable
+src.odrive_app.services.db.tables.PropertyTable
+src.odrive_app.services.db.tables.StickySyncTable
+src.odrive_app.services.db.tables.SyncModeTable
+
+# Dispatchers and servers
+src.odrive_app.dispatchers.EventDispatcher
+src.odrive_app.dispatchers.ProtocolRequestDispatcher
+src.odrive_app.servers.Commands
+src.odrive_app.servers.EventServer
+src.odrive_app.servers.ProtocolCommands
+src.odrive_app.servers.ProtocolServer
+
+# Sync9 engine
+src.sync9.Sync9Adapter
+src.sync9.Sync9Service
+src.sync9.SyncThresholdInfinite
+src.sync9.Exceptions
+
+# Sync tracking (most critical subsystem)
+src.sync9.sync_tracking_service.SyncTrackingNode
+src.sync9.sync_tracking_service.SyncTrackingService
+src.sync9.sync_tracking_service.SyncTrackingDBDump
+src.sync9.sync_tracking_service.internals.SyncTrackingValuesV0
+src.sync9.sync_tracking_service.internals.db.SyncTrackingDBConnection
+src.sync9.sync_tracking_service.internals.db.SyncTrackingDBService
+src.sync9.sync_tracking_service.internals.db.tables.SyncTrackingTable
+
+# Sync API common
+src.sync_api_common.FileSyncState
+src.sync_api_common.O2Path
+src.sync_api_common.StopStatus
+
+# File system layer
+src.file_system.implementation.NativeFileSystemService
+src.file_system.interface.AbstractFileSystemService
+src.file_system_sync9.Blacklist
+src.file_system_sync9.FSEventService
+src.file_system_sync9.FileSystemCodes
+src.file_system_sync9.FileSystemService
+src.file_system_sync9.MacFSEventService
+src.file_system_sync9.WindowsFSEventService
+
+# FS service
+src.odrive_fs_service.OdriveFSService
+src.odrive_fs_service.SyncAdapterFactory
+
+# Integration adapters (all implement Sync9Adapter)
+src.integrations.autodesk.AutodeskSync9Adapter
+src.integrations.b2.B2Sync9Adapter
+src.integrations.box.BoxSync9Adapter
+src.integrations.clouddrive.CloudDriveSync9Adapter
+src.integrations.dropbox.DropboxSync9Adapter
+src.integrations.dropboxteams.DropboxTeamsSync9Adapter
+src.integrations.encryption.EncryptionSync9Adapter
+src.integrations.facebook.FacebookSync9Adapter
+src.integrations.ftp.FTPSync9Adapter
+src.integrations.googlecloud.GoogleCloudSync9Adapter
+src.integrations.googlecloud.GoogleCloudxSync9Adapter
+src.integrations.googledrive.GoogleDriveSync9Adapter
+src.integrations.instagram.InstagramSync9Adapter
+src.integrations.odrive.odriveSync9Adapter
+src.integrations.odrivegateway.OdriveGatewaySync9Adapter
+src.integrations.onedrive.OneDriveSync9Adapter
+src.integrations.onedrive.OneDriveForBusinessSync9Adapter
+src.integrations.onedrive.SharepointSync9Adapter
+src.integrations.procore.ProcoreSync9Adapter
+src.integrations.s3.S3Sync9Adapter
+src.integrations.s3.S3xSync9Adapter
+src.integrations.s3compat.S3Sync9Adapter
+src.integrations.s3compat.S3xSync9Adapter
+src.integrations.sftp.SFTPSync9Adapter
+src.integrations.slack.SlackSync9Adapter
+src.integrations.webDAV.WebDAVSync9Adapter
+
+# Integration services
+src.integrations.IntegrationCacheDBConnection
+src.integrations.IntegrationCacheDBService
+src.integrations.IntegrationCacheTable
+
+# Backoff checkers
+src.integrations.clouddrive.BackoffChecker
+src.integrations.dropbox.BackoffChecker
+src.integrations.googledrive.GoogleDriveBackoffChecker
+src.integrations.onedrive.BackoffChecker
+src.integrations.procore.BackoffChecker
+src.integrations.slack.SlackBackoffChecker
+
+# Exception handling
+src.exception_handling.Exceptions
+src.exception_handling.diagnostics.DetailedThreadDump
+src.exception_handling.diagnostics.DiagnosticDump
+src.exception_handling.diagnostics.ExceptionDump
+src.exception_handling.diagnostics.SyncActivityDump
+src.exception_handling.diagnostics.ThreadsDump
+
+# Utility
+src.utility.EmptyStream
+src.utility.EncryptionUtility
+src.utility.EnumDeprecated
+src.utility.EnvironmentContext
+src.utility.HashCalculator
+src.utility.KeyChainService
+src.utility.Singleton
+src.utility.StopStatus
+src.utility.StringUtility
+src.utility.ThreadPoolExecutor
+src.utility.Utility
+src.utility.db.DBConnection
+src.utility.db.DBConnectionManager
+
+# System alerts
+src.system_alert.NotificationProvider
+src.system_alert.StorageProvider
+src.system_alert.SystemAlertService
+
+# Common
+src.common.FileAttributes
+src.common.SendThreadsDump
+src.common.StringTable
+src.common.mixpanel.MixpanelUtil
+src.common.services.IdPath
+src.common.services.TrackingFileService
+src.common.services.badge.BadgeRefreshService
+src.common.services.shell.OSShellService
+src.common.startup.RegistryFileService
+
+## ============================================================
+## 2. FileSyncState ENUM VALUES
+## ============================================================
+NOT_SYNCED
+SYNCED
+ACTIVE
+LOCKED
+
+## ============================================================
+## 3. Sync9Codes (Status/Error Codes)
+## ============================================================
+SS100 = DELAYED_DELETE
+SS101 = MERGE_CONFLICT
+SS102 = IN_PROGRESS
+SS103 = BLACKLISTED
+SS104 = BUSY
+SS105 = ORPHANED_CLOUD_FILE
+SS106 = SYNC_EXCEPTION
+SS107 = ILLEGAL_FILE_NAME
+
+## ============================================================
+## 4. Sync9 Exception Types
+## ============================================================
+Sync9Exception
+SyncAdapterRequestException
+ItemNotFoundException
+AdapterOutOfBoundsMoveException
+LockException
+TrackingValueUpdateException
+ParentNotSyncedException
+LoginRequestException
+LinkLoginRequestException
+RefreshTokenRequestException
+ConnectionInfoEmptyException
+EncryptorPasswordNotFoundException
+ConflictingMountException
+
+## ============================================================
+## 5. Placeholder Extensions
+## ============================================================
+# File placeholders: .cloud
+# Folder placeholders: .cloudf
+# Encrypted name file: encrypted name + .cloud
+# Encrypted name folder: encrypted name + .cloudf
+# Decrypted name file: decrypted name + .cloud
+# Decrypted name folder: decrypted name + .cloudf
+# XL file extension: .cloudx (large file segments)
+# Deprecated: .cloudfx
+
+## ============================================================
+## 6. Expand Operation Key Strings
+## ============================================================
+expand_folder_and_enqueue_cloud_files
+expand_children_and_enqueue_cloud_files_until_done
+apply_local_expand_files_from_queue
+apply_local_expand_file
+apply_local_expand_xl_file
+apply_local_expand_folder_item
+_expand_folder_in_thread
+_expand_files_in_thread
+_expand_children_in_thread
+set_expand_children_running
+get_expand_children_running
+get_expand_folder_configuration
+get_sync_folder_configuration
+
+## ============================================================
+## 7. Unsync Operation Key Strings
+## ============================================================
+_unsync_item
+_enforce_unsync_policy
+_first_item_that_cannot_unsync
+_iter_dirty_or_read_only_children
+_first_dirty_or_read_only_item
+get_unsync_policy
+get_placeholder_name_for_local
+remove_folder_from_light_space
+add_folder_to_light_space
+is_folder_in_light_space
+render_unsync_dirty_dialog
+local_move_to_os_trash
+local_delete_folder
+local_delete_file
+
+## ============================================================
+## 8. Auto-Unsync Operation Key Strings
+## ============================================================
+get_auto_unsync_threshold
+get_auto_unsync_policy
+get_auto_unsync_interval
+get_auto_unsync_use_access
+set_auto_unsync_threshold_for_type
+_auto_unsync_file
+_has_auto_unsync_policy
+_run_auto_unsync
+_deliver_auto_unsync_user_notification
+
+## ============================================================
+## 9. SyncTrackingNode Fields
+## ============================================================
+oid                 # UUID primary key
+localValues         # SyncTrackingValuesV0 (local state)
+remoteValues        # SyncTrackingValuesV0 (remote state)
+parentOid           # parent node reference
+timestamp           # NodeTimestamp
+
+## ============================================================
+## 10. SyncTrackingValuesV0 Fields (local/remote values)
+## ============================================================
+fileAttributes      # FileAttributes object
+parentId            # unicode parent identifier
+# FileAttributes contains: uri, id, name, isFolder, size, modTime, contentTag
+
+## ============================================================
+## 11. Error/Warning Log Strings (sync-related)
+## ============================================================
+"unable_to_sync"
+"cant_sync"
+"cant_sync_at_this_time"
+"doesnt_exist"
+"error_updating_file"
+"error_updating_folder"
+"exception_unexpected"
+"corrupt_or_not_ready_xl_file"
+"cant_unsync"
+"cant_unsync_path"
+"cant_unsync_no_policy"
+"cant_use_unsync"
+"cant_change_auto_unsync_threshold_no_policy"
+"cant_change_auto_unsync_settings"
+"premium_required"
+"no_mount_for_path"
+"expand_not_a_cloud_path"
+"path_locked"
+"active_path"
+"not_found"
+"Item is blacklisted"
+"Item already unsynced"
+"Item not inside a defined mount"
+"Item not found"
+"Item is actively syncing"
+"Folder not in light space"
+"Unsync subscription missing"
+"Login required"
+
+## ============================================================
+## 12. Queued Expand Configuration Fields
+## ============================================================
+maxDownloadingBytes
+minThroughput
+minFileSizeForThroughputCalculation
+maxRetriesOnSystemExceptionBeforeGivingUp
+maxRetriesOnNonSystemExceptionBeforeGivingUp
+secondsToDelayForRateLimiting
+secondsToDelayForSystemExceptionOnRemoteListFolder
+maxRetriesOnSystemExceptionOnRemoteListFolder
+MAX_ITERATION
+QUEUE_ITEM_WAIT
+QUEUE_END_MARKER
