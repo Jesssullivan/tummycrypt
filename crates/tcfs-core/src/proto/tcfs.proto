@@ -28,6 +28,8 @@ service TcfsDaemon {
   rpc AuthRevoke(AuthRevokeRequest) returns (AuthRevokeResponse);
   // Device enrollment via invite
   rpc DeviceEnroll(DeviceEnrollRequest) returns (DeviceEnrollResponse);
+  // Runtime diagnostics dump
+  rpc Diagnostics(DiagnosticsRequest) returns (DiagnosticsResponse);
 }
 
 message Empty {}
@@ -272,4 +274,24 @@ message DeviceEnrollResponse {
   string remote_prefix = 10;
   string encryption_passphrase = 11;
   string encryption_salt = 12;
+}
+
+// ── Diagnostics ──────────────────────────────────────────────────────────
+
+message DiagnosticsRequest {}
+message DiagnosticsResponse {
+  // State cache
+  int32 state_cache_entries = 1;
+  int32 conflict_count = 2;
+  // NATS
+  int64 last_nats_seq = 3;
+  bool nats_connected = 4;
+  // Auto-unsync
+  int32 auto_unsync_eligible = 5;
+  int64 auto_unsync_max_age_secs = 6;
+  // Storage
+  bool storage_reachable = 7;
+  // General
+  int64 uptime_secs = 8;
+  string device_id = 9;
 }

@@ -1968,6 +1968,50 @@ impl TcfsDaemon for TcfsDaemonImpl {
             encryption_salt: invite.encryption_salt.unwrap_or_default(),
         }))
     }
+
+    // ── Diagnostics ──────────────────────────────────────────────────────
+
+    async fn diagnostics(
+        &self,
+        _request: tonic::Request<DiagnosticsRequest>,
+    ) -> Result<tonic::Response<DiagnosticsResponse>, tonic::Status> {
+        let cache = self.state_cache.lock().await;
+
+        // Count conflicts
+        let mut conflict_count = 0i32;
+        for (_key, state) in StateCacheBackend::all_entries(&*cache) {
+            if state.conflict.is_some() {
+                conflict_count += 1;
+            }
+        }
+
+        // Count auto-unsync eligible files
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let max_age = self.config.sync.auto_unsync_max_age_secs;
+        let eligible = if max_age > 0 {
+            StateCacheBackend::all_entries(&*cache)
+                .iter()
+                .filter(|(_, s)| now.saturating_sub(s.last_synced) > max_age)
+                .count() as i32
+        } else {
+            0
+        };
+
+        Ok(tonic::Response::new(DiagnosticsResponse {
+            state_cache_entries: StateCacheBackend::len(&*cache) as i32,
+            conflict_count,
+            last_nats_seq: cache.last_nats_seq as i64,
+            nats_connected: self.nats_ok.load(std::sync::atomic::Ordering::Relaxed),
+            auto_unsync_eligible: eligible,
+            auto_unsync_max_age_secs: max_age as i64,
+            storage_reachable: self.storage_ok,
+            uptime_secs: self.start_time.elapsed().as_secs() as i64,
+            device_id: self.device_id.clone(),
+        }))
+    }
 }
 
 /// Bind a Unix domain socket, removing any stale socket and creating parent dirs.
