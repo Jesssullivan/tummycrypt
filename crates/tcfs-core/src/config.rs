@@ -217,6 +217,13 @@ pub struct SyncConfig {
     pub exclude_patterns: Vec<String>,
     /// Local directory root for synced files (used by auto-pull)
     pub sync_root: Option<PathBuf>,
+    /// Maximum file age (seconds) before eligible for auto-unsync.
+    /// 0 = disabled. Default: 0 (disabled).
+    pub auto_unsync_max_age_secs: u64,
+    /// How often to run the auto-unsync sweep (seconds). Default: 3600 (hourly).
+    pub auto_unsync_interval_secs: u64,
+    /// If true, log auto-unsync candidates but don't actually remove them.
+    pub auto_unsync_dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +342,9 @@ impl Default for SyncConfig {
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
             sync_root: None,
+            auto_unsync_max_age_secs: 0,
+            auto_unsync_interval_secs: 3600,
+            auto_unsync_dry_run: false,
         }
     }
 }
