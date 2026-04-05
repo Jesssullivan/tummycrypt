@@ -289,6 +289,11 @@ impl StateCache {
             .with_context(|| format!("writing state cache temp: {}", tmp_path.display()))?;
         std::fs::rename(&tmp_path, &self.db_path)
             .with_context(|| format!("renaming state cache: {}", self.db_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.db_path, std::fs::Permissions::from_mode(0o600));
+        }
 
         self.dirty = false;
         Ok(())

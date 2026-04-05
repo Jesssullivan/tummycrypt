@@ -124,7 +124,7 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            require_session: false,
+            require_session: true,
             session_expiry_hours: 24,
             methods: vec!["master_key".into()],
             totp: AuthTotpConfig::default(),
