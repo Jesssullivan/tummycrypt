@@ -192,5 +192,8 @@ notes/
 # Claude Code (local per-user config)
 .claude/
 
+# odrive RE artifacts (NEVER commit binaries)
+odrive-cleanroom-re/
+
 # Generated docs
 dist/docs/
