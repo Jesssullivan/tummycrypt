@@ -20,8 +20,14 @@ async fn main() -> Result<()> {
 
     tracing::info!("tcfs-mcp starting");
 
-    let socket_path =
-        std::env::var("TCFS_SOCKET").unwrap_or_else(|_| "/run/tcfsd/tcfsd.sock".to_string());
+    let default_socket = {
+        let state_dir = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            format!("{}/.local/state", home)
+        });
+        format!("{}/tcfsd/tcfsd.sock", state_dir)
+    };
+    let socket_path = std::env::var("TCFS_SOCKET").unwrap_or(default_socket);
 
     let config_path = std::env::var("TCFS_CONFIG").ok();
 

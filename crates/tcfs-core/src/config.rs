@@ -301,8 +301,17 @@ impl Default for SopsConfig {
 
 impl Default for DaemonConfig {
     fn default() -> Self {
+        // XDG_STATE_HOME/tcfsd/tcfsd.sock (default: ~/.local/state/tcfsd/tcfsd.sock)
+        let socket = std::env::var("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                PathBuf::from(home).join(".local/state")
+            })
+            .join("tcfsd/tcfsd.sock");
+
         Self {
-            socket: PathBuf::from("/run/tcfsd/tcfsd.sock"),
+            socket,
             fileprovider_socket: None,
             listen: None,
             metrics_addr: Some("127.0.0.1:9100".into()),
@@ -423,7 +432,12 @@ argon2_parallelism = 8
     fn test_parse_defaults() {
         let config: TcfsConfig = toml::from_str("").unwrap();
 
-        assert_eq!(config.daemon.socket, PathBuf::from("/run/tcfsd/tcfsd.sock"));
+        // Socket path is now XDG_STATE_HOME-based (dynamic), just verify it ends correctly
+        assert!(
+            config.daemon.socket.ends_with("tcfsd/tcfsd.sock"),
+            "socket path should end with tcfsd/tcfsd.sock, got: {}",
+            config.daemon.socket.display()
+        );
         assert_eq!(config.daemon.log_level, "info");
         assert_eq!(config.storage.endpoint, "http://localhost:8333");
         assert!(!config.storage.enforce_tls);

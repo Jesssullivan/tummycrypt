@@ -497,21 +497,66 @@ async fn load_config(path: &Path) -> Result<tcfs_core::config::TcfsConfig> {
 /// Reads AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (standard S3 env vars).
 /// These override any config file credentials for direct CLI use.
 fn build_operator_from_env(config: &tcfs_core::config::TcfsConfig) -> Result<opendal::Operator> {
+    // Priority: env vars → *_FILE env vars → credentials_file config → error
     let access_key = std::env::var("AWS_ACCESS_KEY_ID")
         .or_else(|_| std::env::var("TCFS_ACCESS_KEY_ID"))
+        .or_else(|_| read_credential_file("TCFS_S3_ACCESS_KEY_FILE"))
+        .or_else(|_| {
+            config
+                .storage
+                .credentials_file
+                .as_ref()
+                .and_then(|p| read_sops_credential(p, "access_key_id").ok())
+                .ok_or_else(|| std::env::VarError::NotPresent)
+        })
         .context(
             "S3 credentials not set\n\
-             Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.\n\
-             Example:\n\
-             \texport AWS_ACCESS_KEY_ID=your-key\n\
-             \texport AWS_SECRET_ACCESS_KEY=your-secret",
+             Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env vars,\n\
+             TCFS_S3_ACCESS_KEY_FILE / TCFS_S3_SECRET_KEY_FILE file pointers,\n\
+             or storage.credentials_file in config.toml.",
         )?;
     let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
         .or_else(|_| std::env::var("TCFS_SECRET_ACCESS_KEY"))
-        .context("AWS_SECRET_ACCESS_KEY environment variable not set")?;
+        .or_else(|_| read_credential_file("TCFS_S3_SECRET_KEY_FILE"))
+        .or_else(|_| {
+            config
+                .storage
+                .credentials_file
+                .as_ref()
+                .and_then(|p| read_sops_credential(p, "secret_access_key").ok())
+                .ok_or_else(|| std::env::VarError::NotPresent)
+        })
+        .context("S3 secret key not set")?;
 
     tcfs_storage::operator::build_from_core_config(&config.storage, &access_key, &secret_key)
         .context("building storage operator")
+}
+
+/// Read a credential from a file pointed to by an env var (e.g., TCFS_S3_ACCESS_KEY_FILE).
+fn read_credential_file(env_var: &str) -> Result<String, std::env::VarError> {
+    let path = std::env::var(env_var)?;
+    std::fs::read_to_string(path.trim())
+        .map(|s| s.trim().to_string())
+        .map_err(|_| std::env::VarError::NotPresent)
+}
+
+/// Read a credential from a plaintext YAML/JSON credential file (post-SOPS decryption).
+fn read_sops_credential(path: &std::path::Path, key: &str) -> Result<String> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading credentials file: {}", path.display()))?;
+    // Try JSON first, then key=value lines
+    if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+        if let Some(val) = map.get(key) {
+            return Ok(val.clone());
+        }
+    }
+    // Fallback: line-based key=value
+    for line in content.lines() {
+        if let Some(val) = line.strip_prefix(&format!("{}=", key)) {
+            return Ok(val.trim().to_string());
+        }
+    }
+    anyhow::bail!("key '{}' not found in {}", key, path.display())
 }
 
 /// Expand `~` in path to the user's home directory
