@@ -195,5 +195,8 @@ notes/
 # odrive RE artifacts (NEVER commit binaries)
 odrive-cleanroom-re/
 
+# Ghidra project files (large binary databases)
+odrive-re/ghidra/
+
 # Generated docs
 dist/docs/

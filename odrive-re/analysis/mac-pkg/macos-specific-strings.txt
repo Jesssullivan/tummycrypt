@@ -1,0 +1,232 @@
+# macOS-Specific Strings from odrive Binaries
+# Source: odrivesync.7666.pkg + odriveSyncAgent-mac-977.zip
+# Generated: 2026-04-04
+
+================================================================================
+STANDALONE AGENT (odriveagent v977) - PyInstaller binary
+================================================================================
+
+=== FINDER / CARBON INTEGRATION ===
+# The standalone agent uses Carbon and Finder AppleScript bindings
+/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon
+Carbon.AE
+Carbon.Appearance
+Carbon.AppleEvents
+Carbon.CarbonEvents
+Carbon.ControlAccessor
+Carbon.Controls
+Carbon.Ctl
+Carbon.Dialogs
+Carbon.Dlg
+Carbon.Dragconst
+Carbon.Events
+Carbon.Evt
+Carbon.File
+Carbon.Files
+Carbon.Menu
+Carbon.Qd
+Carbon.QuickDraw
+Carbon.Res
+Carbon.TextEdit
+Carbon.Win
+Carbon.Windows
+Finder
+Finder.Containers_and_folders
+Finder.Enumerations
+Finder.Files
+Finder.Finder_Basics
+Finder.Finder_items
+Finder.Legacy_suite
+Finder.Standard_Suite
+Finder.Type_Definitions
+Finder.Window_classes
+
+=== FS EVENT MONITORING ===
+src.file_system_sync9.FSEventService
+src.file_system_sync9.MacFSEventService
+src.file_system_sync9.WindowsFSEventService
+
+=== KEYCHAIN ===
+src.utility.KeyChainService
+
+=== PLIST SUPPORT ===
+plistlib
+
+=== KERNEL/FS EXTENSIONS ===
+# No kext, FUSE, macFUSE, or FileProvider references found
+
+=== NETWORK/IPC ===
+# Agent uses TCP sockets on localhost for CLI protocol
+# Port read from ~/.odrive-agent/.oreg
+PyImport_AddModule
+PyImport_ExecCodeModule
+PyImport_ImportModule
+socket
+SocketServer
+BaseHTTPServer
+httplib
+paramiko.transport
+
+================================================================================
+PKG DESKTOP APP (odriveapp v7666) - Obj-C/Swift launcher
+================================================================================
+
+=== APPKIT / UI FRAMEWORK ===
+NSApplication
+NSApplicationDelegate
+NSBundle
+NSWorkspace
+NSStatusBar
+NSStatusItem
+NSMenu
+NSMenuDelegate
+NSMenuItem
+NSWindowController
+NSView
+NSWindow
+NSButton
+NSTextField
+NSImage
+NSAttributedString
+NSImageNameAdvanced
+NSAppKitVersionNumber
+
+=== USER NOTIFICATIONS ===
+UserNotifications.framework
+UNUserNotificationCenter
+UNUserNotificationCenterDelegate
+NSUserNotification
+NSUserNotificationCenter
+NSUserNotificationCenterDelegate
+deliverUserNotificationWithTitle:andMessage:
+userNotificationCenter:shouldPresentNotification:
+userNotificationCenter:didActivateNotification:
+userNotificationCenter:didDeliverNotification:
+userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:
+userNotificationCenter:openSettingsForNotification:
+userNotificationCenter:willPresentNotification:withCompletionHandler:
+
+=== APP DELEGATE - UI OUTLETS ===
+# These reveal the native macOS UI elements:
+_forceRefreshCheckbox
+_stickySyncCheckbox
+_subfoldersCheckbox
+_syncButton
+_saveButton
+_syncingIcon
+_statusItem
+_bottomMessageLabel
+_dirtyPathLabel
+_errorLabel
+_explanationLabel
+_instructionLabel
+_messageLabel
+_remoteMountTextField
+_restrictedSyncLabel
+_sizeLabel
+_thresholdLabel
+_topMessageLabel
+_downloadThrottleLabel
+_localEventsIntervalLabel
+_localScanIntervalLabel
+_progressiveSyncIntervalLabel
+_remoteEventsIntervalLabel
+_remoteScanIntervalLabel
+_uploadThrottleLabel
+_view
+_window
+_appStateRefreshChildOperationsMenuItem
+
+================================================================================
+FINDERSYNC EXTENSION (FinderSyncExtension.appex) - Swift binary
+================================================================================
+
+=== FRAMEWORK LINKS ===
+FinderSync.framework
+AppKit.framework
+Foundation.framework
+CoreFoundation.framework
+
+=== SWIFT RUNTIME LIBS ===
+libswiftAppKit.dylib
+libswiftCore.dylib
+libswiftCoreData.dylib
+libswiftCoreFoundation.dylib
+libswiftCoreGraphics.dylib
+libswiftCoreImage.dylib
+libswiftDarwin.dylib
+libswiftDispatch.dylib
+libswiftFoundation.dylib
+libswiftIOKit.dylib
+libswiftMetal.dylib
+libswiftObjectiveC.dylib
+libswiftQuartzCore.dylib
+libswiftXPC.dylib
+libswiftRemoteMirror.dylib
+
+=== BADGE STATES ===
+# From string analysis of the FinderSync Extension binary:
+Synced
+Syncing
+Active
+Not Sync
+ShowGrey
+
+=== IPC IDENTIFIERS ===
+# Extension communicates with main app:
+odriveUI     # CFMessagePort name
+Command      # IPC message type
+Name         # Message field
+paths        # Message field for file paths
+/Library     # Path reference
+/Volumes     # Volume monitoring path
+serial q     # Serial dispatch queue
+timerQue     # Timer dispatch queue
+uiServer     # UI server reference
+
+=== BADGE ICON FILES ===
+synced.icns
+syncing.icns
+locked.icns
+infinity-darkgrey.icns
+infinity-pink.icns
+
+================================================================================
+PYTHON SRC MODULES - macOS-SPECIFIC (PKG desktop app)
+================================================================================
+
+# Modules unique to macOS that are not in the headless Linux agent:
+src.common.services.shell.MacShellService
+src.file_system_sync9.MacFSEventService
+src.utility.mac_os_util.MacOSUtil
+src.utility.macutil
+src.utility.KeyChainService
+src.odrive_app.controllers.MacOSBadgeController
+src.odrive_app.servers.MacOSExtensionServer
+src.odrive_app.servers.MacOSUIServer
+src.odrive_app.servers.ThreadedCFMessagePortServer
+src.odrive_app.services.MacOSExtensionService
+src.odrive_app.services.MacOSUIService
+src.odrive_app.services.MacPackageService
+
+================================================================================
+CODE SIGNING
+================================================================================
+
+# All binaries signed by same identity:
+Authority=Developer ID Application: Oxygen Cloud, Inc. (N887K88VYZ)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+TeamIdentifier=N887K88VYZ
+
+# PKG inner app (odriveapp.app):
+#   Runtime Version=15.2.0, flags=runtime
+#   Timestamp=Mar 27, 2026
+
+# FinderSync Extension:
+#   Runtime Version=10.14.0, flags=runtime
+#   Built with Xcode 10.1 / SDK macOS 10.14
+
+# Standalone agent (odriveagent.app):
+#   Runtime Version=10.10.0, flags=runtime
+#   Timestamp=Feb 6, 2024
