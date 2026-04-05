@@ -5,7 +5,90 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-dev] - Unreleased
+## [0.10.0] - 2026-04-05
+
+### Added
+
+- **Centralized blacklist** (`tcfs-sync::blacklist`): Consolidates 6 scattered exclusion sites (watcher, engine, VFS, git safety) into a single `Blacklist` type with `check()`, `check_name()`, and `check_path_components()` methods. Configurable glob patterns, hidden dirs, .git policy.
+- **Directory reconciliation pipeline** (`tcfs-sync::reconcile`): Plan-then-execute bidirectional sync. `reconcile()` diffs local tree vs remote index producing a `ReconcilePlan` (pure data). `execute_plan()` performs I/O via existing engine primitives. Supports push, pull, delete, conflict detection via vector clocks.
+- **Per-folder sync policies** (`tcfs-sync::policy`): `PolicyStore` with `FolderPolicy` (SyncMode, download_threshold, auto_unsync_exempt). Parent-chain walk inheritance — policy on `/project` applies to all descendants.
+- **Auto-unsync controller** (`tcfs-sync::auto_unsync`): Background sweep finds files where `last_synced` exceeds configurable max age. Respects PolicyStore exemptions, skips dirty files (unsynced local changes). Removes from state cache only — local files preserved.
+- **PathLocks**: Per-path async mutex preventing concurrent push/pull/unsync on the same file. RAII guard with automatic cleanup.
+- **FileSyncStatus enum**: 5-state runtime status (NotSynced, Synced, Active, Locked, Conflict) for gRPC/JSON.
+- **Unsync dirty-child check**: Before folder unsync, scans `children_with_prefix()` for unsynced modifications. Errors unless `force=true`.
+- **Diagnostics RPC**: New gRPC endpoint reporting state cache size, conflict count, NATS seq, auto-unsync eligible count, storage health, uptime.
+- **Scheduler observability**: `active()`, `completed()`, `failed()` counters on `SyncScheduler` for operational monitoring.
+- `children_with_prefix()` on `StateCacheBackend` for directory-level state queries.
+- `list_remote_index()` for fetching remote S3 index entries.
+- `parse_index_entry()` for the `manifest_hash=.../size=.../chunks=...` format.
+- Config fields: `auto_unsync_max_age_secs`, `auto_unsync_interval_secs`, `auto_unsync_dry_run`.
+- CI job for `cargo test -p tcfs-sync --features nats,crypto`.
+
+### Changed
+
+- **BREAKING**: `auth.require_session` now defaults to `true` (was `false`). Add `auth.require_session = false` for dev environments.
+- **BREAKING**: `NatsClient::connect()` now accepts `require_tls: bool` parameter. If `nats_tls=true` and URL is `nats://`, auto-upgrades to `tls://`.
+- Storage `RetryLayer` now uses exponential backoff factor (2.0x) in addition to existing jitter.
+- Scheduler backoff adds ±25% jitter to prevent thundering herd on retries.
+- Auto-unsync interval task wired into daemon lifecycle (after session cleanup).
+
+### Fixed
+
+- **Credential file permissions**: TOTP credentials, WebAuthn credentials, session tokens, device registry, and state cache now enforce `chmod 0o600` on write (was umask-dependent).
+- **NATS TLS enforcement**: `nats_tls` config option was defined but silently ignored. Now wired into `connect()` with URL scheme upgrade.
+- CLI uses config bucket as default push prefix instead of filename.
+- NATS rel_path normalization for cross-host state cache lookup.
+
+### Security
+
+- 5 credential write paths now enforce restrictive file permissions (`0o600`).
+- NATS connections without TLS log explicit plaintext warning.
+- Session authentication required by default for all gRPC calls.
+
+---
+
+## [0.9.3] - 2026-03-20
+
+### Added
+
+- iOS FileProvider: build info section, TestFlight compliance, QR enrollment view.
+- Auth credential broker for zero-touch device enrollment.
+
+### Fixed
+
+- FileProvider: EDEADLK hydration deadlock, cbindgen exports, ATS exceptions.
+- iOS: QR enrollment + encryption + deep links.
+
+---
+
+## [0.9.0 – 0.9.2] - 2026-03-10 – 2026-03-18
+
+### Added
+
+- Read-write FUSE support: write, create, unlink via SeaweedFS.
+- FastCDC chunking for FUSE writes.
+- NATS publish on FUSE write + index-first auto-pull.
+- Transparent `.tc` suffix for FUSE userspace.
+- FUSE directory ops: mkdir, rename, rmdir.
+- Vector clock conflict detection in FUSE writes.
+- FUSE3 as default mount backend (NFS as fallback).
+
+### Fixed
+
+- Orphaned index entries on skipped uploads.
+- NFS: panic detection, timeout handling, in-process mount, sudo on Linux.
+- Watcher: skip directories in push path.
+- NATS: stream subject filter updates via `create_or_update_stream`.
+- VFS: JSON v2 manifest parsing in hydration path.
+- Flake: disable stale Attic cache.
+
+### Changed
+
+- Retired legacy FUSE crates (removed 11,418 LOC).
+
+---
+
+## [0.6.0-dev] - Unreleased (pre-0.9.0 development)
 
 ### Added
 
