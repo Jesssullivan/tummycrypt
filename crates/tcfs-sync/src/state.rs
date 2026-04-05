@@ -257,13 +257,27 @@ impl StateCache {
         self.entries.is_empty()
     }
 
-    /// Find a state entry by its remote path suffix (for NATS event lookups).
+    /// Find a state entry by relative path (for NATS auto-pull lookups).
+    ///
+    /// Searches cache keys (canonical local paths) by suffix match, then
+    /// falls back to remote_path matching. Cache keys are absolute paths
+    /// like `/home/jess/tcfs/dir/file.txt` — matching the suffix against
+    /// the normalized rel_path (`dir/file.txt`) handles cross-host home
+    /// directory differences.
     pub fn get_by_rel_path(&self, rel_path: &str) -> Option<(&str, &SyncState)> {
+        let normalized = rel_path.trim_start_matches('/');
+        // Primary: match cache keys (canonical local paths) by suffix
         self.entries
             .iter()
-            .find(|(_, state)| {
-                state.remote_path.ends_with(&format!("/{}", rel_path))
-                    || state.remote_path == rel_path
+            .find(|(key, _)| {
+                key.ends_with(&format!("/{}", normalized)) || *key == normalized
+            })
+            // Fallback: match remote_path (manifest path) for backward compat
+            .or_else(|| {
+                self.entries.iter().find(|(_, state)| {
+                    state.remote_path.ends_with(&format!("/{}", normalized))
+                        || state.remote_path == normalized
+                })
             })
             .map(|(k, v)| (k.as_str(), v))
     }

@@ -5,7 +5,7 @@ use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tcfs_core::config::TcfsConfig;
 use tcfs_sync::conflict::ConflictResolver;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use tcfs_crypto::MasterKey;
 
@@ -1127,6 +1127,11 @@ async fn do_auto_download(
                         },
                     );
                     let _ = cache.flush();
+                    debug!(
+                        key = %local_path.display(),
+                        hash = %manifest.file_hash,
+                        "auto-pull: state cache updated with remote metadata"
+                    );
                 }
                 Err(e) => {
                     warn!(
