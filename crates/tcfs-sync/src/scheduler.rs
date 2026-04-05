@@ -11,6 +11,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Mutex};
@@ -124,6 +125,12 @@ pub struct SyncScheduler {
     /// Channel for submitting tasks from outside the run loop.
     submit_tx: mpsc::Sender<SyncTask>,
     submit_rx: Mutex<mpsc::Receiver<SyncTask>>,
+    /// Number of currently active (in-flight) tasks.
+    active_count: std::sync::Arc<AtomicUsize>,
+    /// Total tasks completed successfully.
+    completed_count: std::sync::Arc<AtomicUsize>,
+    /// Total tasks that failed after max retries.
+    failed_count: std::sync::Arc<AtomicUsize>,
 }
 
 impl SyncScheduler {
@@ -135,6 +142,9 @@ impl SyncScheduler {
             config,
             submit_tx,
             submit_rx: Mutex::new(submit_rx),
+            active_count: std::sync::Arc::new(AtomicUsize::new(0)),
+            completed_count: std::sync::Arc::new(AtomicUsize::new(0)),
+            failed_count: std::sync::Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -210,33 +220,56 @@ impl SyncScheduler {
                         "dispatching task"
                     );
 
+                    let active = self.active_count.clone();
+                    let completed = self.completed_count.clone();
+                    let failed = self.failed_count.clone();
+
+                    active.fetch_add(1, AtomicOrdering::Relaxed);
+
                     let fut = handler(task.clone());
                     tokio::spawn(async move {
                         let result = fut.await;
                         drop(permit); // release concurrency slot
+                        active.fetch_sub(1, AtomicOrdering::Relaxed);
 
-                        if let Err(e) = result {
-                            if task.retries < max_retries {
-                                let backoff = base_backoff * 2u32.saturating_pow(task.retries);
-                                warn!(
-                                    path = %task.path.display(),
-                                    op = ?task.op,
-                                    retry = task.retries + 1,
-                                    backoff_ms = backoff.as_millis(),
-                                    error = %e,
-                                    "task failed, scheduling retry"
-                                );
-                                tokio::time::sleep(backoff).await;
-                                let mut retry = task;
-                                retry.retries += 1;
-                                let _ = submit_tx.send(retry).await;
-                            } else {
-                                warn!(
-                                    path = %task.path.display(),
-                                    op = ?task.op,
-                                    error = %e,
-                                    "task failed after max retries, dropping"
-                                );
+                        match result {
+                            Ok(()) => {
+                                completed.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                            Err(e) => {
+                                if task.retries < max_retries {
+                                    // Exponential backoff with jitter (±25%)
+                                    let base = base_backoff * 2u32.saturating_pow(task.retries);
+                                    let jitter_range = base.as_millis() as u64 / 4;
+                                    let jitter = if jitter_range > 0 {
+                                        let seed = task.path.to_string_lossy().len() as u64
+                                            ^ task.retries as u64;
+                                        Duration::from_millis(seed % jitter_range)
+                                    } else {
+                                        Duration::ZERO
+                                    };
+                                    let backoff = base + jitter;
+                                    warn!(
+                                        path = %task.path.display(),
+                                        op = ?task.op,
+                                        retry = task.retries + 1,
+                                        backoff_ms = backoff.as_millis(),
+                                        error = %e,
+                                        "task failed, scheduling retry"
+                                    );
+                                    tokio::time::sleep(backoff).await;
+                                    let mut retry = task;
+                                    retry.retries += 1;
+                                    let _ = submit_tx.send(retry).await;
+                                } else {
+                                    failed.fetch_add(1, AtomicOrdering::Relaxed);
+                                    warn!(
+                                        path = %task.path.display(),
+                                        op = ?task.op,
+                                        error = %e,
+                                        "task failed after max retries, dropping"
+                                    );
+                                }
                             }
                         }
                     });
@@ -258,9 +291,29 @@ impl SyncScheduler {
         }
     }
 
-    /// Current number of pending tasks.
+    /// Current number of pending tasks in the queue.
     pub async fn pending(&self) -> usize {
         self.queue.lock().await.len()
+    }
+
+    /// Number of currently active (in-flight) tasks.
+    pub fn active(&self) -> usize {
+        self.active_count.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Total tasks completed successfully since scheduler start.
+    pub fn completed(&self) -> usize {
+        self.completed_count.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Total tasks that failed after max retries.
+    pub fn failed(&self) -> usize {
+        self.failed_count.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Scheduler configuration (for diagnostics reporting).
+    pub fn config(&self) -> &SchedulerConfig {
+        &self.config
     }
 }
 

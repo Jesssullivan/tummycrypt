@@ -34,6 +34,7 @@ pub fn build_operator(cfg: &StorageConfig) -> Result<Operator> {
         .layer(
             opendal::layers::RetryLayer::new()
                 .with_max_times(5)
+                .with_factor(2.0)
                 .with_jitter(),
         )
         .finish();
