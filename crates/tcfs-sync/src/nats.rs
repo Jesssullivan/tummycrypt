@@ -199,11 +199,30 @@ mod inner {
 
     impl NatsClient {
         /// Connect to NATS and return a client with JetStream enabled.
-        pub async fn connect(url: &str) -> Result<Self> {
-            let client = async_nats::connect(url)
+        ///
+        /// If `require_tls` is true and the URL uses `nats://`, it is upgraded to `tls://`.
+        pub async fn connect(url: &str, require_tls: bool) -> Result<Self> {
+            let effective_url = if require_tls && url.starts_with("nats://") {
+                let upgraded = url.replacen("nats://", "tls://", 1);
+                warn!(
+                    original = url,
+                    upgraded = %upgraded,
+                    "NATS: upgrading to TLS (nats_tls=true)"
+                );
+                upgraded
+            } else {
+                if !require_tls && !url.starts_with("tls://") {
+                    warn!(
+                        url,
+                        "NATS: connecting without TLS — credentials transmitted in plaintext"
+                    );
+                }
+                url.to_string()
+            };
+            let client = async_nats::connect(&effective_url)
                 .await
-                .map_err(|e| anyhow::anyhow!("connecting to NATS at {url}: {e}"))?;
-            info!("NATS: connected to {url}");
+                .map_err(|e| anyhow::anyhow!("connecting to NATS at {effective_url}: {e}"))?;
+            info!("NATS: connected to {effective_url}");
             let js = jetstream::new(client);
             Ok(NatsClient { js })
         }
