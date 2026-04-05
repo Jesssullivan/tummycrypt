@@ -595,9 +595,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let result = {
             let mut cache = state_cache.lock().await;
             let mk_guard = self.master_key.lock().await;
-            let enc_ctx = mk_guard.as_ref().map(|mk| tcfs_sync::engine::EncryptionContext {
-                master_key: mk.clone(),
-            });
+            let enc_ctx = mk_guard
+                .as_ref()
+                .map(|mk| tcfs_sync::engine::EncryptionContext {
+                    master_key: mk.clone(),
+                });
             tcfs_sync::engine::upload_file_with_device(
                 &op,
                 &local_path,
@@ -897,6 +899,43 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 stub_path: String::new(),
                 error: format!("path not in sync state: {}", req.path),
             }));
+        }
+
+        // Dirty-child safety check: if this is a directory, verify no children
+        // have unsynced local modifications before removing from state cache.
+        if path.is_dir() && !req.force {
+            let children = cache.children_with_prefix(&path);
+            let mut dirty_paths = Vec::new();
+            for (child_key, _child_state) in &children {
+                let child_path = std::path::Path::new(child_key);
+                if child_path.exists() {
+                    if let Ok(Some(reason)) = cache.needs_sync(child_path) {
+                        dirty_paths.push(format!("{}: {reason}", child_key));
+                    }
+                }
+            }
+            if !dirty_paths.is_empty() {
+                let count = dirty_paths.len();
+                let detail = dirty_paths
+                    .into_iter()
+                    .take(10)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Ok(tonic::Response::new(UnsyncResponse {
+                    success: false,
+                    stub_path: String::new(),
+                    error: format!(
+                        "{count} dirty child(ren) with unsynced changes (use force=true to override): {detail}"
+                    ),
+                }));
+            }
+
+            // Remove all children from state cache too
+            let child_keys: Vec<String> = children.into_iter().map(|(k, _)| k).collect();
+            for child_key in &child_keys {
+                let child_path = std::path::PathBuf::from(child_key);
+                cache.remove(&child_path);
+            }
         }
 
         cache.remove(&path);
