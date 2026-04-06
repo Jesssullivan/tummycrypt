@@ -49,7 +49,8 @@ pub struct SopsFile {
 
 impl SopsFile {
     pub fn parse(yaml_str: &str) -> Result<Self> {
-        let data: serde_norway::Value = serde_norway::from_str(yaml_str).context("parsing SOPS YAML")?;
+        let data: serde_norway::Value =
+            serde_norway::from_str(yaml_str).context("parsing SOPS YAML")?;
 
         let age_enc = extract_age_enc(&data)?;
 

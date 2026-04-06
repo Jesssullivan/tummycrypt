@@ -269,9 +269,7 @@ impl StateCache {
         // Primary: match cache keys (canonical local paths) by suffix
         self.entries
             .iter()
-            .find(|(key, _)| {
-                key.ends_with(&format!("/{}", normalized)) || *key == normalized
-            })
+            .find(|(key, _)| key.ends_with(&format!("/{}", normalized)) || *key == normalized)
             // Fallback: match remote_path (manifest path) for backward compat
             .or_else(|| {
                 self.entries.iter().find(|(_, state)| {

@@ -52,6 +52,33 @@ pub fn mnemonic_to_master_key(words: &str) -> anyhow::Result<MasterKey> {
     derive_master_key(&SecretString::from(words.to_string()), &salt, &params)
 }
 
+/// Derive a master key using SHA-256 (legacy crush-dots compatibility).
+pub fn sha256_master_key(passphrase: &str) -> anyhow::Result<MasterKey> {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(passphrase.as_bytes());
+    let mut key = [0u8; crate::KEY_SIZE];
+    key.copy_from_slice(&hash);
+    Ok(MasterKey::from_bytes(key))
+}
+
+/// Derive master key using the specified method.
+/// "argon2id" -> BIP-39 validated + Argon2id KDF (recommended)
+/// "sha256" -> SHA-256 hash (legacy crush-dots compat)
+pub fn derive_from_passphrase(passphrase: &str, method: &str) -> anyhow::Result<MasterKey> {
+    match method {
+        "sha256" => sha256_master_key(passphrase),
+        _ => {
+            if passphrase.split_whitespace().count() >= 12 {
+                mnemonic_to_master_key(passphrase)
+            } else {
+                let salt: [u8; 16] = *b"tcfs-recovery-v1";
+                let params = KdfParams::default();
+                derive_master_key(&SecretString::from(passphrase.to_string()), &salt, &params)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +108,22 @@ mod tests {
     fn test_invalid_mnemonic() {
         let result = mnemonic_to_master_key("not a valid mnemonic at all");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sha256_master_key() {
+        use sha2::{Digest, Sha256};
+        let passphrase = "test passphrase";
+        let key = sha256_master_key(passphrase).unwrap();
+        let expected = Sha256::digest(passphrase.as_bytes());
+        assert_eq!(key.as_bytes(), expected.as_slice());
+    }
+
+    #[test]
+    fn test_derive_from_passphrase_sha256() {
+        let key = derive_from_passphrase("test", "sha256").unwrap();
+        let direct = sha256_master_key("test").unwrap();
+        assert_eq!(key.as_bytes(), direct.as_bytes());
     }
 
     #[test]
