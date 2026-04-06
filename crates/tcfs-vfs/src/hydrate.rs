@@ -77,15 +77,29 @@ pub async fn fetch_content(
     let prefix = remote_prefix.trim_end_matches('/');
     let mut assembled = Vec::new();
 
-    // Compute file_id_bytes for AEAD decryption (same derivation as encrypt path)
-    let file_id_bytes: Option<[u8; 32]> = file_key.as_ref().map(|_| {
-        // file_id is derived from the manifest hash (last component of manifest_path)
-        let manifest_hash = manifest_path.rsplit('/').next().unwrap_or(manifest_path);
-        let h = tcfs_chunks::hash_bytes(manifest_hash.as_bytes());
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(h.as_bytes());
-        arr
-    });
+    // file_id for AEAD = BLAKE3(plaintext).as_bytes() (raw 32 bytes).
+    // The manifest stores file_hash as hex(BLAKE3(plaintext)). We decode
+    // the hex back to raw bytes to match what encrypt_chunk used.
+    let file_id_bytes: Option<[u8; 32]> = if file_key.is_some() {
+        let parsed: Option<String> = serde_json::from_str::<serde_json::Value>(&manifest_str)
+            .ok()
+            .and_then(|v| v.get("file_hash").and_then(|h| h.as_str().map(String::from)));
+        parsed.and_then(|hex_hash| {
+            let raw: Vec<u8> = (0..hex_hash.len())
+                .step_by(2)
+                .filter_map(|i| u8::from_str_radix(&hex_hash[i..i+2], 16).ok())
+                .collect();
+            if raw.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&raw);
+                Some(arr)
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
 
     for (i, hash) in chunk_hashes.iter().enumerate() {
         let chunk_key = format!("{}/chunks/{}", prefix, hash);
