@@ -253,6 +253,10 @@ pub struct CryptoConfig {
     pub master_key_file: Option<PathBuf>,
     /// Path to the device identity file
     pub device_identity: Option<PathBuf>,
+    /// Path to a passphrase file — if set, daemon derives key on startup (auto-unlock)
+    pub passphrase_file: Option<PathBuf>,
+    /// Key derivation method: "argon2id" (default) or "sha256" (legacy crush-dots compat)
+    pub key_derivation: String,
 }
 
 impl Default for CryptoConfig {
@@ -264,6 +268,8 @@ impl Default for CryptoConfig {
             argon2_parallelism: 4,
             master_key_file: None,
             device_identity: None,
+            passphrase_file: None,
+            key_derivation: "argon2id".into(),
         }
     }
 }
@@ -301,8 +307,15 @@ impl Default for SopsConfig {
 
 impl Default for DaemonConfig {
     fn default() -> Self {
+        let socket = std::env::var("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                PathBuf::from(home).join(".local/state")
+            })
+            .join("tcfsd/tcfsd.sock");
         Self {
-            socket: PathBuf::from("/run/tcfsd/tcfsd.sock"),
+            socket,
             fileprovider_socket: None,
             listen: None,
             metrics_addr: Some("127.0.0.1:9100".into()),
@@ -423,7 +436,15 @@ argon2_parallelism = 8
     fn test_parse_defaults() {
         let config: TcfsConfig = toml::from_str("").unwrap();
 
-        assert_eq!(config.daemon.socket, PathBuf::from("/run/tcfsd/tcfsd.sock"));
+        assert!(
+            config
+                .daemon
+                .socket
+                .to_string_lossy()
+                .ends_with("tcfsd/tcfsd.sock"),
+            "socket path should end with tcfsd/tcfsd.sock, got: {}",
+            config.daemon.socket.display()
+        );
         assert_eq!(config.daemon.log_level, "info");
         assert_eq!(config.storage.endpoint, "http://localhost:8333");
         assert!(!config.storage.enforce_tls);

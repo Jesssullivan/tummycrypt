@@ -15,6 +15,9 @@ use crate::grpc::TcfsDaemonImpl;
 pub async fn run(config: TcfsConfig) -> Result<()> {
     info!("daemon starting");
 
+    // Ensure all required directories exist before anything else
+    ensure_dirs(&config);
+
     // ── Device identity ──────────────────────────────────────────────────
     let device_name = config
         .sync
@@ -95,7 +98,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
     // ── Load master key for E2E encryption ─────────────────────────────
     let master_key: Option<MasterKey> = if config.crypto.enabled {
-        if let Some(ref key_path) = config.crypto.master_key_file {
+        // Try master_key_file first
+        let from_file = if let Some(ref key_path) = config.crypto.master_key_file {
             match std::fs::read(key_path) {
                 Ok(bytes) if bytes.len() == tcfs_crypto::KEY_SIZE => {
                     let mut key_bytes = [0u8; tcfs_crypto::KEY_SIZE];
@@ -108,20 +112,61 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         path = %key_path.display(),
                         size = bytes.len(),
                         expected = tcfs_crypto::KEY_SIZE,
-                        "master key file has wrong size, encryption disabled"
+                        "master key file has wrong size"
                     );
                     None
                 }
                 Err(e) => {
                     warn!(
                         path = %key_path.display(),
-                        "failed to read master key file: {e} (encryption disabled)"
+                        "failed to read master key file: {e}"
                     );
                     None
                 }
             }
         } else {
-            warn!("crypto.enabled = true but no master_key_file configured");
+            None
+        };
+
+        // Fallback: derive from passphrase_file (auto-unlock)
+        if from_file.is_some() {
+            from_file
+        } else if let Some(ref pf) = config.crypto.passphrase_file {
+            match std::fs::read_to_string(pf) {
+                Ok(passphrase) => {
+                    match tcfs_crypto::recovery::derive_from_passphrase(
+                        passphrase.trim(),
+                        &config.crypto.key_derivation,
+                    ) {
+                        Ok(mk) => {
+                            info!(
+                                path = %pf.display(),
+                                method = %config.crypto.key_derivation,
+                                "master key derived from passphrase file (auto-unlock)"
+                            );
+                            Some(mk)
+                        }
+                        Err(e) => {
+                            warn!(
+                                path = %pf.display(),
+                                "passphrase key derivation failed: {e}"
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        path = %pf.display(),
+                        "failed to read passphrase file: {e}"
+                    );
+                    None
+                }
+            }
+        } else {
+            if config.crypto.master_key_file.is_none() {
+                warn!("crypto.enabled = true but no master_key_file or passphrase_file configured");
+            }
             None
         }
     } else {
@@ -1172,6 +1217,44 @@ fn notify_stopping() {
         if let Ok(sock) = UnixDatagram::unbound() {
             let _ = sock.send_to(b"STOPPING=1\n", &socket);
             tracing::debug!(notify_socket = %socket, "sent systemd STOPPING=1");
+        }
+    }
+}
+
+/// Create directories needed by the daemon at startup.
+fn ensure_dirs(config: &TcfsConfig) {
+    // Socket parent directory
+    if let Some(parent) = config.daemon.socket.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(path = %parent.display(), "failed to create socket dir: {e}");
+        }
+    }
+
+    // State cache parent directory
+    if let Some(parent) = config.sync.state_db.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(path = %parent.display(), "failed to create state dir: {e}");
+        }
+    }
+
+    // FUSE cache directory
+    if let Err(e) = std::fs::create_dir_all(&config.fuse.cache_dir) {
+        warn!(path = %config.fuse.cache_dir.display(), "failed to create cache dir: {e}");
+    }
+
+    // sync_root (mount target)
+    if let Some(ref root) = config.sync.sync_root {
+        if let Err(e) = std::fs::create_dir_all(root) {
+            warn!(path = %root.display(), "failed to create sync_root dir: {e}");
+        }
+    }
+
+    // FileProvider App Group Container directory (macOS)
+    if let Some(ref fp_socket) = config.daemon.fileprovider_socket {
+        if let Some(parent) = fp_socket.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(path = %parent.display(), "failed to create FileProvider socket dir: {e}");
+            }
         }
     }
 }

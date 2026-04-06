@@ -246,6 +246,9 @@ enum AuthAction {
         /// Path to master key file (default: ~/.config/tcfs/master.key)
         #[arg(long)]
         key_file: Option<PathBuf>,
+        /// Path to a passphrase file (derives key via configured key_derivation method)
+        #[arg(long, conflicts_with = "key_file")]
+        passphrase_file: Option<PathBuf>,
     },
     /// Lock the encryption session (clear master key from daemon memory)
     Lock,
@@ -420,8 +423,11 @@ async fn main() -> Result<()> {
         Commands::Auth { action } => {
             #[cfg(unix)]
             match action {
-                AuthAction::Unlock { key_file } => {
-                    cmd_auth_unlock(&config, key_file.as_deref()).await
+                AuthAction::Unlock {
+                    key_file,
+                    passphrase_file,
+                } => {
+                    cmd_auth_unlock(&config, key_file.as_deref(), passphrase_file.as_deref()).await
                 }
                 AuthAction::Lock => cmd_auth_lock(&config).await,
                 AuthAction::Status => cmd_auth_status(&config).await,
@@ -492,22 +498,66 @@ async fn load_config(path: &Path) -> Result<tcfs_core::config::TcfsConfig> {
 
 // ── Storage operator from environment credentials ─────────────────────────────
 
+/// Read a credential from a `*_FILE` env var (the var points to a file path).
+fn read_credential_file(env_var: &str) -> Result<String, std::env::VarError> {
+    let path = std::env::var(env_var)?;
+    std::fs::read_to_string(path.trim())
+        .map(|s| s.trim().to_string())
+        .map_err(|_| std::env::VarError::NotPresent)
+}
+
+/// Read a credential from a SOPS-decrypted JSON or KEY=VALUE file.
+fn read_sops_credential(path: &std::path::Path, key: &str) -> Result<String> {
+    let content = std::fs::read_to_string(path)?;
+    if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
+        if let Some(val) = map.get(key) {
+            return Ok(val.clone());
+        }
+    }
+    for line in content.lines() {
+        if let Some(val) = line.strip_prefix(&format!("{}=", key)) {
+            return Ok(val.trim().to_string());
+        }
+    }
+    anyhow::bail!("key '{}' not found in {}", key, path.display())
+}
+
 /// Build an OpenDAL operator using credentials from environment variables.
 ///
-/// Reads AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (standard S3 env vars).
-/// These override any config file credentials for direct CLI use.
+/// Discovery chain: direct env var -> *_FILE env var -> config credentials_file (SOPS)
 fn build_operator_from_env(config: &tcfs_core::config::TcfsConfig) -> Result<opendal::Operator> {
     let access_key = std::env::var("AWS_ACCESS_KEY_ID")
         .or_else(|_| std::env::var("TCFS_ACCESS_KEY_ID"))
+        .or_else(|_| read_credential_file("TCFS_S3_ACCESS_FILE"))
+        .or_else(|_| read_credential_file("AWS_ACCESS_KEY_ID_FILE"))
+        .or_else(|_| {
+            config
+                .storage
+                .credentials_file
+                .as_ref()
+                .and_then(|p| read_sops_credential(p, "access_key_id").ok())
+                .ok_or(std::env::VarError::NotPresent)
+        })
         .context(
             "S3 credentials not set\n\
-             Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.\n\
+             Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables,\n\
+             or use *_FILE variants pointing to credential files.\n\
              Example:\n\
              \texport AWS_ACCESS_KEY_ID=your-key\n\
              \texport AWS_SECRET_ACCESS_KEY=your-secret",
         )?;
     let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
         .or_else(|_| std::env::var("TCFS_SECRET_ACCESS_KEY"))
+        .or_else(|_| read_credential_file("TCFS_S3_SECRET_FILE"))
+        .or_else(|_| read_credential_file("AWS_SECRET_ACCESS_KEY_FILE"))
+        .or_else(|_| {
+            config
+                .storage
+                .credentials_file
+                .as_ref()
+                .and_then(|p| read_sops_credential(p, "secret_access_key").ok())
+                .ok_or(std::env::VarError::NotPresent)
+        })
         .context("AWS_SECRET_ACCESS_KEY environment variable not set")?;
 
     tcfs_storage::operator::build_from_core_config(&config.storage, &access_key, &secret_key)
@@ -1770,28 +1820,43 @@ fn cmd_device_status() -> Result<()> {
 async fn cmd_auth_unlock(
     config: &tcfs_core::config::TcfsConfig,
     key_file: Option<&Path>,
+    passphrase_file: Option<&Path>,
 ) -> Result<()> {
-    // Resolve master key file path
-    let key_path = key_file
-        .map(|p| p.to_path_buf())
-        .or_else(|| config.crypto.master_key_file.clone())
-        .unwrap_or_else(|| {
-            tcfs_secrets::device::default_registry_path()
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("master.key")
-        });
+    let key_bytes = if let Some(pf) = passphrase_file {
+        // Derive key from passphrase file using configured key_derivation method
+        let passphrase = std::fs::read_to_string(pf)
+            .with_context(|| format!("reading passphrase file: {}", pf.display()))?;
+        let passphrase = passphrase.trim();
+        let mk = tcfs_crypto::recovery::derive_from_passphrase(
+            passphrase,
+            &config.crypto.key_derivation,
+        )
+        .context("deriving key from passphrase")?;
+        mk.as_bytes().to_vec()
+    } else {
+        // Resolve master key file path
+        let key_path = key_file
+            .map(|p| p.to_path_buf())
+            .or_else(|| config.crypto.master_key_file.clone())
+            .unwrap_or_else(|| {
+                tcfs_secrets::device::default_registry_path()
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("master.key")
+            });
 
-    let key_bytes = std::fs::read(&key_path)
-        .with_context(|| format!("reading master key: {}", key_path.display()))?;
+        let bytes = std::fs::read(&key_path)
+            .with_context(|| format!("reading master key: {}", key_path.display()))?;
 
-    if key_bytes.len() != tcfs_crypto::KEY_SIZE {
-        anyhow::bail!(
-            "master key file has wrong size: {} bytes (expected {})",
-            key_bytes.len(),
-            tcfs_crypto::KEY_SIZE
-        );
-    }
+        if bytes.len() != tcfs_crypto::KEY_SIZE {
+            anyhow::bail!(
+                "master key file has wrong size: {} bytes (expected {})",
+                bytes.len(),
+                tcfs_crypto::KEY_SIZE
+            );
+        }
+        bytes
+    };
 
     // Send to daemon via gRPC
     let mut client = connect_daemon(&config.daemon.socket).await?;
