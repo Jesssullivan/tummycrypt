@@ -167,6 +167,10 @@ pub struct StorageConfig {
     pub region: String,
     /// Default bucket name
     pub bucket: String,
+    /// Remote prefix within the bucket for index/manifest/chunk objects.
+    /// Used by CLI push/pull and FUSE mount. Defaults to bucket name if unset.
+    #[serde(default)]
+    pub remote_prefix: Option<String>,
     /// SOPS credential file path
     pub credentials_file: Option<PathBuf>,
     /// Enforce HTTPS for S3 connections (warn/error on HTTP endpoints)
@@ -331,6 +335,7 @@ impl Default for StorageConfig {
             endpoint: "http://localhost:8333".into(),
             region: "us-east-1".into(),
             bucket: "tcfs".into(),
+            remote_prefix: None,
             credentials_file: None,
             enforce_tls: false,
             ca_cert_path: None,
