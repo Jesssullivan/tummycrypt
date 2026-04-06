@@ -59,6 +59,12 @@ pub async fn fetch_content(
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect();
             let fk = try_unwrap_file_key(&parsed, master_key);
+            debug!(
+                master_key_present = master_key.is_some(),
+                file_key_unwrapped = fk.is_some(),
+                has_encrypted_file_key = parsed.get("encrypted_file_key").is_some(),
+                "hydration crypto state"
+            );
             (hashes, fk)
         } else {
             // Legacy plaintext: one chunk hash per line, no encryption
@@ -85,6 +91,7 @@ pub async fn fetch_content(
             .ok()
             .and_then(|v| v.get("file_hash").and_then(|h| h.as_str().map(String::from)));
         parsed.and_then(|hex_hash| {
+            debug!(file_hash_hex_len = hex_hash.len(), "parsing file_id for decryption");
             let raw: Vec<u8> = (0..hex_hash.len())
                 .step_by(2)
                 .filter_map(|i| u8::from_str_radix(&hex_hash[i..i+2], 16).ok())
