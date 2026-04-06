@@ -1437,7 +1437,30 @@ async fn cmd_mount(
             allow_other: false,
             on_flush: None,
             device_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "cli".to_string()),
-            master_key: None, // CLI mount doesn't support encryption yet
+            // Load master key from file for FUSE read decryption.
+            // The mount process is separate from the daemon, so it can't
+            // share the daemon's Arc<Mutex<MasterKey>>. Read the key file directly.
+            master_key: {
+                let mk_path = if config.crypto.enabled {
+                    config.crypto.master_key_file.as_ref()
+                } else {
+                    None
+                };
+                if let Some(path) = mk_path {
+                    match std::fs::read(path) {
+                        Ok(bytes) if bytes.len() == 32 => {
+                            let mut key_bytes = [0u8; 32];
+                            key_bytes.copy_from_slice(&bytes);
+                            Some(std::sync::Arc::new(tokio::sync::Mutex::new(
+                                Some(tcfs_crypto::MasterKey::from_bytes(key_bytes))
+                            )))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            },
         })
         .await
         .context("FUSE mount failed")
