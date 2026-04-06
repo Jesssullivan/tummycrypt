@@ -1437,6 +1437,7 @@ async fn cmd_mount(
             allow_other: false,
             on_flush: None,
             device_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "cli".to_string()),
+            master_key: None, // CLI mount doesn't support encryption yet
         })
         .await
         .context("FUSE mount failed")

@@ -45,3 +45,6 @@ pub use stub::{is_stub_path, real_to_stub_name, stub_to_real_name, IndexEntry, S
 
 // Hydration
 pub use hydrate::{fetch_cached, fetch_content};
+
+// Shared master key type for daemon → VFS propagation
+pub type SharedMasterKey = std::sync::Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>>;
