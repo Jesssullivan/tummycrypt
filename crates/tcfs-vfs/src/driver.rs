@@ -84,8 +84,10 @@ pub struct TcfsVfs {
     device_id: String,
     /// Per-file vector clocks for conflict detection
     vclocks: Arc<Mutex<HashMap<String, VectorClock>>>,
-    /// Master key for E2E chunk encryption (None = plaintext mode)
-    master_key: Option<tcfs_crypto::MasterKey>,
+    /// Master key for E2E chunk encryption (None = plaintext mode).
+    /// Shared Arc allows the daemon to inject the key after FUSE mount starts
+    /// (unlock happens via gRPC after daemon is already serving).
+    master_key: Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>>,
 }
 
 impl TcfsVfs {
@@ -121,8 +123,15 @@ impl TcfsVfs {
             on_flush: None,
             device_id,
             vclocks: Arc::new(Mutex::new(HashMap::new())),
-            master_key: None,
+            master_key: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    /// Create a VFS with a shared master key mutex (for daemon integration).
+    /// The daemon can inject the key after mount via the shared Arc.
+    pub fn with_shared_master_key(mut self, mk: Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>>) -> Self {
+        self.master_key = mk;
+        self
     }
 
     /// Set a callback invoked after each flush_to_remote.
@@ -133,8 +142,10 @@ impl TcfsVfs {
 
     /// Set the master key for E2E chunk encryption.
     /// When set, flush_to_remote encrypts chunks with XChaCha20-Poly1305.
-    pub fn set_master_key(&mut self, key: tcfs_crypto::MasterKey) {
-        self.master_key = Some(key);
+    pub fn set_master_key(&self, key: tcfs_crypto::MasterKey) {
+        // Use blocking lock since this is called from sync context
+        let mut guard = self.master_key.blocking_lock();
+        *guard = Some(key);
     }
 
     /// Access the underlying disk cache (for stats, inspection).
@@ -158,10 +169,14 @@ impl TcfsVfs {
         let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(data));
 
         // 2. Generate per-file encryption key if master key is available
-        let file_key = self
-            .master_key
-            .as_ref()
-            .map(|_| tcfs_crypto::generate_file_key());
+        let mk_guard = self.master_key.lock().await;
+        let has_master_key = mk_guard.is_some();
+        drop(mk_guard);
+        let file_key = if has_master_key {
+            Some(tcfs_crypto::generate_file_key())
+        } else {
+            None
+        };
         let file_id_bytes: [u8; 32] = {
             let h = tcfs_chunks::hash_bytes(data);
             let mut arr = [0u8; 32];
@@ -191,7 +206,8 @@ impl TcfsVfs {
         }
 
         // 4. Wrap file key with master key for manifest storage
-        let encrypted_file_key = match (&self.master_key, &file_key) {
+        let mk_guard = self.master_key.lock().await;
+        let encrypted_file_key = match (mk_guard.as_ref(), &file_key) {
             (Some(mk), Some(fk)) => {
                 let wrapped = tcfs_crypto::wrap_key(mk, fk).context("wrapping file key")?;
                 Some(base64::Engine::encode(
@@ -201,6 +217,7 @@ impl TcfsVfs {
             }
             _ => None,
         };
+        drop(mk_guard);
 
         // 5. Build vector clock and create v2 manifest with conflict metadata
         let mut vclock = {
@@ -554,9 +571,14 @@ impl VirtualFilesystem for TcfsVfs {
 
         debug!(path = %path, manifest = %manifest_path, "hydrating on open");
 
+        // Read master key from shared mutex (may be injected after mount via gRPC unlock)
+        let mk_guard = self.master_key.lock().await;
+        let mk_bytes: Option<[u8; 32]> = mk_guard.as_ref().map(|k| *k.as_bytes());
+        drop(mk_guard);
+
         let data = fetch_cached(
             &self.op, &manifest_path, prefix, &self.disk_cache,
-            self.master_key.as_ref().map(|k| k.as_bytes()),
+            mk_bytes.as_ref(),
         )
             .await
             .with_context(|| format!("hydration failed: {}", path))?;

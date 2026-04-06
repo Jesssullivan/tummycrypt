@@ -504,6 +504,10 @@ pub struct MountConfig {
     pub on_flush: Option<tcfs_vfs::OnFlushCallback>,
     /// Device identifier for vector clock tracking (e.g., hostname)
     pub device_id: String,
+    /// Shared master key for E2E encryption (injected by daemon after gRPC unlock).
+    /// Type-erased: the inner type is `Option<tcfs_crypto::MasterKey>` but tcfs-fuse
+    /// doesn't depend on tcfs-crypto — the VFS handles the actual crypto.
+    pub master_key: Option<tcfs_vfs::SharedMasterKey>,
 }
 
 /// Mount the FUSE filesystem and block until unmounted.
@@ -522,7 +526,12 @@ pub async fn mount(cfg: MountConfig) -> std::io::Result<()> {
     if let Some(cb) = cfg.on_flush {
         vfs.set_on_flush(cb);
     }
-    let vfs = Arc::new(vfs);
+    // Wire shared master key from daemon (injected after gRPC unlock)
+    let vfs = if let Some(mk) = cfg.master_key {
+        Arc::new(vfs.with_shared_master_key(mk))
+    } else {
+        Arc::new(vfs)
+    };
 
     let fs = TcfsFs::new(vfs);
 

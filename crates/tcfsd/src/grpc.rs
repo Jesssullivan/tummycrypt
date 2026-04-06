@@ -378,6 +378,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let flush_device_id = self.device_id.clone();
             let mount_device_id = self.device_id.clone();
             let flush_prefix = prefix.clone();
+            let mount_master_key = self.master_key.clone();
             let on_flush: Option<tcfs_vfs::OnFlushCallback> = Some(std::sync::Arc::new(
                 move |vpath: &str,
                       hash: &str,
@@ -431,6 +432,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     allow_other: false,
                     on_flush,
                     device_id: mount_device_id,
+                    master_key: Some(mount_master_key),
                 })
                 .await
                 {
