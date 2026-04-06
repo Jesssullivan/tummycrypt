@@ -59,7 +59,7 @@ pub async fn fetch_content(
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect();
             let fk = try_unwrap_file_key(&parsed, master_key);
-            debug!(
+            warn!(
                 master_key_present = master_key.is_some(),
                 file_key_unwrapped = fk.is_some(),
                 has_encrypted_file_key = parsed.get("encrypted_file_key").is_some(),
