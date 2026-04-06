@@ -684,10 +684,14 @@ async fn cmd_push(
     let device_id = load_device_id(config);
     let collect_cfg = collect_config_from_sync(config);
 
-    // Default prefix: storage bucket from config (matches daemon behavior).
+    // Default prefix: storage.remote_prefix from config, falling back to bucket.
+    // This must match the FUSE daemon's mount prefix for cross-host visibility.
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| config.storage.bucket.clone());
+        .unwrap_or_else(|| {
+            config.storage.remote_prefix.clone()
+                .unwrap_or_else(|| config.storage.bucket.clone())
+        });
 
     println!(
         "Pushing {} → {}:{} (endpoint: {}{})",
@@ -864,23 +868,18 @@ async fn cmd_pull(
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_else(|| {
-            if is_file_path {
-                // Derive prefix the same way push does: from file_name()
-                std::path::Path::new(manifest_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "tcfs".to_string())
-            } else {
+            if !is_file_path {
+                // Extract prefix from manifest path: "pfx/manifests/hash" → "pfx"
                 manifest_path
                     .rsplit_once("/manifests/")
                     .map(|(pfx, _)| pfx.to_string())
                     .unwrap_or_else(|| {
-                        manifest_path
-                            .split('/')
-                            .next()
-                            .unwrap_or("tcfs")
-                            .to_string()
+                        manifest_path.split('/').next().unwrap_or("data").to_string()
                     })
+            } else {
+                // File path: use config remote_prefix (matches FUSE daemon)
+                config.storage.remote_prefix.clone()
+                    .unwrap_or_else(|| config.storage.bucket.clone())
             }
         });
 

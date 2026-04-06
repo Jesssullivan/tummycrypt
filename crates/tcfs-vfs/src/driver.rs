@@ -554,7 +554,10 @@ impl VirtualFilesystem for TcfsVfs {
 
         debug!(path = %path, manifest = %manifest_path, "hydrating on open");
 
-        let data = fetch_cached(&self.op, &manifest_path, prefix, &self.disk_cache)
+        let data = fetch_cached(
+            &self.op, &manifest_path, prefix, &self.disk_cache,
+            self.master_key.as_ref().map(|k| k.as_bytes()),
+        )
             .await
             .with_context(|| format!("hydration failed: {}", path))?;
 
