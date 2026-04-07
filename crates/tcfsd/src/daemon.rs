@@ -134,14 +134,24 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         } else if let Some(ref pf) = config.crypto.passphrase_file {
             match std::fs::read_to_string(pf) {
                 Ok(passphrase) => {
-                    match tcfs_crypto::recovery::derive_from_passphrase(
-                        passphrase.trim(),
-                        &config.crypto.key_derivation,
-                    ) {
+                    let salt = config
+                        .crypto
+                        .kdf_salt
+                        .as_deref()
+                        .and_then(|s| (0..s.len())
+                            .step_by(2)
+                            .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+                            .collect::<Result<Vec<u8>, _>>()
+                            .ok())
+                        .and_then(|b| <[u8; 16]>::try_from(b).ok())
+                        .unwrap_or_else(|| {
+                            warn!("no kdf_salt configured — generating ephemeral salt (key will differ across restarts!)");
+                            tcfs_crypto::recovery::generate_passphrase_salt()
+                        });
+                    match tcfs_crypto::recovery::derive_from_passphrase(passphrase.trim(), &salt) {
                         Ok(mk) => {
                             info!(
                                 path = %pf.display(),
-                                method = %config.crypto.key_derivation,
                                 "master key derived from passphrase file (auto-unlock)"
                             );
                             Some(mk)
@@ -666,8 +676,24 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
     // Connect to NATS for fleet state sync (non-blocking, best-effort)
     let nats_url = &config.sync.nats_url;
-    if nats_url != "nats://localhost:4222" || std::env::var("TCFS_NATS_URL").is_ok() {
-        let url = std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| nats_url.clone());
+    // Config.toml is authoritative when nats_url is explicitly set.
+    // TCFS_NATS_URL env var only overrides the default (localhost:4222).
+    let is_default = nats_url == "nats://localhost:4222";
+    if !is_default || std::env::var("TCFS_NATS_URL").is_ok() {
+        let url = if is_default {
+            std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| nats_url.clone())
+        } else {
+            if let Ok(ref env_url) = std::env::var("TCFS_NATS_URL") {
+                if env_url != nats_url {
+                    warn!(
+                        config_url = %nats_url,
+                        env_url = %env_url,
+                        "TCFS_NATS_URL env var differs from config — using config value"
+                    );
+                }
+            }
+            nats_url.clone()
+        };
         match tcfs_sync::NatsClient::connect(&url, config.sync.nats_tls).await {
             Ok(nats) => {
                 if let Err(e) = nats.ensure_streams().await {

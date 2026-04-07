@@ -52,31 +52,31 @@ pub fn mnemonic_to_master_key(words: &str) -> anyhow::Result<MasterKey> {
     derive_master_key(&SecretString::from(words.to_string()), &salt, &params)
 }
 
-/// Derive a master key using SHA-256 (legacy crush-dots compatibility).
-pub fn sha256_master_key(passphrase: &str) -> anyhow::Result<MasterKey> {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(passphrase.as_bytes());
-    let mut key = [0u8; crate::KEY_SIZE];
-    key.copy_from_slice(&hash);
-    Ok(MasterKey::from_bytes(key))
+/// Derive master key from a passphrase using Argon2id.
+///
+/// If the passphrase looks like a BIP-39 mnemonic (>= 12 words), it is
+/// validated and derived via the mnemonic path (fixed salt is acceptable
+/// because 256-bit mnemonic entropy prevents brute-force).
+///
+/// For shorter passphrases, a per-vault random salt MUST be provided to
+/// prevent identical passphrases from producing identical keys. Generate
+/// the salt once with `generate_passphrase_salt()` and persist it alongside
+/// the config.
+pub fn derive_from_passphrase(passphrase: &str, salt: &[u8; 16]) -> anyhow::Result<MasterKey> {
+    if passphrase.split_whitespace().count() >= 12 {
+        mnemonic_to_master_key(passphrase)
+    } else {
+        let params = KdfParams::default();
+        derive_master_key(&SecretString::from(passphrase.to_string()), salt, &params)
+    }
 }
 
-/// Derive master key using the specified method.
-/// "argon2id" -> BIP-39 validated + Argon2id KDF (recommended)
-/// "sha256" -> SHA-256 hash (legacy crush-dots compat)
-pub fn derive_from_passphrase(passphrase: &str, method: &str) -> anyhow::Result<MasterKey> {
-    match method {
-        "sha256" => sha256_master_key(passphrase),
-        _ => {
-            if passphrase.split_whitespace().count() >= 12 {
-                mnemonic_to_master_key(passphrase)
-            } else {
-                let salt: [u8; 16] = *b"tcfs-recovery-v1";
-                let params = KdfParams::default();
-                derive_master_key(&SecretString::from(passphrase.to_string()), &salt, &params)
-            }
-        }
-    }
+/// Generate a random 16-byte salt for passphrase-based key derivation.
+/// This salt should be persisted in the config and reused for the same vault.
+pub fn generate_passphrase_salt() -> [u8; 16] {
+    let mut salt = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut salt);
+    salt
 }
 
 #[cfg(test)]
@@ -111,19 +111,23 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256_master_key() {
-        use sha2::{Digest, Sha256};
-        let passphrase = "test passphrase";
-        let key = sha256_master_key(passphrase).unwrap();
-        let expected = Sha256::digest(passphrase.as_bytes());
-        assert_eq!(key.as_bytes(), expected.as_slice());
+    fn test_short_passphrase_uses_salt() {
+        let salt_a: [u8; 16] = *b"salt-aaaaaaaaaa\0";
+        let salt_b: [u8; 16] = *b"salt-bbbbbbbbbb\0";
+        let key_a = derive_from_passphrase("same passphrase", &salt_a).unwrap();
+        let key_b = derive_from_passphrase("same passphrase", &salt_b).unwrap();
+        assert_ne!(
+            key_a.as_bytes(),
+            key_b.as_bytes(),
+            "different salts must produce different keys"
+        );
     }
 
     #[test]
-    fn test_derive_from_passphrase_sha256() {
-        let key = derive_from_passphrase("test", "sha256").unwrap();
-        let direct = sha256_master_key("test").unwrap();
-        assert_eq!(key.as_bytes(), direct.as_bytes());
+    fn test_generate_passphrase_salt() {
+        let s1 = generate_passphrase_salt();
+        let s2 = generate_passphrase_salt();
+        assert_ne!(s1, s2, "salts must be random");
     }
 
     #[test]

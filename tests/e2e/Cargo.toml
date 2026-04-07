@@ -1,0 +1,22 @@
+[package]
+name = "tcfs-e2e"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "E2E integration tests for the tcfs stack"
+
+[dependencies]
+tcfs-core = { path = "../../crates/tcfs-core" }
+tcfs-sync = { path = "../../crates/tcfs-sync", features = ["crypto"] }
+tcfs-vfs = { path = "../../crates/tcfs-vfs" }
+tcfs-crypto = { path = "../../crates/tcfs-crypto" }
+tcfs-storage = { path = "../../crates/tcfs-storage" }
+opendal = { workspace = true }
+async-nats = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
