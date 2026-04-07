@@ -12,11 +12,15 @@ use crate::cache::{cache_key_for_path, DiskCache};
 
 /// Try to extract and unwrap the per-file encryption key from a JSON manifest.
 /// Returns None if the manifest has no encrypted_file_key or decryption fails.
-fn try_unwrap_file_key(manifest_json: &serde_json::Value, master_key: Option<&[u8; 32]>) -> Option<tcfs_crypto::FileKey> {
+fn try_unwrap_file_key(
+    manifest_json: &serde_json::Value,
+    master_key: Option<&[u8; 32]>,
+) -> Option<tcfs_crypto::FileKey> {
     let mk_bytes = master_key?;
     let mk = tcfs_crypto::MasterKey::from_bytes(*mk_bytes);
     let efk_b64 = manifest_json.get("encrypted_file_key")?.as_str()?;
-    let wrapped = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, efk_b64).ok()?;
+    let wrapped =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, efk_b64).ok()?;
     tcfs_crypto::unwrap_key(&mk, &wrapped).ok()
 }
 
@@ -89,12 +93,18 @@ pub async fn fetch_content(
     let file_id_bytes: Option<[u8; 32]> = if file_key.is_some() {
         let parsed: Option<String> = serde_json::from_str::<serde_json::Value>(&manifest_str)
             .ok()
-            .and_then(|v| v.get("file_hash").and_then(|h| h.as_str().map(String::from)));
+            .and_then(|v| {
+                v.get("file_hash")
+                    .and_then(|h| h.as_str().map(String::from))
+            });
         parsed.and_then(|hex_hash| {
-            debug!(file_hash_hex_len = hex_hash.len(), "parsing file_id for decryption");
+            debug!(
+                file_hash_hex_len = hex_hash.len(),
+                "parsing file_id for decryption"
+            );
             let raw: Vec<u8> = (0..hex_hash.len())
                 .step_by(2)
-                .filter_map(|i| u8::from_str_radix(&hex_hash[i..i+2], 16).ok())
+                .filter_map(|i| u8::from_str_radix(&hex_hash[i..i + 2], 16).ok())
                 .collect();
             if raw.len() == 32 {
                 let mut arr = [0u8; 32];

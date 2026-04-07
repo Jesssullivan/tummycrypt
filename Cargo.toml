@@ -19,6 +19,7 @@ members = [
     "crates/tcfs-file-provider",
     "crates/tcfs-dbus",
     "crates/tcfs-auth",
+    "tests/e2e",
 ]
 
 [workspace.package]

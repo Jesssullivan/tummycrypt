@@ -5282,6 +5282,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcfs-e2e"
+version = "0.10.1"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "base64 0.22.1",
+ "futures",
+ "opendal",
+ "serde_json",
+ "tcfs-core",
+ "tcfs-crypto",
+ "tcfs-storage",
+ "tcfs-sync",
+ "tcfs-vfs",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "tcfs-file-provider"
 version = "0.10.1"
 dependencies = [

@@ -259,8 +259,10 @@ pub struct CryptoConfig {
     pub device_identity: Option<PathBuf>,
     /// Path to a passphrase file — if set, daemon derives key on startup (auto-unlock)
     pub passphrase_file: Option<PathBuf>,
-    /// Key derivation method: "argon2id" (default) or "sha256" (legacy crush-dots compat)
-    pub key_derivation: String,
+    /// Hex-encoded 16-byte salt for passphrase-based key derivation.
+    /// Generated once per vault. If unset and passphrase_file is used, a random
+    /// salt is generated and must be persisted by the caller.
+    pub kdf_salt: Option<String>,
 }
 
 impl Default for CryptoConfig {
@@ -273,7 +275,7 @@ impl Default for CryptoConfig {
             master_key_file: None,
             device_identity: None,
             passphrase_file: None,
-            key_derivation: "argon2id".into(),
+            kdf_salt: None,
         }
     }
 }

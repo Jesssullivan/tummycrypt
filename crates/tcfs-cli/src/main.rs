@@ -689,7 +689,10 @@ async fn cmd_push(
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_else(|| {
-            config.storage.remote_prefix.clone()
+            config
+                .storage
+                .remote_prefix
+                .clone()
                 .unwrap_or_else(|| config.storage.bucket.clone())
         });
 
@@ -874,11 +877,18 @@ async fn cmd_pull(
                     .rsplit_once("/manifests/")
                     .map(|(pfx, _)| pfx.to_string())
                     .unwrap_or_else(|| {
-                        manifest_path.split('/').next().unwrap_or("data").to_string()
+                        manifest_path
+                            .split('/')
+                            .next()
+                            .unwrap_or("data")
+                            .to_string()
                     })
             } else {
                 // File path: use config remote_prefix (matches FUSE daemon)
-                config.storage.remote_prefix.clone()
+                config
+                    .storage
+                    .remote_prefix
+                    .clone()
                     .unwrap_or_else(|| config.storage.bucket.clone())
             }
         });
@@ -916,6 +926,24 @@ async fn cmd_pull(
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
+    // Load master key for E2E decryption if configured
+    let master_key = config
+        .crypto
+        .master_key_file
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .filter(|k| k.len() == 32)
+        .map(|bytes| {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            tcfs_crypto::MasterKey::from_bytes(key)
+        });
+    let enc_ctx = master_key
+        .as_ref()
+        .map(|mk| tcfs_sync::engine::EncryptionContext {
+            master_key: mk.clone(),
+        });
+
     let result = tcfs_sync::engine::download_file_with_device(
         &op,
         &resolved_manifest,
@@ -924,7 +952,7 @@ async fn cmd_pull(
         Some(&progress),
         &device_id,
         Some(&mut state),
-        None,
+        enc_ctx.as_ref(),
     )
     .await
     .with_context(|| format!("downloading {}", manifest_path))?;
@@ -1451,9 +1479,9 @@ async fn cmd_mount(
                         Ok(bytes) if bytes.len() == 32 => {
                             let mut key_bytes = [0u8; 32];
                             key_bytes.copy_from_slice(&bytes);
-                            Some(std::sync::Arc::new(tokio::sync::Mutex::new(
-                                Some(tcfs_crypto::MasterKey::from_bytes(key_bytes))
-                            )))
+                            Some(std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+                                tcfs_crypto::MasterKey::from_bytes(key_bytes),
+                            ))))
                         }
                         _ => None,
                     }
@@ -1846,15 +1874,29 @@ async fn cmd_auth_unlock(
     passphrase_file: Option<&Path>,
 ) -> Result<()> {
     let key_bytes = if let Some(pf) = passphrase_file {
-        // Derive key from passphrase file using configured key_derivation method
+        // Derive key from passphrase file using Argon2id with per-vault salt
         let passphrase = std::fs::read_to_string(pf)
             .with_context(|| format!("reading passphrase file: {}", pf.display()))?;
         let passphrase = passphrase.trim();
-        let mk = tcfs_crypto::recovery::derive_from_passphrase(
-            passphrase,
-            &config.crypto.key_derivation,
-        )
-        .context("deriving key from passphrase")?;
+        let salt = config
+            .crypto
+            .kdf_salt
+            .as_deref()
+            .and_then(|s| {
+                (0..s.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+                    .collect::<Result<Vec<u8>, _>>()
+                    .ok()
+            })
+            .and_then(|b| <[u8; 16]>::try_from(b).ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "crypto.kdf_salt not configured — required for passphrase-based key derivation"
+                )
+            })?;
+        let mk = tcfs_crypto::recovery::derive_from_passphrase(passphrase, &salt)
+            .context("deriving key from passphrase")?;
         mk.as_bytes().to_vec()
     } else {
         // Resolve master key file path

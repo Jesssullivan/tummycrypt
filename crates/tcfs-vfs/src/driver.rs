@@ -129,7 +129,10 @@ impl TcfsVfs {
 
     /// Create a VFS with a shared master key mutex (for daemon integration).
     /// The daemon can inject the key after mount via the shared Arc.
-    pub fn with_shared_master_key(mut self, mk: Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>>) -> Self {
+    pub fn with_shared_master_key(
+        mut self,
+        mk: Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>>,
+    ) -> Self {
         self.master_key = mk;
         self
     }
@@ -577,11 +580,14 @@ impl VirtualFilesystem for TcfsVfs {
         drop(mk_guard);
 
         let data = fetch_cached(
-            &self.op, &manifest_path, prefix, &self.disk_cache,
+            &self.op,
+            &manifest_path,
+            prefix,
+            &self.disk_cache,
             mk_bytes.as_ref(),
         )
-            .await
-            .with_context(|| format!("hydration failed: {}", path))?;
+        .await
+        .with_context(|| format!("hydration failed: {}", path))?;
 
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
         self.handles.lock().await.insert(
