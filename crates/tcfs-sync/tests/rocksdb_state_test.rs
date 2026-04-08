@@ -19,6 +19,7 @@ fn make_state(rel_path: &str, hash: &str) -> SyncState {
         vclock: Default::default(),
         device_id: "test-device".to_string(),
         conflict: None,
+    status: Default::default(),
     }
 }
 

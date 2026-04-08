@@ -40,6 +40,12 @@ pub enum FileSyncStatus {
     Conflict,
 }
 
+impl Default for FileSyncStatus {
+    fn default() -> Self {
+        FileSyncStatus::NotSynced
+    }
+}
+
 impl std::fmt::Display for FileSyncStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -173,6 +179,9 @@ pub struct SyncState {
     /// Set by the sync engine, cleared by `tcfs resolve`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<crate::conflict::ConflictInfo>,
+    /// Runtime sync status (transient — reflects current operation state).
+    #[serde(default)]
+    pub status: FileSyncStatus,
 }
 
 /// In-memory state cache, persisted to a JSON file
@@ -787,6 +796,7 @@ pub fn make_sync_state_full(
         vclock,
         device_id,
         conflict: None,
+        status: FileSyncStatus::Synced,
     })
 }
 
@@ -823,6 +833,7 @@ mod tests {
                 vclock: VectorClock::new(),
                 device_id: String::new(),
                 conflict: None,
+            status: Default::default(),
             },
         );
         cache.flush().unwrap();
@@ -855,6 +866,7 @@ mod tests {
                 vclock: VectorClock::new(),
                 device_id: String::new(),
                 conflict: None,
+            status: Default::default(),
             },
         );
         assert_eq!(cache.len(), 1);
@@ -886,6 +898,7 @@ mod tests {
                     vclock: VectorClock::new(),
                     device_id: String::new(),
                     conflict: None,
+                status: Default::default(),
                 },
             );
         }
@@ -968,6 +981,7 @@ mod tests {
             vclock: VectorClock::new(),
             device_id: String::new(),
             conflict: None,
+        status: Default::default(),
         };
 
         cache.set(&f1, make("a"));

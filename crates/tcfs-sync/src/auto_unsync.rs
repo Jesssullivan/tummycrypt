@@ -154,6 +154,7 @@ mod tests {
             vclock: VectorClock::new(),
             device_id: String::new(),
             conflict: None,
+        status: Default::default(),
         }
     }
 

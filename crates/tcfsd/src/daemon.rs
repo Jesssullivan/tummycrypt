@@ -365,6 +365,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         }
                     });
 
+                    // Per-path locks: prevent concurrent push/pull on the same file
+                    let path_locks = tcfs_sync::state::PathLocks::new();
+
                     // Scheduler run loop: dispatch tasks to sync engine
                     let sched_operator = operator.clone();
                     let sched_state = state_cache.clone();
@@ -375,6 +378,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sched_nats = shared_nats.clone();
                     let sched_metrics = daemon_metrics.clone();
                     let sched_master_key = master_key.clone();
+                    let sched_path_locks = path_locks.clone();
 
                     tokio::spawn({
                         let scheduler = scheduler.clone();
@@ -390,8 +394,12 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     let nats = sched_nats.clone();
                                     let metrics = sched_metrics.clone();
                                     let mk = sched_master_key.clone();
+                                    let locks = sched_path_locks.clone();
 
                                     Box::pin(async move {
+                                        // Acquire per-path lock to prevent concurrent operations
+                                        let _lock_guard = locks.lock(&task.path).await;
+
                                         match task.op {
                                             tcfs_sync::scheduler::SyncOp::Push => {
                                                 // Skip directories — only push regular files
@@ -410,6 +418,16 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     .to_string_lossy()
                                                     .to_string();
                                                 let mut cache = state.lock().await;
+
+                                                // Set status = Active while uploading
+                                                if let Some(entry) = cache.get(&task.path).cloned() {
+                                                    let active = tcfs_sync::state::SyncState {
+                                                        status: tcfs_sync::state::FileSyncStatus::Active,
+                                                        ..entry
+                                                    };
+                                                    cache.set(&task.path, active);
+                                                }
+
                                                 let enc_ctx = mk.as_ref().map(|k| tcfs_sync::engine::EncryptionContext {
                                                     master_key: k.clone(),
                                                 });
@@ -454,6 +472,15 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                         task.path.to_string_lossy().to_string(),
                                                         "conflict".to_string(),
                                                     ));
+                                                }
+
+                                                // Set status = Synced after successful upload
+                                                if let Some(entry) = cache.get(&task.path).cloned() {
+                                                    let synced = tcfs_sync::state::SyncState {
+                                                        status: tcfs_sync::state::FileSyncStatus::Synced,
+                                                        ..entry
+                                                    };
+                                                    cache.set(&task.path, synced);
                                                 }
 
                                                 let _ = cache.flush();
@@ -1222,6 +1249,7 @@ async fn do_auto_download(
                             vclock: manifest.vclock.clone(),
                             device_id: manifest.written_by.clone(),
                             conflict: None,
+                            status: tcfs_sync::state::FileSyncStatus::Synced,
                         },
                     );
                     let _ = cache.flush();
