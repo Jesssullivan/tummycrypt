@@ -96,11 +96,26 @@ crates/
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
 
+## Platform Support
+
+| Feature | Linux | macOS | Windows | iOS |
+|---------|-------|-------|---------|-----|
+| CLI (push/pull/reconcile) | Full | Full | Planned | - |
+| Daemon (gRPC + metrics) | systemd | launchd | Planned | - |
+| Filesystem mount | FUSE3 | NFS loopback | Cloud Files API (skeleton) | - |
+| FileProvider | - | Full (Finder integration) | - | Read-only |
+| Finder/Explorer badges | - | 6 states | - | - |
+| D-Bus integration | Full | - | - | - |
+| Fleet sync (NATS) | Full | Full | Planned | - |
+| E2E encryption | Full | Full | Planned | Full |
+
+See [docs/platform-support.md](docs/platform-support.md) for details.
+
 ## Development
 
 ```bash
 task build          # Build all crates
-task test           # Run all tests (418 tests)
+task test           # Run all tests (424 tests)
 task lint           # Clippy + rustfmt
 task deny           # License + advisory check
 task check          # All of the above
