@@ -41,6 +41,12 @@ class TCFSFinderSync: FIFinderSync {
         if let conflictImage = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Conflict") {
             controller.setBadgeImage(conflictImage, label: "Conflict", forBadgeIdentifier: "conflict")
         }
+        if let excludedImage = NSImage(systemSymbolName: "slash.circle", accessibilityDescription: "Excluded") {
+            controller.setBadgeImage(excludedImage, label: "Excluded", forBadgeIdentifier: "excluded")
+        }
+        if let pinnedImage = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Pinned") {
+            controller.setBadgeImage(pinnedImage, label: "Pinned", forBadgeIdentifier: "pinned")
+        }
 
         // Monitor the FPFS CloudStorage volume
         let fpfsPath = FileManager.default.homeDirectoryForCurrentUser

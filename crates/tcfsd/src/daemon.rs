@@ -327,6 +327,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     // Watcher → Scheduler bridge: convert watch events to sync tasks.
                     // Consults the blacklist to filter excluded paths before scheduling.
                     let bridge_blacklist = blacklist.clone();
+                    let bridge_policy_store = {
+                        let policy_path = sync_root.join(".tcfs-policy.json");
+                        tcfs_sync::policy::PolicyStore::open(&policy_path).unwrap_or_default()
+                    };
                     tokio::spawn(async move {
                         while let Some(event) = watch_rx.recv().await {
                             // Check blacklist before scheduling
@@ -343,6 +347,17 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     "watcher: skipped (blacklisted)"
                                 );
                                 continue;
+                            }
+
+                            // Check per-folder policy (Never = skip)
+                            if let Some(policy) = bridge_policy_store.get(&event.path) {
+                                if policy.sync_mode == tcfs_sync::policy::SyncMode::Never {
+                                    debug!(
+                                        path = %event.path.display(),
+                                        "watcher: skipped (Never policy)"
+                                    );
+                                    continue;
+                                }
                             }
 
                             let op = match event.kind {
