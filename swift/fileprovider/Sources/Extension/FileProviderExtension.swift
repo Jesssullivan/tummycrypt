@@ -83,39 +83,63 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
-        let progress = Progress(totalUnitCount: 100)
+        // Start with estimated size; updated by callback as real size is known
+        let progress = Progress(totalUnitCount: 0)
 
         guard let prov = provider else {
             completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
             return progress
         }
 
+        // Capture progress for the C callback closure
+        let progressPtr = Unmanaged.passRetained(progress).toOpaque()
+
         DispatchQueue.global(qos: .userInitiated).async {
             let tempDir = FileManager.default.temporaryDirectory
             let tempFile = tempDir.appendingPathComponent(UUID().uuidString)
 
             let itemId = itemIdentifier.rawValue
+
+            // C callback that updates NSProgress from Rust's chunk loop
+            let callback: @convention(c) (UInt64, UInt64, UnsafeRawPointer?) -> Void = {
+                completed, total, ctx in
+                guard let ctx = ctx else { return }
+                let prog = Unmanaged<Progress>.fromOpaque(ctx).takeUnretainedValue()
+                prog.totalUnitCount = Int64(total)
+                prog.completedUnitCount = Int64(completed)
+            }
+
             let result = itemId.withCString { idPtr in
                 tempFile.path.withCString { destPtr in
-                    tcfs_provider_fetch(prov, idPtr, destPtr)
+                    tcfs_provider_fetch_with_progress(
+                        prov, idPtr, destPtr,
+                        callback,
+                        progressPtr
+                    )
                 }
             }
 
+            // Balance the passRetained
+            Unmanaged<Progress>.fromOpaque(progressPtr).release()
+
             if result == TCFS_ERROR_TCFS_ERROR_NONE {
+                let fileSize = (try? FileManager.default.attributesOfItem(
+                    atPath: tempFile.path
+                )[.size] as? UInt64) ?? 0
+
                 let item = TCFSFileProviderItem(
                     identifier: itemIdentifier,
                     parentIdentifier: .rootContainer,
                     filename: itemId.components(separatedBy: "/").last ?? itemId,
                     isDirectory: false,
-                    fileSize: (try? FileManager.default.attributesOfItem(atPath: tempFile.path)[.size] as? UInt64) ?? 0,
+                    fileSize: fileSize,
                     downloaded: true,
                     uploaded: true
                 )
-                progress.completedUnitCount = 100
+                progress.completedUnitCount = progress.totalUnitCount
                 self.signalEnumeratorUpdate(for: .rootContainer)
                 completionHandler(tempFile, item, nil)
             } else {
-                progress.completedUnitCount = 100
                 completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
             }
         }

@@ -14,6 +14,11 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 
+/// Progress callback for file downloads.
+/// Called with (completed_bytes, total_bytes, user_context).
+pub type TcfsProgressCallback =
+    Option<unsafe extern "C" fn(u64, u64, *const std::ffi::c_void)>;
+
 /// Error codes returned by FFI functions.
 #[repr(C)]
 pub enum TcfsError {

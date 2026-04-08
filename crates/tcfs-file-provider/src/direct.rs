@@ -8,6 +8,8 @@ use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
 use std::ptr;
 
+use crate::TcfsProgressCallback;
+
 use base64::Engine;
 use secrecy::SecretString;
 
@@ -339,6 +341,142 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
                     assembled.extend_from_slice(&plaintext);
                 } else {
                     assembled.extend_from_slice(&chunk_bytes);
+                }
+            }
+
+            tokio::fs::write(dest_str, &assembled).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        match fetch_result {
+            Ok(()) => TcfsError::TcfsErrorNone,
+            Err(_) => TcfsError::TcfsErrorStorage,
+        }
+    }));
+
+    result.unwrap_or(TcfsError::TcfsErrorInternal)
+}
+
+/// Download remote content to a local file, reporting progress via callback.
+///
+/// Same as `tcfs_provider_fetch` but calls `callback(completed_bytes, total_bytes, context)`
+/// after each chunk download. Finder uses this to render a progress bar.
+///
+/// # Safety
+///
+/// - `provider` must be a valid pointer from `tcfs_provider_new`.
+/// - `item_id` and `dest_path` must be valid null-terminated UTF-8 C strings.
+/// - `callback` may be null (progress not reported).
+/// - `context` is passed through to the callback (may be null).
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+    dest_path: *const c_char,
+    callback: TcfsProgressCallback,
+    context: *const std::ffi::c_void,
+) -> TcfsError {
+    if provider.is_null() || item_id.is_null() || dest_path.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    // context pointer must be safe to send across threads
+    let ctx = context as usize;
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let prov = unsafe { &*provider };
+        let c_item = unsafe { CStr::from_ptr(item_id) };
+        let c_dest = unsafe { CStr::from_ptr(dest_path) };
+
+        let item_str = match c_item.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+        let dest_str = match c_dest.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+
+        let fetch_result = prov.runtime.block_on(async {
+            let index_key = format!(
+                "{}/index/{}",
+                prov.remote_prefix.trim_end_matches('/'),
+                item_str.trim_start_matches('/')
+            );
+            let data = prov.operator.read(&index_key).await?;
+            let bytes = data.to_bytes();
+            let text = String::from_utf8_lossy(&bytes);
+
+            let mut manifest_hash = String::new();
+            for line in text.lines() {
+                if let Some(val) = line.strip_prefix("manifest_hash=") {
+                    manifest_hash = val.to_string();
+                }
+            }
+            if manifest_hash.is_empty() {
+                anyhow::bail!("no manifest_hash in index entry");
+            }
+
+            let manifest_path = format!(
+                "{}/manifests/{}",
+                prov.remote_prefix.trim_end_matches('/'),
+                manifest_hash
+            );
+            let manifest_bytes = prov.operator.read(&manifest_path).await?;
+            let manifest =
+                tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())?;
+
+            let file_key = match (&prov.master_key, &manifest.encrypted_file_key) {
+                (Some(mk), Some(wrapped_b64)) => {
+                    let wrapped = base64::engine::general_purpose::STANDARD.decode(wrapped_b64)?;
+                    Some(tcfs_crypto::unwrap_key(mk, &wrapped)?)
+                }
+                (None, Some(_)) => {
+                    anyhow::bail!("file is encrypted but no master key configured");
+                }
+                _ => None,
+            };
+
+            let file_id_bytes: [u8; 32] = tcfs_chunks::hash_from_hex(&manifest.file_hash)
+                .map(|h| *h.as_bytes())
+                .unwrap_or([0u8; 32]);
+
+            let total_bytes = manifest.file_size;
+            let mut bytes_received: u64 = 0;
+
+            // Signal start
+            if let Some(cb) = callback {
+                unsafe { cb(0, total_bytes, ctx as *const std::ffi::c_void) };
+            }
+
+            let mut assembled = Vec::with_capacity(total_bytes as usize);
+            for (idx, hash) in manifest.chunk_hashes().iter().enumerate() {
+                let chunk_key = format!(
+                    "{}/chunks/{}",
+                    prov.remote_prefix.trim_end_matches('/'),
+                    hash
+                );
+                let chunk_data = prov.operator.read(&chunk_key).await?;
+                let chunk_bytes = chunk_data.to_bytes();
+
+                let actual = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
+                if actual != *hash {
+                    anyhow::bail!("chunk integrity failure: expected {}, got {}", hash, actual);
+                }
+
+                if let Some(ref fk) = file_key {
+                    let plaintext =
+                        tcfs_crypto::decrypt_chunk(fk, idx as u64, &file_id_bytes, &chunk_bytes)?;
+                    bytes_received += plaintext.len() as u64;
+                    assembled.extend_from_slice(&plaintext);
+                } else {
+                    bytes_received += chunk_bytes.len() as u64;
+                    assembled.extend_from_slice(&chunk_bytes);
+                }
+
+                // Report progress after each chunk
+                if let Some(cb) = callback {
+                    unsafe { cb(bytes_received, total_bytes, ctx as *const std::ffi::c_void) };
                 }
             }
 
