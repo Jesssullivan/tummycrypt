@@ -133,6 +133,36 @@ echo "==> Compiling host app..."
     -o TCFSProvider \
     "$SCRIPT_DIR/Sources/HostApp/"*.swift
 
+# --- Compile Finder Sync extension (status badges) ---
+FINDER_SYNC_DIR="$SCRIPT_DIR/Sources/FinderSync"
+if [ -d "$FINDER_SYNC_DIR" ]; then
+    echo "==> Compiling Finder Sync extension..."
+
+    /usr/bin/clang -c \
+        -isysroot "$SDKPATH" \
+        -target arm64-apple-macos${MIN_MACOS} \
+        -fobjc-arc \
+        -O2 \
+        -o finder_sync_main.o \
+        "$FINDER_SYNC_DIR/finder_sync_main.m"
+
+    /usr/bin/swiftc \
+        -sdk "$SDKPATH" \
+        -parse-as-library \
+        -framework FinderSync \
+        -framework Foundation \
+        -target arm64-apple-macos${MIN_MACOS} \
+        -Xfrontend -disable-modules-validate-system-headers \
+        -O \
+        -o TCFSFinderSync \
+        "$FINDER_SYNC_DIR/"*.swift \
+        finder_sync_main.o
+    HAVE_FINDER_SYNC=true
+else
+    echo "==> No FinderSync sources found, skipping"
+    HAVE_FINDER_SYNC=false
+fi
+
 # --- Assemble bundle ---
 echo "==> Assembling bundle..."
 APP="$OUTPUT_DIR/TCFSProvider.app/Contents"
@@ -145,6 +175,14 @@ cp "$SCRIPT_DIR/resources/HostApp-Info.plist" "$APP/Info.plist"
 
 cp TCFSFileProvider "$EXT/MacOS/"
 cp "$SCRIPT_DIR/resources/Extension-Info.plist" "$EXT/Info.plist"
+
+# Finder Sync extension (if compiled)
+if [ "$HAVE_FINDER_SYNC" = "true" ]; then
+    FSEXT="$APP/Extensions/TCFSFinderSync.appex/Contents"
+    mkdir -p "$FSEXT/MacOS"
+    cp TCFSFinderSync "$FSEXT/MacOS/"
+    cp "$SCRIPT_DIR/resources/FinderSync-Info.plist" "$FSEXT/Info.plist"
+fi
 
 # --- Resolve entitlements (expand TeamID for keychain-access-groups) ---
 echo "==> Resolving entitlements..."
@@ -171,14 +209,23 @@ if [ "$SIGNING_IDENTITY" != "-" ]; then
     fi
 fi
 
-# --- Code sign (inside-out: extension first, then host app) ---
+# --- Code sign (inside-out: extensions first, then host app) ---
 echo "==> Signing..."
+FINDER_SYNC_ENTITLEMENTS="$SCRIPT_DIR/resources/FinderSync.entitlements"
+
 if [ "$SIGNING_IDENTITY" != "-" ]; then
     echo "    Identity: $SIGNING_IDENTITY (Developer ID)"
     /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
         --options runtime --timestamp \
         --entitlements "$EXT_ENTITLEMENTS" \
         "$APP/Extensions/TCFSFileProvider.appex"
+
+    if [ "$HAVE_FINDER_SYNC" = "true" ]; then
+        /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
+            --options runtime --timestamp \
+            --entitlements "$FINDER_SYNC_ENTITLEMENTS" \
+            "$APP/Extensions/TCFSFinderSync.appex"
+    fi
 
     /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
         --options runtime --timestamp \
@@ -189,6 +236,12 @@ else
     /usr/bin/codesign -f -s - \
         --entitlements "$EXT_ENTITLEMENTS" \
         "$APP/Extensions/TCFSFileProvider.appex"
+
+    if [ "$HAVE_FINDER_SYNC" = "true" ]; then
+        /usr/bin/codesign -f -s - \
+            --entitlements "$FINDER_SYNC_ENTITLEMENTS" \
+            "$APP/Extensions/TCFSFinderSync.appex"
+    fi
 
     /usr/bin/codesign -f -s - \
         --entitlements "$HOST_ENTITLEMENTS" \
@@ -217,7 +270,7 @@ echo "    Host app:  OK"
 echo "    Extension: OK"
 
 # --- Cleanup temp binaries ---
-rm -f TCFSFileProvider TCFSProvider extension_main.o
+rm -f TCFSFileProvider TCFSProvider TCFSFinderSync extension_main.o finder_sync_main.o
 rm -f "$EMBEDDED_CONFIG_SWIFT"
 
 echo "==> Done: $OUTPUT_DIR/TCFSProvider.app"
