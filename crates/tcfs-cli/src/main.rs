@@ -2648,10 +2648,7 @@ async fn cmd_rotate_credentials(
 
 // ── `tcfs policy` ────────────────────────────────────────────────────────────
 
-async fn cmd_policy(
-    config: &tcfs_core::config::TcfsConfig,
-    action: PolicyAction,
-) -> Result<()> {
+async fn cmd_policy(config: &tcfs_core::config::TcfsConfig, action: PolicyAction) -> Result<()> {
     let policy_path = config
         .sync
         .sync_root
@@ -2659,30 +2656,24 @@ async fn cmd_policy(
         .map(|r| r.join(".tcfs-policy.json"))
         .unwrap_or_else(|| PathBuf::from(".tcfs-policy.json"));
 
-    let mut store =
-        tcfs_sync::policy::PolicyStore::open(&policy_path).unwrap_or_default();
+    let mut store = tcfs_sync::policy::PolicyStore::open(&policy_path).unwrap_or_default();
 
     match action {
         PolicyAction::Set { path, mode } => {
-            let abs = std::fs::canonicalize(&path)
-                .unwrap_or_else(|_| path.clone());
+            let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
             let sync_mode = match mode.as_str() {
                 "always" => tcfs_sync::policy::SyncMode::Always,
                 "never" => tcfs_sync::policy::SyncMode::Never,
                 _ => tcfs_sync::policy::SyncMode::OnDemand,
             };
-            let mut policy = store
-                .get(&abs)
-                .cloned()
-                .unwrap_or_default();
+            let mut policy = store.get(&abs).cloned().unwrap_or_default();
             policy.sync_mode = sync_mode;
             store.set(&abs, policy);
             store.flush().context("saving policy")?;
             println!("Policy set: {} → {}", abs.display(), mode);
         }
         PolicyAction::Get { path } => {
-            let abs = std::fs::canonicalize(&path)
-                .unwrap_or_else(|_| path.clone());
+            let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
             match store.get(&abs) {
                 Some(policy) => {
                     println!("Policy for {}:", abs.display());
@@ -2690,12 +2681,12 @@ async fn cmd_policy(
                     if let Some(threshold) = policy.download_threshold {
                         println!("  download_threshold: {} bytes", threshold);
                     }
-                    println!(
-                        "  auto_unsync_exempt: {}",
-                        policy.auto_unsync_exempt
-                    );
+                    println!("  auto_unsync_exempt: {}", policy.auto_unsync_exempt);
                 }
-                None => println!("No policy set for {} (inherits default: on-demand)", abs.display()),
+                None => println!(
+                    "No policy set for {} (inherits default: on-demand)",
+                    abs.display()
+                ),
             }
         }
         PolicyAction::List => {
@@ -2722,24 +2713,16 @@ async fn cmd_policy(
             }
         }
         PolicyAction::Pin { path } => {
-            let abs = std::fs::canonicalize(&path)
-                .unwrap_or_else(|_| path.clone());
-            let mut policy = store
-                .get(&abs)
-                .cloned()
-                .unwrap_or_default();
+            let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            let mut policy = store.get(&abs).cloned().unwrap_or_default();
             policy.auto_unsync_exempt = true;
             store.set(&abs, policy);
             store.flush().context("saving policy")?;
             println!("Pinned: {} (exempt from auto-unsync)", abs.display());
         }
         PolicyAction::Unpin { path } => {
-            let abs = std::fs::canonicalize(&path)
-                .unwrap_or_else(|_| path.clone());
-            let mut policy = store
-                .get(&abs)
-                .cloned()
-                .unwrap_or_default();
+            let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            let mut policy = store.get(&abs).cloned().unwrap_or_default();
             policy.auto_unsync_exempt = false;
             store.set(&abs, policy);
             store.flush().context("saving policy")?;

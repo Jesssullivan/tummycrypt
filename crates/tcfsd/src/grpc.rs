@@ -1292,7 +1292,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         if conflict_file.exists() {
                             let mut cache = self.state_cache.lock().await;
                             if let Err(e) = tcfs_sync::engine::upload_file(
-                                &op, conflict_file, &prefix, &mut cache, None,
+                                &op,
+                                conflict_file,
+                                &prefix,
+                                &mut cache,
+                                None,
                             )
                             .await
                             {
