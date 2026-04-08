@@ -1,10 +1,8 @@
 # tummycrypt / tcfs
 
-**tcfs** (TummyCrypt FileSystem) is a self-hosted, encrypted file sync system. It mounts remote
-SeaweedFS storage as a local directory with on-demand hydration — files appear as zero-byte `.tc`
-stubs until accessed, then transparently download and decrypt.
+> Under active development. Not yet stable. Expect breaking changes.
 
-Built as a FOSS replacement for proprietary cloud sync clients (odrive, Dropbox, etc.).
+Self-hosted encrypted file sync with on-demand hydration. Mounts SeaweedFS as a local directory — files appear as zero-byte `.tc` stubs until accessed, then transparently download and decrypt. FOSS odrive/Dropbox replacement.
 
 ## Features
 
