@@ -48,6 +48,11 @@ jobs:
       - name: cargo test tcfs-sync (nats + crypto features)
         run: cargo test -p tcfs-sync --features nats,crypto
 
+      - name: Wire-up integration tests (prove modules are connected)
+        run: |
+          cargo test -p tcfs-e2e --test blacklist_wireup -- --nocapture
+          cargo test -p tcfs-e2e --test reconcile_wireup -- --nocapture
+
       - name: Build workspace (default features)
         run: cargo build --workspace
 
