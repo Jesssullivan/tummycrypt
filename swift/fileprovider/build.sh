@@ -68,7 +68,19 @@ else
 import Foundation
 let embeddedConfigBase64: String? = nil
 SWIFT
-    echo "==> No config at $CONFIG_PATH — embedded config will be nil"
+    echo "WARNING: No config at $CONFIG_PATH — embedded config will be nil" >&2
+    echo "         Extension will fall back to Keychain/XDG/App Group (slower, may fail)" >&2
+fi
+
+# Validate config has a real endpoint (not stale or empty)
+if [ -f "$CONFIG_PATH" ]; then
+    if grep -q "seaweedfs-seaweedfs-filer-ts" "$CONFIG_PATH" 2>/dev/null; then
+        echo "WARNING: config.json contains stale CIVO endpoint (seaweedfs-seaweedfs-filer-ts)" >&2
+        echo "         Run home-manager switch to regenerate with current endpoints" >&2
+    fi
+    if ! grep -q '"s3_access"' "$CONFIG_PATH" 2>/dev/null || grep -q '"s3_access": ""' "$CONFIG_PATH" 2>/dev/null; then
+        echo "WARNING: config.json has empty S3 credentials — FileProvider won't authenticate" >&2
+    fi
 fi
 
 # --- Compile extension binary ---
@@ -182,6 +194,27 @@ else
         --entitlements "$HOST_ENTITLEMENTS" \
         "$OUTPUT_DIR/TCFSProvider.app"
 fi
+
+# --- Validate outputs ---
+echo "==> Validating..."
+if [ ! -f "$APP/MacOS/TCFSProvider" ]; then
+    echo "ERROR: host app binary missing: $APP/MacOS/TCFSProvider" >&2
+    exit 1
+fi
+if [ ! -f "$EXT/MacOS/TCFSFileProvider" ]; then
+    echo "ERROR: extension binary missing: $EXT/MacOS/TCFSFileProvider" >&2
+    exit 1
+fi
+/usr/bin/codesign -v "$OUTPUT_DIR/TCFSProvider.app" 2>/dev/null || {
+    echo "ERROR: code signature validation failed for TCFSProvider.app" >&2
+    exit 1
+}
+/usr/bin/codesign -v "$APP/Extensions/TCFSFileProvider.appex" 2>/dev/null || {
+    echo "ERROR: code signature validation failed for TCFSFileProvider.appex" >&2
+    exit 1
+}
+echo "    Host app:  OK"
+echo "    Extension: OK"
 
 # --- Cleanup temp binaries ---
 rm -f TCFSFileProvider TCFSProvider extension_main.o
