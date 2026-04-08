@@ -2,32 +2,32 @@
 # To use: brew tap tinyland-inc/tap && brew install tcfs
 #
 # This template is used by CI to generate the versioned formula.
-# Placeholders: 0.11.0, d144b3cb631b156b3783c4934b84c32b862c026562d003aab187d2da64f82a97, e82c7a231ebd5eaa19a2bb53daa5e5f0f42e023fe7938ef53f6ab7b23c78b6c0,
-#               7816145c83c6bef054716a822dec1199058910fa5abe1d35947e5da5cffd99ee, 2f1e4174a8c8eeefd65acb2b04856ef7974c2784cdad8b423a256da2d94d9cf5
+# Placeholders: 0.11.1, aa613ee414ea59661b35a950129bb7341aafcf310ee59ae5b0f7ae61d62bc8d0, 83ae22ae0d06c541b9cf520194070f0c65d0b9becb924c6c02f411c85e682d8a,
+#               6bc85b0603c37686d2daddfd7835fd3b8960775710540d5f3841af7570043348, 504bf6b901240f9df5c54eef20ec4995a9bee8e50a0660971313bab64a8dbf5c
 
 class Tcfs < Formula
   desc "FOSS self-hosted odrive replacement — FUSE-based, SeaweedFS-backed file sync"
   homepage "https://github.com/tinyland-inc/tummycrypt"
-  version "0.11.0"
+  version "0.11.1"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.11.0/tcfs-0.11.0-macos-aarch64.tar.gz"
-      sha256 "d144b3cb631b156b3783c4934b84c32b862c026562d003aab187d2da64f82a97"
+      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.11.1/tcfs-0.11.1-macos-aarch64.tar.gz"
+      sha256 "aa613ee414ea59661b35a950129bb7341aafcf310ee59ae5b0f7ae61d62bc8d0"
     else
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.11.0/tcfs-0.11.0-macos-x86_64.tar.gz"
-      sha256 "e82c7a231ebd5eaa19a2bb53daa5e5f0f42e023fe7938ef53f6ab7b23c78b6c0"
+      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.11.1/tcfs-0.11.1-macos-x86_64.tar.gz"
+      sha256 "83ae22ae0d06c541b9cf520194070f0c65d0b9becb924c6c02f411c85e682d8a"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.11.0/tcfs-0.11.0-linux-aarch64.tar.gz"
-      sha256 "2f1e4174a8c8eeefd65acb2b04856ef7974c2784cdad8b423a256da2d94d9cf5"
+      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.11.1/tcfs-0.11.1-linux-aarch64.tar.gz"
+      sha256 "504bf6b901240f9df5c54eef20ec4995a9bee8e50a0660971313bab64a8dbf5c"
     else
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.11.0/tcfs-0.11.0-linux-x86_64.tar.gz"
-      sha256 "7816145c83c6bef054716a822dec1199058910fa5abe1d35947e5da5cffd99ee"
+      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.11.1/tcfs-0.11.1-linux-x86_64.tar.gz"
+      sha256 "6bc85b0603c37686d2daddfd7835fd3b8960775710540d5f3841af7570043348"
     end
   end
 
