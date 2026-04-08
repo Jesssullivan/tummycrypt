@@ -83,7 +83,11 @@
         tcfsd = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tcfsd";
-          cargoExtraArgs = "-p tcfsd";
+          # Vendor OpenSSL on macOS to avoid dyld Team ID mismatch
+          # when launchd loads the binary (Nix store openssl has different
+          # code signature than the daemon binary).
+          cargoExtraArgs = "-p tcfsd"
+            + pkgs.lib.optionalString pkgs.stdenv.isDarwin " --features openssl-vendored";
           meta.mainProgram = "tcfsd";
         });
 
