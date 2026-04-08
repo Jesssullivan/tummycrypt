@@ -2050,6 +2050,15 @@ async fn bind_uds(socket_path: &Path) -> Result<UnixListenerStream> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let listener = UnixListener::bind(socket_path)?;
+
+    // Restrict socket to owner-only access (prevents other users from connecting)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| anyhow::anyhow!("setting socket permissions: {e}"))?;
+    }
+
     Ok(UnixListenerStream::new(listener))
 }
 

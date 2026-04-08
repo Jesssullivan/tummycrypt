@@ -197,6 +197,8 @@ pub struct SyncConfig {
     pub nats_url: String,
     /// Enforce TLS for NATS connections
     pub nats_tls: bool,
+    /// NATS authentication token (optional)
+    pub nats_token: Option<String>,
     /// Path to a custom CA certificate for NATS TLS verification
     pub nats_ca_cert: Option<PathBuf>,
     /// RocksDB state cache path
@@ -350,6 +352,7 @@ impl Default for SyncConfig {
         Self {
             nats_url: "nats://localhost:4222".into(),
             nats_tls: false,
+            nats_token: None,
             nats_ca_cert: None,
             state_db: PathBuf::from("~/.local/share/tcfsd/state.db"),
             workers: 0,

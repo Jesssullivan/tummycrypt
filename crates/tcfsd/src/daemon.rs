@@ -763,7 +763,13 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             }
             nats_url.clone()
         };
-        match tcfs_sync::NatsClient::connect(&url, config.sync.nats_tls).await {
+        match tcfs_sync::NatsClient::connect(
+            &url,
+            config.sync.nats_tls,
+            config.sync.nats_token.as_deref(),
+        )
+        .await
+        {
             Ok(nats) => {
                 if let Err(e) = nats.ensure_streams().await {
                     warn!("NATS stream setup failed: {e}");
