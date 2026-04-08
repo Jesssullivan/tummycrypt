@@ -198,6 +198,25 @@ enum Commands {
         non_interactive: bool,
     },
 
+    /// Reconcile local directory with remote storage
+    ///
+    /// Diffs local tree against remote index and shows what would change.
+    /// Use --execute to apply the plan (default is dry-run).
+    Reconcile {
+        /// Local directory to reconcile (default: sync_root from config)
+        #[arg(long, short = 'p')]
+        path: Option<PathBuf>,
+        /// Remote prefix override
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Actually execute the plan (default: dry-run)
+        #[arg(long)]
+        execute: bool,
+        /// Path to the sync state cache JSON file (overrides config)
+        #[arg(long, env = "TCFS_STATE_PATH")]
+        state: Option<PathBuf>,
+    },
+
     /// Resolve a sync conflict for a file
     ///
     /// When two devices modify the same file without syncing, a conflict is
@@ -456,6 +475,12 @@ async fn main() -> Result<()> {
             password,
             non_interactive,
         } => cmd_rotate_key(&config, old_key_file.as_deref(), password, non_interactive).await,
+        Commands::Reconcile {
+            path,
+            prefix,
+            execute,
+            state,
+        } => cmd_reconcile(&config, path.as_deref(), prefix.as_deref(), execute, state.as_deref()).await,
         Commands::Resolve { path, strategy } => {
             #[cfg(unix)]
             {
@@ -2586,6 +2611,165 @@ async fn cmd_rotate_credentials(
 }
 
 // ── Interactive conflict resolver ──────────────────────────────────────────
+
+// ── `tcfs reconcile` ─────────────────────────────────────────────────────────
+
+async fn cmd_reconcile(
+    config: &tcfs_core::config::TcfsConfig,
+    path: Option<&Path>,
+    prefix: Option<&str>,
+    execute: bool,
+    state_override: Option<&Path>,
+) -> Result<()> {
+    let op = build_operator_from_env(config)?;
+    let device_id = load_device_id(config);
+
+    let local_root = path
+        .map(|p| p.to_path_buf())
+        .or_else(|| config.sync.sync_root.clone())
+        .ok_or_else(|| anyhow::anyhow!("no path specified and no sync_root in config"))?;
+
+    let remote_prefix = prefix
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            config
+                .storage
+                .remote_prefix
+                .clone()
+                .unwrap_or_else(|| config.storage.bucket.clone())
+        });
+
+    let state_path = resolve_state_path(config, state_override);
+    let state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+
+    let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&config.sync);
+    let reconcile_config = tcfs_sync::reconcile::ReconcileConfig::default();
+
+    println!(
+        "Reconciling {} ↔ {}:{}/",
+        local_root.display(),
+        config.storage.endpoint,
+        remote_prefix
+    );
+
+    let plan = tcfs_sync::reconcile::reconcile(
+        &op,
+        &local_root,
+        &remote_prefix,
+        &state,
+        &device_id,
+        &blacklist,
+        &reconcile_config,
+    )
+    .await
+    .context("reconciliation failed")?;
+
+    // Display plan
+    println!();
+    println!(
+        "Plan: {} push, {} pull, {} delete-local, {} delete-remote, {} conflict, {} up-to-date",
+        plan.summary.pushes,
+        plan.summary.pulls,
+        plan.summary.local_deletes,
+        plan.summary.remote_deletes,
+        plan.summary.conflicts,
+        plan.summary.up_to_date
+    );
+
+    if plan.actions.is_empty() {
+        println!("Nothing to do — local and remote are in sync.");
+        return Ok(());
+    }
+
+    for action in &plan.actions {
+        match action {
+            tcfs_sync::reconcile::ReconcileAction::Push {
+                rel_path, reason, ..
+            } => println!("  → push  {rel_path}  ({reason:?})"),
+            tcfs_sync::reconcile::ReconcileAction::Pull {
+                rel_path,
+                reason,
+                size,
+                ..
+            } => println!("  ← pull  {rel_path}  ({reason:?}, {size} bytes)"),
+            tcfs_sync::reconcile::ReconcileAction::DeleteLocal { rel_path, .. } => {
+                println!("  ✗ delete-local  {rel_path}")
+            }
+            tcfs_sync::reconcile::ReconcileAction::DeleteRemote { rel_path } => {
+                println!("  ✗ delete-remote  {rel_path}")
+            }
+            tcfs_sync::reconcile::ReconcileAction::Conflict { rel_path, info } => {
+                println!(
+                    "  ! conflict  {rel_path}  (local: {}, remote: {})",
+                    info.local_device, info.remote_device
+                )
+            }
+            tcfs_sync::reconcile::ReconcileAction::UpToDate { rel_path } => {
+                println!("  = up-to-date  {rel_path}")
+            }
+        }
+    }
+
+    if !execute {
+        println!();
+        println!("Dry run — no changes made. Use --execute to apply.");
+        return Ok(());
+    }
+
+    // Execute the plan
+    println!();
+    println!("Executing plan...");
+
+    let mut state = tcfs_sync::state::StateCache::open(&state_path)?;
+
+    let master_key = config
+        .crypto
+        .master_key_file
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .filter(|k| k.len() == 32)
+        .map(|bytes| {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            tcfs_crypto::MasterKey::from_bytes(key)
+        });
+    let enc_ctx = master_key
+        .as_ref()
+        .map(|mk| tcfs_sync::engine::EncryptionContext {
+            master_key: mk.clone(),
+        });
+
+    let result = tcfs_sync::reconcile::execute_plan(
+        &plan,
+        &op,
+        &local_root,
+        &remote_prefix,
+        &mut state,
+        &device_id,
+        enc_ctx.as_ref(),
+        None,
+    )
+    .await
+    .context("executing reconciliation plan")?;
+
+    state.flush().context("flushing state cache")?;
+
+    println!(
+        "Done: {} pushed, {} pulled, {} deleted, {} conflicts, {} errors",
+        result.pushed,
+        result.pulled,
+        result.deleted_local + result.deleted_remote,
+        result.conflicts_recorded,
+        result.errors.len()
+    );
+
+    for (path, err) in &result.errors {
+        eprintln!("  error: {path}: {err}");
+    }
+
+    Ok(())
+}
 
 // ── `tcfs resolve` ───────────────────────────────────────────────────────────
 
