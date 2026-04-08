@@ -298,6 +298,15 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     #[allow(unused_variables, unused_mut)]
     let (status_tx, mut status_rx) = tokio::sync::mpsc::channel::<(String, String)>(64);
 
+    // ── Blacklist (centralized exclusion filter) ───────────────────────
+    let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&config.sync);
+    info!(
+        patterns = config.sync.exclude_patterns.len(),
+        git_dirs = config.sync.sync_git_dirs,
+        hidden_dirs = config.sync.sync_hidden_dirs,
+        "blacklist configured"
+    );
+
     // ── File Watcher + Scheduler ─────────────────────────────────────
     // If sync_root is configured, start watching for local file changes
     // and feed them through the priority scheduler for automatic sync.
@@ -315,9 +324,27 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     ));
                     let scheduler_tx = scheduler.sender();
 
-                    // Watcher → Scheduler bridge: convert watch events to sync tasks
+                    // Watcher → Scheduler bridge: convert watch events to sync tasks.
+                    // Consults the blacklist to filter excluded paths before scheduling.
+                    let bridge_blacklist = blacklist.clone();
                     tokio::spawn(async move {
                         while let Some(event) = watch_rx.recv().await {
+                            // Check blacklist before scheduling
+                            let filename = event
+                                .path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("");
+                            let is_dir = event.path.is_dir();
+                            if let Some(reason) = bridge_blacklist.check_name(filename, is_dir) {
+                                debug!(
+                                    path = %event.path.display(),
+                                    reason = %reason,
+                                    "watcher: skipped (blacklisted)"
+                                );
+                                continue;
+                            }
+
                             let op = match event.kind {
                                 tcfs_sync::watcher::WatchEventKind::Created
                                 | tcfs_sync::watcher::WatchEventKind::Modified => {
