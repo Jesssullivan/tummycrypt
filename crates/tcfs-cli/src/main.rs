@@ -217,6 +217,12 @@ enum Commands {
         state: Option<PathBuf>,
     },
 
+    /// Manage per-folder sync policies
+    Policy {
+        #[command(subcommand)]
+        action: PolicyAction,
+    },
+
     /// Resolve a sync conflict for a file
     ///
     /// When two devices modify the same file without syncing, a conflict is
@@ -228,6 +234,24 @@ enum Commands {
         #[arg(long, short = 's', value_parser = ["keep-local", "keep-remote", "keep-both", "defer"])]
         strategy: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum PolicyAction {
+    /// Set sync mode for a folder (always, on-demand, never)
+    Set {
+        path: PathBuf,
+        #[arg(value_parser = ["always", "on-demand", "never"])]
+        mode: String,
+    },
+    /// Show the effective sync policy for a path (including inherited)
+    Get { path: PathBuf },
+    /// List all configured policies
+    List,
+    /// Pin a path (exempt from auto-unsync)
+    Pin { path: PathBuf },
+    /// Unpin a path
+    Unpin { path: PathBuf },
 }
 
 #[derive(Subcommand, Debug)]
@@ -490,6 +514,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Policy { action } => cmd_policy(&config, action).await,
         Commands::Resolve { path, strategy } => {
             #[cfg(unix)]
             {
@@ -2620,6 +2645,109 @@ async fn cmd_rotate_credentials(
 }
 
 // ── Interactive conflict resolver ──────────────────────────────────────────
+
+// ── `tcfs policy` ────────────────────────────────────────────────────────────
+
+async fn cmd_policy(
+    config: &tcfs_core::config::TcfsConfig,
+    action: PolicyAction,
+) -> Result<()> {
+    let policy_path = config
+        .sync
+        .sync_root
+        .as_ref()
+        .map(|r| r.join(".tcfs-policy.json"))
+        .unwrap_or_else(|| PathBuf::from(".tcfs-policy.json"));
+
+    let mut store =
+        tcfs_sync::policy::PolicyStore::open(&policy_path).unwrap_or_default();
+
+    match action {
+        PolicyAction::Set { path, mode } => {
+            let abs = std::fs::canonicalize(&path)
+                .unwrap_or_else(|_| path.clone());
+            let sync_mode = match mode.as_str() {
+                "always" => tcfs_sync::policy::SyncMode::Always,
+                "never" => tcfs_sync::policy::SyncMode::Never,
+                _ => tcfs_sync::policy::SyncMode::OnDemand,
+            };
+            let mut policy = store
+                .get(&abs)
+                .cloned()
+                .unwrap_or_default();
+            policy.sync_mode = sync_mode;
+            store.set(&abs, policy);
+            store.flush().context("saving policy")?;
+            println!("Policy set: {} → {}", abs.display(), mode);
+        }
+        PolicyAction::Get { path } => {
+            let abs = std::fs::canonicalize(&path)
+                .unwrap_or_else(|_| path.clone());
+            match store.get(&abs) {
+                Some(policy) => {
+                    println!("Policy for {}:", abs.display());
+                    println!("  sync_mode: {:?}", policy.sync_mode);
+                    if let Some(threshold) = policy.download_threshold {
+                        println!("  download_threshold: {} bytes", threshold);
+                    }
+                    println!(
+                        "  auto_unsync_exempt: {}",
+                        policy.auto_unsync_exempt
+                    );
+                }
+                None => println!("No policy set for {} (inherits default: on-demand)", abs.display()),
+            }
+        }
+        PolicyAction::List => {
+            let all = store.all();
+            if all.is_empty() {
+                println!("No policies configured.");
+            } else {
+                for (path, policy) in all {
+                    println!(
+                        "  {} → {:?}{}{}",
+                        path,
+                        policy.sync_mode,
+                        if policy.auto_unsync_exempt {
+                            " [pinned]"
+                        } else {
+                            ""
+                        },
+                        policy
+                            .download_threshold
+                            .map(|t| format!(" [threshold: {}B]", t))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+        PolicyAction::Pin { path } => {
+            let abs = std::fs::canonicalize(&path)
+                .unwrap_or_else(|_| path.clone());
+            let mut policy = store
+                .get(&abs)
+                .cloned()
+                .unwrap_or_default();
+            policy.auto_unsync_exempt = true;
+            store.set(&abs, policy);
+            store.flush().context("saving policy")?;
+            println!("Pinned: {} (exempt from auto-unsync)", abs.display());
+        }
+        PolicyAction::Unpin { path } => {
+            let abs = std::fs::canonicalize(&path)
+                .unwrap_or_else(|_| path.clone());
+            let mut policy = store
+                .get(&abs)
+                .cloned()
+                .unwrap_or_default();
+            policy.auto_unsync_exempt = false;
+            store.set(&abs, policy);
+            store.flush().context("saving policy")?;
+            println!("Unpinned: {}", abs.display());
+        }
+    }
+    Ok(())
+}
 
 // ── `tcfs reconcile` ─────────────────────────────────────────────────────────
 

@@ -39,6 +39,7 @@ class StatusCache {
     private var entries: [String: CachedSyncState] = [:]
     private let lock = NSLock()
     private var pollTimer: Timer?
+    private let conflictNotifier = ConflictNotifier()
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -57,7 +58,10 @@ class StatusCache {
             lock.lock()
             entries = decoded
             lock.unlock()
-            logger.info("status cache loaded: \(decoded.count) entries")
+
+            // Check for new conflicts and notify user
+            let statusMap = decoded.compactMapValues { $0.status }
+            conflictNotifier.checkForNewConflicts(entries: statusMap)
         } catch {
             logger.error("failed to parse status cache: \(error.localizedDescription)")
         }

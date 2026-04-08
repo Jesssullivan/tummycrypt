@@ -7,7 +7,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::cred_store::SharedCredStore;
 
@@ -1286,6 +1286,23 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
                 match result {
                     Ok(_dl) => {
+                        // Push the conflict copy to S3 index so FileProvider
+                        // enumerates both the original and the conflict version
+                        let conflict_file = std::path::Path::new(&conflict_path);
+                        if conflict_file.exists() {
+                            let mut cache = self.state_cache.lock().await;
+                            if let Err(e) = tcfs_sync::engine::upload_file(
+                                &op, conflict_file, &prefix, &mut cache, None,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    path = %conflict_path,
+                                    "failed to push conflict copy to S3: {e}"
+                                );
+                            }
+                        }
+
                         self.publish_conflict_resolved(&req.path, "keep_both").await;
                         Ok(tonic::Response::new(ResolveConflictResponse {
                             success: true,
