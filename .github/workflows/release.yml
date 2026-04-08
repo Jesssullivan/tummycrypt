@@ -2,7 +2,7 @@
 #
 # Triggered by git tag push (v*.*.*) or manual dispatch.
 # Builds cross-platform binaries, .deb/.rpm packages, container images,
-# creates GitHub Release with installers, and deploys to Civo K8s.
+# creates GitHub Release with installers and Homebrew formula.
 #
 # Targets:
 #   - Linux x86_64 (with FUSE)
@@ -36,7 +36,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: jesssullivan/tcfsd
+  IMAGE_NAME: ${{ github.repository_owner }}/tcfsd
 
 permissions:
   contents: write
@@ -72,6 +72,7 @@ jobs:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     needs: plan
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -944,6 +945,15 @@ jobs:
           mkdir -p release
           find dist/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.pkg" -o -name "*.sh" -o -name "*.ps1" \) \
             -exec cp {} release/ \;
+
+          # Validate at least one artifact was collected
+          ASSET_COUNT=$(find release/ -type f | wc -l | tr -d ' ')
+          echo "Collected $ASSET_COUNT release assets"
+          if [ "$ASSET_COUNT" -lt 1 ]; then
+            echo "::error::No release artifacts collected — upstream build jobs may have failed"
+            exit 1
+          fi
+
           # .sig and .pem are generated in-place by Cosign step below
           cd release
           sha256sum * > SHA256SUMS.txt
@@ -965,6 +975,7 @@ jobs:
         with:
           name: tcfs ${{ needs.plan.outputs.tag }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: release/*
           body: |
             ## tcfs ${{ needs.plan.outputs.tag }}

@@ -27,27 +27,39 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Cache dependency compilation: copy manifests first, then source
+# Cache dependency compilation: copy ALL workspace member manifests first
 COPY Cargo.toml Cargo.lock ./
-COPY crates/tcfs-core/Cargo.toml      crates/tcfs-core/
-COPY crates/tcfs-crypto/Cargo.toml    crates/tcfs-crypto/
-COPY crates/tcfs-secrets/Cargo.toml   crates/tcfs-secrets/
-COPY crates/tcfs-storage/Cargo.toml   crates/tcfs-storage/
-COPY crates/tcfs-chunks/Cargo.toml    crates/tcfs-chunks/
-COPY crates/tcfs-sync/Cargo.toml      crates/tcfs-sync/
-COPY crates/tcfs-cloudfilter/Cargo.toml crates/tcfs-cloudfilter/
-COPY crates/tcfs-sops/Cargo.toml     crates/tcfs-sops/
-COPY crates/tcfsd/Cargo.toml          crates/tcfsd/
-COPY crates/tcfs-cli/Cargo.toml       crates/tcfs-cli/
-COPY crates/tcfs-tui/Cargo.toml       crates/tcfs-tui/
+COPY crates/tcfs-core/Cargo.toml           crates/tcfs-core/
+COPY crates/tcfs-crypto/Cargo.toml         crates/tcfs-crypto/
+COPY crates/tcfs-secrets/Cargo.toml        crates/tcfs-secrets/
+COPY crates/tcfs-storage/Cargo.toml        crates/tcfs-storage/
+COPY crates/tcfs-chunks/Cargo.toml         crates/tcfs-chunks/
+COPY crates/tcfs-sync/Cargo.toml           crates/tcfs-sync/
+COPY crates/tcfs-vfs/Cargo.toml            crates/tcfs-vfs/
+COPY crates/tcfs-fuse/Cargo.toml           crates/tcfs-fuse/
+COPY crates/tcfs-nfs/Cargo.toml            crates/tcfs-nfs/
+COPY crates/tcfs-cloudfilter/Cargo.toml    crates/tcfs-cloudfilter/
+COPY crates/tcfs-sops/Cargo.toml           crates/tcfs-sops/
+COPY crates/tcfs-file-provider/Cargo.toml  crates/tcfs-file-provider/
+COPY crates/tcfs-dbus/Cargo.toml           crates/tcfs-dbus/
+COPY crates/tcfs-auth/Cargo.toml           crates/tcfs-auth/
+COPY crates/tcfsd/Cargo.toml               crates/tcfsd/
+COPY crates/tcfs-cli/Cargo.toml            crates/tcfs-cli/
+COPY crates/tcfs-tui/Cargo.toml            crates/tcfs-tui/
+COPY crates/tcfs-mcp/Cargo.toml            crates/tcfs-mcp/
+COPY tests/e2e/Cargo.toml                  tests/e2e/
 
-# Create stub lib/main files so cargo can compute the dependency graph
-RUN for d in tcfs-core tcfs-crypto tcfs-secrets tcfs-storage tcfs-chunks tcfs-sync tcfs-cloudfilter tcfs-sops tcfs-tui; do \
+# Create stub lib/main files so cargo can resolve the workspace dependency graph
+RUN for d in tcfs-core tcfs-crypto tcfs-secrets tcfs-storage tcfs-chunks tcfs-sync \
+             tcfs-vfs tcfs-fuse tcfs-nfs tcfs-cloudfilter tcfs-sops tcfs-file-provider \
+             tcfs-dbus tcfs-auth tcfs-tui; do \
       mkdir -p crates/$d/src && echo "// stub" > crates/$d/src/lib.rs; \
     done && \
-    mkdir -p crates/tcfsd/src crates/tcfs-cli/src && \
+    mkdir -p crates/tcfsd/src crates/tcfs-cli/src crates/tcfs-mcp/src tests/e2e/src && \
     echo "fn main() {}" > crates/tcfsd/src/main.rs && \
-    echo "fn main() {}" > crates/tcfs-cli/src/main.rs
+    echo "fn main() {}" > crates/tcfs-cli/src/main.rs && \
+    echo "fn main() {}" > crates/tcfs-mcp/src/main.rs && \
+    echo "// stub" > tests/e2e/src/lib.rs
 
 # Build deps only (cached layer)
 RUN cargo build --release --features tcfsd/k8s-worker -p tcfsd 2>&1 || true
