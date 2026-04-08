@@ -833,7 +833,7 @@ mod tests {
                 vclock: VectorClock::new(),
                 device_id: String::new(),
                 conflict: None,
-            status: Default::default(),
+                status: Default::default(),
             },
         );
         cache.flush().unwrap();
@@ -866,7 +866,7 @@ mod tests {
                 vclock: VectorClock::new(),
                 device_id: String::new(),
                 conflict: None,
-            status: Default::default(),
+                status: Default::default(),
             },
         );
         assert_eq!(cache.len(), 1);
@@ -898,7 +898,7 @@ mod tests {
                     vclock: VectorClock::new(),
                     device_id: String::new(),
                     conflict: None,
-                status: Default::default(),
+                    status: Default::default(),
                 },
             );
         }
@@ -981,7 +981,7 @@ mod tests {
             vclock: VectorClock::new(),
             device_id: String::new(),
             conflict: None,
-        status: Default::default(),
+            status: Default::default(),
         };
 
         cache.set(&f1, make("a"));

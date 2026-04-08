@@ -480,7 +480,16 @@ async fn main() -> Result<()> {
             prefix,
             execute,
             state,
-        } => cmd_reconcile(&config, path.as_deref(), prefix.as_deref(), execute, state.as_deref()).await,
+        } => {
+            cmd_reconcile(
+                &config,
+                path.as_deref(),
+                prefix.as_deref(),
+                execute,
+                state.as_deref(),
+            )
+            .await
+        }
         Commands::Resolve { path, strategy } => {
             #[cfg(unix)]
             {
@@ -2629,15 +2638,13 @@ async fn cmd_reconcile(
         .or_else(|| config.sync.sync_root.clone())
         .ok_or_else(|| anyhow::anyhow!("no path specified and no sync_root in config"))?;
 
-    let remote_prefix = prefix
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            config
-                .storage
-                .remote_prefix
-                .clone()
-                .unwrap_or_else(|| config.storage.bucket.clone())
-        });
+    let remote_prefix = prefix.map(|s| s.to_string()).unwrap_or_else(|| {
+        config
+            .storage
+            .remote_prefix
+            .clone()
+            .unwrap_or_else(|| config.storage.bucket.clone())
+    });
 
     let state_path = resolve_state_path(config, state_override);
     let state = tcfs_sync::state::StateCache::open(&state_path)

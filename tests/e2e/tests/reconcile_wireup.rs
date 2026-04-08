@@ -39,7 +39,10 @@ async fn reconcile_detects_up_to_date() {
     .await
     .unwrap();
 
-    assert_eq!(plan.summary.up_to_date, 1, "pushed file should be up-to-date");
+    assert_eq!(
+        plan.summary.up_to_date, 1,
+        "pushed file should be up-to-date"
+    );
     assert_eq!(plan.summary.pushes, 0);
     assert_eq!(plan.summary.pulls, 0);
 }
