@@ -70,7 +70,7 @@
         commonArgs = {
           inherit src;
           buildInputs = commonBuildInputs;
-          nativeBuildInputs = with pkgs; [ pkg-config protobuf ];
+          nativeBuildInputs = with pkgs; [ pkg-config protobuf perl ];
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           ROCKSDB_INCLUDE_DIR = "${pkgs.rocksdb}/include";
           ROCKSDB_LIB_DIR = "${pkgs.rocksdb}/lib";
