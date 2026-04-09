@@ -91,7 +91,14 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             })
             .flatten();
 
-        let runtime = match tokio::runtime::Runtime::new() {
+        // Single-threaded tokio runtime to avoid deadlock with fileproviderd.
+        // Multi-threaded runtime spawns worker threads that contend with XPC
+        // file coordination locks, causing EDEADLK. Single-threaded runs all
+        // async work on the calling thread (the dispatch queue thread).
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(_) => return ptr::null_mut(),
         };

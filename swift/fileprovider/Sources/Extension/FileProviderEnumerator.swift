@@ -148,6 +148,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
             var updatedItems: [NSFileProviderItem] = []
             var deletedIds: [NSFileProviderItemIdentifier] = []
+            var maxTimestamp: Int64 = sinceTimestamp
 
             if let events = outEvents, outCount > 0 {
                 let count = Int(outCount)
@@ -157,6 +158,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     let filename = event.filename.map { String(cString: $0) } ?? ""
                     let eventType = event.event_type.map { String(cString: $0) } ?? ""
                     let contentHash = event.content_hash.map { String(cString: $0) } ?? "1"
+
+                    maxTimestamp = max(maxTimestamp, event.timestamp)
 
                     if eventType == "deleted" {
                         deletedIds.append(NSFileProviderItemIdentifier(itemPath))
@@ -186,7 +189,11 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             if !deletedIds.isEmpty {
                 observer.didDeleteItems(withIdentifiers: deletedIds)
             }
-            let newAnchor = Self.makeAnchor()
+            // Use max event timestamp as anchor to avoid skipping events
+            // that arrive between anchor creation and next enumerateChanges
+            let newAnchor = outCount > 0
+                ? Self.makeAnchorFromTimestamp(maxTimestamp)
+                : anchor
             observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
         }
     }
@@ -195,10 +202,17 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         completionHandler(Self.makeAnchor())
     }
 
-    /// Monotonic sync anchor from current timestamp (milliseconds since epoch).
+    /// Sync anchor from current timestamp (milliseconds since epoch).
     private static func makeAnchor() -> NSFileProviderSyncAnchor {
         var timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
         let data = Data(bytes: &timestamp, count: MemoryLayout<UInt64>.size)
+        return NSFileProviderSyncAnchor(data)
+    }
+
+    /// Sync anchor from a specific Unix timestamp (seconds).
+    private static func makeAnchorFromTimestamp(_ seconds: Int64) -> NSFileProviderSyncAnchor {
+        var millis = UInt64(seconds) * 1000
+        let data = Data(bytes: &millis, count: MemoryLayout<UInt64>.size)
         return NSFileProviderSyncAnchor(data)
     }
 

@@ -14,11 +14,13 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     let domain: NSFileProviderDomain
     /// Provider is created lazily on first use to avoid blocking the XPC bringup.
-    /// `tcfs_provider_new()` creates a tokio runtime and S3 operator, which can
-    /// take seconds — long enough to exceed fileproviderd's initial handshake timeout.
     private lazy var provider: OpaquePointer? = Self.createProvider()
     /// FileProvider manager for signaling enumerator updates after mutations.
     private lazy var manager: NSFileProviderManager? = NSFileProviderManager(for: domain)
+    /// Whether the persistent background watch stream has been started.
+    private var backgroundWatchStarted = false
+    /// Retained NSFileProviderManager pointer for the background watch callback.
+    private var watchManagerPtr: UnsafeMutableRawPointer?
 
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
@@ -26,6 +28,10 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     }
 
     func invalidate() {
+        if let ptr = watchManagerPtr {
+            Unmanaged<NSFileProviderManager>.fromOpaque(ptr).release()
+            watchManagerPtr = nil
+        }
         if let p = provider {
             tcfs_provider_free(p)
             provider = nil
@@ -153,14 +159,35 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         for containerItemIdentifier: NSFileProviderItemIdentifier,
         request: NSFileProviderRequest
     ) throws -> NSFileProviderEnumerator {
-        // Pass a closure so the enumerator can resolve the provider off the
-        // calling (file-coordination) thread.  Accessing `self.provider` here
-        // would trigger the lazy init synchronously, which blocks long enough
-        // to cause an EDEADLK file-coordination deadlock on first access.
+        // Start background watch on first enumerate (provider is now initialized)
+        if !backgroundWatchStarted, let prov = provider, let mgr = manager {
+            backgroundWatchStarted = true
+            startBackgroundWatch(provider: prov, manager: mgr)
+        }
+
         return TCFSFileProviderEnumerator(
             providerAccessor: { [weak self] in self?.provider ?? nil },
             containerIdentifier: containerItemIdentifier
         )
+    }
+
+    /// Start a persistent Watch RPC stream that signals fileproviderd on changes.
+    private func startBackgroundWatch(provider prov: OpaquePointer, manager mgr: NSFileProviderManager) {
+        let callback: @convention(c) (UnsafeRawPointer?) -> Void = { ctx in
+            guard let ctx = ctx else { return }
+            let m = Unmanaged<NSFileProviderManager>.fromOpaque(ctx).takeUnretainedValue()
+            m.signalEnumerator(for: .rootContainer) { _ in }
+        }
+
+        let ptr = Unmanaged.passRetained(mgr).toOpaque()
+        watchManagerPtr = UnsafeMutableRawPointer(mutating: ptr)
+
+        let result = tcfs_provider_start_watch(prov, callback, ptr)
+        if result != TCFS_ERROR_TCFS_ERROR_NONE {
+            logger.error("startBackgroundWatch: failed with \(result.rawValue)")
+            Unmanaged<NSFileProviderManager>.fromOpaque(ptr).release()
+            watchManagerPtr = nil
+        }
     }
 
     // MARK: - Write operations

@@ -320,6 +320,35 @@ impl StateCache {
         Ok(())
     }
 
+    /// Remove stale entries whose `remote_path` doesn't match `expected_prefix`
+    /// or whose local path (under /tmp/) no longer exists on disk.
+    ///
+    /// Returns the number of entries removed. Caller should `flush()` if > 0.
+    pub fn purge_stale(&mut self, expected_prefix: &str) -> usize {
+        let prefix_slash = format!("{}/", expected_prefix.trim_end_matches('/'));
+        let before = self.entries.len();
+
+        self.entries.retain(|key, state| {
+            // Keep entries whose remote_path starts with the expected prefix
+            if !state.remote_path.starts_with(&prefix_slash) {
+                return false;
+            }
+            // Remove entries for tmp files that no longer exist
+            if (key.starts_with("/tmp/") || key.starts_with("/private/tmp/"))
+                && !std::path::Path::new(key).exists()
+            {
+                return false;
+            }
+            true
+        });
+
+        let removed = before - self.entries.len();
+        if removed > 0 {
+            self.dirty = true;
+        }
+        removed
+    }
+
     /// Find all entries whose key starts with the given directory prefix.
     pub fn children_with_prefix(&self, dir_path: &Path) -> Vec<(String, &SyncState)> {
         let prefix = path_key(dir_path);

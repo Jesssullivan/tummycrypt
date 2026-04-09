@@ -1,13 +1,11 @@
 // Entry point for the Finder Sync extension.
-// Calls NSExtensionMain() which handles XPC listener setup
-// and principal class discovery from Info.plist.
+// FinderSync extensions are AppKit-based plugins that run inside Finder's process.
+// They use NSApplicationMain (not NSExtensionMain which is for XPC services).
 
-#import <Foundation/Foundation.h>
+#import <Cocoa/Cocoa.h>
 
-FOUNDATION_EXTERN int NSExtensionMain(int argc, char * _Nonnull argv[_Nonnull]);
-
-int main(int argc, char *argv[]) {
+int main(int argc, const char * argv[]) {
     @autoreleasepool {
-        return NSExtensionMain(argc, argv);
+        return NSApplicationMain(argc, argv);
     }
 }

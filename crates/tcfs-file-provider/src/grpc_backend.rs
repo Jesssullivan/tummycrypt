@@ -117,11 +117,23 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             .map(|s| s.to_string())
             .or_else(|| std::env::var("TCFS_SOCKET").ok())
             .unwrap_or_else(|| {
-                let state_home = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                    format!("{home}/.local/state")
-                });
-                format!("{state_home}/tcfsd/tcfsd.sock")
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                let state_home = std::env::var("XDG_STATE_HOME")
+                    .unwrap_or_else(|_| format!("{home}/.local/state"));
+                let xdg_path = format!("{state_home}/tcfsd/tcfsd.sock");
+
+                if std::path::Path::new(&xdg_path).exists() {
+                    return xdg_path;
+                }
+
+                // Sandboxed macOS extensions: try App Group container
+                let app_group =
+                    format!("{home}/Library/Group Containers/group.io.tinyland.tcfs/tcfsd.sock");
+                if std::path::Path::new(&app_group).exists() {
+                    return app_group;
+                }
+
+                xdg_path
             });
 
         let prefix = config["remote_prefix"]
@@ -129,7 +141,15 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             .unwrap_or("default")
             .to_string();
 
-        let runtime = match tokio::runtime::Runtime::new() {
+        // Multi-threaded runtime with 2 workers — one for the background watch
+        // stream, one for synchronous FFI calls (enumerate, fetch, upload).
+        // The gRPC backend only does network I/O (no file coordination), so
+        // worker threads don't conflict with fileproviderd's XPC locks.
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(_) => return ptr::null_mut(),
         };
@@ -337,7 +357,11 @@ pub unsafe extern "C" fn tcfs_provider_enumerate_changes(
     result.unwrap_or(TcfsError::TcfsErrorInternal)
 }
 
-/// Fetch (hydrate) a file via the daemon's Hydrate RPC.
+/// Fetch a file via the daemon's Pull RPC.
+///
+/// Uses Pull (not Hydrate) because the daemon writes to `local_path` which
+/// must be in the App Group container — the sandboxed extension cannot access
+/// files on the daemon's filesystem.
 ///
 /// # Safety
 ///
@@ -368,37 +392,23 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
         };
 
         let fetch_result = prov.runtime.block_on(async {
-            // Use Hydrate RPC — daemon handles download, decryption, assembly
             let mut stream = prov
                 .client
-                .hydrate(tonic::Request::new(tcfs_core::proto::HydrateRequest {
-                    stub_path: item_str.to_string(),
-                    partial_ok: false,
+                .pull(tonic::Request::new(tcfs_core::proto::PullRequest {
+                    remote_path: item_str.to_string(),
+                    local_path: dest_str.to_string(),
                 }))
                 .await?
                 .into_inner();
 
-            let mut local_path = String::new();
             while let Some(progress) = stream.message().await? {
                 if !progress.error.is_empty() {
                     return Err(tonic::Status::internal(progress.error));
                 }
                 if progress.done {
-                    local_path = progress.local_path;
                     break;
                 }
             }
-
-            if local_path.is_empty() {
-                return Err(tonic::Status::internal(
-                    "hydrate completed without local_path",
-                ));
-            }
-
-            // Copy the daemon's hydrated file to the FileProvider's destination
-            tokio::fs::copy(&local_path, dest_str)
-                .await
-                .map_err(|e| tonic::Status::internal(format!("copy to dest: {e}")))?;
 
             Ok::<(), tonic::Status>(())
         });
@@ -406,7 +416,99 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
         match fetch_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("fetch failed: {}, attempting reconnect", e);
+                tracing::error!("fetch failed: {e}");
+                prov.try_reconnect();
+                TcfsError::TcfsErrorStorage
+            }
+        }
+    }));
+
+    result.unwrap_or(TcfsError::TcfsErrorInternal)
+}
+
+/// Fetch a file via the daemon's Pull RPC with progress reporting.
+///
+/// Identical to `tcfs_provider_fetch` but invokes `callback` on each
+/// `PullProgress` message so the caller (Swift/Finder) can drive a
+/// progress bar.
+///
+/// # Safety
+///
+/// - `provider` must be a valid pointer from `tcfs_provider_new`.
+/// - `item_id` and `dest_path` must be valid null-terminated UTF-8 C strings.
+/// - `callback_context` must remain valid until this function returns.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+    dest_path: *const c_char,
+    callback: crate::TcfsProgressCallback,
+    callback_context: *const std::ffi::c_void,
+) -> TcfsError {
+    if provider.is_null() || item_id.is_null() || dest_path.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    // Store as usize so the closure is Send-safe (same pattern as direct.rs).
+    let ctx = callback_context as usize;
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let prov = unsafe { &mut *provider };
+        let c_item = unsafe { CStr::from_ptr(item_id) };
+        let c_dest = unsafe { CStr::from_ptr(dest_path) };
+
+        let item_str = match c_item.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+        let dest_str = match c_dest.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+
+        let fetch_result = prov.runtime.block_on(async {
+            let mut stream = prov
+                .client
+                .pull(tonic::Request::new(tcfs_core::proto::PullRequest {
+                    remote_path: item_str.to_string(),
+                    local_path: dest_str.to_string(),
+                }))
+                .await?
+                .into_inner();
+
+            // Signal start
+            if let Some(cb) = callback {
+                unsafe { cb(0, 0, ctx as *const std::ffi::c_void) };
+            }
+
+            while let Some(progress) = stream.message().await? {
+                if !progress.error.is_empty() {
+                    return Err(tonic::Status::internal(progress.error));
+                }
+
+                // Report progress to caller (Finder progress bar)
+                if let Some(cb) = callback {
+                    unsafe {
+                        cb(
+                            progress.bytes_received,
+                            progress.total_bytes,
+                            ctx as *const std::ffi::c_void,
+                        )
+                    };
+                }
+
+                if progress.done {
+                    break;
+                }
+            }
+
+            Ok::<(), tonic::Status>(())
+        });
+
+        match fetch_result {
+            Ok(()) => TcfsError::TcfsErrorNone,
+            Err(e) => {
+                tracing::error!("fetch_with_progress failed: {e}");
                 prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }
@@ -627,6 +729,87 @@ pub unsafe extern "C" fn tcfs_provider_create_dir(
     }));
 
     result.unwrap_or(TcfsError::TcfsErrorInternal)
+}
+
+/// Start a persistent background Watch RPC stream.
+///
+/// Spawns a long-lived async task that keeps a Watch stream open to the daemon.
+/// When any change event arrives, `callback` is invoked (debounced to at most
+/// once per 500ms). The Swift side should call `signalEnumerator()` from the
+/// callback to wake fileproviderd.
+///
+/// The task runs until the provider is freed (runtime dropped).
+///
+/// # Safety
+///
+/// - `provider` must be a valid pointer from `tcfs_provider_new`.
+/// - `callback_context` must remain valid for the lifetime of the provider.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_start_watch(
+    provider: *mut TcfsProvider,
+    callback: crate::TcfsWatchCallback,
+    callback_context: *const std::ffi::c_void,
+) -> TcfsError {
+    if provider.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    let cb = match callback {
+        Some(f) => f,
+        None => return TcfsError::TcfsErrorInvalidArg,
+    };
+
+    let ctx = callback_context as usize;
+    let prov = unsafe { &mut *provider };
+    let socket_path = prov.socket_path.clone();
+
+    // Create a SEPARATE gRPC client for the watch stream.
+    // Sharing the main client's HTTP/2 channel can cause contention
+    // with synchronous block_on() calls from fetchContents.
+    let watch_client = match prov.runtime.block_on(connect_once(&socket_path)) {
+        Ok(c) => c,
+        Err(_) => return TcfsError::TcfsErrorStorage,
+    };
+    let mut client = watch_client;
+
+    prov.runtime.spawn(async move {
+        loop {
+            let watch_result = client
+                .watch(tonic::Request::new(tcfs_core::proto::WatchRequest {
+                    paths: vec![String::new()],
+                    since_timestamp: 0,
+                }))
+                .await;
+
+            match watch_result {
+                Ok(resp) => {
+                    let mut stream = resp.into_inner();
+                    let mut last_signal = std::time::Instant::now();
+
+                    while let Ok(Some(_event)) = stream.message().await {
+                        // Debounce: signal at most once per 500ms
+                        if last_signal.elapsed() > std::time::Duration::from_millis(500) {
+                            unsafe {
+                                cb(ctx as *const std::ffi::c_void);
+                            }
+                            last_signal = std::time::Instant::now();
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("background watch failed: {e}, reconnecting in 5s");
+                    // Try to reconnect the client
+                    if let Ok(new_client) = connect_once(&socket_path).await {
+                        client = new_client;
+                    }
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
+    TcfsError::TcfsErrorNone
 }
 
 /// Free a provider handle.

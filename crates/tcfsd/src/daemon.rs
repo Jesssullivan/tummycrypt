@@ -216,18 +216,34 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         false
     };
 
-    // Open state cache (wrapped in Arc<Mutex> for shared access)
-    // Derive .json sibling from state_db path to match CLI convention
+    // Open state cache, purge stale entries, then wrap in Arc<Mutex>
     let state_json_path = config.sync.state_db.with_extension("json");
-    let state_cache = Arc::new(tokio::sync::Mutex::new(
-        tcfs_sync::state::StateCache::open(&state_json_path).unwrap_or_else(|e| {
+    let mut state_cache_inner = tcfs_sync::state::StateCache::open(&state_json_path)
+        .unwrap_or_else(|e| {
             warn!("state cache open failed: {e}  (starting fresh)");
             tcfs_sync::state::StateCache::open(&std::path::PathBuf::from(
                 "/tmp/tcfsd-state.db.json",
             ))
             .expect("fallback state cache")
-        }),
-    ));
+        });
+
+    // Purge entries with wrong remote prefix or stale tmp paths
+    let resolved_prefix = config
+        .storage
+        .remote_prefix
+        .as_deref()
+        .unwrap_or(&config.storage.bucket);
+    let purged = state_cache_inner.purge_stale(resolved_prefix);
+    if purged > 0 {
+        info!(
+            purged,
+            prefix = resolved_prefix,
+            "purged stale state cache entries"
+        );
+        let _ = state_cache_inner.flush();
+    }
+
+    let state_cache = Arc::new(tokio::sync::Mutex::new(state_cache_inner));
 
     // Wrap operator in Arc<Mutex> for shared access
     let operator = Arc::new(tokio::sync::Mutex::new(operator));

@@ -20,7 +20,9 @@ private let logger = Logger(
 )
 
 class TCFSFinderSync: FIFinderSync {
-    private let statusCache = StatusCache()
+    // Deferred init — avoid filesystem access during extension load
+    // which can deadlock with Finder's coordination locks.
+    private var statusCache: StatusCache?
 
     override init() {
         super.init()
@@ -60,19 +62,23 @@ class TCFSFinderSync: FIFinderSync {
 
     override func beginObservingDirectory(at url: URL) {
         logger.info("beginObserving: \(url.path)")
-        statusCache.startPolling()
+        // Initialize StatusCache on first observation (safe — extension fully loaded)
+        if statusCache == nil {
+            statusCache = StatusCache()
+        }
+        statusCache?.startPolling()
     }
 
     override func endObservingDirectory(at url: URL) {
         logger.info("endObserving: \(url.path)")
-        statusCache.stopPolling()
+        statusCache?.stopPolling()
     }
 
     override func requestBadgeIdentifier(for url: URL) {
         let filename = url.lastPathComponent
 
         // Look up status in the daemon's state cache
-        if let status = statusCache.statusByName(filename) {
+        if let status = statusCache?.statusByName(filename) {
             let badgeId: String
             switch status {
             case "synced":

@@ -72,14 +72,11 @@ SWIFT
     echo "         Extension will fall back to Keychain/XDG/App Group (slower, may fail)" >&2
 fi
 
-# Validate config has a real endpoint (not stale or empty)
+# Validate config has daemon_socket for gRPC backend
 if [ -f "$CONFIG_PATH" ]; then
-    if grep -q "seaweedfs-seaweedfs-filer-ts" "$CONFIG_PATH" 2>/dev/null; then
-        echo "WARNING: config.json contains stale CIVO endpoint (seaweedfs-seaweedfs-filer-ts)" >&2
-        echo "         Run home-manager switch to regenerate with current endpoints" >&2
-    fi
-    if ! grep -q '"s3_access"' "$CONFIG_PATH" 2>/dev/null || grep -q '"s3_access": ""' "$CONFIG_PATH" 2>/dev/null; then
-        echo "WARNING: config.json has empty S3 credentials — FileProvider won't authenticate" >&2
+    if ! grep -q '"daemon_socket"' "$CONFIG_PATH" 2>/dev/null; then
+        echo "WARNING: config.json has no daemon_socket — gRPC backend needs a socket path" >&2
+        echo "         Extension will fall back to XDG or App Group container path" >&2
     fi
 fi
 
@@ -155,6 +152,8 @@ FINDER_SYNC_DIR="$SCRIPT_DIR/Sources/FinderSync"
 if [ -d "$FINDER_SYNC_DIR" ]; then
     echo "==> Compiling Finder Sync extension..."
 
+    # FinderSync is an AppKit-based in-process plugin (NOT an XPC service).
+    # Uses NSApplicationMain entry point (NOT NSExtensionMain).
     /usr/bin/clang -c \
         -isysroot "$SDKPATH" \
         -target arm64-apple-macos${MIN_MACOS} \
@@ -168,6 +167,7 @@ if [ -d "$FINDER_SYNC_DIR" ]; then
         -parse-as-library \
         -framework FinderSync \
         -framework Foundation \
+        -framework AppKit \
         -target arm64-apple-macos${MIN_MACOS} \
         -Xfrontend -disable-modules-validate-system-headers \
         -O \

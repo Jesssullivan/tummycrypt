@@ -119,7 +119,7 @@
         tcfs-file-provider-staticlib = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tcfs-file-provider-staticlib";
-          cargoExtraArgs = "-p tcfs-file-provider";
+          cargoExtraArgs = "-p tcfs-file-provider --no-default-features --features grpc";
           postInstall = ''
             mkdir -p $out/lib $out/include
             find target -name "libtcfs_file_provider.a" -exec cp {} $out/lib/ \;

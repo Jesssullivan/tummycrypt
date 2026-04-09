@@ -557,7 +557,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let op = op.clone();
 
         let state_cache = self.state_cache.clone();
-        let prefix = self.config.storage.bucket.clone();
+        let prefix = self
+            .config
+            .storage
+            .remote_prefix
+            .clone()
+            .unwrap_or_else(|| self.config.storage.bucket.clone());
 
         let mut stream = request.into_inner();
 
@@ -734,7 +739,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
             .ok_or_else(|| tonic::Status::unavailable("no storage operator — check credentials"))?;
         let op = op.clone();
 
-        let prefix = self.config.storage.bucket.clone();
+        let prefix = self
+            .config
+            .storage
+            .remote_prefix
+            .clone()
+            .unwrap_or_else(|| self.config.storage.bucket.clone());
         let local_path = std::path::PathBuf::from(&req.local_path);
         let state_cache = self.state_cache.clone();
 
@@ -821,7 +831,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let blake3_hex = meta
             .blake3_hex()
             .ok_or_else(|| tonic::Status::invalid_argument("stub oid missing blake3: prefix"))?;
-        let prefix = self.config.storage.bucket.clone();
+        let prefix = self
+            .config
+            .storage
+            .remote_prefix
+            .clone()
+            .unwrap_or_else(|| self.config.storage.bucket.clone());
         let manifest_path = format!("{prefix}/manifests/{blake3_hex}");
 
         let op = self.operator.lock().await;
@@ -1167,7 +1182,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     let cache = self.state_cache.lock().await;
                     let entry = cache.get(&path);
                     let remote = entry.map(|e| e.remote_path.clone()).unwrap_or_default();
-                    let prefix = self.config.storage.bucket.clone();
+                    let prefix = self
+                        .config
+                        .storage
+                        .remote_prefix
+                        .clone()
+                        .unwrap_or_else(|| self.config.storage.bucket.clone());
                     (remote, prefix)
                 };
 
@@ -1224,7 +1244,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     let cache = self.state_cache.lock().await;
                     let entry = cache.get(&path);
                     let remote = entry.map(|e| e.remote_path.clone()).unwrap_or_default();
-                    let prefix = self.config.storage.bucket.clone();
+                    let prefix = self
+                        .config
+                        .storage
+                        .remote_prefix
+                        .clone()
+                        .unwrap_or_else(|| self.config.storage.bucket.clone());
                     (remote, prefix)
                 };
 
