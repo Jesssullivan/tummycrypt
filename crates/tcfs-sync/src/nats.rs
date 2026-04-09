@@ -201,11 +201,7 @@ mod inner {
         /// Connect to NATS and return a client with JetStream enabled.
         ///
         /// If `require_tls` is true and the URL uses `nats://`, it is upgraded to `tls://`.
-        pub async fn connect(
-            url: &str,
-            require_tls: bool,
-            token: Option<&str>,
-        ) -> Result<Self> {
+        pub async fn connect(url: &str, require_tls: bool, token: Option<&str>) -> Result<Self> {
             let effective_url = if require_tls && url.starts_with("nats://") {
                 let upgraded = url.replacen("nats://", "tls://", 1);
                 warn!(
@@ -229,15 +225,11 @@ mod inner {
                 async_nats::ConnectOptions::with_token(tok.to_string())
                     .connect(&effective_url)
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("connecting to NATS at {effective_url}: {e}")
-                    })?
+                    .map_err(|e| anyhow::anyhow!("connecting to NATS at {effective_url}: {e}"))?
             } else {
                 async_nats::connect(&effective_url)
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("connecting to NATS at {effective_url}: {e}")
-                    })?
+                    .map_err(|e| anyhow::anyhow!("connecting to NATS at {effective_url}: {e}"))?
             };
 
             info!("NATS: connected to {effective_url}");

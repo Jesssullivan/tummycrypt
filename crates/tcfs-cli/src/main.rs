@@ -1528,34 +1528,29 @@ async fn cmd_mount(
                         let dev = device_id.clone();
                         let pfx = prefix.clone();
                         Some(std::sync::Arc::new(
-                            move |rel_path: &str,
-                                  hash: &str,
-                                  size: u64,
-                                  _chunks: usize,
-                                  vclock: &tcfs_sync::conflict::VectorClock| {
-                                let event = tcfs_sync::StateEvent::FileSynced {
-                                    device_id: dev.clone(),
-                                    rel_path: rel_path.to_string(),
-                                    blake3: hash.to_string(),
-                                    size,
-                                    vclock: vclock.clone(),
-                                    manifest_path: format!(
-                                        "{}/manifests/{}",
-                                        pfx, hash
-                                    ),
-                                    timestamp: tcfs_sync::StateEvent::now(),
-                                };
-                                let n = nats.clone();
-                                tokio::spawn(async move {
-                                    let client = n.lock().await;
-                                    if let Err(e) =
-                                        client.publish_state_event(&event).await
-                                    {
-                                        tracing::warn!("on_flush NATS publish failed: {e}");
-                                    }
-                                });
-                            },
-                        ))
+                        move |rel_path: &str,
+                              hash: &str,
+                              size: u64,
+                              _chunks: usize,
+                              vclock: &tcfs_sync::conflict::VectorClock| {
+                            let event = tcfs_sync::StateEvent::FileSynced {
+                                device_id: dev.clone(),
+                                rel_path: rel_path.to_string(),
+                                blake3: hash.to_string(),
+                                size,
+                                vclock: vclock.clone(),
+                                manifest_path: format!("{}/manifests/{}", pfx, hash),
+                                timestamp: tcfs_sync::StateEvent::now(),
+                            };
+                            let n = nats.clone();
+                            tokio::spawn(async move {
+                                let client = n.lock().await;
+                                if let Err(e) = client.publish_state_event(&event).await {
+                                    tracing::warn!("on_flush NATS publish failed: {e}");
+                                }
+                            });
+                        },
+                    ))
                     }
                     Err(e) => {
                         tracing::warn!("NATS unavailable for mount callback: {e}");

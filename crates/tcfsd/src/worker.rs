@@ -120,8 +120,12 @@ mod inner {
         ));
 
         // Connect to NATS
-        let nats: NatsClient =
-            NatsClient::connect(&config.sync.nats_url, config.sync.nats_tls).await?;
+        let nats: NatsClient = NatsClient::connect(
+            &config.sync.nats_url,
+            config.sync.nats_tls,
+            config.sync.nats_token.as_deref(),
+        )
+        .await?;
         nats.ensure_streams().await?;
 
         // Concurrency limit: configurable via TCFS_WORKER_CONCURRENCY or CPU count
