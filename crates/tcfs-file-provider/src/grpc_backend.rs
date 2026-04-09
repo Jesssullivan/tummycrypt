@@ -154,7 +154,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             Err(_) => return ptr::null_mut(),
         };
 
-        let client = match runtime.block_on(connect_with_retry(&socket_path, 4)) {
+        let client = match runtime.block_on(connect_with_retry(&socket_path, 8)) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("failed to connect to tcfsd at {}: {}", socket_path, e);
