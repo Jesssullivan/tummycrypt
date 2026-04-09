@@ -14,7 +14,7 @@ path = "src/main.rs"
 tcfs-core = { path = "../tcfs-core" }
 tcfs-secrets = { path = "../tcfs-secrets" }
 tcfs-storage = { path = "../tcfs-storage" }
-tcfs-sync = { path = "../tcfs-sync", features = ["crypto"] }
+tcfs-sync = { path = "../tcfs-sync", features = ["crypto", "nats"] }
 tcfs-chunks = { path = "../tcfs-chunks" }
 tcfs-vfs = { path = "../tcfs-vfs" }
 tcfs-nfs = { path = "../tcfs-nfs" }

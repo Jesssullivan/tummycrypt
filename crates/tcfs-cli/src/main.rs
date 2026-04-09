@@ -1512,6 +1512,60 @@ async fn cmd_mount(
         .await
         .context("NFS mount failed")
     } else {
+        // Connect to NATS for flush events (if configured)
+        let device_id = load_device_id(config);
+        let on_flush: Option<tcfs_vfs::OnFlushCallback> =
+            if config.sync.nats_url != "nats://localhost:4222" {
+                match tcfs_sync::nats::NatsClient::connect(
+                    &config.sync.nats_url,
+                    config.sync.nats_tls,
+                    config.sync.nats_token.as_deref(),
+                )
+                .await
+                {
+                    Ok(nats) => {
+                        let nats = std::sync::Arc::new(tokio::sync::Mutex::new(nats));
+                        let dev = device_id.clone();
+                        let pfx = prefix.clone();
+                        Some(std::sync::Arc::new(
+                            move |rel_path: &str,
+                                  hash: &str,
+                                  size: u64,
+                                  _chunks: usize,
+                                  vclock: &tcfs_sync::conflict::VectorClock| {
+                                let event = tcfs_sync::StateEvent::FileSynced {
+                                    device_id: dev.clone(),
+                                    rel_path: rel_path.to_string(),
+                                    blake3: hash.to_string(),
+                                    size,
+                                    vclock: vclock.clone(),
+                                    manifest_path: format!(
+                                        "{}/manifests/{}",
+                                        pfx, hash
+                                    ),
+                                    timestamp: tcfs_sync::StateEvent::now(),
+                                };
+                                let n = nats.clone();
+                                tokio::spawn(async move {
+                                    let client = n.lock().await;
+                                    if let Err(e) =
+                                        client.publish_state_event(&event).await
+                                    {
+                                        tracing::warn!("on_flush NATS publish failed: {e}");
+                                    }
+                                });
+                            },
+                        ))
+                    }
+                    Err(e) => {
+                        tracing::warn!("NATS unavailable for mount callback: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
         // FUSE3 mount (default — unprivileged via fusermount3)
         tcfs_fuse::mount(tcfs_fuse::MountConfig {
             op,
@@ -1522,7 +1576,7 @@ async fn cmd_mount(
             negative_ttl_secs: neg_ttl,
             read_only: read_only,
             allow_other: false,
-            on_flush: None,
+            on_flush,
             device_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "cli".to_string()),
             // Load master key from file for FUSE read decryption.
             // The mount process is separate from the daemon, so it can't
