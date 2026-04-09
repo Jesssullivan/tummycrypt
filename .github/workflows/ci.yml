@@ -109,6 +109,9 @@ jobs:
           grep -q "tcfs_provider_delete" "$HEADER"
           echo "header: $HEADER"
 
+      - name: Check gRPC backend compiles
+        run: cargo check -p tcfs-file-provider --no-default-features --features grpc
+
   ios-typecheck:
     name: iOS FileProvider typecheck
     runs-on: macos-14

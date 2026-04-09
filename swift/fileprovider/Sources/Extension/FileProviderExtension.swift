@@ -13,8 +13,25 @@ private let logger = Logger(subsystem: "io.tinyland.tcfs.fileprovider", category
 class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     let domain: NSFileProviderDomain
-    /// Provider is created lazily on first use to avoid blocking the XPC bringup.
-    private lazy var provider: OpaquePointer? = Self.createProvider()
+    /// Cached provider handle — retries creation up to 3 times if daemon is slow to start.
+    private var _cachedProvider: OpaquePointer?
+    private var _providerAttempts = 0
+    private let _providerLock = NSLock()
+
+    /// Thread-safe provider accessor that retries creation on failure.
+    /// Once the daemon socket is available, the provider is cached for the
+    /// extension's lifetime. If creation fails 3 times, returns nil permanently.
+    private var provider: OpaquePointer? {
+        _providerLock.lock()
+        defer { _providerLock.unlock() }
+        if let cached = _cachedProvider { return cached }
+        if _providerAttempts >= 3 { return nil }
+        _providerAttempts += 1
+        let p = Self.createProvider()
+        if p != nil { _cachedProvider = p; _providerAttempts = 0 }
+        return p
+    }
+
     /// FileProvider manager for signaling enumerator updates after mutations.
     private lazy var manager: NSFileProviderManager? = NSFileProviderManager(for: domain)
     /// Whether the persistent background watch stream has been started.
@@ -32,10 +49,13 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             Unmanaged<NSFileProviderManager>.fromOpaque(ptr).release()
             watchManagerPtr = nil
         }
-        if let p = provider {
+        _providerLock.lock()
+        if let p = _cachedProvider {
             tcfs_provider_free(p)
-            provider = nil
+            _cachedProvider = nil
         }
+        _providerAttempts = 0
+        _providerLock.unlock()
     }
 
     // MARK: - Item lookup
