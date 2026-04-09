@@ -105,6 +105,22 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             let tempFile = tempDir.appendingPathComponent(UUID().uuidString)
 
             let itemId = itemIdentifier.rawValue
+            logger.error("fetchContents: id=\(itemId) dest=\(tempFile.path)")
+
+            // Write pre-FFI trace to Group Container
+            if let groupURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: "group.io.tinyland.tcfs"
+            ) {
+                let traceFile = groupURL.appendingPathComponent("swift-trace.log")
+                let msg = "pre-FFI: prov=\(prov) id=\(itemId) dest=\(tempFile.path)\n"
+                if let fh = try? FileHandle(forWritingTo: traceFile) {
+                    fh.seekToEndOfFile()
+                    fh.write(msg.data(using: .utf8)!)
+                    fh.closeFile()
+                } else {
+                    try? msg.data(using: .utf8)?.write(to: traceFile)
+                }
+            }
 
             // C callback that updates NSProgress from Rust's chunk loop
             let callback: @convention(c) (UInt64, UInt64, UnsafeRawPointer?) -> Void = {
@@ -127,6 +143,23 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
             // Balance the passRetained
             Unmanaged<Progress>.fromOpaque(progressPtr).release()
+
+            // Write post-FFI trace
+            if let groupURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: "group.io.tinyland.tcfs"
+            ) {
+                let traceFile = groupURL.appendingPathComponent("swift-trace.log")
+                let msg = "post-FFI: result=\(result.rawValue)\n"
+                if let fh = try? FileHandle(forWritingTo: traceFile) {
+                    fh.seekToEndOfFile()
+                    fh.write(msg.data(using: .utf8)!)
+                    fh.closeFile()
+                } else {
+                    try? msg.data(using: .utf8)?.write(to: traceFile)
+                }
+            }
+
+            logger.error("fetchContents: result=\(result.rawValue)")
 
             if result == TCFS_ERROR_TCFS_ERROR_NONE {
                 let fileSize = (try? FileManager.default.attributesOfItem(

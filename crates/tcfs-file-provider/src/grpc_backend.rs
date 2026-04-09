@@ -391,33 +391,59 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
 
-        let fetch_result = prov.runtime.block_on(async {
-            let mut stream = prov
-                .client
-                .pull(tonic::Request::new(tcfs_core::proto::PullRequest {
-                    remote_path: item_str.to_string(),
-                    local_path: dest_str.to_string(),
-                }))
-                .await?
-                .into_inner();
+        // Use a fresh connection per fetch to avoid channel contention
+        // with the background watch stream on the shared HTTP/2 connection.
+        let socket = prov.socket_path.clone();
+        let remote = item_str.to_string();
+        let dest = dest_str.to_string();
 
-            while let Some(progress) = stream.message().await? {
-                if !progress.error.is_empty() {
-                    return Err(tonic::Status::internal(progress.error));
-                }
-                if progress.done {
-                    break;
-                }
+        let handle = prov.runtime.handle().clone();
+        // Hardcoded path — sandbox blocks /tmp/ and HOME may be unset
+        let dbg = |msg: &str| {
+            use std::io::Write;
+            let p = "/Users/jess/Library/Group Containers/group.io.tinyland.tcfs/fetch-debug.log";
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                let _ = writeln!(f, "{msg}");
             }
+        };
+        dbg(&format!("fetch: socket={socket} remote={remote} dest={dest}"));
 
-            Ok::<(), tonic::Status>(())
-        });
+        let fetch_result = std::thread::spawn(move || {
+            dbg("fetch thread: started");
+            handle.block_on(async {
+                dbg("fetch thread: connecting...");
+                let mut client = match connect_once(&socket).await {
+                    Ok(c) => { dbg("fetch thread: connected"); c }
+                    Err(e) => { dbg(&format!("fetch thread: CONNECT FAILED: {e}")); return Err(tonic::Status::unavailable(format!("connect: {e}"))); }
+                };
 
+                dbg("fetch thread: calling pull...");
+                match client.pull(tonic::Request::new(tcfs_core::proto::PullRequest {
+                    remote_path: remote, local_path: dest,
+                })).await {
+                    Ok(resp) => {
+                        let mut stream = resp.into_inner();
+                        dbg("fetch thread: stream opened");
+                        while let Some(progress) = stream.message().await? {
+                            dbg(&format!("fetch thread: progress {}/{} done={}", progress.bytes_received, progress.total_bytes, progress.done));
+                            if !progress.error.is_empty() { return Err(tonic::Status::internal(progress.error)); }
+                            if progress.done { break; }
+                        }
+                        dbg("fetch thread: SUCCESS");
+                        Ok(())
+                    }
+                    Err(e) => { dbg(&format!("fetch thread: PULL FAILED: {e}")); Err(e) }
+                }
+            })
+        })
+        .join()
+        .unwrap_or_else(|e| { dbg(&format!("fetch thread: PANICKED: {e:?}")); Err(tonic::Status::internal("fetch thread panicked")) });
+
+        dbg(&format!("fetch: result={fetch_result:?}"));
         match fetch_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("fetch failed: {e}");
-                prov.try_reconnect();
+                dbg(&format!("fetch: ERROR: {e}"));
                 TcfsError::TcfsErrorStorage
             }
         }
@@ -466,17 +492,50 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
 
+        let socket = prov.socket_path.clone();
+        let remote = item_str.to_string();
+        let dest = dest_str.to_string();
+
+        fn trace(msg: &str) {
+            use std::io::Write;
+            // stderr goes to os_log on macOS (visible in Console.app / `log show`)
+            let _ = writeln!(std::io::stderr(), "TCFS_FWP: {msg}");
+            // Also try hardcoded file path
+            let p = "/Users/jess/Library/Group Containers/group.io.tinyland.tcfs/fetch-debug.log";
+            match std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                Ok(mut f) => { let _ = writeln!(f, "{msg}"); }
+                Err(e) => { let _ = writeln!(std::io::stderr(), "TCFS_FWP: file_err={e}"); }
+            }
+        }
+
+        trace(&format!(
+            "fetch_with_progress ENTERED: item={} dest={} socket={}",
+            item_str, dest_str, socket
+        ));
+
+        // Use the existing client directly — no new thread, no new connection.
+        // The runtime has 2 workers; block_on parks this GCD thread while
+        // a worker drives the future.
         let fetch_result = prov.runtime.block_on(async {
-            let mut stream = prov
+            trace("sending pull request...");
+            let mut stream = match prov
                 .client
                 .pull(tonic::Request::new(tcfs_core::proto::PullRequest {
-                    remote_path: item_str.to_string(),
-                    local_path: dest_str.to_string(),
+                    remote_path: remote,
+                    local_path: dest,
                 }))
-                .await?
-                .into_inner();
+                .await
+            {
+                Ok(resp) => {
+                    trace("pull accepted");
+                    resp.into_inner()
+                }
+                Err(e) => {
+                    trace(&format!("pull FAILED: {e}"));
+                    return Err(e);
+                }
+            };
 
-            // Signal start
             if let Some(cb) = callback {
                 unsafe { cb(0, 0, ctx as *const std::ffi::c_void) };
             }
@@ -485,8 +544,6 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
                 if !progress.error.is_empty() {
                     return Err(tonic::Status::internal(progress.error));
                 }
-
-                // Report progress to caller (Finder progress bar)
                 if let Some(cb) = callback {
                     unsafe {
                         cb(
@@ -496,8 +553,8 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
                         )
                     };
                 }
-
                 if progress.done {
+                    trace("fetch complete");
                     break;
                 }
             }
@@ -506,10 +563,13 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
         });
 
         match fetch_result {
-            Ok(()) => TcfsError::TcfsErrorNone,
+            Ok(()) => {
+                trace("returning TcfsErrorNone");
+                TcfsError::TcfsErrorNone
+            }
             Err(e) => {
+                trace(&format!("returning TcfsErrorStorage: {e}"));
                 tracing::error!("fetch_with_progress failed: {e}");
-                prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }
         }

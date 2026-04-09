@@ -730,6 +730,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
         request: tonic::Request<PullRequest>,
     ) -> Result<tonic::Response<Self::PullStream>, tonic::Status> {
         let session = self.require_session(&request).await?;
+        let req_inner = request.get_ref();
+        info!(
+            remote = %req_inner.remote_path,
+            local = %req_inner.local_path,
+            "pull requested"
+        );
         Self::check_permission(&session, "pull")?;
         let req = request.into_inner();
 
@@ -757,6 +763,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let result = {
             let mut cache = state_cache.lock().await;
+            let mk_guard = self.master_key.lock().await;
+            let enc_ctx = mk_guard
+                .as_ref()
+                .map(|mk| tcfs_sync::engine::EncryptionContext {
+                    master_key: mk.clone(),
+                });
             tcfs_sync::engine::download_file_with_device(
                 &op,
                 &resolved_manifest,
@@ -765,7 +777,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 None,
                 &self.device_id,
                 Some(&mut cache),
-                None,
+                enc_ctx.as_ref(),
             )
             .await
         };
@@ -783,6 +795,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 )))))
             }
             Err(e) => {
+                warn!(error = %e, "pull download failed");
                 let progress = PullProgress {
                     bytes_received: 0,
                     total_bytes: 0,
@@ -850,6 +863,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let result = {
             let mut cache = self.state_cache.lock().await;
+            let mk_guard = self.master_key.lock().await;
+            let enc_ctx = mk_guard
+                .as_ref()
+                .map(|mk| tcfs_sync::engine::EncryptionContext {
+                    master_key: mk.clone(),
+                });
             tcfs_sync::engine::download_file_with_device(
                 &op,
                 &manifest_path,
@@ -858,7 +877,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 None,
                 &self.device_id,
                 Some(&mut cache),
-                None,
+                enc_ctx.as_ref(),
             )
             .await
         };
