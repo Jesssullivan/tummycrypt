@@ -189,6 +189,7 @@ pub async fn upload_file_with_device(
     // First try the index entry (covers different-content conflicts), then
     // fall back to checking the same-hash manifest path.
     let mut outcome = None;
+    let mut remote_vclock_snapshot: Option<crate::conflict::VectorClock> = None;
     if !device_id.is_empty() {
         let remote_manifest_obj = if let Some(rp) = rel_path {
             // Look up the index entry to find what manifest is currently stored
@@ -226,6 +227,11 @@ pub async fn upload_file_with_device(
                 None
             }
         };
+
+        // Capture remote vclock for deferred merge (Issue #183)
+        remote_vclock_snapshot = remote_manifest_obj
+            .as_ref()
+            .map(|m| m.vclock.clone());
 
         if let Some(remote_manifest_obj) = remote_manifest_obj {
             let local_hash = &file_hash_hex;
@@ -298,8 +304,8 @@ pub async fn upload_file_with_device(
                     });
                 }
                 SyncOutcome::LocalNewer => {
-                    // Merge remote vclock into local before writing
-                    local_vclock.merge(&remote_manifest_obj.vclock);
+                    // Defer vclock merge until after successful manifest upload
+                    // (prevents stale vclocks if upload fails)
                     outcome = Some(SyncOutcome::LocalNewer);
                 }
             }
@@ -526,6 +532,14 @@ pub async fn upload_file_with_device(
     op.write(&remote_manifest, manifest_bytes)
         .await
         .with_context(|| format!("uploading manifest: {remote_manifest}"))?;
+
+    // Deferred vclock merge: only merge remote vclock after successful upload
+    // to prevent stale vclocks if the upload had failed.
+    if matches!(outcome, Some(SyncOutcome::LocalNewer)) {
+        if let Some(ref remote_vc) = remote_vclock_snapshot {
+            local_vclock.merge(remote_vc);
+        }
+    }
 
     info!(
         path = %local_path.display(),
