@@ -255,6 +255,7 @@ impl TcfsVfs {
             written_by: self.device_id.clone(),
             written_at: now,
             rel_path: Some(vpath.to_string()),
+            mode: None,
             encrypted_file_key,
         };
         let manifest_key = format!("{}/manifests/{}", prefix, file_hash);

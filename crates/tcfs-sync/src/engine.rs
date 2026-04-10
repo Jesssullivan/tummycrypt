@@ -51,6 +51,8 @@ pub struct CollectConfig {
     pub sync_hidden_dirs: bool,
     /// Glob patterns to exclude
     pub exclude_patterns: Vec<String>,
+    /// Whether to follow symlinks (default: false — skip with warning)
+    pub follow_symlinks: bool,
 }
 
 impl Default for CollectConfig {
@@ -60,6 +62,7 @@ impl Default for CollectConfig {
             git_sync_mode: "bundle".into(),
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
+            follow_symlinks: false,
         }
     }
 }
@@ -149,13 +152,27 @@ pub async fn upload_file_with_device(
         }
     }
 
-    // Chunk the file
-    let (chunks, data) = tcfs_chunks::chunk_file(local_path)
-        .with_context(|| format!("chunking: {}", local_path.display()))?;
+    // Tiered chunking: files below STREAMING_THRESHOLD are read into memory,
+    // larger files use streaming two-pass (hash, then chunk) to bound memory.
+    let file_meta = std::fs::metadata(local_path)
+        .with_context(|| format!("stat for chunking: {}", local_path.display()))?;
+    let file_size = file_meta.len();
 
-    let file_size = data.len() as u64;
-    let file_hash = tcfs_chunks::hash_bytes(&data);
-    let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
+    let use_streaming = file_size >= tcfs_chunks::STREAMING_THRESHOLD;
+
+    // Pass 1: compute file hash
+    let file_hash_hex = if use_streaming {
+        let hash = tcfs_chunks::hash_file_streaming(local_path)
+            .with_context(|| format!("streaming hash: {}", local_path.display()))?;
+        tcfs_chunks::hash_to_hex(&hash)
+    } else {
+        // Small file: read fully, hash in memory
+        let data = std::fs::read(local_path)
+            .with_context(|| format!("reading for hash: {}", local_path.display()))?;
+        tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
+    };
+
+    // Pass 2: chunk (deferred until after conflict check — may skip upload)
 
     // Build remote manifest path (using the file's content hash)
     let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
@@ -229,7 +246,7 @@ pub async fn upload_file_with_device(
                         path: local_path.to_path_buf(),
                         remote_path: remote_manifest.clone(),
                         hash: file_hash_hex,
-                        chunks: chunks.len(),
+                        chunks: 0,
                         bytes: file_size,
                         skipped: true,
                         outcome: Some(sync_outcome),
@@ -240,7 +257,7 @@ pub async fn upload_file_with_device(
                     let mut sync_state = make_sync_state_full(
                         local_path,
                         file_hash_hex.clone(),
-                        chunks.len(),
+                        0,
                         remote_manifest.clone(),
                         local_vclock,
                         device_id.to_string(),
@@ -251,7 +268,7 @@ pub async fn upload_file_with_device(
                         path: local_path.to_path_buf(),
                         remote_path: remote_manifest.clone(),
                         hash: file_hash_hex,
-                        chunks: chunks.len(),
+                        chunks: 0,
                         bytes: file_size,
                         skipped: true,
                         outcome: Some(sync_outcome),
@@ -262,7 +279,7 @@ pub async fn upload_file_with_device(
                     let sync_state = make_sync_state_full(
                         local_path,
                         file_hash_hex.clone(),
-                        chunks.len(),
+                        0,
                         remote_manifest.clone(),
                         local_vclock,
                         device_id.to_string(),
@@ -272,7 +289,7 @@ pub async fn upload_file_with_device(
                         path: local_path.to_path_buf(),
                         remote_path: remote_manifest,
                         hash: file_hash_hex,
-                        chunks: chunks.len(),
+                        chunks: 0,
                         bytes: file_size,
                         skipped: true,
                         outcome: Some(sync_outcome),
@@ -298,7 +315,7 @@ pub async fn upload_file_with_device(
         let sync_state = make_sync_state_full(
             local_path,
             file_hash_hex.clone(),
-            chunks.len(),
+            0,
             remote_path.clone(),
             local_vclock,
             device_id.to_string(),
@@ -308,7 +325,7 @@ pub async fn upload_file_with_device(
             path: local_path.to_path_buf(),
             remote_path,
             hash: file_hash_hex,
-            chunks: chunks.len(),
+            chunks: 0,
             bytes: file_size,
             skipped: false,
             outcome: None,
@@ -320,15 +337,16 @@ pub async fn upload_file_with_device(
         local_vclock.tick(device_id);
     }
 
-    // Upload each chunk (skip if already present — dedup by chunk hash)
-    let mut chunk_hashes = Vec::with_capacity(chunks.len());
+    // Chunk the file (deferred until after conflict/dedup checks).
+    // Small files: read into memory. Large files: streaming chunker.
+    let mut chunk_hashes = Vec::new();
     let mut bytes_uploaded = 0u64;
+    let num_chunks;
 
     // Generate per-file encryption key if encryption is enabled
     #[cfg(feature = "crypto")]
     let (file_key, file_id) = if encryption.is_some() {
         let fk = tcfs_crypto::generate_file_key();
-        // Use the plaintext file hash as the file_id for AAD binding
         let fid: [u8; 32] = {
             let hash = tcfs_chunks::hash_from_hex(&file_hash_hex)
                 .context("parsing file hash for encryption file_id")?;
@@ -339,46 +357,111 @@ pub async fn upload_file_with_device(
         (None, None)
     };
 
-    for (i, chunk) in chunks.iter().enumerate() {
-        let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
+    if use_streaming {
+        // ── Streaming path: bounded memory for large files ─────────
+        debug!(path = %local_path.display(), size = file_size, "using streaming chunker");
 
-        // Encrypt chunk if encryption is enabled
-        #[cfg(feature = "crypto")]
-        let (upload_data, chunk_hash_hex) =
-            if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
-                let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, chunk_data)
-                    .with_context(|| format!("encrypting chunk {i}"))?;
-                // CAS key is ciphertext hash (not plaintext hash)
-                let ct_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
-                (ciphertext, ct_hash)
-            } else {
+        // Verify file hasn't changed between hash and chunk passes
+        let pre_chunk_meta = std::fs::metadata(local_path)
+            .with_context(|| format!("re-stat before streaming chunk: {}", local_path.display()))?;
+        if pre_chunk_meta.len() != file_size {
+            anyhow::bail!(
+                "file size changed between hash and chunk passes: {} ({} → {})",
+                local_path.display(), file_size, pre_chunk_meta.len()
+            );
+        }
+
+        let streaming_chunks = tcfs_chunks::chunk_file_streaming(local_path)
+            .with_context(|| format!("streaming chunk: {}", local_path.display()))?;
+
+        num_chunks = streaming_chunks.len();
+        chunk_hashes.reserve(num_chunks);
+
+        for (i, chunk) in streaming_chunks.iter().enumerate() {
+            #[cfg(feature = "crypto")]
+            let (upload_data, chunk_hash_hex) =
+                if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
+                    let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, &chunk.data)
+                        .with_context(|| format!("encrypting chunk {i}"))?;
+                    let ct_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
+                    (ciphertext, ct_hash)
+                } else {
+                    let h = tcfs_chunks::hash_to_hex(&chunk.hash);
+                    (chunk.data.clone(), h)
+                };
+
+            #[cfg(not(feature = "crypto"))]
+            let (upload_data, chunk_hash_hex) = {
+                let h = tcfs_chunks::hash_to_hex(&chunk.hash);
+                (chunk.data.clone(), h)
+            };
+
+            let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
+
+            if !op.exists(&chunk_key).await.unwrap_or(false) {
+                op.write(&chunk_key, upload_data)
+                    .await
+                    .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
+                bytes_uploaded += chunk.data.len() as u64;
+            }
+
+            chunk_hashes.push(chunk_hash_hex);
+
+            if let Some(cb) = progress {
+                cb(
+                    (i + 1) as u64,
+                    num_chunks as u64,
+                    &format!("chunk {}/{num_chunks}", i + 1),
+                );
+            }
+        }
+    } else {
+        // ── In-memory path: small files ───────────────────────────
+        let (chunks, data) = tcfs_chunks::chunk_file(local_path)
+            .with_context(|| format!("chunking: {}", local_path.display()))?;
+
+        num_chunks = chunks.len();
+        chunk_hashes.reserve(num_chunks);
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
+
+            #[cfg(feature = "crypto")]
+            let (upload_data, chunk_hash_hex) =
+                if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
+                    let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, chunk_data)
+                        .with_context(|| format!("encrypting chunk {i}"))?;
+                    let ct_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
+                    (ciphertext, ct_hash)
+                } else {
+                    let h = tcfs_chunks::hash_to_hex(&chunk.hash);
+                    (chunk_data.to_vec(), h)
+                };
+
+            #[cfg(not(feature = "crypto"))]
+            let (upload_data, chunk_hash_hex) = {
                 let h = tcfs_chunks::hash_to_hex(&chunk.hash);
                 (chunk_data.to_vec(), h)
             };
 
-        #[cfg(not(feature = "crypto"))]
-        let (upload_data, chunk_hash_hex) = {
-            let h = tcfs_chunks::hash_to_hex(&chunk.hash);
-            (chunk_data.to_vec(), h)
-        };
+            let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
 
-        let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
+            if !op.exists(&chunk_key).await.unwrap_or(false) {
+                op.write(&chunk_key, upload_data)
+                    .await
+                    .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
+                bytes_uploaded += chunk.length as u64;
+            }
 
-        if !op.exists(&chunk_key).await.unwrap_or(false) {
-            op.write(&chunk_key, upload_data)
-                .await
-                .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
-            bytes_uploaded += chunk.length as u64;
-        }
+            chunk_hashes.push(chunk_hash_hex);
 
-        chunk_hashes.push(chunk_hash_hex);
-
-        if let Some(cb) = progress {
-            cb(
-                (i + 1) as u64,
-                chunks.len() as u64,
-                &format!("chunk {}/{}", i + 1, chunks.len()),
-            );
+            if let Some(cb) = progress {
+                cb(
+                    (i + 1) as u64,
+                    num_chunks as u64,
+                    &format!("chunk {}/{num_chunks}", i + 1),
+                );
+            }
         }
     }
 
@@ -397,6 +480,17 @@ pub async fn upload_file_with_device(
     #[cfg(not(feature = "crypto"))]
     let encrypted_file_key: Option<String> = None;
 
+    // Capture Unix file permissions for cross-device preservation
+    #[cfg(unix)]
+    let file_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(local_path)
+            .ok()
+            .map(|m| m.permissions().mode())
+    };
+    #[cfg(not(unix))]
+    let file_mode: Option<u32> = None;
+
     // Build and upload SyncManifest v2
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -412,6 +506,7 @@ pub async fn upload_file_with_device(
         written_by: device_id.to_string(),
         written_at: now,
         rel_path: rel_path.map(|s| s.to_string()),
+        mode: file_mode,
         encrypted_file_key,
     };
 
@@ -423,9 +518,10 @@ pub async fn upload_file_with_device(
     info!(
         path = %local_path.display(),
         hash = %file_hash_hex,
-        chunks = chunks.len(),
+        chunks = num_chunks,
         bytes = file_size,
         uploaded_bytes = bytes_uploaded,
+        streaming = use_streaming,
         "uploaded"
     );
 
@@ -433,7 +529,7 @@ pub async fn upload_file_with_device(
     let sync_state = make_sync_state_full(
         local_path,
         file_hash_hex.clone(),
-        chunks.len(),
+        num_chunks,
         remote_manifest.clone(),
         local_vclock,
         device_id.to_string(),
@@ -444,7 +540,7 @@ pub async fn upload_file_with_device(
         path: local_path.to_path_buf(),
         remote_path: remote_manifest,
         hash: file_hash_hex,
-        chunks: chunks.len(),
+        chunks: num_chunks,
         bytes: file_size,
         skipped: false,
         outcome,
@@ -498,8 +594,65 @@ pub async fn download_file_with_device(
 
     let chunk_hashes = manifest.chunk_hashes();
 
+    // Empty file: no chunks to fetch — write an empty file directly
     if chunk_hashes.is_empty() {
-        anyhow::bail!("manifest is empty: {remote_manifest}");
+        if let Some(parent) = local_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating dir: {}", parent.display()))?;
+        }
+
+        let tmp = local_path.with_extension("tcfs_tmp");
+        tokio::fs::write(&tmp, &[])
+            .await
+            .with_context(|| format!("writing empty tmp: {}", tmp.display()))?;
+        tokio::fs::rename(&tmp, local_path)
+            .await
+            .with_context(|| format!("renaming to: {}", local_path.display()))?;
+
+        // Restore Unix file permissions from manifest
+        #[cfg(unix)]
+        if let Some(mode) = manifest.mode {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(mode);
+            tokio::fs::set_permissions(local_path, perms)
+                .await
+                .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+        }
+
+        // Merge remote vclock into local state
+        if let Some(state) = state {
+            if !_device_id.is_empty() {
+                let mut local_vclock = state
+                    .get(local_path)
+                    .map(|s| s.vclock.clone())
+                    .unwrap_or_default();
+                local_vclock.merge(&manifest.vclock);
+
+                let sync_state = make_sync_state_full(
+                    local_path,
+                    manifest.file_hash.clone(),
+                    0,
+                    remote_manifest.to_string(),
+                    local_vclock,
+                    _device_id.to_string(),
+                )?;
+                state.set(local_path, sync_state);
+            }
+        }
+
+        info!(
+            remote = %remote_manifest,
+            local = %local_path.display(),
+            bytes = 0u64,
+            "downloaded (empty file)"
+        );
+
+        return Ok(DownloadResult {
+            remote_path: remote_manifest.to_string(),
+            local_path: local_path.to_path_buf(),
+            bytes: 0,
+        });
     }
 
     // Unwrap file key if manifest is encrypted
@@ -599,6 +752,16 @@ pub async fn download_file_with_device(
     tokio::fs::rename(&tmp, local_path)
         .await
         .with_context(|| format!("renaming to: {}", local_path.display()))?;
+
+    // Restore Unix file permissions from manifest
+    #[cfg(unix)]
+    if let Some(mode) = manifest.mode {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(mode);
+        tokio::fs::set_permissions(local_path, perms)
+            .await
+            .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+    }
 
     // Merge remote vclock into local state if we have a state cache
     if let Some(state) = state {
@@ -742,7 +905,12 @@ pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<Vec<PathBuf>
         .iter()
         .filter_map(|p| glob::Pattern::new(p).ok())
         .collect();
-    collect_files_inner(root, &mut files, config, &exclude_matchers)?;
+    // Track visited canonical paths for symlink cycle detection
+    let mut visited = std::collections::HashSet::new();
+    if let Ok(canon) = std::fs::canonicalize(root) {
+        visited.insert(canon);
+    }
+    collect_files_inner(root, &mut files, config, &exclude_matchers, &mut visited)?;
     files.sort(); // deterministic order
     Ok(files)
 }
@@ -752,13 +920,16 @@ fn collect_files_inner(
     out: &mut Vec<PathBuf>,
     config: &CollectConfig,
     excludes: &[glob::Pattern],
+    visited: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("reading dir: {}", dir.display()))?
     {
         let entry = entry.context("reading dir entry")?;
         let path = entry.path();
-        let meta = entry.metadata().context("stat dir entry")?;
+
+        // Use file_type() (doesn't follow symlinks) for initial dispatch
+        let ft = entry.file_type().context("file_type dir entry")?;
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             // Check exclude patterns
@@ -766,10 +937,70 @@ fn collect_files_inner(
                 continue;
             }
 
-            if meta.is_dir() {
+            // Handle symlinks explicitly
+            if ft.is_symlink() {
+                if !config.follow_symlinks {
+                    let target = std::fs::read_link(&path).unwrap_or_default();
+                    warn!(
+                        path = %path.display(),
+                        target = %target.display(),
+                        "skipping symlink (follow_symlinks=false)"
+                    );
+                    continue;
+                }
+
+                // Follow the symlink — resolve target and check for cycles
+                match std::fs::canonicalize(&path) {
+                    Ok(real) => {
+                        if !visited.insert(real.clone()) {
+                            warn!(
+                                path = %path.display(),
+                                target = %real.display(),
+                                "skipping symlink: cycle detected"
+                            );
+                            continue;
+                        }
+                        // Check what the resolved target actually is
+                        match std::fs::metadata(&real) {
+                            Ok(meta) if meta.is_dir() => {
+                                collect_files_inner(&path, out, config, excludes, visited)?;
+                            }
+                            Ok(meta) if meta.is_file() => {
+                                out.push(path);
+                            }
+                            Ok(_) => {} // special file, skip
+                            Err(e) => {
+                                warn!(
+                                    path = %path.display(),
+                                    target = %real.display(),
+                                    "skipping symlink: stat target failed: {e}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Broken symlink — canonicalize fails
+                        warn!(
+                            path = %path.display(),
+                            "skipping broken symlink: {e}"
+                        );
+                    }
+                }
+                continue;
+            }
+
+            if ft.is_dir() {
                 // Always skip these
                 if name == "target" || name == "node_modules" || name == ".DS_Store" {
                     continue;
+                }
+
+                // Track visited directories — skip if already traversed
+                // (prevents re-traversal when a symlink was followed first)
+                if let Ok(canon) = std::fs::canonicalize(&path) {
+                    if !visited.insert(canon) {
+                        continue;
+                    }
                 }
 
                 // Handle .git directories
@@ -793,7 +1024,7 @@ fn collect_files_inner(
                             continue;
                         }
                         // In raw mode, recurse into .git
-                        collect_files_inner(&path, out, config, excludes)?;
+                        collect_files_inner(&path, out, config, excludes, visited)?;
                     }
                     continue;
                 }
@@ -803,8 +1034,8 @@ fn collect_files_inner(
                     continue;
                 }
 
-                collect_files_inner(&path, out, config, excludes)?;
-            } else if meta.is_file() {
+                collect_files_inner(&path, out, config, excludes, visited)?;
+            } else if ft.is_file() {
                 out.push(path);
             }
         }
@@ -910,6 +1141,66 @@ pub async fn resolve_manifest_path(
         "no index entry found for '{}' (tried: {index_key}, filename search: {filename})",
         input
     )
+}
+
+/// Delete a file from remote storage (index entry + manifest + chunks).
+///
+/// Looks up the index entry for `rel_path`, reads the manifest to find chunk
+/// hashes, then deletes the index entry and manifest. Chunks are left for GC
+/// (they may be shared with other files via content-addressed dedup).
+///
+/// Also removes the file from the local state cache if present.
+pub async fn delete_remote_file(
+    op: &Operator,
+    rel_path: &str,
+    remote_prefix: &str,
+    state: &mut StateCache,
+    sync_root: Option<&Path>,
+) -> Result<()> {
+    let prefix = remote_prefix.trim_end_matches('/');
+    let index_key = format!("{prefix}/index/{rel_path}");
+
+    // Read index to find manifest hash
+    let idx_raw = op
+        .read(&index_key)
+        .await
+        .with_context(|| format!("reading index entry: {index_key}"))?
+        .to_bytes();
+
+    let idx_str = String::from_utf8_lossy(&idx_raw);
+    let manifest_hash = idx_str
+        .lines()
+        .find_map(|l| l.strip_prefix("manifest_hash="))
+        .ok_or_else(|| anyhow::anyhow!("index entry missing manifest_hash: {index_key}"))?
+        .to_string();
+
+    let manifest_key = format!("{prefix}/manifests/{manifest_hash}");
+
+    // Delete index entry and manifest
+    op.delete(&index_key)
+        .await
+        .with_context(|| format!("deleting index entry: {index_key}"))?;
+    op.delete(&manifest_key)
+        .await
+        .with_context(|| format!("deleting manifest: {manifest_key}"))?;
+
+    info!(rel_path = %rel_path, manifest = %manifest_hash, "deleted remote file");
+
+    // Remove from state cache
+    let local_path = sync_root
+        .map(|r| r.join(rel_path))
+        .unwrap_or_else(|| PathBuf::from(rel_path));
+    state.remove(&local_path);
+
+    // Also try to remove by searching the cache (handles path normalization mismatches)
+    if let Some((key, _)) = state.get_by_rel_path(rel_path) {
+        let key_owned = key.to_string();
+        state.remove(Path::new(&key_owned));
+    }
+
+    state.flush()?;
+
+    Ok(())
 }
 
 /// Normalize a remote prefix: ensure it doesn't have trailing slash

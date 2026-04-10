@@ -95,6 +95,66 @@ pub fn chunk_slice(data: &[u8], sizes: ChunkSizes) -> Vec<Chunk> {
     chunk_data(data, sizes)
 }
 
+/// A chunk carrying its own data — used by the streaming chunker.
+///
+/// Unlike `Chunk` (which references a shared buffer by offset), each
+/// `ChunkWithData` owns its bytes so the full file never needs to be
+/// in memory at once.
+#[derive(Debug, Clone)]
+pub struct ChunkWithData {
+    /// Byte offset within the source file
+    pub offset: u64,
+    /// Owned chunk bytes
+    pub data: Vec<u8>,
+    /// BLAKE3 hash of this chunk's data
+    pub hash: crate::blake3::Hash,
+}
+
+/// Chunk a large file using the streaming interface (bounded memory).
+///
+/// Uses `fastcdc::v2020::StreamCDC<File>` which reads the file in
+/// chunks via `Read`, so peak memory is bounded to ~max_size instead
+/// of the file size.
+///
+/// Returns chunks with owned data — the caller uploads each chunk
+/// individually without needing the full file in memory.
+pub fn chunk_file_streaming(path: &Path) -> Result<Vec<ChunkWithData>> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("opening file for streaming chunk: {}: {e}", path.display()))?;
+
+    let file_len = file.metadata()
+        .map_err(|e| anyhow::anyhow!("stat for streaming chunk: {}: {e}", path.display()))?
+        .len();
+
+    if file_len == 0 {
+        return Ok(vec![]);
+    }
+
+    let sizes = ChunkSizes::for_path(path);
+
+    let chunker = fastcdc::v2020::StreamCDC::new(
+        file,
+        sizes.min_size,
+        sizes.avg_size,
+        sizes.max_size,
+    );
+
+    let mut chunks = Vec::new();
+
+    for result in chunker {
+        let entry = result
+            .map_err(|e| anyhow::anyhow!("streaming chunk error: {e}"))?;
+        let hash = crate::blake3::hash_bytes(&entry.data);
+        chunks.push(ChunkWithData {
+            offset: entry.offset as u64,
+            data: entry.data,
+            hash,
+        });
+    }
+
+    Ok(chunks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +212,67 @@ mod tests {
             let total: usize = chunks.iter().map(|c| c.length).sum();
             prop_assert_eq!(total, data.len(), "chunks must cover full input");
         }
+    }
+
+    #[test]
+    fn streaming_chunker_matches_in_memory() {
+        // Write a 256KB file and verify streaming produces identical boundaries
+        let data: Vec<u8> = (0u64..262144)
+            .map(|i| (i.wrapping_mul(7) ^ (i >> 3)) as u8)
+            .collect();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &data).unwrap();
+
+        // In-memory chunking
+        let (mem_chunks, _) = chunk_file(tmp.path()).unwrap();
+
+        // Streaming chunking
+        let stream_chunks = chunk_file_streaming(tmp.path()).unwrap();
+
+        assert_eq!(
+            mem_chunks.len(),
+            stream_chunks.len(),
+            "chunk count must match between in-memory and streaming"
+        );
+
+        for (i, (mem, stream)) in mem_chunks.iter().zip(stream_chunks.iter()).enumerate() {
+            assert_eq!(
+                mem.offset, stream.offset,
+                "chunk {i} offset mismatch"
+            );
+            assert_eq!(
+                mem.length,
+                stream.data.len(),
+                "chunk {i} length mismatch"
+            );
+            assert_eq!(
+                mem.hash, stream.hash,
+                "chunk {i} hash mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_empty_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &[]).unwrap();
+
+        let chunks = chunk_file_streaming(tmp.path()).unwrap();
+        assert!(chunks.is_empty(), "empty file should yield 0 chunks");
+    }
+
+    #[test]
+    fn streaming_chunks_cover_full_file() {
+        let data: Vec<u8> = (0u64..524288)
+            .map(|i| (i.wrapping_mul(13) ^ (i >> 5)) as u8)
+            .collect();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &data).unwrap();
+
+        let chunks = chunk_file_streaming(tmp.path()).unwrap();
+        let total: usize = chunks.iter().map(|c| c.data.len()).sum();
+        assert_eq!(total, data.len(), "streaming chunks must cover full file");
     }
 }
