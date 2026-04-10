@@ -843,6 +843,23 @@ impl VirtualFilesystem for TcfsVfs {
         Ok(())
     }
 
+    async fn fsync(&self, fh: u64, _datasync: bool) -> Result<()> {
+        // Clone data out of the handle to avoid holding the lock during flush
+        let (path, data, modified) = {
+            let handles = self.handles.lock().await;
+            let handle = handles
+                .get(&fh)
+                .context(format!("fsync: bad file handle: {}", fh))?;
+            (handle.path.clone(), handle.data.clone(), handle.modified)
+        };
+
+        if !modified {
+            return Ok(());
+        }
+
+        self.flush_to_remote(&path, &data).await
+    }
+
     async fn statfs(&self) -> Result<VfsStatFs> {
         Ok(VfsStatFs::default())
     }
