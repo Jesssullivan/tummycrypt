@@ -397,6 +397,17 @@ pub async fn upload_file_with_device(
     #[cfg(not(feature = "crypto"))]
     let encrypted_file_key: Option<String> = None;
 
+    // Capture Unix file permissions for cross-device preservation
+    #[cfg(unix)]
+    let file_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(local_path)
+            .ok()
+            .map(|m| m.permissions().mode())
+    };
+    #[cfg(not(unix))]
+    let file_mode: Option<u32> = None;
+
     // Build and upload SyncManifest v2
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -412,6 +423,7 @@ pub async fn upload_file_with_device(
         written_by: device_id.to_string(),
         written_at: now,
         rel_path: rel_path.map(|s| s.to_string()),
+        mode: file_mode,
         encrypted_file_key,
     };
 
@@ -513,6 +525,16 @@ pub async fn download_file_with_device(
         tokio::fs::rename(&tmp, local_path)
             .await
             .with_context(|| format!("renaming to: {}", local_path.display()))?;
+
+        // Restore Unix file permissions from manifest
+        #[cfg(unix)]
+        if let Some(mode) = manifest.mode {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(mode);
+            tokio::fs::set_permissions(local_path, perms)
+                .await
+                .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+        }
 
         // Merge remote vclock into local state
         if let Some(state) = state {
@@ -646,6 +668,16 @@ pub async fn download_file_with_device(
     tokio::fs::rename(&tmp, local_path)
         .await
         .with_context(|| format!("renaming to: {}", local_path.display()))?;
+
+    // Restore Unix file permissions from manifest
+    #[cfg(unix)]
+    if let Some(mode) = manifest.mode {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(mode);
+        tokio::fs::set_permissions(local_path, perms)
+            .await
+            .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+    }
 
     // Merge remote vclock into local state if we have a state cache
     if let Some(state) = state {

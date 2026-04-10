@@ -366,3 +366,106 @@ async fn roundtrip_empty_file_with_device() {
         "vclock should be non-empty after device-aware empty file sync"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn roundtrip_preserves_executable_permission() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/perms";
+    let device_id = "test-device-perms";
+
+    // Create a file with executable permissions (0o755)
+    let src = write_test_file(tmp.path(), "script.sh", b"#!/bin/sh\necho hello\n");
+    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let dst = tmp.path().join("output/script.sh");
+
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+
+    // Push with device identity
+    let upload = tcfs_sync::engine::upload_file_with_device(
+        &op,
+        &src,
+        prefix,
+        &mut state,
+        None,
+        device_id,
+        Some("script.sh"),
+        None,
+    )
+    .await
+    .expect("upload executable file");
+
+    assert!(!upload.skipped);
+
+    // Verify manifest has mode field
+    let manifest_bytes = op.read(&upload.remote_path).await.unwrap();
+    let manifest =
+        tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes()).unwrap();
+    assert!(manifest.mode.is_some(), "manifest should capture file mode");
+    assert_eq!(
+        manifest.mode.unwrap() & 0o777,
+        0o755,
+        "manifest mode should be 755"
+    );
+
+    // Pull to a new location
+    let download = tcfs_sync::engine::download_file_with_device(
+        &op,
+        &upload.remote_path,
+        &dst,
+        prefix,
+        None,
+        device_id,
+        Some(&mut state),
+        None,
+    )
+    .await
+    .expect("download executable file");
+
+    // Verify content
+    let downloaded = std::fs::read(&dst).unwrap();
+    assert_eq!(downloaded, b"#!/bin/sh\necho hello\n");
+    assert_eq!(download.bytes, 21);
+
+    // Verify permissions were preserved
+    let meta = std::fs::metadata(&dst).unwrap();
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755, "executable permission should be preserved after pull");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn roundtrip_preserves_readonly_permission() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/perms-ro";
+
+    // Create a read-only file (0o444)
+    let src = write_test_file(tmp.path(), "readonly.txt", b"do not edit");
+    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    let dst = tmp.path().join("output/readonly.txt");
+
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+
+    // Push
+    let upload = tcfs_sync::engine::upload_file(&op, &src, prefix, &mut state, None)
+        .await
+        .expect("upload readonly file");
+
+    // Pull
+    tcfs_sync::engine::download_file(&op, &upload.remote_path, &dst, prefix, None)
+        .await
+        .expect("download readonly file");
+
+    // Verify permissions preserved
+    let meta = std::fs::metadata(&dst).unwrap();
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o444, "read-only permission should be preserved");
+}
