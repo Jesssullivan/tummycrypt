@@ -149,13 +149,27 @@ pub async fn upload_file_with_device(
         }
     }
 
-    // Chunk the file
-    let (chunks, data) = tcfs_chunks::chunk_file(local_path)
-        .with_context(|| format!("chunking: {}", local_path.display()))?;
+    // Tiered chunking: files below STREAMING_THRESHOLD are read into memory,
+    // larger files use streaming two-pass (hash, then chunk) to bound memory.
+    let file_meta = std::fs::metadata(local_path)
+        .with_context(|| format!("stat for chunking: {}", local_path.display()))?;
+    let file_size = file_meta.len();
 
-    let file_size = data.len() as u64;
-    let file_hash = tcfs_chunks::hash_bytes(&data);
-    let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
+    let use_streaming = file_size >= tcfs_chunks::STREAMING_THRESHOLD;
+
+    // Pass 1: compute file hash
+    let file_hash_hex = if use_streaming {
+        let hash = tcfs_chunks::hash_file_streaming(local_path)
+            .with_context(|| format!("streaming hash: {}", local_path.display()))?;
+        tcfs_chunks::hash_to_hex(&hash)
+    } else {
+        // Small file: read fully, hash in memory
+        let data = std::fs::read(local_path)
+            .with_context(|| format!("reading for hash: {}", local_path.display()))?;
+        tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
+    };
+
+    // Pass 2: chunk (deferred until after conflict check — may skip upload)
 
     // Build remote manifest path (using the file's content hash)
     let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
@@ -229,7 +243,7 @@ pub async fn upload_file_with_device(
                         path: local_path.to_path_buf(),
                         remote_path: remote_manifest.clone(),
                         hash: file_hash_hex,
-                        chunks: chunks.len(),
+                        chunks: 0,
                         bytes: file_size,
                         skipped: true,
                         outcome: Some(sync_outcome),
@@ -240,7 +254,7 @@ pub async fn upload_file_with_device(
                     let mut sync_state = make_sync_state_full(
                         local_path,
                         file_hash_hex.clone(),
-                        chunks.len(),
+                        0,
                         remote_manifest.clone(),
                         local_vclock,
                         device_id.to_string(),
@@ -251,7 +265,7 @@ pub async fn upload_file_with_device(
                         path: local_path.to_path_buf(),
                         remote_path: remote_manifest.clone(),
                         hash: file_hash_hex,
-                        chunks: chunks.len(),
+                        chunks: 0,
                         bytes: file_size,
                         skipped: true,
                         outcome: Some(sync_outcome),
@@ -262,7 +276,7 @@ pub async fn upload_file_with_device(
                     let sync_state = make_sync_state_full(
                         local_path,
                         file_hash_hex.clone(),
-                        chunks.len(),
+                        0,
                         remote_manifest.clone(),
                         local_vclock,
                         device_id.to_string(),
@@ -272,7 +286,7 @@ pub async fn upload_file_with_device(
                         path: local_path.to_path_buf(),
                         remote_path: remote_manifest,
                         hash: file_hash_hex,
-                        chunks: chunks.len(),
+                        chunks: 0,
                         bytes: file_size,
                         skipped: true,
                         outcome: Some(sync_outcome),
@@ -298,7 +312,7 @@ pub async fn upload_file_with_device(
         let sync_state = make_sync_state_full(
             local_path,
             file_hash_hex.clone(),
-            chunks.len(),
+            0,
             remote_path.clone(),
             local_vclock,
             device_id.to_string(),
@@ -308,7 +322,7 @@ pub async fn upload_file_with_device(
             path: local_path.to_path_buf(),
             remote_path,
             hash: file_hash_hex,
-            chunks: chunks.len(),
+            chunks: 0,
             bytes: file_size,
             skipped: false,
             outcome: None,
@@ -320,15 +334,16 @@ pub async fn upload_file_with_device(
         local_vclock.tick(device_id);
     }
 
-    // Upload each chunk (skip if already present — dedup by chunk hash)
-    let mut chunk_hashes = Vec::with_capacity(chunks.len());
+    // Chunk the file (deferred until after conflict/dedup checks).
+    // Small files: read into memory. Large files: streaming chunker.
+    let mut chunk_hashes = Vec::new();
     let mut bytes_uploaded = 0u64;
+    let num_chunks;
 
     // Generate per-file encryption key if encryption is enabled
     #[cfg(feature = "crypto")]
     let (file_key, file_id) = if encryption.is_some() {
         let fk = tcfs_crypto::generate_file_key();
-        // Use the plaintext file hash as the file_id for AAD binding
         let fid: [u8; 32] = {
             let hash = tcfs_chunks::hash_from_hex(&file_hash_hex)
                 .context("parsing file hash for encryption file_id")?;
@@ -339,46 +354,111 @@ pub async fn upload_file_with_device(
         (None, None)
     };
 
-    for (i, chunk) in chunks.iter().enumerate() {
-        let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
+    if use_streaming {
+        // ── Streaming path: bounded memory for large files ─────────
+        debug!(path = %local_path.display(), size = file_size, "using streaming chunker");
 
-        // Encrypt chunk if encryption is enabled
-        #[cfg(feature = "crypto")]
-        let (upload_data, chunk_hash_hex) =
-            if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
-                let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, chunk_data)
-                    .with_context(|| format!("encrypting chunk {i}"))?;
-                // CAS key is ciphertext hash (not plaintext hash)
-                let ct_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
-                (ciphertext, ct_hash)
-            } else {
+        // Verify file hasn't changed between hash and chunk passes
+        let pre_chunk_meta = std::fs::metadata(local_path)
+            .with_context(|| format!("re-stat before streaming chunk: {}", local_path.display()))?;
+        if pre_chunk_meta.len() != file_size {
+            anyhow::bail!(
+                "file size changed between hash and chunk passes: {} ({} → {})",
+                local_path.display(), file_size, pre_chunk_meta.len()
+            );
+        }
+
+        let streaming_chunks = tcfs_chunks::chunk_file_streaming(local_path)
+            .with_context(|| format!("streaming chunk: {}", local_path.display()))?;
+
+        num_chunks = streaming_chunks.len();
+        chunk_hashes.reserve(num_chunks);
+
+        for (i, chunk) in streaming_chunks.iter().enumerate() {
+            #[cfg(feature = "crypto")]
+            let (upload_data, chunk_hash_hex) =
+                if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
+                    let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, &chunk.data)
+                        .with_context(|| format!("encrypting chunk {i}"))?;
+                    let ct_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
+                    (ciphertext, ct_hash)
+                } else {
+                    let h = tcfs_chunks::hash_to_hex(&chunk.hash);
+                    (chunk.data.clone(), h)
+                };
+
+            #[cfg(not(feature = "crypto"))]
+            let (upload_data, chunk_hash_hex) = {
+                let h = tcfs_chunks::hash_to_hex(&chunk.hash);
+                (chunk.data.clone(), h)
+            };
+
+            let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
+
+            if !op.exists(&chunk_key).await.unwrap_or(false) {
+                op.write(&chunk_key, upload_data)
+                    .await
+                    .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
+                bytes_uploaded += chunk.data.len() as u64;
+            }
+
+            chunk_hashes.push(chunk_hash_hex);
+
+            if let Some(cb) = progress {
+                cb(
+                    (i + 1) as u64,
+                    num_chunks as u64,
+                    &format!("chunk {}/{num_chunks}", i + 1),
+                );
+            }
+        }
+    } else {
+        // ── In-memory path: small files ───────────────────────────
+        let (chunks, data) = tcfs_chunks::chunk_file(local_path)
+            .with_context(|| format!("chunking: {}", local_path.display()))?;
+
+        num_chunks = chunks.len();
+        chunk_hashes.reserve(num_chunks);
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
+
+            #[cfg(feature = "crypto")]
+            let (upload_data, chunk_hash_hex) =
+                if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
+                    let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, chunk_data)
+                        .with_context(|| format!("encrypting chunk {i}"))?;
+                    let ct_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
+                    (ciphertext, ct_hash)
+                } else {
+                    let h = tcfs_chunks::hash_to_hex(&chunk.hash);
+                    (chunk_data.to_vec(), h)
+                };
+
+            #[cfg(not(feature = "crypto"))]
+            let (upload_data, chunk_hash_hex) = {
                 let h = tcfs_chunks::hash_to_hex(&chunk.hash);
                 (chunk_data.to_vec(), h)
             };
 
-        #[cfg(not(feature = "crypto"))]
-        let (upload_data, chunk_hash_hex) = {
-            let h = tcfs_chunks::hash_to_hex(&chunk.hash);
-            (chunk_data.to_vec(), h)
-        };
+            let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
 
-        let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
+            if !op.exists(&chunk_key).await.unwrap_or(false) {
+                op.write(&chunk_key, upload_data)
+                    .await
+                    .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
+                bytes_uploaded += chunk.length as u64;
+            }
 
-        if !op.exists(&chunk_key).await.unwrap_or(false) {
-            op.write(&chunk_key, upload_data)
-                .await
-                .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
-            bytes_uploaded += chunk.length as u64;
-        }
+            chunk_hashes.push(chunk_hash_hex);
 
-        chunk_hashes.push(chunk_hash_hex);
-
-        if let Some(cb) = progress {
-            cb(
-                (i + 1) as u64,
-                chunks.len() as u64,
-                &format!("chunk {}/{}", i + 1, chunks.len()),
-            );
+            if let Some(cb) = progress {
+                cb(
+                    (i + 1) as u64,
+                    num_chunks as u64,
+                    &format!("chunk {}/{num_chunks}", i + 1),
+                );
+            }
         }
     }
 
@@ -423,9 +503,10 @@ pub async fn upload_file_with_device(
     info!(
         path = %local_path.display(),
         hash = %file_hash_hex,
-        chunks = chunks.len(),
+        chunks = num_chunks,
         bytes = file_size,
         uploaded_bytes = bytes_uploaded,
+        streaming = use_streaming,
         "uploaded"
     );
 
@@ -433,7 +514,7 @@ pub async fn upload_file_with_device(
     let sync_state = make_sync_state_full(
         local_path,
         file_hash_hex.clone(),
-        chunks.len(),
+        num_chunks,
         remote_manifest.clone(),
         local_vclock,
         device_id.to_string(),
@@ -444,7 +525,7 @@ pub async fn upload_file_with_device(
         path: local_path.to_path_buf(),
         remote_path: remote_manifest,
         hash: file_hash_hex,
-        chunks: chunks.len(),
+        chunks: num_chunks,
         bytes: file_size,
         skipped: false,
         outcome,
