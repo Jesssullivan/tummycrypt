@@ -377,6 +377,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         "blacklist configured"
     );
 
+    // Per-path locks: prevent concurrent operations on the same file.
+    // Shared across the watcher/scheduler and the state sync loop.
+    let path_locks = tcfs_sync::state::PathLocks::new();
+
     // ── File Watcher + Scheduler ─────────────────────────────────────
     // If sync_root is configured, start watching for local file changes
     // and feed them through the priority scheduler for automatic sync.
@@ -449,9 +453,6 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                             }
                         }
                     });
-
-                    // Per-path locks: prevent concurrent push/pull on the same file
-                    let path_locks = tcfs_sync::state::PathLocks::new();
 
                     // Scheduler run loop: dispatch tasks to sync engine
                     let sched_operator = operator.clone();
@@ -568,7 +569,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     cache.set(&task.path, synced);
                                                 }
 
-                                                let _ = cache.flush();
+                                                if let Err(e) = cache.flush() {
+                                                    warn!(error = %e, "state cache flush failed");
+                                                }
                                                 info!(
                                                     path = %task.path.display(),
                                                     "watcher: auto-pushed"
@@ -613,7 +616,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                 // Remove from state cache on delete
                                                 let mut cache = state.lock().await;
                                                 cache.remove(&task.path);
-                                                let _ = cache.flush();
+                                                if let Err(e) = cache.flush() {
+                                                    warn!(error = %e, "state cache flush failed");
+                                                }
                                                 info!(
                                                     path = %task.path.display(),
                                                     "watcher: removed from state"
@@ -732,7 +737,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("sync failed: {e}"))?;
-                let _ = cache.flush();
+                if let Err(e) = cache.flush() {
+                    warn!(error = %e, "state cache flush failed");
+                }
                 Ok(())
             }
 
@@ -741,7 +748,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 let p = std::path::Path::new(path);
                 let mut cache = self.state_cache.lock().await;
                 cache.remove(p);
-                let _ = cache.flush();
+                if let Err(e) = cache.flush() {
+                    warn!(error = %e, "state cache flush failed");
+                }
 
                 // Remove local cached file (dehydrate)
                 if p.exists() {
@@ -870,6 +879,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         sync_root,
                         storage_prefix,
                         impl_.vfs_handle.clone(),
+                        path_locks.clone(),
                     )
                     .await;
 
@@ -1032,6 +1042,7 @@ async fn spawn_state_sync_loop(
     sync_root: Option<std::path::PathBuf>,
     storage_prefix: String,
     vfs_handle: tokio::sync::watch::Receiver<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
+    path_locks: tcfs_sync::state::PathLocks,
 ) {
     use futures::StreamExt;
 
@@ -1134,7 +1145,9 @@ async fn spawn_state_sync_loop(
                                             ..entry
                                         };
                                         cache.set(&local_path, updated);
-                                        let _ = cache.flush();
+                                        if let Err(e) = cache.flush() {
+                                            warn!(error = %e, "state cache flush failed");
+                                        }
                                     }
                                 }
                                 tcfs_sync::StateEvent::FileDeleted {
@@ -1153,6 +1166,12 @@ async fn spawn_state_sync_loop(
                                         .as_ref()
                                         .map(|r| r.join(rel_path))
                                         .unwrap_or_else(|| std::path::PathBuf::from(rel_path));
+
+                                    // Guard: defer delete if the file is locked by an active operation
+                                    if path_locks.is_locked(&local_path).await {
+                                        warn!(path = %local_path.display(), "deferring remote delete: file is locked by active operation");
+                                        continue;
+                                    }
 
                                     // Remove local file if it exists
                                     if local_path.exists() {
@@ -1178,7 +1197,9 @@ async fn spawn_state_sync_loop(
                                         let key_owned = key.to_string();
                                         cache.remove(std::path::Path::new(&key_owned));
                                     }
-                                    let _ = cache.flush();
+                                    if let Err(e) = cache.flush() {
+                                        warn!(error = %e, "state cache flush failed");
+                                    }
 
                                     // Invalidate FUSE cache so the file disappears
                                     if let Some(ref vfs) = *vfs_handle.borrow() {
@@ -1294,6 +1315,16 @@ async fn handle_auto_pull(
             info!(path = %rel_path, "local is newer, skipping pull");
         }
         tcfs_sync::conflict::SyncOutcome::RemoteNewer => {
+            // Guard: defer auto-pull if file is actively being modified
+            {
+                let cache = state_cache.lock().await;
+                if let Some(entry) = cache.get(&local_path) {
+                    if entry.status == tcfs_sync::state::FileSyncStatus::Active {
+                        info!(path = %rel_path, "deferring auto-pull: file is actively being modified");
+                        return;
+                    }
+                }
+            }
             info!(path = %rel_path, from = %remote_device, "remote is newer, auto-pulling");
             do_auto_download(
                 device_id,
@@ -1403,7 +1434,9 @@ async fn do_auto_download(
                             status: tcfs_sync::state::FileSyncStatus::Synced,
                         },
                     );
-                    let _ = cache.flush();
+                    if let Err(e) = cache.flush() {
+                        warn!(error = %e, "state cache flush failed");
+                    }
                     debug!(
                         key = %local_path.display(),
                         hash = %manifest.file_hash,
@@ -1417,7 +1450,9 @@ async fn do_auto_download(
                     );
                     // Still mark as verified even if parse fails
                     let mut cache = state_cache.lock().await;
-                    let _ = cache.flush();
+                    if let Err(e) = cache.flush() {
+                        warn!(error = %e, "state cache flush failed");
+                    }
                 }
             }
         }
