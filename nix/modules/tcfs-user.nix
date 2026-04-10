@@ -115,6 +115,30 @@ in {
       description = "Glob patterns for files/dirs to exclude from sync";
     };
 
+    # ── macOS TCC persistence (.app bundle) ──────────────────────────────
+    useAppBundle = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Use TCFSDaemon.app bundle for launchd instead of the bare Nix store binary.
+        TCC grants (Full Disk Access, etc.) are tied to bundle ID + CDHash.
+        Bare /nix/store/ binaries lose grants on every rebuild.
+        The .app bundle provides a stable identity (io.tinyland.tcfsd).
+      '';
+    };
+
+    appBundlePath = lib.mkOption {
+      type = lib.types.str;
+      default = "/Applications/TCFSDaemon.app";
+      description = "Path to installed TCFSDaemon.app bundle (used when useAppBundle is true)";
+    };
+
+    appBundlePackage = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = null;
+      description = "tcfsd-app package derivation (builds the .app bundle from Nix)";
+    };
+
     remoteJuggler = {
       enable = lib.mkEnableOption "RemoteJuggler integration for credential management";
 
@@ -178,7 +202,11 @@ in {
     launchd.agents.tcfsd = lib.mkIf pkgs.stdenv.isDarwin {
       enable = true;
       config = {
-        ProgramArguments = [ "${cfg.package}/bin/tcfsd" "--mode" "daemon" ];
+        ProgramArguments = let
+          executable = if cfg.useAppBundle
+            then "${cfg.appBundlePath}/Contents/MacOS/tcfsd"
+            else "${cfg.package}/bin/tcfsd";
+        in [ executable "--mode" "daemon" ];
         RunAtLoad = true;
         KeepAlive = true;
         StandardOutPath = "/tmp/tcfsd.stdout.log";
@@ -188,5 +216,18 @@ in {
         };
       };
     };
+
+    # ── macOS: install .app bundle to /Applications/ ────────────────────
+    home.activation.tcfsd-app-bundle = lib.mkIf (pkgs.stdenv.isDarwin && cfg.useAppBundle && cfg.appBundlePackage != null)
+      (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        if [ -d "${cfg.appBundlePackage}/Applications/TCFSDaemon.app" ]; then
+          $DRY_RUN_CMD rm -rf "${cfg.appBundlePath}"
+          $DRY_RUN_CMD cp -RL "${cfg.appBundlePackage}/Applications/TCFSDaemon.app" "${cfg.appBundlePath}"
+          $DRY_RUN_CMD chmod -R u+w "${cfg.appBundlePath}"
+          # Re-sign after copy (Nix store copy invalidates ad-hoc signature)
+          $DRY_RUN_CMD codesign -f -s - --options runtime "${cfg.appBundlePath}" || true
+          $VERBOSE_ECHO "Installed TCFSDaemon.app to ${cfg.appBundlePath}"
+        fi
+      '');
   };
 }

@@ -243,6 +243,59 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         let _ = state_cache_inner.flush();
     }
 
+    // ── Remote index discovery ────────────────────────────────────────────
+    // Populate state cache with remote-only files so FileProvider can enumerate
+    // the full tree, not just locally-synced files.
+    if let Some(ref op) = operator {
+        let sync_root = config.sync.sync_root.as_deref().unwrap_or(std::path::Path::new("/tmp/tcfs"));
+        match tcfs_sync::reconcile::list_remote_index(op, resolved_prefix).await {
+            Ok(remote_index) => {
+                let mut discovered = 0usize;
+                for (rel_path, entry) in &remote_index {
+                    let local_key =
+                        std::path::PathBuf::from(sync_root).join(rel_path);
+                    if state_cache_inner.get(&local_key).is_none() {
+                        state_cache_inner.set(
+                            &local_key,
+                            tcfs_sync::state::SyncState {
+                                blake3: String::new(),
+                                size: entry.size,
+                                mtime: 0,
+                                chunk_count: entry.chunks,
+                                remote_path: format!(
+                                    "{}/manifests/{}",
+                                    resolved_prefix, entry.manifest_hash
+                                ),
+                                last_synced: 0,
+                                vclock: Default::default(),
+                                device_id: String::new(),
+                                conflict: None,
+                                status: tcfs_sync::state::FileSyncStatus::NotSynced,
+                            },
+                        );
+                        discovered += 1;
+                    }
+                }
+                if discovered > 0 {
+                    info!(
+                        discovered,
+                        total = remote_index.len(),
+                        "remote index discovery: added new entries to state cache"
+                    );
+                    let _ = state_cache_inner.flush();
+                } else {
+                    info!(
+                        total = remote_index.len(),
+                        "remote index discovery: cache already up to date"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("remote index discovery failed (non-fatal): {e}");
+            }
+        }
+    }
+
     let state_cache = Arc::new(tokio::sync::Mutex::new(state_cache_inner));
 
     // Wrap operator in Arc<Mutex> for shared access
@@ -264,6 +317,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         let health_state = crate::metrics::HealthState {
             registry: metrics_registry.clone(),
             operator: operator.clone(),
+            sync_root: config.sync.sync_root.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = crate::metrics::serve(addr, health_state).await {
@@ -815,6 +869,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         impl_.state_cache_handle(),
                         sync_root,
                         storage_prefix,
+                        impl_.vfs_handle.clone(),
                     )
                     .await;
 
@@ -976,6 +1031,7 @@ async fn spawn_state_sync_loop(
     state_cache: Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
     sync_root: Option<std::path::PathBuf>,
     storage_prefix: String,
+    vfs_handle: tokio::sync::watch::Receiver<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
 ) {
     use futures::StreamExt;
 
@@ -1033,6 +1089,14 @@ async fn spawn_state_sync_loop(
                                                 &storage_prefix,
                                             )
                                             .await;
+
+                                            // Invalidate FUSE negative cache so the
+                                            // new file appears in readdir immediately
+                                            if let Some(ref vfs) = *vfs_handle.borrow() {
+                                                let vpath = format!("/{}", rel_path);
+                                                vfs.invalidate_path(&vpath);
+                                                debug!(path = %vpath, "FUSE negative cache invalidated for remote file");
+                                            }
                                         }
                                         "interactive" => {
                                             info!(
@@ -1071,6 +1135,56 @@ async fn spawn_state_sync_loop(
                                         };
                                         cache.set(&local_path, updated);
                                         let _ = cache.flush();
+                                    }
+                                }
+                                tcfs_sync::StateEvent::FileDeleted {
+                                    rel_path,
+                                    vclock: remote_vclock,
+                                    ..
+                                } => {
+                                    info!(
+                                        from_device = %event_device,
+                                        path = %rel_path,
+                                        "remote file deleted"
+                                    );
+
+                                    // Determine local path
+                                    let local_path = sync_root
+                                        .as_ref()
+                                        .map(|r| r.join(rel_path))
+                                        .unwrap_or_else(|| std::path::PathBuf::from(rel_path));
+
+                                    // Remove local file if it exists
+                                    if local_path.exists() {
+                                        if let Err(e) = tokio::fs::remove_file(&local_path).await {
+                                            warn!(
+                                                path = %local_path.display(),
+                                                "failed to remove local file for remote delete: {e}"
+                                            );
+                                        } else {
+                                            info!(
+                                                path = %local_path.display(),
+                                                from_device = %event_device,
+                                                "removed local file (remote delete)"
+                                            );
+                                        }
+                                    }
+
+                                    // Remove from state cache and merge vclock
+                                    let mut cache = state_cache.lock().await;
+                                    cache.remove(&local_path);
+                                    // Also try by rel_path (handles path normalization)
+                                    if let Some((key, _)) = cache.get_by_rel_path(rel_path) {
+                                        let key_owned = key.to_string();
+                                        cache.remove(std::path::Path::new(&key_owned));
+                                    }
+                                    let _ = cache.flush();
+
+                                    // Invalidate FUSE cache so the file disappears
+                                    if let Some(ref vfs) = *vfs_handle.borrow() {
+                                        let vpath = format!("/{}", rel_path);
+                                        vfs.invalidate_path(&vpath);
+                                        debug!(path = %vpath, "FUSE cache invalidated for deleted file");
                                     }
                                 }
                                 tcfs_sync::StateEvent::DeviceOnline { device_id: did, .. } => {

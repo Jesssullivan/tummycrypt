@@ -22,8 +22,12 @@ use tcfs_vfs::{OnFlushCallback, TcfsVfs, VfsAttr, VirtualFilesystem};
 
 // ── Configuration ─────────────────────────────────────────────────────────
 
-/// TTL for positive dentry/attr cache entries (FUSE kernel cache)
+/// TTL for file attribute cache entries (FUSE kernel cache).
 const ATTR_TTL: Duration = Duration::from_secs(5);
+
+/// TTL for directory entry cache. Shorter than ATTR_TTL so that new files
+/// from NATS events appear within ~1s without needing kernel notification.
+const DIR_TTL: Duration = Duration::from_secs(1);
 
 /// Timeout for VFS/S3 operations. Prevents mount from hanging when the
 /// S3 backend is slow or unreachable.
@@ -249,13 +253,20 @@ impl PathFilesystem for TcfsFs {
                     Some(ref a) => to_fuse_attr(a),
                     None => dir_attr,
                 };
+                // Use shorter TTL for directory entries so NATS-synced files
+                // appear within ~1s without kernel invalidation.
+                let ttl = if vfs_entry.kind == VfsFileType::Directory {
+                    DIR_TTL
+                } else {
+                    ATTR_TTL
+                };
                 entries.push(Ok(DirectoryEntryPlus {
                     kind: to_fuse_file_type(vfs_entry.kind),
                     name: vfs_entry.name.into(),
                     offset: next_offset,
                     attr,
-                    entry_ttl: ATTR_TTL,
-                    attr_ttl: ATTR_TTL,
+                    entry_ttl: DIR_TTL,
+                    attr_ttl: ttl,
                 }));
             }
             next_offset += 1;
@@ -514,7 +525,10 @@ pub struct MountConfig {
 ///
 /// Creates a `TcfsVfs` and wraps it with the FUSE `PathFilesystem` adapter.
 /// Uses `mount_with_unprivileged` which invokes `fusermount3` — no root needed.
-pub async fn mount(cfg: MountConfig) -> std::io::Result<()> {
+///
+/// Returns the shared VFS handle via `vfs_out` so the caller can invalidate
+/// the negative cache from the NATS handler when remote files arrive.
+pub async fn mount(cfg: MountConfig, vfs_out: Option<&tokio::sync::watch::Sender<Option<Arc<TcfsVfs>>>>) -> std::io::Result<()> {
     let mut vfs = TcfsVfs::new(
         cfg.op,
         cfg.prefix,
@@ -532,6 +546,11 @@ pub async fn mount(cfg: MountConfig) -> std::io::Result<()> {
     } else {
         Arc::new(vfs)
     };
+
+    // Publish VFS handle so NATS handler can invalidate negative cache
+    if let Some(tx) = vfs_out {
+        let _ = tx.send(Some(vfs.clone()));
+    }
 
     let fs = TcfsFs::new(vfs);
 

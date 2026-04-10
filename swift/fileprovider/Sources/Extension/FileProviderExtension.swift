@@ -86,12 +86,18 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
         // For non-root items, return the item as a placeholder (not downloaded).
         // This tells fileproviderd the content needs to be fetched via fetchContents.
+        let rawPath = identifier.rawValue
+        let isDir = rawPath.hasSuffix("/")
+        let parentId = Self.parentIdentifier(forPath: rawPath)
+        let name = rawPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .components(separatedBy: "/").last ?? rawPath
+
         completionHandler(
             TCFSFileProviderItem(
                 identifier: identifier,
-                parentIdentifier: .rootContainer,
-                filename: identifier.rawValue.components(separatedBy: "/").last ?? identifier.rawValue,
-                isDirectory: false,
+                parentIdentifier: parentId,
+                filename: name,
+                isDirectory: isDir,
                 fileSize: 0,
                 downloaded: false
             ),
@@ -153,9 +159,10 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     atPath: tempFile.path
                 )[.size] as? UInt64) ?? 0
 
+                let parentId = TCFSFileProviderExtension.parentIdentifier(forPath: itemId)
                 let item = TCFSFileProviderItem(
                     identifier: itemIdentifier,
-                    parentIdentifier: .rootContainer,
+                    parentIdentifier: parentId,
                     filename: itemId.components(separatedBy: "/").last ?? itemId,
                     isDirectory: false,
                     fileSize: fileSize,
@@ -163,7 +170,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     uploaded: true
                 )
                 progress.completedUnitCount = progress.totalUnitCount
-                self.signalEnumeratorUpdate(for: .rootContainer)
+                self.signalEnumeratorUpdate(for: parentId)
                 completionHandler(tempFile, item, nil)
             } else {
                 completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
@@ -208,6 +215,23 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             Unmanaged<NSFileProviderManager>.fromOpaque(ptr).release()
             watchManagerPtr = nil
         }
+    }
+
+    // MARK: - Path utilities
+
+    /// Compute the parent item identifier from a logical relative path.
+    ///
+    /// - `"dotfiles/bashrc"` → `NSFileProviderItemIdentifier("dotfiles/")`
+    /// - `"dotfiles/"` → `.rootContainer`
+    /// - `"readme.txt"` → `.rootContainer`
+    static func parentIdentifier(forPath path: String) -> NSFileProviderItemIdentifier {
+        let trimmed = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let components = trimmed.components(separatedBy: "/")
+        if components.count <= 1 {
+            return .rootContainer
+        }
+        let parentPath = components.dropLast().joined(separator: "/") + "/"
+        return NSFileProviderItemIdentifier(parentPath)
     }
 
     // MARK: - Write operations

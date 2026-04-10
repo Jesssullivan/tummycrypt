@@ -409,6 +409,43 @@ mod inner {
 
             Ok(stream)
         }
+
+        /// Create an ephemeral (non-durable) pull consumer for STATE_UPDATES.
+        ///
+        /// Each call produces an independent consumer that receives messages
+        /// from the stream's current position. Unlike `state_consumer`, these do
+        /// NOT share a cursor with the daemon's durable consumer, so Watch RPC
+        /// callers get every event without competing with state_sync_loop.
+        pub async fn state_consumer_ephemeral(
+            &self,
+        ) -> Result<impl futures::Stream<Item = Result<StateEventMessage>>> {
+            let consumer: jetstream::consumer::Consumer<pull::Config> = self
+                .js
+                .create_consumer_on_stream(
+                    pull::Config {
+                        // No durable_name → ephemeral consumer, auto-deleted on disconnect
+                        deliver_policy: jetstream::consumer::DeliverPolicy::New,
+                        ack_wait: Duration::from_secs(30),
+                        ..Default::default()
+                    },
+                    STREAM_STATE,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("creating ephemeral state consumer: {e}"))?;
+
+            let messages = consumer
+                .messages()
+                .await
+                .map_err(|e| anyhow::anyhow!("opening ephemeral state consumer: {e}"))?;
+
+            let stream = messages.map(|msg_result| {
+                let msg = msg_result.map_err(|e| anyhow::anyhow!("receiving state msg: {e}"))?;
+                let event = StateEvent::from_bytes(&msg.payload)?;
+                Ok(StateEventMessage { event, msg })
+            });
+
+            Ok(stream)
+        }
     }
 
     // ── TaskMessage ───────────────────────────────────────────────────────────

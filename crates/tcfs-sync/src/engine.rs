@@ -397,6 +397,17 @@ pub async fn upload_file_with_device(
     #[cfg(not(feature = "crypto"))]
     let encrypted_file_key: Option<String> = None;
 
+    // Capture Unix file permissions for cross-device preservation
+    #[cfg(unix)]
+    let file_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(local_path)
+            .ok()
+            .map(|m| m.permissions().mode())
+    };
+    #[cfg(not(unix))]
+    let file_mode: Option<u32> = None;
+
     // Build and upload SyncManifest v2
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -412,6 +423,7 @@ pub async fn upload_file_with_device(
         written_by: device_id.to_string(),
         written_at: now,
         rel_path: rel_path.map(|s| s.to_string()),
+        mode: file_mode,
         encrypted_file_key,
     };
 
@@ -498,8 +510,65 @@ pub async fn download_file_with_device(
 
     let chunk_hashes = manifest.chunk_hashes();
 
+    // Empty file: no chunks to fetch — write an empty file directly
     if chunk_hashes.is_empty() {
-        anyhow::bail!("manifest is empty: {remote_manifest}");
+        if let Some(parent) = local_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating dir: {}", parent.display()))?;
+        }
+
+        let tmp = local_path.with_extension("tcfs_tmp");
+        tokio::fs::write(&tmp, &[])
+            .await
+            .with_context(|| format!("writing empty tmp: {}", tmp.display()))?;
+        tokio::fs::rename(&tmp, local_path)
+            .await
+            .with_context(|| format!("renaming to: {}", local_path.display()))?;
+
+        // Restore Unix file permissions from manifest
+        #[cfg(unix)]
+        if let Some(mode) = manifest.mode {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(mode);
+            tokio::fs::set_permissions(local_path, perms)
+                .await
+                .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+        }
+
+        // Merge remote vclock into local state
+        if let Some(state) = state {
+            if !_device_id.is_empty() {
+                let mut local_vclock = state
+                    .get(local_path)
+                    .map(|s| s.vclock.clone())
+                    .unwrap_or_default();
+                local_vclock.merge(&manifest.vclock);
+
+                let sync_state = make_sync_state_full(
+                    local_path,
+                    manifest.file_hash.clone(),
+                    0,
+                    remote_manifest.to_string(),
+                    local_vclock,
+                    _device_id.to_string(),
+                )?;
+                state.set(local_path, sync_state);
+            }
+        }
+
+        info!(
+            remote = %remote_manifest,
+            local = %local_path.display(),
+            bytes = 0u64,
+            "downloaded (empty file)"
+        );
+
+        return Ok(DownloadResult {
+            remote_path: remote_manifest.to_string(),
+            local_path: local_path.to_path_buf(),
+            bytes: 0,
+        });
     }
 
     // Unwrap file key if manifest is encrypted
@@ -599,6 +668,16 @@ pub async fn download_file_with_device(
     tokio::fs::rename(&tmp, local_path)
         .await
         .with_context(|| format!("renaming to: {}", local_path.display()))?;
+
+    // Restore Unix file permissions from manifest
+    #[cfg(unix)]
+    if let Some(mode) = manifest.mode {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(mode);
+        tokio::fs::set_permissions(local_path, perms)
+            .await
+            .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+    }
 
     // Merge remote vclock into local state if we have a state cache
     if let Some(state) = state {
@@ -910,6 +989,66 @@ pub async fn resolve_manifest_path(
         "no index entry found for '{}' (tried: {index_key}, filename search: {filename})",
         input
     )
+}
+
+/// Delete a file from remote storage (index entry + manifest + chunks).
+///
+/// Looks up the index entry for `rel_path`, reads the manifest to find chunk
+/// hashes, then deletes the index entry and manifest. Chunks are left for GC
+/// (they may be shared with other files via content-addressed dedup).
+///
+/// Also removes the file from the local state cache if present.
+pub async fn delete_remote_file(
+    op: &Operator,
+    rel_path: &str,
+    remote_prefix: &str,
+    state: &mut StateCache,
+    sync_root: Option<&Path>,
+) -> Result<()> {
+    let prefix = remote_prefix.trim_end_matches('/');
+    let index_key = format!("{prefix}/index/{rel_path}");
+
+    // Read index to find manifest hash
+    let idx_raw = op
+        .read(&index_key)
+        .await
+        .with_context(|| format!("reading index entry: {index_key}"))?
+        .to_bytes();
+
+    let idx_str = String::from_utf8_lossy(&idx_raw);
+    let manifest_hash = idx_str
+        .lines()
+        .find_map(|l| l.strip_prefix("manifest_hash="))
+        .ok_or_else(|| anyhow::anyhow!("index entry missing manifest_hash: {index_key}"))?
+        .to_string();
+
+    let manifest_key = format!("{prefix}/manifests/{manifest_hash}");
+
+    // Delete index entry and manifest
+    op.delete(&index_key)
+        .await
+        .with_context(|| format!("deleting index entry: {index_key}"))?;
+    op.delete(&manifest_key)
+        .await
+        .with_context(|| format!("deleting manifest: {manifest_key}"))?;
+
+    info!(rel_path = %rel_path, manifest = %manifest_hash, "deleted remote file");
+
+    // Remove from state cache
+    let local_path = sync_root
+        .map(|r| r.join(rel_path))
+        .unwrap_or_else(|| PathBuf::from(rel_path));
+    state.remove(&local_path);
+
+    // Also try to remove by searching the cache (handles path normalization mismatches)
+    if let Some((key, _)) = state.get_by_rel_path(rel_path) {
+        let key_owned = key.to_string();
+        state.remove(Path::new(&key_owned));
+    }
+
+    state.flush()?;
+
+    Ok(())
 }
 
 /// Normalize a remote prefix: ensure it doesn't have trailing slash
