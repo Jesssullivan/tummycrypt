@@ -1597,7 +1597,7 @@ async fn cmd_mount(
                     None
                 }
             },
-        })
+        }, None)
         .await
         .context("FUSE mount failed")
     }

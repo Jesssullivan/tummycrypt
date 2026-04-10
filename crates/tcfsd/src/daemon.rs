@@ -868,6 +868,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         impl_.state_cache_handle(),
                         sync_root,
                         storage_prefix,
+                        impl_.vfs_handle.clone(),
                     )
                     .await;
 
@@ -1029,6 +1030,7 @@ async fn spawn_state_sync_loop(
     state_cache: Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
     sync_root: Option<std::path::PathBuf>,
     storage_prefix: String,
+    vfs_handle: tokio::sync::watch::Receiver<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
 ) {
     use futures::StreamExt;
 
@@ -1086,6 +1088,14 @@ async fn spawn_state_sync_loop(
                                                 &storage_prefix,
                                             )
                                             .await;
+
+                                            // Invalidate FUSE negative cache so the
+                                            // new file appears in readdir immediately
+                                            if let Some(ref vfs) = *vfs_handle.borrow() {
+                                                let vpath = format!("/{}", rel_path);
+                                                vfs.invalidate_path(&vpath);
+                                                debug!(path = %vpath, "FUSE negative cache invalidated for remote file");
+                                            }
                                         }
                                         "interactive" => {
                                             info!(

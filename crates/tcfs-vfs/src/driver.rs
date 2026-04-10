@@ -156,6 +156,18 @@ impl TcfsVfs {
         &self.disk_cache
     }
 
+    /// Invalidate the negative cache for a path, so the next lookup/readdir
+    /// won't return ENOENT from cache. Called by the NATS handler when a
+    /// remote device syncs a new file.
+    pub fn invalidate_path(&self, path: &str) {
+        self.negative_cache.remove(path);
+        // Also invalidate parent directory so readdir picks up the new entry
+        if let Some(parent) = path.rsplit_once('/').map(|(p, _)| p) {
+            let parent = if parent.is_empty() { "/" } else { parent };
+            self.negative_cache.remove(parent);
+        }
+    }
+
     /// Flush modified file content to SeaweedFS (index + manifest + chunks).
     ///
     /// Uses FastCDC content-defined chunking for deduplication. Small files

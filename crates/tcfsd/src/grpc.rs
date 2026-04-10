@@ -33,6 +33,10 @@ pub struct TcfsDaemonImpl {
     nats_ok: std::sync::atomic::AtomicBool,
     nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
     active_mounts: Arc<TokioMutex<std::collections::HashMap<String, tokio::process::Child>>>,
+    /// VFS handle from active FUSE mount — used to invalidate negative cache
+    /// on NATS events so remote files appear in readdir immediately.
+    pub vfs_handle: tokio::sync::watch::Receiver<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
+    vfs_tx: tokio::sync::watch::Sender<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
     // Auth infrastructure
     session_store: tcfs_auth::SessionStore,
     totp_provider: Arc<tcfs_auth::totp::TotpProvider>,
@@ -53,6 +57,8 @@ impl TcfsDaemonImpl {
         device_name: String,
         master_key: Option<tcfs_crypto::MasterKey>,
     ) -> Self {
+        let (vfs_tx, vfs_rx) = tokio::sync::watch::channel(None);
+
         let totp_config = tcfs_auth::totp::TotpConfig {
             issuer: config.auth.totp.issuer.clone(),
             digits: config.auth.totp.digits as usize,
@@ -95,6 +101,8 @@ impl TcfsDaemonImpl {
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
             active_mounts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
+            vfs_handle: vfs_rx,
+            vfs_tx,
             session_store: tcfs_auth::SessionStore::new(),
             totp_provider,
             webauthn_provider,
@@ -419,26 +427,32 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 },
             ));
 
+            let vfs_sender = self.vfs_tx.clone();
             let mount_handle = tokio::spawn(async move {
                 tracing::info!("FUSE mount task starting (prefix={prefix})");
-                match tcfs_fuse::mount(tcfs_fuse::MountConfig {
-                    op,
-                    prefix,
-                    mountpoint: mp,
-                    cache_dir: std::path::PathBuf::from(&cache_dir),
-                    cache_max_bytes: cache_max,
-                    negative_ttl_secs: neg_ttl,
-                    read_only: req.read_only,
-                    allow_other: false,
-                    on_flush,
-                    device_id: mount_device_id,
-                    master_key: Some(mount_master_key),
-                })
+                match tcfs_fuse::mount(
+                    tcfs_fuse::MountConfig {
+                        op,
+                        prefix,
+                        mountpoint: mp,
+                        cache_dir: std::path::PathBuf::from(&cache_dir),
+                        cache_max_bytes: cache_max,
+                        negative_ttl_secs: neg_ttl,
+                        read_only: req.read_only,
+                        allow_other: false,
+                        on_flush,
+                        device_id: mount_device_id,
+                        master_key: Some(mount_master_key),
+                    },
+                    Some(&vfs_sender),
+                )
                 .await
                 {
                     Ok(()) => tracing::info!("FUSE mount unmounted cleanly"),
                     Err(e) => tracing::error!(error = %e, "FUSE mount failed"),
                 }
+                // Clear VFS handle on unmount
+                let _ = vfs_sender.send(None);
             });
 
             let mk = mountpoint_key.clone();
