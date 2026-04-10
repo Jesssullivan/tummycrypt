@@ -33,6 +33,28 @@ const DIR_TTL: Duration = Duration::from_secs(1);
 /// S3 backend is slow or unreachable.
 const VFS_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Map VFS/anyhow errors to appropriate POSIX errno values.
+fn vfs_error_to_errno(err: &anyhow::Error) -> Errno {
+    let msg = format!("{err:#}").to_lowercase();
+    if msg.contains("not found") || msg.contains("enoent") {
+        Errno::from(libc::ENOENT)
+    } else if msg.contains("enotempty") || msg.contains("not empty") {
+        Errno::from(libc::ENOTEMPTY)
+    } else if msg.contains("permission") || msg.contains("eacces") {
+        Errno::from(libc::EACCES)
+    } else if msg.contains("no space") || msg.contains("enospc") || msg.contains("quota") {
+        Errno::from(libc::ENOSPC)
+    } else if msg.contains("already exists") || msg.contains("eexist") {
+        Errno::from(libc::EEXIST)
+    } else if msg.contains("bad file handle") || msg.contains("ebadf") {
+        Errno::from(libc::EBADF)
+    } else if msg.contains("efbig") || msg.contains("file too large") {
+        Errno::from(libc::EFBIG)
+    } else {
+        Errno::from(libc::EIO)
+    }
+}
+
 // ── TcfsFs ────────────────────────────────────────────────────────────────
 
 /// The FUSE filesystem driver — thin wrapper around `TcfsVfs`.
@@ -107,7 +129,7 @@ impl PathFilesystem for TcfsFs {
                 warn!(path = %path_str, "FUSE GETATTR timed out");
                 Errno::from(libc::EIO)
             })?
-            .map_err(|_| Errno::from(libc::ENOENT))?;
+            .map_err(|e| vfs_error_to_errno(&e))?;
 
         Ok(ReplyAttr {
             ttl: ATTR_TTL,
@@ -128,7 +150,7 @@ impl PathFilesystem for TcfsFs {
                 warn!(parent = %parent_str, name = ?name, "FUSE LOOKUP timed out");
                 Errno::from(libc::EIO)
             })?
-            .map_err(|_| Errno::from(libc::ENOENT))?;
+            .map_err(|e| vfs_error_to_errno(&e))?;
 
         Ok(ReplyEntry {
             ttl: ATTR_TTL,
@@ -292,7 +314,7 @@ impl PathFilesystem for TcfsFs {
             })?
             .map_err(|e| {
                 warn!(path = %path_str, error = %e, "FUSE OPEN failed");
-                Errno::from(libc::ENOENT)
+                vfs_error_to_errno(&e)
             })?;
 
         Ok(ReplyOpen { fh, flags: 0 })
@@ -310,7 +332,7 @@ impl PathFilesystem for TcfsFs {
             .vfs
             .read(fh, offset, size)
             .await
-            .map_err(|_| Errno::from(libc::EBADF))?;
+            .map_err(|e| vfs_error_to_errno(&e))?;
 
         Ok(ReplyData {
             data: Bytes::from(data),
@@ -329,17 +351,23 @@ impl PathFilesystem for TcfsFs {
         self.vfs
             .release(fh)
             .await
-            .map_err(|_| Errno::from(libc::EIO))
+            .map_err(|e| vfs_error_to_errno(&e))
     }
 
     async fn flush(
         &self,
         _req: Request,
         _path: Option<&OsStr>,
-        _fh: u64,
+        fh: u64,
         _lock_owner: u64,
     ) -> fuse3::Result<()> {
-        Ok(())
+        self.vfs
+            .fsync(fh, false)
+            .await
+            .map_err(|e| {
+                warn!(fh, error = %e, "FUSE flush failed");
+                Errno::from(libc::EIO)
+            })
     }
 
     // ── Write handlers ─────────────────────────────────────────────────
@@ -467,13 +495,11 @@ impl PathFilesystem for TcfsFs {
             .await
             .map_err(|_| Errno::from(libc::EIO))?
             .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("ENOTEMPTY") {
-                    Errno::from(libc::ENOTEMPTY)
-                } else {
+                let errno = vfs_error_to_errno(&e);
+                if errno != Errno::from(libc::ENOTEMPTY) {
                     warn!(parent = %parent_str, name = ?name, error = %e, "FUSE RMDIR failed");
-                    Errno::from(libc::EIO)
                 }
+                errno
             })
     }
 
@@ -569,4 +595,53 @@ pub async fn mount(cfg: MountConfig, vfs_out: Option<&tokio::sync::watch::Sender
         .await?;
 
     handle.await
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errno_mapping_not_found() {
+        let err = anyhow::anyhow!("path not found in index");
+        assert_eq!(vfs_error_to_errno(&err), Errno::from(libc::ENOENT));
+    }
+
+    #[test]
+    fn errno_mapping_permission() {
+        let err = anyhow::anyhow!("permission denied by storage backend");
+        assert_eq!(vfs_error_to_errno(&err), Errno::from(libc::EACCES));
+    }
+
+    #[test]
+    fn errno_mapping_exists() {
+        let err = anyhow::anyhow!("file already exists at target path");
+        assert_eq!(vfs_error_to_errno(&err), Errno::from(libc::EEXIST));
+    }
+
+    #[test]
+    fn errno_mapping_bad_handle() {
+        let err = anyhow::anyhow!("bad file handle: 42");
+        assert_eq!(vfs_error_to_errno(&err), Errno::from(libc::EBADF));
+    }
+
+    #[test]
+    fn errno_mapping_not_empty() {
+        let err = anyhow::anyhow!("ENOTEMPTY: directory not empty: /foo");
+        assert_eq!(vfs_error_to_errno(&err), Errno::from(libc::ENOTEMPTY));
+    }
+
+    #[test]
+    fn errno_mapping_no_space() {
+        let err = anyhow::anyhow!("no space left on device / quota exceeded");
+        assert_eq!(vfs_error_to_errno(&err), Errno::from(libc::ENOSPC));
+    }
+
+    #[test]
+    fn errno_mapping_default_eio() {
+        let err = anyhow::anyhow!("some unknown storage error");
+        assert_eq!(vfs_error_to_errno(&err), Errno::from(libc::EIO));
+    }
 }
