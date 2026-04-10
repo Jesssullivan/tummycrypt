@@ -498,8 +498,55 @@ pub async fn download_file_with_device(
 
     let chunk_hashes = manifest.chunk_hashes();
 
+    // Empty file: no chunks to fetch — write an empty file directly
     if chunk_hashes.is_empty() {
-        anyhow::bail!("manifest is empty: {remote_manifest}");
+        if let Some(parent) = local_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating dir: {}", parent.display()))?;
+        }
+
+        let tmp = local_path.with_extension("tcfs_tmp");
+        tokio::fs::write(&tmp, &[])
+            .await
+            .with_context(|| format!("writing empty tmp: {}", tmp.display()))?;
+        tokio::fs::rename(&tmp, local_path)
+            .await
+            .with_context(|| format!("renaming to: {}", local_path.display()))?;
+
+        // Merge remote vclock into local state
+        if let Some(state) = state {
+            if !_device_id.is_empty() {
+                let mut local_vclock = state
+                    .get(local_path)
+                    .map(|s| s.vclock.clone())
+                    .unwrap_or_default();
+                local_vclock.merge(&manifest.vclock);
+
+                let sync_state = make_sync_state_full(
+                    local_path,
+                    manifest.file_hash.clone(),
+                    0,
+                    remote_manifest.to_string(),
+                    local_vclock,
+                    _device_id.to_string(),
+                )?;
+                state.set(local_path, sync_state);
+            }
+        }
+
+        info!(
+            remote = %remote_manifest,
+            local = %local_path.display(),
+            bytes = 0u64,
+            "downloaded (empty file)"
+        );
+
+        return Ok(DownloadResult {
+            remote_path: remote_manifest.to_string(),
+            local_path: local_path.to_path_buf(),
+            bytes: 0,
+        });
     }
 
     // Unwrap file key if manifest is encrypted

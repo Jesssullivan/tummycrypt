@@ -276,3 +276,93 @@ async fn roundtrip_with_device_identity() {
         "vclock should be non-empty after device-aware sync"
     );
 }
+
+#[tokio::test]
+async fn roundtrip_empty_file() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/empty";
+
+    let src = write_test_file(tmp.path(), "empty.txt", b"");
+    let dst = tmp.path().join("output/empty.txt");
+
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+
+    // Push empty file
+    let upload = tcfs_sync::engine::upload_file(&op, &src, prefix, &mut state, None)
+        .await
+        .expect("upload empty file should succeed");
+
+    assert!(!upload.skipped);
+    assert_eq!(upload.chunks, 0, "empty file should produce 0 chunks");
+    assert_eq!(upload.bytes, 0, "empty file should be 0 bytes");
+
+    // Pull empty file
+    let download =
+        tcfs_sync::engine::download_file(&op, &upload.remote_path, &dst, prefix, None)
+            .await
+            .expect("download empty file should succeed");
+
+    assert_eq!(download.bytes, 0);
+
+    // Verify the file exists and is empty
+    let downloaded = std::fs::read(&dst).unwrap();
+    assert!(downloaded.is_empty(), "downloaded empty file must be empty");
+}
+
+#[tokio::test]
+async fn roundtrip_empty_file_with_device() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/empty-dev";
+    let device_id = "test-device-empty";
+
+    let src = write_test_file(tmp.path(), "empty-dev.txt", b"");
+    let dst = tmp.path().join("output/empty-dev.txt");
+
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+
+    // Push with device identity
+    let upload = tcfs_sync::engine::upload_file_with_device(
+        &op,
+        &src,
+        prefix,
+        &mut state,
+        None,
+        device_id,
+        Some("empty-dev.txt"),
+        None,
+    )
+    .await
+    .expect("upload empty file with device should succeed");
+
+    assert!(!upload.skipped);
+    assert_eq!(upload.chunks, 0);
+    assert_eq!(upload.bytes, 0);
+
+    // Pull with device identity and state merge
+    let download = tcfs_sync::engine::download_file_with_device(
+        &op,
+        &upload.remote_path,
+        &dst,
+        prefix,
+        None,
+        device_id,
+        Some(&mut state),
+        None,
+    )
+    .await
+    .expect("download empty file with device should succeed");
+
+    assert_eq!(download.bytes, 0);
+
+    let downloaded = std::fs::read(&dst).unwrap();
+    assert!(downloaded.is_empty(), "downloaded empty file must be empty");
+
+    // Verify state cache has vclock entry
+    let cached = state.get(&dst).expect("state cache should have entry for empty file");
+    assert!(
+        !cached.vclock.clocks.is_empty(),
+        "vclock should be non-empty after device-aware empty file sync"
+    );
+}
