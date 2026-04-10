@@ -1236,6 +1236,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     written_by: self.device_id.clone(),
                     written_at: tcfs_sync::StateEvent::now(),
                     rel_path: Some(req.path.clone()),
+                    mode: None,
                     encrypted_file_key: None,
                 };
 

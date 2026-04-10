@@ -160,6 +160,7 @@ fn execute_op(
                 written_by: machines[*machine].device_id.clone(),
                 written_at: 0,
                 rel_path: Some(path.clone()),
+                mode: None,
                 encrypted_file_key: None,
             };
 
@@ -754,6 +755,7 @@ fn test_manifest_serialization_in_sim() {
         written_by: "yoga".into(),
         written_at: 1000,
         rel_path: Some("src/main.rs".into()),
+        mode: None,
         encrypted_file_key: None,
     };
 

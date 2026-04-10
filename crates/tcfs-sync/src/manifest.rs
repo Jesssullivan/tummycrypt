@@ -25,6 +25,10 @@ pub struct SyncManifest {
     pub written_at: u64,
     /// Relative path of the file (for cross-device lookup)
     pub rel_path: Option<String>,
+    /// Unix file mode (permissions) — preserved across sync on Unix systems.
+    /// Backward-compatible: old manifests deserialize with `mode: None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
     /// Base64-encoded wrapped file key (present only when E2E encryption is enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_file_key: Option<String>,
@@ -64,6 +68,7 @@ impl SyncManifest {
             written_by: String::new(),
             written_at: 0,
             rel_path: None,
+            mode: None,
             encrypted_file_key: None,
         })
     }
@@ -102,6 +107,7 @@ mod tests {
             written_by: "yoga".into(),
             written_at: 1000,
             rel_path: Some("docs/readme.md".into()),
+            mode: Some(0o644),
             encrypted_file_key: None,
         };
 
