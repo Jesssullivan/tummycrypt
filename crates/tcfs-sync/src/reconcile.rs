@@ -144,9 +144,9 @@ pub fn parse_index_entry(data: &[u8]) -> Result<RemoteIndexEntry> {
         if let Some(v) = line.strip_prefix("manifest_hash=") {
             manifest_hash = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("size=") {
-            size = v.parse().unwrap_or(0);
+            size = v.parse().context("invalid size in index entry")?;
         } else if let Some(v) = line.strip_prefix("chunks=") {
-            chunks = v.parse().unwrap_or(0);
+            chunks = v.parse().context("invalid chunk count in index entry")?;
         }
     }
 
@@ -728,5 +728,19 @@ mod tests {
         let config = ReconcileConfig::default();
         assert!(!config.delete_local_orphans);
         assert!(!config.delete_remote_orphans);
+    }
+
+    #[test]
+    fn parse_index_entry_garbage_size_errors() {
+        let data = b"manifest_hash=abc123\nsize=notanumber\nchunks=5\n";
+        let result = parse_index_entry(data);
+        assert!(result.is_err(), "garbage size should return error, not default to 0");
+    }
+
+    #[test]
+    fn parse_index_entry_garbage_chunks_errors() {
+        let data = b"manifest_hash=abc123\nsize=1024\nchunks=xyz\n";
+        let result = parse_index_entry(data);
+        assert!(result.is_err(), "garbage chunks should return error, not default to 0");
     }
 }

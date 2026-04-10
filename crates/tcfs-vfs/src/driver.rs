@@ -202,7 +202,17 @@ impl TcfsVfs {
         // 3. Upload each chunk (encrypt if master key available)
         let mut chunk_hashes = Vec::with_capacity(chunks.len());
         for (idx, chunk) in chunks.iter().enumerate() {
-            let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
+            let start = chunk.offset as usize;
+            let end = start
+                .checked_add(chunk.length)
+                .context("chunk offset+length overflow")?;
+            anyhow::ensure!(
+                end <= data.len(),
+                "chunk out of bounds: offset={start} length={} data_len={}",
+                chunk.length,
+                data.len()
+            );
+            let chunk_data = &data[start..end];
 
             let upload_data = if let Some(ref fk) = file_key {
                 tcfs_crypto::encrypt_chunk(fk, idx as u64, &file_id_bytes, chunk_data)

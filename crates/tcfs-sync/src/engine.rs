@@ -134,7 +134,9 @@ pub async fn upload_file_with_device(
     // Fast-path: check if file is already up-to-date
     match state.needs_sync(local_path)? {
         None => {
-            let cached = state.get(local_path).unwrap();
+            let cached = state.get(local_path).ok_or_else(|| {
+                anyhow::anyhow!("state entry vanished during upload for {}", local_path.display())
+            })?;
             let result = UploadResult {
                 path: local_path.to_path_buf(),
                 remote_path: cached.remote_path.clone(),
@@ -424,7 +426,17 @@ pub async fn upload_file_with_device(
         chunk_hashes.reserve(num_chunks);
 
         for (i, chunk) in chunks.iter().enumerate() {
-            let chunk_data = &data[chunk.offset as usize..chunk.offset as usize + chunk.length];
+            let start = chunk.offset as usize;
+            let end = start
+                .checked_add(chunk.length)
+                .context("chunk offset+length overflow")?;
+            anyhow::ensure!(
+                end <= data.len(),
+                "chunk out of bounds: offset={start} length={} data_len={}",
+                chunk.length,
+                data.len()
+            );
+            let chunk_data = &data[start..end];
 
             #[cfg(feature = "crypto")]
             let (upload_data, chunk_hash_hex) =
