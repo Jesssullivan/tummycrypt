@@ -317,6 +317,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         let health_state = crate::metrics::HealthState {
             registry: metrics_registry.clone(),
             operator: operator.clone(),
+            sync_root: config.sync.sync_root.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = crate::metrics::serve(addr, health_state).await {
