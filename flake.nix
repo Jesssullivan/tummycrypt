@@ -127,10 +127,32 @@
           '';
         });
 
+        # macOS .app bundle for TCC persistence.
+        # TCC grants (Full Disk Access, etc.) are tied to bundle ID + CDHash.
+        # Bare binaries in /nix/store/ lose grants on every rebuild.
+        # This bundle provides a stable identity (io.tinyland.tcfsd).
+        tcfsd-app = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
+          pkgs.stdenv.mkDerivation {
+            pname = "tcfsd-app";
+            version = tcfsd.version or "0.12.0";
+            dontUnpack = true;
+            buildInputs = [ pkgs.darwin.sigtool ];
+            installPhase = ''
+              mkdir -p $out/Applications/TCFSDaemon.app/Contents/MacOS
+              cp ${tcfsd}/bin/tcfsd $out/Applications/TCFSDaemon.app/Contents/MacOS/tcfsd
+              cp ${./swift/daemon/resources/Info.plist} $out/Applications/TCFSDaemon.app/Contents/Info.plist
+              # Ad-hoc sign for local use; Developer ID signing done out-of-band
+              codesign -f -s - --options runtime $out/Applications/TCFSDaemon.app || true
+            '';
+          }
+        );
+
       in {
         packages = {
           default = tcfsd;
           inherit tcfsd tcfs-cli tcfs-tui tcfs-mcp tcfs-file-provider-staticlib;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          inherit tcfsd-app;
         };
 
         devShells.default = pkgs.mkShell {
