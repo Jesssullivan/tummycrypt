@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Shared Group Container for FileProvider IPC socket -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>$(TeamIdentifierPrefix)group.io.tinyland.tcfs</string>
+    </array>
+    <!-- Network client (gRPC socket, S3/NATS connections) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- Disable library validation so Nix-built dylibs load
+         without matching the daemon's code signature -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
