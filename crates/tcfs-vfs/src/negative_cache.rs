@@ -6,6 +6,7 @@
 //! repeated misses are answered instantly in-process.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 pub struct NegativeCache {
     entries: Mutex<HashMap<String, Instant>>,
     ttl: Duration,
+    insert_count: AtomicU64,
 }
 
 impl NegativeCache {
@@ -21,6 +23,7 @@ impl NegativeCache {
         NegativeCache {
             entries: Mutex::new(HashMap::new()),
             ttl,
+            insert_count: AtomicU64::new(0),
         }
     }
 
@@ -28,6 +31,12 @@ impl NegativeCache {
     pub fn insert(&self, path: &str) {
         let mut map = self.entries.lock().unwrap();
         map.insert(path.to_string(), Instant::now());
+
+        // Periodic eviction: every 100 inserts, remove expired entries
+        let count = self.insert_count.fetch_add(1, Ordering::Relaxed);
+        if count.is_multiple_of(100) {
+            map.retain(|_, inserted_at| inserted_at.elapsed() < self.ttl);
+        }
     }
 
     /// Returns true if `path` is known to be absent and the TTL has not expired.
@@ -80,5 +89,30 @@ mod tests {
         assert!(cache.is_negative("/tmp/test"));
         thread::sleep(Duration::from_millis(80));
         assert!(!cache.is_negative("/tmp/test"));
+    }
+
+    #[test]
+    fn eviction_bounds_cache_size() {
+        let cache = NegativeCache::new(Duration::from_millis(50));
+
+        // Insert 200 entries
+        for i in 0..200 {
+            cache.insert(&format!("path/{i}"));
+        }
+
+        // Wait for TTL to expire
+        thread::sleep(Duration::from_millis(100));
+
+        // Insert one more to trigger eviction
+        cache.insert("trigger");
+
+        // The cache should have evicted expired entries
+        // Only "trigger" should be non-expired
+        let map = cache.entries.lock().unwrap();
+        assert!(
+            map.len() < 50,
+            "cache should have evicted expired entries, got {}",
+            map.len()
+        );
     }
 }
