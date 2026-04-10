@@ -581,6 +581,7 @@ impl TcfsProviderHandle {
                 written_by: self.device_id.clone(),
                 written_at,
                 rel_path: Some(remote_path.to_string()),
+                mode: None,
                 encrypted_file_key,
             };
 

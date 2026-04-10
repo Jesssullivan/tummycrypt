@@ -469,3 +469,77 @@ async fn roundtrip_preserves_readonly_permission() {
     let mode = meta.permissions().mode() & 0o777;
     assert_eq!(mode, 0o444, "read-only permission should be preserved");
 }
+
+#[tokio::test]
+async fn delete_removes_index_and_manifest() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/delete";
+    let device_id = "test-device-del";
+
+    // Push a file
+    let src = write_test_file(tmp.path(), "to-delete.txt", b"delete me");
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+
+    let upload = tcfs_sync::engine::upload_file_with_device(
+        &op,
+        &src,
+        prefix,
+        &mut state,
+        None,
+        device_id,
+        Some("to-delete.txt"),
+        None,
+    )
+    .await
+    .expect("upload file to delete");
+
+    assert!(!upload.skipped);
+
+    // Write index entry (normally done by push_tree or cmd_push)
+    let index_key = format!("{prefix}/index/to-delete.txt");
+    let index_entry = format!(
+        "manifest_hash={}\nsize={}\nchunks={}\n",
+        upload.hash, upload.bytes, upload.chunks
+    );
+    op.write(&index_key, index_entry.into_bytes())
+        .await
+        .expect("write index entry");
+
+    // Verify index and manifest exist
+    assert!(
+        op.exists(&index_key).await.unwrap(),
+        "index entry should exist after push"
+    );
+    assert!(
+        op.exists(&upload.remote_path).await.unwrap(),
+        "manifest should exist after push"
+    );
+
+    // Delete the remote file
+    tcfs_sync::engine::delete_remote_file(
+        &op,
+        "to-delete.txt",
+        prefix,
+        &mut state,
+        Some(tmp.path()),
+    )
+    .await
+    .expect("delete should succeed");
+
+    // Verify index and manifest are gone
+    assert!(
+        !op.exists(&index_key).await.unwrap(),
+        "index entry should be gone after delete"
+    );
+    assert!(
+        !op.exists(&upload.remote_path).await.unwrap(),
+        "manifest should be gone after delete"
+    );
+
+    // Verify state cache entry is gone
+    assert!(
+        state.get(&src).is_none(),
+        "state cache entry should be removed after delete"
+    );
+}

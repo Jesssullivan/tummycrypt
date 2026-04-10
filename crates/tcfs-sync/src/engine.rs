@@ -991,6 +991,66 @@ pub async fn resolve_manifest_path(
     )
 }
 
+/// Delete a file from remote storage (index entry + manifest + chunks).
+///
+/// Looks up the index entry for `rel_path`, reads the manifest to find chunk
+/// hashes, then deletes the index entry and manifest. Chunks are left for GC
+/// (they may be shared with other files via content-addressed dedup).
+///
+/// Also removes the file from the local state cache if present.
+pub async fn delete_remote_file(
+    op: &Operator,
+    rel_path: &str,
+    remote_prefix: &str,
+    state: &mut StateCache,
+    sync_root: Option<&Path>,
+) -> Result<()> {
+    let prefix = remote_prefix.trim_end_matches('/');
+    let index_key = format!("{prefix}/index/{rel_path}");
+
+    // Read index to find manifest hash
+    let idx_raw = op
+        .read(&index_key)
+        .await
+        .with_context(|| format!("reading index entry: {index_key}"))?
+        .to_bytes();
+
+    let idx_str = String::from_utf8_lossy(&idx_raw);
+    let manifest_hash = idx_str
+        .lines()
+        .find_map(|l| l.strip_prefix("manifest_hash="))
+        .ok_or_else(|| anyhow::anyhow!("index entry missing manifest_hash: {index_key}"))?
+        .to_string();
+
+    let manifest_key = format!("{prefix}/manifests/{manifest_hash}");
+
+    // Delete index entry and manifest
+    op.delete(&index_key)
+        .await
+        .with_context(|| format!("deleting index entry: {index_key}"))?;
+    op.delete(&manifest_key)
+        .await
+        .with_context(|| format!("deleting manifest: {manifest_key}"))?;
+
+    info!(rel_path = %rel_path, manifest = %manifest_hash, "deleted remote file");
+
+    // Remove from state cache
+    let local_path = sync_root
+        .map(|r| r.join(rel_path))
+        .unwrap_or_else(|| PathBuf::from(rel_path));
+    state.remove(&local_path);
+
+    // Also try to remove by searching the cache (handles path normalization mismatches)
+    if let Some((key, _)) = state.get_by_rel_path(rel_path) {
+        let key_owned = key.to_string();
+        state.remove(Path::new(&key_owned));
+    }
+
+    state.flush()?;
+
+    Ok(())
+}
+
 /// Normalize a remote prefix: ensure it doesn't have trailing slash
 fn remote_path_prefix(prefix: &str) -> String {
     prefix.trim_end_matches('/').to_string()

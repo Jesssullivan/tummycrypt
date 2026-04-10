@@ -223,6 +223,22 @@ enum Commands {
         action: PolicyAction,
     },
 
+    /// Delete a file from remote storage and local disk
+    ///
+    /// Removes the index entry, manifest, and local file. The daemon's file
+    /// watcher will detect the local deletion and publish a NATS FileDeleted
+    /// event for other devices to process.
+    Rm {
+        /// Path to the file to delete
+        path: PathBuf,
+        /// Remote prefix override
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
+        /// Path to the sync state cache JSON file (overrides config)
+        #[arg(long, env = "TCFS_STATE_PATH")]
+        state: Option<PathBuf>,
+    },
+
     /// Resolve a sync conflict for a file
     ///
     /// When two devices modify the same file without syncing, a conflict is
@@ -515,6 +531,11 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::Policy { action } => cmd_policy(&config, action).await,
+        Commands::Rm {
+            path,
+            prefix,
+            state,
+        } => cmd_rm(&config, &path, prefix.as_deref(), state.as_deref()).await,
         Commands::Resolve { path, strategy } => {
             #[cfg(unix)]
             {
@@ -1079,6 +1100,52 @@ fn cmd_sync_status(
             }
         }
     }
+
+    Ok(())
+}
+
+// ── `tcfs rm` ────────────────────────────────────────────────────────────────
+
+async fn cmd_rm(
+    config: &tcfs_core::config::TcfsConfig,
+    path: &Path,
+    prefix: Option<&str>,
+    state_override: Option<&Path>,
+) -> Result<()> {
+    let op = build_operator_from_env(config)?;
+    let state_path = resolve_state_path(config, state_override);
+    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+
+    let remote_prefix = prefix
+        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| {
+            config
+                .storage
+                .remote_prefix
+                .clone()
+                .unwrap_or_else(|| config.storage.bucket.clone())
+        });
+
+    let sync_root = config.sync.sync_root.as_deref();
+    let rel = tcfs_sync::engine::normalize_rel_path(path, sync_root);
+
+    println!("Deleting {} (remote: {}/index/{})", path.display(), remote_prefix, rel);
+
+    // Delete from remote storage (index + manifest)
+    tcfs_sync::engine::delete_remote_file(&op, &rel, &remote_prefix, &mut state, sync_root)
+        .await
+        .with_context(|| format!("deleting remote file: {}", rel))?;
+
+    // Delete local file if it exists
+    if path.exists() {
+        std::fs::remove_file(path)
+            .with_context(|| format!("deleting local file: {}", path.display()))?;
+        println!("  Removed local file: {}", path.display());
+    }
+
+    println!("  Removed remote index + manifest");
+    println!("Done.");
 
     Ok(())
 }

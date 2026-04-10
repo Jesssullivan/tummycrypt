@@ -1137,6 +1137,56 @@ async fn spawn_state_sync_loop(
                                         let _ = cache.flush();
                                     }
                                 }
+                                tcfs_sync::StateEvent::FileDeleted {
+                                    rel_path,
+                                    vclock: remote_vclock,
+                                    ..
+                                } => {
+                                    info!(
+                                        from_device = %event_device,
+                                        path = %rel_path,
+                                        "remote file deleted"
+                                    );
+
+                                    // Determine local path
+                                    let local_path = sync_root
+                                        .as_ref()
+                                        .map(|r| r.join(rel_path))
+                                        .unwrap_or_else(|| std::path::PathBuf::from(rel_path));
+
+                                    // Remove local file if it exists
+                                    if local_path.exists() {
+                                        if let Err(e) = tokio::fs::remove_file(&local_path).await {
+                                            warn!(
+                                                path = %local_path.display(),
+                                                "failed to remove local file for remote delete: {e}"
+                                            );
+                                        } else {
+                                            info!(
+                                                path = %local_path.display(),
+                                                from_device = %event_device,
+                                                "removed local file (remote delete)"
+                                            );
+                                        }
+                                    }
+
+                                    // Remove from state cache and merge vclock
+                                    let mut cache = state_cache.lock().await;
+                                    cache.remove(&local_path);
+                                    // Also try by rel_path (handles path normalization)
+                                    if let Some((key, _)) = cache.get_by_rel_path(rel_path) {
+                                        let key_owned = key.to_string();
+                                        cache.remove(std::path::Path::new(&key_owned));
+                                    }
+                                    let _ = cache.flush();
+
+                                    // Invalidate FUSE cache so the file disappears
+                                    if let Some(ref vfs) = *vfs_handle.borrow() {
+                                        let vpath = format!("/{}", rel_path);
+                                        vfs.invalidate_path(&vpath);
+                                        debug!(path = %vpath, "FUSE cache invalidated for deleted file");
+                                    }
+                                }
                                 tcfs_sync::StateEvent::DeviceOnline { device_id: did, .. } => {
                                     info!(device = %did, "remote device online");
                                 }

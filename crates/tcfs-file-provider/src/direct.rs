@@ -621,6 +621,7 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                 written_by: prov.device_id.clone(),
                 written_at,
                 rel_path: Some(remote_str.to_string()),
+                mode: None,
                 encrypted_file_key,
             };
 

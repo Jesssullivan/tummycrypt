@@ -580,18 +580,41 @@ pub async fn execute_plan(
             },
 
             ReconcileAction::DeleteRemote { rel_path } => {
-                let index_key =
-                    format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rel_path);
-                match op.delete(&index_key).await {
-                    Ok(()) => {
-                        result.deleted_remote += 1;
-                    }
-                    Err(e) => {
-                        result
-                            .errors
-                            .push((rel_path.clone(), format!("remote delete failed: {e}")));
+                let prefix = remote_prefix.trim_end_matches('/');
+                let index_key = format!("{prefix}/index/{rel_path}");
+
+                // Read index to find manifest hash before deleting
+                let manifest_key = if let Ok(idx_bytes) = op.read(&index_key).await {
+                    let idx_raw = idx_bytes.to_bytes();
+                    let idx_str = String::from_utf8_lossy(&idx_raw);
+                    idx_str
+                        .lines()
+                        .find_map(|l| l.strip_prefix("manifest_hash="))
+                        .map(|h| format!("{prefix}/manifests/{h}"))
+                } else {
+                    None
+                };
+
+                // Delete index entry
+                if let Err(e) = op.delete(&index_key).await {
+                    result
+                        .errors
+                        .push((rel_path.clone(), format!("remote index delete failed: {e}")));
+                    continue;
+                }
+
+                // Delete manifest (prevents orphaned manifests)
+                if let Some(ref mkey) = manifest_key {
+                    if let Err(e) = op.delete(mkey).await {
+                        tracing::warn!(
+                            rel_path = %rel_path,
+                            manifest = %mkey,
+                            "failed to delete manifest during reconcile: {e}"
+                        );
                     }
                 }
+
+                result.deleted_remote += 1;
             }
 
             ReconcileAction::Conflict { rel_path, info } => {
