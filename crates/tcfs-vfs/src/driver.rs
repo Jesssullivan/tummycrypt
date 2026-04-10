@@ -26,7 +26,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use opendal::Operator;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 use tcfs_sync::conflict::VectorClock;
@@ -38,6 +38,10 @@ use crate::negative_cache::NegativeCache;
 use crate::stub::IndexEntry;
 use crate::types::{VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs};
 use crate::vfs::VirtualFilesystem;
+
+/// Maximum in-memory file buffer size (10 GB).
+/// Writes exceeding this are rejected with EFBIG.
+const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024 * 1024;
 
 /// Sentinel filename written under empty directories so they appear
 /// in S3 `list()` results. Filtered out of readdir output.
@@ -73,7 +77,7 @@ pub struct TcfsVfs {
     negative_cache: Arc<NegativeCache>,
     disk_cache: Arc<DiskCache>,
     /// Open file handles: fh -> hydrated bytes
-    handles: Arc<Mutex<HashMap<u64, FileHandle>>>,
+    handles: Arc<RwLock<HashMap<u64, FileHandle>>>,
     /// Monotonically increasing file-handle counter
     next_fh: Arc<AtomicU64>,
     /// Mount timestamp (used as atime/mtime for all synthetic entries)
@@ -117,7 +121,7 @@ impl TcfsVfs {
             gid,
             negative_cache: Arc::new(NegativeCache::new(negative_ttl)),
             disk_cache: Arc::new(DiskCache::new(cache_dir, cache_max_bytes)),
-            handles: Arc::new(Mutex::new(HashMap::new())),
+            handles: Arc::new(RwLock::new(HashMap::new())),
             next_fh: Arc::new(AtomicU64::new(1)),
             mount_time: SystemTime::now(),
             on_flush: None,
@@ -613,7 +617,7 @@ impl VirtualFilesystem for TcfsVfs {
         .with_context(|| format!("hydration failed: {}", path))?;
 
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-        self.handles.lock().await.insert(
+        self.handles.write().await.insert(
             fh,
             FileHandle {
                 path: path.to_string(),
@@ -626,7 +630,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>> {
-        let handles = self.handles.lock().await;
+        let handles = self.handles.read().await;
         let handle = handles
             .get(&fh)
             .context(format!("bad file handle: {}", fh))?;
@@ -641,7 +645,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn release(&self, fh: u64) -> Result<()> {
-        let handle = self.handles.lock().await.remove(&fh);
+        let handle = self.handles.write().await.remove(&fh);
 
         if let Some(h) = handle {
             if h.modified {
@@ -655,13 +659,22 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32> {
-        let mut handles = self.handles.lock().await;
+        let mut handles = self.handles.write().await;
         let handle = handles
             .get_mut(&fh)
             .context(format!("bad file handle: {}", fh))?;
 
-        // Extend buffer if write extends past current end
+        // Prevent OOM: reject writes that would exceed the maximum buffer size
         let end = offset as usize + data.len();
+        if end > MAX_WRITE_SIZE {
+            anyhow::bail!(
+                "EFBIG: write would exceed maximum file size ({} bytes, limit {} bytes)",
+                end,
+                MAX_WRITE_SIZE
+            );
+        }
+
+        // Extend buffer if write extends past current end
         if end > handle.data.len() {
             handle.data.resize(end, 0);
         }
@@ -683,7 +696,7 @@ impl VirtualFilesystem for TcfsVfs {
         debug!(path = %vpath, "creating new file");
 
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-        self.handles.lock().await.insert(
+        self.handles.write().await.insert(
             fh,
             FileHandle {
                 path: vpath,
@@ -789,7 +802,7 @@ impl VirtualFilesystem for TcfsVfs {
 
         // Update any open file handles pointing to the old path
         {
-            let mut handles = self.handles.lock().await;
+            let mut handles = self.handles.write().await;
             for h in handles.values_mut() {
                 if h.path == from_path {
                     h.path = to_path.clone();
