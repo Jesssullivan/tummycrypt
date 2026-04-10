@@ -1040,35 +1040,103 @@ impl TcfsDaemon for TcfsDaemonImpl {
         request: tonic::Request<ListFilesRequest>,
     ) -> Result<tonic::Response<ListFilesResponse>, tonic::Status> {
         let req = request.into_inner();
-        let prefix = req.prefix;
+        let prefix = req.prefix; // logical directory prefix (e.g., "dotfiles/" or "")
 
         let cache = self.state_cache.lock().await;
         let all = cache.all_entries();
 
-        let files: Vec<FileEntry> = all
-            .into_iter()
-            .filter(|(_, state)| {
-                if prefix.is_empty() {
-                    return true;
-                }
-                // Match entries whose remote_path contains the prefix
-                state.remote_path.contains(&prefix)
-            })
-            .map(|(key, state): (String, &tcfs_sync::state::SyncState)| {
-                // Extract filename from the key (last path component)
-                let filename = key.rsplit('/').next().unwrap_or(&key).to_string();
-                let is_directory = state.remote_path.ends_with('/');
+        let sync_root_str = self
+            .config
+            .sync
+            .sync_root
+            .as_deref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        // Ensure sync_root ends with '/' for reliable stripping
+        let sync_root_prefix = if sync_root_str.ends_with('/') {
+            sync_root_str.clone()
+        } else {
+            format!("{}/", sync_root_str)
+        };
 
-                FileEntry {
-                    path: state.remote_path.clone(),
-                    filename,
+        let mut dirs_seen = std::collections::HashSet::new();
+        let mut files: Vec<FileEntry> = Vec::new();
+
+        for (key, state) in &all {
+            // Compute logical relative path from cache key (local abs path).
+            // Skip entries not under sync_root (e.g., /private/tmp/ test artifacts).
+            let rel_path = match key
+                .strip_prefix(&sync_root_prefix)
+                .or_else(|| key.strip_prefix(&sync_root_str))
+            {
+                Some(r) => r.trim_start_matches('/'),
+                None => continue,
+            };
+
+            if rel_path.is_empty() {
+                continue;
+            }
+
+            // Filter by prefix: only entries under the requested directory
+            let normalized_prefix = if prefix.is_empty() {
+                ""
+            } else if prefix.ends_with('/') {
+                prefix.as_str()
+            } else {
+                // Caller omitted trailing slash — we'll match with it
+                &prefix
+            };
+
+            let remainder = if normalized_prefix.is_empty() {
+                rel_path.to_string()
+            } else {
+                // Must start with prefix (exact prefix match, not substring)
+                let pfx = if normalized_prefix.ends_with('/') {
+                    normalized_prefix.to_string()
+                } else {
+                    format!("{}/", normalized_prefix)
+                };
+                match rel_path.strip_prefix(&pfx) {
+                    Some(r) => r.to_string(),
+                    None => continue,
+                }
+            };
+
+            if remainder.is_empty() {
+                continue;
+            }
+
+            if remainder.contains('/') {
+                // File in a subdirectory — synthesize a directory entry
+                let dir_name = remainder.split('/').next().unwrap_or(&remainder);
+                if dirs_seen.insert(dir_name.to_string()) {
+                    let dir_path = if normalized_prefix.is_empty() {
+                        format!("{}/", dir_name)
+                    } else {
+                        let pfx = normalized_prefix.trim_end_matches('/');
+                        format!("{}/{}/", pfx, dir_name)
+                    };
+                    files.push(FileEntry {
+                        path: dir_path,
+                        filename: dir_name.to_string(),
+                        size: 0,
+                        last_synced: 0,
+                        is_directory: true,
+                        blake3: String::new(),
+                    });
+                }
+            } else {
+                // Immediate child file
+                files.push(FileEntry {
+                    path: rel_path.to_string(),
+                    filename: remainder.clone(),
                     size: state.size,
                     last_synced: state.last_synced as i64,
-                    is_directory,
+                    is_directory: false,
                     blake3: state.blake3.clone(),
-                }
-            })
-            .collect();
+                });
+            }
+        }
 
         Ok(tonic::Response::new(ListFilesResponse { files }))
     }
@@ -1416,7 +1484,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         filename,
                         size: state.size,
                         blake3: state.blake3.clone(),
-                        is_directory: false,
+                        is_directory: std::path::Path::new(path.as_str()).is_dir(),
                         device_id: state.device_id.clone(),
                     };
                     if async_tx.send(Ok(event)).await.is_err() {
@@ -1489,6 +1557,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
                                 .unwrap_or((0, String::new()))
                         };
 
+                        let is_dir = event
+                            .paths
+                            .first()
+                            .map(|p| p.is_dir())
+                            .unwrap_or(false);
+
                         WatchEvent {
                             path,
                             event_type: event_type.to_string(),
@@ -1496,7 +1570,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                             filename,
                             size,
                             blake3,
-                            is_directory: false,
+                            is_directory: is_dir,
                             device_id: String::new(), // local event
                         }
                     }
@@ -1514,6 +1588,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         });
 
         // ── Live remote events via NATS STATE_UPDATES ───────────────────────
+        // Use an ephemeral consumer so Watch callers don't compete with
+        // the daemon's durable state_sync_loop consumer for messages.
         let nats_tx = async_tx;
         let nats_client = self.nats.clone();
         let device_id = self.device_id.clone();
@@ -1523,7 +1599,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 debug!("watch: NATS not connected, skipping remote events");
                 return;
             };
-            match nats.state_consumer(&device_id).await {
+            match nats.state_consumer_ephemeral().await {
                 Ok(mut consumer) => {
                     use futures::StreamExt;
                     while let Some(msg_result) = consumer.next().await {

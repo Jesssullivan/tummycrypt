@@ -243,6 +243,59 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         let _ = state_cache_inner.flush();
     }
 
+    // ── Remote index discovery ────────────────────────────────────────────
+    // Populate state cache with remote-only files so FileProvider can enumerate
+    // the full tree, not just locally-synced files.
+    if let Some(ref op) = operator {
+        let sync_root = config.sync.sync_root.as_deref().unwrap_or(std::path::Path::new("/tmp/tcfs"));
+        match tcfs_sync::reconcile::list_remote_index(op, resolved_prefix).await {
+            Ok(remote_index) => {
+                let mut discovered = 0usize;
+                for (rel_path, entry) in &remote_index {
+                    let local_key =
+                        std::path::PathBuf::from(sync_root).join(rel_path);
+                    if state_cache_inner.get(&local_key).is_none() {
+                        state_cache_inner.set(
+                            &local_key,
+                            tcfs_sync::state::SyncState {
+                                blake3: String::new(),
+                                size: entry.size,
+                                mtime: 0,
+                                chunk_count: entry.chunks,
+                                remote_path: format!(
+                                    "{}/manifests/{}",
+                                    resolved_prefix, entry.manifest_hash
+                                ),
+                                last_synced: 0,
+                                vclock: Default::default(),
+                                device_id: String::new(),
+                                conflict: None,
+                                status: tcfs_sync::state::FileSyncStatus::NotSynced,
+                            },
+                        );
+                        discovered += 1;
+                    }
+                }
+                if discovered > 0 {
+                    info!(
+                        discovered,
+                        total = remote_index.len(),
+                        "remote index discovery: added new entries to state cache"
+                    );
+                    let _ = state_cache_inner.flush();
+                } else {
+                    info!(
+                        total = remote_index.len(),
+                        "remote index discovery: cache already up to date"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("remote index discovery failed (non-fatal): {e}");
+            }
+        }
+    }
+
     let state_cache = Arc::new(tokio::sync::Mutex::new(state_cache_inner));
 
     // Wrap operator in Arc<Mutex> for shared access
