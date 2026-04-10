@@ -334,3 +334,27 @@ NATS and the tcfsd gRPC socket also run unencrypted. For production hardening:
 - Set `storage.enforce_tls = true` in tcfs config for HTTPS S3
 - Set `sync.nats_tls = true` for TLS NATS connections
 - Wire `security.toml` into SeaweedFS Ansible roles / Helm values for mTLS
+
+---
+
+## NATS JetStream Hardening
+
+### sync_always (REQUIRED)
+
+Jepsen testing (December 2025) found that NATS JetStream 2.12.1 can lose
+acknowledged writes under power failure when the default lazy-fsync policy
+is used. **All production NATS servers MUST set `sync_always: true`** in
+the jetstream configuration block.
+
+See `config/nats-server.conf` for a reference configuration.
+
+### Architectural Note
+
+TCFS treats NATS as a **notification bus**, not a source of truth:
+- The S3/SeaweedFS CAS store is the durable source of truth for file data
+- The local state cache is the authority for sync state
+- NATS events trigger reconciliation but are not themselves authoritative
+- If NATS messages are lost, the periodic full-reconciliation sweep recovers
+
+This design means a NATS failure degrades real-time sync latency but does
+not cause data loss.

@@ -251,6 +251,7 @@ mod inner {
                     max_messages: 1_000_000,
                     max_age: Duration::from_secs(7 * 24 * 3600),
                     retention: stream::RetentionPolicy::WorkQueue,
+                    num_replicas: 1,
                     ..Default::default()
                 })
                 .await
@@ -262,10 +263,17 @@ mod inner {
                     subjects: vec![STREAM_HYDRATION.to_string()],
                     max_messages: 100_000,
                     max_age: Duration::from_secs(3600),
+                    num_replicas: 1,
                     ..Default::default()
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("ensuring HYDRATION_EVENTS stream: {e}"))?;
+
+            // CRITICAL: Jepsen testing (Dec 2025) found NATS JetStream 2.12.1 can lose
+            // acknowledged writes under power failure due to lazy fsync. The NATS server
+            // MUST be configured with `sync_always: true` in its jetstream block.
+            // See: docs/ops/fleet-deployment.md for required server configuration.
+            // Client-side, we set num_replicas=1 explicitly and verify stream health below.
 
             // STATE_UPDATES: fan-out (Limits retention), hierarchical subjects, 7-day TTL
             self.js
@@ -276,6 +284,7 @@ mod inner {
                     max_age: Duration::from_secs(7 * 24 * 3600),
                     retention: stream::RetentionPolicy::Limits,
                     storage: stream::StorageType::File,
+                    num_replicas: 1,
                     ..Default::default()
                 })
                 .await
@@ -286,10 +295,20 @@ mod inner {
                 Ok(mut stream) => {
                     let info = stream.info().await;
                     if let Ok(info) = info {
+                        if info.config.num_replicas < 3 {
+                            warn!(
+                                replicas = info.config.num_replicas,
+                                "NATS: STATE_UPDATES has < 3 replicas — \
+                                 ensure server has sync_always: true to prevent data loss \
+                                 (ref: Jepsen NATS JetStream Dec 2025)"
+                            );
+                        }
                         info!(
                             subjects = ?info.config.subjects,
+                            replicas = info.config.num_replicas,
+                            storage = ?info.config.storage,
                             messages = info.state.messages,
-                            "NATS: STATE_UPDATES stream config"
+                            "NATS: STATE_UPDATES stream verified"
                         );
                     }
                 }
