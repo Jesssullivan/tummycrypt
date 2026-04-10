@@ -635,6 +635,7 @@ fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap
         git_sync_mode: blacklist.git_sync_mode().to_string(),
         sync_hidden_dirs: blacklist.allows_hidden_dirs(),
         exclude_patterns: blacklist.glob_patterns(),
+        follow_symlinks: false,
     };
     let files = crate::engine::collect_files(local_root, &config)?;
 

@@ -51,6 +51,8 @@ pub struct CollectConfig {
     pub sync_hidden_dirs: bool,
     /// Glob patterns to exclude
     pub exclude_patterns: Vec<String>,
+    /// Whether to follow symlinks (default: false — skip with warning)
+    pub follow_symlinks: bool,
 }
 
 impl Default for CollectConfig {
@@ -60,6 +62,7 @@ impl Default for CollectConfig {
             git_sync_mode: "bundle".into(),
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
+            follow_symlinks: false,
         }
     }
 }
@@ -742,7 +745,12 @@ pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<Vec<PathBuf>
         .iter()
         .filter_map(|p| glob::Pattern::new(p).ok())
         .collect();
-    collect_files_inner(root, &mut files, config, &exclude_matchers)?;
+    // Track visited canonical paths for symlink cycle detection
+    let mut visited = std::collections::HashSet::new();
+    if let Ok(canon) = std::fs::canonicalize(root) {
+        visited.insert(canon);
+    }
+    collect_files_inner(root, &mut files, config, &exclude_matchers, &mut visited)?;
     files.sort(); // deterministic order
     Ok(files)
 }
@@ -752,13 +760,16 @@ fn collect_files_inner(
     out: &mut Vec<PathBuf>,
     config: &CollectConfig,
     excludes: &[glob::Pattern],
+    visited: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("reading dir: {}", dir.display()))?
     {
         let entry = entry.context("reading dir entry")?;
         let path = entry.path();
-        let meta = entry.metadata().context("stat dir entry")?;
+
+        // Use file_type() (doesn't follow symlinks) for initial dispatch
+        let ft = entry.file_type().context("file_type dir entry")?;
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             // Check exclude patterns
@@ -766,10 +777,70 @@ fn collect_files_inner(
                 continue;
             }
 
-            if meta.is_dir() {
+            // Handle symlinks explicitly
+            if ft.is_symlink() {
+                if !config.follow_symlinks {
+                    let target = std::fs::read_link(&path).unwrap_or_default();
+                    warn!(
+                        path = %path.display(),
+                        target = %target.display(),
+                        "skipping symlink (follow_symlinks=false)"
+                    );
+                    continue;
+                }
+
+                // Follow the symlink — resolve target and check for cycles
+                match std::fs::canonicalize(&path) {
+                    Ok(real) => {
+                        if !visited.insert(real.clone()) {
+                            warn!(
+                                path = %path.display(),
+                                target = %real.display(),
+                                "skipping symlink: cycle detected"
+                            );
+                            continue;
+                        }
+                        // Check what the resolved target actually is
+                        match std::fs::metadata(&real) {
+                            Ok(meta) if meta.is_dir() => {
+                                collect_files_inner(&path, out, config, excludes, visited)?;
+                            }
+                            Ok(meta) if meta.is_file() => {
+                                out.push(path);
+                            }
+                            Ok(_) => {} // special file, skip
+                            Err(e) => {
+                                warn!(
+                                    path = %path.display(),
+                                    target = %real.display(),
+                                    "skipping symlink: stat target failed: {e}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Broken symlink — canonicalize fails
+                        warn!(
+                            path = %path.display(),
+                            "skipping broken symlink: {e}"
+                        );
+                    }
+                }
+                continue;
+            }
+
+            if ft.is_dir() {
                 // Always skip these
                 if name == "target" || name == "node_modules" || name == ".DS_Store" {
                     continue;
+                }
+
+                // Track visited directories — skip if already traversed
+                // (prevents re-traversal when a symlink was followed first)
+                if let Ok(canon) = std::fs::canonicalize(&path) {
+                    if !visited.insert(canon) {
+                        continue;
+                    }
                 }
 
                 // Handle .git directories
@@ -793,7 +864,7 @@ fn collect_files_inner(
                             continue;
                         }
                         // In raw mode, recurse into .git
-                        collect_files_inner(&path, out, config, excludes)?;
+                        collect_files_inner(&path, out, config, excludes, visited)?;
                     }
                     continue;
                 }
@@ -803,8 +874,8 @@ fn collect_files_inner(
                     continue;
                 }
 
-                collect_files_inner(&path, out, config, excludes)?;
-            } else if meta.is_file() {
+                collect_files_inner(&path, out, config, excludes, visited)?;
+            } else if ft.is_file() {
                 out.push(path);
             }
         }

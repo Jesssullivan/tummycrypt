@@ -724,6 +724,7 @@ fn collect_config_from_sync(
         git_sync_mode: config.sync.git_sync_mode.clone(),
         sync_hidden_dirs: config.sync.sync_hidden_dirs,
         exclude_patterns: config.sync.exclude_patterns.clone(),
+        follow_symlinks: false,
     }
 }
 
