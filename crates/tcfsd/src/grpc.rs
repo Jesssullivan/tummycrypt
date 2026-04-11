@@ -1083,15 +1083,30 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let mut dirs_seen = std::collections::HashSet::new();
         let mut files: Vec<FileEntry> = Vec::new();
 
+        let storage_prefix = self.config.storage.resolved_prefix();
+
         for (key, state) in &all {
             // Compute logical relative path from cache key (local abs path).
-            // Skip entries not under sync_root (e.g., /private/tmp/ test artifacts).
+            // Primary: strip sync_root from local path.
+            // Fallback: extract rel_path from remote_path (e.g., "data/manifests/hash"
+            //   → look up original rel_path from the index key pattern).
+            // Skip entries that can't be mapped (e.g., /private/tmp/ test artifacts
+            //   with no usable remote_path).
             let rel_path = match key
                 .strip_prefix(&sync_root_prefix)
                 .or_else(|| key.strip_prefix(&sync_root_str))
             {
                 Some(r) => r.trim_start_matches('/'),
-                None => continue,
+                None => {
+                    // Fallback: derive rel_path from remote_path for entries not
+                    // keyed under sync_root (e.g., FileProvider container temps).
+                    let index_prefix = format!("{}/index/", storage_prefix);
+                    if let Some(rel) = state.remote_path.strip_prefix(&index_prefix) {
+                        rel.trim_start_matches('/')
+                    } else {
+                        continue;
+                    }
+                }
             };
 
             if rel_path.is_empty() {
