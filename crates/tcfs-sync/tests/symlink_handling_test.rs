@@ -43,14 +43,19 @@ fn symlink_to_file_skipped_when_follow_false() {
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(root.join("real.txt"), root.join("link.txt")).unwrap();
 
-    let files = collect_files(root, &config_no_follow()).unwrap();
+    let result = collect_files(root, &config_no_follow()).unwrap();
 
     // Should only contain real.txt, not link.txt
-    assert_eq!(files.len(), 1, "should skip symlink, got: {:?}", files);
+    assert_eq!(
+        result.files.len(),
+        1,
+        "should skip symlink, got: {:?}",
+        result.files
+    );
     assert!(
-        files[0].ends_with("real.txt"),
+        result.files[0].ends_with("real.txt"),
         "should contain real.txt, got: {:?}",
-        files
+        result.files
     );
 }
 
@@ -65,11 +70,17 @@ fn symlink_to_file_included_when_follow_true() {
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(root.join("real.txt"), root.join("link.txt")).unwrap();
 
-    let files = collect_files(root, &config_follow()).unwrap();
+    let result = collect_files(root, &config_follow()).unwrap();
 
     // Should contain both real.txt and link.txt
-    assert_eq!(files.len(), 2, "should follow symlink, got: {:?}", files);
-    let names: Vec<String> = files
+    assert_eq!(
+        result.files.len(),
+        2,
+        "should follow symlink, got: {:?}",
+        result.files
+    );
+    let names: Vec<String> = result
+        .files
         .iter()
         .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
         .collect();
@@ -89,10 +100,15 @@ fn symlink_to_dir_skipped_when_follow_false() {
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(root.join("subdir"), root.join("link_dir")).unwrap();
 
-    let files = collect_files(root, &config_no_follow()).unwrap();
+    let result = collect_files(root, &config_no_follow()).unwrap();
 
     // Should only find inner.txt via subdir, not link_dir
-    assert_eq!(files.len(), 1, "should skip dir symlink, got: {:?}", files);
+    assert_eq!(
+        result.files.len(),
+        1,
+        "should skip dir symlink, got: {:?}",
+        result.files
+    );
 }
 
 #[test]
@@ -107,7 +123,7 @@ fn symlink_to_dir_followed_when_follow_true() {
     #[cfg(windows)]
     std::os::windows::fs::symlink_dir(root.join("subdir"), root.join("link_dir")).unwrap();
 
-    let files = collect_files(root, &config_follow()).unwrap();
+    let result = collect_files(root, &config_follow()).unwrap();
 
     // Should find inner.txt via both subdir and link_dir, but cycle detection
     // means the symlink target (subdir) is already visited, so link_dir is skipped
@@ -115,10 +131,10 @@ fn symlink_to_dir_followed_when_follow_true() {
     // from the real dir walk, then link_dir → subdir is detected as a cycle.
     // So we get 1 file, not 2.
     assert_eq!(
-        files.len(),
+        result.files.len(),
         1,
         "cycle detection should prevent re-traversal, got: {:?}",
-        files
+        result.files
     );
 }
 
@@ -132,14 +148,14 @@ fn broken_symlink_skipped_gracefully() {
     // Create a symlink to a non-existent target
     std::os::unix::fs::symlink("/nonexistent/path/to/nowhere", root.join("broken.txt")).unwrap();
 
-    let files = collect_files(root, &config_no_follow()).unwrap();
-    assert_eq!(files.len(), 1, "broken symlink should be skipped");
-    assert!(files[0].ends_with("real.txt"));
+    let result = collect_files(root, &config_no_follow()).unwrap();
+    assert_eq!(result.files.len(), 1, "broken symlink should be skipped");
+    assert!(result.files[0].ends_with("real.txt"));
 
     // Also test with follow=true — should still skip (broken target)
-    let files = collect_files(root, &config_follow()).unwrap();
+    let result = collect_files(root, &config_follow()).unwrap();
     assert_eq!(
-        files.len(),
+        result.files.len(),
         1,
         "broken symlink should be skipped even with follow=true"
     );
@@ -159,14 +175,14 @@ fn circular_symlink_detected() {
     std::os::unix::fs::symlink(root.join("a"), root.join("b/link")).unwrap();
 
     // With follow=true, should detect the cycle and not infinite loop
-    let files = collect_files(root, &config_follow()).unwrap();
+    let result = collect_files(root, &config_follow()).unwrap();
     // Should find real.txt without getting stuck
     assert!(
-        !files.is_empty(),
+        !result.files.is_empty(),
         "should find at least real.txt despite circular symlinks"
     );
     assert!(
-        files.iter().any(|f| f.ends_with("real.txt")),
+        result.files.iter().any(|f| f.ends_with("real.txt")),
         "should still find real.txt"
     );
 }

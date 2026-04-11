@@ -241,6 +241,9 @@ pub struct SyncConfig {
     pub sync_hidden_dirs: bool,
     /// Glob patterns to exclude from sync
     pub exclude_patterns: Vec<String>,
+    /// Whether to sync empty directories via `.tcfs_dir` markers.
+    /// Default: true.
+    pub sync_empty_dirs: bool,
     /// Local directory root for synced files (used by auto-pull)
     pub sync_root: Option<PathBuf>,
     /// Maximum file age (seconds) before eligible for auto-unsync.
@@ -406,6 +409,7 @@ impl Default for SyncConfig {
             git_sync_mode: "bundle".into(),
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
+            sync_empty_dirs: true,
             sync_root: None,
             auto_unsync_max_age_secs: 0,
             auto_unsync_interval_secs: 3600,

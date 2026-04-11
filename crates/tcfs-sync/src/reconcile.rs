@@ -660,11 +660,12 @@ fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap
         sync_hidden_dirs: blacklist.allows_hidden_dirs(),
         exclude_patterns: blacklist.glob_patterns(),
         follow_symlinks: false,
+        sync_empty_dirs: false, // reconcile only cares about files
     };
-    let files = crate::engine::collect_files(local_root, &config)?;
+    let result = crate::engine::collect_files(local_root, &config)?;
 
     let mut map = HashMap::new();
-    for file in files {
+    for file in result.files {
         if let Ok(rel) = file.strip_prefix(local_root) {
             let rel_str = rel.to_string_lossy().replace('\\', "/");
             map.insert(rel_str, file);
