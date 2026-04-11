@@ -20,6 +20,7 @@ pub mod driver;
 pub mod hydrate;
 pub mod negative_cache;
 pub mod stub;
+pub mod trash;
 pub mod types;
 pub mod vfs;
 
