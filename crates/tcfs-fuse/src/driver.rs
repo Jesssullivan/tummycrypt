@@ -361,13 +361,10 @@ impl PathFilesystem for TcfsFs {
         fh: u64,
         _lock_owner: u64,
     ) -> fuse3::Result<()> {
-        self.vfs
-            .fsync(fh, false)
-            .await
-            .map_err(|e| {
-                warn!(fh, error = %e, "FUSE flush failed");
-                Errno::from(libc::EIO)
-            })
+        self.vfs.fsync(fh, false).await.map_err(|e| {
+            warn!(fh, error = %e, "FUSE flush failed");
+            Errno::from(libc::EIO)
+        })
     }
 
     // ── Write handlers ─────────────────────────────────────────────────
@@ -554,7 +551,10 @@ pub struct MountConfig {
 ///
 /// Returns the shared VFS handle via `vfs_out` so the caller can invalidate
 /// the negative cache from the NATS handler when remote files arrive.
-pub async fn mount(cfg: MountConfig, vfs_out: Option<&tokio::sync::watch::Sender<Option<Arc<TcfsVfs>>>>) -> std::io::Result<()> {
+pub async fn mount(
+    cfg: MountConfig,
+    vfs_out: Option<&tokio::sync::watch::Sender<Option<Arc<TcfsVfs>>>>,
+) -> std::io::Result<()> {
     let mut vfs = TcfsVfs::new(
         cfg.op,
         cfg.prefix,

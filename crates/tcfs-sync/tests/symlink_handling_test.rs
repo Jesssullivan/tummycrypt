@@ -7,8 +7,8 @@
 //! - Circular symlinks (detect cycle, don't infinite loop)
 
 use std::path::Path;
-use tempfile::TempDir;
 use tcfs_sync::engine::{collect_files, CollectConfig};
+use tempfile::TempDir;
 
 fn config_no_follow() -> CollectConfig {
     CollectConfig {

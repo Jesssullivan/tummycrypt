@@ -13,7 +13,9 @@ pub mod seekable_zstd;
 
 // Convenience re-exports for the most common operations
 pub use blake3::{hash_bytes, hash_file, hash_file_streaming, hash_from_hex, hash_to_hex, Hash};
-pub use fastcdc::{chunk_data, chunk_file, chunk_file_streaming, chunk_slice, Chunk, ChunkSizes, ChunkWithData};
+pub use fastcdc::{
+    chunk_data, chunk_file, chunk_file_streaming, chunk_slice, Chunk, ChunkSizes, ChunkWithData,
+};
 pub use seekable_zstd::{compress, decompress_all, decompress_range, SeekEntry, SeekableBlob};
 
 /// Files at or above this size use the streaming chunker (two-pass: hash then chunk).

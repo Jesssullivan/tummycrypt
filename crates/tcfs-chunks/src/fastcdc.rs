@@ -119,10 +119,12 @@ pub struct ChunkWithData {
 /// Returns chunks with owned data — the caller uploads each chunk
 /// individually without needing the full file in memory.
 pub fn chunk_file_streaming(path: &Path) -> Result<Vec<ChunkWithData>> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("opening file for streaming chunk: {}: {e}", path.display()))?;
+    let file = std::fs::File::open(path).map_err(|e| {
+        anyhow::anyhow!("opening file for streaming chunk: {}: {e}", path.display())
+    })?;
 
-    let file_len = file.metadata()
+    let file_len = file
+        .metadata()
         .map_err(|e| anyhow::anyhow!("stat for streaming chunk: {}: {e}", path.display()))?
         .len();
 
@@ -132,18 +134,13 @@ pub fn chunk_file_streaming(path: &Path) -> Result<Vec<ChunkWithData>> {
 
     let sizes = ChunkSizes::for_path(path);
 
-    let chunker = fastcdc::v2020::StreamCDC::new(
-        file,
-        sizes.min_size,
-        sizes.avg_size,
-        sizes.max_size,
-    );
+    let chunker =
+        fastcdc::v2020::StreamCDC::new(file, sizes.min_size, sizes.avg_size, sizes.max_size);
 
     let mut chunks = Vec::new();
 
     for result in chunker {
-        let entry = result
-            .map_err(|e| anyhow::anyhow!("streaming chunk error: {e}"))?;
+        let entry = result.map_err(|e| anyhow::anyhow!("streaming chunk error: {e}"))?;
         let hash = crate::blake3::hash_bytes(&entry.data);
         chunks.push(ChunkWithData {
             offset: entry.offset as u64,
@@ -237,19 +234,9 @@ mod tests {
         );
 
         for (i, (mem, stream)) in mem_chunks.iter().zip(stream_chunks.iter()).enumerate() {
-            assert_eq!(
-                mem.offset, stream.offset,
-                "chunk {i} offset mismatch"
-            );
-            assert_eq!(
-                mem.length,
-                stream.data.len(),
-                "chunk {i} length mismatch"
-            );
-            assert_eq!(
-                mem.hash, stream.hash,
-                "chunk {i} hash mismatch"
-            );
+            assert_eq!(mem.offset, stream.offset, "chunk {i} offset mismatch");
+            assert_eq!(mem.length, stream.data.len(), "chunk {i} length mismatch");
+            assert_eq!(mem.hash, stream.hash, "chunk {i} hash mismatch");
         }
     }
 

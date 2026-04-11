@@ -298,10 +298,9 @@ async fn roundtrip_empty_file() {
     assert_eq!(upload.bytes, 0, "empty file should be 0 bytes");
 
     // Pull empty file
-    let download =
-        tcfs_sync::engine::download_file(&op, &upload.remote_path, &dst, prefix, None)
-            .await
-            .expect("download empty file should succeed");
+    let download = tcfs_sync::engine::download_file(&op, &upload.remote_path, &dst, prefix, None)
+        .await
+        .expect("download empty file should succeed");
 
     assert_eq!(download.bytes, 0);
 
@@ -360,7 +359,9 @@ async fn roundtrip_empty_file_with_device() {
     assert!(downloaded.is_empty(), "downloaded empty file must be empty");
 
     // Verify state cache has vclock entry
-    let cached = state.get(&dst).expect("state cache should have entry for empty file");
+    let cached = state
+        .get(&dst)
+        .expect("state cache should have entry for empty file");
     assert!(
         !cached.vclock.clocks.is_empty(),
         "vclock should be non-empty after device-aware empty file sync"
@@ -434,7 +435,10 @@ async fn roundtrip_preserves_executable_permission() {
     // Verify permissions were preserved
     let meta = std::fs::metadata(&dst).unwrap();
     let mode = meta.permissions().mode() & 0o777;
-    assert_eq!(mode, 0o755, "executable permission should be preserved after pull");
+    assert_eq!(
+        mode, 0o755,
+        "executable permission should be preserved after pull"
+    );
 }
 
 #[cfg(unix)]

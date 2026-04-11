@@ -135,7 +135,10 @@ pub async fn upload_file_with_device(
     match state.needs_sync(local_path)? {
         None => {
             let cached = state.get(local_path).ok_or_else(|| {
-                anyhow::anyhow!("state entry vanished during upload for {}", local_path.display())
+                anyhow::anyhow!(
+                    "state entry vanished during upload for {}",
+                    local_path.display()
+                )
             })?;
             let result = UploadResult {
                 path: local_path.to_path_buf(),
@@ -229,9 +232,7 @@ pub async fn upload_file_with_device(
         };
 
         // Capture remote vclock for deferred merge (Issue #183)
-        remote_vclock_snapshot = remote_manifest_obj
-            .as_ref()
-            .map(|m| m.vclock.clone());
+        remote_vclock_snapshot = remote_manifest_obj.as_ref().map(|m| m.vclock.clone());
 
         if let Some(remote_manifest_obj) = remote_manifest_obj {
             let local_hash = &file_hash_hex;
@@ -375,7 +376,9 @@ pub async fn upload_file_with_device(
         if pre_chunk_meta.len() != file_size {
             anyhow::bail!(
                 "file size changed between hash and chunk passes: {} ({} → {})",
-                local_path.display(), file_size, pre_chunk_meta.len()
+                local_path.display(),
+                file_size,
+                pre_chunk_meta.len()
             );
         }
 
