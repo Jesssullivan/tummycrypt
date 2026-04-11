@@ -204,6 +204,11 @@ impl TcfsDaemonImpl {
         self.nats.clone()
     }
 
+    /// Get a handle to the master key for background tasks (e.g., periodic reconciliation).
+    pub fn master_key_handle(&self) -> Arc<TokioMutex<Option<tcfs_crypto::MasterKey>>> {
+        self.master_key.clone()
+    }
+
     /// Publish a ConflictResolved event via NATS (best-effort).
     async fn publish_conflict_resolved(&self, rel_path: &str, resolution: &str) {
         if let Some(nats) = self.nats.lock().await.as_ref() {
