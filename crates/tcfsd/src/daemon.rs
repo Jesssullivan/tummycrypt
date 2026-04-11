@@ -383,8 +383,21 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // ── File Watcher + Scheduler ─────────────────────────────────────
     // If sync_root is configured, start watching for local file changes
     // and feed them through the priority scheduler for automatic sync.
+    //
+    // On macOS with FileProvider active, the watcher is skipped because
+    // ~/Library/CloudStorage/TCFSProvider-TCFS/ is the primary interface.
+    // The FileProvider extension handles uploads/downloads via gRPC RPCs.
+    let fileprovider_active = cfg!(target_os = "macos")
+        && config.daemon.fileprovider_socket.is_some();
+
     let _watcher_handle = if let Some(ref sync_root) = config.sync.sync_root {
-        if sync_root.exists() {
+        if fileprovider_active {
+            info!(
+                dir = %sync_root.display(),
+                "FileProvider active — sync_root watcher disabled. Use CloudStorage."
+            );
+            None
+        } else if sync_root.exists() {
             let (watch_tx, mut watch_rx) = tokio::sync::mpsc::channel(256);
             let watcher_config = tcfs_sync::watcher::WatcherConfig::default();
 
@@ -456,7 +469,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     // Scheduler run loop: dispatch tasks to sync engine
                     let sched_operator = operator.clone();
                     let sched_state = state_cache.clone();
-                    let sched_prefix = config.storage.bucket.clone();
+                    let sched_prefix = config.storage.resolved_prefix().to_string();
                     let sched_device = device_id.clone();
                     let sched_sync_root = sync_root.clone();
                     let sched_status_tx = status_tx.clone();

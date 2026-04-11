@@ -1159,10 +1159,18 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         last_synced: 0,
                         is_directory: true,
                         blake3: String::new(),
+                        hydration_state: String::new(),
                     });
                 }
             } else {
                 // Immediate child file
+                let hydration = match state.status {
+                    tcfs_sync::state::FileSyncStatus::NotSynced => "not_synced",
+                    tcfs_sync::state::FileSyncStatus::Synced => "synced",
+                    tcfs_sync::state::FileSyncStatus::Active => "active",
+                    tcfs_sync::state::FileSyncStatus::Locked => "locked",
+                    tcfs_sync::state::FileSyncStatus::Conflict => "conflict",
+                };
                 files.push(FileEntry {
                     path: rel_path.to_string(),
                     filename: remainder.clone(),
@@ -1170,6 +1178,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     last_synced: state.last_synced as i64,
                     is_directory: false,
                     blake3: state.blake3.clone(),
+                    hydration_state: hydration.to_string(),
                 });
             }
         }
