@@ -332,6 +332,23 @@ impl StateCache {
         }
     }
 
+    /// Clear conflict state after successful resolution.
+    ///
+    /// Sets `conflict` to `None` and `status` to `Synced`. Both fields
+    /// must be updated together — clearing only `conflict` leaves the file
+    /// flagged as conflicted in UI badges and FileProvider decorations.
+    pub fn resolve_conflict(&mut self, local_path: &Path) -> bool {
+        let key = path_key(local_path);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.conflict = None;
+            entry.status = FileSyncStatus::Synced;
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove stale entries whose `remote_path` doesn't match `expected_prefix`
     /// or whose local path (under /tmp/) no longer exists on disk.
     ///
@@ -1126,5 +1143,189 @@ mod tests {
         cache.set_status(&file_path, FileSyncStatus::NotSynced);
         // Should be dirty after set_status
         assert!(cache.dirty);
+    }
+
+    // ── Conflict resolution tests ──────────────────────────────────────
+
+    #[test]
+    fn resolve_conflict_clears_both_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        let file_path = dir.path().join("conflicted.txt");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        let conflict_info = crate::conflict::ConflictInfo {
+            rel_path: "conflicted.txt".into(),
+            local_vclock: VectorClock::new(),
+            remote_vclock: VectorClock::new(),
+            local_blake3: "aaa".into(),
+            remote_blake3: "bbb".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            detected_at: 1700000000,
+        };
+
+        cache.set(
+            &file_path,
+            SyncState {
+                blake3: "aaa".into(),
+                size: 4,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "data/index/conflicted.txt".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: Some(conflict_info),
+                status: FileSyncStatus::Conflict,
+            },
+        );
+
+        // Verify conflict is set
+        let entry = cache.get(&file_path).unwrap();
+        assert!(entry.conflict.is_some());
+        assert_eq!(entry.status, FileSyncStatus::Conflict);
+
+        // Resolve it
+        let resolved = cache.resolve_conflict(&file_path);
+        assert!(
+            resolved,
+            "resolve_conflict should return true for existing entry"
+        );
+
+        // Both fields must be cleared
+        let entry = cache.get(&file_path).unwrap();
+        assert!(
+            entry.conflict.is_none(),
+            "conflict must be None after resolve"
+        );
+        assert_eq!(
+            entry.status,
+            FileSyncStatus::Synced,
+            "status must be Synced after resolve"
+        );
+
+        // Metadata preserved
+        assert_eq!(entry.blake3, "aaa");
+        assert_eq!(entry.remote_path, "data/index/conflicted.txt");
+        assert_eq!(entry.device_id, "neo");
+    }
+
+    #[test]
+    fn resolve_conflict_marks_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        let file_path = dir.path().join("file.txt");
+        std::fs::write(&file_path, b"x").unwrap();
+
+        cache.set(
+            &file_path,
+            SyncState {
+                blake3: "abc".into(),
+                size: 1,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "data/index/file.txt".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: Some(crate::conflict::ConflictInfo {
+                    rel_path: "file.txt".into(),
+                    local_vclock: VectorClock::new(),
+                    remote_vclock: VectorClock::new(),
+                    local_blake3: "abc".into(),
+                    remote_blake3: "def".into(),
+                    local_device: "neo".into(),
+                    remote_device: "honey".into(),
+                    detected_at: 0,
+                }),
+                status: FileSyncStatus::Conflict,
+            },
+        );
+        cache.flush().unwrap();
+
+        cache.resolve_conflict(&file_path);
+        assert!(cache.dirty, "cache must be dirty after resolve_conflict");
+    }
+
+    #[test]
+    fn resolve_conflict_returns_false_for_missing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        let nonexistent = dir.path().join("nope.txt");
+        assert!(
+            !cache.resolve_conflict(&nonexistent),
+            "should return false for missing entry"
+        );
+    }
+
+    #[test]
+    fn resolve_conflict_roundtrip_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let file_path = dir.path().join("rt.txt");
+        std::fs::write(&file_path, b"roundtrip").unwrap();
+
+        // Write conflicted state and flush
+        {
+            let mut cache = StateCache::open(&path).unwrap();
+            cache.set(
+                &file_path,
+                SyncState {
+                    blake3: "rt".into(),
+                    size: 9,
+                    mtime: 0,
+                    chunk_count: 1,
+                    remote_path: "data/index/rt.txt".into(),
+                    last_synced: 0,
+                    vclock: VectorClock::new(),
+                    device_id: "neo".into(),
+                    conflict: Some(crate::conflict::ConflictInfo {
+                        rel_path: "rt.txt".into(),
+                        local_vclock: VectorClock::new(),
+                        remote_vclock: VectorClock::new(),
+                        local_blake3: "rt".into(),
+                        remote_blake3: "xx".into(),
+                        local_device: "neo".into(),
+                        remote_device: "honey".into(),
+                        detected_at: 0,
+                    }),
+                    status: FileSyncStatus::Conflict,
+                },
+            );
+            cache.flush().unwrap();
+        }
+
+        // Reload, resolve, flush
+        {
+            let mut cache = StateCache::open(&path).unwrap();
+            let entry = cache.get(&file_path).unwrap();
+            assert!(entry.conflict.is_some(), "conflict should persist on disk");
+            assert_eq!(entry.status, FileSyncStatus::Conflict);
+
+            cache.resolve_conflict(&file_path);
+            cache.flush().unwrap();
+        }
+
+        // Reload again — verify resolved state persisted
+        {
+            let cache = StateCache::open(&path).unwrap();
+            let entry = cache.get(&file_path).unwrap();
+            assert!(
+                entry.conflict.is_none(),
+                "conflict must be None after reload"
+            );
+            assert_eq!(
+                entry.status,
+                FileSyncStatus::Synced,
+                "status must be Synced after reload"
+            );
+        }
     }
 }

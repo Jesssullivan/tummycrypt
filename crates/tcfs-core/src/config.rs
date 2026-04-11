@@ -414,7 +414,7 @@ impl Default for SyncConfig {
             auto_download_threshold: 10 * 1024 * 1024, // 10MB
             trash_enabled: true,
             trash_retention_secs: 30 * 24 * 3600, // 30 days
-            reconcile_interval_secs: 300,          // 5 minutes
+            reconcile_interval_secs: 300,         // 5 minutes
         }
     }
 }

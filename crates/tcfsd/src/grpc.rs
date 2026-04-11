@@ -1289,7 +1289,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 }
                 drop(op);
 
-                // Update state cache (clear conflict)
+                // Update state cache (clear conflict + status)
                 {
                     let mut cache = self.state_cache.lock().await;
                     if let Some(entry) = cache.get(&path).cloned() {
@@ -1297,6 +1297,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                             vclock,
                             last_synced: tcfs_sync::StateEvent::now(),
                             conflict: None,
+                            status: tcfs_sync::state::FileSyncStatus::Synced,
                             ..entry
                         };
                         cache.set(&path, updated);
@@ -1356,6 +1357,13 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
                 match result {
                     Ok(_dl) => {
+                        // Ensure conflict is fully cleared (download_file_with_device
+                        // creates fresh state, but belt-and-suspenders)
+                        {
+                            let mut cache = self.state_cache.lock().await;
+                            cache.resolve_conflict(&path);
+                            let _ = cache.flush();
+                        }
                         self.publish_conflict_resolved(&req.path, "keep_remote")
                             .await;
                         Ok(tonic::Response::new(ResolveConflictResponse {
@@ -1458,6 +1466,13 @@ impl TcfsDaemon for TcfsDaemonImpl {
                                     "failed to push conflict copy to S3: {e}"
                                 );
                             }
+                        }
+
+                        // Ensure conflict is fully cleared on the original path
+                        {
+                            let mut cache = self.state_cache.lock().await;
+                            cache.resolve_conflict(&path);
+                            let _ = cache.flush();
                         }
 
                         self.publish_conflict_resolved(&req.path, "keep_both").await;
