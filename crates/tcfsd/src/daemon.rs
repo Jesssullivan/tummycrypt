@@ -982,6 +982,130 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         });
     }
 
+    // ── Periodic reconciliation ────────────────────────────────────────
+    // Reconciles local sync_root against remote index on a timer.
+    // Respects per-folder policies (Always/OnDemand/Never).
+    if config.sync.reconcile_interval_secs > 0 {
+        if let Some(ref sync_root) = config.sync.sync_root {
+            let recon_interval = config.sync.reconcile_interval_secs;
+            let recon_root = sync_root.clone();
+            let recon_prefix = config.storage.resolved_prefix().to_string();
+            let recon_state = impl_.state_cache_handle();
+            let recon_op = operator.clone();
+            let recon_device = device_id.clone();
+            let recon_master_key = impl_.master_key_handle();
+            let _recon_policy_path = data_dir.join("folder-policies.json");
+
+            info!(
+                interval_secs = recon_interval,
+                prefix = %recon_prefix,
+                root = %recon_root.display(),
+                "periodic reconciliation enabled"
+            );
+
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(recon_interval));
+                // Skip the first immediate tick — startup index discovery covers it
+                interval.tick().await;
+
+                loop {
+                    interval.tick().await;
+
+                    let op_guard = recon_op.lock().await;
+                    let op = match op_guard.as_ref() {
+                        Some(op) => op.clone(),
+                        None => {
+                            debug!("reconcile: no storage operator, skipping");
+                            continue;
+                        }
+                    };
+                    drop(op_guard);
+
+                    let blacklist = tcfs_sync::blacklist::Blacklist::default();
+                    let recon_config = tcfs_sync::reconcile::ReconcileConfig::default();
+
+                    let cache = recon_state.lock().await;
+                    let plan = match tcfs_sync::reconcile::reconcile(
+                        &op,
+                        &recon_root,
+                        &recon_prefix,
+                        &cache,
+                        &recon_device,
+                        &blacklist,
+                        &recon_config,
+                    )
+                    .await
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!("periodic reconcile failed: {e}");
+                            continue;
+                        }
+                    };
+                    drop(cache);
+
+                    let s = &plan.summary;
+                    if s.pushes == 0 && s.pulls == 0 && s.conflicts == 0 {
+                        debug!(
+                            up_to_date = s.up_to_date,
+                            "reconcile: nothing to do"
+                        );
+                        continue;
+                    }
+
+                    info!(
+                        pushes = s.pushes,
+                        pulls = s.pulls,
+                        conflicts = s.conflicts,
+                        up_to_date = s.up_to_date,
+                        "reconcile: executing plan"
+                    );
+
+                    // Build encryption context from master key (if loaded)
+                    let mk_guard = recon_master_key.lock().await;
+                    let enc_ctx = mk_guard.as_ref().map(|k| {
+                        tcfs_sync::engine::EncryptionContext {
+                            master_key: k.clone(),
+                        }
+                    });
+                    drop(mk_guard);
+
+                    let mut cache = recon_state.lock().await;
+                    match tcfs_sync::reconcile::execute_plan(
+                        &plan,
+                        &op,
+                        &recon_root,
+                        &recon_prefix,
+                        &mut cache,
+                        &recon_device,
+                        enc_ctx.as_ref(),
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            info!(
+                                pushed = result.pushed,
+                                pulled = result.pulled,
+                                errors = result.errors.len(),
+                                bytes_up = result.bytes_uploaded,
+                                bytes_down = result.bytes_downloaded,
+                                "reconcile: plan executed"
+                            );
+                            if let Err(e) = cache.flush() {
+                                warn!("reconcile: state cache flush failed: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            warn!("reconcile: plan execution failed: {e}");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     // Auto-unsync sweep with dehydration (if configured)
     if config.sync.auto_unsync_max_age_secs > 0 {
         let unsync_state = impl_.state_cache_handle();
