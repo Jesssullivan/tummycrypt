@@ -247,13 +247,16 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // Populate state cache with remote-only files so FileProvider can enumerate
     // the full tree, not just locally-synced files.
     if let Some(ref op) = operator {
-        let sync_root = config.sync.sync_root.as_deref().unwrap_or(std::path::Path::new("/tmp/tcfs"));
+        let sync_root = config
+            .sync
+            .sync_root
+            .as_deref()
+            .unwrap_or(std::path::Path::new("/tmp/tcfs"));
         match tcfs_sync::reconcile::list_remote_index(op, resolved_prefix).await {
             Ok(remote_index) => {
                 let mut discovered = 0usize;
                 for (rel_path, entry) in &remote_index {
-                    let local_key =
-                        std::path::PathBuf::from(sync_root).join(rel_path);
+                    let local_key = std::path::PathBuf::from(sync_root).join(rel_path);
                     if state_cache_inner.get(&local_key).is_none() {
                         state_cache_inner.set(
                             &local_key,
@@ -966,18 +969,24 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         });
     }
 
-    // Auto-unsync sweep (if configured)
+    // Auto-unsync sweep with dehydration (if configured)
     if config.sync.auto_unsync_max_age_secs > 0 {
         let unsync_state = impl_.state_cache_handle();
         let unsync_interval = config.sync.auto_unsync_interval_secs;
         let unsync_max_age = config.sync.auto_unsync_max_age_secs;
         let unsync_dry_run = config.sync.auto_unsync_dry_run;
         let unsync_policy_path = data_dir.join("folder-policies.json");
+        let unsync_vfs = impl_.vfs_handle.clone();
+        let disk_pressure_pct = config.sync.auto_unsync_disk_pressure_pct;
+        let max_per_sweep = config.sync.auto_unsync_max_per_sweep;
+        let sync_root = config.sync.sync_root.clone();
 
         info!(
             max_age_secs = unsync_max_age,
             interval_secs = unsync_interval,
             dry_run = unsync_dry_run,
+            disk_pressure_pct,
+            max_per_sweep,
             "auto-unsync enabled"
         );
 
@@ -986,24 +995,76 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 tokio::time::interval(std::time::Duration::from_secs(unsync_interval));
             loop {
                 interval.tick().await;
+
+                // Check disk pressure — if under threshold and not time-based, skip
+                let under_pressure = sync_root.as_ref().map_or(false, |root| {
+                    tcfs_sync::auto_unsync::disk_pressure_check(root, disk_pressure_pct)
+                });
+
                 let policy_store =
                     tcfs_sync::policy::PolicyStore::open(&unsync_policy_path).unwrap_or_default();
                 let mut cache = unsync_state.lock().await;
-                let result = tcfs_sync::auto_unsync::sweep(
-                    &mut cache,
-                    &policy_store,
-                    unsync_max_age,
-                    unsync_dry_run,
-                );
-                if result.unsynced > 0 || result.skipped_dirty > 0 {
-                    info!(
-                        scanned = result.scanned,
-                        unsynced = result.unsynced,
-                        skipped_exempt = result.skipped_exempt,
-                        skipped_dirty = result.skipped_dirty,
-                        bytes_reclaimed = result.bytes_reclaimed,
-                        "auto-unsync sweep complete"
+
+                if unsync_dry_run {
+                    // Dry-run: use the original sweep (doesn't call callbacks)
+                    let result = tcfs_sync::auto_unsync::sweep(
+                        &mut cache,
+                        &policy_store,
+                        unsync_max_age,
+                        true,
                     );
+                    if result.unsynced > 0 || result.skipped_dirty > 0 {
+                        info!(
+                            scanned = result.scanned,
+                            unsynced = result.unsynced,
+                            skipped_exempt = result.skipped_exempt,
+                            skipped_dirty = result.skipped_dirty,
+                            bytes_reclaimed = result.bytes_reclaimed,
+                            "auto-unsync dry-run sweep complete"
+                        );
+                    }
+                } else {
+                    // Real dehydration sweep — use VFS unsync_path if available
+                    let vfs_ref = unsync_vfs.borrow().clone();
+                    let effective_max_age = if under_pressure {
+                        // Under disk pressure: halve the max age for more aggressive eviction
+                        unsync_max_age / 2
+                    } else {
+                        unsync_max_age
+                    };
+
+                    let result = tcfs_sync::auto_unsync::sweep_with_dehydration(
+                        &mut cache,
+                        &policy_store,
+                        effective_max_age,
+                        max_per_sweep,
+                        |path| {
+                            let vfs_opt = vfs_ref.clone();
+                            async move {
+                                if let Some(ref vfs) = vfs_opt {
+                                    let ur = vfs.unsync_path(&path).await?;
+                                    Ok(ur.bytes_freed)
+                                } else {
+                                    Ok(0) // No VFS, just update state
+                                }
+                            }
+                        },
+                    )
+                    .await;
+
+                    if result.dehydrated > 0 || result.failed > 0 {
+                        info!(
+                            scanned = result.scanned,
+                            dehydrated = result.dehydrated,
+                            skipped_exempt = result.skipped_exempt,
+                            skipped_dirty = result.skipped_dirty,
+                            skipped_missing = result.skipped_missing,
+                            failed = result.failed,
+                            bytes_freed = result.bytes_freed,
+                            under_pressure,
+                            "auto-unsync dehydration sweep complete"
+                        );
+                    }
                 }
             }
         });

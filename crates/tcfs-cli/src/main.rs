@@ -1131,7 +1131,12 @@ async fn cmd_rm(
     let sync_root = config.sync.sync_root.as_deref();
     let rel = tcfs_sync::engine::normalize_rel_path(path, sync_root);
 
-    println!("Deleting {} (remote: {}/index/{})", path.display(), remote_prefix, rel);
+    println!(
+        "Deleting {} (remote: {}/index/{})",
+        path.display(),
+        remote_prefix,
+        rel
+    );
 
     // Delete from remote storage (index + manifest)
     tcfs_sync::engine::delete_remote_file(&op, &rel, &remote_prefix, &mut state, sync_root)
@@ -1630,42 +1635,45 @@ async fn cmd_mount(
             };
 
         // FUSE3 mount (default — unprivileged via fusermount3)
-        tcfs_fuse::mount(tcfs_fuse::MountConfig {
-            op,
-            prefix,
-            mountpoint: mountpoint.to_path_buf(),
-            cache_dir,
-            cache_max_bytes: cache_max,
-            negative_ttl_secs: neg_ttl,
-            read_only: read_only,
-            allow_other: false,
-            on_flush,
-            device_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "cli".to_string()),
-            // Load master key from file for FUSE read decryption.
-            // The mount process is separate from the daemon, so it can't
-            // share the daemon's Arc<Mutex<MasterKey>>. Read the key file directly.
-            master_key: {
-                let mk_path = if config.crypto.enabled {
-                    config.crypto.master_key_file.as_ref()
-                } else {
-                    None
-                };
-                if let Some(path) = mk_path {
-                    match std::fs::read(path) {
-                        Ok(bytes) if bytes.len() == 32 => {
-                            let mut key_bytes = [0u8; 32];
-                            key_bytes.copy_from_slice(&bytes);
-                            Some(std::sync::Arc::new(tokio::sync::Mutex::new(Some(
-                                tcfs_crypto::MasterKey::from_bytes(key_bytes),
-                            ))))
+        tcfs_fuse::mount(
+            tcfs_fuse::MountConfig {
+                op,
+                prefix,
+                mountpoint: mountpoint.to_path_buf(),
+                cache_dir,
+                cache_max_bytes: cache_max,
+                negative_ttl_secs: neg_ttl,
+                read_only: read_only,
+                allow_other: false,
+                on_flush,
+                device_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "cli".to_string()),
+                // Load master key from file for FUSE read decryption.
+                // The mount process is separate from the daemon, so it can't
+                // share the daemon's Arc<Mutex<MasterKey>>. Read the key file directly.
+                master_key: {
+                    let mk_path = if config.crypto.enabled {
+                        config.crypto.master_key_file.as_ref()
+                    } else {
+                        None
+                    };
+                    if let Some(path) = mk_path {
+                        match std::fs::read(path) {
+                            Ok(bytes) if bytes.len() == 32 => {
+                                let mut key_bytes = [0u8; 32];
+                                key_bytes.copy_from_slice(&bytes);
+                                Some(std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+                                    tcfs_crypto::MasterKey::from_bytes(key_bytes),
+                                ))))
+                            }
+                            _ => None,
                         }
-                        _ => None,
+                    } else {
+                        None
                     }
-                } else {
-                    None
-                }
+                },
             },
-        }, None)
+            None,
+        )
         .await
         .context("FUSE mount failed")
     }
