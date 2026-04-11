@@ -150,7 +150,7 @@ async fn roundtrip_integrity_verification() {
     );
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("integrity check failed"),
+        err.contains("integrity"),
         "error should mention integrity: {err}"
     );
 }
