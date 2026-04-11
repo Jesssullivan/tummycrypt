@@ -264,6 +264,10 @@ pub struct SyncConfig {
     /// Trash retention in seconds. Auto-purge entries older than this.
     /// 0 = never auto-purge. Default: 2592000 (30 days).
     pub trash_retention_secs: u64,
+    /// Periodic reconciliation interval in seconds. 0 = disabled.
+    /// Reconciles local sync_root against remote index, applying per-folder policies.
+    /// Default: 300 (5 minutes).
+    pub reconcile_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,6 +414,7 @@ impl Default for SyncConfig {
             auto_download_threshold: 10 * 1024 * 1024, // 10MB
             trash_enabled: true,
             trash_retention_secs: 30 * 24 * 3600, // 30 days
+            reconcile_interval_secs: 300,          // 5 minutes
         }
     }
 }
