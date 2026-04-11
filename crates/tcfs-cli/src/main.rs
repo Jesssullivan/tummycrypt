@@ -250,6 +250,16 @@ enum Commands {
         #[arg(long, short = 's', value_parser = ["keep-local", "keep-remote", "keep-both", "defer"])]
         strategy: Option<String>,
     },
+
+    /// Manage the sync trash (staged deletes)
+    ///
+    /// When trash is enabled, deleted files are moved to a .tcfs-trash/ prefix
+    /// instead of being permanently removed. Use these subcommands to list,
+    /// restore, or purge trashed items.
+    Trash {
+        #[command(subcommand)]
+        action: TrashAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -342,6 +352,36 @@ enum AuthAction {
         /// Device ID to revoke all sessions for
         #[arg(long)]
         device: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TrashAction {
+    /// List all trashed items
+    List {
+        /// Remote prefix override
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
+    },
+    /// Restore a trashed item back to its original index location
+    Restore {
+        /// Original path of the trashed file (as shown by `trash list`)
+        path: String,
+        /// Remote prefix override
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
+    },
+    /// Permanently delete old trash entries
+    Purge {
+        /// Delete entries older than N seconds (default: from config trash_retention_secs)
+        #[arg(long)]
+        older_than: Option<u64>,
+        /// Purge ALL trash entries regardless of age
+        #[arg(long)]
+        all: bool,
+        /// Remote prefix override
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
     },
 }
 
@@ -536,6 +576,7 @@ async fn main() -> Result<()> {
             prefix,
             state,
         } => cmd_rm(&config, &path, prefix.as_deref(), state.as_deref()).await,
+        Commands::Trash { action } => cmd_trash(&config, action).await,
         Commands::Resolve { path, strategy } => {
             #[cfg(unix)]
             {
@@ -1103,6 +1144,137 @@ fn cmd_sync_status(
     }
 
     Ok(())
+}
+
+// ── `tcfs trash` ─────────────────────────────────────────────────────────────
+
+async fn cmd_trash(config: &tcfs_core::config::TcfsConfig, action: TrashAction) -> Result<()> {
+    let op = build_operator_from_env(config)?;
+
+    let resolve_prefix = |p: Option<&str>| -> String {
+        p.map(|s| s.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| {
+                config
+                    .storage
+                    .remote_prefix
+                    .clone()
+                    .unwrap_or_else(|| config.storage.bucket.clone())
+            })
+    };
+
+    match action {
+        TrashAction::List { prefix } => {
+            let remote_prefix = resolve_prefix(prefix.as_deref());
+            let entries = tcfs_vfs::trash::list_trash(&op, &remote_prefix).await?;
+
+            if entries.is_empty() {
+                println!("Trash is empty.");
+                return Ok(());
+            }
+
+            println!("{:<40} {:<20} {}", "ORIGINAL PATH", "TRASHED", "TRASH KEY");
+            println!("{}", "-".repeat(90));
+
+            for entry in &entries {
+                let age = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_sub(entry.trashed_at);
+                let age_str = format_duration(age);
+
+                println!(
+                    "{:<40} {:<20} {}",
+                    truncate_str(&entry.original_path, 39),
+                    format!("{} ago", age_str),
+                    entry.trash_key,
+                );
+            }
+
+            println!("\n{} item(s) in trash.", entries.len());
+            Ok(())
+        }
+
+        TrashAction::Restore { path, prefix } => {
+            let remote_prefix = resolve_prefix(prefix.as_deref());
+            let entries = tcfs_vfs::trash::list_trash(&op, &remote_prefix).await?;
+
+            // Find matching entry by original path (most recent first)
+            let entry = entries
+                .iter()
+                .find(|e| e.original_path == path)
+                .with_context(|| {
+                    format!(
+                        "no trash entry found for '{}'\nRun `tcfs trash list` to see trashed items.",
+                        path
+                    )
+                })?;
+
+            tcfs_vfs::trash::restore_trash_entry(&op, &remote_prefix, entry).await?;
+            println!("Restored: {} → index/{}", path, entry.original_path);
+            Ok(())
+        }
+
+        TrashAction::Purge {
+            older_than,
+            all,
+            prefix,
+        } => {
+            let remote_prefix = resolve_prefix(prefix.as_deref());
+
+            let max_age = if all {
+                0 // purge everything
+            } else {
+                older_than.unwrap_or(config.sync.trash_retention_secs)
+            };
+
+            if all {
+                // List first to confirm count
+                let entries = tcfs_vfs::trash::list_trash(&op, &remote_prefix).await?;
+                if entries.is_empty() {
+                    println!("Trash is already empty.");
+                    return Ok(());
+                }
+                println!("Purging ALL {} trash entries...", entries.len());
+            } else {
+                println!(
+                    "Purging trash entries older than {}...",
+                    format_duration(max_age)
+                );
+            }
+
+            let purged = tcfs_vfs::trash::purge_old_trash(&op, &remote_prefix, max_age).await?;
+
+            if purged > 0 {
+                println!("Purged {} entry(ies).", purged);
+            } else {
+                println!("Nothing to purge.");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Format seconds into a human-readable duration string.
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+/// Truncate a string to max_len, appending "…" if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max_len.saturating_sub(1)])
+    }
 }
 
 // ── `tcfs rm` ────────────────────────────────────────────────────────────────
