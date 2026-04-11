@@ -177,6 +177,15 @@ pub struct StorageConfig {
     pub enforce_tls: bool,
     /// Path to a custom CA certificate for S3 TLS verification
     pub ca_cert_path: Option<PathBuf>,
+    /// Maximum concurrent S3 operations (0 = unlimited). Default: 0.
+    #[serde(default)]
+    pub max_concurrent_ops: usize,
+    /// Maximum upload speed in bytes/sec (0 = unlimited). Default: 0.
+    #[serde(default)]
+    pub max_upload_bytes_per_sec: u64,
+    /// Maximum download speed in bytes/sec (0 = unlimited). Default: 0.
+    #[serde(default)]
+    pub max_download_bytes_per_sec: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -239,6 +248,12 @@ pub struct SyncConfig {
     /// Files smaller than this are auto-pulled on NATS events. 0 = never auto-download.
     /// Default: 10MB. Per-folder overrides via PolicyStore.download_threshold.
     pub auto_download_threshold: u64,
+    /// Enable sync trash (unlink moves to .tcfs-trash/ instead of deleting).
+    /// Default: true.
+    pub trash_enabled: bool,
+    /// Trash retention in seconds. Auto-purge entries older than this.
+    /// 0 = never auto-purge. Default: 2592000 (30 days).
+    pub trash_retention_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,6 +367,9 @@ impl Default for StorageConfig {
             credentials_file: None,
             enforce_tls: false,
             ca_cert_path: None,
+            max_concurrent_ops: 0,
+            max_upload_bytes_per_sec: 0,
+            max_download_bytes_per_sec: 0,
         }
     }
 }
@@ -380,6 +398,8 @@ impl Default for SyncConfig {
             auto_unsync_disk_pressure_pct: 0.0,
             auto_unsync_max_per_sweep: 100,
             auto_download_threshold: 10 * 1024 * 1024, // 10MB
+            trash_enabled: true,
+            trash_retention_secs: 30 * 24 * 3600, // 30 days
         }
     }
 }

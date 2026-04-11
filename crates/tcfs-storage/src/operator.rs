@@ -42,6 +42,40 @@ pub fn build_operator(cfg: &StorageConfig) -> Result<Operator> {
     Ok(op)
 }
 
+/// Build an operator with optional concurrent-operation limiting.
+///
+/// If `max_concurrent > 0`, applies `ConcurrentLimitLayer` to cap inflight S3 ops.
+pub fn build_operator_with_limits(cfg: &StorageConfig, max_concurrent: usize) -> Result<Operator> {
+    let builder = opendal::services::S3::default()
+        .endpoint(&cfg.endpoint)
+        .region(&cfg.region)
+        .bucket(&cfg.bucket)
+        .access_key_id(&cfg.access_key_id)
+        .secret_access_key(&cfg.secret_access_key);
+
+    // Use a very high limit when unlimited (effectively no limit)
+    let effective_limit = if max_concurrent > 0 {
+        tracing::info!(max_concurrent, "S3 concurrent operation limit enabled");
+        max_concurrent
+    } else {
+        1024 // Effectively unlimited
+    };
+
+    let op = Operator::new(builder)
+        .context("creating OpenDAL S3 operator")?
+        .layer(opendal::layers::LoggingLayer::default())
+        .layer(
+            opendal::layers::RetryLayer::new()
+                .with_max_times(5)
+                .with_factor(2.0)
+                .with_jitter(),
+        )
+        .layer(opendal::layers::ConcurrentLimitLayer::new(effective_limit))
+        .finish();
+
+    Ok(op)
+}
+
 /// Build an operator from tcfs-core config + loaded credentials.
 ///
 /// If `enforce_tls` is true and the endpoint uses HTTP, this returns an error.
@@ -66,13 +100,16 @@ pub fn build_from_core_config(
         );
     }
 
-    build_operator(&StorageConfig {
-        endpoint: storage.endpoint.clone(),
-        region: storage.region.clone(),
-        bucket: storage.bucket.clone(),
-        access_key_id: access_key_id.to_string(),
-        secret_access_key: secret_access_key.to_string(),
-    })
+    build_operator_with_limits(
+        &StorageConfig {
+            endpoint: storage.endpoint.clone(),
+            region: storage.region.clone(),
+            bucket: storage.bucket.clone(),
+            access_key_id: access_key_id.to_string(),
+            secret_access_key: secret_access_key.to_string(),
+        },
+        storage.max_concurrent_ops,
+    )
 }
 
 #[cfg(test)]
