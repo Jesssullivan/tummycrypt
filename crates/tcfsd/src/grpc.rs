@@ -984,15 +984,16 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 }));
             }
 
-            // Remove all children from state cache too
+            // Transition children to NotSynced (preserve metadata for re-hydration)
             let child_keys: Vec<String> = children.into_iter().map(|(k, _)| k).collect();
             for child_key in &child_keys {
                 let child_path = std::path::PathBuf::from(child_key);
-                cache.remove(&child_path);
+                cache.set_status(&child_path, tcfs_sync::state::FileSyncStatus::NotSynced);
             }
         }
 
-        cache.remove(&path);
+        // Transition to NotSynced instead of removing — preserves metadata for re-hydration
+        cache.set_status(&path, tcfs_sync::state::FileSyncStatus::NotSynced);
         if let Err(e) = cache.flush() {
             return Ok(tonic::Response::new(UnsyncResponse {
                 success: false,
@@ -1001,7 +1002,28 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }));
         }
 
-        info!(path = %req.path, "unsynced successfully");
+        // Evict from VFS disk cache if VFS is active
+        // Clone the Arc out of the watch::Ref to avoid holding a !Send borrow across .await
+        let mut bytes_freed = 0u64;
+        let vfs_opt = self.vfs_handle.borrow().clone();
+        if let Some(ref vfs) = vfs_opt {
+            match vfs.unsync_path(&req.path).await {
+                Ok(result) => {
+                    info!(
+                        path = %req.path,
+                        bytes_freed = result.bytes_freed,
+                        was_cached = result.was_cached,
+                        "unsync: VFS cache evicted"
+                    );
+                    bytes_freed = result.bytes_freed;
+                }
+                Err(e) => {
+                    warn!(path = %req.path, error = %e, "unsync: VFS cache eviction failed (non-fatal)");
+                }
+            }
+        }
+
+        info!(path = %req.path, bytes_freed, "unsynced successfully");
 
         Ok(tonic::Response::new(UnsyncResponse {
             success: true,
@@ -1572,11 +1594,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                                 .unwrap_or((0, String::new()))
                         };
 
-                        let is_dir = event
-                            .paths
-                            .first()
-                            .map(|p| p.is_dir())
-                            .unwrap_or(false);
+                        let is_dir = event.paths.first().map(|p| p.is_dir()).unwrap_or(false);
 
                         WatchEvent {
                             path,

@@ -230,6 +230,11 @@ pub struct SyncConfig {
     pub auto_unsync_interval_secs: u64,
     /// If true, log auto-unsync candidates but don't actually remove them.
     pub auto_unsync_dry_run: bool,
+    /// Disk usage threshold (0.0-1.0) that triggers aggressive auto-unsync.
+    /// 0.0 = disabled. Example: 0.85 triggers when disk is 85% full.
+    pub auto_unsync_disk_pressure_pct: f64,
+    /// Maximum files to dehydrate per sweep (prevents long lock holds). 0 = unlimited.
+    pub auto_unsync_max_per_sweep: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +373,8 @@ impl Default for SyncConfig {
             auto_unsync_max_age_secs: 0,
             auto_unsync_interval_secs: 3600,
             auto_unsync_dry_run: false,
+            auto_unsync_disk_pressure_pct: 0.0,
+            auto_unsync_max_per_sweep: 100,
         }
     }
 }

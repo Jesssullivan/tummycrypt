@@ -320,6 +320,18 @@ impl StateCache {
         Ok(())
     }
 
+    /// Transition a file's sync status without removing its metadata.
+    ///
+    /// Used by unsync/dehydration: marks as `NotSynced` while preserving
+    /// blake3, remote_path, size, etc. for future re-hydration.
+    pub fn set_status(&mut self, local_path: &Path, status: FileSyncStatus) {
+        let key = path_key(local_path);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.status = status;
+            self.dirty = true;
+        }
+    }
+
     /// Remove stale entries whose `remote_path` doesn't match `expected_prefix`
     /// or whose local path (under /tmp/) no longer exists on disk.
     ///
@@ -1048,5 +1060,71 @@ mod tests {
         // Drop first guard, should unlock
         drop(guard);
         assert!(!locks.is_locked(&path).await);
+    }
+
+    #[test]
+    fn set_status_preserves_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, b"hello").unwrap();
+
+        let state = SyncState {
+            blake3: "abc123".into(),
+            size: 1024,
+            mtime: 12345,
+            chunk_count: 3,
+            remote_path: "prefix/manifests/abc123".into(),
+            last_synced: 12345,
+            vclock: VectorClock::new(),
+            device_id: "dev1".into(),
+            conflict: None,
+            status: FileSyncStatus::Synced,
+        };
+        cache.set(&file_path, state);
+
+        // Transition to NotSynced
+        cache.set_status(&file_path, FileSyncStatus::NotSynced);
+
+        let entry = cache.get(&file_path).unwrap();
+        assert_eq!(entry.status, FileSyncStatus::NotSynced);
+        // Metadata must be preserved
+        assert_eq!(entry.blake3, "abc123");
+        assert_eq!(entry.size, 1024);
+        assert_eq!(entry.chunk_count, 3);
+        assert_eq!(entry.remote_path, "prefix/manifests/abc123");
+    }
+
+    #[test]
+    fn set_status_marks_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, b"hello").unwrap();
+
+        cache.set(
+            &file_path,
+            SyncState {
+                blake3: "abc".into(),
+                size: 5,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "p/m/abc".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: String::new(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+        cache.flush().unwrap();
+
+        cache.set_status(&file_path, FileSyncStatus::NotSynced);
+        // Should be dirty after set_status
+        assert!(cache.dirty);
     }
 }
