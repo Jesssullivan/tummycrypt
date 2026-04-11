@@ -103,6 +103,8 @@ pub struct TcfsVfs {
     /// Shared Arc allows the daemon to inject the key after FUSE mount starts
     /// (unlock happens via gRPC after daemon is already serving).
     master_key: Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>>,
+    /// If true, unlink moves index entries to .tcfs-trash/ instead of deleting.
+    trash_enabled: bool,
 }
 
 impl TcfsVfs {
@@ -139,7 +141,14 @@ impl TcfsVfs {
             device_id,
             vclocks: Arc::new(Mutex::new(HashMap::new())),
             master_key: Arc::new(tokio::sync::Mutex::new(None)),
+            trash_enabled: false,
         }
+    }
+
+    /// Enable sync trash (unlink moves to .tcfs-trash/ instead of deleting).
+    pub fn with_trash(mut self, enabled: bool) -> Self {
+        self.trash_enabled = enabled;
+        self
     }
 
     /// Create a VFS with a shared master key mutex (for daemon integration).
@@ -779,10 +788,19 @@ impl VirtualFilesystem for TcfsVfs {
             format!("{}/{}", parent.trim_end_matches('/'), name_str)
         };
 
-        // Delete index entry from S3
         if let Some(key) = self.index_key_for(&vpath) {
-            debug!(path = %vpath, key = %key, "deleting index entry");
-            self.op.delete(&key).await.context("deleting index entry")?;
+            if self.trash_enabled {
+                // Move to trash instead of permanent delete
+                let rel_path = vpath.trim_start_matches('/');
+                debug!(path = %vpath, key = %key, "trashing index entry");
+                crate::trash::trash_index_entry(&self.op, &self.prefix, &key, rel_path)
+                    .await
+                    .context("moving index entry to trash")?;
+            } else {
+                // Permanent delete
+                debug!(path = %vpath, key = %key, "deleting index entry");
+                self.op.delete(&key).await.context("deleting index entry")?;
+            }
         }
 
         Ok(())
