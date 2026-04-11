@@ -140,14 +140,18 @@ impl TcfsDaemonImpl {
     /// Returns Ok(Session) if the session is valid, or a gRPC UNAUTHENTICATED
     /// error if auth is required and the token is missing/invalid/expired.
     ///
-    /// When `config.auth.require_session` is false (default for alpha), this
-    /// returns a synthetic session with full permissions (bypass mode).
+    /// When `config.auth.require_session` is false, this returns a synthetic
+    /// session with full permissions (bypass mode). A warning is logged on
+    /// each bypassed request.
     async fn require_session<T>(
         &self,
         request: &tonic::Request<T>,
     ) -> Result<tcfs_auth::Session, tonic::Status> {
-        // Alpha bypass: if auth is not required, allow all requests with full permissions
         if !self.config.auth.require_session {
+            tracing::warn!(
+                "AUTH BYPASS: request granted full permissions — \
+                 set auth.require_session=true for production"
+            );
             return Ok(tcfs_auth::Session::new(&self.device_id, "local", "bypass"));
         }
 

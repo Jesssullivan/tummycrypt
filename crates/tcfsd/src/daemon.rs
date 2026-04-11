@@ -387,8 +387,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // On macOS with FileProvider active, the watcher is skipped because
     // ~/Library/CloudStorage/TCFSProvider-TCFS/ is the primary interface.
     // The FileProvider extension handles uploads/downloads via gRPC RPCs.
-    let fileprovider_active = cfg!(target_os = "macos")
-        && config.daemon.fileprovider_socket.is_some();
+    let fileprovider_active =
+        cfg!(target_os = "macos") && config.daemon.fileprovider_socket.is_some();
 
     let _watcher_handle = if let Some(ref sync_root) = config.sync.sync_root {
         if fileprovider_active {
@@ -1047,10 +1047,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
                     let s = &plan.summary;
                     if s.pushes == 0 && s.pulls == 0 && s.conflicts == 0 {
-                        debug!(
-                            up_to_date = s.up_to_date,
-                            "reconcile: nothing to do"
-                        );
+                        debug!(up_to_date = s.up_to_date, "reconcile: nothing to do");
                         continue;
                     }
 
@@ -1064,11 +1061,11 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
                     // Build encryption context from master key (if loaded)
                     let mk_guard = recon_master_key.lock().await;
-                    let enc_ctx = mk_guard.as_ref().map(|k| {
-                        tcfs_sync::engine::EncryptionContext {
+                    let enc_ctx = mk_guard
+                        .as_ref()
+                        .map(|k| tcfs_sync::engine::EncryptionContext {
                             master_key: k.clone(),
-                        }
-                    });
+                        });
                     drop(mk_guard);
 
                     let mut cache = recon_state.lock().await;

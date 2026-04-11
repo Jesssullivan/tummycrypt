@@ -11,8 +11,33 @@
 
 use anyhow::{Context, Result};
 use opendal::Operator;
+use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
+
+/// Validate that a relative path does not contain traversal components.
+///
+/// Rejects paths with `..`, absolute prefixes, or other components that
+/// could escape the intended prefix when used in S3 key construction.
+fn validate_rel_path(rel_path: &str) -> Result<()> {
+    if rel_path.is_empty() {
+        anyhow::bail!("rel_path must not be empty");
+    }
+    for component in Path::new(rel_path).components() {
+        match component {
+            Component::ParentDir => {
+                anyhow::bail!(
+                    "path traversal rejected: rel_path contains '..' component: {rel_path}"
+                );
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("absolute path rejected: rel_path must be relative: {rel_path}");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
 /// A single trashed item.
 #[derive(Debug, Clone)]
@@ -36,6 +61,8 @@ pub async fn trash_index_entry(
     index_key: &str,
     rel_path: &str,
 ) -> Result<String> {
+    validate_rel_path(rel_path)?;
+
     // Read the original index entry
     let content = op
         .read(index_key)
@@ -257,5 +284,47 @@ mod tests {
         let op = memory_op();
         let entries = list_trash(&op, "prefix").await.unwrap();
         assert!(entries.is_empty());
+    }
+
+    // ── Path traversal tests ────────────────────────────────────────────
+
+    #[test]
+    fn validate_rel_path_normal() {
+        assert!(validate_rel_path("doc.txt").is_ok());
+        assert!(validate_rel_path("dir/file.txt").is_ok());
+        assert!(validate_rel_path("a/b/c/deep.md").is_ok());
+        assert!(validate_rel_path(".hidden").is_ok());
+    }
+
+    #[test]
+    fn validate_rel_path_rejects_parent_dir() {
+        assert!(validate_rel_path("../escape.txt").is_err());
+        assert!(validate_rel_path("dir/../../etc/passwd").is_err());
+        assert!(validate_rel_path("ok/../sneaky").is_err());
+    }
+
+    #[test]
+    fn validate_rel_path_rejects_absolute() {
+        assert!(validate_rel_path("/etc/passwd").is_err());
+        assert!(validate_rel_path("/root/.ssh/id_rsa").is_err());
+    }
+
+    #[test]
+    fn validate_rel_path_rejects_empty() {
+        assert!(validate_rel_path("").is_err());
+    }
+
+    #[tokio::test]
+    async fn trash_rejects_traversal() {
+        let op = memory_op();
+        let index_key = "test/index/doc.txt";
+        op.write(index_key, b"content".to_vec()).await.unwrap();
+
+        let result = trash_index_entry(&op, "test", index_key, "../escape").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("path traversal"));
+
+        // Original should still exist (not deleted)
+        assert!(op.read(index_key).await.is_ok());
     }
 }

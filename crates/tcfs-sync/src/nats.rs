@@ -197,28 +197,38 @@ mod inner {
         js: jetstream::Context,
     }
 
+    /// Resolve the effective NATS URL based on TLS requirements.
+    ///
+    /// - `require_tls=true` + `nats://` → upgraded to `tls://`
+    /// - `require_tls=true` + `tls://` → unchanged
+    /// - `require_tls=false` + `nats://` → unchanged (plaintext warning logged)
+    /// - `require_tls=false` + `tls://` → unchanged
+    pub fn resolve_nats_url(url: &str, require_tls: bool) -> String {
+        if require_tls && url.starts_with("nats://") {
+            let upgraded = url.replacen("nats://", "tls://", 1);
+            warn!(
+                original = url,
+                upgraded = %upgraded,
+                "NATS: upgrading to TLS (nats_tls=true)"
+            );
+            upgraded
+        } else {
+            if !require_tls && !url.starts_with("tls://") {
+                warn!(
+                    url,
+                    "NATS: connecting without TLS — credentials transmitted in plaintext"
+                );
+            }
+            url.to_string()
+        }
+    }
+
     impl NatsClient {
         /// Connect to NATS and return a client with JetStream enabled.
         ///
         /// If `require_tls` is true and the URL uses `nats://`, it is upgraded to `tls://`.
         pub async fn connect(url: &str, require_tls: bool, token: Option<&str>) -> Result<Self> {
-            let effective_url = if require_tls && url.starts_with("nats://") {
-                let upgraded = url.replacen("nats://", "tls://", 1);
-                warn!(
-                    original = url,
-                    upgraded = %upgraded,
-                    "NATS: upgrading to TLS (nats_tls=true)"
-                );
-                upgraded
-            } else {
-                if !require_tls && !url.starts_with("tls://") {
-                    warn!(
-                        url,
-                        "NATS: connecting without TLS — credentials transmitted in plaintext"
-                    );
-                }
-                url.to_string()
-            };
+            let effective_url = resolve_nats_url(url, require_tls);
 
             let client = if let Some(tok) = token {
                 info!("NATS: connecting with token auth");
@@ -546,6 +556,35 @@ mod inner {
                     warn!(task_id, "nak failed: {nak_err}");
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn tls_url_upgrade_nats_to_tls() {
+            let url = resolve_nats_url("nats://nats.example.com:4222", true);
+            assert_eq!(url, "tls://nats.example.com:4222");
+        }
+
+        #[test]
+        fn tls_url_already_tls_unchanged() {
+            let url = resolve_nats_url("tls://nats.example.com:4222", true);
+            assert_eq!(url, "tls://nats.example.com:4222");
+        }
+
+        #[test]
+        fn plaintext_url_preserved_when_tls_not_required() {
+            let url = resolve_nats_url("nats://localhost:4222", false);
+            assert_eq!(url, "nats://localhost:4222");
+        }
+
+        #[test]
+        fn tls_url_preserved_when_tls_not_required() {
+            let url = resolve_nats_url("tls://nats.example.com:4222", false);
+            assert_eq!(url, "tls://nats.example.com:4222");
         }
     }
 }
