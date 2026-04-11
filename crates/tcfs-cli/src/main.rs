@@ -260,6 +260,17 @@ enum Commands {
         #[command(subcommand)]
         action: TrashAction,
     },
+
+    /// Migrate S3 index entries from stale/incorrect prefixes
+    ///
+    /// Fixes double-prefixed entries (data/index/data/*) and orphaned entries
+    /// under old prefixes (tcfs/index/*). Run once after upgrading.
+    #[command(name = "migrate-prefix")]
+    MigratePrefix {
+        /// Dry-run mode (show what would be migrated without changing anything)
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -577,6 +588,7 @@ async fn main() -> Result<()> {
             state,
         } => cmd_rm(&config, &path, prefix.as_deref(), state.as_deref()).await,
         Commands::Trash { action } => cmd_trash(&config, action).await,
+        Commands::MigratePrefix { dry_run } => cmd_migrate_prefix(&config, dry_run).await,
         Commands::Resolve { path, strategy } => {
             #[cfg(unix)]
             {
@@ -810,13 +822,7 @@ async fn cmd_push(
     // This must match the FUSE daemon's mount prefix for cross-host visibility.
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| {
-            config
-                .storage
-                .remote_prefix
-                .clone()
-                .unwrap_or_else(|| config.storage.bucket.clone())
-        });
+        .unwrap_or_else(|| config.storage.resolved_prefix().to_string());
 
     println!(
         "Pushing {} → {}:{} (endpoint: {}{})",
@@ -1146,6 +1152,103 @@ fn cmd_sync_status(
     Ok(())
 }
 
+// ── `tcfs migrate-prefix` ────────────────────────────────────────────────────
+
+async fn cmd_migrate_prefix(config: &tcfs_core::config::TcfsConfig, dry_run: bool) -> Result<()> {
+    let op = build_operator_from_env(config)?;
+    let target = config.storage.resolved_prefix();
+
+    println!(
+        "Migrating S3 index entries → target prefix: \"{}\"{}\n",
+        target,
+        if dry_run { " (DRY RUN)" } else { "" }
+    );
+
+    let mut migrated = 0u32;
+    let mut deleted = 0u32;
+
+    // 1. Fix double-prefixed entries: {target}/index/{target}/* → {target}/index/*
+    let double_prefix = format!(
+        "{}/index/{}/",
+        target.trim_end_matches('/'),
+        target.trim_end_matches('/')
+    );
+    let entries = op
+        .list_with(&double_prefix)
+        .recursive(true)
+        .await
+        .with_context(|| format!("listing {double_prefix}"))?;
+
+    for entry in entries {
+        let old_key = entry.path().to_string();
+        if old_key.ends_with('/') {
+            continue;
+        }
+        let rel = old_key.strip_prefix(&double_prefix).unwrap_or(&old_key);
+        let new_key = format!("{}/index/{}", target.trim_end_matches('/'), rel);
+
+        println!("  move: {} → {}", old_key, new_key);
+        if !dry_run {
+            let data = op.read(&old_key).await?.to_bytes();
+            op.write(&new_key, data.to_vec()).await?;
+            op.delete(&old_key).await?;
+        }
+        migrated += 1;
+    }
+
+    // 2. Migrate orphan prefixes (e.g., tcfs/index/* when target is "data")
+    let bucket = &config.storage.bucket;
+    if bucket != target {
+        let orphan_prefix = format!("{}/index/", bucket.trim_end_matches('/'));
+        let entries = op
+            .list_with(&orphan_prefix)
+            .recursive(true)
+            .await
+            .with_context(|| format!("listing {orphan_prefix}"))?;
+
+        for entry in entries {
+            let old_key = entry.path().to_string();
+            if old_key.ends_with('/') {
+                continue;
+            }
+            let rel = old_key.strip_prefix(&orphan_prefix).unwrap_or(&old_key);
+            let new_key = format!("{}/index/{}", target.trim_end_matches('/'), rel);
+
+            // Check if target already has this entry
+            let exists = op.read(&new_key).await.is_ok();
+            if exists {
+                println!("  delete orphan (target exists): {}", old_key);
+                if !dry_run {
+                    op.delete(&old_key).await?;
+                }
+                deleted += 1;
+            } else {
+                println!("  move orphan: {} → {}", old_key, new_key);
+                if !dry_run {
+                    let data = op.read(&old_key).await?.to_bytes();
+                    op.write(&new_key, data.to_vec()).await?;
+                    op.delete(&old_key).await?;
+                }
+                migrated += 1;
+            }
+        }
+    }
+
+    println!(
+        "\n{}: migrated={}, orphans_deleted={}",
+        if dry_run { "Would process" } else { "Done" },
+        migrated,
+        deleted
+    );
+    if dry_run {
+        println!("Run without --dry-run to apply changes.");
+    } else if migrated > 0 || deleted > 0 {
+        println!("Restart tcfsd to re-populate the state cache.");
+    }
+
+    Ok(())
+}
+
 // ── `tcfs trash` ─────────────────────────────────────────────────────────────
 
 async fn cmd_trash(config: &tcfs_core::config::TcfsConfig, action: TrashAction) -> Result<()> {
@@ -1292,13 +1395,7 @@ async fn cmd_rm(
 
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| {
-            config
-                .storage
-                .remote_prefix
-                .clone()
-                .unwrap_or_else(|| config.storage.bucket.clone())
-        });
+        .unwrap_or_else(|| config.storage.resolved_prefix().to_string());
 
     let sync_root = config.sync.sync_root.as_deref();
     let rel = tcfs_sync::engine::normalize_rel_path(path, sync_root);

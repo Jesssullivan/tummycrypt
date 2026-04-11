@@ -228,11 +228,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         });
 
     // Purge entries with wrong remote prefix or stale tmp paths
-    let resolved_prefix = config
-        .storage
-        .remote_prefix
-        .as_deref()
-        .unwrap_or(&config.storage.bucket);
+    let resolved_prefix = config.storage.resolved_prefix();
     let purged = state_cache_inner.purge_stale(resolved_prefix);
     if purged > 0 {
         info!(
@@ -872,7 +868,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sync_device_id = device_id.clone();
                     let sync_conflict_mode = config.sync.conflict_mode.clone();
                     let sync_root = config.sync.sync_root.clone();
-                    let storage_prefix = config.storage.bucket.clone();
+                    let storage_prefix = config.storage.resolved_prefix().to_string();
                     let policy_path = data_dir.join("folder-policies.json");
                     let download_threshold = config.sync.auto_download_threshold;
                     spawn_state_sync_loop(

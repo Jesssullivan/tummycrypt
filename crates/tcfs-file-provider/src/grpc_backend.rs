@@ -138,7 +138,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
 
         let prefix = config["remote_prefix"]
             .as_str()
-            .unwrap_or("default")
+            .unwrap_or("tcfs") // match StorageConfig::default().bucket
             .to_string();
 
         // Multi-threaded runtime with 2 workers — one for the background watch
@@ -570,11 +570,10 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                 .await
                 .map_err(|e| tonic::Status::internal(format!("read local file: {e}")))?;
 
-            let remote_path = format!(
-                "{}/{}",
-                prov.remote_prefix.trim_end_matches('/'),
-                remote_str.trim_start_matches('/')
-            );
+            // Pass only the relative path — the daemon's Push RPC applies the
+            // remote_prefix when constructing the S3 index key. Prepending it
+            // here caused double-prefixing: data/index/data/{file}.
+            let remote_path = remote_str.trim_start_matches('/').to_string();
 
             // Send the file as a single PushChunk (daemon handles chunking internally)
             let chunk = tcfs_core::proto::PushChunk {
@@ -700,16 +699,16 @@ pub unsafe extern "C" fn tcfs_provider_create_dir(
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
 
-        let dir_path = format!(
-            "{}/{}{}/",
-            prov.remote_prefix.trim_end_matches('/'),
-            if parent_str.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", parent_str.trim_matches('/'))
-            },
-            name_str.trim_matches('/')
-        );
+        // Relative path only — daemon applies the remote_prefix.
+        let dir_path = if parent_str.is_empty() {
+            format!("{}/", name_str.trim_matches('/'))
+        } else {
+            format!(
+                "{}/{}/",
+                parent_str.trim_matches('/'),
+                name_str.trim_matches('/')
+            )
+        };
 
         let create_result = prov.runtime.block_on(async {
             let chunk = tcfs_core::proto::PushChunk {

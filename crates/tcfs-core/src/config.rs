@@ -188,6 +188,16 @@ pub struct StorageConfig {
     pub max_download_bytes_per_sec: u64,
 }
 
+impl StorageConfig {
+    /// Resolve the effective S3 prefix: explicit `remote_prefix` or fall back to `bucket`.
+    ///
+    /// ALL code that needs the S3 prefix MUST call this instead of inlining
+    /// `remote_prefix.unwrap_or(bucket)` — there were 3 inconsistent copies.
+    pub fn resolved_prefix(&self) -> &str {
+        self.remote_prefix.as_deref().unwrap_or(&self.bucket)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SecretsConfig {
