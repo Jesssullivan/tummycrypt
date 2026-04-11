@@ -25,7 +25,8 @@ pub struct AuthConfig {
     /// Enable auth subsystem (default: false)
     pub enabled: bool,
     /// Require a valid session token for protected RPCs (push, pull, mount, unsync).
-    /// Default: false (alpha bypass — all local requests are trusted).
+    /// Default: true. When false, all local requests are trusted (alpha bypass).
+    /// WARNING: Setting this to false grants full permissions to any Unix socket client.
     pub require_session: bool,
     /// Session expiry in hours (default: 24)
     pub session_expiry_hours: u64,
@@ -392,7 +393,7 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             nats_url: "nats://localhost:4222".into(),
-            nats_tls: false,
+            nats_tls: true,
             nats_token: None,
             nats_ca_cert: None,
             state_db: PathBuf::from("~/.local/share/tcfsd/state.db"),
@@ -414,7 +415,7 @@ impl Default for SyncConfig {
             auto_download_threshold: 10 * 1024 * 1024, // 10MB
             trash_enabled: true,
             trash_retention_secs: 30 * 24 * 3600, // 30 days
-            reconcile_interval_secs: 300,          // 5 minutes
+            reconcile_interval_secs: 300,         // 5 minutes
         }
     }
 }
@@ -507,7 +508,7 @@ argon2_parallelism = 8
         assert!(!config.storage.enforce_tls);
         assert_eq!(config.storage.bucket, "tcfs");
         assert_eq!(config.sync.nats_url, "nats://localhost:4222");
-        assert!(!config.sync.nats_tls);
+        assert!(config.sync.nats_tls);
         assert!(!config.crypto.enabled);
         assert_eq!(config.crypto.argon2_mem_cost_kib, 65536);
         assert!(config.config_file_mode_check);
@@ -538,5 +539,39 @@ endpoint = "http://192.168.1.100:8333"
         assert_eq!(config.daemon.socket, parsed.daemon.socket);
         assert_eq!(config.storage.endpoint, parsed.storage.endpoint);
         assert_eq!(config.sync.nats_url, parsed.sync.nats_url);
+    }
+
+    #[test]
+    fn auth_require_session_defaults_to_true() {
+        let config = AuthConfig::default();
+        assert!(
+            config.require_session,
+            "require_session must default to true for security"
+        );
+    }
+
+    #[test]
+    fn nats_tls_defaults_to_true() {
+        let config = SyncConfig::default();
+        assert!(
+            config.nats_tls,
+            "nats_tls must default to true for security"
+        );
+    }
+
+    #[test]
+    fn auth_bypass_from_toml() {
+        let toml_str = r#"
+[auth]
+require_session = false
+"#;
+        let config: TcfsConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.auth.require_session);
+    }
+
+    #[test]
+    fn auth_defaults_when_omitted() {
+        let config: TcfsConfig = toml::from_str("").unwrap();
+        assert!(config.auth.require_session);
     }
 }
