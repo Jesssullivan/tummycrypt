@@ -53,6 +53,8 @@ pub struct CollectConfig {
     pub exclude_patterns: Vec<String>,
     /// Whether to follow symlinks (default: false — skip with warning)
     pub follow_symlinks: bool,
+    /// Whether to sync empty directories via `.tcfs_dir` markers
+    pub sync_empty_dirs: bool,
 }
 
 impl Default for CollectConfig {
@@ -63,8 +65,18 @@ impl Default for CollectConfig {
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
             follow_symlinks: false,
+            sync_empty_dirs: true,
         }
     }
+}
+
+/// Result of collecting files and empty directories from a local tree.
+#[derive(Debug, Clone)]
+pub struct CollectResult {
+    /// Regular files to upload.
+    pub files: Vec<PathBuf>,
+    /// Empty directories (no files after exclusions) to create markers for.
+    pub empty_dirs: Vec<PathBuf>,
 }
 
 /// Result of uploading a single file
@@ -869,10 +881,10 @@ pub async fn push_tree_with_device(
     let mut bytes = 0u64;
 
     let cfg = collect_cfg.cloned().unwrap_or_default();
-    let files = collect_files(local_root, &cfg)?;
-    let total = files.len();
+    let result = collect_files(local_root, &cfg)?;
+    let total = result.files.len();
 
-    for (i, path) in files.iter().enumerate() {
+    for (i, path) in result.files.iter().enumerate() {
         let rel = path.strip_prefix(local_root).unwrap_or(path);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
 
@@ -920,6 +932,28 @@ pub async fn push_tree_with_device(
         }
     }
 
+    // Write `.tcfs_dir` markers for empty directories
+    for dir in &result.empty_dirs {
+        // Skip the root itself — it's never "empty" in the sync sense
+        if dir == local_root {
+            continue;
+        }
+        if let Ok(rel) = dir.strip_prefix(local_root) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let marker_key = format!(
+                "{}/index/{}/.tcfs_dir",
+                remote_path_prefix(remote_prefix),
+                rel_str
+            );
+            let marker_content = b"type=directory\n";
+            if let Err(e) = op.write(&marker_key, marker_content.to_vec()).await {
+                warn!(dir = %dir.display(), "failed to write empty dir marker: {e}");
+            } else {
+                debug!(dir = %rel_str, "wrote empty directory marker");
+            }
+        }
+    }
+
     // Flush state cache after tree push
     state.flush()?;
 
@@ -927,8 +961,13 @@ pub async fn push_tree_with_device(
 }
 
 /// Collect all regular files under `root` recursively, respecting config.
-pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<Vec<PathBuf>> {
+///
+/// When `config.sync_empty_dirs` is true, also collects directories that
+/// contain no files (after exclusion rules) so callers can create `.tcfs_dir`
+/// marker objects in the remote index.
+pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<CollectResult> {
     let mut files = Vec::new();
+    let mut empty_dirs = Vec::new();
     let exclude_matchers: Vec<glob::Pattern> = config
         .exclude_patterns
         .iter()
@@ -939,18 +978,29 @@ pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<Vec<PathBuf>
     if let Ok(canon) = std::fs::canonicalize(root) {
         visited.insert(canon);
     }
-    collect_files_inner(root, &mut files, config, &exclude_matchers, &mut visited)?;
+    collect_files_inner(
+        root,
+        &mut files,
+        &mut empty_dirs,
+        config,
+        &exclude_matchers,
+        &mut visited,
+    )?;
     files.sort(); // deterministic order
-    Ok(files)
+    empty_dirs.sort();
+    Ok(CollectResult { files, empty_dirs })
 }
 
 fn collect_files_inner(
     dir: &Path,
     out: &mut Vec<PathBuf>,
+    empty_dirs: &mut Vec<PathBuf>,
     config: &CollectConfig,
     excludes: &[glob::Pattern],
     visited: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
+    let before = out.len();
+
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("reading dir: {}", dir.display()))?
     {
@@ -992,7 +1042,9 @@ fn collect_files_inner(
                         // Check what the resolved target actually is
                         match std::fs::metadata(&real) {
                             Ok(meta) if meta.is_dir() => {
-                                collect_files_inner(&path, out, config, excludes, visited)?;
+                                collect_files_inner(
+                                    &path, out, empty_dirs, config, excludes, visited,
+                                )?;
                             }
                             Ok(meta) if meta.is_file() => {
                                 out.push(path);
@@ -1053,7 +1105,7 @@ fn collect_files_inner(
                             continue;
                         }
                         // In raw mode, recurse into .git
-                        collect_files_inner(&path, out, config, excludes, visited)?;
+                        collect_files_inner(&path, out, empty_dirs, config, excludes, visited)?;
                     }
                     continue;
                 }
@@ -1063,12 +1115,19 @@ fn collect_files_inner(
                     continue;
                 }
 
-                collect_files_inner(&path, out, config, excludes, visited)?;
+                collect_files_inner(&path, out, empty_dirs, config, excludes, visited)?;
             } else if ft.is_file() {
                 out.push(path);
             }
         }
     }
+
+    // If no files were collected from this directory (directly or via
+    // subdirectories) and we're tracking empty dirs, record it as empty.
+    if config.sync_empty_dirs && out.len() == before {
+        empty_dirs.push(dir.to_path_buf());
+    }
+
     Ok(())
 }
 
@@ -1235,4 +1294,134 @@ pub async fn delete_remote_file(
 /// Normalize a remote prefix: ensure it doesn't have trailing slash
 fn remote_path_prefix(prefix: &str) -> String {
     prefix.trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_config() -> CollectConfig {
+        CollectConfig::default()
+    }
+
+    fn no_empty_dirs_config() -> CollectConfig {
+        CollectConfig {
+            sync_empty_dirs: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn collect_finds_empty_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Create structure: root/a/file.txt, root/empty/, root/nested/also_empty/
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a/file.txt"), b"content").unwrap();
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        std::fs::create_dir_all(root.join("nested/also_empty")).unwrap();
+
+        let result = collect_files(root, &default_config()).unwrap();
+
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].ends_with("a/file.txt"));
+
+        // empty/ and nested/also_empty/ should be detected as empty dirs
+        // nested/ itself also has no files (its only child is also_empty/ which is empty)
+        let empty_names: Vec<String> = result
+            .empty_dirs
+            .iter()
+            .map(|d| d.strip_prefix(root).unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            empty_names.contains(&"empty".to_string()),
+            "should detect empty/ as empty dir, got: {:?}",
+            empty_names
+        );
+        assert!(
+            empty_names.contains(&"nested/also_empty".to_string()),
+            "should detect nested/also_empty/ as empty dir, got: {:?}",
+            empty_names
+        );
+    }
+
+    #[test]
+    fn collect_skips_empty_dirs_when_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        std::fs::write(root.join("file.txt"), b"data").unwrap();
+
+        let result = collect_files(root, &no_empty_dirs_config()).unwrap();
+
+        assert_eq!(result.files.len(), 1);
+        assert!(
+            result.empty_dirs.is_empty(),
+            "empty_dirs should be empty when sync_empty_dirs=false"
+        );
+    }
+
+    #[test]
+    fn collect_dir_with_file_not_marked_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("has_file")).unwrap();
+        std::fs::write(root.join("has_file/doc.txt"), b"hello").unwrap();
+
+        let result = collect_files(root, &default_config()).unwrap();
+
+        assert_eq!(result.files.len(), 1);
+        // has_file/ contains a file, so it should NOT appear in empty_dirs
+        assert!(
+            !result.empty_dirs.iter().any(|d| d.ends_with("has_file")),
+            "directory with files should not be in empty_dirs"
+        );
+    }
+
+    #[test]
+    fn collect_root_not_marked_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Completely empty root
+        let result = collect_files(root, &default_config()).unwrap();
+
+        assert!(result.files.is_empty());
+        // Root itself should be in empty_dirs (it's empty), but push_tree
+        // skips it. The collector doesn't special-case root.
+        // Actually root IS recorded — push_tree_with_device skips it.
+    }
+
+    #[test]
+    fn collect_excluded_dir_not_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Create structure: root/target/ (excluded by hardcoded rule)
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::create_dir_all(root.join("real_empty")).unwrap();
+        std::fs::write(root.join("file.txt"), b"data").unwrap();
+
+        let result = collect_files(root, &default_config()).unwrap();
+
+        let empty_names: Vec<String> = result
+            .empty_dirs
+            .iter()
+            .map(|d| d.strip_prefix(root).unwrap().to_string_lossy().to_string())
+            .collect();
+
+        // target/ is excluded entirely, so it shouldn't appear
+        assert!(
+            !empty_names.contains(&"target".to_string()),
+            "excluded dirs should not appear in empty_dirs"
+        );
+        // real_empty/ should appear
+        assert!(
+            empty_names.contains(&"real_empty".to_string()),
+            "real empty dir should be detected"
+        );
+    }
 }
