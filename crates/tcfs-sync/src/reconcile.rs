@@ -166,7 +166,8 @@ pub async fn list_remote_index(
 ) -> Result<HashMap<String, RemoteIndexEntry>> {
     let index_prefix = format!("{}/index/", remote_prefix.trim_end_matches('/'));
     let entries = op
-        .list(&index_prefix)
+        .list_with(&index_prefix)
+        .recursive(true)
         .await
         .context("listing remote index")?;
 
