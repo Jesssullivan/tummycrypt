@@ -67,6 +67,104 @@ impl StatusBackend for StubBackend {
 }
 
 // ---------------------------------------------------------------------------
+// gRPC backend (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "grpc")]
+pub mod grpc_backend {
+    use super::{StatusBackend, SyncStatus};
+    use std::path::{Path, PathBuf};
+    use tonic::transport::{Channel, Endpoint, Uri};
+    use tower::service_fn;
+
+    /// Backend that queries the tcfsd daemon over gRPC Unix socket.
+    pub struct GrpcBackend {
+        socket_path: PathBuf,
+    }
+
+    impl GrpcBackend {
+        pub fn new(socket_path: &Path) -> Self {
+            Self {
+                socket_path: socket_path.to_path_buf(),
+            }
+        }
+
+        async fn connect(
+            &self,
+        ) -> Result<tcfs_core::proto::tcfs_daemon_client::TcfsDaemonClient<Channel>, anyhow::Error>
+        {
+            let path = self.socket_path.clone();
+            let channel = Endpoint::from_static("http://[::]:0")
+                .connect_with_connector(service_fn(move |_: Uri| {
+                    let path = path.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(&path).await?;
+                        Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+                    }
+                }))
+                .await?;
+            Ok(tcfs_core::proto::tcfs_daemon_client::TcfsDaemonClient::new(
+                channel,
+            ))
+        }
+
+        pub fn map_status(state: &str) -> SyncStatus {
+            match state {
+                "Synced" | "synced" => SyncStatus::Synced,
+                "Active" | "active" | "Syncing" | "syncing" => SyncStatus::Syncing,
+                "NotSynced" | "not_synced" => SyncStatus::Placeholder,
+                "Conflict" | "conflict" => SyncStatus::Conflict,
+                "Locked" | "locked" | "Error" | "error" => SyncStatus::Error,
+                _ => SyncStatus::Unknown,
+            }
+        }
+    }
+
+    impl StatusBackend for GrpcBackend {
+        async fn get_status(&self, path: &str) -> SyncStatus {
+            match self.connect().await {
+                Ok(mut client) => {
+                    let req = tcfs_core::proto::SyncStatusRequest {
+                        path: path.to_string(),
+                    };
+                    match client.sync_status(req).await {
+                        Ok(resp) => Self::map_status(&resp.into_inner().state),
+                        Err(e) => {
+                            tracing::debug!(error = %e, "gRPC sync_status failed");
+                            SyncStatus::Unknown
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "gRPC connect failed");
+                    SyncStatus::Unknown
+                }
+            }
+        }
+
+        async fn sync(&self, path: &str) -> anyhow::Result<()> {
+            let mut client = self.connect().await?;
+            let req = tcfs_core::proto::PullRequest {
+                remote_path: path.to_string(),
+                local_path: path.to_string(),
+            };
+            client.pull(req).await?;
+            Ok(())
+        }
+
+        async fn unsync(&self, path: &str) -> anyhow::Result<()> {
+            let mut client = self.connect().await?;
+            let req = tcfs_core::proto::UnsyncRequest {
+                path: path.to_string(),
+                force: false,
+            };
+            client.unsync(req).await?;
+            Ok(())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // D-Bus interface object
 // ---------------------------------------------------------------------------
 
@@ -187,5 +285,21 @@ mod tests {
     async fn stub_backend_returns_unknown() {
         let backend = StubBackend;
         assert_eq!(backend.get_status("/any/path").await, SyncStatus::Unknown);
+    }
+
+    #[cfg(feature = "grpc")]
+    #[test]
+    fn grpc_backend_status_mapping() {
+        use grpc_backend::GrpcBackend;
+        assert_eq!(GrpcBackend::map_status("Synced"), SyncStatus::Synced);
+        assert_eq!(GrpcBackend::map_status("synced"), SyncStatus::Synced);
+        assert_eq!(GrpcBackend::map_status("Active"), SyncStatus::Syncing);
+        assert_eq!(
+            GrpcBackend::map_status("NotSynced"),
+            SyncStatus::Placeholder
+        );
+        assert_eq!(GrpcBackend::map_status("Conflict"), SyncStatus::Conflict);
+        assert_eq!(GrpcBackend::map_status("Locked"), SyncStatus::Error);
+        assert_eq!(GrpcBackend::map_status("garbage"), SyncStatus::Unknown);
     }
 }

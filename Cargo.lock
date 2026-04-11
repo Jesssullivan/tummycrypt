@@ -5276,8 +5276,12 @@ name = "tcfs-dbus"
 version = "0.12.0"
 dependencies = [
  "anyhow",
+ "hyper-util",
  "serde",
+ "tcfs-core",
  "tokio",
+ "tonic",
+ "tower",
  "tracing",
  "zbus",
 ]

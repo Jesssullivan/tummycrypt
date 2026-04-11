@@ -235,6 +235,10 @@ pub struct SyncConfig {
     pub auto_unsync_disk_pressure_pct: f64,
     /// Maximum files to dehydrate per sweep (prevents long lock holds). 0 = unlimited.
     pub auto_unsync_max_per_sweep: usize,
+    /// Global auto-download threshold (bytes) for OnDemand folders.
+    /// Files smaller than this are auto-pulled on NATS events. 0 = never auto-download.
+    /// Default: 10MB. Per-folder overrides via PolicyStore.download_threshold.
+    pub auto_download_threshold: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,6 +379,7 @@ impl Default for SyncConfig {
             auto_unsync_dry_run: false,
             auto_unsync_disk_pressure_pct: 0.0,
             auto_unsync_max_per_sweep: 100,
+            auto_download_threshold: 10 * 1024 * 1024, // 10MB
         }
     }
 }
