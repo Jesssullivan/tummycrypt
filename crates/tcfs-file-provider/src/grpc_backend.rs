@@ -235,6 +235,7 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
                     modified_timestamp: entry.last_synced,
                     is_directory: entry.is_directory,
                     content_hash: to_c_string(&entry.blake3),
+                    hydration_state: to_c_string(&entry.hydration_state),
                 })
                 .collect();
 

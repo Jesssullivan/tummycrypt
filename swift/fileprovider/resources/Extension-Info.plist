@@ -14,7 +14,7 @@
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>LSMinimumSystemVersion</key>
@@ -31,6 +31,68 @@
         <true/>
         <key>NSExtensionFileProviderSupportsDatalessFolders</key>
         <true/>
+        <key>NSFileProviderDecorations</key>
+        <array>
+            <dict>
+                <key>Identifier</key>
+                <string>io.tinyland.tcfs.fileprovider.decoration.conflict</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.fileprovider.decoration.conflict</string>
+                <key>Label</key>
+                <string>Sync Conflict</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.tinyland.tcfs.fileprovider.decoration.locked</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.fileprovider.decoration.locked</string>
+                <key>Label</key>
+                <string>Locked</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.tinyland.tcfs.fileprovider.decoration.pinned</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.fileprovider.decoration.pinned</string>
+                <key>Label</key>
+                <string>Pinned</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.tinyland.tcfs.fileprovider.decoration.excluded</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.fileprovider.decoration.excluded</string>
+                <key>Label</key>
+                <string>Excluded from Sync</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+        </array>
+        <key>NSExtensionFileProviderActions</key>
+        <array>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key>
+                <string>io.tinyland.tcfs.action.unsync</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>Free Up Space (Unsync)</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>TRUEPREDICATE</string>
+            </dict>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key>
+                <string>io.tinyland.tcfs.action.pin</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>Always Keep on This Device</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>TRUEPREDICATE</string>
+            </dict>
+        </array>
     </dict>
 </dict>
 </plist>

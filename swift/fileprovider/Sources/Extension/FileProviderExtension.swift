@@ -576,3 +576,71 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return config
     }
 }
+
+// MARK: - Custom Actions (context menu items)
+
+extension TCFSFileProviderExtension: NSFileProviderCustomAction {
+    func performAction(
+        identifier actionIdentifier: NSFileProviderExtensionActionIdentifier,
+        onItemsWithIdentifiers itemIdentifiers: [NSFileProviderItemIdentifier],
+        completionHandler: @escaping (Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: Int64(itemIdentifiers.count))
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let prov = self?.provider else {
+                completionHandler(NSFileProviderError(.serverUnreachable))
+                return
+            }
+
+            for itemId in itemIdentifiers {
+                let itemPath = itemId.rawValue
+
+                switch actionIdentifier.rawValue {
+                case "io.tinyland.tcfs.action.unsync":
+                    // Dehydrate: call daemon's Unsync/Delete RPC to free disk space
+                    logger.info("action.unsync: \(itemPath)")
+                    let result = itemPath.withCString { pathPtr in
+                        tcfs_provider_delete(prov, pathPtr)
+                    }
+                    if result != TCFS_ERROR_TCFS_ERROR_NONE {
+                        logger.error("action.unsync failed for \(itemPath): \(result.rawValue)")
+                    }
+
+                case "io.tinyland.tcfs.action.pin":
+                    // Pin: fetch content immediately so it stays on disk
+                    logger.info("action.pin: \(itemPath)")
+                    let tmpDir = FileManager.default.temporaryDirectory
+                    let dest = tmpDir.appendingPathComponent(UUID().uuidString)
+                    let result = itemPath.withCString { pathPtr in
+                        dest.path.withCString { destPtr in
+                            tcfs_provider_fetch(prov, pathPtr, destPtr)
+                        }
+                    }
+                    if result != TCFS_ERROR_TCFS_ERROR_NONE {
+                        logger.error("action.pin failed for \(itemPath): \(result.rawValue)")
+                    }
+                    // Clean up temp file — the system manages the real materialized copy
+                    try? FileManager.default.removeItem(at: dest)
+
+                default:
+                    logger.warning("unknown action: \(actionIdentifier.rawValue)")
+                }
+
+                progress.completedUnitCount += 1
+            }
+
+            // Signal enumerator to refresh badges after action
+            if let domain = self?.domain {
+                NSFileProviderManager(for: domain)?.signalEnumerator(
+                    for: .rootContainer,
+                    completionHandler: { _ in }
+                )
+            }
+
+            completionHandler(nil)
+        }
+
+        return progress
+    }
+}
