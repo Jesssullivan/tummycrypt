@@ -137,6 +137,9 @@ message FileEntry {
   int64 last_synced = 4;
   bool is_directory = 5;
   string blake3 = 6;
+  // Hydration state: "not_synced" (placeholder), "synced" (downloaded),
+  // "active" (downloading/uploading), "conflict", "locked"
+  string hydration_state = 7;
 }
 
 message WatchRequest {
