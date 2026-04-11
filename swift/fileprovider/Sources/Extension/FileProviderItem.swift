@@ -1,6 +1,25 @@
 import FileProvider
 import UniformTypeIdentifiers
 
+/// Decoration identifiers for custom Finder badges.
+///
+/// These must match declarations in Extension-Info.plist under
+/// NSExtension > NSFileProviderDecorations.
+enum TCFSDecoration {
+    static let conflict = NSFileProviderItemDecorationIdentifier(
+        rawValue: "io.tinyland.tcfs.fileprovider.decoration.conflict"
+    )
+    static let locked = NSFileProviderItemDecorationIdentifier(
+        rawValue: "io.tinyland.tcfs.fileprovider.decoration.locked"
+    )
+    static let pinned = NSFileProviderItemDecorationIdentifier(
+        rawValue: "io.tinyland.tcfs.fileprovider.decoration.pinned"
+    )
+    static let excluded = NSFileProviderItemDecorationIdentifier(
+        rawValue: "io.tinyland.tcfs.fileprovider.decoration.excluded"
+    )
+}
+
 /// NSFileProviderItem implementation for TCFS files.
 ///
 /// Maps between the Rust `TcfsFileItem` C struct and the
@@ -8,7 +27,11 @@ import UniformTypeIdentifiers
 ///
 /// Supports placeholder (dataless) files: items with `isDownloaded = false`
 /// appear in Finder but content is only fetched on demand via `fetchContents`.
-class TCFSFileProviderItem: NSObject, NSFileProviderItem {
+///
+/// Conforms to `NSFileProviderItemDecorating` to render custom badges
+/// (conflict, locked, pinned, excluded) directly in Finder without
+/// needing a separate Finder Sync Extension.
+class TCFSFileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorating {
 
     let itemIdentifier: NSFileProviderItemIdentifier
     let parentItemIdentifier: NSFileProviderItemIdentifier
@@ -26,6 +49,9 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
     /// Whether the local copy is the latest version from remote.
     var isMostRecentVersionDownloaded: Bool
 
+    /// Hydration state from daemon: "synced", "not_synced", "active", "locked", "conflict".
+    var hydrationState: String
+
     init(
         identifier: NSFileProviderItemIdentifier,
         parentIdentifier: NSFileProviderItemIdentifier,
@@ -34,7 +60,8 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         fileSize: UInt64,
         downloaded: Bool = true,
         uploaded: Bool = true,
-        versionTag: String = "1"
+        versionTag: String = "1",
+        hydrationState: String = ""
     ) {
         self.itemIdentifier = identifier
         self.parentItemIdentifier = parentIdentifier
@@ -48,13 +75,14 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
         self.isDownloaded = isDirectory ? true : downloaded
         self.isUploaded = uploaded
         self.isMostRecentVersionDownloaded = isDirectory ? true : downloaded
+        self.hydrationState = hydrationState
     }
 
     var capabilities: NSFileProviderItemCapabilities {
         if contentType == .folder {
             return [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems, .allowsDeleting, .allowsRenaming]
         }
-        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting]
+        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting, .allowsEvicting]
     }
 
     /// Content policy controls eviction (dehydration) for placeholder support.
@@ -65,6 +93,27 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem {
             return .inherited
         }
         return .downloadLazilyAndEvictOnRemoteUpdate
+    }
+
+    // MARK: - NSFileProviderItemDecorating
+
+    /// Custom badge decorations based on hydration/sync state.
+    ///
+    /// Replaces the FinderSync extension badges — FileProvider handles
+    /// standard sync badges (cloud/checkmark/progress) automatically,
+    /// so we only add custom decorations for states that need extra
+    /// visual indicators.
+    var decorations: [NSFileProviderItemDecorationIdentifier]? {
+        switch hydrationState {
+        case "conflict":
+            return [TCFSDecoration.conflict]
+        case "locked":
+            return [TCFSDecoration.locked]
+        default:
+            // "synced", "not_synced", "active" — use FileProvider's
+            // built-in badges (isDownloaded, isUploading, etc.)
+            return nil
+        }
     }
 
     static func rootItem() -> TCFSFileProviderItem {

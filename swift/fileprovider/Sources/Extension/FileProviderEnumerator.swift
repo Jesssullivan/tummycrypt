@@ -79,6 +79,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 let itemId = item.item_id.map { String(cString: $0) } ?? ""
                 let filename = item.filename.map { String(cString: $0) } ?? ""
                 let contentHash = item.content_hash.map { String(cString: $0) } ?? "1"
+                let hydration = item.hydration_state.map { String(cString: $0) } ?? ""
 
                 // Items are created as placeholders (downloaded: false).
                 // Content will be fetched on demand via fetchContents.
@@ -91,7 +92,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                         fileSize: item.file_size,
                         downloaded: false,
                         uploaded: true,
-                        versionTag: contentHash
+                        versionTag: contentHash,
+                        hydrationState: hydration
                     )
                 )
             }

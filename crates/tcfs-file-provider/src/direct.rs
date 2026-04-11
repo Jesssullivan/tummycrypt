@@ -227,6 +227,7 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
                 modified_timestamp: 0,
                 is_directory: is_dir,
                 content_hash: to_c_string(""),
+                hydration_state: to_c_string("not_synced"),
             });
         }
 
