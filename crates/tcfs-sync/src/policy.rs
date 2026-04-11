@@ -128,6 +128,47 @@ impl PolicyStore {
         &self.policies
     }
 
+    /// Get the effective sync mode for a path with parent-chain inheritance.
+    ///
+    /// Returns the `SyncMode` from the most specific matching policy,
+    /// or `OnDemand` if no policy covers this path.
+    pub fn effective_mode(&self, path: &Path) -> SyncMode {
+        self.get(path)
+            .map(|p| p.sync_mode)
+            .unwrap_or(SyncMode::OnDemand)
+    }
+
+    /// Get the effective download threshold for a path.
+    ///
+    /// Returns `Some(bytes)` if a threshold is set on the path or any ancestor,
+    /// `None` if no threshold configured (use global default).
+    pub fn effective_download_threshold(&self, path: &Path) -> Option<u64> {
+        self.get(path).and_then(|p| p.download_threshold)
+    }
+
+    /// Check if a path should auto-download based on policy and file size.
+    ///
+    /// Returns `true` if:
+    /// - Mode is `Always` (unconditional download), or
+    /// - Mode is `OnDemand` AND file size ≤ download_threshold (or threshold specified by `global_threshold`)
+    ///
+    /// Returns `false` if:
+    /// - Mode is `Never`, or
+    /// - Mode is `OnDemand` and file exceeds threshold
+    pub fn should_auto_download(&self, path: &Path, file_size: u64, global_threshold: u64) -> bool {
+        let mode = self.effective_mode(path);
+        match mode {
+            SyncMode::Always => true,
+            SyncMode::Never => false,
+            SyncMode::OnDemand => {
+                let threshold = self
+                    .effective_download_threshold(path)
+                    .unwrap_or(global_threshold);
+                file_size <= threshold
+            }
+        }
+    }
+
     /// Check if a path is exempt from auto-unsync (walks parent chain).
     pub fn is_auto_unsync_exempt(&self, path: &Path) -> bool {
         self.get(path)
@@ -298,5 +339,137 @@ mod tests {
         assert!(store.remove(Path::new("/test")));
         assert_eq!(store.all().len(), 0);
         assert!(!store.remove(Path::new("/nonexistent")));
+    }
+
+    #[test]
+    fn test_effective_mode_default() {
+        let store = PolicyStore::default();
+        // No policies set → default OnDemand
+        assert_eq!(
+            store.effective_mode(Path::new("/any/path")),
+            SyncMode::OnDemand
+        );
+    }
+
+    #[test]
+    fn test_effective_mode_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policies.json");
+        let mut store = PolicyStore::open(&path).unwrap();
+
+        let parent = dir.path().join("projects");
+        let child = parent.join("subdir");
+        let file = child.join("file.txt");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(&file, b"data").unwrap();
+
+        store.set(
+            &parent,
+            FolderPolicy {
+                sync_mode: SyncMode::Always,
+                ..Default::default()
+            },
+        );
+
+        // Child inherits Always from parent
+        assert_eq!(store.effective_mode(&file), SyncMode::Always);
+        // Unrelated path gets OnDemand
+        assert_eq!(
+            store.effective_mode(Path::new("/other")),
+            SyncMode::OnDemand
+        );
+    }
+
+    #[test]
+    fn test_should_auto_download_always() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policies.json");
+        let mut store = PolicyStore::open(&path).unwrap();
+
+        let folder = dir.path().join("always_sync");
+        std::fs::create_dir_all(&folder).unwrap();
+        store.set(
+            &folder,
+            FolderPolicy {
+                sync_mode: SyncMode::Always,
+                ..Default::default()
+            },
+        );
+
+        let file = folder.join("huge.bin");
+        std::fs::write(&file, b"x").unwrap();
+
+        // Always mode downloads regardless of size
+        assert!(store.should_auto_download(&file, 1_000_000_000, 0));
+    }
+
+    #[test]
+    fn test_should_auto_download_never() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policies.json");
+        let mut store = PolicyStore::open(&path).unwrap();
+
+        let folder = dir.path().join("never_sync");
+        std::fs::create_dir_all(&folder).unwrap();
+        store.set(
+            &folder,
+            FolderPolicy {
+                sync_mode: SyncMode::Never,
+                ..Default::default()
+            },
+        );
+
+        let file = folder.join("small.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        // Never mode blocks all downloads
+        assert!(!store.should_auto_download(&file, 1, 1_000_000_000));
+    }
+
+    #[test]
+    fn test_should_auto_download_on_demand_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policies.json");
+        let store = PolicyStore::open(&path).unwrap();
+
+        let file = dir.path().join("data.bin");
+        std::fs::write(&file, b"x").unwrap();
+
+        let threshold = 10 * 1024 * 1024; // 10MB
+
+        // Under threshold: auto-download
+        assert!(store.should_auto_download(&file, 5_000_000, threshold));
+        // Over threshold: skip
+        assert!(!store.should_auto_download(&file, 50_000_000, threshold));
+        // Exactly at threshold: download
+        assert!(store.should_auto_download(&file, threshold, threshold));
+    }
+
+    #[test]
+    fn test_should_auto_download_per_folder_threshold_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policies.json");
+        let mut store = PolicyStore::open(&path).unwrap();
+
+        let folder = dir.path().join("big_files");
+        std::fs::create_dir_all(&folder).unwrap();
+        store.set(
+            &folder,
+            FolderPolicy {
+                sync_mode: SyncMode::OnDemand,
+                download_threshold: Some(100 * 1024 * 1024), // 100MB override
+                ..Default::default()
+            },
+        );
+
+        let file = folder.join("medium.bin");
+        std::fs::write(&file, b"x").unwrap();
+
+        let global_threshold = 10 * 1024 * 1024; // 10MB global
+
+        // 50MB file: exceeds global (10MB) but under per-folder (100MB)
+        assert!(store.should_auto_download(&file, 50_000_000, global_threshold));
+        // 200MB file: exceeds even per-folder threshold
+        assert!(!store.should_auto_download(&file, 200_000_000, global_threshold));
     }
 }
