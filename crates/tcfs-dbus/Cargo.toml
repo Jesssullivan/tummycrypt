@@ -12,3 +12,13 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
+
+# Optional: gRPC backend for connecting to tcfsd
+tcfs-core = { path = "../tcfs-core", optional = true }
+tonic = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+
+[features]
+default = []
+grpc = ["dep:tcfs-core", "dep:tonic", "dep:tower", "dep:hyper-util"]

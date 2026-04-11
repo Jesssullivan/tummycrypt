@@ -873,6 +873,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sync_conflict_mode = config.sync.conflict_mode.clone();
                     let sync_root = config.sync.sync_root.clone();
                     let storage_prefix = config.storage.bucket.clone();
+                    let policy_path = data_dir.join("folder-policies.json");
+                    let download_threshold = config.sync.auto_download_threshold;
                     spawn_state_sync_loop(
                         &nats,
                         &sync_device_id,
@@ -883,6 +885,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         storage_prefix,
                         impl_.vfs_handle.clone(),
                         path_locks.clone(),
+                        policy_path.clone(),
+                        download_threshold,
                     )
                     .await;
 
@@ -1104,6 +1108,8 @@ async fn spawn_state_sync_loop(
     storage_prefix: String,
     vfs_handle: tokio::sync::watch::Receiver<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
     path_locks: tcfs_sync::state::PathLocks,
+    policy_path: std::path::PathBuf,
+    auto_download_threshold: u64,
 ) {
     use futures::StreamExt;
 
@@ -1146,6 +1152,50 @@ async fn spawn_state_sync_loop(
                                         "remote file synced"
                                     );
 
+                                    // Check folder policy before auto-pulling
+                                    let policy_store =
+                                        tcfs_sync::policy::PolicyStore::open(&policy_path)
+                                            .unwrap_or_default();
+                                    let file_path = sync_root
+                                        .as_ref()
+                                        .map(|r| r.join(rel_path))
+                                        .unwrap_or_else(|| std::path::PathBuf::from(rel_path));
+                                    let effective_mode = policy_store.effective_mode(&file_path);
+
+                                    // Never-mode paths are completely ignored
+                                    if effective_mode == tcfs_sync::policy::SyncMode::Never {
+                                        debug!(
+                                            path = %rel_path,
+                                            "skipping auto-pull: folder policy is Never"
+                                        );
+                                        if let Err(e) = msg.ack().await {
+                                            warn!("ack failed: {e}");
+                                        }
+                                        continue;
+                                    }
+
+                                    // OnDemand mode: only auto-pull if size ≤ threshold
+                                    if effective_mode == tcfs_sync::policy::SyncMode::OnDemand {
+                                        if !policy_store.should_auto_download(
+                                            &file_path,
+                                            *size,
+                                            auto_download_threshold,
+                                        ) {
+                                            debug!(
+                                                path = %rel_path,
+                                                size,
+                                                threshold = auto_download_threshold,
+                                                "skipping auto-pull: OnDemand file exceeds download threshold"
+                                            );
+                                            if let Err(e) = msg.ack().await {
+                                                warn!("ack failed: {e}");
+                                            }
+                                            continue;
+                                        }
+                                    }
+
+                                    // Always mode: unconditional auto-pull
+                                    // OnDemand mode (under threshold): conditional auto-pull
                                     match conflict_mode.as_str() {
                                         "auto" => {
                                             handle_auto_pull(
