@@ -65,6 +65,17 @@ struct FileHandle {
 pub type OnFlushCallback =
     Arc<dyn Fn(&str, &str, u64, usize, &VectorClock) + Send + Sync + 'static>;
 
+/// Result of an unsync (dehydration) operation.
+#[derive(Debug)]
+pub struct UnsyncResult {
+    /// Virtual path that was unsynced.
+    pub path: String,
+    /// Bytes freed from disk cache.
+    pub bytes_freed: u64,
+    /// Whether the file was actually cached (false = already a stub).
+    pub was_cached: bool,
+}
+
 /// The tcfs virtual filesystem driver.
 ///
 /// Protocol-agnostic: implements `VirtualFilesystem` for use by FUSE, NFS,
@@ -170,6 +181,54 @@ impl TcfsVfs {
             let parent = if parent.is_empty() { "/" } else { parent };
             self.negative_cache.remove(parent);
         }
+    }
+
+    /// Unsync (dehydrate) a file: evict it from the disk cache.
+    ///
+    /// After this the file appears as a stub in the VFS and will be
+    /// re-hydrated on-demand when next accessed.
+    pub async fn unsync_path(&self, vpath: &str) -> Result<UnsyncResult> {
+        let clean = vpath.trim_start_matches('/');
+        let index_key = if self.prefix.is_empty() {
+            format!("index/{clean}")
+        } else {
+            format!("{}/index/{clean}", self.prefix)
+        };
+
+        // Read the index entry to get the manifest hash (= cache key)
+        let idx_bytes = self
+            .op
+            .read(&index_key)
+            .await
+            .with_context(|| format!("unsync: reading index for {vpath}"))?;
+        let idx_raw = idx_bytes.to_bytes();
+        let idx_str = String::from_utf8_lossy(&idx_raw);
+
+        // Parse manifest_hash from index entry
+        // Format: "manifest_hash=HASH\nsize=...\nchunks=..."
+        let manifest_hash = idx_str
+            .lines()
+            .find_map(|line| line.strip_prefix("manifest_hash="))
+            .context("unsync: no manifest_hash in index entry")?
+            .to_string();
+
+        // Evict from disk cache
+        let bytes_freed = self.disk_cache.evict(&manifest_hash).await?;
+
+        // Close any open file handles for this path
+        {
+            let mut handles = self.handles.write().await;
+            handles.retain(|_, h| h.path != vpath);
+        }
+
+        // Clear negative cache for this path (it's still a valid remote entry)
+        self.negative_cache.remove(clean);
+
+        Ok(UnsyncResult {
+            path: vpath.to_string(),
+            bytes_freed,
+            was_cached: bytes_freed > 0,
+        })
     }
 
     /// Flush modified file content to SeaweedFS (index + manifest + chunks).

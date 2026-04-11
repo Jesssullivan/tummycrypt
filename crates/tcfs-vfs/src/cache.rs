@@ -103,6 +103,47 @@ impl DiskCache {
 
         Ok(())
     }
+
+    /// Evict a specific cache entry by key. Returns bytes freed, or 0 if not cached.
+    pub async fn evict(&self, key: &str) -> Result<u64> {
+        let path = self.path_for(key);
+        match fs::metadata(&path).await {
+            Ok(meta) => {
+                let size = meta.len();
+                fs::remove_file(&path)
+                    .await
+                    .with_context(|| format!("evicting cache entry: {}", path.display()))?;
+                Ok(size)
+            }
+            Err(_) => Ok(0), // Not cached
+        }
+    }
+
+    /// Evict all cache entries whose key starts with `prefix`. Returns total bytes freed.
+    ///
+    /// Walks the two-level shard directories and removes matching files.
+    pub async fn evict_prefix(&self, prefix: &str) -> Result<u64> {
+        let mut freed = 0u64;
+        let mut top = fs::read_dir(&self.dir).await?;
+        while let Some(shard) = top.next_entry().await? {
+            if !shard.file_type().await?.is_dir() {
+                continue;
+            }
+            let mut inner = fs::read_dir(shard.path()).await?;
+            while let Some(entry) = inner.next_entry().await? {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(prefix) {
+                    if let Ok(meta) = entry.metadata().await {
+                        if meta.is_file() {
+                            freed += meta.len();
+                            let _ = fs::remove_file(entry.path()).await;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(freed)
+    }
 }
 
 /// Statistics about the disk cache
@@ -243,5 +284,44 @@ mod tests {
         let stats = cache.stats().await.unwrap();
         assert_eq!(stats.entry_count, 1);
         assert_eq!(stats.total_bytes, 11);
+    }
+
+    #[tokio::test]
+    async fn evict_returns_bytes_freed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 1024 * 1024);
+
+        let data = vec![0xABu8; 4096];
+        cache.put("test_key_abc", &data).await.unwrap();
+        assert!(cache.contains("test_key_abc").await);
+
+        let freed = cache.evict("test_key_abc").await.unwrap();
+        assert_eq!(freed, 4096);
+        assert!(!cache.contains("test_key_abc").await);
+    }
+
+    #[tokio::test]
+    async fn evict_missing_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 1024 * 1024);
+
+        let freed = cache.evict("nonexistent").await.unwrap();
+        assert_eq!(freed, 0);
+    }
+
+    #[tokio::test]
+    async fn evict_prefix_removes_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 1024 * 1024);
+
+        cache.put("abc_one", b"data1").await.unwrap();
+        cache.put("abc_two", b"data22").await.unwrap();
+        cache.put("xyz_other", b"data333").await.unwrap();
+
+        let freed = cache.evict_prefix("abc").await.unwrap();
+        assert_eq!(freed, 5 + 6); // "data1" + "data22"
+        assert!(!cache.contains("abc_one").await);
+        assert!(!cache.contains("abc_two").await);
+        assert!(cache.contains("xyz_other").await);
     }
 }
