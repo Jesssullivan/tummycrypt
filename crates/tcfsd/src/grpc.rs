@@ -1497,7 +1497,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     }
                 }
             }
-            _ => return Err(tonic::Status::invalid_argument("unsupported resolution strategy")),
+            _ => {
+                return Err(tonic::Status::invalid_argument(
+                    "unsupported resolution strategy",
+                ))
+            }
         }
     }
 
