@@ -767,7 +767,8 @@ fn load_device_id(config: &tcfs_core::config::TcfsConfig) -> String {
             match registry.find(&device_name) {
                 Some(d) if d.device_id.is_empty() => {
                     // Backfill device_id for entries created before UUID generation
-                    let new_id = registry.backfill_device_id(&device_name)
+                    let new_id = registry
+                        .backfill_device_id(&device_name)
                         .expect("backfill_device_id with valid device name");
                     if let Err(e) = registry.save(&registry_path) {
                         eprintln!("warning: failed to save backfilled device registry: {e}");
