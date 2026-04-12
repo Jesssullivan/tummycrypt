@@ -1045,13 +1045,8 @@ mod tests {
             let c_path = CString::new("").unwrap();
             let mut events: *mut crate::TcfsChangeEvent = ptr::null_mut();
             let mut count: usize = 0;
-            let err = tcfs_provider_enumerate_changes(
-                prov,
-                c_path.as_ptr(),
-                0,
-                &mut events,
-                &mut count,
-            );
+            let err =
+                tcfs_provider_enumerate_changes(prov, c_path.as_ptr(), 0, &mut events, &mut count);
             assert_eq!(err, TcfsError::TcfsErrorNone);
             assert_eq!(count, 0);
 
@@ -1102,8 +1097,15 @@ mod tests {
                 ptr::null(),
             );
             assert_eq!(err, TcfsError::TcfsErrorNone);
-            assert!(PROGRESS_CALLED.load(Ordering::SeqCst), "progress callback should have been called");
-            assert_eq!(LAST_TOTAL.load(Ordering::SeqCst), 4096, "total should match file size");
+            assert!(
+                PROGRESS_CALLED.load(Ordering::SeqCst),
+                "progress callback should have been called"
+            );
+            assert_eq!(
+                LAST_TOTAL.load(Ordering::SeqCst),
+                4096,
+                "total should match file size"
+            );
 
             // Verify data
             let fetched = std::fs::read(&dest).unwrap();
