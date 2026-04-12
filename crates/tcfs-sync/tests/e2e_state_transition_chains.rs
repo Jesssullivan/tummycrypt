@@ -612,13 +612,8 @@ async fn unsync_modify_resync_no_conflict() {
     );
 
     // Verify no conflict in the outcome
-    if let Some(ref outcome) = upload2.outcome {
-        match outcome {
-            SyncOutcome::Conflict(_) => {
-                panic!("re-upload after dehydration should not produce a conflict")
-            }
-            _ => {} // LocalNewer, RemoteNewer, UpToDate are all acceptable
-        }
+    if let Some(SyncOutcome::Conflict(_)) = upload2.outcome {
+        panic!("re-upload after dehydration should not produce a conflict")
     }
 }
 

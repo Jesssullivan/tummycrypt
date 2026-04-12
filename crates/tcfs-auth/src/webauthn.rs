@@ -187,7 +187,7 @@ impl AuthProvider for WebAuthnProvider {
 
         let (rcr, auth_state) = self
             .webauthn
-            .start_passkey_authentication(&[credential.passkey.clone()])
+            .start_passkey_authentication(std::slice::from_ref(&credential.passkey))
             .map_err(|e| anyhow::anyhow!("failed to start authentication: {e}"))?;
 
         let challenge_id = uuid::Uuid::new_v4().to_string();
