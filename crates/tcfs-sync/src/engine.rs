@@ -1680,3 +1680,35 @@ mod tests {
         assert_eq!(remote_path_prefix("a/b/c/"), "a/b/c");
     }
 }
+
+#[cfg(test)]
+mod proptest_suite {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// normalize_rel_path must never panic on arbitrary path strings.
+        #[test]
+        fn normalize_never_panics(input in ".*") {
+            let _ = normalize_rel_path(Path::new(&input), None);
+        }
+
+        /// Output never contains backslashes (Windows path separators).
+        #[test]
+        fn normalize_no_backslash(input in ".*") {
+            let result = normalize_rel_path(Path::new(&input), None);
+            prop_assert!(!result.contains('\\'), "backslash in output: {result}");
+        }
+
+        /// With a real tempdir as sync_root, file paths under it are relativized.
+        #[test]
+        fn normalize_under_root_is_relative(filename in "[a-zA-Z][a-zA-Z0-9._-]{0,63}") {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join(&filename);
+            std::fs::write(&file, b"x").unwrap();
+
+            let result = normalize_rel_path(&file, Some(dir.path()));
+            prop_assert_eq!(result, filename);
+        }
+    }
+}
