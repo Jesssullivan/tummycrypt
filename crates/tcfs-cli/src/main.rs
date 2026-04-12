@@ -642,10 +642,9 @@ async fn load_config(path: &Path) -> Result<tcfs_core::config::TcfsConfig> {
 ///   6. File-pointer env vars (*_FILE)
 ///   7. AWS shared credentials file (~/.aws/credentials)
 async fn build_operator(config: &tcfs_core::config::TcfsConfig) -> Result<opendal::Operator> {
-    let cred_store =
-        tcfs_secrets::CredStore::load(&config.secrets, &config.storage)
-            .await
-            .context("credential discovery failed")?;
+    let cred_store = tcfs_secrets::CredStore::load(&config.secrets, &config.storage)
+        .await
+        .context("credential discovery failed")?;
 
     let s3 = cred_store.s3.context(
         "S3 credentials not found.\n\
