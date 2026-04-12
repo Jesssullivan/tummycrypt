@@ -236,12 +236,12 @@ mod tests {
         .unwrap();
 
         // Trash it
-        let trash_key = trash_index_entry(&op, prefix, index_key, "doc.txt")
+        let _trash_key = trash_index_entry(&op, prefix, index_key, "doc.txt")
             .await
             .unwrap();
 
         // Original should be gone
-        assert!(!op.read(index_key).await.is_ok());
+        assert!(op.read(index_key).await.is_err());
 
         // Should appear in trash list
         let entries = list_trash(&op, prefix).await.unwrap();
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(purged, 1);
 
         // Should be gone
-        assert!(!op.read(old_key).await.is_ok());
+        assert!(op.read(old_key).await.is_err());
     }
 
     #[tokio::test]

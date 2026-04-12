@@ -1276,7 +1276,7 @@ async fn cmd_trash(config: &tcfs_core::config::TcfsConfig, action: TrashAction) 
                 return Ok(());
             }
 
-            println!("{:<40} {:<20} {}", "ORIGINAL PATH", "TRASHED", "TRASH KEY");
+            println!("{:<40} {:<20} TRASH KEY", "ORIGINAL PATH", "TRASHED");
             println!("{}", "-".repeat(90));
 
             for entry in &entries {
@@ -1913,7 +1913,7 @@ async fn cmd_mount(
                 cache_dir,
                 cache_max_bytes: cache_max,
                 negative_ttl_secs: neg_ttl,
-                read_only: read_only,
+                read_only,
                 allow_other: false,
                 on_flush,
                 device_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "cli".to_string()),
@@ -1962,7 +1962,7 @@ fn cmd_unmount(mountpoint: &std::path::Path) -> Result<()> {
         match status {
             Ok(s) if s.success() => {
                 println!("Unmounted: {}", mountpoint.display());
-                return Ok(());
+                Ok(())
             }
             Ok(s) => anyhow::bail!(
                 "umount exited {}: try `diskutil unmount {}`",

@@ -99,21 +99,12 @@ pub struct ReconcilePlan {
 }
 
 /// Configuration controlling reconciliation behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ReconcileConfig {
     /// Delete local files that were synced but no longer exist on remote.
     pub delete_local_orphans: bool,
     /// Delete remote files that were synced but no longer exist locally.
     pub delete_remote_orphans: bool,
-}
-
-impl Default for ReconcileConfig {
-    fn default() -> Self {
-        Self {
-            delete_local_orphans: false,
-            delete_remote_orphans: false,
-        }
-    }
 }
 
 /// Result of executing a reconciliation plan.
@@ -302,6 +293,7 @@ pub async fn reconcile(
 }
 
 /// Classify a single path into a reconciliation action.
+#[allow(clippy::too_many_arguments)]
 async fn classify_path(
     rel_path: &str,
     local: Option<&PathBuf>,
@@ -387,7 +379,7 @@ async fn classify_path(
 /// Compare when both local and remote exist — uses vector clocks.
 async fn compare_both_exist(
     rel_path: &str,
-    local_path: &PathBuf,
+    local_path: &Path,
     remote_entry: &RemoteIndexEntry,
     tracked: Option<&SyncState>,
     op: &Operator,
@@ -421,7 +413,7 @@ async fn compare_both_exist(
             Err(e) => {
                 warn!(path = manifest_path, error = %e, "failed to parse remote manifest");
                 return ReconcileAction::Push {
-                    local_path: local_path.clone(),
+                    local_path: local_path.to_path_buf(),
                     rel_path: rel_path.to_string(),
                     reason: PushReason::NewLocal,
                 };
@@ -430,7 +422,7 @@ async fn compare_both_exist(
         Err(e) => {
             warn!(path = manifest_path, error = %e, "failed to read remote manifest");
             return ReconcileAction::Push {
-                local_path: local_path.clone(),
+                local_path: local_path.to_path_buf(),
                 rel_path: rel_path.to_string(),
                 reason: PushReason::NewLocal,
             };
@@ -454,7 +446,7 @@ async fn compare_both_exist(
             rel_path: rel_path.to_string(),
         },
         crate::conflict::SyncOutcome::LocalNewer => ReconcileAction::Push {
-            local_path: local_path.clone(),
+            local_path: local_path.to_path_buf(),
             rel_path: rel_path.to_string(),
             reason: PushReason::LocalNewer,
         },
@@ -476,6 +468,7 @@ async fn compare_both_exist(
 /// Execute a reconciliation plan, performing all I/O operations.
 ///
 /// Errors on individual actions are collected — the plan continues past failures.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_plan(
     plan: &ReconcilePlan,
     op: &Operator,

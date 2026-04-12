@@ -1131,7 +1131,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 interval.tick().await;
 
                 // Check disk pressure — if under threshold and not time-based, skip
-                let under_pressure = sync_root.as_ref().map_or(false, |root| {
+                let under_pressure = sync_root.as_ref().is_some_and(|root| {
                     tcfs_sync::auto_unsync::disk_pressure_check(root, disk_pressure_pct)
                 });
 
@@ -1305,23 +1305,23 @@ async fn spawn_state_sync_loop(
                                     }
 
                                     // OnDemand mode: only auto-pull if size ≤ threshold
-                                    if effective_mode == tcfs_sync::policy::SyncMode::OnDemand {
-                                        if !policy_store.should_auto_download(
+                                    if effective_mode == tcfs_sync::policy::SyncMode::OnDemand
+                                        && !policy_store.should_auto_download(
                                             &file_path,
                                             *size,
                                             auto_download_threshold,
-                                        ) {
-                                            debug!(
-                                                path = %rel_path,
-                                                size,
-                                                threshold = auto_download_threshold,
-                                                "skipping auto-pull: OnDemand file exceeds download threshold"
-                                            );
-                                            if let Err(e) = msg.ack().await {
-                                                warn!("ack failed: {e}");
-                                            }
-                                            continue;
+                                        )
+                                    {
+                                        debug!(
+                                            path = %rel_path,
+                                            size,
+                                            threshold = auto_download_threshold,
+                                            "skipping auto-pull: OnDemand file exceeds download threshold"
+                                        );
+                                        if let Err(e) = msg.ack().await {
+                                            warn!("ack failed: {e}");
                                         }
+                                        continue;
                                     }
 
                                     // Always mode: unconditional auto-pull
@@ -1393,7 +1393,7 @@ async fn spawn_state_sync_loop(
                                 }
                                 tcfs_sync::StateEvent::FileDeleted {
                                     rel_path,
-                                    vclock: remote_vclock,
+                                    vclock: _remote_vclock,
                                     ..
                                 } => {
                                     info!(
@@ -1621,7 +1621,7 @@ async fn handle_auto_pull(
 ///
 /// We only update the state cache so vector clocks stay in sync.
 async fn do_auto_download(
-    device_id: &str,
+    _device_id: &str,
     manifest_path: &str,
     local_path: &std::path::Path,
     operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,

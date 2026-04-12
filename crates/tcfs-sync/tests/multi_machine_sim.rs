@@ -9,7 +9,7 @@
 //!   5. Eventual convergence — after draining events, all online machines agree
 
 use proptest::prelude::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use tcfs_sync::conflict::{compare_clocks, SyncOutcome, VectorClock};
 use tcfs_sync::manifest::SyncManifest;
 
@@ -599,7 +599,7 @@ proptest! {
 
             if hashes.len() > 1 {
                 let first = hashes[0];
-                for (i, h) in hashes.iter().enumerate().skip(1) {
+                for (_i, h) in hashes.iter().enumerate().skip(1) {
                     prop_assert_eq!(
                         *h,
                         first,

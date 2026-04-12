@@ -67,7 +67,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
         let master_key = config["encryption_passphrase"]
             .as_str()
             .filter(|s| !s.is_empty())
-            .map(|passphrase| {
+            .and_then(|passphrase| {
                 let salt_str = config["encryption_salt"]
                     .as_str()
                     .unwrap_or("tcfs-default-salt!");
@@ -88,8 +88,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
                     &params,
                 )
                 .ok()
-            })
-            .flatten();
+            });
 
         // Single-threaded tokio runtime to avoid deadlock with fileproviderd.
         // Multi-threaded runtime spawns worker threads that contend with XPC
