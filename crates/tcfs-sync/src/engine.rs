@@ -133,6 +133,7 @@ pub async fn upload_file(
 
 /// Upload with device identity, vector clock awareness, and optional encryption.
 #[allow(unused_variables)]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_file_with_device(
     op: &Operator,
     local_path: &Path,
@@ -614,6 +615,7 @@ pub async fn download_file(
 
 /// Download with device identity, vector clock merge, and optional decryption.
 #[allow(unused_variables)]
+#[allow(clippy::too_many_arguments)]
 pub async fn download_file_with_device(
     op: &Operator,
     remote_manifest: &str,
@@ -866,6 +868,7 @@ pub async fn push_tree(
 }
 
 /// Push tree with device identity, optional collection config, and optional encryption.
+#[allow(clippy::too_many_arguments)]
 pub async fn push_tree_with_device(
     op: &Operator,
     local_root: &Path,

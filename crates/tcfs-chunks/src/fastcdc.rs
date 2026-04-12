@@ -143,7 +143,7 @@ pub fn chunk_file_streaming(path: &Path) -> Result<Vec<ChunkWithData>> {
         let entry = result.map_err(|e| anyhow::anyhow!("streaming chunk error: {e}"))?;
         let hash = crate::blake3::hash_bytes(&entry.data);
         chunks.push(ChunkWithData {
-            offset: entry.offset as u64,
+            offset: entry.offset,
             data: entry.data,
             hash,
         });
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn streaming_empty_file() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), &[]).unwrap();
+        std::fs::write(tmp.path(), []).unwrap();
 
         let chunks = chunk_file_streaming(tmp.path()).unwrap();
         assert!(chunks.is_empty(), "empty file should yield 0 chunks");

@@ -4,7 +4,6 @@
 //! conflict selection, and uptime history management.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tcfs_core::config::TcfsConfig;
 
 // ── Re-implement App model for testing (binary crate, can't import directly) ──
 

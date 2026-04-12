@@ -3,7 +3,6 @@
 //! These tests prove that the Blacklist module is consulted during the
 //! engine's upload path. If the wiring is removed, these tests FAIL.
 
-use std::path::Path;
 use tcfs_e2e::{memory_operator, write_test_file};
 use tempfile::TempDir;
 
@@ -31,7 +30,7 @@ async fn blacklist_excludes_glob_from_push() {
     assert!(result.is_ok(), "keep.txt push should succeed");
 
     // Push excluded.log — engine should check blacklist and skip
-    let log_path = dir.path().join("excluded.log");
+    let _log_path = dir.path().join("excluded.log");
     let rel = "excluded.log";
     let reason = blacklist.check_name(rel, false);
     assert!(
@@ -72,9 +71,11 @@ fn blacklist_default_patterns_work() {
 /// Blacklist constructed from SyncConfig reads exclude_patterns.
 #[test]
 fn blacklist_from_config_reads_patterns() {
-    let mut config = tcfs_core::config::SyncConfig::default();
-    config.exclude_patterns = vec!["*.tmp".into(), "build/**".into()];
-    config.sync_git_dirs = true;
+    let config = tcfs_core::config::SyncConfig {
+        exclude_patterns: vec!["*.tmp".into(), "build/**".into()],
+        sync_git_dirs: true,
+        ..Default::default()
+    };
 
     let bl = tcfs_sync::blacklist::Blacklist::from_sync_config(&config);
 

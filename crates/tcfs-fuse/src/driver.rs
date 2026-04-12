@@ -18,7 +18,7 @@ use opendal::Operator;
 use tracing::{debug, info, warn};
 
 use tcfs_vfs::types::VfsFileType;
-use tcfs_vfs::{OnFlushCallback, TcfsVfs, VfsAttr, VirtualFilesystem};
+use tcfs_vfs::{TcfsVfs, VfsAttr, VirtualFilesystem};
 
 // ── Configuration ─────────────────────────────────────────────────────────
 

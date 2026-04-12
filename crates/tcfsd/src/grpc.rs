@@ -356,7 +356,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let mp = mountpoint.clone();
         let cache_dir = self.config.fuse.cache_dir.clone();
-        let cache_max = self.config.fuse.cache_max_mb as u64 * 1024 * 1024;
+        let cache_max = self.config.fuse.cache_max_mb * 1024 * 1024;
         let neg_ttl = self.config.fuse.negative_cache_ttl_secs;
         let mountpoint_key = req.mountpoint.clone();
         let active_mounts_watcher = self.active_mounts.clone();
@@ -1648,7 +1648,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         // the daemon's durable state_sync_loop consumer for messages.
         let nats_tx = async_tx;
         let nats_client = self.nats.clone();
-        let device_id = self.device_id.clone();
+        let _device_id = self.device_id.clone();
         tokio::spawn(async move {
             let client = nats_client.lock().await;
             let Some(nats) = client.as_ref() else {
