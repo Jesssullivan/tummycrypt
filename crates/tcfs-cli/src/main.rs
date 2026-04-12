@@ -629,72 +629,42 @@ async fn load_config(path: &Path) -> Result<tcfs_core::config::TcfsConfig> {
     }
 }
 
-// ── Storage operator from environment credentials ─────────────────────────────
+// ── Storage operator from unified credential discovery ───────────────────────
 
-/// Read a credential from a `*_FILE` env var (the var points to a file path).
-fn read_credential_file(env_var: &str) -> Result<String, std::env::VarError> {
-    let path = std::env::var(env_var)?;
-    std::fs::read_to_string(path.trim())
-        .map(|s| s.trim().to_string())
-        .map_err(|_| std::env::VarError::NotPresent)
-}
-
-/// Read a credential from a SOPS-decrypted JSON or KEY=VALUE file.
-fn read_sops_credential(path: &std::path::Path, key: &str) -> Result<String> {
-    let content = std::fs::read_to_string(path)?;
-    if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&content) {
-        if let Some(val) = map.get(key) {
-            return Ok(val.clone());
-        }
-    }
-    for line in content.lines() {
-        if let Some(val) = line.strip_prefix(&format!("{}=", key)) {
-            return Ok(val.trim().to_string());
-        }
-    }
-    anyhow::bail!("key '{}' not found in {}", key, path.display())
-}
-
-/// Build an OpenDAL operator using credentials from environment variables.
+/// Build an OpenDAL operator using the unified credential discovery chain.
 ///
-/// Discovery chain: direct env var -> *_FILE env var -> config credentials_file (SOPS)
-fn build_operator_from_env(config: &tcfs_core::config::TcfsConfig) -> Result<opendal::Operator> {
-    let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-        .or_else(|_| std::env::var("TCFS_ACCESS_KEY_ID"))
-        .or_else(|_| read_credential_file("TCFS_S3_ACCESS_FILE"))
-        .or_else(|_| read_credential_file("AWS_ACCESS_KEY_ID_FILE"))
-        .or_else(|_| {
-            config
-                .storage
-                .credentials_file
-                .as_ref()
-                .and_then(|p| read_sops_credential(p, "access_key_id").ok())
-                .ok_or(std::env::VarError::NotPresent)
-        })
-        .context(
-            "S3 credentials not set\n\
-             Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables,\n\
-             or use *_FILE variants pointing to credential files.\n\
-             Example:\n\
-             \texport AWS_ACCESS_KEY_ID=your-key\n\
-             \texport AWS_SECRET_ACCESS_KEY=your-secret",
-        )?;
-    let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-        .or_else(|_| std::env::var("TCFS_SECRET_ACCESS_KEY"))
-        .or_else(|_| read_credential_file("TCFS_S3_SECRET_FILE"))
-        .or_else(|_| read_credential_file("AWS_SECRET_ACCESS_KEY_FILE"))
-        .or_else(|_| {
-            config
-                .storage
-                .credentials_file
-                .as_ref()
-                .and_then(|p| read_sops_credential(p, "secret_access_key").ok())
-                .ok_or(std::env::VarError::NotPresent)
-        })
-        .context("AWS_SECRET_ACCESS_KEY environment variable not set")?;
+/// Delegates to `tcfs_secrets::CredStore::load()` which tries (in order):
+///   1. SOPS-encrypted credential file
+///   2. RemoteJuggler KDBX store
+///   3. TCFS-specific env vars (TCFS_S3_ACCESS/SECRET)
+///   4. AWS env vars (with warning)
+///   5. Legacy SeaweedFS env vars
+///   6. File-pointer env vars (*_FILE)
+///   7. AWS shared credentials file (~/.aws/credentials)
+async fn build_operator(config: &tcfs_core::config::TcfsConfig) -> Result<opendal::Operator> {
+    let cred_store =
+        tcfs_secrets::CredStore::load(&config.secrets, &config.storage)
+            .await
+            .context("credential discovery failed")?;
 
-    tcfs_storage::operator::build_from_core_config(&config.storage, &access_key, &secret_key)
-        .context("building storage operator")
+    let s3 = cred_store.s3.context(
+        "S3 credentials not found.\n\
+         Set TCFS_S3_ACCESS and TCFS_S3_SECRET environment variables,\n\
+         or configure storage.credentials_file in tcfs.toml,\n\
+         or use ~/.aws/credentials file.\n\
+         Example:\n\
+         \texport TCFS_S3_ACCESS=your-key\n\
+         \texport TCFS_S3_SECRET=your-secret",
+    )?;
+
+    tracing::info!(source = %cred_store.source, "CLI credentials loaded");
+
+    tcfs_storage::operator::build_from_core_config(
+        &config.storage,
+        &s3.access_key_id,
+        s3.secret_access_key.expose_secret(),
+    )
+    .context("building storage operator")
 }
 
 /// Expand `~` in path to the user's home directory
@@ -811,7 +781,7 @@ async fn cmd_push(
     prefix: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let op = build_operator_from_env(config)?;
+    let op = build_operator(config).await?;
     let state_path = resolve_state_path(config, state_override);
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
@@ -987,7 +957,7 @@ async fn cmd_pull(
     prefix: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let op = build_operator_from_env(config)?;
+    let op = build_operator(config).await?;
     let device_id = load_device_id(config);
 
     // Detect whether input looks like a file path vs a manifest path
@@ -1156,7 +1126,7 @@ fn cmd_sync_status(
 // ── `tcfs migrate-prefix` ────────────────────────────────────────────────────
 
 async fn cmd_migrate_prefix(config: &tcfs_core::config::TcfsConfig, dry_run: bool) -> Result<()> {
-    let op = build_operator_from_env(config)?;
+    let op = build_operator(config).await?;
     let target = config.storage.resolved_prefix();
 
     println!(
@@ -1253,7 +1223,7 @@ async fn cmd_migrate_prefix(config: &tcfs_core::config::TcfsConfig, dry_run: boo
 // ── `tcfs trash` ─────────────────────────────────────────────────────────────
 
 async fn cmd_trash(config: &tcfs_core::config::TcfsConfig, action: TrashAction) -> Result<()> {
-    let op = build_operator_from_env(config)?;
+    let op = build_operator(config).await?;
 
     let resolve_prefix = |p: Option<&str>| -> String {
         p.map(|s| s.trim_end_matches('/').to_string())
@@ -1389,7 +1359,7 @@ async fn cmd_rm(
     prefix: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let op = build_operator_from_env(config)?;
+    let op = build_operator(config).await?;
     let state_path = resolve_state_path(config, state_override);
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
@@ -3136,7 +3106,7 @@ async fn cmd_reconcile(
     execute: bool,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let op = build_operator_from_env(config)?;
+    let op = build_operator(config).await?;
     let device_id = load_device_id(config);
 
     let local_root = path
