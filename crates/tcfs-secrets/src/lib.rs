@@ -286,14 +286,19 @@ fn read_env_file(env_var: &str) -> Result<String, std::env::VarError> {
 /// Respects `$AWS_SHARED_CREDENTIALS_FILE` for custom path and
 /// `$AWS_PROFILE` for non-default profile selection.
 fn parse_aws_credentials_file() -> Option<(String, String)> {
-    let cred_path = std::env::var("AWS_SHARED_CREDENTIALS_FILE").ok().map(
-        std::path::PathBuf::from,
-    ).or_else(|| {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .ok()?;
-        Some(std::path::PathBuf::from(home).join(".aws").join("credentials"))
-    })?;
+    let cred_path = std::env::var("AWS_SHARED_CREDENTIALS_FILE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .ok()?;
+            Some(
+                std::path::PathBuf::from(home)
+                    .join(".aws")
+                    .join("credentials"),
+            )
+        })?;
 
     let content = std::fs::read_to_string(&cred_path).ok()?;
     let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".into());
@@ -419,7 +424,11 @@ mod tests {
         let mut f = std::fs::File::create(&cred_path).unwrap();
         writeln!(f, "[default]").unwrap();
         writeln!(f, "aws_access_key_id = AKIAIOSFODNN7EXAMPLE").unwrap();
-        writeln!(f, "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY").unwrap();
+        writeln!(
+            f,
+            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        )
+        .unwrap();
         drop(f);
 
         std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", cred_path.to_str().unwrap());
