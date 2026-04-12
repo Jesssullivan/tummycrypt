@@ -25,10 +25,11 @@ use crate::conflict::VectorClock;
 ///
 /// Unlike `SyncState` (which is persisted), this is a transient runtime status
 /// that reflects what is happening to a file *right now*.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSyncStatus {
     /// File exists only as a stub/placeholder (not hydrated).
+    #[default]
     NotSynced,
     /// File content matches remote — fully synchronized.
     Synced,
@@ -38,12 +39,6 @@ pub enum FileSyncStatus {
     Locked,
     /// Local and remote versions diverged (vector clock conflict).
     Conflict,
-}
-
-impl Default for FileSyncStatus {
-    fn default() -> Self {
-        FileSyncStatus::NotSynced
-    }
 }
 
 impl std::fmt::Display for FileSyncStatus {

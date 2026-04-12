@@ -120,14 +120,14 @@ impl Blacklist {
     /// This is the fast path for the watcher, which only has a name and no full path.
     pub fn check_name(&self, name: &str, is_dir: bool) -> Option<BlacklistReason> {
         // Built-in directory exclusions
-        if is_dir && BUILTIN_DIRS.iter().any(|&b| b == name) {
+        if is_dir && BUILTIN_DIRS.contains(&name) {
             return Some(BlacklistReason::BuiltIn(
                 BUILTIN_DIRS.iter().find(|&&b| b == name).unwrap(),
             ));
         }
 
         // Built-in file exclusions
-        if BUILTIN_FILES.iter().any(|&b| b == name) {
+        if BUILTIN_FILES.contains(&name) {
             return Some(BlacklistReason::BuiltIn(
                 BUILTIN_FILES.iter().find(|&&b| b == name).unwrap(),
             ));

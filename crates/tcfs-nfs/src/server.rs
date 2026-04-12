@@ -44,17 +44,10 @@ pub struct NfsMount {
 impl NfsMount {
     /// Unmount the NFS filesystem.
     pub async fn unmount(&self) -> Result<()> {
-        let status = if cfg!(target_os = "macos") {
-            Command::new("umount")
-                .arg(&self.mountpoint)
-                .status()
-                .await?
-        } else {
-            Command::new("umount")
-                .arg(&self.mountpoint)
-                .status()
-                .await?
-        };
+        let status = Command::new("umount")
+            .arg(&self.mountpoint)
+            .status()
+            .await?;
 
         if !status.success() {
             // Try lazy unmount on Linux
@@ -172,7 +165,7 @@ async fn mount_nfs(port: u16, mountpoint: &Path) -> Result<()> {
         Command::new("mount_nfs")
             .arg("-o")
             .arg(format!("tcp,vers=3,resvport,locallocks,port={}", port))
-            .arg(format!("127.0.0.1:/"))
+            .arg("127.0.0.1:/")
             .arg(mountpoint)
             .status()
             .await
@@ -188,7 +181,7 @@ async fn mount_nfs(port: u16, mountpoint: &Path) -> Result<()> {
             .arg("nfs")
             .arg("-o")
             .arg(format!("tcp,vers=3,noacl,nolock,port={}", port))
-            .arg(format!("127.0.0.1:/"))
+            .arg("127.0.0.1:/")
             .arg(mountpoint)
             .status()
             .await

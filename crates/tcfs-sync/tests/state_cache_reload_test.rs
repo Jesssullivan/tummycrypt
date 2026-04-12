@@ -1,7 +1,6 @@
 //! Tests for StateCache::reload_from_disk — verifies that entries written
 //! by one process (CLI) are visible to another (daemon) after reload.
 
-use tcfs_sync::conflict::VectorClock;
 use tcfs_sync::state::StateCache;
 use tempfile::TempDir;
 

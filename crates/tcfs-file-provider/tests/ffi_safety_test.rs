@@ -5,8 +5,7 @@
 //! - String allocation and deallocation are balanced
 //! - Error enum has correct C repr values
 
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
+use std::ffi::CString;
 use std::ptr;
 
 use tcfs_file_provider::*;

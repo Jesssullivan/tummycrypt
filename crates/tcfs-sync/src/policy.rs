@@ -12,21 +12,16 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Sync mode for a folder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncMode {
     /// Sync on demand — user triggers push/pull explicitly.
+    #[default]
     OnDemand,
     /// Always keep synced — auto-push changes, auto-pull remote updates.
     Always,
     /// Never sync — ignore all changes in this folder.
     Never,
-}
-
-impl Default for SyncMode {
-    fn default() -> Self {
-        SyncMode::OnDemand
-    }
 }
 
 /// Sync behavior policy for a single folder.

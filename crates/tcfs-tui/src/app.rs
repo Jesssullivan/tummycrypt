@@ -63,6 +63,7 @@ pub struct PendingConflict {
     pub remote_device: String,
     pub local_hash: String,
     pub remote_hash: String,
+    #[allow(dead_code)]
     pub detected_at: u64,
 }
 
