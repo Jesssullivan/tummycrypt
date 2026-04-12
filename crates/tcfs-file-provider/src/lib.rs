@@ -24,6 +24,7 @@ pub type TcfsWatchCallback = Option<unsafe extern "C" fn(*const std::ffi::c_void
 
 /// Error codes returned by FFI functions.
 #[repr(C)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TcfsError {
     /// Success (no error).
     TcfsErrorNone = 0,

@@ -814,3 +814,348 @@ pub unsafe extern "C" fn tcfs_provider_free(provider: *mut TcfsProvider) {
         }
     }
 }
+
+// ── Functional tests (memory-backed provider) ────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    /// Create a TcfsProvider backed by opendal::services::Memory (no network).
+    fn memory_provider(prefix: &str) -> *mut TcfsProvider {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        let operator = opendal::Operator::new(opendal::services::Memory::default())
+            .expect("memory operator")
+            .finish();
+
+        let provider = TcfsProvider {
+            runtime,
+            operator,
+            remote_prefix: prefix.to_string(),
+            device_id: "test-device".to_string(),
+            master_key: None,
+        };
+
+        Box::into_raw(Box::new(provider))
+    }
+
+    /// Helper: call enumerate and return (items_ptr, count).
+    /// Caller must free items via tcfs_file_items_free.
+    unsafe fn enumerate(
+        prov: *mut TcfsProvider,
+        path: &str,
+    ) -> (TcfsError, *mut TcfsFileItem, usize) {
+        let c_path = CString::new(path).unwrap();
+        let mut items: *mut TcfsFileItem = ptr::null_mut();
+        let mut count: usize = 0;
+        let err = tcfs_provider_enumerate(prov, c_path.as_ptr(), &mut items, &mut count);
+        (err, items, count)
+    }
+
+    // ── Enumerate ────────────────────────────────────────────────────────
+
+    #[test]
+    fn enumerate_empty_returns_zero() {
+        let prov = memory_provider("test");
+        unsafe {
+            let (err, items, count) = enumerate(prov, "");
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(count, 0);
+            crate::tcfs_file_items_free(items, count);
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── Upload + Enumerate ───────────────────────────────────────────────
+
+    #[test]
+    fn upload_then_enumerate() {
+        let prov = memory_provider("pfx");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"Hello, TCFS!").unwrap();
+
+        unsafe {
+            let c_local = CString::new(file.to_str().unwrap()).unwrap();
+            let c_remote = CString::new("hello.txt").unwrap();
+            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            // Enumerate root should show the file
+            let (err, items, count) = enumerate(prov, "");
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(count, 1);
+
+            let item = &*items;
+            let name = CStr::from_ptr(item.filename).to_str().unwrap();
+            assert_eq!(name, "hello.txt");
+            assert!(!item.is_directory);
+            // file_size comes from index entry metadata (content_length),
+            // not the actual file — exact value depends on backend.
+
+            crate::tcfs_file_items_free(items, count);
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── Upload + Fetch roundtrip ─────────────────────────────────────────
+
+    #[test]
+    fn upload_then_fetch_roundtrip() {
+        let prov = memory_provider("rt");
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write source file
+        let src = dir.path().join("source.bin");
+        let data = b"binary content for roundtrip test";
+        std::fs::write(&src, data).unwrap();
+
+        // Upload
+        unsafe {
+            let c_local = CString::new(src.to_str().unwrap()).unwrap();
+            let c_remote = CString::new("source.bin").unwrap();
+            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            // Fetch to a different location
+            let dest = dir.path().join("fetched.bin");
+            let c_item = CString::new("source.bin").unwrap();
+            let c_dest = CString::new(dest.to_str().unwrap()).unwrap();
+            let err = tcfs_provider_fetch(prov, c_item.as_ptr(), c_dest.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            // Verify content matches
+            let fetched = std::fs::read(&dest).unwrap();
+            assert_eq!(&fetched, data);
+
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── Upload + Delete ──────────────────────────────────────────────────
+
+    #[test]
+    fn upload_then_delete() {
+        let prov = memory_provider("del");
+        let dir = tempfile::tempdir().unwrap();
+
+        let file = dir.path().join("to_delete.txt");
+        std::fs::write(&file, b"delete me").unwrap();
+
+        unsafe {
+            let c_local = CString::new(file.to_str().unwrap()).unwrap();
+            let c_remote = CString::new("to_delete.txt").unwrap();
+            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            // Verify it exists
+            let (_, _, count) = enumerate(prov, "");
+            assert_eq!(count, 1);
+
+            // Delete
+            let c_item = CString::new("to_delete.txt").unwrap();
+            let err = tcfs_provider_delete(prov, c_item.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            // Should be gone
+            let (_, items, count) = enumerate(prov, "");
+            assert_eq!(count, 0);
+            crate::tcfs_file_items_free(items, count);
+
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── Create directory ─────────────────────────────────────────────────
+    // Note: create_dir writes trailing-slash keys which the Memory backend
+    // does not support (it rejects directory-like paths). S3 backends
+    // handle this correctly. The null-safety tests in ffi_safety_test.rs
+    // cover the FFI boundary; functional coverage requires an S3 backend.
+
+    // ── Multiple files ──────────────────────────────────────────────────
+
+    #[test]
+    fn enumerate_multiple_files() {
+        let prov = memory_provider("multi");
+        let dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(dir.path().join("a.txt"), b"aaa").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"bbb").unwrap();
+        std::fs::write(dir.path().join("c.txt"), b"ccc").unwrap();
+
+        unsafe {
+            for name in &["a.txt", "b.txt", "c.txt"] {
+                let local = dir.path().join(name);
+                let c_local = CString::new(local.to_str().unwrap()).unwrap();
+                let c_remote = CString::new(*name).unwrap();
+                let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+                assert_eq!(err, TcfsError::TcfsErrorNone);
+            }
+
+            let (err, items, count) = enumerate(prov, "");
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(count, 3);
+
+            // Collect names
+            let mut names: Vec<String> = Vec::new();
+            for i in 0..count {
+                let item = &*items.add(i);
+                names.push(CStr::from_ptr(item.filename).to_str().unwrap().to_string());
+            }
+            names.sort();
+            assert_eq!(names, vec!["a.txt", "b.txt", "c.txt"]);
+
+            crate::tcfs_file_items_free(items, count);
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── Fetch nonexistent file ───────────────────────────────────────────
+
+    #[test]
+    fn fetch_nonexistent_errors() {
+        let prov = memory_provider("miss");
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("output.bin");
+
+        unsafe {
+            let c_item = CString::new("does-not-exist.txt").unwrap();
+            let c_dest = CString::new(dest.to_str().unwrap()).unwrap();
+            let err = tcfs_provider_fetch(prov, c_item.as_ptr(), c_dest.as_ptr());
+            // Should fail (storage error or not found)
+            assert_ne!(err, TcfsError::TcfsErrorNone);
+            // Destination should not have been created
+            assert!(!dest.exists());
+
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── Enumerate changes (always empty for direct backend) ──────────────
+
+    #[test]
+    fn enumerate_changes_returns_empty() {
+        let prov = memory_provider("chg");
+        unsafe {
+            let c_path = CString::new("").unwrap();
+            let mut events: *mut crate::TcfsChangeEvent = ptr::null_mut();
+            let mut count: usize = 0;
+            let err =
+                tcfs_provider_enumerate_changes(prov, c_path.as_ptr(), 0, &mut events, &mut count);
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(count, 0);
+
+            crate::tcfs_change_events_free(events, count);
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── Fetch with progress callback ─────────────────────────────────────
+
+    #[test]
+    fn fetch_with_progress_reports_bytes() {
+        let prov = memory_provider("prog");
+        let dir = tempfile::tempdir().unwrap();
+
+        // Upload a file first
+        let src = dir.path().join("progress_test.bin");
+        std::fs::write(&src, vec![0xAA; 4096]).unwrap();
+
+        unsafe {
+            let c_local = CString::new(src.to_str().unwrap()).unwrap();
+            let c_remote = CString::new("progress_test.bin").unwrap();
+            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            // Fetch with progress callback — use atomic counters to avoid static mut
+            use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+            static PROGRESS_CALLED: AtomicBool = AtomicBool::new(false);
+            static LAST_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+            unsafe extern "C" fn on_progress(
+                _completed: u64,
+                total: u64,
+                _context: *const std::ffi::c_void,
+            ) {
+                PROGRESS_CALLED.store(true, Ordering::SeqCst);
+                LAST_TOTAL.store(total, Ordering::SeqCst);
+            }
+
+            let dest = dir.path().join("progress_out.bin");
+            let c_item = CString::new("progress_test.bin").unwrap();
+            let c_dest = CString::new(dest.to_str().unwrap()).unwrap();
+            let err = tcfs_provider_fetch_with_progress(
+                prov,
+                c_item.as_ptr(),
+                c_dest.as_ptr(),
+                Some(on_progress),
+                ptr::null(),
+            );
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert!(
+                PROGRESS_CALLED.load(Ordering::SeqCst),
+                "progress callback should have been called"
+            );
+            assert_eq!(
+                LAST_TOTAL.load(Ordering::SeqCst),
+                4096,
+                "total should match file size"
+            );
+
+            // Verify data
+            let fetched = std::fs::read(&dest).unwrap();
+            assert_eq!(fetched.len(), 4096);
+
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── Subdirectory enumeration ─────────────────────────────────────────
+
+    #[test]
+    fn upload_nested_then_enumerate_parent() {
+        let prov = memory_provider("nest");
+        let dir = tempfile::tempdir().unwrap();
+
+        let file = dir.path().join("readme.md");
+        std::fs::write(&file, b"# Docs").unwrap();
+
+        unsafe {
+            // Upload into a subdirectory
+            let c_local = CString::new(file.to_str().unwrap()).unwrap();
+            let c_remote = CString::new("docs/readme.md").unwrap();
+            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            // Enumerate root — should show "docs" as a directory
+            let (err, items, count) = enumerate(prov, "");
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(count, 1);
+
+            let item = &*items;
+            let name = CStr::from_ptr(item.filename).to_str().unwrap();
+            assert_eq!(name, "docs");
+            assert!(item.is_directory);
+
+            crate::tcfs_file_items_free(items, count);
+
+            // Enumerate docs/ — should show the file
+            let (err, items, count) = enumerate(prov, "docs");
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(count, 1);
+
+            let item = &*items;
+            let name = CStr::from_ptr(item.filename).to_str().unwrap();
+            assert_eq!(name, "readme.md");
+            assert!(!item.is_directory);
+
+            crate::tcfs_file_items_free(items, count);
+            tcfs_provider_free(prov);
+        }
+    }
+}

@@ -46,6 +46,9 @@ name = "uniffi-bindgen"
 path = "uniffi-bindgen/main.rs"
 required-features = ["uniffi"]
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [build-dependencies]
 cbindgen = "0.27"
 uniffi = { workspace = true, features = ["build"], optional = true }
