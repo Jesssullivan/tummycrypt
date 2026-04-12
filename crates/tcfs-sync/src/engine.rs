@@ -1302,6 +1302,11 @@ fn remote_path_prefix(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opendal::services::Memory;
+
+    fn memory_op() -> Operator {
+        Operator::new(Memory::default()).unwrap().finish()
+    }
 
     fn default_config() -> CollectConfig {
         CollectConfig::default()
@@ -1314,6 +1319,7 @@ mod tests {
         }
     }
 
+    // ── collect_files (empty dir detection) ──────────────────────────────
     #[test]
     fn collect_finds_empty_dirs() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1426,5 +1432,173 @@ mod tests {
             empty_names.contains(&"real_empty".to_string()),
             "real empty dir should be detected"
         );
+    }
+
+    // ── normalize_rel_path ───────────────────────────────────────────────
+
+    #[test]
+    fn normalize_rel_path_relative_passthrough() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        // With sync_root set, file under root → relative
+        let result = normalize_rel_path(&file, Some(dir.path()));
+        assert_eq!(result, "doc.txt");
+    }
+
+    #[test]
+    fn normalize_rel_path_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        let file = dir.path().join("a/b/deep.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        let result = normalize_rel_path(&file, Some(dir.path()));
+        assert_eq!(result, "a/b/deep.txt");
+    }
+
+    #[test]
+    fn normalize_rel_path_no_sync_root_strips_leading_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        let result = normalize_rel_path(&file, None);
+        // Absolute path should have leading / stripped
+        assert!(!result.starts_with('/'), "should strip leading /: {result}");
+        assert!(result.ends_with("file.txt"));
+    }
+
+    // ── resolve_manifest_path ─────────────────────────────────────────��──
+
+    #[tokio::test]
+    async fn resolve_manifest_passthrough() {
+        let op = memory_op();
+        let result = resolve_manifest_path(&op, "data/manifests/abc123", "data", None)
+            .await
+            .unwrap();
+        assert_eq!(result, "data/manifests/abc123");
+    }
+
+    #[tokio::test]
+    async fn resolve_manifest_from_index() {
+        let op = memory_op();
+        // Write an index entry
+        op.write(
+            "data/index/doc.txt",
+            b"manifest_hash=abc123\nsize=100\nchunks=1\n".to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let result = resolve_manifest_path(&op, "doc.txt", "data", None)
+            .await
+            .unwrap();
+        assert_eq!(result, "data/manifests/abc123");
+    }
+
+    #[tokio::test]
+    async fn resolve_manifest_missing_errors() {
+        let op = memory_op();
+        let result = resolve_manifest_path(&op, "nonexistent.txt", "data", None).await;
+        assert!(result.is_err());
+    }
+
+    // ── delete_remote_file ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn delete_remote_file_removes_index_and_manifest() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        // Write index and manifest
+        op.write(
+            "data/index/file.txt",
+            b"manifest_hash=abc123\nsize=100\nchunks=1\n".to_vec(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/manifests/abc123",
+            br#"{"version":2,"file_hash":"abc123","file_size":100,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        delete_remote_file(&op, "file.txt", "data", &mut state, None)
+            .await
+            .unwrap();
+
+        // Both should be gone
+        assert!(op.read("data/index/file.txt").await.is_err());
+        assert!(op.read("data/manifests/abc123").await.is_err());
+    }
+
+    // ── upload + download roundtrip (memory operator) ────────────────────
+
+    #[tokio::test]
+    async fn upload_download_roundtrip_small_file() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        // Write a small local file
+        let local = dir.path().join("hello.txt");
+        std::fs::write(&local, b"hello world").unwrap();
+
+        // Upload
+        let up = upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap();
+        assert!(!up.skipped);
+        assert_eq!(up.bytes, 11);
+        assert!(!up.hash.is_empty());
+
+        // Download to a different location
+        let dl_path = dir.path().join("downloaded.txt");
+        let dl = download_file(&op, &up.remote_path, &dl_path, "data", None)
+            .await
+            .unwrap();
+        assert_eq!(dl.bytes, 11);
+
+        // Verify content matches
+        let content = std::fs::read_to_string(&dl_path).unwrap();
+        assert_eq!(content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn upload_skips_when_already_synced() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let local = dir.path().join("file.txt");
+        std::fs::write(&local, b"content").unwrap();
+
+        // First upload
+        let up1 = upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap();
+        assert!(!up1.skipped);
+
+        // Second upload of same file — should skip (dedup)
+        let up2 = upload_file(&op, &local, "data", &mut state, None)
+            .await
+            .unwrap();
+        assert!(up2.skipped, "second upload of unchanged file should skip");
+    }
+
+    // ── remote_path_prefix ───────────────────────────────────────────────
+
+    #[test]
+    fn remote_path_prefix_strips_trailing_slash() {
+        assert_eq!(remote_path_prefix("data/"), "data");
+        assert_eq!(remote_path_prefix("data"), "data");
+        assert_eq!(remote_path_prefix("a/b/c/"), "a/b/c");
     }
 }

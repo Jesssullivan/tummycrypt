@@ -685,6 +685,179 @@ fn extract_rel_path_from_state(state_key: &str, local_root: &Path) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opendal::services::Memory;
+
+    fn memory_op() -> Operator {
+        Operator::new(Memory::default()).unwrap().finish()
+    }
+
+    // ── list_remote_index ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_remote_index_empty() {
+        let op = memory_op();
+        let index = list_remote_index(&op, "data").await.unwrap();
+        assert!(index.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_remote_index_finds_entries() {
+        let op = memory_op();
+        op.write(
+            "data/index/file1.txt",
+            b"manifest_hash=aaa\nsize=100\nchunks=1\n".to_vec(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/index/file2.txt",
+            b"manifest_hash=bbb\nsize=200\nchunks=2\n".to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let index = list_remote_index(&op, "data").await.unwrap();
+        assert_eq!(index.len(), 2);
+        assert_eq!(index["file1.txt"].manifest_hash, "aaa");
+        assert_eq!(index["file2.txt"].manifest_hash, "bbb");
+        assert_eq!(index["file2.txt"].size, 200);
+    }
+
+    // ── reconcile plan: local-only → push ────────────────────────────────
+
+    #[tokio::test]
+    async fn reconcile_local_only_file_generates_push() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        std::fs::write(local_root.join("new_file.txt"), b"hello").unwrap();
+
+        let state_path = dir.path().join("state.json");
+        let state = crate::state::StateCache::open(&state_path).unwrap();
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            plan.summary.pushes, 1,
+            "local-only file should generate a push"
+        );
+        assert!(
+            plan.actions.iter().any(|a| matches!(a, ReconcileAction::Push { rel_path, .. } if rel_path == "new_file.txt")),
+            "push action should target new_file.txt"
+        );
+    }
+
+    // ── reconcile plan: remote-only → pull ───────────────────────────────
+
+    #[tokio::test]
+    async fn reconcile_remote_only_file_generates_pull() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+
+        // Write a remote index entry (no local file)
+        op.write(
+            "data/index/remote_only.txt",
+            b"manifest_hash=abc123\nsize=50\nchunks=1\n".to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let state_path = dir.path().join("state.json");
+        let state = crate::state::StateCache::open(&state_path).unwrap();
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            plan.summary.pulls, 1,
+            "remote-only file should generate a pull"
+        );
+        assert!(
+            plan.actions.iter().any(|a| matches!(a, ReconcileAction::Pull { rel_path, .. } if rel_path == "remote_only.txt")),
+            "pull action should target remote_only.txt"
+        );
+    }
+
+    // ── reconcile plan: both exist, up-to-date ───────────────────────────
+
+    #[tokio::test]
+    async fn reconcile_matching_files_up_to_date() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+
+        let content = b"matching content";
+        let hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(content));
+
+        // Write local file
+        std::fs::write(local_root.join("same.txt"), content).unwrap();
+
+        // Write matching remote index + manifest
+        let index_entry = format!("manifest_hash={hash}\nsize={}\nchunks=1\n", content.len());
+        op.write("data/index/same.txt", index_entry.into_bytes())
+            .await
+            .unwrap();
+
+        let manifest_json = serde_json::json!({
+            "version": 2,
+            "file_hash": hash,
+            "file_size": content.len(),
+            "chunks": [],
+            "vclock": {"clocks": {"neo": 1}},
+            "written_by": "neo",
+            "written_at": 0
+        });
+        op.write(
+            &format!("data/manifests/{hash}"),
+            serde_json::to_vec(&manifest_json).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Set up state cache with matching entry
+        let state_path = dir.path().join("state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let local_file = local_root.join("same.txt");
+        let mut vc = crate::conflict::VectorClock::new();
+        vc.tick("neo");
+        let sync_state = crate::state::make_sync_state_full(
+            &local_file,
+            hash.clone(),
+            1,
+            format!("data/manifests/{hash}"),
+            vc,
+            "neo".into(),
+        )
+        .unwrap();
+        state.set(&local_file, sync_state);
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            plan.summary.up_to_date, 1,
+            "matching files should be up-to-date"
+        );
+        assert_eq!(plan.summary.pushes, 0);
+        assert_eq!(plan.summary.pulls, 0);
+        assert_eq!(plan.summary.conflicts, 0);
+    }
+
+    // ── original tests ───────────────────────────────────────────────────
 
     #[test]
     fn test_parse_index_entry() {
