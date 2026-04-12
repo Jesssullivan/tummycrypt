@@ -13,9 +13,7 @@ targets = [
 ignore = [
     "RUSTSEC-2025-0141",  # bincode unmaintained — transitive dep, no direct usage
     "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained — transitive dep via reqwest
-    "RUSTSEC-2024-0436",  # paste unmaintained — transitive dep via uniffi, no replacement available
     "RUSTSEC-2026-0049",  # rustls-webpki CRL bug — transitive dep, limited impact
-    "RUSTSEC-2026-0097",  # rand 0.8.5 unsound with custom logger — transitive via age, no custom logger in TCFS
     # RUSTSEC-2025-0067/0068 removed: serde_yml migrated to serde_norway
 ]
 

@@ -1497,7 +1497,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     }
                 }
             }
-            _ => unreachable!("already validated"),
+            _ => return Err(tonic::Status::invalid_argument("unsupported resolution strategy")),
         }
     }
 
