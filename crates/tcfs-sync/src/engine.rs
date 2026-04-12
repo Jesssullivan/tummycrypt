@@ -20,6 +20,99 @@ use crate::conflict::{compare_clocks, SyncOutcome};
 use crate::manifest::SyncManifest;
 use crate::state::{make_sync_state_full, StateCache};
 
+/// Maximum number of retry attempts for chunk upload/download operations.
+const CHUNK_MAX_RETRIES: u32 = 3;
+
+/// Base delay between retries (doubles each attempt: 100ms, 200ms, 400ms).
+const CHUNK_RETRY_BASE_MS: u64 = 100;
+
+/// Write a chunk to remote storage with exponential backoff retry.
+///
+/// Retries up to `CHUNK_MAX_RETRIES` times on transient failures.
+async fn write_chunk_with_retry(
+    op: &Operator,
+    key: &str,
+    data: Vec<u8>,
+    chunk_idx: usize,
+) -> Result<()> {
+    let mut last_err = None;
+    for attempt in 0..CHUNK_MAX_RETRIES {
+        match op.write(key, data.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let delay = CHUNK_RETRY_BASE_MS * 2u64.pow(attempt);
+                warn!(
+                    chunk = chunk_idx,
+                    attempt = attempt + 1,
+                    max = CHUNK_MAX_RETRIES,
+                    delay_ms = delay,
+                    error = %e,
+                    "chunk upload failed, retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err
+        .map(|e| anyhow::anyhow!(e))
+        .unwrap_or_else(|| anyhow::anyhow!("chunk upload failed after {CHUNK_MAX_RETRIES} retries"))
+        .context(format!("uploading chunk {chunk_idx}: {key}")))
+}
+
+/// Read a chunk from remote storage with exponential backoff retry.
+///
+/// Retries up to `CHUNK_MAX_RETRIES` times on transient failures.
+/// After successful read, verifies the BLAKE3 hash matches the expected value.
+async fn read_chunk_with_retry(
+    op: &Operator,
+    key: &str,
+    expected_hash: &str,
+    chunk_idx: usize,
+) -> Result<Vec<u8>> {
+    let mut last_err = None;
+    for attempt in 0..CHUNK_MAX_RETRIES {
+        match op.read(key).await {
+            Ok(data) => {
+                let chunk_bytes = data.to_vec();
+                let actual_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
+                if actual_hash == expected_hash {
+                    return Ok(chunk_bytes);
+                }
+                // Hash mismatch — treat as corruption, retry
+                warn!(
+                    chunk = chunk_idx,
+                    attempt = attempt + 1,
+                    expected = expected_hash,
+                    actual = %actual_hash,
+                    "chunk integrity mismatch, retrying"
+                );
+                last_err = Some(anyhow::anyhow!(
+                    "chunk integrity failed: expected {expected_hash}, got {actual_hash}"
+                ));
+            }
+            Err(e) => {
+                let delay = CHUNK_RETRY_BASE_MS * 2u64.pow(attempt);
+                warn!(
+                    chunk = chunk_idx,
+                    attempt = attempt + 1,
+                    max = CHUNK_MAX_RETRIES,
+                    delay_ms = delay,
+                    error = %e,
+                    "chunk download failed, retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                last_err = Some(anyhow::anyhow!(e));
+            }
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| {
+            anyhow::anyhow!("chunk download failed after {CHUNK_MAX_RETRIES} retries")
+        })
+        .context(format!("downloading chunk {chunk_idx}: {key}")))
+}
+
 /// Optional encryption context for E2E encrypted push/pull.
 ///
 /// When present, chunks are encrypted before upload and decrypted after download
@@ -423,9 +516,7 @@ pub async fn upload_file_with_device(
             let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
 
             if !op.exists(&chunk_key).await.unwrap_or(false) {
-                op.write(&chunk_key, upload_data)
-                    .await
-                    .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
+                write_chunk_with_retry(op, &chunk_key, upload_data, i).await?;
                 bytes_uploaded += chunk.data.len() as u64;
             }
 
@@ -481,9 +572,7 @@ pub async fn upload_file_with_device(
             let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
 
             if !op.exists(&chunk_key).await.unwrap_or(false) {
-                op.write(&chunk_key, upload_data)
-                    .await
-                    .with_context(|| format!("uploading chunk {i}: {chunk_key}"))?;
+                write_chunk_with_retry(op, &chunk_key, upload_data, i).await?;
                 bytes_uploaded += chunk.length as u64;
             }
 
@@ -732,20 +821,9 @@ pub async fn download_file_with_device(
 
     for (i, hash) in chunk_hashes.iter().enumerate() {
         let chunk_key = format!("{remote_prefix}/chunks/{hash}");
-        let chunk_data = op
-            .read(&chunk_key)
-            .await
-            .with_context(|| format!("downloading chunk {i}: {chunk_key}"))?;
 
-        let chunk_bytes = chunk_data.to_bytes();
-
-        // Verify chunk integrity: BLAKE3 hash must match the manifest entry
-        let actual_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
-        if actual_hash != *hash {
-            anyhow::bail!(
-                "chunk integrity check failed for {chunk_key}: expected {hash}, got {actual_hash}"
-            );
-        }
+        // Download with retry + integrity verification
+        let chunk_bytes: Vec<u8> = read_chunk_with_retry(op, &chunk_key, hash, i).await?;
 
         // Decrypt chunk if file key is present
         #[cfg(feature = "crypto")]
@@ -753,11 +831,11 @@ pub async fn download_file_with_device(
             tcfs_crypto::decrypt_chunk(fk, i as u64, fid, &chunk_bytes)
                 .with_context(|| format!("decrypting chunk {i}"))?
         } else {
-            chunk_bytes.to_vec()
+            chunk_bytes
         };
 
         #[cfg(not(feature = "crypto"))]
-        let plaintext = chunk_bytes.to_vec();
+        let plaintext = chunk_bytes;
 
         assembled.extend_from_slice(&plaintext);
 
