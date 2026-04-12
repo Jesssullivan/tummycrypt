@@ -174,8 +174,10 @@ async fn livez_handler(State(state): State<HealthState>) -> impl IntoResponse {
             "live probe task panicked",
         ),
         Err(_timeout) => {
-            tracing::warn!(path = %state.sync_root.as_ref().unwrap().display(),
-                "FUSE mount probe timed out — mount likely stale");
+            if let Some(ref root) = state.sync_root {
+                tracing::warn!(path = %root.display(),
+                    "FUSE mount probe timed out — mount likely stale");
+            }
             (StatusCode::SERVICE_UNAVAILABLE, "fuse mount unresponsive")
         }
     }
