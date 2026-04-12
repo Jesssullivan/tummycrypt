@@ -699,7 +699,7 @@ fn make_progress_bar(total: u64, prefix: &str) -> ProgressBar {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::with_template("{prefix:.bold} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
+            .expect("hard-coded progress template")
             .progress_chars("=>-"),
     );
     pb.set_prefix(prefix.to_string());
@@ -709,7 +709,10 @@ fn make_progress_bar(total: u64, prefix: &str) -> ProgressBar {
 
 fn make_spinner(prefix: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
-    pb.set_style(ProgressStyle::with_template("{prefix:.bold} {spinner} {msg}").unwrap());
+    pb.set_style(
+        ProgressStyle::with_template("{prefix:.bold} {spinner} {msg}")
+            .expect("hard-coded spinner template"),
+    );
     pb.set_prefix(prefix.to_string());
     pb.enable_steady_tick(Duration::from_millis(80));
     pb
@@ -733,7 +736,9 @@ fn load_device_id(config: &tcfs_core::config::TcfsConfig) -> String {
             match registry.find(&device_name) {
                 Some(d) if d.device_id.is_empty() => {
                     // Backfill device_id for entries created before UUID generation
-                    let new_id = registry.backfill_device_id(&device_name).unwrap();
+                    let new_id = registry
+                        .backfill_device_id(&device_name)
+                        .expect("backfill_device_id with valid device name");
                     if let Err(e) = registry.save(&registry_path) {
                         eprintln!("warning: failed to save backfilled device registry: {e}");
                     } else {
@@ -909,7 +914,7 @@ async fn cmd_push(
                     ProgressStyle::with_template(
                         "{prefix:.bold} [{bar:40.cyan/blue}] {pos}/{len} {msg}",
                     )
-                    .unwrap()
+                    .expect("hard-coded progress template")
                     .progress_chars("=>-"),
                 );
                 pb_clone.set_length(total);
