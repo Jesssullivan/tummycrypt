@@ -1,0 +1,34 @@
+[package]
+name = "tcfs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tcfs-sync = { path = "../crates/tcfs-sync" }
+tcfs-crypto = { path = "../crates/tcfs-crypto" }
+arbitrary = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "manifest_parse"
+path = "fuzz_targets/manifest_parse.rs"
+doc = false
+
+[[bin]]
+name = "crypto_roundtrip"
+path = "fuzz_targets/crypto_roundtrip.rs"
+doc = false
+
+[[bin]]
+name = "path_sanitize"
+path = "fuzz_targets/path_sanitize.rs"
+doc = false
+
+[[bin]]
+name = "name_encrypt"
+path = "fuzz_targets/name_encrypt.rs"
+doc = false

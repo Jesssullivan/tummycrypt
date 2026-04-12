@@ -145,3 +145,66 @@ mod tests {
         assert_eq!(parsed.chunks, vec!["single_hash"]);
     }
 }
+
+#[cfg(test)]
+mod proptest_suite {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// from_bytes must never panic on arbitrary bytes — it returns Ok or Err.
+        #[test]
+        fn from_bytes_never_panics(data in proptest::collection::vec(any::<u8>(), 0..=4096)) {
+            let _ = SyncManifest::from_bytes(&data);
+        }
+
+        /// Valid v2 manifests must roundtrip through to_bytes/from_bytes.
+        #[test]
+        fn v2_roundtrip(
+            file_hash in "[a-f0-9]{64}",
+            file_size in any::<u64>(),
+            chunk_count in 1..10usize,
+            written_by in "[a-z]{1,16}",
+            written_at in any::<u64>(),
+        ) {
+            let chunks: Vec<String> = (0..chunk_count)
+                .map(|i| format!("chunk_{i:016x}"))
+                .collect();
+
+            let mut vc = VectorClock::new();
+            vc.tick(&written_by);
+
+            let manifest = SyncManifest {
+                version: 2,
+                file_hash,
+                file_size,
+                chunks,
+                vclock: vc,
+                written_by,
+                written_at,
+                rel_path: None,
+                mode: None,
+                encrypted_file_key: None,
+            };
+
+            let bytes = manifest.to_bytes().unwrap();
+            let parsed = SyncManifest::from_bytes(&bytes).unwrap();
+
+            prop_assert_eq!(parsed.version, 2);
+            prop_assert_eq!(parsed.file_hash, manifest.file_hash);
+            prop_assert_eq!(parsed.file_size, manifest.file_size);
+            prop_assert_eq!(parsed.chunks.len(), manifest.chunks.len());
+        }
+
+        /// v1 text manifests: any non-empty newline-separated text should parse as v1.
+        #[test]
+        fn v1_any_lines_parse(
+            lines in proptest::collection::vec("[a-f0-9]{8,64}", 1..20)
+        ) {
+            let text = lines.join("\n") + "\n";
+            let parsed = SyncManifest::from_bytes(text.as_bytes()).unwrap();
+            prop_assert!(parsed.is_legacy());
+            prop_assert_eq!(parsed.chunks.len(), lines.len());
+        }
+    }
+}
