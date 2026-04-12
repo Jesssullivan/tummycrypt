@@ -2377,9 +2377,7 @@ mod tests {
         // Unlock with a 32-byte key
         let key = vec![0xAA; tcfs_crypto::KEY_SIZE];
         let resp = daemon
-            .auth_unlock(tonic::Request::new(AuthUnlockRequest {
-                master_key: key,
-            }))
+            .auth_unlock(tonic::Request::new(AuthUnlockRequest { master_key: key }))
             .await
             .unwrap()
             .into_inner();
