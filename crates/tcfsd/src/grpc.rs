@@ -2296,3 +2296,180 @@ pub async fn serve(
 
     result
 }
+
+// ── Unit tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a TcfsDaemonImpl with in-memory components for testing.
+    fn test_daemon() -> TcfsDaemonImpl {
+        let config = Arc::new(TcfsConfig::default());
+        let cred_store = crate::cred_store::new_shared();
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("state.json");
+        let state_cache = Arc::new(TokioMutex::new(
+            tcfs_sync::state::StateCache::open(&state_path).unwrap(),
+        ));
+        let operator = Arc::new(TokioMutex::new(None));
+
+        TcfsDaemonImpl::new(
+            cred_store,
+            config,
+            false,
+            "http://test:8333".into(),
+            state_cache,
+            operator,
+            "test-device-id".into(),
+            "test-device".into(),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn status_returns_version() {
+        let daemon = test_daemon();
+        let resp = daemon
+            .status(tonic::Request::new(StatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(resp.device_id, "test-device-id");
+        assert_eq!(resp.device_name, "test-device");
+        assert!(!resp.storage_ok);
+        assert!(!resp.nats_ok);
+        assert_eq!(resp.active_mounts, 0);
+        assert!(resp.uptime_secs >= 0);
+    }
+
+    #[tokio::test]
+    async fn credential_status_empty() {
+        let daemon = test_daemon();
+        let resp = daemon
+            .credential_status(tonic::Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.loaded);
+        assert_eq!(resp.source, "none");
+        assert!(resp.needs_reload);
+    }
+
+    #[tokio::test]
+    async fn auth_status_locked_by_default() {
+        let daemon = test_daemon();
+        let resp = daemon
+            .auth_status(tonic::Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.unlocked);
+        assert!(resp.available_methods.contains(&"master_key".to_string()));
+        assert!(resp.auth_method.is_empty());
+        assert_eq!(resp.session_device_id, "test-device-id");
+    }
+
+    #[tokio::test]
+    async fn auth_unlock_then_lock_roundtrip() {
+        let daemon = test_daemon();
+
+        // Unlock with a 32-byte key
+        let key = vec![0xAA; tcfs_crypto::KEY_SIZE];
+        let resp = daemon
+            .auth_unlock(tonic::Request::new(AuthUnlockRequest { master_key: key }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.success);
+
+        // Verify unlocked
+        let status = daemon
+            .auth_status(tonic::Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(status.unlocked);
+
+        // Lock
+        let resp = daemon
+            .auth_lock(tonic::Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.success);
+
+        // Verify locked
+        let status = daemon
+            .auth_status(tonic::Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!status.unlocked);
+    }
+
+    #[tokio::test]
+    async fn auth_unlock_wrong_key_size_fails() {
+        let daemon = test_daemon();
+
+        let resp = daemon
+            .auth_unlock(tonic::Request::new(AuthUnlockRequest {
+                master_key: vec![0x00; 16], // too short
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.success);
+        assert!(resp.error.contains("must be"));
+    }
+
+    #[tokio::test]
+    async fn diagnostics_empty_state() {
+        let daemon = test_daemon();
+        let resp = daemon
+            .diagnostics(tonic::Request::new(DiagnosticsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.state_cache_entries, 0);
+        assert_eq!(resp.conflict_count, 0);
+        assert!(!resp.nats_connected);
+        assert!(!resp.storage_reachable);
+        assert_eq!(resp.device_id, "test-device-id");
+    }
+
+    #[tokio::test]
+    async fn sync_status_unknown_path() {
+        let daemon = test_daemon();
+        let resp = daemon
+            .sync_status(tonic::Request::new(SyncStatusRequest {
+                path: "/nonexistent/file.txt".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Unknown path returns empty/default state
+        assert!(resp.state.is_empty() || resp.state == "unknown");
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_invalid_resolution() {
+        let daemon = test_daemon();
+        let resp = daemon
+            .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                resolution: "invalid_strategy".into(),
+                ..Default::default()
+            }))
+            .await;
+
+        // Should return error status for invalid resolution
+        assert!(resp.is_err());
+    }
+}

@@ -41,7 +41,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     let device_id = if let Some(dev) = registry.find(&device_name) {
         if dev.device_id.is_empty() {
             // Backfill device_id for entries created before UUID generation was added
-            let new_id = registry.backfill_device_id(&device_name).unwrap();
+            let new_id = registry
+                .backfill_device_id(&device_name)
+                .expect("backfill_device_id with valid device name");
             if let Err(e) = registry.save(&registry_path) {
                 warn!("failed to save backfilled device registry: {e}");
             }
