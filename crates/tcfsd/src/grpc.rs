@@ -44,6 +44,31 @@ pub struct TcfsDaemonImpl {
     rate_limiter: tcfs_auth::RateLimiter,
 }
 
+/// Validate a client-provided relative path before joining it under a tempdir.
+fn sanitize_rel_path(path: &str) -> std::result::Result<String, String> {
+    use std::path::Component;
+
+    if path.is_empty() {
+        return Err("path must not be empty".to_string());
+    }
+
+    let rel_path = Path::new(path);
+    if rel_path.is_absolute() {
+        return Err(format!("absolute path not allowed: {path}"));
+    }
+
+    for component in rel_path.components() {
+        if matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        ) {
+            return Err(format!("path traversal not allowed: {path}"));
+        }
+    }
+
+    Ok(path.to_string())
+}
+
 impl TcfsDaemonImpl {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -601,6 +626,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 "no path provided in push stream",
             ));
         }
+
+        let path = sanitize_rel_path(&path).map_err(tonic::Status::invalid_argument)?;
 
         // Write to a temp file and upload via sync engine
         let tmp_dir =
@@ -2471,5 +2498,34 @@ mod tests {
 
         // Should return error status for invalid resolution
         assert!(resp.is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_parent_traversal() {
+        assert!(sanitize_rel_path("../../etc/passwd").is_err());
+        assert!(sanitize_rel_path("foo/../../../bar").is_err());
+        assert!(sanitize_rel_path("..").is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_absolute_paths() {
+        assert!(sanitize_rel_path("/etc/passwd").is_err());
+        assert!(sanitize_rel_path("/tmp/file.txt").is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_empty_path() {
+        assert!(sanitize_rel_path("").is_err());
+    }
+
+    #[test]
+    fn sanitize_accepts_valid_relative_paths() {
+        assert_eq!(sanitize_rel_path("file.txt").unwrap(), "file.txt");
+        assert_eq!(sanitize_rel_path("a/b/c.txt").unwrap(), "a/b/c.txt");
+        assert_eq!(
+            sanitize_rel_path("docs/nested/deep.md").unwrap(),
+            "docs/nested/deep.md"
+        );
+        assert_eq!(sanitize_rel_path("./current.txt").unwrap(), "./current.txt");
     }
 }
