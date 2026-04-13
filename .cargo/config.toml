@@ -3,10 +3,13 @@
 # NOTE: mold linker is available in the Nix devShell (nix develop).
 # Outside Nix, the default system linker is used.
 # To enable mold manually: export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+# Rust itself is pinned by rust-toolchain.toml and flake.nix.
 
 # Cross-compilation targets (via cargo cross or nix)
 [target.x86_64-apple-darwin]
 [target.aarch64-apple-darwin]
+[target.aarch64-apple-ios]
+[target.aarch64-apple-ios-sim]
 
 [env]
 # Ensure RocksDB uses bundled version by default (overridden if system lib found)

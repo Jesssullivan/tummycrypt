@@ -1,5 +1,6 @@
 # tcfs project Justfile
 # Run `just --list` to see all recipes
+# cargo is expected to come from the pinned rust-toolchain or Nix devShell.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -100,24 +101,32 @@ nix-check:
 nix-devshell:
     nix develop
 
+# Show active toolchain and local environment helpers
+toolchain-status:
+    rustc --version
+    cargo --version
+    just --version
+    @if command -v nix >/dev/null 2>&1; then nix --version; else echo "nix: not installed"; fi
+    @if command -v direnv >/dev/null 2>&1; then direnv version; else echo "direnv: not installed"; fi
+
 # ── Cargo ───────────────────────────────────────────────────────────────────
 
 # Build workspace
 build:
-    ~/.cargo/bin/cargo build --workspace
+    cargo build --workspace
 
 # Run all tests
 test:
-    ~/.cargo/bin/cargo test --workspace
+    cargo test --workspace
 
 # Lint (clippy + fmt check)
 lint:
-    ~/.cargo/bin/cargo clippy --workspace --all-targets
-    ~/.cargo/bin/cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets
+    cargo fmt --all -- --check
 
 # cargo-deny license and advisory check
 deny:
-    ~/.cargo/bin/cargo deny check
+    cargo deny check
 
 # ── iOS (TestFlight) ─────────────────────────────────────────────────────
 # Pipeline: Rust staticlib → xcodegen → archive → export IPA → TestFlight
@@ -180,7 +189,7 @@ fileprovider-build:
         exit 1
     fi
     echo "==> Building Rust staticlib..."
-    ~/.cargo/bin/cargo build -p tcfs-file-provider --release -j 4
+    cargo build -p tcfs-file-provider --release -j 4
     HEADER=$(find target/release/build -name "tcfs_file_provider.h" | head -1)
     if [ -z "$HEADER" ]; then
         echo "ERROR: cbindgen header not found" >&2
