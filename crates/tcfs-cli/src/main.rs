@@ -1555,7 +1555,7 @@ fn fetch_latest_version() -> Option<String> {
             "5",
             "-H",
             "Accept: application/vnd.github+json",
-            "https://api.github.com/repos/tinyland-inc/tummycrypt/releases/latest",
+            "https://api.github.com/repos/Jesssullivan/tummycrypt/releases/latest",
         ])
         .output()
         .ok()?;
@@ -1593,7 +1593,7 @@ fn print_update_notice(current: &str, latest: &str) {
                 "  A newer version (v{}) is available. You are running v{}.",
                 latest, current
             );
-            println!("  Update: curl -fsSL https://github.com/tinyland-inc/tummycrypt/releases/latest/download/install.sh | sh");
+            println!("  Update: curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh");
         }
     }
 }

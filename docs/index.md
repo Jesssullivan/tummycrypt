@@ -8,14 +8,19 @@ tcfs is a FUSE-based file sync daemon backed by [SeaweedFS](https://github.com/s
 
 ### Binary Releases
 
-Download the latest release from [GitHub Releases](https://github.com/tinyland-inc/tummycrypt/releases):
+`Jesssullivan/tummycrypt` is the canonical source repository. Downstream org
+forks may exist for distribution, but releases and source references should
+default here.
+
+Download the latest release from [GitHub Releases](https://github.com/Jesssullivan/tummycrypt/releases):
 
 ```bash
 # Linux (x86_64)
-curl -fsSL https://github.com/tinyland-inc/tummycrypt/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
 
-# macOS (Homebrew)
-brew install tinyland-inc/tap/tcfs
+# macOS (Homebrew tap from canonical repo)
+brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap
+brew install tcfs
 
 # Debian/Ubuntu
 sudo dpkg -i tcfs-*.deb
@@ -27,14 +32,14 @@ sudo rpm -i tcfsd-*.rpm
 ### Container (K8s worker mode)
 
 ```bash
-podman pull ghcr.io/tinyland-inc/tcfsd:latest
+podman pull ghcr.io/jesssullivan/tcfsd:latest
 ```
 
 ### From Source
 
 ```bash
-# Requires Rust 1.93+, protoc, libfuse3-dev
-git clone https://github.com/tinyland-inc/tummycrypt.git
+# Requires the pinned Rust 1.93.0 toolchain (see rust-toolchain.toml), protoc, libfuse3-dev
+git clone https://github.com/Jesssullivan/tummycrypt.git
 cd tummycrypt
 cargo build --release
 # Binaries: target/release/tcfs, target/release/tcfsd, target/release/tcfs-tui, target/release/tcfs-mcp
@@ -43,9 +48,9 @@ cargo build --release
 ### Nix
 
 ```bash
-nix build github:tinyland-inc/tummycrypt
+nix build github:Jesssullivan/tummycrypt
 # Or enter a devShell:
-nix develop github:tinyland-inc/tummycrypt
+nix develop github:Jesssullivan/tummycrypt
 ```
 
 ## How It Works

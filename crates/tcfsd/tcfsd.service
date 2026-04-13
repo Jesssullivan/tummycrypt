@@ -1,6 +1,6 @@
 [Unit]
 Description=TummyCrypt filesystem daemon (tcfsd)
-Documentation=https://github.com/tinyland-inc/tummycrypt
+Documentation=https://github.com/Jesssullivan/tummycrypt
 After=network-online.target
 Wants=network-online.target
 

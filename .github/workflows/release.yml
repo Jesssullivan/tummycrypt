@@ -37,6 +37,7 @@ env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
   IMAGE_NAME: tcfsd  # Prefixed with lowercase $REGISTRY/$GITHUB_REPOSITORY_OWNER in tags
+  RUST_TOOLCHAIN: 1.93.0
 
 permissions:
   contents: write
@@ -52,18 +53,25 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      image_repo: ${{ steps.version.outputs.image_repo }}
     steps:
       - name: Determine version
         id: version
         run: |
+          if [[ "${GITHUB_REPOSITORY}" != "Jesssullivan/tummycrypt" ]]; then
+            echo "::error::Release workflow is canonical-only and must run from Jesssullivan/tummycrypt"
+            exit 1
+          fi
           if [[ "${{ github.event_name }}" == "push" ]]; then
             TAG="${GITHUB_REF_NAME}"
           else
             TAG="${{ github.event.inputs.tag }}"
           fi
           VERSION="${TAG#v}"  # strip leading v
+          OWNER_LOWER="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_repo=${{ env.REGISTRY }}/${OWNER_LOWER}/${{ env.IMAGE_NAME }}" >> "$GITHUB_OUTPUT"
           echo "Building release: ${TAG} (version ${VERSION})"
 
   # ── Build client binaries ─────────────────────────────────────────────────
@@ -138,6 +146,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo
@@ -428,9 +437,9 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/jesssullivan/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.tag }}
-            ghcr.io/jesssullivan/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.version }}
-            ghcr.io/jesssullivan/${{ env.IMAGE_NAME }}:latest
+            ${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.tag }}
+            ${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.version }}
+            ${{ needs.plan.outputs.image_repo }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
@@ -449,9 +458,9 @@ jobs:
         run: |
           # Sign each tag with keyless (OIDC-based) signing
           for TAG in \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.tag }}" \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.version }}" \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"; do
+            "${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.tag }}" \
+            "${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.version }}" \
+            "${{ needs.plan.outputs.image_repo }}:latest"; do
             cosign sign --yes "${TAG}"
           done
 
@@ -636,6 +645,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
 
@@ -995,12 +1006,13 @@ jobs:
 
             **Homebrew:**
             ```bash
-            brew install tinyland-inc/tap/tcfs
+            brew tap ${{ github.repository }} https://github.com/${{ github.repository }} --branch homebrew-tap
+            brew install tcfs
             ```
 
             **Container image:**
             ```bash
-            podman pull ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.plan.outputs.tag }}
+            podman pull ${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.tag }}
             ```
 
             **Debian/Ubuntu:**
@@ -1029,7 +1041,7 @@ jobs:
               --signature SHA256SUMS.txt.sig \
               --certificate SHA256SUMS.txt.pem \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              --certificate-identity-regexp 'github.com/tinyland-inc/tummycrypt' \
+              --certificate-identity-regexp 'github.com/${{ github.repository }}' \
               SHA256SUMS.txt
             ```
 
@@ -1109,14 +1121,14 @@ jobs:
           cp tcfs.rb Formula/tcfs.rb
 
           cat > README.md << 'EOF'
-          # tinyland-inc/homebrew-tap
+          # Canonical tcfs homebrew-tap
 
           Homebrew formulae for [TummyCrypt/tcfs](https://github.com/${{ github.repository }}).
 
           ## Usage
 
           ```bash
-          brew tap tinyland-inc/tap https://github.com/${{ github.repository }} --branch homebrew-tap
+          brew tap ${{ github.repository }} https://github.com/${{ github.repository }} --branch homebrew-tap
           brew install tcfs
           ```
           EOF
