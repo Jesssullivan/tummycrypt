@@ -23,6 +23,8 @@ struct SimMachine {
     files: HashMap<String, (String, VectorClock)>,
     /// Whether this machine is online (can push/pull)
     online: bool,
+    /// Whether this machine can currently receive NATS replay/events.
+    nats_connected: bool,
     /// Pending inbound events (received while processing)
     _pending_events: Vec<SimEvent>,
 }
@@ -33,18 +35,31 @@ impl SimMachine {
             device_id: device_id.to_string(),
             files: HashMap::new(),
             online: true,
+            nats_connected: true,
             _pending_events: Vec::new(),
         }
     }
 }
 
 /// Simulated remote storage (S3/SeaweedFS).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct SimRemote {
     /// Remote manifests: path → SyncManifest
     manifests: HashMap<String, SyncManifest>,
     /// Remote chunks: hash → data (simplified as hash string)
     chunks: HashMap<String, String>,
+    /// Whether remote storage is currently available.
+    storage_available: bool,
+}
+
+impl Default for SimRemote {
+    fn default() -> Self {
+        Self {
+            manifests: HashMap::new(),
+            chunks: HashMap::new(),
+            storage_available: true,
+        }
+    }
 }
 
 /// A state sync event (models NATS STATE_UPDATES).
@@ -118,6 +133,9 @@ fn execute_op(
             if !m.online {
                 return Some(false);
             }
+            if !remote.storage_available {
+                return Some(false);
+            }
             let (local_hash, local_vclock) = match m.files.get(path) {
                 Some(f) => f.clone(),
                 None => return Some(false),
@@ -188,6 +206,9 @@ fn execute_op(
             if !m.online {
                 return None;
             }
+            if !remote.storage_available {
+                return None;
+            }
 
             if let Some(manifest) = remote.manifests.get(path) {
                 let mut local_vclock = m
@@ -215,7 +236,7 @@ fn execute_op(
 
         SimOp::ProcessEvents { machine } => {
             let m_id = machines[*machine].device_id.clone();
-            if !machines[*machine].online {
+            if !machines[*machine].online || !machines[*machine].nats_connected {
                 return None;
             }
 
@@ -736,6 +757,144 @@ fn test_offline_machine_catches_up() {
             path
         );
     }
+}
+
+#[test]
+fn test_nats_reconnect_replays_missed_updates() {
+    let mut machines = [
+        SimMachine::new("xoxd-bates"),
+        SimMachine::new("yoga"),
+        SimMachine::new("petting-zoo-mini"),
+    ];
+    let mut remote = SimRemote::default();
+    let mut nats = SimNats::default();
+
+    machines[2].nats_connected = false;
+
+    for (hash, expected_clock) in [("hash_v1", 1_u64), ("hash_v2", 2_u64)] {
+        execute_op(
+            &mut machines,
+            &mut remote,
+            &mut nats,
+            &SimOp::WriteFile {
+                machine: 0,
+                path: "report.txt".into(),
+                content_hash: hash.into(),
+            },
+        );
+        execute_op(
+            &mut machines,
+            &mut remote,
+            &mut nats,
+            &SimOp::Push {
+                machine: 0,
+                path: "report.txt".into(),
+            },
+        );
+
+        assert_eq!(nats.events.len(), expected_clock as usize);
+    }
+
+    // Still disconnected from NATS: no replay yet.
+    execute_op(
+        &mut machines,
+        &mut remote,
+        &mut nats,
+        &SimOp::ProcessEvents { machine: 2 },
+    );
+    assert!(
+        machines[2].files.get("report.txt").is_none(),
+        "machine should not receive replay while NATS is disconnected"
+    );
+
+    // Reconnect and drain replay.
+    machines[2].nats_connected = true;
+    execute_op(
+        &mut machines,
+        &mut remote,
+        &mut nats,
+        &SimOp::ProcessEvents { machine: 2 },
+    );
+
+    let (hash, vclock) = machines[2].files.get("report.txt").unwrap();
+    assert_eq!(hash, "hash_v2");
+    assert_eq!(vclock.get("xoxd-bates"), 2);
+    assert_eq!(
+        nats.cursors.get("petting-zoo-mini").copied(),
+        Some(nats.events.len()),
+        "reconnected machine should advance its replay cursor to the bus tail"
+    );
+}
+
+#[test]
+fn test_storage_recovery_allows_retry_and_replay() {
+    let mut machines = [
+        SimMachine::new("xoxd-bates"),
+        SimMachine::new("yoga"),
+        SimMachine::new("petting-zoo-mini"),
+    ];
+    let mut remote = SimRemote::default();
+    let mut nats = SimNats::default();
+
+    execute_op(
+        &mut machines,
+        &mut remote,
+        &mut nats,
+        &SimOp::WriteFile {
+            machine: 0,
+            path: "offline.txt".into(),
+            content_hash: "hash_outage".into(),
+        },
+    );
+
+    remote.storage_available = false;
+    let failed_push = execute_op(
+        &mut machines,
+        &mut remote,
+        &mut nats,
+        &SimOp::Push {
+            machine: 0,
+            path: "offline.txt".into(),
+        },
+    );
+    assert_eq!(failed_push, Some(false));
+    assert!(
+        remote.manifests.get("offline.txt").is_none(),
+        "failed push must not leave a remote manifest behind"
+    );
+    assert!(
+        nats.events.is_empty(),
+        "failed push must not publish a replay event"
+    );
+
+    remote.storage_available = true;
+    let recovered_push = execute_op(
+        &mut machines,
+        &mut remote,
+        &mut nats,
+        &SimOp::Push {
+            machine: 0,
+            path: "offline.txt".into(),
+        },
+    );
+    assert_eq!(recovered_push, Some(false));
+    assert_eq!(
+        remote.manifests.get("offline.txt").unwrap().file_hash,
+        "hash_outage"
+    );
+    assert_eq!(nats.events.len(), 1);
+
+    execute_op(
+        &mut machines,
+        &mut remote,
+        &mut nats,
+        &SimOp::ProcessEvents { machine: 1 },
+    );
+    assert_eq!(
+        machines[1].files.get("offline.txt").unwrap().0,
+        "hash_outage",
+        "peer should converge after storage recovers and replay resumes"
+    );
 }
 
 #[test]
