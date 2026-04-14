@@ -109,14 +109,21 @@ async fn delete_and_recreate_same_path() {
 
     assert!(!upload_v1.skipped);
     let hash_v1 = upload_v1.hash.clone();
+    let previous_state = state.get(&src).expect("state after v1 upload").clone();
 
     // Delete the file from disk and state
     std::fs::remove_file(&src).expect("delete v1 from disk");
     state.remove(&src);
 
-    // Recreate at the same path with different content
+    // Recreate at the same path with different content. Preserve the prior
+    // sync lineage and tick the local clock to model a new local edit at the
+    // same rel_path after the deletion.
+    write_test_file(tmp.path(), "src/cycle.txt", content_v1);
+    let mut recreated_state = previous_state;
+    recreated_state.vclock.tick("device-a");
+    state.set(&src, recreated_state);
     let content_v2 = b"v2 content is completely different from v1";
-    write_test_file(tmp.path(), "src/cycle.txt", content_v2);
+    std::fs::write(&src, content_v2).expect("write recreated v2 content");
 
     // Upload v2
     let upload_v2 = upload_file_with_device(
@@ -132,7 +139,11 @@ async fn delete_and_recreate_same_path() {
     .await
     .expect("upload v2");
 
-    assert!(!upload_v2.skipped, "recreated file should be uploaded");
+    assert!(
+        !upload_v2.skipped,
+        "recreated file should be uploaded, got outcome: {:?}",
+        upload_v2.outcome
+    );
     assert_ne!(
         upload_v2.hash, hash_v1,
         "new content should produce a different hash"
@@ -191,9 +202,15 @@ async fn delete_vs_modify_cross_device_conflict() {
     std::fs::remove_file(&src_a).expect("delete from A's disk");
     vclock_a_delete.tick("device-a"); // tick for the delete event
 
-    // Device B modifies and pushes independently
+    // Device B modifies and pushes independently. Seed B's local path with the
+    // downloaded state and tick its clock to model an edit after observing A's
+    // prior version.
+    let src_b = write_test_file(tmp.path(), "src_b/shared.txt", content_v1);
+    let mut b_edit_state = state_b.get(&dst_b).expect("B downloaded state").clone();
+    b_edit_state.vclock.tick("device-b");
+    state_b.set(&src_b, b_edit_state);
     let content_b_v2 = b"device B modified this document while A deleted it";
-    let src_b = write_test_file(tmp.path(), "src_b/shared.txt", content_b_v2);
+    std::fs::write(&src_b, content_b_v2).expect("device-b writes modified content");
 
     let upload_b = upload_file_with_device(
         &op,
@@ -208,7 +225,11 @@ async fn delete_vs_modify_cross_device_conflict() {
     .await
     .expect("device-b upload v2");
 
-    assert!(!upload_b.skipped);
+    assert!(
+        !upload_b.skipped,
+        "device-b edit should upload, got outcome: {:?}",
+        upload_b.outcome
+    );
 
     // Get device B's vclock after upload
     let vclock_b = state_b.get(&src_b).expect("B state").vclock.clone();
@@ -431,16 +452,24 @@ async fn recreate_deleted_file_with_different_size() {
 
     assert!(!upload_1kb.skipped);
     assert_eq!(upload_1kb.bytes, 1024);
+    let previous_state = state.get(&src).expect("state after 1KB upload").clone();
 
     // Delete from disk and state
     std::fs::remove_file(&src).expect("delete 1KB file");
     state.remove(&src);
 
+    // Recreate the tracked path and preserve/tick the prior lineage so the new
+    // upload is compared as a descendant edit rather than an unrelated file.
+    write_test_file(tmp.path(), "src/resized.bin", &content_1kb);
+    let mut recreated_state = previous_state;
+    recreated_state.vclock.tick("device-a");
+    state.set(&src, recreated_state);
+
     // Create 10KB file at the same path
     let content_10kb: Vec<u8> = (0u64..10240)
         .map(|i| (i.wrapping_mul(13) ^ (i >> 5)) as u8)
         .collect();
-    write_test_file(tmp.path(), "src/resized.bin", &content_10kb);
+    std::fs::write(&src, &content_10kb).expect("write recreated 10KB file");
 
     // Upload the 10KB file
     let upload_10kb = upload_file_with_device(
@@ -456,7 +485,11 @@ async fn recreate_deleted_file_with_different_size() {
     .await
     .expect("upload 10KB");
 
-    assert!(!upload_10kb.skipped, "new 10KB file should not be skipped");
+    assert!(
+        !upload_10kb.skipped,
+        "new 10KB file should not be skipped, got outcome: {:?}",
+        upload_10kb.outcome
+    );
     assert_eq!(upload_10kb.bytes, 10240, "upload should reflect 10KB size");
     assert_ne!(
         upload_10kb.hash, upload_1kb.hash,
