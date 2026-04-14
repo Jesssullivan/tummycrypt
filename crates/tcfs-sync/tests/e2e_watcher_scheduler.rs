@@ -10,7 +10,7 @@ use tcfs_sync::scheduler::{Priority, SchedulerConfig, SyncOp, SyncScheduler, Syn
 use tcfs_sync::watcher::{FileWatcher, WatcherConfig};
 use tempfile::TempDir;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::timeout;
+use tokio::time::{advance, timeout};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -20,6 +20,23 @@ fn short_debounce() -> Duration {
 
 async fn sleep_past_debounce(debounce: Duration) {
     tokio::time::sleep(debounce + Duration::from_millis(150)).await;
+}
+
+async fn settle_scheduler() {
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+}
+
+fn expected_scheduler_backoff(path: &str, retries: u32, base_backoff: Duration) -> Duration {
+    let base = base_backoff * 2u32.saturating_pow(retries);
+    let jitter_range = base.as_millis() as u64 / 4;
+    let jitter = if jitter_range > 0 {
+        let seed = path.len() as u64 ^ retries as u64;
+        Duration::from_millis(seed % jitter_range)
+    } else {
+        Duration::ZERO
+    };
+    base + jitter
 }
 
 /// Canonicalize a path for comparison (resolves /tmp → /private/tmp on macOS).
@@ -365,4 +382,138 @@ async fn scheduler_retries_failed_task() {
         attempts, 2,
         "task should have been processed twice (1 original + 1 retry), got {attempts}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn scheduler_backoff_is_deterministic_under_paused_time() {
+    let config = SchedulerConfig {
+        max_concurrent: 1,
+        max_retries: 2,
+        base_backoff: Duration::from_millis(100),
+    };
+
+    let scheduler = Arc::new(SyncScheduler::new(config.clone()));
+    let sender = scheduler.sender();
+    let path = "retry-me.txt";
+
+    scheduler
+        .enqueue(SyncTask::new(path.into(), SyncOp::Push, Priority::Normal))
+        .await;
+
+    let attempts: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    let attempt_clone = attempts.clone();
+    let done_tx = Arc::new(tokio::sync::Notify::new());
+    let done_rx = done_tx.clone();
+
+    let handler = move |_task: SyncTask| {
+        let attempts = attempt_clone.clone();
+        let done = done_tx.clone();
+        Box::pin(async move {
+            let mut count = attempts.lock().await;
+            *count += 1;
+            if *count < 3 {
+                anyhow::bail!("transient failure");
+            }
+            done.notify_one();
+            Ok(())
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+    };
+
+    let scheduler_for_run = scheduler.clone();
+    let sched_handle = tokio::spawn(async move {
+        scheduler_for_run.run(handler).await;
+    });
+
+    settle_scheduler().await;
+    assert_eq!(*attempts.lock().await, 1);
+
+    let first_backoff = expected_scheduler_backoff(path, 0, config.base_backoff);
+    advance(first_backoff - Duration::from_millis(1)).await;
+    settle_scheduler().await;
+    assert_eq!(*attempts.lock().await, 1);
+
+    advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
+    assert_eq!(*attempts.lock().await, 2);
+
+    let second_backoff = expected_scheduler_backoff(path, 1, config.base_backoff);
+    advance(second_backoff - Duration::from_millis(1)).await;
+    settle_scheduler().await;
+    assert_eq!(*attempts.lock().await, 2);
+
+    advance(Duration::from_millis(1)).await;
+    settle_scheduler().await;
+    timeout(Duration::from_millis(1), done_rx.notified())
+        .await
+        .expect("third attempt should succeed immediately after expected backoff");
+    assert_eq!(*attempts.lock().await, 3);
+
+    drop(sender);
+    sched_handle.abort();
+    let _ = sched_handle.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn scheduler_marks_task_failed_after_retry_exhaustion() {
+    let config = SchedulerConfig {
+        max_concurrent: 1,
+        max_retries: 2,
+        base_backoff: Duration::from_millis(100),
+    };
+
+    let scheduler = Arc::new(SyncScheduler::new(config.clone()));
+    let sender = scheduler.sender();
+    let path = "always-fail.txt";
+
+    scheduler
+        .enqueue(SyncTask::new(path.into(), SyncOp::Push, Priority::Normal))
+        .await;
+
+    let attempts: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+    let attempt_clone = attempts.clone();
+    let final_attempt_tx = Arc::new(tokio::sync::Notify::new());
+    let final_attempt_rx = final_attempt_tx.clone();
+
+    let handler = move |_task: SyncTask| {
+        let attempts = attempt_clone.clone();
+        let final_attempt = final_attempt_tx.clone();
+        Box::pin(async move {
+            let mut count = attempts.lock().await;
+            *count += 1;
+            if *count == 3 {
+                final_attempt.notify_one();
+            }
+            anyhow::bail!("persistent failure");
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+    };
+
+    let scheduler_for_run = scheduler.clone();
+    let sched_handle = tokio::spawn(async move {
+        scheduler_for_run.run(handler).await;
+    });
+
+    settle_scheduler().await;
+    assert_eq!(*attempts.lock().await, 1);
+
+    advance(expected_scheduler_backoff(path, 0, config.base_backoff)).await;
+    settle_scheduler().await;
+    assert_eq!(*attempts.lock().await, 2);
+
+    advance(expected_scheduler_backoff(path, 1, config.base_backoff)).await;
+    settle_scheduler().await;
+    timeout(Duration::from_millis(1), final_attempt_rx.notified())
+        .await
+        .expect("final attempt should run after the second deterministic backoff");
+    settle_scheduler().await;
+
+    assert_eq!(*attempts.lock().await, 3);
+    assert_eq!(scheduler.failed(), 1);
+    assert_eq!(scheduler.completed(), 0);
+    assert_eq!(scheduler.active(), 0);
+
+    drop(sender);
+    sched_handle.abort();
+    let _ = sched_handle.await;
 }
