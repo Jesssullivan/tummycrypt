@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use opendal::{ErrorKind, Operator};
 use serde::{Deserialize, Serialize};
 
 /// A parsed remote index entry that points to a committed manifest.
@@ -61,6 +62,10 @@ impl PendingIndexEntry {
             chunks,
             staged_manifest_key: staged_manifest_key.into(),
         }
+    }
+
+    pub fn as_remote_entry(&self) -> RemoteIndexEntry {
+        RemoteIndexEntry::new(self.manifest_hash.clone(), self.size, self.chunks)
     }
 }
 
@@ -144,6 +149,21 @@ impl ParsedIndexEntry {
             ParsedIndexEntry::V2(entry) => entry.pending.as_ref(),
         }
     }
+
+    pub fn referenced_object_keys(&self, manifest_prefix: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+
+        if let Some(current) = self.visible_entry() {
+            keys.push(manifest_key(manifest_prefix, &current.manifest_hash));
+        }
+
+        if let Some(pending) = self.pending_entry() {
+            keys.push(manifest_key(manifest_prefix, &pending.manifest_hash));
+            keys.push(pending.staged_manifest_key.clone());
+        }
+
+        keys
+    }
 }
 
 /// Parse the current visible remote index entry for callers that only support
@@ -196,6 +216,120 @@ fn parse_versioned_index_entry(text: &str) -> Result<ParsedIndexEntry> {
     }))
 }
 
+pub fn manifest_key(manifest_prefix: &str, manifest_hash: &str) -> String {
+    format!(
+        "{}/{}",
+        manifest_prefix.trim_end_matches('/'),
+        manifest_hash
+    )
+}
+
+pub async fn read_index_entry_record_from_store(
+    op: &Operator,
+    index_key: &str,
+) -> Result<Option<ParsedIndexEntry>> {
+    match op.read(index_key).await {
+        Ok(bytes) => parse_index_entry_record(&bytes.to_vec()).map(Some),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            Err(anyhow::anyhow!(e)).with_context(|| format!("reading index entry: {index_key}"))
+        }
+    }
+}
+
+pub async fn write_committed_index_entry(
+    op: &Operator,
+    index_key: &str,
+    entry: &RemoteIndexEntry,
+) -> Result<()> {
+    let bytes = VersionedIndexEntry::committed(entry.clone()).to_json_bytes()?;
+    op.write(index_key, bytes)
+        .await
+        .with_context(|| format!("writing committed index entry: {index_key}"))?;
+    Ok(())
+}
+
+pub async fn write_preparing_index_entry(
+    op: &Operator,
+    index_key: &str,
+    current: Option<RemoteIndexEntry>,
+    pending: PendingIndexEntry,
+) -> Result<()> {
+    let bytes = VersionedIndexEntry::preparing(current, pending).to_json_bytes()?;
+    op.write(index_key, bytes)
+        .await
+        .with_context(|| format!("writing preparing index entry: {index_key}"))?;
+    Ok(())
+}
+
+pub async fn resolve_visible_index_entry(
+    op: &Operator,
+    index_key: &str,
+    manifest_prefix: &str,
+) -> Result<Option<RemoteIndexEntry>> {
+    let parsed = match read_index_entry_record_from_store(op, index_key).await? {
+        Some(parsed) => parsed,
+        None => return Ok(None),
+    };
+
+    resolve_visible_parsed_entry(op, index_key, manifest_prefix, parsed).await
+}
+
+async fn resolve_visible_parsed_entry(
+    op: &Operator,
+    index_key: &str,
+    manifest_prefix: &str,
+    parsed: ParsedIndexEntry,
+) -> Result<Option<RemoteIndexEntry>> {
+    if let Some(pending) = parsed.pending_entry() {
+        let pending_manifest_key = manifest_key(manifest_prefix, &pending.manifest_hash);
+        if op.exists(&pending_manifest_key).await.unwrap_or(false) {
+            let committed = pending.as_remote_entry();
+            write_committed_index_entry(op, index_key, &committed).await?;
+            let _ = op.delete(&pending.staged_manifest_key).await;
+            return Ok(Some(committed));
+        }
+
+        if op
+            .exists(&pending.staged_manifest_key)
+            .await
+            .unwrap_or(false)
+        {
+            let staged_bytes = op
+                .read(&pending.staged_manifest_key)
+                .await
+                .with_context(|| {
+                    format!(
+                        "reading staged manifest for recovery: {}",
+                        pending.staged_manifest_key
+                    )
+                })?
+                .to_vec();
+            op.write(&pending_manifest_key, staged_bytes)
+                .await
+                .with_context(|| {
+                    format!("materializing pending manifest: {pending_manifest_key}")
+                })?;
+
+            let committed = pending.as_remote_entry();
+            write_committed_index_entry(op, index_key, &committed).await?;
+            let _ = op.delete(&pending.staged_manifest_key).await;
+            return Ok(Some(committed));
+        }
+    }
+
+    if let Some(current) = parsed.visible_entry() {
+        let current_manifest_key = manifest_key(manifest_prefix, &current.manifest_hash);
+        if op.exists(&current_manifest_key).await.unwrap_or(false) {
+            return Ok(Some(current.clone()));
+        }
+
+        bail!("index entry points to missing manifest: {current_manifest_key}");
+    }
+
+    Ok(None)
+}
+
 fn parse_legacy_index_entry(text: &str) -> Result<RemoteIndexEntry> {
     let mut manifest_hash = None;
     let mut size = 0u64;
@@ -220,7 +354,17 @@ fn parse_legacy_index_entry(text: &str) -> Result<RemoteIndexEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_index_entry, parse_index_entry_record, IndexEntryState, ParsedIndexEntry};
+    use super::{
+        manifest_key, parse_index_entry, parse_index_entry_record, resolve_visible_index_entry,
+        write_preparing_index_entry, IndexEntryState, ParsedIndexEntry, PendingIndexEntry,
+        RemoteIndexEntry, VersionedIndexEntry,
+    };
+    use opendal::services::Memory;
+    use opendal::Operator;
+
+    fn memory_op() -> Operator {
+        Operator::new(Memory::default()).unwrap().finish()
+    }
 
     #[test]
     fn parse_legacy_index_entry() {
@@ -394,5 +538,73 @@ mod tests {
                 assert!(entry.current.is_some());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_preparing_entry_rolls_forward_from_staged_manifest() {
+        let op = memory_op();
+        let index_key = "data/index/doc.txt";
+        let manifest_prefix = "data/manifests";
+        let staged_key = "data/staging/manifests/txn-1.json";
+
+        op.write(staged_key, br#"{"version":2,"file_hash":"new456","file_size":11,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec())
+            .await
+            .unwrap();
+
+        write_preparing_index_entry(
+            &op,
+            index_key,
+            Some(RemoteIndexEntry::new("old123", 10, 1)),
+            PendingIndexEntry::new("new456", 11, 1, staged_key),
+        )
+        .await
+        .unwrap();
+
+        let visible = resolve_visible_index_entry(&op, index_key, manifest_prefix)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(visible.manifest_hash, "new456");
+        assert!(op
+            .exists(&manifest_key(manifest_prefix, "new456"))
+            .await
+            .unwrap());
+        assert!(!op.exists(staged_key).await.unwrap());
+
+        match parse_index_entry_record(&op.read(index_key).await.unwrap().to_vec()).unwrap() {
+            ParsedIndexEntry::Legacy(_) => panic!("expected v2 committed entry"),
+            ParsedIndexEntry::V2(entry) => {
+                assert_eq!(entry, VersionedIndexEntry::committed(visible));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_preparing_entry_keeps_current_when_pending_is_missing() {
+        let op = memory_op();
+        let index_key = "data/index/doc.txt";
+        let manifest_prefix = "data/manifests";
+
+        op.write(
+            &manifest_key(manifest_prefix, "old123"),
+            br#"{"version":2,"file_hash":"old123","file_size":10,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        write_preparing_index_entry(
+            &op,
+            index_key,
+            Some(RemoteIndexEntry::new("old123", 10, 1)),
+            PendingIndexEntry::new("new456", 11, 1, "data/staging/manifests/missing.json"),
+        )
+        .await
+        .unwrap();
+
+        let visible = resolve_visible_index_entry(&op, index_key, manifest_prefix)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(visible.manifest_hash, "old123");
     }
 }

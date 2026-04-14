@@ -886,16 +886,8 @@ async fn cmd_push(
             ));
             println!("  skipped (unchanged since last sync)");
         } else {
-            // Write index entry for FUSE discoverability (same pattern as push_tree_with_device)
-            let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), &rel);
-            let index_entry = format!(
-                "manifest_hash={}\nsize={}\nchunks={}\n",
-                result.hash, result.bytes, result.chunks
-            );
-            if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
-                eprintln!("warning: failed to write index entry: {e}");
-            }
-
+            // Path publication is handled inside upload_file_with_device so the
+            // manifest/index sequence remains crash-aware.
             pb.finish_with_message("done".to_string());
             println!("  hash:    {}", &result.hash[..16.min(result.hash.len())]);
             println!("  chunks:  {}", result.chunks);

@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use crate::blacklist::Blacklist;
 use crate::conflict::{compare_clocks, ConflictInfo};
 use crate::engine::{self, OptionalEncryption, ProgressFn};
-use crate::index_entry::{parse_index_entry, parse_index_entry_record, RemoteIndexEntry};
+use crate::index_entry::{resolve_visible_index_entry, RemoteIndexEntry};
 use crate::manifest::SyncManifest;
 use crate::state::{StateCache, StateCacheBackend, SyncState};
 
@@ -143,22 +143,20 @@ pub async fn list_remote_index(
         }
 
         match op.read(full_key).await {
-            Ok(data) => match parse_index_entry_record(&data.to_vec()) {
-                Ok(parsed) => {
-                    if let Some(visible) = parsed.visible_entry().cloned() {
+            Ok(_) => {
+                let manifest_prefix = format!("{}/manifests", remote_prefix.trim_end_matches('/'));
+                match resolve_visible_index_entry(op, full_key, &manifest_prefix).await {
+                    Ok(Some(visible)) => {
                         result.insert(rel_path, visible);
-                    } else {
-                        debug!(
-                            key = full_key,
-                            state = ?parsed.state(),
-                            "skipping non-visible index entry"
-                        );
+                    }
+                    Ok(None) => {
+                        debug!(key = full_key, "skipping non-visible index entry");
+                    }
+                    Err(e) => {
+                        warn!(key = full_key, error = %e, "skipping unreadable index entry");
                     }
                 }
-                Err(e) => {
-                    warn!(key = full_key, error = %e, "skipping unparseable index entry");
-                }
-            },
+            }
             Err(e) => {
                 warn!(key = full_key, error = %e, "skipping unreadable index entry");
             }
@@ -549,38 +547,17 @@ pub async fn execute_plan(
             },
 
             ReconcileAction::DeleteRemote { rel_path } => {
-                let prefix = remote_prefix.trim_end_matches('/');
-                let index_key = format!("{prefix}/index/{rel_path}");
-
-                // Read index to find manifest hash before deleting
-                let manifest_key = if let Ok(idx_bytes) = op.read(&index_key).await {
-                    parse_index_entry(&idx_bytes.to_vec())
-                        .ok()
-                        .map(|entry| format!("{prefix}/manifests/{}", entry.manifest_hash))
-                } else {
-                    None
-                };
-
-                // Delete index entry
-                if let Err(e) = op.delete(&index_key).await {
+                if let Err(e) =
+                    engine::delete_remote_file(op, rel_path, remote_prefix, state, Some(local_root))
+                        .await
+                {
                     result
                         .errors
-                        .push((rel_path.clone(), format!("remote index delete failed: {e}")));
+                        .push((rel_path.clone(), format!("remote delete failed: {e}")));
+                } else {
+                    result.deleted_remote += 1;
                     continue;
                 }
-
-                // Delete manifest (prevents orphaned manifests)
-                if let Some(ref mkey) = manifest_key {
-                    if let Err(e) = op.delete(mkey).await {
-                        tracing::warn!(
-                            rel_path = %rel_path,
-                            manifest = %mkey,
-                            "failed to delete manifest during reconcile: {e}"
-                        );
-                    }
-                }
-
-                result.deleted_remote += 1;
             }
 
             ReconcileAction::Conflict { rel_path, info } => {
@@ -687,6 +664,18 @@ mod tests {
         )
         .await
         .unwrap();
+        op.write(
+            "data/manifests/aaa",
+            br#"{"version":2,"file_hash":"aaa","file_size":100,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/manifests/bbb",
+            br#"{"version":2,"file_hash":"bbb","file_size":200,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
 
         let index = list_remote_index(&op, "data").await.unwrap();
         assert_eq!(index.len(), 2);
@@ -736,6 +725,12 @@ mod tests {
         op.write(
             "data/index/remote_only.txt",
             RemoteIndexEntry::new("abc123", 50, 1).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/manifests/abc123",
+            br#"{"version":2,"file_hash":"abc123","file_size":50,"chunks":[],"vclock":{"clocks":{"neo":1}},"written_by":"neo","written_at":0}"#.to_vec(),
         )
         .await
         .unwrap();

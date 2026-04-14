@@ -15,9 +15,13 @@ use anyhow::{Context, Result};
 use opendal::Operator;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::conflict::{compare_clocks, SyncOutcome};
-use crate::index_entry::{parse_index_entry, RemoteIndexEntry};
+use crate::index_entry::{
+    manifest_key, read_index_entry_record_from_store, resolve_visible_index_entry,
+    write_committed_index_entry, write_preparing_index_entry, PendingIndexEntry, RemoteIndexEntry,
+};
 use crate::manifest::SyncManifest;
 use crate::state::{make_sync_state_full, StateCache};
 
@@ -112,6 +116,77 @@ async fn read_chunk_with_retry(
             anyhow::anyhow!("chunk download failed after {CHUNK_MAX_RETRIES} retries")
         })
         .context(format!("downloading chunk {chunk_idx}: {key}")))
+}
+
+fn manifest_path_prefix(remote_prefix: &str) -> String {
+    format!("{}/manifests", remote_prefix.trim_end_matches('/'))
+}
+
+async fn publish_index_reference(
+    op: &Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    entry: RemoteIndexEntry,
+) -> Result<()> {
+    let prefix = remote_prefix.trim_end_matches('/');
+    let index_key = format!("{prefix}/index/{rel_path}");
+    let manifest_prefix = manifest_path_prefix(prefix);
+    let manifest_path = manifest_key(&manifest_prefix, &entry.manifest_hash);
+
+    anyhow::ensure!(
+        op.exists(&manifest_path).await.unwrap_or(false),
+        "cannot point index at missing manifest: {manifest_path}"
+    );
+
+    let _ = resolve_visible_index_entry(op, &index_key, &manifest_prefix).await?;
+    write_committed_index_entry(op, &index_key, &entry).await
+}
+
+async fn publish_manifest_for_rel_path(
+    op: &Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    manifest_bytes: Vec<u8>,
+    entry: RemoteIndexEntry,
+) -> Result<()> {
+    let prefix = remote_prefix.trim_end_matches('/');
+    let index_key = format!("{prefix}/index/{rel_path}");
+    let manifest_prefix = manifest_path_prefix(prefix);
+    let final_manifest_key = manifest_key(&manifest_prefix, &entry.manifest_hash);
+    let staged_manifest_key = format!(
+        "{prefix}/staging/manifests/{}-{}.json",
+        Uuid::new_v4(),
+        entry.manifest_hash
+    );
+
+    let current = resolve_visible_index_entry(op, &index_key, &manifest_prefix).await?;
+
+    op.write(&staged_manifest_key, manifest_bytes.clone())
+        .await
+        .with_context(|| format!("writing staged manifest: {staged_manifest_key}"))?;
+
+    write_preparing_index_entry(
+        op,
+        &index_key,
+        current,
+        PendingIndexEntry::new(
+            entry.manifest_hash.clone(),
+            entry.size,
+            entry.chunks,
+            staged_manifest_key.clone(),
+        ),
+    )
+    .await?;
+
+    if !op.exists(&final_manifest_key).await.unwrap_or(false) {
+        op.write(&final_manifest_key, manifest_bytes)
+            .await
+            .with_context(|| format!("uploading manifest: {final_manifest_key}"))?;
+    }
+
+    write_committed_index_entry(op, &index_key, &entry).await?;
+    let _ = op.delete(&staged_manifest_key).await;
+    Ok(())
 }
 
 /// Optional encryption context for E2E encrypted push/pull.
@@ -304,17 +379,12 @@ pub async fn upload_file_with_device(
         let remote_manifest_obj = if let Some(rp) = rel_path {
             // Look up the index entry to find what manifest is currently stored
             let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
-            let idx_manifest = if let Ok(idx_bytes) = op.read(&index_key).await {
-                parse_index_entry(&idx_bytes.to_vec()).ok().map(|entry| {
-                    format!(
-                        "{}/manifests/{}",
-                        remote_prefix.trim_end_matches('/'),
-                        entry.manifest_hash
-                    )
-                })
-            } else {
-                None
-            };
+            let manifest_prefix = manifest_path_prefix(remote_prefix);
+            let idx_manifest = resolve_visible_index_entry(op, &index_key, &manifest_prefix)
+                .await
+                .ok()
+                .flatten()
+                .map(|entry| manifest_key(&manifest_prefix, &entry.manifest_hash));
             // Read the manifest pointed to by the index entry
             if let Some(ref manifest_path) = idx_manifest {
                 if let Ok(remote_bytes) = op.read(manifest_path).await {
@@ -427,11 +497,29 @@ pub async fn upload_file_with_device(
         && device_id.is_empty()
     {
         debug!(hash = %file_hash_hex, "dedup: manifest already exists");
+        let existing_manifest = op
+            .read(&remote_manifest)
+            .await
+            .with_context(|| format!("reading existing manifest for dedup: {remote_manifest}"))?;
+        let existing_manifest = SyncManifest::from_bytes(&existing_manifest.to_bytes())
+            .with_context(|| format!("parsing existing manifest for dedup: {remote_manifest}"))?;
+        let chunk_count = existing_manifest.chunk_hashes().len();
+
+        if let Some(rp) = rel_path {
+            publish_index_reference(
+                op,
+                remote_prefix,
+                rp,
+                RemoteIndexEntry::new(file_hash_hex.clone(), file_size, chunk_count),
+            )
+            .await?;
+        }
+
         let remote_path = remote_manifest.clone();
         let sync_state = make_sync_state_full(
             local_path,
             file_hash_hex.clone(),
-            0,
+            chunk_count,
             remote_path.clone(),
             local_vclock,
             device_id.to_string(),
@@ -441,7 +529,7 @@ pub async fn upload_file_with_device(
             path: local_path.to_path_buf(),
             remote_path,
             hash: file_hash_hex,
-            chunks: 0,
+            chunks: chunk_count,
             bytes: file_size,
             skipped: false,
             outcome: None,
@@ -635,9 +723,20 @@ pub async fn upload_file_with_device(
     };
 
     let manifest_bytes = manifest.to_bytes()?;
-    op.write(&remote_manifest, manifest_bytes)
-        .await
-        .with_context(|| format!("uploading manifest: {remote_manifest}"))?;
+    if let Some(rp) = rel_path {
+        publish_manifest_for_rel_path(
+            op,
+            remote_prefix,
+            rp,
+            manifest_bytes,
+            RemoteIndexEntry::new(file_hash_hex.clone(), file_size, num_chunks),
+        )
+        .await?;
+    } else {
+        op.write(&remote_manifest, manifest_bytes)
+            .await
+            .with_context(|| format!("uploading manifest: {remote_manifest}"))?;
+    }
 
     // Deferred vclock merge: only merge remote vclock after successful upload
     // to prevent stale vclocks if the upload had failed.
@@ -991,18 +1090,8 @@ pub async fn push_tree_with_device(
                 if result.skipped {
                     skipped += 1;
                 } else {
-                    // Write index entry only when the manifest was actually uploaded.
-                    // Skipped files (RemoteNewer, UpToDate, Conflict) already have
-                    // a valid index entry, and writing one with the local hash would
-                    // create an orphan pointing to a non-existent manifest.
-                    let index_key =
-                        format!("{}/index/{}", remote_path_prefix(remote_prefix), rel_str);
-                    let index_entry =
-                        RemoteIndexEntry::new(result.hash.clone(), result.bytes, result.chunks)
-                            .to_legacy_bytes();
-                    if let Err(e) = op.write(&index_key, index_entry).await {
-                        warn!(path = %path.display(), "failed to write index entry: {e}");
-                    }
+                    // Path publication is owned by upload_file_with_device so
+                    // the manifest and index sequence stays crash-aware.
                     uploaded += 1;
                     bytes += result.bytes;
                 }
@@ -1265,10 +1354,9 @@ pub async fn resolve_manifest_path(
     let rel = normalize_rel_path(Path::new(input), sync_root);
     let index_key = format!("{prefix}/index/{rel}");
 
-    if let Ok(idx_bytes) = op.read(&index_key).await {
-        if let Ok(entry) = parse_index_entry(&idx_bytes.to_vec()) {
-            return Ok(format!("{prefix}/manifests/{}", entry.manifest_hash));
-        }
+    let manifest_prefix = manifest_path_prefix(prefix);
+    if let Ok(Some(entry)) = resolve_visible_index_entry(op, &index_key, &manifest_prefix).await {
+        return Ok(manifest_key(&manifest_prefix, &entry.manifest_hash));
     }
 
     // Try 2: Search index entries for a matching filename.
@@ -1288,10 +1376,10 @@ pub async fn resolve_manifest_path(
     for entry in entries {
         let entry_path = entry.path();
         if entry_path.ends_with(&format!("/{filename}")) || entry_path.ends_with(&filename) {
-            if let Ok(idx_bytes) = op.read(entry_path).await {
-                if let Ok(entry) = parse_index_entry(&idx_bytes.to_vec()) {
-                    return Ok(format!("{prefix}/manifests/{}", entry.manifest_hash));
-                }
+            if let Ok(Some(entry)) =
+                resolve_visible_index_entry(op, entry_path, &manifest_prefix).await
+            {
+                return Ok(manifest_key(&manifest_prefix, &entry.manifest_hash));
             }
         }
     }
@@ -1318,29 +1406,30 @@ pub async fn delete_remote_file(
 ) -> Result<()> {
     let prefix = remote_prefix.trim_end_matches('/');
     let index_key = format!("{prefix}/index/{rel_path}");
-
-    // Read index to find manifest hash
-    let idx_raw = op
-        .read(&index_key)
-        .await
-        .with_context(|| format!("reading index entry: {index_key}"))?
-        .to_bytes();
-
-    let manifest_hash = parse_index_entry(&idx_raw)
-        .with_context(|| format!("parsing index entry: {index_key}"))?
-        .manifest_hash;
-
-    let manifest_key = format!("{prefix}/manifests/{manifest_hash}");
+    let manifest_prefix = manifest_path_prefix(prefix);
+    let parsed = read_index_entry_record_from_store(op, &index_key)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing index entry: {index_key}"))?;
+    let current_manifest = parsed
+        .visible_entry()
+        .map(|entry| manifest_key(&manifest_prefix, &entry.manifest_hash));
+    let referenced_keys = parsed.referenced_object_keys(&manifest_prefix);
 
     // Delete index entry and manifest
     op.delete(&index_key)
         .await
         .with_context(|| format!("deleting index entry: {index_key}"))?;
-    op.delete(&manifest_key)
-        .await
-        .with_context(|| format!("deleting manifest: {manifest_key}"))?;
+    for object_key in referenced_keys {
+        if Some(object_key.as_str()) == current_manifest.as_deref() {
+            op.delete(&object_key)
+                .await
+                .with_context(|| format!("deleting manifest: {object_key}"))?;
+        } else if let Err(e) = op.delete(&object_key).await {
+            debug!(rel_path = %rel_path, object = %object_key, "best-effort delete failed: {e}");
+        }
+    }
 
-    info!(rel_path = %rel_path, manifest = %manifest_hash, "deleted remote file");
+    info!(rel_path = %rel_path, "deleted remote file");
 
     // Remove from state cache
     let local_path = sync_root
@@ -1556,6 +1645,12 @@ mod tests {
         )
         .await
         .unwrap();
+        op.write(
+            "data/manifests/abc123",
+            br#"{"version":2,"file_hash":"abc123","file_size":100,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
 
         let result = resolve_manifest_path(&op, "doc.txt", "data", None)
             .await
@@ -1633,6 +1728,44 @@ mod tests {
         // Verify content matches
         let content = std::fs::read_to_string(&dl_path).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn upload_file_with_device_publishes_committed_v2_index() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let local = dir.path().join("hello.txt");
+        std::fs::write(&local, b"hello index").unwrap();
+
+        let upload = upload_file_with_device(
+            &op,
+            &local,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("hello.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let index_bytes = op.read("data/index/hello.txt").await.unwrap().to_vec();
+        match crate::index_entry::parse_index_entry_record(&index_bytes).unwrap() {
+            crate::index_entry::ParsedIndexEntry::Legacy(_) => {
+                panic!("expected committed v2 index entry")
+            }
+            crate::index_entry::ParsedIndexEntry::V2(entry) => {
+                assert_eq!(entry.state, crate::index_entry::IndexEntryState::Committed);
+                let current = entry.current.expect("current committed entry");
+                assert_eq!(current.manifest_hash, upload.hash);
+                assert_eq!(current.size, upload.bytes);
+                assert_eq!(current.chunks, upload.chunks);
+            }
+        }
     }
 
     #[tokio::test]
