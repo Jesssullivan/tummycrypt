@@ -60,6 +60,36 @@ async fn write_chunk_with_retry(
         .context(format!("uploading chunk {chunk_idx}: {key}")))
 }
 
+/// Read a key from remote storage with exponential backoff retry.
+///
+/// Used for manifest/index reads so transient storage errors behave the same as
+/// chunk downloads instead of aborting the whole pull on the first failure.
+async fn read_with_retry(op: &Operator, key: &str) -> Result<Vec<u8>> {
+    let mut last_err = None;
+    for attempt in 0..CHUNK_MAX_RETRIES {
+        match op.read(key).await {
+            Ok(data) => return Ok(data.to_vec()),
+            Err(e) => {
+                let delay = CHUNK_RETRY_BASE_MS * 2u64.pow(attempt);
+                warn!(
+                    key = key,
+                    attempt = attempt + 1,
+                    max = CHUNK_MAX_RETRIES,
+                    delay_ms = delay,
+                    error = %e,
+                    "read failed, retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err
+        .map(|e| anyhow::anyhow!(e))
+        .unwrap_or_else(|| anyhow::anyhow!("read failed after {CHUNK_MAX_RETRIES} retries"))
+        .context(format!("reading: {key}")))
+}
+
 /// Read a chunk from remote storage with exponential backoff retry.
 ///
 /// Retries up to `CHUNK_MAX_RETRIES` times on transient failures.
@@ -715,13 +745,13 @@ pub async fn download_file_with_device(
     state: Option<&mut StateCache>,
     encryption: OptionalEncryption<'_>,
 ) -> Result<DownloadResult> {
-    // Read manifest
-    let manifest_bytes = op
-        .read(remote_manifest)
+    // Read manifest with retry so transient storage failures don't abort pull
+    // paths immediately while chunk reads already back off.
+    let manifest_bytes = read_with_retry(op, remote_manifest)
         .await
         .with_context(|| format!("reading manifest: {remote_manifest}"))?;
 
-    let manifest = SyncManifest::from_bytes(&manifest_bytes.to_bytes())
+    let manifest = SyncManifest::from_bytes(&manifest_bytes)
         .with_context(|| format!("parsing manifest: {remote_manifest}"))?;
 
     let chunk_hashes = manifest.chunk_hashes();
