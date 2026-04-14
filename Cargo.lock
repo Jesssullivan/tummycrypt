@@ -5373,6 +5373,7 @@ dependencies = [
  "serde_json",
  "tcfs-core",
  "tcfs-secrets",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "toml 0.8.23",
