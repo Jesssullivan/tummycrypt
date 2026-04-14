@@ -46,6 +46,9 @@ rpassword = { workspace = true }
 [features]
 default = []
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [package.metadata.deb]
 maintainer = "TummyCrypt Contributors <jess@sulliwood.org>"
 copyright = "2026 TummyCrypt Contributors"

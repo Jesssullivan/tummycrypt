@@ -5210,6 +5210,7 @@ dependencies = [
  "tcfs-storage",
  "tcfs-sync",
  "tcfs-vfs",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
