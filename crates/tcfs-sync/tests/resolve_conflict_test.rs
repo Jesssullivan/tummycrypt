@@ -22,6 +22,16 @@ fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf
     path
 }
 
+fn seed_state_at_new_path(
+    state: &mut tcfs_sync::state::StateCache,
+    tracked: &tcfs_sync::state::SyncState,
+    new_path: &Path,
+) {
+    let mut seeded = tracked.clone();
+    seeded.mtime = 0;
+    state.set(new_path, seeded);
+}
+
 /// Simulates keep_remote: device A uploads, device B downloads the remote version.
 #[tokio::test]
 async fn resolve_keep_remote_downloads_remote() {
@@ -90,7 +100,7 @@ async fn resolve_keep_local_re_uploads() {
     let src_a = write_test_file(tmp.path(), "src_a/notes.txt", content_a);
     let mut state_a = tcfs_sync::state::StateCache::open(&tmp.path().join("state_a.db")).unwrap();
 
-    let _upload_a = tcfs_sync::engine::upload_file_with_device(
+    let upload_a = tcfs_sync::engine::upload_file_with_device(
         &op,
         &src_a,
         prefix,
@@ -108,10 +118,18 @@ async fn resolve_keep_local_re_uploads() {
     let src_b = write_test_file(tmp.path(), "src_b/notes.txt", content_b);
     let mut state_b = tcfs_sync::state::StateCache::open(&tmp.path().join("state_b.db")).unwrap();
 
-    // Tick B's clock to make it newer
-    let mut vclock = tcfs_sync::conflict::VectorClock::new();
-    vclock.tick("device-b");
-    vclock.tick("device-b"); // Tick twice so B dominates
+    // Seed B's local path with A's observed baseline so the follow-up upload
+    // is a descendant keep_local decision rather than a stateless overwrite.
+    let baseline_b_state = tcfs_sync::state::make_sync_state_full(
+        &src_b,
+        upload_a.hash.clone(),
+        upload_a.chunks,
+        upload_a.remote_path.clone(),
+        state_a.get(&src_a).expect("device A state").vclock.clone(),
+        "device-b".into(),
+    )
+    .expect("make B baseline state");
+    seed_state_at_new_path(&mut state_b, &baseline_b_state, &src_b);
 
     let upload_b = tcfs_sync::engine::upload_file_with_device(
         &op,

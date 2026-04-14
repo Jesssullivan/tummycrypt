@@ -347,8 +347,11 @@ pub async fn upload_file_with_device(
     rel_path: Option<&str>,
     encryption: OptionalEncryption<'_>,
 ) -> Result<UploadResult> {
+    let tracked_state = state.get(local_path).cloned();
+
     // Fast-path: check if file is already up-to-date
-    match state.needs_sync(local_path)? {
+    let sync_reason = state.needs_sync(local_path)?;
+    match sync_reason.as_deref() {
         None => {
             let cached = state.get(local_path).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -399,10 +402,17 @@ pub async fn upload_file_with_device(
     let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
 
     // Get the local vclock from state (or start fresh)
-    let mut local_vclock = state
-        .get(local_path)
+    let mut local_vclock = tracked_state
+        .as_ref()
         .map(|s| s.vclock.clone())
         .unwrap_or_default();
+    let local_edit_inferred = !device_id.is_empty() && tracked_state.is_some();
+    if local_edit_inferred {
+        // The file changed relative to tracked local state, so model the
+        // pending upload as a descendant of the last synced version before
+        // comparing against the current rel_path index entry.
+        local_vclock.tick(device_id);
+    }
 
     // Conflict detection: find the current remote manifest for this rel_path.
     // First try the index entry (covers different-content conflicts), then
@@ -571,7 +581,7 @@ pub async fn upload_file_with_device(
     }
 
     // Tick local vclock before writing
-    if !device_id.is_empty() {
+    if !device_id.is_empty() && !local_edit_inferred {
         local_vclock.tick(device_id);
     }
 

@@ -249,6 +249,10 @@ async fn unsync_then_modify_then_resync() {
         state_b.get(&dst_b).is_some(),
         "state_b should have entry after download"
     );
+    let downloaded_state = state_b
+        .get(&dst_b)
+        .expect("downloaded state before unsync")
+        .clone();
 
     // Device B removes from state cache (unsync)
     state_b.remove(&dst_b);
@@ -258,7 +262,11 @@ async fn unsync_then_modify_then_resync() {
         "entry should be gone after unsync"
     );
 
-    // Device B modifies the local copy
+    // Device B modifies the local copy. Seed the path with the last known
+    // lineage and tick B's clock to model a local edit after the unsync.
+    let mut resync_state = downloaded_state;
+    resync_state.vclock.tick("device-b");
+    state_b.set(&dst_b, resync_state);
     let modified = b"modified content by device-b after unsync";
     std::fs::write(&dst_b, modified).expect("modify local copy");
 

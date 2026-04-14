@@ -26,6 +26,15 @@ fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf
     path
 }
 
+fn seed_state_at_new_path(state: &mut StateCache, tracked_path: &Path, new_path: &Path) {
+    let mut seeded = state
+        .get(tracked_path)
+        .expect("tracked state for lineage seed")
+        .clone();
+    seeded.mtime = 0;
+    state.set(new_path, seeded);
+}
+
 /// Test case 1: Device A pushes a file, Device B pulls it, content matches.
 #[tokio::test]
 async fn two_device_push_then_pull() {
@@ -136,6 +145,7 @@ async fn two_device_modify_and_re_sync() {
     // Step 3: Device B modifies the file and pushes v2
     let content_v2 = b"version 2 modified by device-b with extra changes";
     let src_b = write_test_file(tmp.path(), "src_b/notes.txt", content_v2);
+    seed_state_at_new_path(&mut state_b, &dst_b, &src_b);
 
     let upload_b = upload_file_with_device(
         &op,
@@ -183,13 +193,9 @@ async fn two_device_modify_and_re_sync() {
     );
 }
 
-/// Test case 3: Both devices modify simultaneously — VectorClock detects conflict.
-///
-/// Note: The sync engine uses content-addressed manifest paths, so two devices
-/// writing different content get different remote paths (no collision at the
-/// storage layer). Conflict detection happens at the VectorClock/NATS layer.
-/// This test simulates that layer: both devices push independently, then we
-/// compare their vclocks to verify the conflict is detectable.
+/// Test case 3: Both devices modify from the same baseline. Once one device
+/// publishes the rel_path, the other should be stopped by VectorClock-based
+/// conflict detection rather than silently publishing a second winner.
 #[tokio::test]
 async fn two_device_simultaneous_conflict_detection() {
     let tmp = TempDir::new().unwrap();
@@ -234,11 +240,14 @@ async fn two_device_simultaneous_conflict_detection() {
     // Step 3: Both modify and push independently
     let content_a_v2 = b"device-a made independent changes to the document";
     let src_a_v2 = write_test_file(tmp.path(), "src_a2/shared.txt", content_a_v2);
+    seed_state_at_new_path(&mut state_a, &src_a_v1, &src_a_v2);
 
     let content_b_v2 = b"device-b also made different independent changes";
     let src_b_v2 = write_test_file(tmp.path(), "src_b2/shared.txt", content_b_v2);
+    seed_state_at_new_path(&mut state_b, &dst_b, &src_b_v2);
 
-    // Both push (content-addressed, so no storage collision)
+    // Device A publishes first. Device B should then be rejected as a
+    // concurrent modifier for the same rel_path.
     let upload_a_v2 = upload_file_with_device(
         &op,
         &src_a_v2,
@@ -266,11 +275,21 @@ async fn two_device_simultaneous_conflict_detection() {
     .expect("device-b upload v2");
 
     assert!(!upload_a_v2.skipped);
-    assert!(!upload_b_v2.skipped);
+    assert!(
+        upload_b_v2.skipped,
+        "second independent writer should be stopped by conflict detection"
+    );
+    match &upload_b_v2.outcome {
+        Some(tcfs_sync::conflict::SyncOutcome::Conflict(info)) => {
+            assert_eq!(info.rel_path, "shared.txt");
+            assert_eq!(info.local_device, "device-b");
+            assert_eq!(info.remote_device, "device-a");
+        }
+        other => panic!("expected Conflict for second writer, got: {:?}", other),
+    }
 
-    // Step 4: Simulate NATS-layer conflict detection by comparing vclocks
-    // In production, when device B receives device A's NATS event (or vice versa),
-    // it compares the vclocks to detect the conflict.
+    // Step 4: Compare the recorded local/remote clocks to verify the conflict
+    // is concurrent, not a stale remote overwrite.
     let vclock_a = state_a.get(&src_a_v2).expect("A state").vclock.clone();
     let vclock_b = state_b.get(&src_b_v2).expect("B state").vclock.clone();
 
@@ -286,7 +305,7 @@ async fn two_device_simultaneous_conflict_detection() {
     let outcome = tcfs_sync::conflict::compare_clocks(
         &vclock_b,
         &vclock_a,
-        &upload_b_v2.hash,
+        &state_b.get(&src_b_v2).expect("B state").blake3,
         &upload_a_v2.hash,
         "shared.txt",
         "device-b",
@@ -350,6 +369,7 @@ async fn two_device_multi_round_sync() {
     // Round 2: B modifies and pushes
     let content_r2 = b"round 2 content from device-b";
     let src_b = write_test_file(tmp.path(), "round/2/file.txt", content_r2);
+    seed_state_at_new_path(&mut state_b, &dst_b, &src_b);
     let upload_r2 = upload_file_with_device(
         &op,
         &src_b,

@@ -34,6 +34,17 @@ fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf
     path
 }
 
+fn seed_state_at_new_path(state: &mut StateCache, tracked_path: &Path, new_path: &Path) {
+    let mut seeded = state
+        .get(tracked_path)
+        .expect("tracked state for lineage seed")
+        .clone();
+    // Force needs_sync() to hash-check the new path even when same-size writes
+    // happen within the same one-second mtime granularity window.
+    seeded.mtime = 0;
+    state.set(new_path, seeded);
+}
+
 /// Upload file as device-a. Verify state shows synced. Modify file content
 /// locally. Verify `needs_sync()` returns Some. Re-upload. Verify state
 /// updated with new hash.
@@ -173,6 +184,7 @@ async fn push_pull_modify_push_two_device_chain() {
     // Step 3: Device B modifies
     let content_v2 = b"modified content by device-b in two-device chain";
     let src_b = write_test_file(tmp.path(), "src_b/shared.txt", content_v2);
+    seed_state_at_new_path(&mut state_b, &dst_b, &src_b);
 
     // Step 4: Device B pushes modified version
     let upload_b = upload_file_with_device(
@@ -275,9 +287,11 @@ async fn conflict_detect_resolve_then_continue() {
     // Step 3: Both devices diverge independently
     let content_a = b"device A diverged content after baseline";
     let src_a2 = write_test_file(tmp.path(), "src_a2/doc.txt", content_a);
+    seed_state_at_new_path(&mut state_a, &src_a, &src_a2);
 
     let content_b = b"device B diverged content after baseline";
     let src_b2 = write_test_file(tmp.path(), "src_b2/doc.txt", content_b);
+    seed_state_at_new_path(&mut state_b, &dst_b, &src_b2);
 
     let upload_a = upload_file_with_device(
         &op,
@@ -369,6 +383,7 @@ async fn conflict_detect_resolve_then_continue() {
     // Step 8: Verify no further conflict -- device B pushes new content, A pulls
     let content_v3 = b"post-resolution content from device-b";
     let src_b3 = write_test_file(tmp.path(), "src_b3/doc.txt", content_v3);
+    seed_state_at_new_path(&mut state_b, &resolved_b, &src_b3);
 
     let upload_b3 = upload_file_with_device(
         &op,
@@ -472,6 +487,7 @@ async fn three_device_relay_chain() {
     // Step 3: Device B modifies and pushes
     let content_b = b"modified content by device-b in relay chain";
     let src_b = write_test_file(tmp.path(), "src_b/relay.txt", content_b);
+    seed_state_at_new_path(&mut state_b, &dst_b, &src_b);
 
     let upload_b = upload_file_with_device(
         &op,
@@ -562,6 +578,10 @@ async fn unsync_modify_resync_no_conflict() {
         state.get(&src).is_some(),
         "state should have entry after upload"
     );
+    let tracked_state = state
+        .get(&src)
+        .expect("state entry after initial upload")
+        .clone();
 
     // Step 2: Remove from state cache (simulate unsync/dehydration)
     state.remove(&src);
@@ -571,7 +591,12 @@ async fn unsync_modify_resync_no_conflict() {
         "state entry should be gone after unsync"
     );
 
-    // Step 3: Modify the local file
+    // Step 3: Modify the local file. Restore the prior lineage and tick the
+    // local clock so the follow-up upload is a descendant edit, not a fresh
+    // stateless write against the rel_path index.
+    let mut resync_state = tracked_state;
+    resync_state.vclock.tick("device-a");
+    state.set(&src, resync_state);
     let content_v2 = b"modified content after dehydration unsync";
     std::fs::write(&src, content_v2).expect("modify after unsync");
 
@@ -698,6 +723,7 @@ async fn alternating_device_writes() {
 
     let content_v2 = b"version 2 from device-b";
     let src_b2 = write_test_file(tmp.path(), "round2/src_b/alt.txt", content_v2);
+    seed_state_at_new_path(&mut state_b, &dst_b1, &src_b2);
 
     let upload_v2 = upload_file_with_device(
         &op,
@@ -758,6 +784,7 @@ async fn alternating_device_writes() {
 
     let content_v3 = b"version 3 from device-a final round";
     let src_a3 = write_test_file(tmp.path(), "round3/src_a/alt.txt", content_v3);
+    seed_state_at_new_path(&mut state_a, &dst_a2, &src_a3);
 
     let upload_v3 = upload_file_with_device(
         &op,
