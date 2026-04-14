@@ -113,6 +113,15 @@ pub struct ExecutionResult {
     pub bytes_downloaded: u64,
 }
 
+/// Visibility report for chunk objects that are no longer referenced by any
+/// manifest under a remote prefix.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrphanedChunkReport {
+    pub orphaned_chunks: Vec<String>,
+    pub referenced_chunks: usize,
+    pub scanned_chunks: usize,
+}
+
 // ── Remote Index ─────────────────────────────────────────────────────────────
 
 /// Fetch the full remote index for a prefix.
@@ -165,6 +174,74 @@ pub async fn list_remote_index(
 
     debug!(count = result.len(), "fetched remote index");
     Ok(result)
+}
+
+/// Scan manifests and chunk objects under a prefix and report chunks that are
+/// no longer referenced by any reachable manifest.
+pub async fn find_orphaned_chunks(
+    op: &Operator,
+    remote_prefix: &str,
+) -> Result<OrphanedChunkReport> {
+    let prefix = remote_prefix.trim_end_matches('/');
+    let manifest_prefix = format!("{prefix}/manifests/");
+    let chunk_prefix = format!("{prefix}/chunks/");
+
+    let manifest_entries = op
+        .list_with(&manifest_prefix)
+        .recursive(true)
+        .await
+        .context("listing remote manifests")?;
+
+    let mut referenced = HashSet::new();
+    for entry in manifest_entries {
+        let key = entry.path();
+        if key.ends_with('/') {
+            continue;
+        }
+
+        match op.read(key).await {
+            Ok(data) => match SyncManifest::from_bytes(&data.to_vec()) {
+                Ok(manifest) => {
+                    referenced.extend(manifest.chunks);
+                }
+                Err(e) => {
+                    warn!(manifest = key, error = %e, "skipping unparseable manifest during orphan scan")
+                }
+            },
+            Err(e) => {
+                warn!(manifest = key, error = %e, "skipping unreadable manifest during orphan scan")
+            }
+        }
+    }
+
+    let chunk_entries = op
+        .list_with(&chunk_prefix)
+        .recursive(true)
+        .await
+        .context("listing remote chunks")?;
+
+    let mut orphaned_chunks = Vec::new();
+    let mut scanned_chunks = 0usize;
+    for entry in chunk_entries {
+        let key = entry.path();
+        let chunk_hash = key.strip_prefix(&chunk_prefix).unwrap_or(key);
+        if chunk_hash.is_empty() || chunk_hash.ends_with('/') {
+            continue;
+        }
+
+        scanned_chunks += 1;
+        if !referenced.contains(chunk_hash) {
+            orphaned_chunks.push(chunk_hash.to_string());
+        }
+    }
+
+    orphaned_chunks.sort();
+
+    Ok(OrphanedChunkReport {
+        orphaned_chunks,
+        referenced_chunks: referenced.len(),
+        scanned_chunks,
+    })
 }
 
 // ── Reconciliation ───────────────────────────────────────────────────────────
@@ -682,6 +759,67 @@ mod tests {
         assert_eq!(index["file1.txt"].manifest_hash, "aaa");
         assert_eq!(index["file2.txt"].manifest_hash, "bbb");
         assert_eq!(index["file2.txt"].size, 200);
+    }
+
+    #[tokio::test]
+    async fn find_orphaned_chunks_empty_when_every_chunk_is_referenced() {
+        let op = memory_op();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "file-hash".into(),
+            file_size: 11,
+            chunks: vec!["chunk-a".into()],
+            vclock: crate::conflict::VectorClock::new(),
+            written_by: "neo".into(),
+            written_at: 0,
+            rel_path: Some("doc.txt".into()),
+            mode: None,
+            encrypted_file_key: None,
+        };
+
+        op.write("data/manifests/file-hash", manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+        op.write("data/chunks/chunk-a", b"hello world".to_vec())
+            .await
+            .unwrap();
+
+        let report = find_orphaned_chunks(&op, "data").await.unwrap();
+        assert_eq!(report.referenced_chunks, 1);
+        assert_eq!(report.scanned_chunks, 1);
+        assert!(report.orphaned_chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_orphaned_chunks_reports_unreferenced_chunk_keys() {
+        let op = memory_op();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "file-hash".into(),
+            file_size: 11,
+            chunks: vec!["chunk-a".into()],
+            vclock: crate::conflict::VectorClock::new(),
+            written_by: "neo".into(),
+            written_at: 0,
+            rel_path: Some("doc.txt".into()),
+            mode: None,
+            encrypted_file_key: None,
+        };
+
+        op.write("data/manifests/file-hash", manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+        op.write("data/chunks/chunk-a", b"hello world".to_vec())
+            .await
+            .unwrap();
+        op.write("data/chunks/chunk-orphan", b"left behind".to_vec())
+            .await
+            .unwrap();
+
+        let report = find_orphaned_chunks(&op, "data").await.unwrap();
+        assert_eq!(report.referenced_chunks, 1);
+        assert_eq!(report.scanned_chunks, 2);
+        assert_eq!(report.orphaned_chunks, vec!["chunk-orphan".to_string()]);
     }
 
     // ── reconcile plan: local-only → push ────────────────────────────────
