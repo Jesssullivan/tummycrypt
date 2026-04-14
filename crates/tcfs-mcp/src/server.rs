@@ -356,3 +356,627 @@ impl ServerHandler for TcfsMcp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use rmcp::handler::server::wrapper::Parameters;
+    use tcfs_core::proto::tcfs_daemon_server::{TcfsDaemon, TcfsDaemonServer};
+    use tcfs_core::proto::*;
+    use tempfile::TempDir;
+    use tokio::net::UnixListener;
+    use tokio::sync::{Mutex as TokioMutex, Notify};
+    use tokio::task::JoinHandle;
+    use tokio_stream::wrappers::UnixListenerStream;
+    use tokio_stream::{Stream, StreamExt};
+    use tonic::{Request, Response, Status};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[derive(Debug, Default)]
+    struct FakeDaemonCalls {
+        status_calls: usize,
+        credential_status_calls: usize,
+        sync_status_paths: Vec<String>,
+        pull_requests: Vec<PullRequest>,
+        resolve_requests: Vec<ResolveConflictRequest>,
+        push_chunks: Vec<PushChunk>,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeDaemon {
+        calls: Arc<TokioMutex<FakeDaemonCalls>>,
+    }
+
+    struct McpHarness {
+        mcp: TcfsMcp,
+        calls: Arc<TokioMutex<FakeDaemonCalls>>,
+        _socket_dir: TempDir,
+        shutdown: Arc<Notify>,
+        handle: JoinHandle<Result<(), tonic::transport::Error>>,
+    }
+
+    impl McpHarness {
+        async fn shutdown(self) {
+            self.shutdown.notify_waiters();
+            self.handle.await.unwrap().unwrap();
+        }
+    }
+
+    impl FakeDaemon {
+        fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    fn parse_json(output: String) -> serde_json::Value {
+        serde_json::from_str(&output).unwrap_or_else(|e| {
+            panic!("expected JSON output, got {output:?}: {e}");
+        })
+    }
+
+    fn assert_object_keys(value: &serde_json::Value, keys: &[&str]) {
+        let actual: BTreeSet<&str> = value
+            .as_object()
+            .expect("expected JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: BTreeSet<&str> = keys.iter().copied().collect();
+        assert_eq!(actual, expected);
+    }
+
+    fn assert_daemon_error(output: String, socket_path: &std::path::Path) {
+        let value = parse_json(output);
+        assert_object_keys(&value, &["error"]);
+        assert!(value["error"].as_str().unwrap().contains(&format!(
+            "failed to connect to daemon at {}",
+            socket_path.display()
+        )));
+    }
+
+    async fn spawn_mcp_harness() -> McpHarness {
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("tcfsd.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let incoming = UnixListenerStream::new(listener);
+        let daemon = FakeDaemon::new();
+        let calls = daemon.calls.clone();
+        let shutdown = Arc::new(Notify::new());
+        let shutdown_for_server = shutdown.clone();
+
+        let handle = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(TcfsDaemonServer::new(daemon))
+                .serve_with_incoming_shutdown(incoming, shutdown_for_server.notified())
+                .await
+        });
+
+        McpHarness {
+            mcp: TcfsMcp::new(socket_path, None),
+            calls,
+            _socket_dir: socket_dir,
+            shutdown,
+            handle,
+        }
+    }
+
+    #[tonic::async_trait]
+    impl TcfsDaemon for FakeDaemon {
+        type PushStream =
+            Pin<Box<dyn Stream<Item = Result<PushProgress, Status>> + Send + 'static>>;
+        type PullStream =
+            Pin<Box<dyn Stream<Item = Result<PullProgress, Status>> + Send + 'static>>;
+        type HydrateStream =
+            Pin<Box<dyn Stream<Item = Result<HydrateProgress, Status>> + Send + 'static>>;
+        type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchEvent, Status>> + Send + 'static>>;
+
+        async fn status(
+            &self,
+            _request: Request<StatusRequest>,
+        ) -> Result<Response<StatusResponse>, Status> {
+            self.calls.lock().await.status_calls += 1;
+            Ok(Response::new(StatusResponse {
+                version: "0.12.0-test".into(),
+                storage_endpoint: "http://seaweedfs:8333".into(),
+                storage_ok: true,
+                nats_ok: false,
+                active_mounts: 2,
+                uptime_secs: 42,
+                device_id: "device-123".into(),
+                device_name: "test-device".into(),
+                conflict_mode: "manual".into(),
+            }))
+        }
+
+        async fn credential_status(
+            &self,
+            _request: Request<Empty>,
+        ) -> Result<Response<CredentialStatusResponse>, Status> {
+            self.calls.lock().await.credential_status_calls += 1;
+            Ok(Response::new(CredentialStatusResponse {
+                loaded: true,
+                source: "env".into(),
+                loaded_at: 123,
+                needs_reload: false,
+            }))
+        }
+
+        async fn push(
+            &self,
+            request: Request<tonic::Streaming<PushChunk>>,
+        ) -> Result<Response<Self::PushStream>, Status> {
+            let mut stream = request.into_inner();
+            let mut chunks = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                chunks.push(chunk?);
+            }
+            let total_bytes: u64 = chunks.iter().map(|chunk| chunk.data.len() as u64).sum();
+            self.calls.lock().await.push_chunks = chunks;
+
+            Ok(Response::new(Box::pin(tokio_stream::iter(vec![Ok(
+                PushProgress {
+                    bytes_sent: total_bytes,
+                    total_bytes,
+                    chunk_hash: "hash-123".into(),
+                    done: true,
+                    error: String::new(),
+                },
+            )]))))
+        }
+
+        async fn pull(
+            &self,
+            request: Request<PullRequest>,
+        ) -> Result<Response<Self::PullStream>, Status> {
+            let req = request.into_inner();
+            self.calls.lock().await.pull_requests.push(req);
+            Ok(Response::new(Box::pin(tokio_stream::iter(vec![
+                Ok(PullProgress {
+                    bytes_received: 4,
+                    total_bytes: 8,
+                    done: false,
+                    error: String::new(),
+                }),
+                Ok(PullProgress {
+                    bytes_received: 8,
+                    total_bytes: 8,
+                    done: true,
+                    error: String::new(),
+                }),
+            ]))))
+        }
+
+        async fn sync_status(
+            &self,
+            request: Request<SyncStatusRequest>,
+        ) -> Result<Response<SyncStatusResponse>, Status> {
+            let req = request.into_inner();
+            let path = req.path;
+            self.calls.lock().await.sync_status_paths.push(path.clone());
+            Ok(Response::new(SyncStatusResponse {
+                path,
+                state: "synced".into(),
+                blake3: "abc123".into(),
+                size: 99,
+                last_synced: 1_717_171_717,
+            }))
+        }
+
+        async fn resolve_conflict(
+            &self,
+            request: Request<ResolveConflictRequest>,
+        ) -> Result<Response<ResolveConflictResponse>, Status> {
+            let req = request.into_inner();
+            self.calls.lock().await.resolve_requests.push(req.clone());
+            Ok(Response::new(ResolveConflictResponse {
+                success: true,
+                resolved_path: req.path,
+                error: String::new(),
+            }))
+        }
+
+        async fn mount(
+            &self,
+            _request: Request<MountRequest>,
+        ) -> Result<Response<MountResponse>, Status> {
+            Err(Status::unimplemented("mount"))
+        }
+
+        async fn unmount(
+            &self,
+            _request: Request<UnmountRequest>,
+        ) -> Result<Response<UnmountResponse>, Status> {
+            Err(Status::unimplemented("unmount"))
+        }
+
+        async fn unsync(
+            &self,
+            _request: Request<UnsyncRequest>,
+        ) -> Result<Response<UnsyncResponse>, Status> {
+            Err(Status::unimplemented("unsync"))
+        }
+
+        async fn list_files(
+            &self,
+            _request: Request<ListFilesRequest>,
+        ) -> Result<Response<ListFilesResponse>, Status> {
+            Err(Status::unimplemented("list_files"))
+        }
+
+        async fn auth_unlock(
+            &self,
+            _request: Request<AuthUnlockRequest>,
+        ) -> Result<Response<AuthUnlockResponse>, Status> {
+            Err(Status::unimplemented("auth_unlock"))
+        }
+
+        async fn auth_lock(
+            &self,
+            _request: Request<Empty>,
+        ) -> Result<Response<AuthLockResponse>, Status> {
+            Err(Status::unimplemented("auth_lock"))
+        }
+
+        async fn auth_status(
+            &self,
+            _request: Request<Empty>,
+        ) -> Result<Response<AuthStatusResponse>, Status> {
+            Err(Status::unimplemented("auth_status"))
+        }
+
+        async fn auth_enroll(
+            &self,
+            _request: Request<AuthEnrollRequest>,
+        ) -> Result<Response<AuthEnrollResponse>, Status> {
+            Err(Status::unimplemented("auth_enroll"))
+        }
+
+        async fn auth_complete_enroll(
+            &self,
+            _request: Request<AuthCompleteEnrollRequest>,
+        ) -> Result<Response<AuthCompleteEnrollResponse>, Status> {
+            Err(Status::unimplemented("auth_complete_enroll"))
+        }
+
+        async fn auth_challenge(
+            &self,
+            _request: Request<AuthChallengeRequest>,
+        ) -> Result<Response<AuthChallengeResponse>, Status> {
+            Err(Status::unimplemented("auth_challenge"))
+        }
+
+        async fn auth_verify(
+            &self,
+            _request: Request<AuthVerifyRequest>,
+        ) -> Result<Response<AuthVerifyResponse>, Status> {
+            Err(Status::unimplemented("auth_verify"))
+        }
+
+        async fn auth_revoke(
+            &self,
+            _request: Request<AuthRevokeRequest>,
+        ) -> Result<Response<AuthRevokeResponse>, Status> {
+            Err(Status::unimplemented("auth_revoke"))
+        }
+
+        async fn device_enroll(
+            &self,
+            _request: Request<DeviceEnrollRequest>,
+        ) -> Result<Response<DeviceEnrollResponse>, Status> {
+            Err(Status::unimplemented("device_enroll"))
+        }
+
+        async fn diagnostics(
+            &self,
+            _request: Request<DiagnosticsRequest>,
+        ) -> Result<Response<DiagnosticsResponse>, Status> {
+            Err(Status::unimplemented("diagnostics"))
+        }
+
+        async fn hydrate(
+            &self,
+            _request: Request<HydrateRequest>,
+        ) -> Result<Response<Self::HydrateStream>, Status> {
+            Err(Status::unimplemented("hydrate"))
+        }
+
+        async fn watch(
+            &self,
+            _request: Request<WatchRequest>,
+        ) -> Result<Response<Self::WatchStream>, Status> {
+            Err(Status::unimplemented("watch"))
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_status_maps_rpc_fields_to_json() {
+        let harness = spawn_mcp_harness().await;
+
+        let value = parse_json(harness.mcp.daemon_status().await);
+
+        assert_object_keys(
+            &value,
+            &[
+                "active_mounts",
+                "conflict_mode",
+                "device_id",
+                "device_name",
+                "nats_ok",
+                "storage_endpoint",
+                "storage_ok",
+                "uptime_secs",
+                "version",
+            ],
+        );
+        assert_eq!(value["version"], "0.12.0-test");
+        assert_eq!(value["device_id"], "device-123");
+        assert_eq!(value["active_mounts"], 2);
+        assert_eq!(harness.calls.lock().await.status_calls, 1);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn credential_status_maps_rpc_fields_to_json() {
+        let harness = spawn_mcp_harness().await;
+
+        let value = parse_json(harness.mcp.credential_status().await);
+
+        assert_object_keys(&value, &["loaded", "loaded_at", "needs_reload", "source"]);
+        assert_eq!(value["loaded"], true);
+        assert_eq!(value["source"], "env");
+        assert_eq!(harness.calls.lock().await.credential_status_calls, 1);
+
+        harness.shutdown().await;
+    }
+
+    #[test]
+    fn config_show_serializes_config_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        config.storage.bucket = "bucket-a".into();
+        config.sync.conflict_mode = "keep_local".into();
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+
+        let mcp = TcfsMcp::new(PathBuf::from("/tmp/unused.sock"), Some(config_path));
+        let value = parse_json(
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(mcp.config_show()),
+        );
+
+        assert_eq!(value["storage"]["bucket"], "bucket-a");
+        assert_eq!(value["sync"]["conflict_mode"], "keep_local");
+        assert!(value.get("daemon").is_some());
+        assert!(value.get("fuse").is_some());
+        assert!(value.get("crypto").is_some());
+    }
+
+    #[tokio::test]
+    async fn sync_status_maps_request_and_response() {
+        let harness = spawn_mcp_harness().await;
+
+        let value = parse_json(
+            harness
+                .mcp
+                .sync_status(Parameters(SyncStatusInput {
+                    path: "/tmp/example.txt".into(),
+                }))
+                .await,
+        );
+
+        assert_object_keys(&value, &["blake3", "last_synced", "path", "size", "state"]);
+        assert_eq!(value["path"], "/tmp/example.txt");
+        assert_eq!(value["state"], "synced");
+        assert_eq!(
+            harness.calls.lock().await.sync_status_paths,
+            vec!["/tmp/example.txt".to_string()]
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pull_maps_request_and_last_stream_progress() {
+        let harness = spawn_mcp_harness().await;
+
+        let value = parse_json(
+            harness
+                .mcp
+                .pull(Parameters(PullInput {
+                    remote_path: "remote/file.txt".into(),
+                    local_path: "/tmp/local.txt".into(),
+                }))
+                .await,
+        );
+
+        assert_object_keys(&value, &["bytes_received", "done", "error", "total_bytes"]);
+        assert_eq!(value["bytes_received"], 8);
+        assert_eq!(value["total_bytes"], 8);
+        assert_eq!(value["done"], true);
+        assert!(value["error"].is_null());
+        assert_eq!(
+            harness.calls.lock().await.pull_requests,
+            vec![PullRequest {
+                remote_path: "remote/file.txt".into(),
+                local_path: "/tmp/local.txt".into(),
+            }]
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_maps_request_and_response() {
+        let harness = spawn_mcp_harness().await;
+
+        let value = parse_json(
+            harness
+                .mcp
+                .resolve_conflict(Parameters(ResolveConflictInput {
+                    rel_path: "docs/report.md".into(),
+                    resolution: "keep_both".into(),
+                }))
+                .await,
+        );
+
+        assert_object_keys(&value, &["error", "resolved_path", "success"]);
+        assert_eq!(value["success"], true);
+        assert_eq!(value["resolved_path"], "docs/report.md");
+        assert!(value["error"].is_null());
+        assert_eq!(
+            harness.calls.lock().await.resolve_requests,
+            vec![ResolveConflictRequest {
+                path: "docs/report.md".into(),
+                resolution: "keep_both".into(),
+            }]
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[test]
+    fn device_status_reads_registry_and_counts_active_devices() {
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_root = dir.path().join("xdg");
+        let registry_path = config_root.join("tcfs").join("devices.json");
+        let registry = tcfs_secrets::device::DeviceRegistry {
+            devices: vec![
+                tcfs_secrets::device::DeviceIdentity {
+                    name: "laptop".into(),
+                    device_id: "device-a".into(),
+                    public_key: "age1laptop".into(),
+                    signing_key_hash: "abc".into(),
+                    description: Some("primary".into()),
+                    enrolled_at: 1,
+                    revoked: false,
+                    last_nats_seq: 7,
+                },
+                tcfs_secrets::device::DeviceIdentity {
+                    name: "phone".into(),
+                    device_id: "device-b".into(),
+                    public_key: "age1phone".into(),
+                    signing_key_hash: "def".into(),
+                    description: None,
+                    enrolled_at: 2,
+                    revoked: true,
+                    last_nats_seq: 3,
+                },
+            ],
+        };
+        registry.save(&registry_path).unwrap();
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config_root);
+        }
+        let mcp = TcfsMcp::new(PathBuf::from("/tmp/unused.sock"), None);
+        let value = parse_json(
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(mcp.device_status()),
+        );
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+
+        assert_object_keys(&value, &["active", "devices", "total"]);
+        assert_eq!(value["total"], 2);
+        assert_eq!(value["active"], 1);
+        assert_eq!(value["devices"].as_array().unwrap().len(), 2);
+        assert_eq!(value["devices"][0]["name"], "laptop");
+    }
+
+    #[tokio::test]
+    async fn push_reads_local_file_and_maps_stream_progress() {
+        let harness = spawn_mcp_harness().await;
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("upload.txt");
+        std::fs::write(&local_path, b"hello mcp").unwrap();
+
+        let value = parse_json(
+            harness
+                .mcp
+                .push(Parameters(PushInput {
+                    local_path: local_path.display().to_string(),
+                }))
+                .await,
+        );
+
+        assert_object_keys(
+            &value,
+            &["bytes_sent", "chunk_hash", "done", "error", "total_bytes"],
+        );
+        assert_eq!(value["bytes_sent"], 9);
+        assert_eq!(value["total_bytes"], 9);
+        assert_eq!(value["chunk_hash"], "hash-123");
+        assert_eq!(value["done"], true);
+        assert!(value["error"].is_null());
+
+        let chunks = {
+            let calls = harness.calls.lock().await;
+            calls.push_chunks.clone()
+        };
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].path, local_path.display().to_string());
+        assert_eq!(chunks[0].data, b"hello mcp");
+        assert!(chunks[0].last);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn daemon_backed_tools_report_connect_errors_when_daemon_is_unavailable() {
+        let socket_path = std::env::temp_dir().join(format!(
+            "tcfs-mcp-missing-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mcp = TcfsMcp::new(socket_path.clone(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("upload.txt");
+        std::fs::write(&local_path, b"hello mcp").unwrap();
+
+        assert_daemon_error(mcp.daemon_status().await, &socket_path);
+        assert_daemon_error(mcp.credential_status().await, &socket_path);
+        assert_daemon_error(
+            mcp.sync_status(Parameters(SyncStatusInput {
+                path: "/tmp/example.txt".into(),
+            }))
+            .await,
+            &socket_path,
+        );
+        assert_daemon_error(
+            mcp.pull(Parameters(PullInput {
+                remote_path: "remote/file.txt".into(),
+                local_path: "/tmp/local.txt".into(),
+            }))
+            .await,
+            &socket_path,
+        );
+        assert_daemon_error(
+            mcp.resolve_conflict(Parameters(ResolveConflictInput {
+                rel_path: "docs/report.md".into(),
+                resolution: "keep_local".into(),
+            }))
+            .await,
+            &socket_path,
+        );
+        assert_daemon_error(
+            mcp.push(Parameters(PushInput {
+                local_path: local_path.display().to_string(),
+            }))
+            .await,
+            &socket_path,
+        );
+    }
+}
