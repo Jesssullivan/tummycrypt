@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::conflict::{compare_clocks, SyncOutcome};
+use crate::index_entry::parse_index_entry;
 use crate::manifest::SyncManifest;
 use crate::state::{make_sync_state_full, StateCache};
 
@@ -304,13 +305,13 @@ pub async fn upload_file_with_device(
             // Look up the index entry to find what manifest is currently stored
             let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
             let idx_manifest = if let Ok(idx_bytes) = op.read(&index_key).await {
-                let idx_raw = idx_bytes.to_bytes();
-                let idx_str = String::from_utf8_lossy(&idx_raw);
-                // Parse "manifest_hash=<hash>\nsize=...\n"
-                idx_str
-                    .lines()
-                    .find_map(|l| l.strip_prefix("manifest_hash="))
-                    .map(|h| format!("{}/manifests/{}", remote_prefix.trim_end_matches('/'), h))
+                parse_index_entry(&idx_bytes.to_vec()).ok().map(|entry| {
+                    format!(
+                        "{}/manifests/{}",
+                        remote_prefix.trim_end_matches('/'),
+                        entry.manifest_hash
+                    )
+                })
             } else {
                 None
             };
@@ -1266,13 +1267,8 @@ pub async fn resolve_manifest_path(
     let index_key = format!("{prefix}/index/{rel}");
 
     if let Ok(idx_bytes) = op.read(&index_key).await {
-        let idx_raw = idx_bytes.to_bytes();
-        let idx_str = String::from_utf8_lossy(&idx_raw);
-        if let Some(manifest_hash) = idx_str
-            .lines()
-            .find_map(|l| l.strip_prefix("manifest_hash="))
-        {
-            return Ok(format!("{prefix}/manifests/{manifest_hash}"));
+        if let Ok(entry) = parse_index_entry(&idx_bytes.to_vec()) {
+            return Ok(format!("{prefix}/manifests/{}", entry.manifest_hash));
         }
     }
 
@@ -1294,13 +1290,8 @@ pub async fn resolve_manifest_path(
         let entry_path = entry.path();
         if entry_path.ends_with(&format!("/{filename}")) || entry_path.ends_with(&filename) {
             if let Ok(idx_bytes) = op.read(entry_path).await {
-                let idx_raw = idx_bytes.to_bytes();
-                let idx_str = String::from_utf8_lossy(&idx_raw);
-                if let Some(manifest_hash) = idx_str
-                    .lines()
-                    .find_map(|l| l.strip_prefix("manifest_hash="))
-                {
-                    return Ok(format!("{prefix}/manifests/{manifest_hash}"));
+                if let Ok(entry) = parse_index_entry(&idx_bytes.to_vec()) {
+                    return Ok(format!("{prefix}/manifests/{}", entry.manifest_hash));
                 }
             }
         }
@@ -1336,12 +1327,9 @@ pub async fn delete_remote_file(
         .with_context(|| format!("reading index entry: {index_key}"))?
         .to_bytes();
 
-    let idx_str = String::from_utf8_lossy(&idx_raw);
-    let manifest_hash = idx_str
-        .lines()
-        .find_map(|l| l.strip_prefix("manifest_hash="))
-        .ok_or_else(|| anyhow::anyhow!("index entry missing manifest_hash: {index_key}"))?
-        .to_string();
+    let manifest_hash = parse_index_entry(&idx_raw)
+        .with_context(|| format!("parsing index entry: {index_key}"))?
+        .manifest_hash;
 
     let manifest_key = format!("{prefix}/manifests/{manifest_hash}");
 

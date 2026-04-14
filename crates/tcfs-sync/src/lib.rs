@@ -5,6 +5,7 @@ pub mod blacklist;
 pub mod conflict;
 pub mod engine;
 pub mod git_safety;
+pub mod index_entry;
 pub mod manifest;
 pub mod nats;
 pub mod policy;

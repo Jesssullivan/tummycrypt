@@ -17,18 +17,11 @@ use tracing::{debug, info, warn};
 use crate::blacklist::Blacklist;
 use crate::conflict::{compare_clocks, ConflictInfo};
 use crate::engine::{self, OptionalEncryption, ProgressFn};
+use crate::index_entry::{parse_index_entry, parse_index_entry_record, RemoteIndexEntry};
 use crate::manifest::SyncManifest;
 use crate::state::{StateCache, StateCacheBackend, SyncState};
 
 // ── Types ────────────────────────────────────────────────────────────────────
-
-/// A parsed remote index entry.
-#[derive(Debug, Clone)]
-pub struct RemoteIndexEntry {
-    pub manifest_hash: String,
-    pub size: u64,
-    pub chunks: usize,
-}
 
 /// Why a file needs to be pushed.
 #[derive(Debug, Clone)]
@@ -122,32 +115,6 @@ pub struct ExecutionResult {
 
 // ── Remote Index ─────────────────────────────────────────────────────────────
 
-/// Parse a remote index entry from its on-disk format.
-///
-/// Format: `"manifest_hash=<hash>\nsize=<n>\nchunks=<n>\n"`
-pub fn parse_index_entry(data: &[u8]) -> Result<RemoteIndexEntry> {
-    let text = std::str::from_utf8(data).context("index entry is not valid UTF-8")?;
-    let mut manifest_hash = None;
-    let mut size = 0u64;
-    let mut chunks = 0usize;
-
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("manifest_hash=") {
-            manifest_hash = Some(v.to_string());
-        } else if let Some(v) = line.strip_prefix("size=") {
-            size = v.parse().context("invalid size in index entry")?;
-        } else if let Some(v) = line.strip_prefix("chunks=") {
-            chunks = v.parse().context("invalid chunk count in index entry")?;
-        }
-    }
-
-    Ok(RemoteIndexEntry {
-        manifest_hash: manifest_hash.context("index entry missing manifest_hash")?,
-        size,
-        chunks,
-    })
-}
-
 /// Fetch the full remote index for a prefix.
 ///
 /// Returns a map of `rel_path → RemoteIndexEntry` for every file in the index.
@@ -176,9 +143,17 @@ pub async fn list_remote_index(
         }
 
         match op.read(full_key).await {
-            Ok(data) => match parse_index_entry(&data.to_vec()) {
+            Ok(data) => match parse_index_entry_record(&data.to_vec()) {
                 Ok(parsed) => {
-                    result.insert(rel_path, parsed);
+                    if let Some(visible) = parsed.visible_entry().cloned() {
+                        result.insert(rel_path, visible);
+                    } else {
+                        debug!(
+                            key = full_key,
+                            state = ?parsed.state(),
+                            "skipping non-visible index entry"
+                        );
+                    }
                 }
                 Err(e) => {
                     warn!(key = full_key, error = %e, "skipping unparseable index entry");
@@ -579,12 +554,9 @@ pub async fn execute_plan(
 
                 // Read index to find manifest hash before deleting
                 let manifest_key = if let Ok(idx_bytes) = op.read(&index_key).await {
-                    let idx_raw = idx_bytes.to_bytes();
-                    let idx_str = String::from_utf8_lossy(&idx_raw);
-                    idx_str
-                        .lines()
-                        .find_map(|l| l.strip_prefix("manifest_hash="))
-                        .map(|h| format!("{prefix}/manifests/{h}"))
+                    parse_index_entry(&idx_bytes.to_vec())
+                        .ok()
+                        .map(|entry| format!("{prefix}/manifests/{}", entry.manifest_hash))
                 } else {
                     None
                 };
@@ -856,32 +828,7 @@ mod tests {
         assert_eq!(plan.summary.pulls, 0);
         assert_eq!(plan.summary.conflicts, 0);
     }
-
     // ── original tests ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_parse_index_entry() {
-        let data = b"manifest_hash=abc123\nsize=1024\nchunks=2\n";
-        let entry = parse_index_entry(data).unwrap();
-        assert_eq!(entry.manifest_hash, "abc123");
-        assert_eq!(entry.size, 1024);
-        assert_eq!(entry.chunks, 2);
-    }
-
-    #[test]
-    fn test_parse_index_entry_missing_hash() {
-        let data = b"size=1024\nchunks=2\n";
-        assert!(parse_index_entry(data).is_err());
-    }
-
-    #[test]
-    fn test_parse_index_entry_partial() {
-        let data = b"manifest_hash=abc123\n";
-        let entry = parse_index_entry(data).unwrap();
-        assert_eq!(entry.manifest_hash, "abc123");
-        assert_eq!(entry.size, 0);
-        assert_eq!(entry.chunks, 0);
-    }
 
     #[test]
     fn test_reconcile_summary_default() {
@@ -896,25 +843,5 @@ mod tests {
         let config = ReconcileConfig::default();
         assert!(!config.delete_local_orphans);
         assert!(!config.delete_remote_orphans);
-    }
-
-    #[test]
-    fn parse_index_entry_garbage_size_errors() {
-        let data = b"manifest_hash=abc123\nsize=notanumber\nchunks=5\n";
-        let result = parse_index_entry(data);
-        assert!(
-            result.is_err(),
-            "garbage size should return error, not default to 0"
-        );
-    }
-
-    #[test]
-    fn parse_index_entry_garbage_chunks_errors() {
-        let data = b"manifest_hash=abc123\nsize=1024\nchunks=xyz\n";
-        let result = parse_index_entry(data);
-        assert!(
-            result.is_err(),
-            "garbage chunks should return error, not default to 0"
-        );
     }
 }
