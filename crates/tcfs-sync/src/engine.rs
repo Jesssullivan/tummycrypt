@@ -459,6 +459,93 @@ pub struct UploadResult {
     pub outcome: Option<SyncOutcome>,
 }
 
+#[derive(Debug)]
+enum UploadSourceSnapshot {
+    InMemory(Vec<u8>),
+    Streaming(Vec<tcfs_chunks::ChunkWithData>),
+}
+
+#[derive(Debug)]
+struct UploadSnapshot {
+    file_hash_hex: String,
+    file_size: u64,
+    source: UploadSourceSnapshot,
+}
+
+fn prepare_upload_snapshot(local_path: &Path, use_streaming: bool) -> Result<UploadSnapshot> {
+    if use_streaming {
+        let chunks = tcfs_chunks::chunk_file_streaming(local_path).with_context(|| {
+            format!(
+                "streaming chunk for upload snapshot: {}",
+                local_path.display()
+            )
+        })?;
+        let mut hasher = blake3::Hasher::new();
+        let mut file_size = 0u64;
+        for chunk in &chunks {
+            hasher.update(&chunk.data);
+            file_size += chunk.data.len() as u64;
+        }
+        let file_hash_hex = tcfs_chunks::hash_to_hex(&hasher.finalize());
+        Ok(UploadSnapshot {
+            file_hash_hex,
+            file_size,
+            source: UploadSourceSnapshot::Streaming(chunks),
+        })
+    } else {
+        let data = std::fs::read(local_path)
+            .with_context(|| format!("reading upload snapshot: {}", local_path.display()))?;
+        let file_hash_hex = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data));
+        Ok(UploadSnapshot {
+            file_hash_hex,
+            file_size: data.len() as u64,
+            source: UploadSourceSnapshot::InMemory(data),
+        })
+    }
+}
+
+fn ensure_source_matches_snapshot(
+    local_path: &Path,
+    snapshot: &UploadSnapshot,
+    stage: &str,
+) -> Result<()> {
+    let current_meta = std::fs::metadata(local_path)
+        .with_context(|| format!("stat during {stage}: {}", local_path.display()))?;
+    if current_meta.len() != snapshot.file_size {
+        anyhow::bail!(
+            "file changed during {stage}: size mismatch for {} (snapshot={} current={})",
+            local_path.display(),
+            snapshot.file_size,
+            current_meta.len()
+        );
+    }
+
+    let current_hash_hex = match snapshot.source {
+        UploadSourceSnapshot::InMemory(_) => {
+            let data = std::fs::read(local_path)
+                .with_context(|| format!("reading during {stage}: {}", local_path.display()))?;
+            tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
+        }
+        UploadSourceSnapshot::Streaming(_) => {
+            let hash = tcfs_chunks::hash_file_streaming(local_path).with_context(|| {
+                format!("streaming hash during {stage}: {}", local_path.display())
+            })?;
+            tcfs_chunks::hash_to_hex(&hash)
+        }
+    };
+
+    if current_hash_hex != snapshot.file_hash_hex {
+        anyhow::bail!(
+            "file changed during {stage}: hash mismatch for {} (snapshot={} current={})",
+            local_path.display(),
+            snapshot.file_hash_hex,
+            current_hash_hex
+        );
+    }
+
+    Ok(())
+}
+
 /// Result of downloading a single file
 #[derive(Debug)]
 pub struct DownloadResult {
@@ -540,26 +627,15 @@ pub async fn upload_file_with_device(
     }
 
     // Tiered chunking: files below STREAMING_THRESHOLD are read into memory,
-    // larger files use streaming two-pass (hash, then chunk) to bound memory.
+    // larger files use streaming chunking. In both cases we derive the file
+    // hash from the same snapshot bytes that will be uploaded.
     let file_meta = std::fs::metadata(local_path)
         .with_context(|| format!("stat for chunking: {}", local_path.display()))?;
-    let file_size = file_meta.len();
-
-    let use_streaming = file_size >= tcfs_chunks::STREAMING_THRESHOLD;
-
-    // Pass 1: compute file hash
-    let file_hash_hex = if use_streaming {
-        let hash = tcfs_chunks::hash_file_streaming(local_path)
-            .with_context(|| format!("streaming hash: {}", local_path.display()))?;
-        tcfs_chunks::hash_to_hex(&hash)
-    } else {
-        // Small file: read fully, hash in memory
-        let data = std::fs::read(local_path)
-            .with_context(|| format!("reading for hash: {}", local_path.display()))?;
-        tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
-    };
-
-    // Pass 2: chunk (deferred until after conflict check — may skip upload)
+    let use_streaming = file_meta.len() >= tcfs_chunks::STREAMING_THRESHOLD;
+    let snapshot = prepare_upload_snapshot(local_path, use_streaming)?;
+    let file_size = snapshot.file_size;
+    let file_hash_hex = snapshot.file_hash_hex.clone();
+    ensure_source_matches_snapshot(local_path, &snapshot, "upload preparation")?;
 
     // Build remote manifest path (using the file's content hash)
     let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
@@ -635,6 +711,7 @@ pub async fn upload_file_with_device(
 
             match &sync_outcome {
                 SyncOutcome::RemoteNewer => {
+                    ensure_source_matches_snapshot(local_path, &snapshot, "remote-newer skip")?;
                     return Ok(UploadResult {
                         path: local_path.to_path_buf(),
                         remote_path: remote_manifest.clone(),
@@ -646,6 +723,7 @@ pub async fn upload_file_with_device(
                     });
                 }
                 SyncOutcome::Conflict(ref conflict_info) => {
+                    ensure_source_matches_snapshot(local_path, &snapshot, "conflict skip")?;
                     // Record local state with conflict info so `tcfs resolve` can find it
                     let mut sync_state = make_sync_state_full(
                         local_path,
@@ -668,6 +746,7 @@ pub async fn upload_file_with_device(
                     });
                 }
                 SyncOutcome::UpToDate => {
+                    ensure_source_matches_snapshot(local_path, &snapshot, "up-to-date skip")?;
                     // Content dedup — already up to date
                     let sync_state = make_sync_state_full(
                         local_path,
@@ -703,6 +782,7 @@ pub async fn upload_file_with_device(
         && op.exists(&remote_manifest).await.unwrap_or(false)
         && device_id.is_empty()
     {
+        ensure_source_matches_snapshot(local_path, &snapshot, "dedup skip")?;
         debug!(hash = %file_hash_hex, "dedup: manifest already exists");
         let existing_manifest = op
             .read(&remote_manifest)
@@ -748,8 +828,7 @@ pub async fn upload_file_with_device(
         local_vclock.tick(device_id);
     }
 
-    // Chunk the file (deferred until after conflict/dedup checks).
-    // Small files: read into memory. Large files: streaming chunker.
+    // Upload the prepared snapshot bytes after conflict/dedup checks.
     let mut chunk_hashes = Vec::new();
     let mut bytes_uploaded = 0u64;
     let num_chunks;
@@ -769,23 +848,11 @@ pub async fn upload_file_with_device(
     };
 
     if use_streaming {
-        // ── Streaming path: bounded memory for large files ─────────
+        // ── Streaming path: prepared snapshot chunks ─────────
         debug!(path = %local_path.display(), size = file_size, "using streaming chunker");
-
-        // Verify file hasn't changed between hash and chunk passes
-        let pre_chunk_meta = std::fs::metadata(local_path)
-            .with_context(|| format!("re-stat before streaming chunk: {}", local_path.display()))?;
-        if pre_chunk_meta.len() != file_size {
-            anyhow::bail!(
-                "file size changed between hash and chunk passes: {} ({} → {})",
-                local_path.display(),
-                file_size,
-                pre_chunk_meta.len()
-            );
-        }
-
-        let streaming_chunks = tcfs_chunks::chunk_file_streaming(local_path)
-            .with_context(|| format!("streaming chunk: {}", local_path.display()))?;
+        let UploadSourceSnapshot::Streaming(streaming_chunks) = &snapshot.source else {
+            unreachable!("streaming upload expected streaming snapshot")
+        };
 
         num_chunks = streaming_chunks.len();
         chunk_hashes.reserve(num_chunks);
@@ -827,9 +894,11 @@ pub async fn upload_file_with_device(
             }
         }
     } else {
-        // ── In-memory path: small files ───────────────────────────
-        let (chunks, data) = tcfs_chunks::chunk_file(local_path)
-            .with_context(|| format!("chunking: {}", local_path.display()))?;
+        // ── In-memory path: prepared snapshot bytes ───────────────
+        let UploadSourceSnapshot::InMemory(data) = &snapshot.source else {
+            unreachable!("in-memory upload expected in-memory snapshot")
+        };
+        let chunks = tcfs_chunks::chunk_data(data, tcfs_chunks::ChunkSizes::for_path(local_path));
 
         num_chunks = chunks.len();
         chunk_hashes.reserve(num_chunks);
@@ -883,6 +952,8 @@ pub async fn upload_file_with_device(
             }
         }
     }
+
+    ensure_source_matches_snapshot(local_path, &snapshot, "manifest publish")?;
 
     // Wrap file key for manifest if encryption is enabled
     #[cfg(feature = "crypto")]
@@ -2481,6 +2552,52 @@ mod tests {
             .await
             .unwrap();
         assert!(up2.skipped, "second upload of unchanged file should skip");
+    }
+
+    #[tokio::test]
+    async fn upload_fails_if_file_changes_during_chunk_upload() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let original = b"hello world";
+        let local = dir.path().join("file.txt");
+        std::fs::write(&local, original).unwrap();
+
+        let mutated = b"jello world";
+        let expected_manifest = format!(
+            "data/manifests/{}",
+            tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(original))
+        );
+        let local_for_progress = local.clone();
+        let mutated_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mutated_once_for_progress = mutated_once.clone();
+        let progress: ProgressFn = Box::new(move |current, _total, _message| {
+            if current == 1
+                && !mutated_once_for_progress.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                std::fs::write(&local_for_progress, mutated).unwrap();
+            }
+        });
+
+        let err = upload_file(&op, &local, "data", &mut state, Some(&progress))
+            .await
+            .unwrap_err();
+        let err_text = format!("{err:#}");
+
+        assert!(
+            err_text.contains("file changed during manifest publish"),
+            "unexpected error: {err_text}"
+        );
+        assert!(
+            op.read(&expected_manifest).await.is_err(),
+            "manifest must not be published after a detected write race"
+        );
+        assert!(
+            state.get(&local).is_none(),
+            "state cache must not be updated after a detected write race"
+        );
     }
 
     // ── remote_path_prefix ───────────────────────────────────────────────

@@ -5470,6 +5470,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "base64 0.22.1",
+ "blake3",
  "bytes",
  "futures",
  "glob",
