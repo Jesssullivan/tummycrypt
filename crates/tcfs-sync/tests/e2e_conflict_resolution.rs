@@ -248,7 +248,7 @@ async fn resolve_keep_local_workflow() {
     let src_a = write_test_file(tmp.path(), "src_a/notes.txt", content_a);
     let mut state_a = StateCache::open(&tmp.path().join("state_a.db")).unwrap();
 
-    let _upload_a = upload_file_with_device(
+    let upload_a = upload_file_with_device(
         &op,
         &src_a,
         prefix,
@@ -263,8 +263,23 @@ async fn resolve_keep_local_workflow() {
 
     // Device B decides to keep its local version and re-upload
     let content_b = b"device B's version that wins the conflict resolution";
-    let src_b = write_test_file(tmp.path(), "src_b/notes.txt", content_b);
+    let src_b = write_test_file(tmp.path(), "src_b/notes.txt", content_a);
     let mut state_b = StateCache::open(&tmp.path().join("state_b.db")).unwrap();
+
+    let a_state = state_a.get(&src_a).expect("A should have state");
+    let mut resolved_b_state = tcfs_sync::state::make_sync_state(
+        &src_b,
+        upload_a.hash.clone(),
+        upload_a.chunks,
+        upload_a.remote_path.clone(),
+    )
+    .expect("resolved B state");
+    // Simulate keep_local resolution: B has observed A's version and then
+    // ticks its own clock before re-uploading its chosen local content.
+    resolved_b_state.vclock = a_state.vclock.clone();
+    resolved_b_state.vclock.tick("device-b");
+    state_b.set(&src_b, resolved_b_state);
+    std::fs::write(&src_b, content_b).expect("device-b writes resolved local version");
 
     let upload_b = upload_file_with_device(
         &op,
@@ -279,7 +294,11 @@ async fn resolve_keep_local_workflow() {
     .await
     .expect("device-b re-upload (keep_local)");
 
-    assert!(!upload_b.skipped);
+    assert!(
+        !upload_b.skipped,
+        "keep_local re-upload should succeed, got outcome: {:?}",
+        upload_b.outcome
+    );
 
     // Verify remote now has B's content
     let verify_path = tmp.path().join("verify/notes.txt");
@@ -450,7 +469,22 @@ async fn resolved_conflict_subsequent_sync() {
 
     // Device B now modifies and pushes v2
     let content_v2 = b"version 2 from device B after resolving";
-    let src_b = write_test_file(tmp.path(), "src_b/v2.txt", content_v2);
+    let src_b = write_test_file(tmp.path(), "src_b/v2.txt", content_v1);
+    let a_cached = state_a.get(&src_a).expect("A state");
+    let mut resolved_b_state = tcfs_sync::state::make_sync_state(
+        &src_b,
+        upload_v1.hash.clone(),
+        upload_v1.chunks,
+        upload_v1.remote_path.clone(),
+    )
+    .expect("resolved B state");
+    // Simulate the post-resolution edit on device B: B has A's clock and then
+    // performs a new local write before uploading v2.
+    resolved_b_state.vclock = a_cached.vclock.clone();
+    resolved_b_state.vclock.tick("device-b");
+    state_b.set(&src_b, resolved_b_state);
+    std::fs::write(&src_b, content_v2).expect("device-b writes v2 after resolving");
+
     let upload_v2 = upload_file_with_device(
         &op,
         &src_b,
@@ -464,7 +498,11 @@ async fn resolved_conflict_subsequent_sync() {
     .await
     .expect("B uploads v2");
 
-    assert!(!upload_v2.skipped, "post-resolution upload should succeed");
+    assert!(
+        !upload_v2.skipped,
+        "post-resolution upload should succeed, got outcome: {:?}",
+        upload_v2.outcome
+    );
 
     // Device A pulls v2
     let dst_a = tmp.path().join("dst_a/doc.txt");

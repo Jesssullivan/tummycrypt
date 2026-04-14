@@ -502,11 +502,13 @@ async fn delete_removes_index_and_manifest() {
 
     // Write index entry (normally done by push_tree or cmd_push)
     let index_key = format!("{prefix}/index/to-delete.txt");
-    let index_entry = format!(
-        "manifest_hash={}\nsize={}\nchunks={}\n",
-        upload.hash, upload.bytes, upload.chunks
-    );
-    op.write(&index_key, index_entry.into_bytes())
+    let index_entry = tcfs_sync::index_entry::RemoteIndexEntry::new(
+        upload.hash.clone(),
+        upload.bytes,
+        upload.chunks,
+    )
+    .to_legacy_bytes();
+    op.write(&index_key, index_entry)
         .await
         .expect("write index entry");
 
