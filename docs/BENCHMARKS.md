@@ -87,7 +87,7 @@ Benchmarks measured on:
 - **RAM**: 16 GB DDR4
 - **Storage**: Samsung MZVLW256 NVMe SSD (238.5 GB)
 - **OS**: Rocky Linux 10 (kernel 6.12.0)
-- **Rust**: 1.93+ (edition 2021, `opt-level = 3`, `lto = "thin"`)
+- **Rust**: 1.93.0 (repo-pinned toolchain, edition 2021, `opt-level = 3`, `lto = "thin"`)
 - **Benchmark framework**: divan 0.1
 
 ## Running Benchmarks
@@ -97,6 +97,6 @@ Benchmarks measured on:
 task bench
 
 # Individual suites
-~/.cargo/bin/cargo bench -p tcfs-chunks --bench chunks
-~/.cargo/bin/cargo bench -p tcfs-crypto --bench crypto
+cargo bench -p tcfs-chunks --bench chunks
+cargo bench -p tcfs-crypto --bench crypto
 ```

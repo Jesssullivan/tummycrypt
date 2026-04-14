@@ -2,7 +2,7 @@
 # Override with: helm install tcfs-backend ./infra/k8s/charts/tcfs-backend -f my-values.yaml
 
 image:
-  repository: ghcr.io/tinyland-inc/tcfsd
+  repository: ghcr.io/jesssullivan/tcfsd
   tag: latest
   pullPolicy: Always
 

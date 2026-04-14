@@ -1,5 +1,7 @@
 # Homebrew formula for tcfs
-# To use: brew tap tinyland-inc/tap && brew install tcfs
+# To use:
+#   brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap
+#   brew install tcfs
 #
 # This template is used by CI to generate the versioned formula.
 # Placeholders: __VERSION__, __SHA256_DARWIN_ARM64__, __SHA256_DARWIN_X86_64__,
@@ -7,26 +9,26 @@
 
 class Tcfs < Formula
   desc "FOSS self-hosted odrive replacement — FUSE-based, SeaweedFS-backed file sync"
-  homepage "https://github.com/tinyland-inc/tummycrypt"
+  homepage "https://github.com/Jesssullivan/tummycrypt"
   version "__VERSION__"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v__VERSION__/tcfs-__VERSION__-macos-aarch64.tar.gz"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v__VERSION__/tcfs-__VERSION__-macos-aarch64.tar.gz"
       sha256 "__SHA256_DARWIN_ARM64__"
     else
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v__VERSION__/tcfs-__VERSION__-macos-x86_64.tar.gz"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v__VERSION__/tcfs-__VERSION__-macos-x86_64.tar.gz"
       sha256 "__SHA256_DARWIN_X86_64__"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v__VERSION__/tcfs-__VERSION__-linux-aarch64.tar.gz"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v__VERSION__/tcfs-__VERSION__-linux-aarch64.tar.gz"
       sha256 "__SHA256_LINUX_ARM64__"
     else
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v__VERSION__/tcfs-__VERSION__-linux-x86_64.tar.gz"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v__VERSION__/tcfs-__VERSION__-linux-x86_64.tar.gz"
       sha256 "__SHA256_LINUX_X86_64__"
     end
   end

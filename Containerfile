@@ -5,12 +5,12 @@
 #   runtime  — distroless/cc for minimal attack surface
 #
 # Build:
-#   podman build -t ghcr.io/tinyland-inc/tcfsd:latest -f Containerfile .
+#   podman build -t ghcr.io/jesssullivan/tcfsd:latest -f Containerfile .
 #
 # Run:
 #   podman run --rm \
 #     --env-file /path/to/s3-credentials.env \
-#     ghcr.io/tinyland-inc/tcfsd:latest \
+#     ghcr.io/jesssullivan/tcfsd:latest \
 #     --mode=worker --config=/etc/tcfsd/config.toml
 
 # ── Stage 1: Rust builder ─────────────────────────────────────────────────────
