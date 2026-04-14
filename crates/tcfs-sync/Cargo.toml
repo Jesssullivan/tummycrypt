@@ -11,6 +11,7 @@ tcfs-core = { path = "../tcfs-core" }
 tcfs-chunks = { path = "../tcfs-chunks" }
 tcfs-storage = { path = "../tcfs-storage" }
 tcfs-crypto = { path = "../tcfs-crypto", optional = true }
+blake3 = { workspace = true }
 opendal = { workspace = true }
 # rocksdb and async-nats are optional until Phase 4 implementation
 rocksdb = { workspace = true, optional = true }
