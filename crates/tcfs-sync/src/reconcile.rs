@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use opendal::Operator;
@@ -122,6 +122,33 @@ pub struct OrphanedChunkReport {
     pub scanned_chunks: usize,
 }
 
+/// Cleanup report for orphaned chunk objects under a remote prefix.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrphanedChunkCleanupReport {
+    pub orphaned_chunks_found: usize,
+    pub deleted_chunks: Vec<String>,
+    pub skipped_within_grace: Vec<String>,
+    pub skipped_missing_last_modified: Vec<String>,
+    pub delete_errors: Vec<(String, String)>,
+    pub referenced_chunks: usize,
+    pub scanned_chunks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteChunkObject {
+    object_key: String,
+    chunk_hash: String,
+    last_modified: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PlannedOrphanCleanup {
+    orphaned_chunks_found: usize,
+    deletable: Vec<RemoteChunkObject>,
+    skipped_within_grace: Vec<String>,
+    skipped_missing_last_modified: Vec<String>,
+}
+
 // ── Remote Index ─────────────────────────────────────────────────────────────
 
 /// Fetch the full remote index for a prefix.
@@ -182,6 +209,65 @@ pub async fn find_orphaned_chunks(
     op: &Operator,
     remote_prefix: &str,
 ) -> Result<OrphanedChunkReport> {
+    let scan = scan_remote_chunks(op, remote_prefix).await?;
+    let mut orphaned_chunks: Vec<String> = scan
+        .chunk_objects
+        .iter()
+        .filter(|entry| !scan.referenced_chunks.contains(&entry.chunk_hash))
+        .map(|entry| entry.chunk_hash.clone())
+        .collect();
+    orphaned_chunks.sort();
+
+    Ok(OrphanedChunkReport {
+        orphaned_chunks,
+        referenced_chunks: scan.referenced_chunks.len(),
+        scanned_chunks: scan.chunk_objects.len(),
+    })
+}
+
+/// Delete orphaned chunks only after they have aged past a grace period.
+///
+/// Chunks without usable last-modified metadata are left in place so cleanup
+/// stays conservative on backends that do not expose object timestamps.
+pub async fn cleanup_orphaned_chunks(
+    op: &Operator,
+    remote_prefix: &str,
+    grace_period: Duration,
+    now: SystemTime,
+) -> Result<OrphanedChunkCleanupReport> {
+    let scan = scan_remote_chunks(op, remote_prefix).await?;
+    let plan = plan_orphaned_chunk_cleanup(
+        &scan.chunk_objects,
+        &scan.referenced_chunks,
+        grace_period,
+        now,
+    );
+
+    let mut deleted_chunks = Vec::new();
+    let mut delete_errors = Vec::new();
+
+    for entry in plan.deletable {
+        match op.delete(&entry.object_key).await {
+            Ok(()) => deleted_chunks.push(entry.chunk_hash),
+            Err(e) => delete_errors.push((entry.chunk_hash, e.to_string())),
+        }
+    }
+
+    deleted_chunks.sort();
+    delete_errors.sort_by(|a, b| a.0.cmp(&b.0));
+
+    Ok(OrphanedChunkCleanupReport {
+        orphaned_chunks_found: plan.orphaned_chunks_found,
+        deleted_chunks,
+        skipped_within_grace: plan.skipped_within_grace,
+        skipped_missing_last_modified: plan.skipped_missing_last_modified,
+        delete_errors,
+        referenced_chunks: scan.referenced_chunks.len(),
+        scanned_chunks: scan.chunk_objects.len(),
+    })
+}
+
+async fn scan_remote_chunks(op: &Operator, remote_prefix: &str) -> Result<RemoteChunkScan> {
     let prefix = remote_prefix.trim_end_matches('/');
     let manifest_prefix = format!("{prefix}/manifests/");
     let chunk_prefix = format!("{prefix}/chunks/");
@@ -192,7 +278,7 @@ pub async fn find_orphaned_chunks(
         .await
         .context("listing remote manifests")?;
 
-    let mut referenced = HashSet::new();
+    let mut referenced_chunks = HashSet::new();
     for entry in manifest_entries {
         let key = entry.path();
         if key.ends_with('/') {
@@ -202,7 +288,7 @@ pub async fn find_orphaned_chunks(
         match op.read(key).await {
             Ok(data) => match SyncManifest::from_bytes(&data.to_vec()) {
                 Ok(manifest) => {
-                    referenced.extend(manifest.chunks);
+                    referenced_chunks.extend(manifest.chunks);
                 }
                 Err(e) => {
                     warn!(manifest = key, error = %e, "skipping unparseable manifest during orphan scan")
@@ -220,8 +306,7 @@ pub async fn find_orphaned_chunks(
         .await
         .context("listing remote chunks")?;
 
-    let mut orphaned_chunks = Vec::new();
-    let mut scanned_chunks = 0usize;
+    let mut chunk_objects = Vec::new();
     for entry in chunk_entries {
         let key = entry.path();
         let chunk_hash = key.strip_prefix(&chunk_prefix).unwrap_or(key);
@@ -229,19 +314,72 @@ pub async fn find_orphaned_chunks(
             continue;
         }
 
-        scanned_chunks += 1;
-        if !referenced.contains(chunk_hash) {
-            orphaned_chunks.push(chunk_hash.to_string());
+        let last_modified = if referenced_chunks.contains(chunk_hash) {
+            entry.metadata().last_modified().map(SystemTime::from)
+        } else {
+            match entry.metadata().last_modified() {
+                Some(last_modified) => Some(SystemTime::from(last_modified)),
+                None => chunk_last_modified(op, key).await,
+            }
+        };
+
+        chunk_objects.push(RemoteChunkObject {
+            object_key: key.to_string(),
+            chunk_hash: chunk_hash.to_string(),
+            last_modified,
+        });
+    }
+
+    Ok(RemoteChunkScan {
+        referenced_chunks,
+        chunk_objects,
+    })
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RemoteChunkScan {
+    referenced_chunks: HashSet<String>,
+    chunk_objects: Vec<RemoteChunkObject>,
+}
+
+async fn chunk_last_modified(op: &Operator, key: &str) -> Option<SystemTime> {
+    op.stat(key)
+        .await
+        .ok()
+        .and_then(|meta| meta.last_modified())
+        .map(SystemTime::from)
+}
+
+fn plan_orphaned_chunk_cleanup(
+    chunk_objects: &[RemoteChunkObject],
+    referenced_chunks: &HashSet<String>,
+    grace_period: Duration,
+    now: SystemTime,
+) -> PlannedOrphanCleanup {
+    let mut plan = PlannedOrphanCleanup::default();
+
+    for entry in chunk_objects {
+        if referenced_chunks.contains(&entry.chunk_hash) {
+            continue;
+        }
+
+        plan.orphaned_chunks_found += 1;
+        match entry.last_modified {
+            Some(last_modified) => match now.duration_since(last_modified) {
+                Ok(age) if age >= grace_period => plan.deletable.push(entry.clone()),
+                Ok(_) | Err(_) => plan.skipped_within_grace.push(entry.chunk_hash.clone()),
+            },
+            None => plan
+                .skipped_missing_last_modified
+                .push(entry.chunk_hash.clone()),
         }
     }
 
-    orphaned_chunks.sort();
-
-    Ok(OrphanedChunkReport {
-        orphaned_chunks,
-        referenced_chunks: referenced.len(),
-        scanned_chunks,
-    })
+    plan.deletable
+        .sort_by(|a, b| a.chunk_hash.cmp(&b.chunk_hash));
+    plan.skipped_within_grace.sort();
+    plan.skipped_missing_last_modified.sort();
+    plan
 }
 
 // ── Reconciliation ───────────────────────────────────────────────────────────
@@ -820,6 +958,104 @@ mod tests {
         assert_eq!(report.referenced_chunks, 1);
         assert_eq!(report.scanned_chunks, 2);
         assert_eq!(report.orphaned_chunks, vec!["chunk-orphan".to_string()]);
+    }
+
+    #[test]
+    fn plan_orphaned_chunk_cleanup_respects_grace_period() {
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let referenced_chunks = std::collections::HashSet::from(["chunk-ref".to_string()]);
+        let chunk_objects = vec![
+            RemoteChunkObject {
+                object_key: "data/chunks/chunk-ref".into(),
+                chunk_hash: "chunk-ref".into(),
+                last_modified: Some(now - Duration::from_secs(7_200)),
+            },
+            RemoteChunkObject {
+                object_key: "data/chunks/chunk-old".into(),
+                chunk_hash: "chunk-old".into(),
+                last_modified: Some(now - Duration::from_secs(7_200)),
+            },
+            RemoteChunkObject {
+                object_key: "data/chunks/chunk-fresh".into(),
+                chunk_hash: "chunk-fresh".into(),
+                last_modified: Some(now - Duration::from_secs(30)),
+            },
+            RemoteChunkObject {
+                object_key: "data/chunks/chunk-future".into(),
+                chunk_hash: "chunk-future".into(),
+                last_modified: Some(now + Duration::from_secs(30)),
+            },
+            RemoteChunkObject {
+                object_key: "data/chunks/chunk-unknown".into(),
+                chunk_hash: "chunk-unknown".into(),
+                last_modified: None,
+            },
+        ];
+
+        let plan = plan_orphaned_chunk_cleanup(
+            &chunk_objects,
+            &referenced_chunks,
+            Duration::from_secs(3_600),
+            now,
+        );
+
+        assert_eq!(plan.orphaned_chunks_found, 4);
+        assert_eq!(
+            plan.deletable
+                .iter()
+                .map(|entry| entry.chunk_hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chunk-old"]
+        );
+        assert_eq!(
+            plan.skipped_within_grace,
+            vec!["chunk-fresh".to_string(), "chunk-future".to_string()]
+        );
+        assert_eq!(
+            plan.skipped_missing_last_modified,
+            vec!["chunk-unknown".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_orphaned_chunks_skips_missing_last_modified() {
+        let op = memory_op();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "file-hash".into(),
+            file_size: 11,
+            chunks: vec!["chunk-a".into()],
+            vclock: crate::conflict::VectorClock::new(),
+            written_by: "neo".into(),
+            written_at: 0,
+            rel_path: Some("doc.txt".into()),
+            mode: None,
+            encrypted_file_key: None,
+        };
+
+        op.write("data/manifests/file-hash", manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+        op.write("data/chunks/chunk-a", b"hello world".to_vec())
+            .await
+            .unwrap();
+        op.write("data/chunks/chunk-orphan", b"left behind".to_vec())
+            .await
+            .unwrap();
+
+        let report = cleanup_orphaned_chunks(&op, "data", Duration::ZERO, SystemTime::now())
+            .await
+            .unwrap();
+
+        assert_eq!(report.orphaned_chunks_found, 1);
+        assert!(report.deleted_chunks.is_empty());
+        assert!(report.skipped_within_grace.is_empty());
+        assert_eq!(
+            report.skipped_missing_last_modified,
+            vec!["chunk-orphan".to_string()]
+        );
+        assert!(report.delete_errors.is_empty());
+        assert!(op.read("data/chunks/chunk-orphan").await.is_ok());
     }
 
     // ── reconcile plan: local-only → push ────────────────────────────────
