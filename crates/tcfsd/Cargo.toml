@@ -29,6 +29,7 @@ tokio-stream = { workspace = true }
 prometheus-client = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
+hyper-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
