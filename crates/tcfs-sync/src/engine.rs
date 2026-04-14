@@ -31,6 +31,77 @@ const CHUNK_MAX_RETRIES: u32 = 3;
 /// Base delay between retries (doubles each attempt: 100ms, 200ms, 400ms).
 const CHUNK_RETRY_BASE_MS: u64 = 100;
 
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(CHUNK_RETRY_BASE_MS * 2u64.saturating_pow(attempt))
+}
+
+async fn retry_with_backoff<T, E, Action, ActionFuture, Sleep, SleepFuture, OnRetry>(
+    max_attempts: u32,
+    mut action: Action,
+    mut on_retry: OnRetry,
+    mut sleep: Sleep,
+) -> std::result::Result<T, E>
+where
+    Action: FnMut(u32) -> ActionFuture,
+    ActionFuture: std::future::Future<Output = std::result::Result<T, E>>,
+    Sleep: FnMut(std::time::Duration) -> SleepFuture,
+    SleepFuture: std::future::Future<Output = ()>,
+    OnRetry: FnMut(u32, std::time::Duration, &E),
+{
+    assert!(
+        max_attempts > 0,
+        "retry_with_backoff requires at least one attempt"
+    );
+
+    let mut last_err = None;
+    for attempt in 0..max_attempts {
+        match action(attempt).await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if attempt + 1 < max_attempts {
+                    let delay = retry_delay(attempt);
+                    on_retry(attempt + 1, delay, &err);
+                    sleep(delay).await;
+                }
+                last_err = Some(err);
+            }
+        }
+    }
+
+    Err(last_err.expect("retry_with_backoff must capture a final error"))
+}
+
+async fn write_chunk_with_retry_inner<Write, WriteFuture, Sleep, SleepFuture>(
+    key: &str,
+    chunk_idx: usize,
+    mut write: Write,
+    sleep: Sleep,
+) -> Result<()>
+where
+    Write: FnMut() -> WriteFuture,
+    WriteFuture: std::future::Future<Output = Result<()>>,
+    Sleep: FnMut(std::time::Duration) -> SleepFuture,
+    SleepFuture: std::future::Future<Output = ()>,
+{
+    retry_with_backoff(
+        CHUNK_MAX_RETRIES,
+        |_| write(),
+        |attempt, delay, err: &anyhow::Error| {
+            warn!(
+                chunk = chunk_idx,
+                attempt,
+                max = CHUNK_MAX_RETRIES,
+                delay_ms = delay.as_millis(),
+                error = %err,
+                "chunk upload failed, retrying"
+            );
+        },
+        sleep,
+    )
+    .await
+    .map_err(|err| err.context(format!("uploading chunk {chunk_idx}: {key}")))
+}
+
 /// Write a chunk to remote storage with exponential backoff retry.
 ///
 /// Retries up to `CHUNK_MAX_RETRIES` times on transient failures.
@@ -40,112 +111,174 @@ async fn write_chunk_with_retry(
     data: Vec<u8>,
     chunk_idx: usize,
 ) -> Result<()> {
-    let mut last_err = None;
-    for attempt in 0..CHUNK_MAX_RETRIES {
-        match op.write(key, data.clone()).await {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                let delay = CHUNK_RETRY_BASE_MS * 2u64.pow(attempt);
-                warn!(
-                    chunk = chunk_idx,
-                    attempt = attempt + 1,
-                    max = CHUNK_MAX_RETRIES,
-                    delay_ms = delay,
-                    error = %e,
-                    "chunk upload failed, retrying"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                last_err = Some(e);
+    write_chunk_with_retry_inner(
+        key,
+        chunk_idx,
+        || {
+            let data = data.clone();
+            async move {
+                op.write(key, data)
+                    .await
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from)
             }
-        }
-    }
-    Err(last_err
-        .map(|e| anyhow::anyhow!(e))
-        .unwrap_or_else(|| anyhow::anyhow!("chunk upload failed after {CHUNK_MAX_RETRIES} retries"))
-        .context(format!("uploading chunk {chunk_idx}: {key}")))
+        },
+        tokio::time::sleep,
+    )
+    .await
 }
 
 /// Read a key from remote storage with exponential backoff retry.
 ///
 /// Used for manifest/index reads so transient storage errors behave the same as
 /// chunk downloads instead of aborting the whole pull on the first failure.
+async fn read_with_retry_inner<Read, ReadFuture, Sleep, SleepFuture>(
+    key: &str,
+    mut read: Read,
+    sleep: Sleep,
+) -> Result<Vec<u8>>
+where
+    Read: FnMut() -> ReadFuture,
+    ReadFuture: std::future::Future<Output = Result<Vec<u8>>>,
+    Sleep: FnMut(std::time::Duration) -> SleepFuture,
+    SleepFuture: std::future::Future<Output = ()>,
+{
+    retry_with_backoff(
+        CHUNK_MAX_RETRIES,
+        |_| read(),
+        |attempt, delay, err: &anyhow::Error| {
+            warn!(
+                key = key,
+                attempt,
+                max = CHUNK_MAX_RETRIES,
+                delay_ms = delay.as_millis(),
+                error = %err,
+                "read failed, retrying"
+            );
+        },
+        sleep,
+    )
+    .await
+    .map_err(|err| err.context(format!("reading: {key}")))
+}
+
 async fn read_with_retry(op: &Operator, key: &str) -> Result<Vec<u8>> {
-    let mut last_err = None;
-    for attempt in 0..CHUNK_MAX_RETRIES {
-        match op.read(key).await {
-            Ok(data) => return Ok(data.to_vec()),
-            Err(e) => {
-                let delay = CHUNK_RETRY_BASE_MS * 2u64.pow(attempt);
-                warn!(
-                    key = key,
-                    attempt = attempt + 1,
-                    max = CHUNK_MAX_RETRIES,
-                    delay_ms = delay,
-                    error = %e,
-                    "read failed, retrying"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                last_err = Some(e);
-            }
-        }
-    }
-    Err(last_err
-        .map(|e| anyhow::anyhow!(e))
-        .unwrap_or_else(|| anyhow::anyhow!("read failed after {CHUNK_MAX_RETRIES} retries"))
-        .context(format!("reading: {key}")))
+    read_with_retry_inner(
+        key,
+        || async {
+            op.read(key)
+                .await
+                .map(|data| data.to_vec())
+                .map_err(anyhow::Error::from)
+        },
+        tokio::time::sleep,
+    )
+    .await
 }
 
 /// Read a chunk from remote storage with exponential backoff retry.
 ///
 /// Retries up to `CHUNK_MAX_RETRIES` times on transient failures.
 /// After successful read, verifies the BLAKE3 hash matches the expected value.
+#[derive(Debug)]
+enum ChunkReadError {
+    Transport(anyhow::Error),
+    Integrity { expected: String, actual: String },
+}
+
+impl std::fmt::Display for ChunkReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(err) => write!(f, "{err}"),
+            Self::Integrity { expected, actual } => {
+                write!(
+                    f,
+                    "chunk integrity failed: expected {expected}, got {actual}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChunkReadError {}
+
+async fn read_chunk_with_retry_inner<Read, ReadFuture, Sleep, SleepFuture>(
+    key: &str,
+    expected_hash: &str,
+    chunk_idx: usize,
+    mut read: Read,
+    sleep: Sleep,
+) -> Result<Vec<u8>>
+where
+    Read: FnMut() -> ReadFuture,
+    ReadFuture: std::future::Future<Output = Result<Vec<u8>>>,
+    Sleep: FnMut(std::time::Duration) -> SleepFuture,
+    SleepFuture: std::future::Future<Output = ()>,
+{
+    retry_with_backoff(
+        CHUNK_MAX_RETRIES,
+        |_| {
+            let read_attempt = read();
+            async move {
+                let chunk_bytes = read_attempt.await.map_err(ChunkReadError::Transport)?;
+                let actual_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
+                if actual_hash == expected_hash {
+                    Ok(chunk_bytes)
+                } else {
+                    Err(ChunkReadError::Integrity {
+                        expected: expected_hash.to_string(),
+                        actual: actual_hash,
+                    })
+                }
+            }
+        },
+        |attempt, delay, err| match err {
+            ChunkReadError::Transport(source) => {
+                warn!(
+                    chunk = chunk_idx,
+                    attempt,
+                    max = CHUNK_MAX_RETRIES,
+                    delay_ms = delay.as_millis(),
+                    error = %source,
+                    "chunk download failed, retrying"
+                );
+            }
+            ChunkReadError::Integrity { actual, .. } => {
+                warn!(
+                    chunk = chunk_idx,
+                    attempt,
+                    expected = expected_hash,
+                    actual = %actual,
+                    delay_ms = delay.as_millis(),
+                    "chunk integrity mismatch, retrying"
+                );
+            }
+        },
+        sleep,
+    )
+    .await
+    .map_err(|err| anyhow::Error::new(err).context(format!("downloading chunk {chunk_idx}: {key}")))
+}
+
 async fn read_chunk_with_retry(
     op: &Operator,
     key: &str,
     expected_hash: &str,
     chunk_idx: usize,
 ) -> Result<Vec<u8>> {
-    let mut last_err = None;
-    for attempt in 0..CHUNK_MAX_RETRIES {
-        match op.read(key).await {
-            Ok(data) => {
-                let chunk_bytes = data.to_vec();
-                let actual_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
-                if actual_hash == expected_hash {
-                    return Ok(chunk_bytes);
-                }
-                // Hash mismatch — treat as corruption, retry
-                warn!(
-                    chunk = chunk_idx,
-                    attempt = attempt + 1,
-                    expected = expected_hash,
-                    actual = %actual_hash,
-                    "chunk integrity mismatch, retrying"
-                );
-                last_err = Some(anyhow::anyhow!(
-                    "chunk integrity failed: expected {expected_hash}, got {actual_hash}"
-                ));
-            }
-            Err(e) => {
-                let delay = CHUNK_RETRY_BASE_MS * 2u64.pow(attempt);
-                warn!(
-                    chunk = chunk_idx,
-                    attempt = attempt + 1,
-                    max = CHUNK_MAX_RETRIES,
-                    delay_ms = delay,
-                    error = %e,
-                    "chunk download failed, retrying"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                last_err = Some(anyhow::anyhow!(e));
-            }
-        }
-    }
-    Err(last_err
-        .unwrap_or_else(|| {
-            anyhow::anyhow!("chunk download failed after {CHUNK_MAX_RETRIES} retries")
-        })
-        .context(format!("downloading chunk {chunk_idx}: {key}")))
+    read_chunk_with_retry_inner(
+        key,
+        expected_hash,
+        chunk_idx,
+        || async {
+            op.read(key)
+                .await
+                .map(|data| data.to_vec())
+                .map_err(anyhow::Error::from)
+        },
+        tokio::time::sleep,
+    )
+    .await
 }
 
 fn manifest_path_prefix(remote_prefix: &str) -> String {
@@ -1534,6 +1667,8 @@ mod tests {
         parse_index_entry_record, write_committed_index_entry, IndexEntryState, ParsedIndexEntry,
     };
     use opendal::services::Memory;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     fn memory_op() -> Operator {
         Operator::new(Memory::default()).unwrap().finish()
@@ -1859,6 +1994,255 @@ mod tests {
                 assert_eq!(current.chunks, upload.chunks);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn chunk_upload_retry_succeeds_after_transient_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+
+        write_chunk_with_retry_inner(
+            "data/chunks/abc123",
+            0,
+            {
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            anyhow::bail!("transient write failure");
+                        }
+                        Ok(())
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![std::time::Duration::from_millis(100)]
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_upload_retry_exhausts_without_sleeping_after_last_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+
+        let err = write_chunk_with_retry_inner(
+            "data/chunks/abc123",
+            0,
+            {
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        anyhow::bail!("persistent write failure");
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("uploading chunk 0: data/chunks/abc123"));
+        assert_eq!(attempts.load(Ordering::SeqCst), CHUNK_MAX_RETRIES as usize);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(200),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_read_retry_succeeds_after_transient_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+
+        let bytes = read_with_retry_inner(
+            "data/manifests/doc.json",
+            {
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            anyhow::bail!("transient read failure");
+                        }
+                        Ok(b"manifest".to_vec())
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(bytes, b"manifest".to_vec());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![std::time::Duration::from_millis(100)]
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_read_retry_exhausts_after_expected_attempts() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+
+        let err = read_with_retry_inner(
+            "data/manifests/doc.json",
+            {
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        anyhow::bail!("persistent read failure");
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("reading: data/manifests/doc.json"));
+        assert_eq!(attempts.load(Ordering::SeqCst), CHUNK_MAX_RETRIES as usize);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(200),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_download_retry_succeeds_after_transient_transport_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+        let payload = b"hello retry".to_vec();
+        let expected_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&payload));
+
+        let bytes = read_chunk_with_retry_inner(
+            "data/chunks/abc123",
+            &expected_hash,
+            0,
+            {
+                let attempts = attempts.clone();
+                let payload = payload.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    let payload = payload.clone();
+                    async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            anyhow::bail!("transient transport failure");
+                        }
+                        Ok(payload)
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(bytes, payload);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![std::time::Duration::from_millis(100)]
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_download_retry_recovers_after_integrity_mismatch() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+        let good = b"hello integrity".to_vec();
+        let expected_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&good));
+
+        let bytes = read_chunk_with_retry_inner(
+            "data/chunks/abc123",
+            &expected_hash,
+            0,
+            {
+                let attempts = attempts.clone();
+                let good = good.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    let good = good.clone();
+                    async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            return Ok(b"corrupted".to_vec());
+                        }
+                        Ok(good)
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(bytes, good);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![std::time::Duration::from_millis(100)]
+        );
     }
 
     #[tokio::test]
