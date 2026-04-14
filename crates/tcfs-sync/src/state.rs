@@ -88,9 +88,10 @@ impl PathLocks {
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
-        let guard = mutex.lock_owned().await;
+        let guard = mutex.clone().lock_owned().await;
         PathLockGuard {
-            _guard: guard,
+            guard: Some(guard),
+            mutex,
             key,
             inner: self.inner.clone(),
         }
@@ -105,9 +106,10 @@ impl PathLocks {
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
-        match mutex.try_lock_owned() {
+        match mutex.clone().try_lock_owned() {
             Ok(guard) => Some(PathLockGuard {
-                _guard: guard,
+                guard: Some(guard),
+                mutex,
                 key,
                 inner: self.inner.clone(),
             }),
@@ -129,19 +131,45 @@ impl PathLocks {
 
 /// RAII guard for a per-path lock. Cleans up the lock entry when no other
 /// references exist to avoid unbounded memory growth.
+///
+/// Cleanup is scheduled after the underlying mutex guard is released, so entry
+/// removal does not depend on winning a synchronous `try_lock()` race on the
+/// path-lock map.
 pub struct PathLockGuard {
-    _guard: tokio::sync::OwnedMutexGuard<()>,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    mutex: Arc<tokio::sync::Mutex<()>>,
     key: String,
     inner: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl Drop for PathLockGuard {
     fn drop(&mut self) {
-        // Best-effort cleanup: remove the entry if we're the last holder.
-        if let Ok(mut map) = self.inner.try_lock() {
-            if let Some(mutex) = map.get(&self.key) {
-                // strong_count == 2: the map entry + this guard's clone.
-                if Arc::strong_count(mutex) <= 2 {
+        // Release the per-path mutex before checking whether the entry can be
+        // removed from the path-lock map.
+        drop(self.guard.take());
+
+        let key = self.key.clone();
+        let inner = self.inner.clone();
+        let mutex = self.mutex.clone();
+
+        let cleanup = async move {
+            let mut map = inner.lock().await;
+            if let Some(current) = map.get(&key) {
+                // strong_count == 2 means only the map entry and this cleanup task
+                // still reference the mutex, so no holder or waiter remains.
+                if Arc::ptr_eq(current, &mutex) && Arc::strong_count(&mutex) == 2 {
+                    map.remove(&key);
+                }
+            }
+        };
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(cleanup);
+        } else if let Ok(mut map) = self.inner.try_lock() {
+            if let Some(current) = map.get(&self.key) {
+                // strong_count == 2 means only the map entry and this guard still
+                // reference the mutex in this synchronous fallback path.
+                if Arc::ptr_eq(current, &self.mutex) && Arc::strong_count(&self.mutex) == 2 {
                     map.remove(&self.key);
                 }
             }
@@ -1171,6 +1199,76 @@ mod tests {
 
         // Drop first guard, should unlock
         drop(guard);
+        assert!(!locks.is_locked(&path).await);
+    }
+
+    async fn wait_for_lock_entry_count(locks: &PathLocks, expected: usize) {
+        for _ in 0..50 {
+            if locks.inner.lock().await.len() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let actual = locks.inner.lock().await.len();
+        panic!("expected {expected} path-lock entries, found {actual}");
+    }
+
+    #[tokio::test]
+    async fn test_path_lock_cleanup_survives_map_contention() {
+        let locks = PathLocks::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contended.txt");
+        std::fs::write(&path, b"data").unwrap();
+
+        let guard = locks.lock(&path).await;
+        assert_eq!(locks.inner.lock().await.len(), 1);
+
+        let map_guard = locks.inner.lock().await;
+        drop(guard);
+
+        assert_eq!(map_guard.len(), 1, "entry remains while cleanup waits");
+        drop(map_guard);
+
+        wait_for_lock_entry_count(&locks, 0).await;
+        assert!(!locks.is_locked(&path).await);
+    }
+
+    #[tokio::test]
+    async fn test_path_lock_entry_persists_for_waiter_then_cleans_up() {
+        let locks = PathLocks::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queued.txt");
+        std::fs::write(&path, b"data").unwrap();
+
+        let guard = locks.lock(&path).await;
+        let acquired = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let locks_clone = locks.clone();
+        let path_clone = path.clone();
+        let acquired_clone = acquired.clone();
+        let release_clone = release.clone();
+
+        let waiter = tokio::spawn(async move {
+            let _guard = locks_clone.lock(&path_clone).await;
+            acquired_clone.notify_one();
+            release_clone.notified().await;
+        });
+
+        tokio::task::yield_now().await;
+        drop(guard);
+
+        acquired.notified().await;
+        assert_eq!(
+            locks.inner.lock().await.len(),
+            1,
+            "entry must remain while another task still holds the path lock"
+        );
+
+        release.notify_waiters();
+        waiter.await.unwrap();
+
+        wait_for_lock_entry_count(&locks, 0).await;
         assert!(!locks.is_locked(&path).await);
     }
 
