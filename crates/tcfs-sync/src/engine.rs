@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use opendal::Operator;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::conflict::{compare_clocks, SyncOutcome};
@@ -1345,7 +1346,7 @@ pub async fn push_tree_with_device(
 
     for (i, path) in result.files.iter().enumerate() {
         let rel = path.strip_prefix(local_root).unwrap_or(path);
-        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let rel_str = normalize_rel_path_text(&rel.to_string_lossy());
 
         let msg = format!("[{}/{}] {}", i + 1, total, rel.display());
         if let Some(cb) = progress {
@@ -1387,7 +1388,7 @@ pub async fn push_tree_with_device(
             continue;
         }
         if let Ok(rel) = dir.strip_prefix(local_root) {
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let rel_str = normalize_rel_path_text(&rel.to_string_lossy());
             let marker_key = format!(
                 "{}/index/{}/.tcfs_dir",
                 remote_path_prefix(remote_prefix),
@@ -1584,6 +1585,14 @@ fn collect_files_inner(
 /// - If `sync_root` is provided and the path is under it, returns the relative path.
 /// - Otherwise strips the leading `/` from absolute paths, or returns relative paths as-is.
 /// - Replaces `\` with `/` for cross-platform consistency.
+pub(crate) fn normalize_rel_path_text(path: &str) -> String {
+    path.replace('\\', "/")
+        .split('/')
+        .map(|component| component.nfc().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 pub fn normalize_rel_path(path: &Path, sync_root: Option<&Path>) -> String {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
@@ -1603,7 +1612,7 @@ pub fn normalize_rel_path(path: &Path, sync_root: Option<&Path>) -> String {
         canonical
     };
 
-    rel.to_string_lossy().replace('\\', "/")
+    normalize_rel_path_text(&rel.to_string_lossy())
 }
 
 /// Resolve a file path or manifest path to the actual S3 manifest path.
@@ -1644,6 +1653,7 @@ pub async fn resolve_manifest_path(
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| input.to_string());
+    let filename = normalize_rel_path_text(&filename);
 
     let index_prefix = format!("{prefix}/index/");
     let entries = op
@@ -1682,6 +1692,7 @@ pub async fn delete_remote_file(
     state: &mut StateCache,
     sync_root: Option<&Path>,
 ) -> Result<()> {
+    let rel_path = normalize_rel_path_text(rel_path.trim_start_matches('/'));
     let prefix = remote_prefix.trim_end_matches('/');
     let index_key = format!("{prefix}/index/{rel_path}");
     let manifest_prefix = manifest_path_prefix(prefix);
@@ -1711,12 +1722,12 @@ pub async fn delete_remote_file(
 
     // Remove from state cache
     let local_path = sync_root
-        .map(|r| r.join(rel_path))
-        .unwrap_or_else(|| PathBuf::from(rel_path));
+        .map(|r| r.join(&rel_path))
+        .unwrap_or_else(|| PathBuf::from(&rel_path));
     state.remove(&local_path);
 
     // Also try to remove by searching the cache (handles path normalization mismatches)
-    if let Some((key, _)) = state.get_by_rel_path(rel_path) {
+    if let Some((key, _)) = state.get_by_rel_path(&rel_path) {
         let key_owned = key.to_string();
         state.remove(Path::new(&key_owned));
     }
@@ -1923,6 +1934,16 @@ mod tests {
         assert!(result.ends_with("file.txt"));
     }
 
+    #[test]
+    fn normalize_rel_path_normalizes_decomposed_unicode() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cafe\u{301}.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        let result = normalize_rel_path(&file, Some(dir.path()));
+        assert_eq!(result, "caf\u{e9}.txt");
+    }
+
     // ── resolve_manifest_path ─────────────────────────────────────────��──
 
     #[tokio::test]
@@ -1954,6 +1975,33 @@ mod tests {
         let result = resolve_manifest_path(&op, "doc.txt", "data", None)
             .await
             .unwrap();
+        assert_eq!(result, "data/manifests/abc123");
+    }
+
+    #[tokio::test]
+    async fn resolve_manifest_filename_search_normalizes_unicode() {
+        let op = memory_op();
+        op.write(
+            "data/index/caf\u{e9}.txt",
+            RemoteIndexEntry::new("abc123", 100, 1).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/manifests/abc123",
+            br#"{"version":2,"file_hash":"abc123","file_size":100,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let host_a = tempfile::tempdir().unwrap();
+        let host_b = tempfile::tempdir().unwrap();
+        let input = host_a.path().join("cafe\u{301}.txt");
+
+        let result =
+            resolve_manifest_path(&op, &input.to_string_lossy(), "data", Some(host_b.path()))
+                .await
+                .unwrap();
         assert_eq!(result, "data/manifests/abc123");
     }
 

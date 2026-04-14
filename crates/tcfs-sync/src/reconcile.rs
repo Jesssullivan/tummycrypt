@@ -168,10 +168,9 @@ pub async fn list_remote_index(
     let mut result = HashMap::new();
     for entry in entries {
         let full_key = entry.path();
-        let rel_path = full_key
-            .strip_prefix(&index_prefix)
-            .unwrap_or(full_key)
-            .to_string();
+        let rel_path = crate::engine::normalize_rel_path_text(
+            full_key.strip_prefix(&index_prefix).unwrap_or(full_key),
+        );
 
         // Skip directory markers and empty paths
         if rel_path.is_empty() || rel_path.ends_with('/') {
@@ -824,7 +823,7 @@ fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap
     let mut map = HashMap::new();
     for file in result.files {
         if let Ok(rel) = file.strip_prefix(local_root) {
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let rel_str = crate::engine::normalize_rel_path_text(&rel.to_string_lossy());
             map.insert(rel_str, file);
         }
     }
@@ -843,7 +842,7 @@ fn extract_rel_path_from_state(state_key: &str, local_root: &Path) -> Option<Str
                 .ok()
                 .and_then(|canon| key_path.strip_prefix(&canon).ok())
         })
-        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .map(|rel| crate::engine::normalize_rel_path_text(&rel.to_string_lossy()))
 }
 
 #[cfg(test)]
@@ -1192,6 +1191,68 @@ mod tests {
             plan.summary.up_to_date, 1,
             "matching files should be up-to-date"
         );
+        assert_eq!(plan.summary.pushes, 0);
+        assert_eq!(plan.summary.pulls, 0);
+        assert_eq!(plan.summary.conflicts, 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_unicode_variants_round_trip_as_up_to_date() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+
+        let content = b"matching unicode content";
+        let hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(content));
+        let local_file = local_root.join("cafe\u{301}.txt");
+        std::fs::write(&local_file, content).unwrap();
+
+        let index_entry =
+            RemoteIndexEntry::new(hash.clone(), content.len() as u64, 1).to_legacy_bytes();
+        op.write("data/index/caf\u{e9}.txt", index_entry)
+            .await
+            .unwrap();
+
+        let manifest_json = serde_json::json!({
+            "version": 2,
+            "file_hash": hash,
+            "file_size": content.len(),
+            "chunks": [],
+            "vclock": {"clocks": {"neo": 1}},
+            "written_by": "neo",
+            "written_at": 0,
+            "rel_path": "caf\u{e9}.txt"
+        });
+        op.write(
+            &format!("data/manifests/{hash}"),
+            serde_json::to_vec(&manifest_json).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let state_path = dir.path().join("state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let mut vc = crate::conflict::VectorClock::new();
+        vc.tick("neo");
+        let sync_state = crate::state::make_sync_state_full(
+            &local_file,
+            hash.clone(),
+            1,
+            format!("data/manifests/{hash}"),
+            vc,
+            "neo".into(),
+        )
+        .unwrap();
+        state.set(&local_file, sync_state);
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.summary.up_to_date, 1);
         assert_eq!(plan.summary.pushes, 0);
         assert_eq!(plan.summary.pulls, 0);
         assert_eq!(plan.summary.conflicts, 0);
