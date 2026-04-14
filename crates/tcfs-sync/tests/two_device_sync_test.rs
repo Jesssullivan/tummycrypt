@@ -7,6 +7,7 @@
 use opendal::Operator;
 use std::path::Path;
 use tcfs_sync::conflict::SyncOutcome;
+use tcfs_sync::index_entry::RemoteIndexEntry;
 use tempfile::TempDir;
 
 fn memory_operator() -> Operator {
@@ -54,11 +55,9 @@ async fn two_device_conflict_via_index() {
 
     // Write index entry (simulating what the CLI does after push)
     let index_key = format!("{}/index/hello.txt", prefix);
-    let index_entry = format!(
-        "manifest_hash={}\nsize={}\nchunks={}\n",
-        upload_a.hash, upload_a.bytes, upload_a.chunks
-    );
-    op.write(&index_key, index_entry.into_bytes())
+    let index_entry = RemoteIndexEntry::new(upload_a.hash.clone(), upload_a.bytes, upload_a.chunks)
+        .to_legacy_bytes();
+    op.write(&index_key, index_entry)
         .await
         .expect("write index entry");
 
@@ -135,11 +134,9 @@ async fn sequential_push_no_conflict() {
 
     // Write index entry
     let index_key = format!("{}/index/doc.txt", prefix);
-    let index_entry = format!(
-        "manifest_hash={}\nsize={}\nchunks={}\n",
-        upload_a.hash, upload_a.bytes, upload_a.chunks
-    );
-    op.write(&index_key, index_entry.into_bytes())
+    let index_entry = RemoteIndexEntry::new(upload_a.hash.clone(), upload_a.bytes, upload_a.chunks)
+        .to_legacy_bytes();
+    op.write(&index_key, index_entry)
         .await
         .expect("write index entry");
 
@@ -217,13 +214,9 @@ async fn conflict_records_state() {
 
     // Write index
     let index_key = format!("{}/index/data.bin", prefix);
-    let index_entry = format!(
-        "manifest_hash={}\nsize={}\nchunks={}\n",
-        upload_a.hash, upload_a.bytes, upload_a.chunks
-    );
-    op.write(&index_key, index_entry.into_bytes())
-        .await
-        .unwrap();
+    let index_entry = RemoteIndexEntry::new(upload_a.hash.clone(), upload_a.bytes, upload_a.chunks)
+        .to_legacy_bytes();
+    op.write(&index_key, index_entry).await.unwrap();
 
     // Device B: write old content, record state, then write new content
     let src_b = write_test_file(tmp.path(), "b/data.bin", b"old");

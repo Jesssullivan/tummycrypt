@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::conflict::{compare_clocks, SyncOutcome};
-use crate::index_entry::parse_index_entry;
+use crate::index_entry::{parse_index_entry, RemoteIndexEntry};
 use crate::manifest::SyncManifest;
 use crate::state::{make_sync_state_full, StateCache};
 
@@ -997,11 +997,10 @@ pub async fn push_tree_with_device(
                     // create an orphan pointing to a non-existent manifest.
                     let index_key =
                         format!("{}/index/{}", remote_path_prefix(remote_prefix), rel_str);
-                    let index_entry = format!(
-                        "manifest_hash={}\nsize={}\nchunks={}\n",
-                        result.hash, result.bytes, result.chunks
-                    );
-                    if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
+                    let index_entry =
+                        RemoteIndexEntry::new(result.hash.clone(), result.bytes, result.chunks)
+                            .to_legacy_bytes();
+                    if let Err(e) = op.write(&index_key, index_entry).await {
                         warn!(path = %path.display(), "failed to write index entry: {e}");
                     }
                     uploaded += 1;
@@ -1553,7 +1552,7 @@ mod tests {
         // Write an index entry
         op.write(
             "data/index/doc.txt",
-            b"manifest_hash=abc123\nsize=100\nchunks=1\n".to_vec(),
+            RemoteIndexEntry::new("abc123", 100, 1).to_legacy_bytes(),
         )
         .await
         .unwrap();
@@ -1583,7 +1582,7 @@ mod tests {
         // Write index and manifest
         op.write(
             "data/index/file.txt",
-            b"manifest_hash=abc123\nsize=100\nchunks=1\n".to_vec(),
+            RemoteIndexEntry::new("abc123", 100, 1).to_legacy_bytes(),
         )
         .await
         .unwrap();

@@ -11,6 +11,24 @@ pub struct RemoteIndexEntry {
     pub chunks: usize,
 }
 
+impl RemoteIndexEntry {
+    pub fn new(manifest_hash: impl Into<String>, size: u64, chunks: usize) -> Self {
+        Self {
+            manifest_hash: manifest_hash.into(),
+            size,
+            chunks,
+        }
+    }
+
+    pub fn to_legacy_bytes(&self) -> Vec<u8> {
+        format!(
+            "manifest_hash={}\nsize={}\nchunks={}\n",
+            self.manifest_hash, self.size, self.chunks
+        )
+        .into_bytes()
+    }
+}
+
 /// State for a versioned index entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +48,22 @@ pub struct PendingIndexEntry {
     pub staged_manifest_key: String,
 }
 
+impl PendingIndexEntry {
+    pub fn new(
+        manifest_hash: impl Into<String>,
+        size: u64,
+        chunks: usize,
+        staged_manifest_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            manifest_hash: manifest_hash.into(),
+            size,
+            chunks,
+            staged_manifest_key: staged_manifest_key.into(),
+        }
+    }
+}
+
 /// Fully parsed index entry, supporting both the legacy text format and the
 /// planned versioned JSON format for durability work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +78,34 @@ pub struct VersionedIndexEntry {
     pub state: IndexEntryState,
     pub current: Option<RemoteIndexEntry>,
     pub pending: Option<PendingIndexEntry>,
+}
+
+impl VersionedIndexEntry {
+    pub fn committed(current: RemoteIndexEntry) -> Self {
+        Self {
+            state: IndexEntryState::Committed,
+            current: Some(current),
+            pending: None,
+        }
+    }
+
+    pub fn preparing(current: Option<RemoteIndexEntry>, pending: PendingIndexEntry) -> Self {
+        Self {
+            state: IndexEntryState::Preparing,
+            current,
+            pending: Some(pending),
+        }
+    }
+
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>> {
+        serde_json::to_vec_pretty(&VersionedIndexEntryWire {
+            version: 2,
+            state: self.state,
+            current: self.current.clone(),
+            pending: self.pending.clone(),
+        })
+        .context("serializing versioned index entry")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +281,28 @@ mod tests {
             pending.staged_manifest_key,
             "data/staging/manifests/txn-1.json"
         );
+    }
+
+    #[test]
+    fn legacy_serializer_roundtrips() {
+        let entry = super::RemoteIndexEntry::new("abc123", 1024, 2);
+        let bytes = entry.to_legacy_bytes();
+        let reparsed = parse_index_entry(&bytes).unwrap();
+        assert_eq!(reparsed, entry);
+    }
+
+    #[test]
+    fn versioned_serializer_roundtrips() {
+        let entry = super::VersionedIndexEntry::preparing(
+            Some(super::RemoteIndexEntry::new("old123", 10, 1)),
+            super::PendingIndexEntry::new("new456", 11, 1, "data/staging/manifests/txn-1.json"),
+        );
+
+        let bytes = entry.to_json_bytes().unwrap();
+        match parse_index_entry_record(&bytes).unwrap() {
+            ParsedIndexEntry::Legacy(_) => panic!("expected v2 entry"),
+            ParsedIndexEntry::V2(reparsed) => assert_eq!(reparsed, entry),
+        }
     }
 
     #[test]

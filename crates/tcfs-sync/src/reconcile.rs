@@ -677,13 +677,13 @@ mod tests {
         let op = memory_op();
         op.write(
             "data/index/file1.txt",
-            b"manifest_hash=aaa\nsize=100\nchunks=1\n".to_vec(),
+            RemoteIndexEntry::new("aaa", 100, 1).to_legacy_bytes(),
         )
         .await
         .unwrap();
         op.write(
             "data/index/file2.txt",
-            b"manifest_hash=bbb\nsize=200\nchunks=2\n".to_vec(),
+            RemoteIndexEntry::new("bbb", 200, 2).to_legacy_bytes(),
         )
         .await
         .unwrap();
@@ -735,7 +735,7 @@ mod tests {
         // Write a remote index entry (no local file)
         op.write(
             "data/index/remote_only.txt",
-            b"manifest_hash=abc123\nsize=50\nchunks=1\n".to_vec(),
+            RemoteIndexEntry::new("abc123", 50, 1).to_legacy_bytes(),
         )
         .await
         .unwrap();
@@ -775,10 +775,9 @@ mod tests {
         std::fs::write(local_root.join("same.txt"), content).unwrap();
 
         // Write matching remote index + manifest
-        let index_entry = format!("manifest_hash={hash}\nsize={}\nchunks=1\n", content.len());
-        op.write("data/index/same.txt", index_entry.into_bytes())
-            .await
-            .unwrap();
+        let index_entry =
+            RemoteIndexEntry::new(hash.clone(), content.len() as u64, 1).to_legacy_bytes();
+        op.write("data/index/same.txt", index_entry).await.unwrap();
 
         let manifest_json = serde_json::json!({
             "version": 2,
