@@ -2329,22 +2329,31 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opendal::services::Memory;
+    use opendal::Operator;
+    use tcfs_core::proto::tcfs_daemon_client::TcfsDaemonClient;
+    use tonic::transport::{Channel, Endpoint, Uri};
+    use tower::service_fn;
 
     /// Build a TcfsDaemonImpl with in-memory components for testing.
-    fn test_daemon() -> TcfsDaemonImpl {
-        let config = Arc::new(TcfsConfig::default());
+    fn test_daemon_with_operator(operator_value: Option<Operator>) -> TcfsDaemonImpl {
+        let mut config = TcfsConfig::default();
+        config.auth.require_session = false;
+        config.storage.bucket = "data".into();
+        config.storage.remote_prefix = Some("data".into());
+        let config = Arc::new(config);
         let cred_store = crate::cred_store::new_shared();
-        let state_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().join("state.json");
+        let state_dir = tempfile::tempdir().unwrap().keep();
+        let state_path = state_dir.join("state.json");
         let state_cache = Arc::new(TokioMutex::new(
             tcfs_sync::state::StateCache::open(&state_path).unwrap(),
         ));
-        let operator = Arc::new(TokioMutex::new(None));
+        let operator = Arc::new(TokioMutex::new(operator_value.clone()));
 
         TcfsDaemonImpl::new(
             cred_store,
             config,
-            false,
+            operator_value.is_some(),
             "http://test:8333".into(),
             state_cache,
             operator,
@@ -2352,6 +2361,66 @@ mod tests {
             "test-device".into(),
             None,
         )
+    }
+
+    fn test_daemon() -> TcfsDaemonImpl {
+        test_daemon_with_operator(None)
+    }
+
+    fn memory_operator() -> Operator {
+        Operator::new(Memory::default()).unwrap().finish()
+    }
+
+    async fn connect_test_client(socket_path: &Path) -> TcfsDaemonClient<Channel> {
+        let path = socket_path.to_path_buf();
+        let mut last_err = None;
+
+        for _ in 0..50 {
+            match Endpoint::from_static("http://[::]:0")
+                .connect_with_connector(service_fn({
+                    let path = path.clone();
+                    move |_: Uri| {
+                        let path = path.clone();
+                        async move {
+                            let stream = tokio::net::UnixStream::connect(&path).await?;
+                            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+                        }
+                    }
+                }))
+                .await
+            {
+                Ok(channel) => return TcfsDaemonClient::new(channel),
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
+
+        panic!(
+            "failed to connect test client to {}: {}",
+            socket_path.display(),
+            last_err.unwrap()
+        );
+    }
+
+    async fn spawn_test_server(
+        daemon: TcfsDaemonImpl,
+    ) -> (
+        tempfile::TempDir,
+        tokio::task::JoinHandle<Result<()>>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("tcfsd.sock");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown_for_server = shutdown.clone();
+
+        let handle = tokio::spawn(async move {
+            serve(&socket_path, None, daemon, shutdown_for_server.notified()).await
+        });
+
+        (dir, handle, shutdown)
     }
 
     #[tokio::test]
@@ -2494,10 +2563,182 @@ mod tests {
                 resolution: "invalid_strategy".into(),
                 ..Default::default()
             }))
-            .await;
+            .await
+            .unwrap()
+            .into_inner();
 
-        // Should return error status for invalid resolution
-        assert!(resp.is_err());
+        assert!(!resp.success);
+        assert!(resp.error.contains("invalid resolution"));
+    }
+
+    #[tokio::test]
+    async fn mount_missing_required_fields_returns_error_response() {
+        let daemon = test_daemon();
+
+        let resp = daemon
+            .mount(tonic::Request::new(MountRequest {
+                remote: String::new(),
+                mountpoint: String::new(),
+                read_only: false,
+                options: vec![],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.success);
+        assert!(resp.error.contains("mountpoint and remote are required"));
+    }
+
+    #[tokio::test]
+    async fn mount_requires_initialized_operator() {
+        let daemon = test_daemon();
+        let mountpoint_dir = tempfile::tempdir().unwrap();
+
+        let err = daemon
+            .mount(tonic::Request::new(MountRequest {
+                remote: "s3://127.0.0.1/test/data".into(),
+                mountpoint: mountpoint_dir.path().join("mnt").display().to_string(),
+                read_only: false,
+                options: vec![],
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert!(err.message().contains("storage operator not initialized"));
+    }
+
+    #[tokio::test]
+    async fn mount_rejects_duplicate_active_mountpoint() {
+        let daemon = test_daemon();
+        let mountpoint = tempfile::tempdir().unwrap();
+        let mountpoint_str = mountpoint.path().display().to_string();
+        let sentinel = tokio::process::Command::new("sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        daemon
+            .active_mounts
+            .lock()
+            .await
+            .insert(mountpoint_str.clone(), sentinel);
+
+        let resp = daemon
+            .mount(tonic::Request::new(MountRequest {
+                remote: "s3://127.0.0.1/test/data".into(),
+                mountpoint: mountpoint_str.clone(),
+                read_only: false,
+                options: vec![],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.success);
+        assert!(resp.error.contains("already mounted"));
+
+        let child = { daemon.active_mounts.lock().await.remove(&mountpoint_str) };
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unmount_requires_mountpoint() {
+        let daemon = test_daemon();
+
+        let resp = daemon
+            .unmount(tonic::Request::new(UnmountRequest {
+                mountpoint: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.success);
+        assert!(resp.error.contains("mountpoint is required"));
+    }
+
+    #[tokio::test]
+    async fn push_then_pull_streams_complete_successfully_over_uds() {
+        let daemon = test_daemon_with_operator(Some(memory_operator()));
+        let (socket_dir, server_handle, shutdown) = spawn_test_server(daemon).await;
+        let socket_path = socket_dir.path().join("tcfsd.sock");
+        let mut client = connect_test_client(&socket_path).await;
+
+        let push_chunk = PushChunk {
+            path: "docs/hello.txt".into(),
+            data: b"hello over grpc".to_vec(),
+            offset: 0,
+            last: true,
+        };
+
+        let mut push_stream = client
+            .push(tonic::Request::new(tokio_stream::once(push_chunk)))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let push_progress = push_stream
+            .message()
+            .await
+            .unwrap()
+            .expect("push should yield a final progress message");
+        assert!(push_progress.done);
+        assert!(
+            push_progress.error.is_empty(),
+            "push error: {}",
+            push_progress.error
+        );
+        assert_eq!(push_progress.bytes_sent, b"hello over grpc".len() as u64);
+        assert_eq!(push_progress.total_bytes, b"hello over grpc".len() as u64);
+        assert!(!push_progress.chunk_hash.is_empty());
+        assert!(push_stream.message().await.unwrap().is_none());
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("downloaded.txt");
+
+        let mut pull_stream = client
+            .pull(tonic::Request::new(PullRequest {
+                remote_path: "docs/hello.txt".into(),
+                local_path: output_path.display().to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let pull_progress = pull_stream
+            .message()
+            .await
+            .unwrap()
+            .expect("pull should yield a final progress message");
+        assert!(pull_progress.done);
+        assert!(
+            pull_progress.error.is_empty(),
+            "pull error: {}",
+            pull_progress.error
+        );
+        assert_eq!(
+            pull_progress.bytes_received,
+            b"hello over grpc".len() as u64
+        );
+        assert_eq!(pull_progress.total_bytes, b"hello over grpc".len() as u64);
+        assert!(pull_stream.message().await.unwrap().is_none());
+        assert_eq!(
+            std::fs::read(&output_path).unwrap(),
+            b"hello over grpc".to_vec()
+        );
+
+        shutdown.notify_one();
+        let server_result = server_handle.await.unwrap();
+        assert!(
+            server_result.is_ok(),
+            "server exited with error: {server_result:?}"
+        );
     }
 
     #[test]
