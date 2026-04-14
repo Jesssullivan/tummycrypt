@@ -2237,7 +2237,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Ok(tonic::Response::new(DiagnosticsResponse {
             state_cache_entries: StateCacheBackend::len(&*cache) as i32,
             conflict_count,
-            last_nats_seq: cache.last_nats_seq as i64,
+            last_nats_seq: cache.last_nats_seq() as i64,
             nats_connected: self.nats_ok.load(std::sync::atomic::Ordering::Relaxed),
             auto_unsync_eligible: eligible,
             auto_unsync_max_age_secs: max_age as i64,
