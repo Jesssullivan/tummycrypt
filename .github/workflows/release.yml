@@ -730,7 +730,8 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
         run: |
-          swift/fileprovider/notarize.sh build/TCFSProvider.app
+          swift/fileprovider/notarize.sh build/TCFSProvider.app \
+            || echo "::warning::FileProvider notarization failed (non-fatal)"
 
       - name: Create artifact archive
         run: |
@@ -923,12 +924,16 @@ jobs:
           VERSION="${{ needs.plan.outputs.version }}"
           PKG="tcfs-${VERSION}-macos-aarch64.pkg"
           echo "Submitting .pkg for notarization..."
-          xcrun notarytool submit "$PKG" \
+          if xcrun notarytool submit "$PKG" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_NOTARIZE_PASSWORD" \
-            --wait
-          xcrun stapler staple "$PKG"
+            --wait; then
+            xcrun stapler staple "$PKG" \
+              || echo "::warning::.pkg stapling failed (non-fatal)"
+          else
+            echo "::warning::.pkg notarization failed (non-fatal)"
+          fi
 
       - name: Upload .pkg artifact
         uses: actions/upload-artifact@v4
@@ -995,6 +1000,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: tcfs ${{ needs.plan.outputs.tag }}
           generate_release_notes: true
           fail_on_unmatched_files: true
@@ -1056,9 +1063,10 @@ jobs:
               SHA256SUMS.txt
             ```
 
-            ### macOS binaries
-            All macOS binaries are signed with Developer ID and notarized by Apple.
-            The FileProvider extension (`TCFSProvider.app`) is stapled for offline verification.
+            ### macOS artifacts
+            macOS CLI binaries are Developer ID signed when Apple credentials are configured.
+            FileProvider and `.pkg` notarization is attempted for Apple artifacts, but release
+            publication does not fail if Apple's notarization service or account agreements are unavailable.
 
             ### Binaries included
             | Binary | Purpose |
