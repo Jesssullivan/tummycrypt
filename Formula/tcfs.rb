@@ -2,8 +2,8 @@
 # To use: brew tap tinyland-inc/tap && brew install tcfs
 #
 # This template is used by CI to generate the versioned formula.
-# Placeholders: 0.12.0, 40317da373af9c461bb11edd40e8bd1c7da94fdca880c6c3fefb14f8246a0ce1, 6dcae1de29ea0c4f54399cddfa0d67bbf37cae81f31ab2fdadbd793675eee0e9,
-#               04229e09c56cd7f51496f3a81c4dc186d902abc515f39d8fe1052c9d52d54a4b, 23c06ea72f0d6772457eb53f0dc7da739153ebcd3f457b87e422b365d361279a
+# Placeholders: 0.12.0, 4d5542641b6a1c7cbf99a70bf7d4f46ad0f21feb05999eeaff48c7ed6f31d779, 5864d0a2d8c80ee373e449133f5b6e47700ce7b73dc093b14a384ca708b88afc,
+#               cd074311fe1d06aef1a0a5beef92f8d36fab15be32bb543348c0e7822c6c8f0a, 927b8c20855c8f28037a5cfcf6e4301063a833c67e5e9f9577fddfca3d7c89ae
 
 class Tcfs < Formula
   desc "FOSS self-hosted odrive replacement — FUSE-based, SeaweedFS-backed file sync"
@@ -14,20 +14,20 @@ class Tcfs < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.12.0/tcfs-0.12.0-macos-aarch64.tar.gz"
-      sha256 "40317da373af9c461bb11edd40e8bd1c7da94fdca880c6c3fefb14f8246a0ce1"
+      sha256 "4d5542641b6a1c7cbf99a70bf7d4f46ad0f21feb05999eeaff48c7ed6f31d779"
     else
       url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.12.0/tcfs-0.12.0-macos-x86_64.tar.gz"
-      sha256 "6dcae1de29ea0c4f54399cddfa0d67bbf37cae81f31ab2fdadbd793675eee0e9"
+      sha256 "5864d0a2d8c80ee373e449133f5b6e47700ce7b73dc093b14a384ca708b88afc"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.12.0/tcfs-0.12.0-linux-aarch64.tar.gz"
-      sha256 "23c06ea72f0d6772457eb53f0dc7da739153ebcd3f457b87e422b365d361279a"
+      sha256 "927b8c20855c8f28037a5cfcf6e4301063a833c67e5e9f9577fddfca3d7c89ae"
     else
       url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.12.0/tcfs-0.12.0-linux-x86_64.tar.gz"
-      sha256 "04229e09c56cd7f51496f3a81c4dc186d902abc515f39d8fe1052c9d52d54a4b"
+      sha256 "cd074311fe1d06aef1a0a5beef92f8d36fab15be32bb543348c0e7822c6c8f0a"
     end
   end
 
