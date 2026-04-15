@@ -18,9 +18,11 @@ Download the latest release from [GitHub Releases](https://github.com/Jesssulliv
 # Linux (x86_64)
 curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
 
-# macOS (Homebrew tap from canonical repo)
-brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap
-brew install tcfs
+# macOS (Homebrew, current manual tap flow)
+brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt.git
+git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin homebrew-tap
+git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
+brew install Jesssullivan/tummycrypt/tcfs
 
 # Debian/Ubuntu
 sudo dpkg -i tcfs-*.deb

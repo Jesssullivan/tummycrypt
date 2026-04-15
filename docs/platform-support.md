@@ -31,8 +31,8 @@ as a production-proven platform.
 - **Filesystem surface**: Experimental; Linux remains the better-proven mount/runtime path
 - **Fleet sync**: Core sync engine and NATS path are shared with Linux, but macOS-specific acceptance coverage is not yet at the same bar
 - **Encryption**: Core crypto path is shared and available
-- **Build targets**: aarch64 (.tar.gz, .pkg with notarization), x86_64 (.tar.gz)
-- **Homebrew**: `brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap && brew install tcfs`
+- **Build targets**: aarch64 (.tar.gz, .pkg; notarization attempted but non-blocking), x86_64 (.tar.gz)
+- **Homebrew**: manual tap flow required today because the formula is published on the `homebrew-tap` branch, not the default branch
 - **Current proof**: CI covers Rust builds plus Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts; broader desktop UX proof is still pending
 
 ## Windows (Planned)
