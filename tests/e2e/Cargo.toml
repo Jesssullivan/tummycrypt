@@ -8,7 +8,7 @@ description = "E2E integration tests for the tcfs stack"
 
 [dependencies]
 tcfs-core = { path = "../../crates/tcfs-core" }
-tcfs-sync = { path = "../../crates/tcfs-sync", features = ["crypto"] }
+tcfs-sync = { path = "../../crates/tcfs-sync", features = ["crypto", "nats"] }
 tcfs-vfs = { path = "../../crates/tcfs-vfs" }
 tcfs-crypto = { path = "../../crates/tcfs-crypto" }
 tcfs-storage = { path = "../../crates/tcfs-storage" }

@@ -20,6 +20,10 @@ use std::time::Duration;
 use futures::StreamExt;
 use tcfs_e2e::write_test_file;
 use tempfile::TempDir;
+use tokio::time::{timeout, Instant};
+
+use tcfs_sync::conflict::VectorClock;
+use tcfs_sync::nats::{NatsClient, StateEvent, StateEventMessage};
 
 /// Check if live E2E is enabled via env var
 fn live_enabled() -> bool {
@@ -37,6 +41,101 @@ fn s3_bucket() -> String {
 
 fn nats_url() -> String {
     std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| "nats://100.71.19.127:4222".into())
+}
+
+fn sample_state_event(
+    device_id: &str,
+    rel_path: &str,
+    manifest_path: &str,
+    timestamp: u64,
+) -> StateEvent {
+    let mut vclock = VectorClock::new();
+    vclock.tick(device_id);
+    StateEvent::FileSynced {
+        device_id: device_id.into(),
+        rel_path: rel_path.into(),
+        blake3: format!("blake3-{timestamp}"),
+        size: rel_path.len() as u64,
+        vclock,
+        manifest_path: manifest_path.into(),
+        timestamp,
+    }
+}
+
+fn matches_rel_path(event: &StateEvent, rel_path: &str) -> bool {
+    match event {
+        StateEvent::FileSynced {
+            rel_path: event_rel_path,
+            ..
+        } => event_rel_path == rel_path,
+        _ => false,
+    }
+}
+
+async fn drain_until_idle<S>(stream: &mut S, idle_for: Duration)
+where
+    S: futures::Stream<Item = anyhow::Result<StateEventMessage>> + Unpin,
+{
+    loop {
+        match timeout(idle_for, stream.next()).await {
+            Ok(Some(Ok(msg))) => {
+                msg.ack().await.expect("ack drained state event");
+            }
+            Ok(Some(Err(err))) => panic!("receiving drained state event: {err}"),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+}
+
+async fn recv_matching_event<S>(stream: &mut S, rel_path: &str, within: Duration) -> StateEvent
+where
+    S: futures::Stream<Item = anyhow::Result<StateEventMessage>> + Unpin,
+{
+    let deadline = Instant::now() + within;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for state event with rel_path={rel_path}"
+        );
+        let msg = timeout(remaining, stream.next())
+            .await
+            .expect("timeout waiting for state event")
+            .expect("state stream ended")
+            .expect("receiving state event");
+        let event = msg.event.clone();
+        msg.ack().await.expect("ack state event");
+        if matches_rel_path(&event, rel_path) {
+            return event;
+        }
+    }
+}
+
+async fn assert_no_matching_event<S>(stream: &mut S, rel_path: &str, within: Duration)
+where
+    S: futures::Stream<Item = anyhow::Result<StateEventMessage>> + Unpin,
+{
+    let deadline = Instant::now() + within;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match timeout(remaining, stream.next()).await {
+            Ok(Some(Ok(msg))) => {
+                let event = msg.event.clone();
+                msg.ack().await.expect("ack state event");
+                assert!(
+                    !matches_rel_path(&event, rel_path),
+                    "ephemeral consumer replayed old event for rel_path={rel_path}"
+                );
+            }
+            Ok(Some(Err(err))) => panic!("receiving state event: {err}"),
+            Ok(None) => return,
+            Err(_) => return,
+        }
+    }
 }
 
 /// Build an opendal S3 operator from env credentials
@@ -201,6 +300,81 @@ async fn live_nats_pubsub_roundtrip() {
     );
 
     eprintln!("NATS pubsub verified on subject: {subject}");
+}
+
+#[tokio::test]
+async fn live_state_consumer_replay_and_ephemeral_new_only() {
+    if !live_enabled() {
+        eprintln!("SKIP: TCFS_E2E_LIVE not set");
+        return;
+    }
+
+    let test_id = uuid::Uuid::new_v4().to_string();
+    let publisher_id = format!("live-pub-{}", &test_id[..8]);
+    let durable_id = format!("live-durable-{}", &test_id[..8]);
+    let first_rel_path = format!("replay/{}/before-reconnect.txt", &test_id[..8]);
+    let second_rel_path = format!("replay/{}/after-ephemeral.txt", &test_id[..8]);
+    let first_manifest = format!("manifests/{}/first", &test_id[..8]);
+    let second_manifest = format!("manifests/{}/second", &test_id[..8]);
+
+    let publisher = NatsClient::connect(&nats_url(), false, None)
+        .await
+        .expect("connect publisher NATS client");
+    publisher
+        .ensure_streams()
+        .await
+        .expect("ensure NATS streams");
+
+    let reader = NatsClient::connect(&nats_url(), false, None)
+        .await
+        .expect("connect reader NATS client");
+    reader.ensure_streams().await.expect("ensure NATS streams");
+
+    // Establish a fresh durable cursor at the current tail so historical
+    // STATE_UPDATES traffic from the live environment does not contaminate
+    // this test's reconnect assertion.
+    let mut durable = reader
+        .state_consumer(&durable_id)
+        .await
+        .expect("create durable state consumer");
+    drain_until_idle(&mut durable, Duration::from_millis(250)).await;
+    drop(durable);
+
+    let first_event = sample_state_event(&publisher_id, &first_rel_path, &first_manifest, 1);
+    publisher
+        .publish_state_event(&first_event)
+        .await
+        .expect("publish first state event");
+
+    let mut durable = reader
+        .state_consumer(&durable_id)
+        .await
+        .expect("reopen durable state consumer");
+    let replayed =
+        recv_matching_event(&mut durable, &first_rel_path, Duration::from_secs(10)).await;
+    assert!(
+        matches_rel_path(&replayed, &first_rel_path),
+        "durable consumer did not replay disconnected event"
+    );
+    drop(durable);
+
+    let mut ephemeral = reader
+        .state_consumer_ephemeral()
+        .await
+        .expect("create ephemeral state consumer");
+    assert_no_matching_event(&mut ephemeral, &first_rel_path, Duration::from_secs(2)).await;
+
+    let second_event = sample_state_event(&publisher_id, &second_rel_path, &second_manifest, 2);
+    publisher
+        .publish_state_event(&second_event)
+        .await
+        .expect("publish second state event");
+
+    let seen = recv_matching_event(&mut ephemeral, &second_rel_path, Duration::from_secs(10)).await;
+    assert!(
+        matches_rel_path(&seen, &second_rel_path),
+        "ephemeral consumer missed new event after attach"
+    );
 }
 
 // ── Two-device sync simulation via NATS ──────────────────────────────────
