@@ -777,20 +777,77 @@ fn collect_config_from_sync(
     }
 }
 
-// ── `tcfs push` ───────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncStatusReport {
+    state_path: PathBuf,
+    tracked_files: usize,
+    file: Option<SyncStatusPathReport>,
+}
 
-async fn cmd_push(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SyncStatusPathReport {
+    Tracked {
+        canonical: PathBuf,
+        hash_prefix: String,
+        size: u64,
+        chunk_count: usize,
+        remote_path: String,
+        last_synced_age_secs: u64,
+        needs_sync_reason: Option<String>,
+    },
+    Untracked {
+        canonical: PathBuf,
+    },
+}
+
+fn build_sync_status_report(
     config: &tcfs_core::config::TcfsConfig,
-    local: &Path,
-    prefix: Option<&str>,
+    path: Option<&Path>,
     state_override: Option<&Path>,
-) -> Result<()> {
-    let op = build_operator(config).await?;
+) -> Result<SyncStatusReport> {
     let state_path = resolve_state_path(config, state_override);
-    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+    let state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
-    let device_id = load_device_id(config);
+    let file = if let Some(p) = path {
+        let canonical =
+            std::fs::canonicalize(p).with_context(|| format!("resolving path: {}", p.display()))?;
+
+        match state.get(&canonical) {
+            Some(entry) => Some(SyncStatusPathReport::Tracked {
+                canonical: canonical.clone(),
+                hash_prefix: entry.blake3[..16.min(entry.blake3.len())].to_string(),
+                size: entry.size,
+                chunk_count: entry.chunk_count,
+                remote_path: entry.remote_path.clone(),
+                last_synced_age_secs: now_epoch().saturating_sub(entry.last_synced),
+                needs_sync_reason: state.needs_sync(&canonical)?,
+            }),
+            None => Some(SyncStatusPathReport::Untracked { canonical }),
+        }
+    } else {
+        None
+    };
+
+    Ok(SyncStatusReport {
+        state_path,
+        tracked_files: state.len(),
+        file,
+    })
+}
+
+// ── `tcfs push` ───────────────────────────────────────────────────────────────
+
+async fn cmd_push_with_operator(
+    config: &tcfs_core::config::TcfsConfig,
+    op: &opendal::Operator,
+    local: &Path,
+    prefix: Option<&str>,
+    state_path: &Path,
+    device_id: &str,
+) -> Result<()> {
+    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
     let collect_cfg = collect_config_from_sync(config);
 
     // Default prefix: storage.remote_prefix from config, falling back to bucket.
@@ -846,12 +903,12 @@ async fn cmd_push(
             });
 
         let result = tcfs_sync::engine::upload_file_with_device(
-            &op,
+            op,
             local,
             &remote_prefix,
             &mut state,
             Some(&progress),
-            &device_id,
+            device_id,
             Some(&rel),
             enc_ctx.as_ref(),
         )
@@ -916,12 +973,12 @@ async fn cmd_push(
         });
 
         let (uploaded, skipped, bytes) = tcfs_sync::engine::push_tree_with_device(
-            &op,
+            op,
             local,
             &remote_prefix,
             &mut state,
             Some(&progress),
-            &device_id,
+            device_id,
             Some(&collect_cfg),
             None,
         )
@@ -944,18 +1001,29 @@ async fn cmd_push(
     Ok(())
 }
 
-// ── `tcfs pull` ───────────────────────────────────────────────────────────────
-
-async fn cmd_pull(
+async fn cmd_push(
     config: &tcfs_core::config::TcfsConfig,
-    manifest_path: &str,
-    local: Option<&Path>,
+    local: &Path,
     prefix: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
     let op = build_operator(config).await?;
+    let state_path = resolve_state_path(config, state_override);
     let device_id = load_device_id(config);
+    cmd_push_with_operator(config, &op, local, prefix, &state_path, &device_id).await
+}
 
+// ── `tcfs pull` ───────────────────────────────────────────────────────────────
+
+async fn cmd_pull_with_operator(
+    config: &tcfs_core::config::TcfsConfig,
+    op: &opendal::Operator,
+    manifest_path: &str,
+    local: Option<&Path>,
+    prefix: Option<&str>,
+    state_path: &Path,
+    device_id: &str,
+) -> Result<()> {
     // Detect whether input looks like a file path vs a manifest path
     let is_file_path = manifest_path.starts_with('/')
         || manifest_path.starts_with('.')
@@ -991,7 +1059,7 @@ async fn cmd_pull(
     // Resolve file paths to manifest paths via the S3 index
     let sync_root = config.sync.sync_root.as_deref();
     let resolved_manifest =
-        tcfs_sync::engine::resolve_manifest_path(&op, manifest_path, &remote_prefix, sync_root)
+        tcfs_sync::engine::resolve_manifest_path(op, manifest_path, &remote_prefix, sync_root)
             .await
             .with_context(|| format!("resolving manifest for: {manifest_path}"))?;
 
@@ -1017,7 +1085,6 @@ async fn cmd_pull(
     });
 
     // Open state cache for vclock merge during pull
-    let state_path = resolve_state_path(config, state_override);
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
@@ -1040,12 +1107,12 @@ async fn cmd_pull(
         });
 
     let result = tcfs_sync::engine::download_file_with_device(
-        &op,
+        op,
         &resolved_manifest,
         &local_path,
         &remote_prefix,
         Some(&progress),
-        &device_id,
+        device_id,
         Some(&mut state),
         enc_ctx.as_ref(),
     )
@@ -1063,6 +1130,28 @@ async fn cmd_pull(
     Ok(())
 }
 
+async fn cmd_pull(
+    config: &tcfs_core::config::TcfsConfig,
+    manifest_path: &str,
+    local: Option<&Path>,
+    prefix: Option<&str>,
+    state_override: Option<&Path>,
+) -> Result<()> {
+    let op = build_operator(config).await?;
+    let device_id = load_device_id(config);
+    let state_path = resolve_state_path(config, state_override);
+    cmd_pull_with_operator(
+        config,
+        &op,
+        manifest_path,
+        local,
+        prefix,
+        &state_path,
+        &device_id,
+    )
+    .await
+}
+
 // ── `tcfs sync-status` ────────────────────────────────────────────────────────
 
 fn cmd_sync_status(
@@ -1070,44 +1159,35 @@ fn cmd_sync_status(
     path: Option<&Path>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let state_path = resolve_state_path(config, state_override);
-    let state = tcfs_sync::state::StateCache::open(&state_path)
-        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+    let report = build_sync_status_report(config, path, state_override)?;
 
-    println!("State cache: {}", state_path.display());
-    println!("Tracked files: {}", state.len());
+    println!("State cache: {}", report.state_path.display());
+    println!("Tracked files: {}", report.tracked_files);
 
-    if let Some(p) = path {
-        let canonical =
-            std::fs::canonicalize(p).with_context(|| format!("resolving path: {}", p.display()))?;
-
-        match state.get(&canonical) {
-            Some(entry) => {
-                println!();
+    if let Some(file) = report.file {
+        println!();
+        match file {
+            SyncStatusPathReport::Tracked {
+                canonical,
+                hash_prefix,
+                size,
+                chunk_count,
+                remote_path,
+                last_synced_age_secs,
+                needs_sync_reason,
+            } => {
                 println!("File: {}", canonical.display());
-                println!(
-                    "  hash:       {}",
-                    &entry.blake3[..16.min(entry.blake3.len())]
-                );
-                println!("  size:       {}", fmt_bytes(entry.size));
-                println!("  chunks:     {}", entry.chunk_count);
-                println!("  remote:     {}", entry.remote_path);
-                println!("  last sync:  {} seconds ago", {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    now.saturating_sub(entry.last_synced)
-                });
-
-                // Check if it needs re-sync
-                match state.needs_sync(&canonical)? {
+                println!("  hash:       {}", hash_prefix);
+                println!("  size:       {}", fmt_bytes(size));
+                println!("  chunks:     {}", chunk_count);
+                println!("  remote:     {}", remote_path);
+                println!("  last sync:  {} seconds ago", last_synced_age_secs);
+                match needs_sync_reason {
                     None => println!("  status:     up to date"),
                     Some(reason) => println!("  status:     needs sync ({reason})"),
                 }
             }
-            None => {
-                println!();
+            SyncStatusPathReport::Untracked { canonical } => {
                 println!(
                     "File: {} — not in sync state (never pushed)",
                     canonical.display()
@@ -3641,7 +3721,6 @@ fn fmt_bytes(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3654,6 +3733,15 @@ mod tests {
 
     fn master_key(fill: u8) -> tcfs_crypto::MasterKey {
         tcfs_crypto::MasterKey::from_bytes([fill; tcfs_crypto::KEY_SIZE])
+    }
+
+    fn test_config(sync_root: &Path) -> tcfs_core::config::TcfsConfig {
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        config.storage.bucket = "test-bucket".into();
+        config.storage.remote_prefix = Some("data".into());
+        config.sync.sync_root = Some(sync_root.to_path_buf());
+        config.sync.state_db = sync_root.join("state.db");
+        config
     }
 
     fn make_encrypted_manifest(
@@ -3691,6 +3779,87 @@ mod tests {
             .decode(wrapped_b64)
             .unwrap();
         tcfs_crypto::unwrap_key(master_key, &wrapped).is_ok()
+    }
+
+    #[tokio::test]
+    async fn cli_push_status_pull_workflow_round_trips_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        std::fs::create_dir_all(sync_root.join("docs")).unwrap();
+        let source = sync_root.join("docs/readme.txt");
+        std::fs::write(&source, b"hello from tcfs").unwrap();
+
+        let op = memory_op();
+        let state_path = dir.path().join("state.json");
+        let config = test_config(&sync_root);
+
+        cmd_push_with_operator(&config, &op, &source, None, &state_path, "test-device")
+            .await
+            .unwrap();
+
+        let report = build_sync_status_report(&config, Some(&source), Some(&state_path)).unwrap();
+        assert_eq!(report.tracked_files, 1);
+        match report.file.unwrap() {
+            SyncStatusPathReport::Tracked {
+                remote_path,
+                needs_sync_reason,
+                ..
+            } => {
+                assert!(remote_path.starts_with("data/manifests/"));
+                assert!(needs_sync_reason.is_none());
+            }
+            other => panic!("expected tracked status, got {other:?}"),
+        }
+
+        let pulled = dir.path().join("pulled.txt");
+        cmd_pull_with_operator(
+            &config,
+            &op,
+            &source.to_string_lossy(),
+            Some(&pulled),
+            None,
+            &state_path,
+            "test-device",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&pulled).unwrap(), b"hello from tcfs");
+    }
+
+    #[tokio::test]
+    async fn cli_directory_push_and_status_detect_modified_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(sync_root.join("sub")).unwrap();
+        let first = sync_root.join("alpha.txt");
+        let second = sync_root.join("sub/beta.txt");
+        std::fs::write(&first, b"alpha").unwrap();
+        std::fs::write(&second, b"beta").unwrap();
+
+        let op = memory_op();
+        let state_path = dir.path().join("state.json");
+        let config = test_config(&sync_root);
+
+        cmd_push_with_operator(&config, &op, &sync_root, None, &state_path, "test-device")
+            .await
+            .unwrap();
+
+        assert!(op.read("data/index/alpha.txt").await.is_ok());
+        assert!(op.read("data/index/sub/beta.txt").await.is_ok());
+
+        std::fs::write(&first, b"alpha updated").unwrap();
+
+        let report = build_sync_status_report(&config, Some(&first), Some(&state_path)).unwrap();
+        assert_eq!(report.tracked_files, 2);
+        match report.file.unwrap() {
+            SyncStatusPathReport::Tracked {
+                needs_sync_reason, ..
+            } => {
+                assert!(needs_sync_reason.is_some());
+            }
+            other => panic!("expected tracked status, got {other:?}"),
+        }
     }
 
     #[tokio::test]
