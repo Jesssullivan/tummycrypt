@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-04-08
+
+### Added
+
+- **Finder status surfaces**: macOS FileProvider gained Finder Sync badge support, download progress reporting, and policy-aware excluded or pinned status badges.
+- **Conflict UX improvements**: conflict notifications, conflict-copy remote writes, and CLI policy controls for handling sync conflicts.
+- **Apple packaging updates**: release artifacts include notarized Apple Silicon `.pkg` installers and bundled `TCFSProvider.app` payloads.
+
+### Changed
+
+- macOS release builds now vendor OpenSSL to avoid code-signing and runtime loader failures during packaging.
+- Canonical release assets now ship from `Jesssullivan/tummycrypt` with GitHub Releases, GHCR images, Homebrew tap updates, and Nix cache publication.
+
+## [0.11.1] - 2026-04-08
+
+### Added
+
+- **`tcfs reconcile` CLI**: explicit reconcile command wired to the bidirectional plan-and-execute sync engine introduced in `0.10.0`.
+- **Scheduler safety wiring**: `PathLocks` and `FileSyncStatus` now drive daemon scheduling decisions instead of remaining library-only primitives.
+- **Watcher blacklist enforcement**: daemon watcher-to-scheduler flow now applies the shared blacklist logic consistently.
+- CI step for the sync integration path to exercise the new robustness and reconciliation lanes during automation.
+
+### Changed
+
+- Release pipeline hardening for container build and publish flow, including lowercase GHCR naming fixes.
+- Re-enabled Attic cache use in the Nix fleet configuration after the earlier stale-cache disablement.
+- FileProvider build script now validates outputs and required configuration before packaging.
+
+### Fixed
+
+- Removed plaintext credential handling from repo and deployment surfaces.
+- Documentation refreshed to match the active development state after the `0.10.x` sync-safety push.
+
+## [0.11.0] - 2026-04-07
+
+### Added
+
+- **Read-write FUSE/VFS path**: write, create, unlink, mkdir, rename, and rmdir operations now flow through the SeaweedFS-backed mount path.
+- **FUSE write pipeline parity**: FastCDC chunking, transparent `.tc` handling, NATS publish on write, and index-first auto-pull wiring for mounted file edits.
+- **Encryption wiring across push paths**: `EncryptionContext` and encrypted manifest support now cover the remaining CLI and daemon upload paths.
+- **Daemon self-sufficiency**: daemon startup can provision sockets, local directories, credentials, and unlock flow without external bootstrapping.
+- **iOS/FileProvider onboarding work**: QR enrollment improvements, credential-broker support, build-info surfaces, and several FileProvider fixes landed in the Apple lane.
+
+### Changed
+
+- FUSE3 returned as the default mount backend, with the NFS path retained as fallback.
+- Stale Attic cache configuration was disabled in Nix surfaces while binary-cache behavior was being corrected.
+
+### Fixed
+
+- Cross-host sync lookup and pull behavior now normalize `rel_path`, repair absolute-path push fallout, and add fallback filename search where older index state exists.
+- FUSE hydration now understands JSON v2 manifests and decrypts encrypted chunks with the correct file identity.
+- Watcher, daemon, and NATS paths now avoid skipped-upload orphaned index entries and missing prefix propagation.
+
 ## [0.10.0] - 2026-04-05
 
 ### Added
