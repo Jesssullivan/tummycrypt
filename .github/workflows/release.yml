@@ -430,6 +430,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push image
+        id: build_image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -456,13 +457,15 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          # Sign each tag with keyless (OIDC-based) signing
-          for TAG in \
-            "${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.tag }}" \
-            "${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.version }}" \
-            "${{ needs.plan.outputs.image_repo }}:latest"; do
-            cosign sign --yes "${TAG}"
-          done
+          # Sign the pushed image digest once. The tags above all resolve to the
+          # same manifest, so signing mutable tags individually is unnecessary
+          # and more failure-prone than signing the immutable digest directly.
+          IMAGE_DIGEST="${{ steps.build_image.outputs.digest }}"
+          if [ -z "$IMAGE_DIGEST" ]; then
+            echo "::error::docker/build-push-action did not return an image digest"
+            exit 1
+          fi
+          cosign sign --yes "${{ needs.plan.outputs.image_repo }}@${IMAGE_DIGEST}"
 
   # ── Nix build + Attic cache push ─────────────────────────────────────────
 
