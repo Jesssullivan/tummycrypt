@@ -20,3 +20,6 @@ tracing = { workspace = true }
 [features]
 default = []
 fuse = ["dep:fuse3", "dep:libc", "dep:bytes", "dep:futures-util"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

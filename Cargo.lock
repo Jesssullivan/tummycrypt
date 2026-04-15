@@ -5358,6 +5358,7 @@ dependencies = [
  "libc",
  "opendal",
  "tcfs-vfs",
+ "tempfile",
  "tokio",
  "tracing",
 ]
