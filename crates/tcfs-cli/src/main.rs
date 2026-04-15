@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use secrecy::ExposeSecret;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -3403,6 +3403,8 @@ async fn cmd_reconcile(
 
     let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&config.sync);
     let reconcile_config = tcfs_sync::reconcile::ReconcileConfig::default();
+    let orphan_chunk_cleanup_grace =
+        Duration::from_secs(config.sync.orphan_chunk_cleanup_grace_secs);
 
     println!(
         "Reconciling {} ↔ {}:{}/",
@@ -3437,7 +3439,6 @@ async fn cmd_reconcile(
 
     if plan.actions.is_empty() {
         println!("Nothing to do — local and remote are in sync.");
-        return Ok(());
     }
 
     for action in &plan.actions {
@@ -3472,58 +3473,95 @@ async fn cmd_reconcile(
     if !execute {
         println!();
         println!("Dry run — no changes made. Use --execute to apply.");
+        if !orphan_chunk_cleanup_grace.is_zero() {
+            println!(
+                "Orphan chunk cleanup runs during execute with a {} second grace period.",
+                config.sync.orphan_chunk_cleanup_grace_secs
+            );
+        }
         return Ok(());
     }
 
-    // Execute the plan
-    println!();
-    println!("Executing plan...");
+    if !plan.actions.is_empty() {
+        println!();
+        println!("Executing plan...");
 
-    let mut state = tcfs_sync::state::StateCache::open(&state_path)?;
+        let mut state = tcfs_sync::state::StateCache::open(&state_path)?;
 
-    let master_key = config
-        .crypto
-        .master_key_file
-        .as_ref()
-        .and_then(|p| std::fs::read(p).ok())
-        .filter(|k| k.len() == 32)
-        .map(|bytes| {
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
-            tcfs_crypto::MasterKey::from_bytes(key)
-        });
-    let enc_ctx = master_key
-        .as_ref()
-        .map(|mk| tcfs_sync::engine::EncryptionContext {
-            master_key: mk.clone(),
-        });
+        let master_key = config
+            .crypto
+            .master_key_file
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .filter(|k| k.len() == 32)
+            .map(|bytes| {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                tcfs_crypto::MasterKey::from_bytes(key)
+            });
+        let enc_ctx = master_key
+            .as_ref()
+            .map(|mk| tcfs_sync::engine::EncryptionContext {
+                master_key: mk.clone(),
+            });
 
-    let result = tcfs_sync::reconcile::execute_plan(
-        &plan,
-        &op,
-        &local_root,
-        &remote_prefix,
-        &mut state,
-        &device_id,
-        enc_ctx.as_ref(),
-        None,
-    )
-    .await
-    .context("executing reconciliation plan")?;
+        let result = tcfs_sync::reconcile::execute_plan(
+            &plan,
+            &op,
+            &local_root,
+            &remote_prefix,
+            &mut state,
+            &device_id,
+            enc_ctx.as_ref(),
+            None,
+        )
+        .await
+        .context("executing reconciliation plan")?;
 
-    state.flush().context("flushing state cache")?;
+        state.flush().context("flushing state cache")?;
 
-    println!(
-        "Done: {} pushed, {} pulled, {} deleted, {} conflicts, {} errors",
-        result.pushed,
-        result.pulled,
-        result.deleted_local + result.deleted_remote,
-        result.conflicts_recorded,
-        result.errors.len()
-    );
+        println!(
+            "Done: {} pushed, {} pulled, {} deleted, {} conflicts, {} errors",
+            result.pushed,
+            result.pulled,
+            result.deleted_local + result.deleted_remote,
+            result.conflicts_recorded,
+            result.errors.len()
+        );
 
-    for (path, err) in &result.errors {
-        eprintln!("  error: {path}: {err}");
+        for (path, err) in &result.errors {
+            eprintln!("  error: {path}: {err}");
+        }
+    }
+
+    if !orphan_chunk_cleanup_grace.is_zero() {
+        println!();
+        println!(
+            "Sweeping orphaned remote chunks older than {} seconds...",
+            config.sync.orphan_chunk_cleanup_grace_secs
+        );
+
+        let cleanup = tcfs_sync::reconcile::cleanup_orphaned_chunks(
+            &op,
+            &remote_prefix,
+            orphan_chunk_cleanup_grace,
+            SystemTime::now(),
+        )
+        .await
+        .context("cleaning orphaned remote chunks")?;
+
+        println!(
+            "Orphan cleanup: {} found, {} deleted, {} within grace, {} missing timestamps, {} errors",
+            cleanup.orphaned_chunks_found,
+            cleanup.deleted_chunks.len(),
+            cleanup.skipped_within_grace.len(),
+            cleanup.skipped_missing_last_modified.len(),
+            cleanup.delete_errors.len()
+        );
+
+        for (chunk, err) in &cleanup.delete_errors {
+            eprintln!("  orphan cleanup error: {chunk}: {err}");
+        }
     }
 
     Ok(())
