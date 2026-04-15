@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-04-15
+
+### Added
+
+- **Named live acceptance lane**: `neo-honey` is now the canonical live SeaweedFS + NATS + two-device smoke path, with a documented script and matching e2e naming.
+- **Failure-oriented validation**: added targeted coverage for manifest/index crash windows, retry backoff behavior, NATS durable replay semantics, live storage outage recovery, and CLI/gRPC/MCP/FUSE workflow paths.
+- **Orphan chunk reporting and cleanup**: reconcile can now surface orphaned remote chunks and clean them up conservatively after a grace period.
+
+### Changed
+
+- Release workflow now signs GHCR images by immutable digest, honors explicit tags on manual proof runs, and no longer lets Apple notarization outages fail the entire release.
+- Release notes and platform/docs surfaces now describe Apple notarization as attempted rather than guaranteed, and keep Apple packaging positioned as experimental.
+
+### Fixed
+
+- **Crash-safe rel-path publish**: manifest/index publication now uses recovery-aware staged, preparing, and committed index states with deterministic crash-window recovery.
+- **Upload and path correctness**: fixed upload TOCTOU races, Unicode rel-path normalization, gRPC push path traversal rejection, manifest-read retries, and resumable key rotation.
+- **State and lifecycle correctness**: fixed StateCache metadata persistence, PathLocks cleanup under contention, orphan cleanup wiring, and rename/delete sync lifecycle handling across CLI and FUSE flows.
+
 ## [0.12.0] - 2026-04-08
 
 ### Added
