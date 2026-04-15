@@ -128,6 +128,7 @@ jobs:
             deb: false
             rpm: false
             sign: true
+            vendored-ssl: true
 
           # Windows x86_64 — disabled until tcfs-cli compiles on Windows
           # (connect_daemon uses Unix sockets, needs cfg(windows) TCP fallback)
@@ -181,7 +182,10 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install protobuf
-          # Native target uses system OpenSSL; cross targets use vendored (openssl-vendored feature)
+          # Only install Homebrew OpenSSL for targets that intentionally link it.
+          # Release artifacts that ship signed binaries should prefer vendored
+          # OpenSSL so they do not depend on a Homebrew dylib being present and
+          # accepted by macOS library validation on the destination machine.
           if [[ "${{ matrix.vendored-ssl }}" != "true" ]]; then
             brew install openssl@3
             echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
@@ -213,7 +217,8 @@ jobs:
           if [[ "${{ matrix.fuse }}" == "true" ]]; then
             FEATURES=""  # use default features (includes fuse)
           fi
-          # Vendor OpenSSL for cross-compilation targets (no system libssl available)
+          # Vendor OpenSSL for release targets that should not depend on a
+          # Homebrew libssl runtime on the destination machine.
           EXTRA_FEATURES=""
           if [[ "${{ matrix.vendored-ssl }}" == "true" ]]; then
             EXTRA_FEATURES="--features openssl-vendored"
