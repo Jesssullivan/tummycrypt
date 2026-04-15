@@ -2728,42 +2728,152 @@ async fn cmd_device_invite(
 
 // ── `tcfs rotate-key` ─────────────────────────────────────────────────────
 
-async fn cmd_rotate_key(
-    config: &tcfs_core::config::TcfsConfig,
-    old_key_file: Option<&Path>,
-    use_password: bool,
-    non_interactive: bool,
-) -> Result<()> {
-    use tcfs_crypto::{MasterKey, KEY_SIZE};
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum KeyRotationStatus {
+    RewritingManifests,
+    ReadyToSwap,
+}
 
-    // Step 1: Load old master key
-    let key_path = old_key_file
-        .map(|p| p.to_path_buf())
-        .or_else(|| config.crypto.master_key_file.clone())
-        .unwrap_or_else(|| {
-            tcfs_secrets::device::default_registry_path()
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("master.key")
-        });
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct KeyRotationState {
+    version: u32,
+    started_at: u64,
+    manifest_prefix: String,
+    pending_key_path: String,
+    status: KeyRotationStatus,
+    rotated_manifests: u64,
+    already_rotated_manifests: u64,
+    skipped_plaintext_manifests: u64,
+    error_count: u64,
+    last_manifest_path: Option<String>,
+}
 
-    let old_bytes = std::fs::read(&key_path)
-        .with_context(|| format!("reading old master key: {}", key_path.display()))?;
-    if old_bytes.len() != KEY_SIZE {
+impl KeyRotationState {
+    fn new(manifest_prefix: &str, pending_key_path: &Path) -> Self {
+        Self {
+            version: 1,
+            started_at: now_epoch(),
+            manifest_prefix: manifest_prefix.to_string(),
+            pending_key_path: pending_key_path.display().to_string(),
+            status: KeyRotationStatus::RewritingManifests,
+            rotated_manifests: 0,
+            already_rotated_manifests: 0,
+            skipped_plaintext_manifests: 0,
+            error_count: 0,
+            last_manifest_path: None,
+        }
+    }
+
+    fn reset_scan_progress(&mut self) {
+        self.status = KeyRotationStatus::RewritingManifests;
+        self.rotated_manifests = 0;
+        self.already_rotated_manifests = 0;
+        self.skipped_plaintext_manifests = 0;
+        self.error_count = 0;
+        self.last_manifest_path = None;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct KeyRotationPaths {
+    state_path: PathBuf,
+    pending_key_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct PreparedKeyRotation {
+    old_master: tcfs_crypto::MasterKey,
+    new_master: tcfs_crypto::MasterKey,
+    state: KeyRotationState,
+    paths: KeyRotationPaths,
+    resumed: bool,
+}
+
+fn key_rotation_paths(key_path: &Path) -> KeyRotationPaths {
+    let parent = key_path.parent().unwrap_or(Path::new("."));
+    let file_name = key_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    KeyRotationPaths {
+        state_path: parent.join(format!(".{file_name}.rotate-state.json")),
+        pending_key_path: parent.join(format!(".{file_name}.rotate-pending")),
+    }
+}
+
+fn atomic_write_bytes(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let tmp_path = parent.join(format!(
+        ".{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+
+    std::fs::write(&tmp_path, data)
+        .with_context(|| format!("writing temp file: {}", tmp_path.display()))?;
+
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("setting permissions on: {}", tmp_path.display()))?;
+    }
+
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
+}
+
+fn write_rotation_state(path: &Path, state: &KeyRotationState) -> Result<()> {
+    let data = serde_json::to_vec_pretty(state).context("serializing key rotation state")?;
+    atomic_write_bytes(path, &data, Some(0o600))
+}
+
+fn read_rotation_state(path: &Path) -> Result<KeyRotationState> {
+    let data = std::fs::read(path)
+        .with_context(|| format!("reading key rotation state: {}", path.display()))?;
+    serde_json::from_slice(&data).context("parsing key rotation state")
+}
+
+fn read_master_key(path: &Path) -> Result<tcfs_crypto::MasterKey> {
+    use tcfs_crypto::KEY_SIZE;
+
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading master key: {}", path.display()))?;
+    if bytes.len() != KEY_SIZE {
         anyhow::bail!(
-            "old master key has wrong size: {} bytes (expected {})",
-            old_bytes.len(),
+            "master key has wrong size: {} bytes (expected {})",
+            bytes.len(),
             KEY_SIZE
         );
     }
-    let mut old_key_bytes = [0u8; KEY_SIZE];
-    old_key_bytes.copy_from_slice(&old_bytes);
-    let old_master = MasterKey::from_bytes(old_key_bytes);
 
-    println!("Old master key loaded from: {}", key_path.display());
+    let mut key_bytes = [0u8; KEY_SIZE];
+    key_bytes.copy_from_slice(&bytes);
+    Ok(tcfs_crypto::MasterKey::from_bytes(key_bytes))
+}
 
-    // Step 2: Generate new master key
-    let new_master = if use_password {
+fn write_master_key(path: &Path, key: &tcfs_crypto::MasterKey) -> Result<()> {
+    atomic_write_bytes(path, key.as_bytes(), Some(0o600))
+        .with_context(|| format!("writing master key: {}", path.display()))
+}
+
+fn cleanup_rotation_artifacts(paths: &KeyRotationPaths) {
+    for path in [&paths.pending_key_path, &paths.state_path] {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("  WARN: failed to remove {}: {e}", path.display());
+            }
+        }
+    }
+}
+
+fn generate_new_master_key(
+    use_password: bool,
+    non_interactive: bool,
+) -> Result<tcfs_crypto::MasterKey> {
+    if use_password {
         let passphrase =
             rpassword::prompt_password("New master passphrase: ").context("reading passphrase")?;
         let confirm =
@@ -2778,7 +2888,7 @@ async fn cmd_rotate_key(
             &secrecy::SecretString::from(passphrase),
             &salt,
             &tcfs_crypto::kdf::KdfParams::default(),
-        )?
+        )
     } else {
         let (mnemonic, master_key) = tcfs_crypto::generate_mnemonic()?;
 
@@ -2800,10 +2910,238 @@ async fn cmd_rotate_key(
                 anyhow::bail!("key rotation cancelled");
             }
         }
-        master_key
+
+        Ok(master_key)
+    }
+}
+
+fn prepare_key_rotation(
+    key_path: &Path,
+    manifest_prefix: &str,
+    use_password: bool,
+    non_interactive: bool,
+) -> Result<Option<PreparedKeyRotation>> {
+    let paths = key_rotation_paths(key_path);
+
+    if paths.state_path.exists() {
+        let mut state = read_rotation_state(&paths.state_path)?;
+        if state.manifest_prefix != manifest_prefix {
+            anyhow::bail!(
+                "pending key rotation targets {} but current config resolved to {}",
+                state.manifest_prefix,
+                manifest_prefix
+            );
+        }
+
+        let new_master = read_master_key(&paths.pending_key_path).with_context(|| {
+            format!(
+                "reading pending rotation key: {}",
+                paths.pending_key_path.display()
+            )
+        })?;
+        let current_master = read_master_key(key_path)?;
+
+        if current_master.as_bytes() == new_master.as_bytes() {
+            cleanup_rotation_artifacts(&paths);
+            return Ok(None);
+        }
+
+        state.reset_scan_progress();
+        write_rotation_state(&paths.state_path, &state)?;
+
+        return Ok(Some(PreparedKeyRotation {
+            old_master: current_master,
+            new_master,
+            state,
+            paths,
+            resumed: true,
+        }));
+    }
+
+    let old_master = read_master_key(key_path)?;
+    let new_master = generate_new_master_key(use_password, non_interactive)?;
+    write_master_key(&paths.pending_key_path, &new_master)?;
+
+    let state = KeyRotationState::new(manifest_prefix, &paths.pending_key_path);
+    write_rotation_state(&paths.state_path, &state)?;
+
+    Ok(Some(PreparedKeyRotation {
+        old_master,
+        new_master,
+        state,
+        paths,
+        resumed: false,
+    }))
+}
+
+async fn rotate_manifests_with_resume(
+    op: &opendal::Operator,
+    manifest_prefix: &str,
+    old_master: &tcfs_crypto::MasterKey,
+    new_master: &tcfs_crypto::MasterKey,
+    state: &mut KeyRotationState,
+    state_path: &Path,
+    max_rotations: Option<u64>,
+) -> Result<()> {
+    state.reset_scan_progress();
+    write_rotation_state(state_path, state)?;
+
+    let entries = op
+        .list(manifest_prefix)
+        .await
+        .with_context(|| format!("listing manifests from storage: {manifest_prefix}"))?;
+
+    for entry in entries {
+        let path = entry.path().to_string();
+        if entry.metadata().is_dir() {
+            continue;
+        }
+
+        let data = match op.read(&path).await {
+            Ok(d) => d.to_bytes(),
+            Err(e) => {
+                eprintln!("  WARN: failed to read {path}: {e}");
+                state.error_count += 1;
+                state.last_manifest_path = Some(path.clone());
+                write_rotation_state(state_path, state)?;
+                continue;
+            }
+        };
+
+        let mut manifest: tcfs_sync::manifest::SyncManifest =
+            match tcfs_sync::manifest::SyncManifest::from_bytes(&data) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("  WARN: failed to parse {path}: {e}");
+                    state.error_count += 1;
+                    state.last_manifest_path = Some(path.clone());
+                    write_rotation_state(state_path, state)?;
+                    continue;
+                }
+            };
+
+        let wrapped_b64 = match &manifest.encrypted_file_key {
+            Some(k) => k.clone(),
+            None => {
+                state.skipped_plaintext_manifests += 1;
+                state.last_manifest_path = Some(path.clone());
+                write_rotation_state(state_path, state)?;
+                continue;
+            }
+        };
+
+        let wrapped_bytes = match base64::engine::general_purpose::STANDARD.decode(&wrapped_b64) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("  WARN: base64 decode failed for {path}: {e}");
+                state.error_count += 1;
+                state.last_manifest_path = Some(path.clone());
+                write_rotation_state(state_path, state)?;
+                continue;
+            }
+        };
+
+        let needs_rotation = match tcfs_crypto::unwrap_key(old_master, &wrapped_bytes) {
+            Ok(file_key) => Some(file_key),
+            Err(old_err) => match tcfs_crypto::unwrap_key(new_master, &wrapped_bytes) {
+                Ok(_) => {
+                    state.already_rotated_manifests += 1;
+                    state.last_manifest_path = Some(path.clone());
+                    write_rotation_state(state_path, state)?;
+                    None
+                }
+                Err(new_err) => {
+                    eprintln!(
+                        "  WARN: unwrap failed for {path}: old_key={old_err}; new_key={new_err}"
+                    );
+                    state.error_count += 1;
+                    state.last_manifest_path = Some(path.clone());
+                    write_rotation_state(state_path, state)?;
+                    None
+                }
+            },
+        };
+
+        let Some(file_key) = needs_rotation else {
+            continue;
+        };
+
+        let new_wrapped = tcfs_crypto::wrap_key(new_master, &file_key)?;
+        let new_wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&new_wrapped);
+        manifest.encrypted_file_key = Some(new_wrapped_b64);
+
+        let new_data = serde_json::to_vec(&manifest).context("serializing rotated manifest")?;
+        if let Err(e) = op.write(&path, new_data).await {
+            eprintln!("  WARN: failed to write {path}: {e}");
+            state.error_count += 1;
+            state.last_manifest_path = Some(path.clone());
+            write_rotation_state(state_path, state)?;
+            continue;
+        }
+
+        state.rotated_manifests += 1;
+        state.last_manifest_path = Some(path.clone());
+        write_rotation_state(state_path, state)?;
+
+        if let Some(limit) = max_rotations {
+            if state.rotated_manifests >= limit {
+                anyhow::bail!("simulated interruption after {limit} manifest rotations");
+            }
+        }
+    }
+
+    if state.error_count > 0 {
+        anyhow::bail!(
+            "key rotation incomplete: {} manifest errors remain; resume after fixing the failures",
+            state.error_count
+        );
+    }
+
+    state.status = KeyRotationStatus::ReadyToSwap;
+    write_rotation_state(state_path, state)?;
+    Ok(())
+}
+
+async fn cmd_rotate_key(
+    config: &tcfs_core::config::TcfsConfig,
+    old_key_file: Option<&Path>,
+    use_password: bool,
+    non_interactive: bool,
+) -> Result<()> {
+    let key_path = old_key_file
+        .map(|p| p.to_path_buf())
+        .or_else(|| config.crypto.master_key_file.clone())
+        .unwrap_or_else(|| {
+            tcfs_secrets::device::default_registry_path()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("master.key")
+        });
+
+    let manifest_prefix = format!("{}/manifests/", config.storage.resolved_prefix());
+    let Some(mut rotation) =
+        prepare_key_rotation(&key_path, &manifest_prefix, use_password, non_interactive)?
+    else {
+        println!(
+            "Key rotation was already finalized; cleaned stale resume state for {}",
+            key_path.display()
+        );
+        return Ok(());
     };
 
-    // Step 3: Connect to storage and enumerate manifests
+    if rotation.resumed {
+        println!(
+            "Resuming key rotation using pending key: {}",
+            rotation.paths.pending_key_path.display()
+        );
+    } else {
+        println!("Old master key loaded from: {}", key_path.display());
+        println!(
+            "Prepared pending new master key at: {}",
+            rotation.paths.pending_key_path.display()
+        );
+    }
+
     let cred_store = tcfs_secrets::CredStore::load(&config.secrets, &config.storage)
         .await
         .context("loading credentials for S3 access")?;
@@ -2819,100 +3157,41 @@ async fn cmd_rotate_key(
         s3.secret_access_key.expose_secret(),
     )?;
 
-    let manifest_prefix = format!("{}/manifests/", config.storage.bucket);
     println!("Scanning manifests at: {manifest_prefix}");
-
-    let entries = op
-        .list(&manifest_prefix)
-        .await
-        .context("listing manifests from S3")?;
-
-    let mut rotated = 0u64;
-    let mut skipped = 0u64;
-    let mut errors = 0u64;
-
-    for entry in entries {
-        let path = entry.path().to_string();
-        if entry.metadata().is_dir() {
-            continue;
-        }
-
-        // Read manifest
-        let data = match op.read(&path).await {
-            Ok(d) => d.to_bytes(),
-            Err(e) => {
-                eprintln!("  WARN: failed to read {path}: {e}");
-                errors += 1;
-                continue;
-            }
-        };
-
-        let mut manifest: tcfs_sync::manifest::SyncManifest =
-            match tcfs_sync::manifest::SyncManifest::from_bytes(&data) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("  WARN: failed to parse {path}: {e}");
-                    errors += 1;
-                    continue;
-                }
-            };
-
-        // Only rotate manifests that have wrapped file keys
-        let wrapped_b64 = match &manifest.encrypted_file_key {
-            Some(k) => k.clone(),
-            None => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        // Unwrap with old key, re-wrap with new key
-        let wrapped_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&wrapped_b64)
-            .context("decoding wrapped file key")?;
-
-        let file_key = match tcfs_crypto::unwrap_key(&old_master, &wrapped_bytes) {
-            Ok(fk) => fk,
-            Err(e) => {
-                eprintln!("  WARN: unwrap failed for {path}: {e}");
-                errors += 1;
-                continue;
-            }
-        };
-
-        let new_wrapped = tcfs_crypto::wrap_key(&new_master, &file_key)?;
-        let new_wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&new_wrapped);
-
-        manifest.encrypted_file_key = Some(new_wrapped_b64);
-
-        // Write back
-        let new_data = serde_json::to_vec(&manifest).context("serializing rotated manifest")?;
-        op.write(&path, new_data)
-            .await
-            .with_context(|| format!("writing rotated manifest: {path}"))?;
-
-        rotated += 1;
-    }
-
-    // Step 4: Write new master key file
-    std::fs::write(&key_path, new_master.as_bytes())
-        .with_context(|| format!("writing new master key: {}", key_path.display()))?;
-
-    #[cfg(unix)]
+    if let Err(e) = rotate_manifests_with_resume(
+        &op,
+        &manifest_prefix,
+        &rotation.old_master,
+        &rotation.new_master,
+        &mut rotation.state,
+        &rotation.paths.state_path,
+        None,
+    )
+    .await
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        println!(
+            "\nKey rotation paused with resumable state preserved:\n  Resume state: {}\n  Pending key:  {}",
+            rotation.paths.state_path.display(),
+            rotation.paths.pending_key_path.display()
+        );
+        return Err(e);
     }
+
+    write_master_key(&key_path, &rotation.new_master)?;
+    cleanup_rotation_artifacts(&rotation.paths);
 
     println!("\nKey rotation complete:");
-    println!("  Manifests rotated: {rotated}");
-    println!("  Manifests skipped (plaintext): {skipped}");
-    if errors > 0 {
-        println!("  Errors: {errors}");
-    }
+    println!("  Manifests rotated: {}", rotation.state.rotated_manifests);
+    println!(
+        "  Already rotated on resume: {}",
+        rotation.state.already_rotated_manifests
+    );
+    println!(
+        "  Manifests skipped (plaintext): {}",
+        rotation.state.skipped_plaintext_manifests
+    );
     println!("  New master key: {}", key_path.display());
 
-    // Step 5: Notify daemon to reload if running
     #[cfg(unix)]
     if let Ok(mut client) = connect_daemon(&config.daemon.socket).await {
         let key_bytes = std::fs::read(&key_path)?;
@@ -3360,5 +3639,165 @@ fn fmt_bytes(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opendal::services::Memory;
+    use opendal::Operator;
+
+    fn memory_op() -> Operator {
+        Operator::new(Memory::default()).unwrap().finish()
+    }
+
+    fn master_key(fill: u8) -> tcfs_crypto::MasterKey {
+        tcfs_crypto::MasterKey::from_bytes([fill; tcfs_crypto::KEY_SIZE])
+    }
+
+    fn make_encrypted_manifest(
+        old_master: &tcfs_crypto::MasterKey,
+        manifest_hash: &str,
+        rel_path: &str,
+    ) -> tcfs_sync::manifest::SyncManifest {
+        let file_key = tcfs_crypto::generate_file_key();
+        let wrapped = tcfs_crypto::wrap_key(old_master, &file_key).unwrap();
+        tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: manifest_hash.to_string(),
+            file_size: 11,
+            chunks: vec![],
+            vclock: tcfs_sync::conflict::VectorClock::new(),
+            written_by: "test-device".into(),
+            written_at: 0,
+            rel_path: Some(rel_path.to_string()),
+            mode: None,
+            encrypted_file_key: Some(base64::engine::general_purpose::STANDARD.encode(wrapped)),
+        }
+    }
+
+    async fn read_manifest(op: &Operator, path: &str) -> tcfs_sync::manifest::SyncManifest {
+        let data = op.read(path).await.unwrap().to_bytes();
+        tcfs_sync::manifest::SyncManifest::from_bytes(&data).unwrap()
+    }
+
+    fn manifest_uses_key(
+        manifest: &tcfs_sync::manifest::SyncManifest,
+        master_key: &tcfs_crypto::MasterKey,
+    ) -> bool {
+        let wrapped_b64 = manifest.encrypted_file_key.as_ref().unwrap();
+        let wrapped = base64::engine::general_purpose::STANDARD
+            .decode(wrapped_b64)
+            .unwrap();
+        tcfs_crypto::unwrap_key(master_key, &wrapped).is_ok()
+    }
+
+    #[tokio::test]
+    async fn rotate_manifests_can_resume_after_interruption() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("master.key");
+        let old_master = master_key(0x11);
+        let new_master = master_key(0x22);
+        let paths = key_rotation_paths(&key_path);
+
+        write_master_key(&key_path, &old_master).unwrap();
+        write_master_key(&paths.pending_key_path, &new_master).unwrap();
+
+        op.write(
+            "data/manifests/a",
+            make_encrypted_manifest(&old_master, "hash-a", "a.txt")
+                .to_bytes()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/manifests/b",
+            make_encrypted_manifest(&old_master, "hash-b", "b.txt")
+                .to_bytes()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let mut state = KeyRotationState::new("data/manifests/", &paths.pending_key_path);
+        write_rotation_state(&paths.state_path, &state).unwrap();
+
+        let err = rotate_manifests_with_resume(
+            &op,
+            "data/manifests/",
+            &old_master,
+            &new_master,
+            &mut state,
+            &paths.state_path,
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("simulated interruption"));
+
+        let persisted = read_rotation_state(&paths.state_path).unwrap();
+        assert_eq!(persisted.rotated_manifests, 1);
+        assert_eq!(persisted.status, KeyRotationStatus::RewritingManifests);
+
+        let manifest_a = read_manifest(&op, "data/manifests/a").await;
+        let manifest_b = read_manifest(&op, "data/manifests/b").await;
+        let rotated_count = [manifest_a.clone(), manifest_b.clone()]
+            .iter()
+            .filter(|manifest| manifest_uses_key(manifest, &new_master))
+            .count();
+        let old_count = [manifest_a.clone(), manifest_b.clone()]
+            .iter()
+            .filter(|manifest| manifest_uses_key(manifest, &old_master))
+            .count();
+        assert_eq!(rotated_count, 1);
+        assert_eq!(old_count, 1);
+
+        let mut resumed_state = read_rotation_state(&paths.state_path).unwrap();
+        rotate_manifests_with_resume(
+            &op,
+            "data/manifests/",
+            &old_master,
+            &new_master,
+            &mut resumed_state,
+            &paths.state_path,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resumed_state.status, KeyRotationStatus::ReadyToSwap);
+        assert_eq!(resumed_state.rotated_manifests, 1);
+        assert_eq!(resumed_state.already_rotated_manifests, 1);
+
+        let manifest_a = read_manifest(&op, "data/manifests/a").await;
+        let manifest_b = read_manifest(&op, "data/manifests/b").await;
+        assert!(manifest_uses_key(&manifest_a, &new_master));
+        assert!(manifest_uses_key(&manifest_b, &new_master));
+        assert!(!manifest_uses_key(&manifest_a, &old_master));
+        assert!(!manifest_uses_key(&manifest_b, &old_master));
+    }
+
+    #[test]
+    fn prepare_key_rotation_cleans_stale_state_after_key_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("master.key");
+        let current_master = master_key(0x33);
+        let paths = key_rotation_paths(&key_path);
+
+        write_master_key(&key_path, &current_master).unwrap();
+        write_master_key(&paths.pending_key_path, &current_master).unwrap();
+        write_rotation_state(
+            &paths.state_path,
+            &KeyRotationState::new("data/manifests/", &paths.pending_key_path),
+        )
+        .unwrap();
+
+        let prepared = prepare_key_rotation(&key_path, "data/manifests/", false, true).unwrap();
+        assert!(prepared.is_none());
+        assert!(!paths.state_path.exists());
+        assert!(!paths.pending_key_path.exists());
     }
 }
