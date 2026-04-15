@@ -89,6 +89,7 @@ notify = { version = "8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 toml = { version = "0.8" }
+unicode-normalization = { version = "0.1" }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

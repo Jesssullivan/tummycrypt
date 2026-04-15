@@ -375,16 +375,22 @@ impl StateCache {
     /// the normalized rel_path (`dir/file.txt`) handles cross-host home
     /// directory differences.
     pub fn get_by_rel_path(&self, rel_path: &str) -> Option<(&str, &SyncState)> {
-        let normalized = rel_path.trim_start_matches('/');
+        let normalized = crate::engine::normalize_rel_path_text(rel_path.trim_start_matches('/'));
         // Primary: match cache keys (canonical local paths) by suffix
         self.entries
             .iter()
-            .find(|(key, _)| key.ends_with(&format!("/{}", normalized)) || *key == normalized)
+            .find(|(key, _)| {
+                let normalized_key = crate::engine::normalize_rel_path_text(key);
+                normalized_key.ends_with(&format!("/{}", normalized))
+                    || normalized_key == normalized
+            })
             // Fallback: match remote_path (manifest path) for backward compat
             .or_else(|| {
                 self.entries.iter().find(|(_, state)| {
-                    state.remote_path.ends_with(&format!("/{}", normalized))
-                        || state.remote_path == normalized
+                    let normalized_remote =
+                        crate::engine::normalize_rel_path_text(&state.remote_path);
+                    normalized_remote.ends_with(&format!("/{}", normalized))
+                        || normalized_remote == normalized
                 })
             })
             .map(|(k, v)| (k.as_str(), v))
