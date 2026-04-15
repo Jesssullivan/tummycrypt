@@ -1,33 +1,35 @@
 # Homebrew formula for tcfs
-# To use: brew tap tinyland-inc/tap && brew install tcfs
+# To use:
+#   brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap
+#   brew install tcfs
 #
 # This template is used by CI to generate the versioned formula.
-# Placeholders: 0.12.0, 4d5542641b6a1c7cbf99a70bf7d4f46ad0f21feb05999eeaff48c7ed6f31d779, 5864d0a2d8c80ee373e449133f5b6e47700ce7b73dc093b14a384ca708b88afc,
-#               cd074311fe1d06aef1a0a5beef92f8d36fab15be32bb543348c0e7822c6c8f0a, 927b8c20855c8f28037a5cfcf6e4301063a833c67e5e9f9577fddfca3d7c89ae
+# Placeholders: 0.12.1, f2524758f152122e2a8efe66a02e4de904b52d5b51e24f1909b3b03899785d6a, a7b77bdde41bce65e674f2619c2fcb49948ad7c90c1fc737d86af4226c5baf84,
+#               76f04bd02228b3efff3eca48248c81e72385aa33c9e48409ada16f74d2bd307d, 6d105a2ffa70f3441bfc5f5325f1961d1ce1f5ffeef69fd6f44ff00782a21d09
 
 class Tcfs < Formula
   desc "FOSS self-hosted odrive replacement — FUSE-based, SeaweedFS-backed file sync"
-  homepage "https://github.com/tinyland-inc/tummycrypt"
-  version "0.12.0"
+  homepage "https://github.com/Jesssullivan/tummycrypt"
+  version "0.12.1"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.12.0/tcfs-0.12.0-macos-aarch64.tar.gz"
-      sha256 "4d5542641b6a1c7cbf99a70bf7d4f46ad0f21feb05999eeaff48c7ed6f31d779"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.1/tcfs-0.12.1-macos-aarch64.tar.gz"
+      sha256 "f2524758f152122e2a8efe66a02e4de904b52d5b51e24f1909b3b03899785d6a"
     else
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.12.0/tcfs-0.12.0-macos-x86_64.tar.gz"
-      sha256 "5864d0a2d8c80ee373e449133f5b6e47700ce7b73dc093b14a384ca708b88afc"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.1/tcfs-0.12.1-macos-x86_64.tar.gz"
+      sha256 "a7b77bdde41bce65e674f2619c2fcb49948ad7c90c1fc737d86af4226c5baf84"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.12.0/tcfs-0.12.0-linux-aarch64.tar.gz"
-      sha256 "927b8c20855c8f28037a5cfcf6e4301063a833c67e5e9f9577fddfca3d7c89ae"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.1/tcfs-0.12.1-linux-aarch64.tar.gz"
+      sha256 "6d105a2ffa70f3441bfc5f5325f1961d1ce1f5ffeef69fd6f44ff00782a21d09"
     else
-      url "https://github.com/tinyland-inc/tummycrypt/releases/download/v0.12.0/tcfs-0.12.0-linux-x86_64.tar.gz"
-      sha256 "cd074311fe1d06aef1a0a5beef92f8d36fab15be32bb543348c0e7822c6c8f0a"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.1/tcfs-0.12.1-linux-x86_64.tar.gz"
+      sha256 "76f04bd02228b3efff3eca48248c81e72385aa33c9e48409ada16f74d2bd307d"
     end
   end
 
