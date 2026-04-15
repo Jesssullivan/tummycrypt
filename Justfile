@@ -87,6 +87,10 @@ fleet-check:
     @echo "Checking fleet NATS connectivity..."
     nats server info --server nats://nats.tcfs.tummycrypt.dev:4222
 
+# Canonical live fleet acceptance lane: SeaweedFS + NATS + neo↔honey sync path
+neo-honey-smoke:
+    bash scripts/neo-honey-smoke.sh
+
 # ── Nix ─────────────────────────────────────────────────────────────────────
 
 # Build tcfsd via Nix
