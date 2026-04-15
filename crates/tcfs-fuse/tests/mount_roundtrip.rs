@@ -113,6 +113,65 @@ async fn read_file(path: PathBuf) -> Result<Vec<u8>> {
         .with_context(|| format!("reading {}", display_path.display()))
 }
 
+async fn rename_path(from: PathBuf, to: PathBuf) -> Result<()> {
+    let from_display = from.clone();
+    let to_display = to.clone();
+    tokio::task::spawn_blocking(move || std::fs::rename(&from, &to))
+        .await
+        .context("joining rename task")?
+        .with_context(|| {
+            format!(
+                "renaming {} -> {}",
+                from_display.display(),
+                to_display.display()
+            )
+        })?;
+    Ok(())
+}
+
+async fn remove_file(path: PathBuf) -> Result<()> {
+    let display_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::remove_file(&path))
+        .await
+        .context("joining remove_file task")?
+        .with_context(|| format!("removing file {}", display_path.display()))?;
+    Ok(())
+}
+
+async fn remove_dir(path: PathBuf) -> Result<()> {
+    let display_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::remove_dir(&path))
+        .await
+        .context("joining remove_dir task")?
+        .with_context(|| format!("removing dir {}", display_path.display()))?;
+    Ok(())
+}
+
+async fn create_dir(path: PathBuf) -> Result<()> {
+    let display_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::create_dir(&path))
+        .await
+        .context("joining create_dir task")?
+        .with_context(|| format!("creating dir {}", display_path.display()))?;
+    Ok(())
+}
+
+async fn read_dir_names(path: PathBuf) -> Result<Vec<String>> {
+    let display_path = path.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&path)? {
+            let entry = entry?;
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok::<Vec<String>, std::io::Error>(names)
+    })
+    .await
+    .context("joining read_dir task")?
+    .with_context(|| format!("reading directory {}", display_path.display()))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mount_roundtrip_persists_across_real_fuse_remount() -> Result<()> {
     if let Some(reason) = skip_reason() {
@@ -168,6 +227,103 @@ async fn mount_roundtrip_persists_across_real_fuse_remount() -> Result<()> {
         .context("joining second mount task")?
         .context("second mount failed")?;
     wait_for_mount_state(&mountpoint, false).await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mount_lifecycle_updates_remote_state_across_rename_and_delete() -> Result<()> {
+    if let Some(reason) = skip_reason() {
+        eprintln!("skipping FUSE lifecycle test: {reason}");
+        return Ok(());
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let mountpoint = tmp.path().join("mnt");
+    let cache_a = tmp.path().join("cache-a");
+    let cache_b = tmp.path().join("cache-b");
+    std::fs::create_dir_all(&mountpoint).unwrap();
+    std::fs::create_dir_all(&cache_a).unwrap();
+    std::fs::create_dir_all(&cache_b).unwrap();
+
+    let op = memory_operator();
+    let prefix = "fuse-lifecycle";
+    let dir_key = format!("{prefix}/index/docs/.tcfs_dir");
+    let old_key = format!("{prefix}/index/docs/old.txt");
+    let new_key = format!("{prefix}/index/docs/new.txt");
+
+    let first_mount =
+        spawn_mount(op.clone(), prefix.to_string(), mountpoint.clone(), cache_a).await;
+    wait_for_mount_state(&mountpoint, true).await?;
+
+    let docs_dir = mountpoint.join("docs");
+    create_dir(docs_dir.clone()).await?;
+    assert!(
+        op.read(&dir_key).await.is_ok(),
+        "expected remote directory marker after mkdir"
+    );
+
+    let old_file = docs_dir.join("old.txt");
+    write_file(old_file.clone(), b"v1 through fuse").await?;
+    assert!(
+        op.read(&old_key).await.is_ok(),
+        "expected old remote index entry after write"
+    );
+
+    let renamed_file = docs_dir.join("new.txt");
+    rename_path(old_file, renamed_file.clone()).await?;
+    assert!(
+        op.read(&old_key).await.is_err(),
+        "old remote index entry should be removed after rename"
+    );
+    assert!(
+        op.read(&new_key).await.is_ok(),
+        "expected new remote index entry after rename"
+    );
+
+    unmount_fuse(&mountpoint).await?;
+    tokio::time::timeout(Duration::from_secs(10), first_mount)
+        .await
+        .context("timed out waiting for first lifecycle mount task to finish")?
+        .context("joining first lifecycle mount task")?
+        .context("first lifecycle mount failed")?;
+    wait_for_mount_state(&mountpoint, false).await?;
+
+    let second_mount =
+        spawn_mount(op.clone(), prefix.to_string(), mountpoint.clone(), cache_b).await;
+    wait_for_mount_state(&mountpoint, true).await?;
+
+    assert_eq!(read_file(renamed_file.clone()).await?, b"v1 through fuse");
+    assert_eq!(
+        read_dir_names(docs_dir.clone()).await?,
+        vec!["new.txt".to_string()]
+    );
+
+    remove_file(renamed_file).await?;
+    remove_dir(docs_dir.clone()).await?;
+
+    let root_names = read_dir_names(mountpoint.clone()).await?;
+    assert!(
+        !root_names.iter().any(|name| name == "docs"),
+        "docs directory should be gone after unlink+rmdir, got {root_names:?}"
+    );
+
+    unmount_fuse(&mountpoint).await?;
+    tokio::time::timeout(Duration::from_secs(10), second_mount)
+        .await
+        .context("timed out waiting for second lifecycle mount task to finish")?
+        .context("joining second lifecycle mount task")?
+        .context("second lifecycle mount failed")?;
+    wait_for_mount_state(&mountpoint, false).await?;
+
+    assert!(
+        op.read(&new_key).await.is_err(),
+        "renamed remote index entry should be removed after unlink"
+    );
+    assert!(
+        op.read(&dir_key).await.is_err(),
+        "directory marker should be removed after rmdir"
+    );
 
     Ok(())
 }
