@@ -15,6 +15,10 @@ persistent source of deployment friction — macFUSE requires a kernel extension
 users must manually approve, FUSE-T works but adds an unnecessary abstraction layer
 over NFS, and both require third-party libraries that complicate packaging.
 
+This RFC describes a target architecture, not the current Apple release posture.
+As of M9, macOS and iOS surfaces remain experimental. See
+[`docs/ops/apple-surface-status.md`](../ops/apple-surface-status.md).
+
 The replacement architecture uses three platform-native backends:
 
 | Platform | Backend | Kernel Module? | Mount Path |
@@ -167,9 +171,13 @@ pub trait VirtualFilesystem: Send + Sync {
 
 ### FileProvider as primary macOS/iOS backend
 
-FileProvider is already working (iOS TestFlight deployed, macOS .appex exists).
+FileProvider code exists on both macOS and iOS, but the Apple lane is not yet a
+fully proven release target. Current evidence is build scripts, packaging work,
+and Swift type-check coverage rather than a continuously exercised user-facing
+acceptance path.
+
 With the `VirtualFilesystem` trait, the FileProvider extension's `DirectBackend`
-becomes a thin adapter:
+can become a thin adapter:
 
 ```swift
 // FileProviderExtension.swift (existing)
@@ -234,7 +242,7 @@ Future Linux backend priority:
 4. Update fleet deployment: remove FUSE-T installation from Nix config
 5. Update E2E tests to validate NFS mounts
 
-### Phase 4: FileProvider as primary macOS path (parallel with Phase 2)
+### Phase 4: FileProvider as future primary macOS path (parallel with Phase 2)
 
 1. Complete macOS FileProvider domain registration (already scaffolded)
 2. Wire FileProvider's `DirectBackend` to use `VirtualFilesystem` trait

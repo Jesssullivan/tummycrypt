@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Upload IPA to TestFlight.
+# Upload an experimental IPA build to TestFlight.
 #
 # Usage:
 #   ./Scripts/upload.sh              # Upload build/export/TCFS.ipa
@@ -24,7 +24,7 @@ if [ ! -f "$ASC_KEY_PATH" ]; then
     exit 1
 fi
 
-echo "==> Uploading to TestFlight"
+echo "==> Uploading experimental build to TestFlight"
 echo "    IPA: $UPLOAD_IPA ($(du -h "$UPLOAD_IPA" | cut -f1))"
 
 clean_exec /usr/bin/xcrun altool --upload-app \
@@ -34,5 +34,5 @@ clean_exec /usr/bin/xcrun altool --upload-app \
     --apiIssuer "$ASC_ISSUER_ID"
 
 echo ""
-echo "==> Upload complete! Check App Store Connect for processing."
+echo "==> Experimental upload complete. Check App Store Connect for processing."
 echo "    https://appstoreconnect.apple.com"
