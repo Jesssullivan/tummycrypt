@@ -23,6 +23,7 @@ use tempfile::TempDir;
 use tokio::time::{timeout, Instant};
 
 use tcfs_sync::conflict::VectorClock;
+use tcfs_sync::manifest::SyncManifest;
 use tcfs_sync::nats::{NatsClient, StateEvent, StateEventMessage};
 
 /// Check if live E2E is enabled via env var
@@ -33,6 +34,10 @@ fn live_enabled() -> bool {
 /// Get S3 endpoint from env or default to CIVO Tailscale IP
 fn s3_endpoint() -> String {
     std::env::var("TCFS_S3_ENDPOINT").unwrap_or_else(|_| "http://100.120.66.67:8333".into())
+}
+
+fn broken_s3_endpoint() -> String {
+    std::env::var("TCFS_S3_BROKEN_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:1".into())
 }
 
 fn s3_bucket() -> String {
@@ -140,13 +145,16 @@ where
 
 /// Build an opendal S3 operator from env credentials
 fn live_operator() -> Option<opendal::Operator> {
+    live_operator_for_endpoint(&s3_endpoint())
+}
+
+fn live_operator_for_endpoint(endpoint: &str) -> Option<opendal::Operator> {
     let access = std::env::var("AWS_ACCESS_KEY_ID").ok()?;
     let secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok()?;
-    let endpoint = s3_endpoint();
     let bucket = s3_bucket();
 
     let config = tcfs_storage::operator::StorageConfig {
-        endpoint,
+        endpoint: endpoint.into(),
         region: "us-east-1".into(),
         bucket,
         access_key_id: access,
@@ -154,6 +162,30 @@ fn live_operator() -> Option<opendal::Operator> {
     };
 
     tcfs_storage::operator::build_operator(&config).ok()
+}
+
+async fn cleanup_upload_objects(
+    op: &opendal::Operator,
+    prefix: &str,
+    upload: &tcfs_sync::engine::UploadResult,
+) {
+    let index_key = format!(
+        "{}/index/{}",
+        prefix,
+        upload.path.file_name().unwrap().to_string_lossy()
+    );
+
+    if let Ok(manifest_bytes) = op.read(&upload.remote_path).await {
+        if let Ok(manifest) = SyncManifest::from_bytes(&manifest_bytes.to_bytes()) {
+            for chunk_hash in manifest.chunk_hashes() {
+                let chunk_key = format!("{}/chunks/{}", prefix, chunk_hash);
+                let _ = op.delete(&chunk_key).await;
+            }
+        }
+    }
+
+    let _ = op.delete(&upload.remote_path).await;
+    let _ = op.delete(&index_key).await;
 }
 
 // ── SeaweedFS connectivity ───────────────────────────────────────────────
@@ -259,6 +291,64 @@ async fn live_push_pull_roundtrip() {
     let _ = op.delete(&upload.remote_path).await;
     let index_key = format!("{}/index/fleet-test.txt", prefix);
     let _ = op.delete(&index_key).await;
+}
+
+#[tokio::test]
+async fn live_storage_outage_leaves_no_remote_index_and_recovers() {
+    if !live_enabled() {
+        eprintln!("SKIP: TCFS_E2E_LIVE not set");
+        return;
+    }
+
+    let good_op = live_operator().expect("S3 credentials required");
+    let bad_op = live_operator_for_endpoint(&broken_s3_endpoint())
+        .expect("S3 credentials required for broken operator");
+    let tmp = TempDir::new().unwrap();
+
+    let test_id = uuid::Uuid::new_v4().to_string();
+    let prefix = format!("e2e-outage/{}", &test_id[..8]);
+    let rel_path = "offline.txt";
+    let content = format!("storage outage recovery content {test_id}").into_bytes();
+    let src = write_test_file(tmp.path(), rel_path, &content);
+    let state_path = tmp.path().join("state.db.json");
+    let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+
+    let outage = tcfs_sync::engine::upload_file(&bad_op, &src, &prefix, &mut state, None)
+        .await
+        .expect_err("broken endpoint should fail upload");
+    eprintln!("expected storage outage failure: {outage:#}");
+
+    let remote_index = tcfs_sync::reconcile::list_remote_index(&good_op, &prefix)
+        .await
+        .expect("list remote index after failed upload");
+    assert!(
+        remote_index.is_empty(),
+        "failed upload must not publish a remote index entry"
+    );
+
+    let remote_objects = good_op
+        .list(&format!("{prefix}/"))
+        .await
+        .expect("list remote prefix after failed upload");
+    assert!(
+        remote_objects.is_empty(),
+        "failed upload should not leave live objects under the test prefix"
+    );
+
+    let recovered = tcfs_sync::engine::upload_file(&good_op, &src, &prefix, &mut state, None)
+        .await
+        .expect("retry after storage recovery");
+    assert!(!recovered.skipped, "recovery retry should upload content");
+
+    let remote_index = tcfs_sync::reconcile::list_remote_index(&good_op, &prefix)
+        .await
+        .expect("list remote index after recovery");
+    let visible = remote_index
+        .get(rel_path)
+        .expect("recovered upload should publish remote index");
+    assert_eq!(visible.manifest_hash, recovered.hash);
+
+    cleanup_upload_objects(&good_op, &prefix, &recovered).await;
 }
 
 // ── NATS event publish + subscribe ───────────────────────────────────────
