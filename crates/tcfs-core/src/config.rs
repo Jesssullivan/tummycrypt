@@ -272,6 +272,9 @@ pub struct SyncConfig {
     /// Reconciles local sync_root against remote index, applying per-folder policies.
     /// Default: 300 (5 minutes).
     pub reconcile_interval_secs: u64,
+    /// Grace period before orphaned remote chunk objects are eligible for cleanup.
+    /// 0 = disabled. Default: 86400 (24 hours).
+    pub orphan_chunk_cleanup_grace_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -420,6 +423,7 @@ impl Default for SyncConfig {
             trash_enabled: true,
             trash_retention_secs: 30 * 24 * 3600, // 30 days
             reconcile_interval_secs: 300,         // 5 minutes
+            orphan_chunk_cleanup_grace_secs: 24 * 3600,
         }
     }
 }
@@ -463,6 +467,7 @@ nats_tls = true
 workers = 4
 max_retries = 5
 sync_root = "/home/user/tcfs"
+orphan_chunk_cleanup_grace_secs = 7200
 
 [fuse]
 negative_cache_ttl_secs = 60
@@ -488,6 +493,7 @@ argon2_parallelism = 8
             config.sync.sync_root,
             Some(PathBuf::from("/home/user/tcfs"))
         );
+        assert_eq!(config.sync.orphan_chunk_cleanup_grace_secs, 7200);
         assert_eq!(config.fuse.cache_max_mb, 20480);
         assert!(config.crypto.enabled);
         assert_eq!(config.crypto.argon2_mem_cost_kib, 131072);
@@ -513,6 +519,7 @@ argon2_parallelism = 8
         assert_eq!(config.storage.bucket, "tcfs");
         assert_eq!(config.sync.nats_url, "nats://localhost:4222");
         assert!(config.sync.nats_tls);
+        assert_eq!(config.sync.orphan_chunk_cleanup_grace_secs, 24 * 3600);
         assert!(!config.crypto.enabled);
         assert_eq!(config.crypto.argon2_mem_cost_kib, 65536);
         assert!(config.config_file_mode_check);

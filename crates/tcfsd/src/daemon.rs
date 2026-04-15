@@ -3,6 +3,7 @@
 use anyhow::Result;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tcfs_core::config::TcfsConfig;
 use tcfs_sync::conflict::ConflictResolver;
 use tracing::{debug, error, info, warn};
@@ -996,6 +997,14 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             let recon_op = operator.clone();
             let recon_device = device_id.clone();
             let recon_master_key = impl_.master_key_handle();
+            let orphan_chunk_cleanup_grace_secs = config.sync.orphan_chunk_cleanup_grace_secs;
+            let orphan_chunk_cleanup_sweep_interval_secs = if orphan_chunk_cleanup_grace_secs > 0 {
+                orphan_chunk_cleanup_grace_secs
+                    .min(3600)
+                    .max(recon_interval)
+            } else {
+                0
+            };
             let _recon_policy_path = data_dir.join("folder-policies.json");
 
             info!(
@@ -1004,10 +1013,21 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 root = %recon_root.display(),
                 "periodic reconciliation enabled"
             );
+            if orphan_chunk_cleanup_sweep_interval_secs > 0 {
+                info!(
+                    grace_secs = orphan_chunk_cleanup_grace_secs,
+                    sweep_interval_secs = orphan_chunk_cleanup_sweep_interval_secs,
+                    "periodic orphan chunk cleanup enabled"
+                );
+            }
 
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_secs(recon_interval));
+                let mut interval = tokio::time::interval(Duration::from_secs(recon_interval));
+                let orphan_chunk_cleanup_grace =
+                    Duration::from_secs(orphan_chunk_cleanup_grace_secs);
+                let orphan_chunk_cleanup_sweep_interval =
+                    Duration::from_secs(orphan_chunk_cleanup_sweep_interval_secs);
+                let mut last_orphan_chunk_sweep = None;
                 // Skip the first immediate tick — startup index discovery covers it
                 interval.tick().await;
 
@@ -1050,54 +1070,99 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let s = &plan.summary;
                     if s.pushes == 0 && s.pulls == 0 && s.conflicts == 0 {
                         debug!(up_to_date = s.up_to_date, "reconcile: nothing to do");
-                        continue;
-                    }
+                    } else {
+                        info!(
+                            pushes = s.pushes,
+                            pulls = s.pulls,
+                            conflicts = s.conflicts,
+                            up_to_date = s.up_to_date,
+                            "reconcile: executing plan"
+                        );
 
-                    info!(
-                        pushes = s.pushes,
-                        pulls = s.pulls,
-                        conflicts = s.conflicts,
-                        up_to_date = s.up_to_date,
-                        "reconcile: executing plan"
-                    );
+                        // Build encryption context from master key (if loaded)
+                        let mk_guard = recon_master_key.lock().await;
+                        let enc_ctx =
+                            mk_guard
+                                .as_ref()
+                                .map(|k| tcfs_sync::engine::EncryptionContext {
+                                    master_key: k.clone(),
+                                });
+                        drop(mk_guard);
 
-                    // Build encryption context from master key (if loaded)
-                    let mk_guard = recon_master_key.lock().await;
-                    let enc_ctx = mk_guard
-                        .as_ref()
-                        .map(|k| tcfs_sync::engine::EncryptionContext {
-                            master_key: k.clone(),
-                        });
-                    drop(mk_guard);
-
-                    let mut cache = recon_state.lock().await;
-                    match tcfs_sync::reconcile::execute_plan(
-                        &plan,
-                        &op,
-                        &recon_root,
-                        &recon_prefix,
-                        &mut cache,
-                        &recon_device,
-                        enc_ctx.as_ref(),
-                        None,
-                    )
-                    .await
-                    {
-                        Ok(result) => {
-                            info!(
-                                pushed = result.pushed,
-                                pulled = result.pulled,
-                                errors = result.errors.len(),
-                                bytes_up = result.bytes_uploaded,
-                                bytes_down = result.bytes_downloaded,
-                                "reconcile: plan executed"
-                            );
-                            if let Err(e) = cache.flush() {
-                                warn!("reconcile: state cache flush failed: {e}");
+                        let mut cache = recon_state.lock().await;
+                        match tcfs_sync::reconcile::execute_plan(
+                            &plan,
+                            &op,
+                            &recon_root,
+                            &recon_prefix,
+                            &mut cache,
+                            &recon_device,
+                            enc_ctx.as_ref(),
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                info!(
+                                    pushed = result.pushed,
+                                    pulled = result.pulled,
+                                    errors = result.errors.len(),
+                                    bytes_up = result.bytes_uploaded,
+                                    bytes_down = result.bytes_downloaded,
+                                    "reconcile: plan executed"
+                                );
+                                if let Err(e) = cache.flush() {
+                                    warn!("reconcile: state cache flush failed: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                warn!("reconcile: plan execution failed: {e}");
                             }
                         }
-                        Err(e) => {
-                            warn!("reconcile: plan execution failed: {e}");
+                    }
+
+                    let now = SystemTime::now();
+                    let should_sweep_orphan_chunks = orphan_chunk_cleanup_sweep_interval_secs > 0
+                        && last_orphan_chunk_sweep
+                            .and_then(|last| now.duration_since(last).ok())
+                            .map(|elapsed| elapsed >= orphan_chunk_cleanup_sweep_interval)
+                            .unwrap_or(true);
+
+                    if should_sweep_orphan_chunks {
+                        match tcfs_sync::reconcile::cleanup_orphaned_chunks(
+                            &op,
+                            &recon_prefix,
+                            orphan_chunk_cleanup_grace,
+                            now,
+                        )
+                        .await
+                        {
+                            Ok(report) => {
+                                last_orphan_chunk_sweep = Some(now);
+                                if report.orphaned_chunks_found == 0
+                                    && report.delete_errors.is_empty()
+                                {
+                                    debug!(
+                                        scanned = report.scanned_chunks,
+                                        "reconcile: no orphaned chunks found"
+                                    );
+                                } else {
+                                    info!(
+                                        orphaned_found = report.orphaned_chunks_found,
+                                        deleted = report.deleted_chunks.len(),
+                                        within_grace = report.skipped_within_grace.len(),
+                                        missing_last_modified =
+                                            report.skipped_missing_last_modified.len(),
+                                        delete_errors = report.delete_errors.len(),
+                                        scanned = report.scanned_chunks,
+                                        referenced = report.referenced_chunks,
+                                        "reconcile: orphan chunk sweep completed"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!("reconcile: orphan chunk cleanup failed: {e}");
+                            }
                         }
                     }
                 }
