@@ -1,0 +1,4 @@
+[
+  { "path": "CLAUDE.md", "description": "Project conventions and context", "scope": ["**"] },
+  { "path": "Cargo.toml", "description": "Rust workspace and dependency definitions", "scope": ["**/*.rs"] }
+]
