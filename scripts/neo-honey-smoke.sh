@@ -1,32 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export TCFS_E2E_LIVE=1
-export TCFS_E2E_SCENARIO="${TCFS_E2E_SCENARIO:-neo-honey}"
-export TCFS_S3_ENDPOINT="${TCFS_S3_ENDPOINT:-http://100.120.66.67:8333}"
-export TCFS_S3_BUCKET="${TCFS_S3_BUCKET:-tcfs}"
-export TCFS_NATS_URL="${TCFS_NATS_URL:-nats://100.71.19.127:4222}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 
-: "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID must be set for neo-honey smoke}"
-: "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY must be set for neo-honey smoke}"
+require_env() {
+  local name="$1"
+  if [[ -z "${!name:-}" ]]; then
+    echo "missing required env: $name" >&2
+    exit 1
+  fi
+}
 
-echo "==> tcfs live acceptance lane: ${TCFS_E2E_SCENARIO}"
-echo "    S3 endpoint: ${TCFS_S3_ENDPOINT}"
-echo "    S3 bucket:   ${TCFS_S3_BUCKET}"
-echo "    NATS URL:    ${TCFS_NATS_URL}"
+echo "==> neo-honey live acceptance smoke"
+echo "repo: $ROOT"
 
-tests=(
-  seaweedfs_health_check
-  nats_connect_and_jetstream
-  live_push_pull_roundtrip
-  neo_honey_two_device_sync_smoke
-)
+require_env TCFS_E2E_LIVE
+require_env TCFS_S3_ENDPOINT
+require_env TCFS_S3_BUCKET
+require_env AWS_ACCESS_KEY_ID
+require_env AWS_SECRET_ACCESS_KEY
+require_env TCFS_NATS_URL
 
-for test_name in "${tests[@]}"; do
-  echo ""
-  echo "==> Running ${test_name}"
-  cargo test -p tcfs-e2e --test fleet_live "${test_name}" -- --nocapture
-done
+if [[ "${TCFS_E2E_LIVE}" != "1" ]]; then
+  echo "TCFS_E2E_LIVE must be set to 1" >&2
+  exit 1
+fi
 
-echo ""
-echo "==> neo-honey smoke lane complete"
+echo "==> proving SeaweedFS health"
+cargo test -p tcfs-e2e --test fleet_live seaweedfs_health_check -- --nocapture
+
+echo "==> proving NATS JetStream connectivity"
+cargo test -p tcfs-e2e --test fleet_live nats_connect_and_jetstream -- --nocapture
+
+echo "==> proving named neo-honey two-device sync path"
+cargo test -p tcfs-e2e --test fleet_live neo_honey_two_device_sync_smoke -- --nocapture
+
+echo "==> neo-honey smoke passed"

@@ -488,8 +488,8 @@ async fn neo_honey_two_device_sync_smoke() {
     let url = nats_url();
     let client = async_nats::connect(&url).await.expect("NATS connect");
 
-    let tmp_a = TempDir::new().unwrap();
-    let tmp_b = TempDir::new().unwrap();
+    let neo_root = TempDir::new().unwrap();
+    let honey_root = TempDir::new().unwrap();
     let test_id = uuid::Uuid::new_v4().to_string();
     let prefix = format!("{}/{}", NEO_HONEY_PREFIX, &test_id[..8]);
 
@@ -497,26 +497,26 @@ async fn neo_honey_two_device_sync_smoke() {
     let subject = format!("tcfs.sync.{}", prefix.replace('/', "."));
     let mut sub = client.subscribe(subject.clone()).await.expect("subscribe");
 
-    // Device A: push file
-    let content = b"synced from device A";
-    let src_a = write_test_file(tmp_a.path(), "sync.txt", content);
-    let mut state_a =
-        tcfs_sync::state::StateCache::open(&tmp_a.path().join("state.db.json")).unwrap();
+    // neo: push file
+    let content = b"synced from neo";
+    let src_neo = write_test_file(neo_root.path(), "sync.txt", content);
+    let mut state_neo =
+        tcfs_sync::state::StateCache::open(&neo_root.path().join("state.db.json")).unwrap();
 
     let upload = tcfs_sync::engine::upload_file_with_device(
         &op,
-        &src_a,
+        &src_neo,
         &prefix,
-        &mut state_a,
+        &mut state_neo,
         None,
         NEO_DEVICE,
         Some("sync.txt"),
         None,
     )
     .await
-    .expect("device A push");
+    .expect("neo push");
 
-    // Device A publishes sync event to NATS
+    // neo publishes sync event to NATS
     let event = serde_json::json!({
         "device": NEO_DEVICE,
         "action": "push",
@@ -530,7 +530,7 @@ async fn neo_honey_two_device_sync_smoke() {
         .expect("publish sync event");
     client.flush().await.expect("flush");
 
-    // Device B: receive NATS event
+    // honey: receive NATS event
     let msg = tokio::time::timeout(Duration::from_secs(5), sub.next())
         .await
         .expect("timeout waiting for sync event")
@@ -541,14 +541,14 @@ async fn neo_honey_two_device_sync_smoke() {
     assert_eq!(received["device"], NEO_DEVICE);
     assert_eq!(received["action"], "push");
 
-    // Device B: pull the file using manifest from event
+    // honey: pull the file using manifest from event
     let manifest_path = received["manifest"].as_str().expect("manifest path");
-    let dst_b = tmp_b.path().join("sync.txt");
+    let dst_honey = honey_root.path().join("sync.txt");
 
     let download = tcfs_sync::engine::download_file_with_device(
         &op,
         manifest_path,
-        &dst_b,
+        &dst_honey,
         &prefix,
         None,
         HONEY_DEVICE,
@@ -556,10 +556,10 @@ async fn neo_honey_two_device_sync_smoke() {
         None,
     )
     .await
-    .expect("device B pull");
+    .expect("honey pull");
 
-    let pulled = std::fs::read(&dst_b).unwrap();
-    assert_eq!(&pulled, content, "device B got different content");
+    let pulled = std::fs::read(&dst_honey).unwrap();
+    assert_eq!(&pulled, content, "honey got different content");
 
     eprintln!(
         "neo-honey smoke verified: {neo} pushed {} bytes, {honey} pulled {} bytes via NATS",

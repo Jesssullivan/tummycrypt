@@ -3,6 +3,9 @@
 Operational guide for deploying tcfs across a multi-machine fleet.
 Companion to [RFC 0001: Fleet Sync Integration](../rfc/0001-fleet-sync-integration.md).
 
+For the named live acceptance lane built on this fleet, see
+[Neo-Honey Live Acceptance](neo-honey-acceptance.md).
+
 ## Prerequisites
 
 - tcfs v0.3.0+ installed on all machines
@@ -85,6 +88,22 @@ just nats-ping
 tcfs status
 tcfs sync-status
 ```
+
+### Canonical Live Acceptance Lane
+
+The named live acceptance lane is `neo-honey`.
+
+Run it with:
+
+```bash
+just neo-honey-smoke
+```
+
+That wrapper proves:
+
+- SeaweedFS health
+- NATS + JetStream connectivity
+- the real two-device `neo` -> `honey` sync path
 
 ### Canonical Live Acceptance Lane: `neo-honey`
 
