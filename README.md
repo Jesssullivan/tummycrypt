@@ -1,4 +1,5 @@
 # tummycrypt / tcfs
+<!-- greptile canary test — safe to close -->
 
 > Under active development. Not yet stable. Expect breaking changes.
 
