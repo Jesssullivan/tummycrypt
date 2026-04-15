@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build script for TCFS FileProvider extension.
+# Build script for the experimental TCFS macOS FileProvider extension.
 # Compiles Swift sources, links Rust staticlib, assembles .appex bundle.
 #
 # Usage:

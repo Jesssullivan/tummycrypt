@@ -1,9 +1,9 @@
 # RFC 0003: iOS File Provider Extension
 
-**Status**: Phase 7b In Progress (iOS project scaffold)
+**Status**: Experimental scaffold (Phase 7b in progress)
 **Author**: xoxd
 **Date**: 2026-02-22 (updated 2026-03-07)
-**Tracking**: Phase 7b — Swift sources + build script ready, needs Xcode project
+**Tracking**: Swift sources + build script exist, but Apple surfaces remain experimental pending stronger acceptance coverage
 
 ---
 
@@ -14,9 +14,14 @@ tcfs storage in the iOS Files app. The extension reuses existing Rust crates
 (tcfs-storage, tcfs-chunks, tcfs-crypto, tcfs-sync) via Mozilla UniFFI, bridging
 to Swift for the native FileProviderExtension API.
 
+Current posture note: this is still an experimental surface. The repo has
+working scaffolding and build scripts, but not a continuously proven iOS
+distribution lane. See [`docs/ops/apple-surface-status.md`](../ops/apple-surface-status.md).
+
 ## Motivation
 
-iOS is a first-class target for tcfs. Users should be able to:
+iOS remains an experimental target for tcfs. The intent is for users to
+eventually be able to:
 
 - Browse their tcfs files in the iOS Files app
 - Open files on-demand (hydration from SeaweedFS)
@@ -223,7 +228,7 @@ enum ProviderError {
 - [x] Sync status dashboard in host app (live file count + error display)
 - [x] Host app type-checks with UniFFI bindings
 - [ ] Share extension for uploading
-- [ ] TestFlight beta (requires Apple Developer Program enrollment)
+- [ ] Manual TestFlight beta path (requires Apple Developer Program enrollment)
 
 ## Technical Challenges
 
