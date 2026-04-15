@@ -531,6 +531,34 @@ mod inner {
 
     // ── process_with_retry helper ─────────────────────────────────────────────
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TaskDeliveryAction {
+        Ack,
+        Nak,
+    }
+
+    async fn decide_task_delivery<F, Fut>(
+        task: SyncTask,
+        task_id: &str,
+        task_type: &str,
+        f: F,
+    ) -> TaskDeliveryAction
+    where
+        F: FnOnce(SyncTask) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        match f(task).await {
+            Ok(()) => {
+                debug!(task_id, task_type, "task succeeded");
+                TaskDeliveryAction::Ack
+            }
+            Err(e) => {
+                error!(task_id, task_type, error = %e, "task failed — naking for retry");
+                TaskDeliveryAction::Nak
+            }
+        }
+    }
+
     /// Process a task: run `f`, ack on success, nak on error.
     ///
     /// After `max_deliver` naks NATS stops redelivering the message.
@@ -543,15 +571,13 @@ mod inner {
         let task_type = msg.task.type_name();
         let task = msg.task.clone();
 
-        match f(task).await {
-            Ok(()) => {
-                debug!(task_id, task_type, "task succeeded");
+        match decide_task_delivery(task, &task_id, task_type, f).await {
+            TaskDeliveryAction::Ack => {
                 if let Err(e) = msg.ack().await {
                     warn!(task_id, "ack failed: {e}");
                 }
             }
-            Err(e) => {
-                error!(task_id, task_type, error = %e, "task failed — naking for retry");
+            TaskDeliveryAction::Nak => {
                 if let Err(nak_err) = msg.nak().await {
                     warn!(task_id, "nak failed: {nak_err}");
                 }
@@ -810,6 +836,51 @@ mod inner {
         fn tls_url_preserved_when_tls_not_required() {
             let url = resolve_nats_url("tls://nats.example.com:4222", false);
             assert_eq!(url, "tls://nats.example.com:4222");
+        }
+
+        #[tokio::test]
+        async fn process_with_retry_success_acks() {
+            let task = SyncTask::Push {
+                task_id: "task-ack".into(),
+                local_path: "/tmp/doc.txt".into(),
+                remote_prefix: "data".into(),
+            };
+
+            let action = decide_task_delivery(
+                task.clone(),
+                task.task_id(),
+                task.type_name(),
+                |seen| async move {
+                    assert_eq!(seen.task_id(), "task-ack");
+                    Ok(())
+                },
+            )
+            .await;
+
+            assert_eq!(action, TaskDeliveryAction::Ack);
+        }
+
+        #[tokio::test]
+        async fn process_with_retry_failure_naks() {
+            let task = SyncTask::Pull {
+                task_id: "task-nak".into(),
+                manifest_path: "data/manifests/abc123".into(),
+                remote_prefix: "data".into(),
+                local_path: "/tmp/out.txt".into(),
+            };
+
+            let action = decide_task_delivery(
+                task.clone(),
+                task.task_id(),
+                task.type_name(),
+                |seen| async move {
+                    assert_eq!(seen.task_id(), "task-nak");
+                    anyhow::bail!("transient NATS worker failure");
+                },
+            )
+            .await;
+
+            assert_eq!(action, TaskDeliveryAction::Nak);
         }
     }
 }
