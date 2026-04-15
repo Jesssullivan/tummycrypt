@@ -86,6 +86,42 @@ tcfs status
 tcfs sync-status
 ```
 
+### Canonical Live Acceptance Lane: `neo-honey`
+
+`neo-honey` is the named live fleet smoke lane for tummycrypt. It is the
+canonical manual acceptance path for proving that the real SeaweedFS + NATS
+stack still supports the end-to-end multi-device flow.
+
+What it covers:
+
+- SeaweedFS health check
+- NATS + JetStream connectivity
+- live push → pull roundtrip against the shared bucket
+- two-device sync semantics using the canonical smoke identities `neo` and `honey`
+
+Run it with:
+
+```bash
+export AWS_ACCESS_KEY_ID=<from seaweedfs-admin secret>
+export AWS_SECRET_ACCESS_KEY=<from seaweedfs-admin secret>
+just neo-honey-smoke
+```
+
+Optional overrides:
+
+```bash
+export TCFS_S3_ENDPOINT=http://100.120.66.67:8333
+export TCFS_S3_BUCKET=tcfs
+export TCFS_NATS_URL=nats://nats.tcfs.tummycrypt.dev:4222
+```
+
+Implementation notes:
+
+- wrapper script: `scripts/neo-honey-smoke.sh`
+- underlying test file: `tests/e2e/tests/fleet_live.rs`
+- this is a manual acceptance lane today, not a continuously scheduled CI lane
+- release readiness can cite this lane explicitly instead of referring to ad hoc live test runs
+
 ### Fallback Behavior
 
 tcfs works without NATS. If NATS is unreachable:

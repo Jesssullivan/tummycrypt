@@ -5,6 +5,7 @@
 //! - NATS JetStream: nats-tcfs (100.71.19.127:4222)
 //!
 //! Gated by TCFS_E2E_LIVE=1. Skips automatically otherwise.
+//! The canonical live acceptance lane is `neo-honey`.
 //!
 //! Run:
 //!   TCFS_E2E_LIVE=1 \
@@ -14,12 +15,19 @@
 //!   AWS_SECRET_ACCESS_KEY=<from k8s secret seaweedfs-admin> \
 //!   TCFS_NATS_URL=nats://100.71.19.127:4222 \
 //!   cargo test -p tcfs-e2e --test fleet_live -- --nocapture
+//!
+//! Or run the named smoke lane wrapper:
+//!   just neo-honey-smoke
 
 use std::time::Duration;
 
 use futures::StreamExt;
 use tcfs_e2e::write_test_file;
 use tempfile::TempDir;
+
+const NEO_DEVICE: &str = "neo";
+const HONEY_DEVICE: &str = "honey";
+const NEO_HONEY_PREFIX: &str = "neo-honey";
 
 /// Check if live E2E is enabled via env var
 fn live_enabled() -> bool {
@@ -206,7 +214,7 @@ async fn live_nats_pubsub_roundtrip() {
 // ── Two-device sync simulation via NATS ──────────────────────────────────
 
 #[tokio::test]
-async fn live_two_device_sync_via_nats() {
+async fn neo_honey_two_device_sync_smoke() {
     if !live_enabled() {
         eprintln!("SKIP: TCFS_E2E_LIVE not set");
         return;
@@ -219,7 +227,7 @@ async fn live_two_device_sync_via_nats() {
     let tmp_a = TempDir::new().unwrap();
     let tmp_b = TempDir::new().unwrap();
     let test_id = uuid::Uuid::new_v4().to_string();
-    let prefix = format!("e2e-sync/{}", &test_id[..8]);
+    let prefix = format!("{}/{}", NEO_HONEY_PREFIX, &test_id[..8]);
 
     // Subscribe to sync events before pushing
     let subject = format!("tcfs.sync.{}", prefix.replace('/', "."));
@@ -237,7 +245,7 @@ async fn live_two_device_sync_via_nats() {
         &prefix,
         &mut state_a,
         None,
-        "device-a",
+        NEO_DEVICE,
         Some("sync.txt"),
         None,
     )
@@ -246,7 +254,7 @@ async fn live_two_device_sync_via_nats() {
 
     // Device A publishes sync event to NATS
     let event = serde_json::json!({
-        "device": "device-a",
+        "device": NEO_DEVICE,
         "action": "push",
         "path": "sync.txt",
         "manifest": upload.remote_path,
@@ -266,7 +274,7 @@ async fn live_two_device_sync_via_nats() {
 
     let received: serde_json::Value =
         serde_json::from_slice(&msg.payload).expect("parse sync event");
-    assert_eq!(received["device"], "device-a");
+    assert_eq!(received["device"], NEO_DEVICE);
     assert_eq!(received["action"], "push");
 
     // Device B: pull the file using manifest from event
@@ -279,7 +287,7 @@ async fn live_two_device_sync_via_nats() {
         &dst_b,
         &prefix,
         None,
-        "device-b",
+        HONEY_DEVICE,
         None,
         None,
     )
@@ -290,8 +298,11 @@ async fn live_two_device_sync_via_nats() {
     assert_eq!(&pulled, content, "device B got different content");
 
     eprintln!(
-        "Two-device sync verified: A pushed {} bytes, B pulled {} bytes via NATS",
-        upload.bytes, download.bytes
+        "neo-honey smoke verified: {neo} pushed {} bytes, {honey} pulled {} bytes via NATS",
+        upload.bytes,
+        download.bytes,
+        neo = NEO_DEVICE,
+        honey = HONEY_DEVICE,
     );
 
     // Cleanup
