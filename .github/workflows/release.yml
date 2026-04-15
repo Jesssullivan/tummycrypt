@@ -654,7 +654,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build staticlib
-        run: cargo build -p tcfs-file-provider --release
+        run: cargo build -p tcfs-file-provider --release --no-default-features --features grpc
 
       - name: Import signing certificate
         env:
