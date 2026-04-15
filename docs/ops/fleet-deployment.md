@@ -89,22 +89,6 @@ tcfs status
 tcfs sync-status
 ```
 
-### Canonical Live Acceptance Lane
-
-The named live acceptance lane is `neo-honey`.
-
-Run it with:
-
-```bash
-just neo-honey-smoke
-```
-
-That wrapper proves:
-
-- SeaweedFS health
-- NATS + JetStream connectivity
-- the real two-device `neo` -> `honey` sync path
-
 ### Canonical Live Acceptance Lane: `neo-honey`
 
 `neo-honey` is the named live fleet smoke lane for tummycrypt. It is the
@@ -115,8 +99,7 @@ What it covers:
 
 - SeaweedFS health check
 - NATS + JetStream connectivity
-- live push → pull roundtrip against the shared bucket
-- two-device sync semantics using the canonical smoke identities `neo` and `honey`
+- the real two-device `neo` -> `honey` sync path using the canonical smoke identities
 
 Run it with:
 
