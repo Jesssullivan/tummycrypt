@@ -2,7 +2,7 @@
 
 **FOSS self-hosted odrive replacement**
 
-tcfs is a FUSE-based file sync daemon backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with end-to-end [age](https://age-encryption.org) encryption, content-defined chunking, on-demand hydration via `.tc` stub files, and multi-machine fleet sync with vector clocks.
+tcfs is a self-hosted encrypted file sync system backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with end-to-end [age](https://age-encryption.org) encryption, content-defined chunking, on-demand hydration via `.tc` stub files, and multi-machine fleet sync with vector clocks. Linux is the best-supported runtime today; Apple desktop and mobile surfaces exist but are still experimental.
 
 ## Installation
 
@@ -57,7 +57,7 @@ nix develop github:Jesssullivan/tummycrypt
 
 1. **Push**: Files are split into content-defined chunks (FastCDC), compressed (zstd), encrypted (age), and uploaded to SeaweedFS via S3. Vector clock is ticked and SyncManifest v2 (JSON) is written.
 2. **Pull**: Manifests describe the chunk layout. Chunks are fetched, verified (BLAKE3), decrypted, decompressed, and reassembled. Vector clock is merged with remote.
-3. **Mount**: FUSE driver presents remote files as local. Files appear as `.tc` stubs until opened — then they're hydrated on demand.
+3. **Mount**: The local filesystem surface presents remote files as local. On Linux this is exercised primarily through FUSE. Apple desktop surfaces are still evolving and should be treated as experimental.
 4. **Unsync**: Convert hydrated files back to stubs, reclaiming disk space while keeping the remote copy.
 5. **Fleet Sync**: NATS JetStream distributes `StateEvent` messages across devices. Vector clocks detect conflicts; pluggable resolvers handle them (auto, interactive, or defer).
 
@@ -136,9 +136,10 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 |----------|--------|-------|
 | Linux x86_64 | Full | FUSE mount, CLI, daemon, TUI, MCP |
 | Linux aarch64 | Full | FUSE mount, CLI, daemon, TUI, MCP |
-| macOS (Apple Silicon) | CLI + FUSE-T | Daemon over Unix socket; FileProvider extension in progress (RFC 0002) |
-| macOS (Intel) | CLI + FUSE-T | Daemon over Unix socket; FileProvider extension in progress (RFC 0002) |
+| macOS (Apple Silicon) | Experimental | CLI and daemon build, release `.pkg`, and FileProvider packaging exist, but user-facing acceptance coverage is still limited |
+| macOS (Intel) | Experimental | CLI binaries ship, but the desktop integration story is not yet as proven as Linux |
 | Windows x86_64 | CLI only | Cloud Files API skeleton; no FUSE or daemon |
+| iOS | Proof-of-concept | Read-only FileProvider direction; CI type-checks Swift, but there is no continuously proven TestFlight/App Store lane |
 | NixOS | Full | Flake + NixOS module + Home Manager module |
 
 ## License

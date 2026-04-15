@@ -18,7 +18,7 @@ releases, or contributor workflow.
 - **Fleet sync**: Multi-machine sync via NATS JetStream with vector clock conflict detection
 - **Content-addressed storage**: FastCDC chunking, BLAKE3 hashing, zstd compression
 - **Git-safe**: Syncs `.git/` directories as atomic bundles with lock detection
-- **Cross-platform**: Linux (FUSE/NFS), macOS (FileProvider/NFS), Windows (Cloud Files API, planned)
+- **Cross-platform**: Linux is the best-supported runtime; macOS has packaged but still experimental desktop surfaces; Windows remains planned
 
 ## Quick Start
 
@@ -111,13 +111,13 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
 | Feature | Linux | macOS | Windows | iOS |
 |---------|-------|-------|---------|-----|
 | CLI (push/pull/reconcile) | Full | Full | Planned | - |
-| Daemon (gRPC + metrics) | systemd | launchd | Planned | - |
-| Filesystem mount | FUSE3 | NFS loopback | Cloud Files API (skeleton) | - |
-| FileProvider | - | Full (Finder integration) | - | Read-only |
-| Finder/Explorer badges | - | 6 states | - | - |
+| Daemon (gRPC + metrics) | Full | Available, lightly validated | Planned | - |
+| Filesystem mount | Full (FUSE3, NFS fallback) | Experimental | Cloud Files API (skeleton) | - |
+| FileProvider | - | Experimental | - | Proof-of-concept, read-only |
+| Finder/Explorer badges | - | Experimental | - | - |
 | D-Bus integration | Full | - | - | - |
-| Fleet sync (NATS) | Full | Full | Planned | - |
-| E2E encryption | Full | Full | Planned | Full |
+| Fleet sync (NATS) | Full | Core path available, not continuously acceptance-tested | Planned | - |
+| E2E encryption | Full | Full | Planned | Core crypto path available |
 
 See [docs/platform-support.md](docs/platform-support.md) for details.
 

@@ -1,10 +1,13 @@
 # Platform Support
 
 tcfs targets Linux, macOS, Windows, and iOS with varying feature completeness.
+The repo is under active development, so "supported" here means "currently
+shipped and evidenced," not "long-term stable."
 
 ## Linux (Primary)
 
-Full feature support. Production-ready.
+Best-supported runtime. This is the platform with the strongest continuous CI
+coverage and the clearest end-to-end validation story.
 
 - **CLI**: All commands (push, pull, reconcile, policy, resolve, mount, unsync)
 - **Daemon**: systemd user service with auto-restart, metrics (Prometheus), health checks
@@ -15,21 +18,22 @@ Full feature support. Production-ready.
 - **Encryption**: XChaCha20-Poly1305 per-chunk, Argon2id KDF
 - **Build targets**: x86_64 (.tar.gz, .deb, .rpm), aarch64 (.tar.gz, .deb)
 
-## macOS (Full)
+## macOS (Experimental Desktop Surface)
 
-Full feature support. Production-ready.
+macOS has real release artifacts and desktop integration code, but the current
+evidence is weaker than Linux. Treat it as an experimental surface rather than
+as a production-proven platform.
 
-- **CLI**: All commands
-- **Daemon**: launchd agent with KeepAlive, auto-restart, Developer ID signed
-- **FileProvider**: Native macOS Finder integration (13,000+ items, on-demand hydration)
-- **Finder Sync**: Badge overlays (synced, syncing, locked, conflict, excluded, pinned)
-- **Progress**: Download progress bars in Finder via NSProgress
-- **NFS loopback**: Primary mount method (no macFUSE/fuse-t dependency)
-- **Fleet sync**: Full NATS JetStream support
-- **Notifications**: macOS User Notifications for conflict detection
-- **Encryption**: Full E2E encryption with BIP-39 recovery
+- **CLI**: Builds and ships for Apple Silicon and Intel
+- **Daemon**: Launchd-oriented runtime exists, but user-facing acceptance coverage is still limited
+- **FileProvider**: Packaged macOS FileProvider app exists in releases, but Finder-level claims should be treated as experimental until stronger acceptance coverage exists
+- **Finder badges / progress**: Implemented in code, not yet continuously proven by system-level tests
+- **Filesystem surface**: Experimental; Linux remains the better-proven mount/runtime path
+- **Fleet sync**: Core sync engine and NATS path are shared with Linux, but macOS-specific acceptance coverage is not yet at the same bar
+- **Encryption**: Core crypto path is shared and available
 - **Build targets**: aarch64 (.tar.gz, .pkg with notarization), x86_64 (.tar.gz)
 - **Homebrew**: `brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap && brew install tcfs`
+- **Current proof**: CI covers Rust builds plus Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts; broader desktop UX proof is still pending
 
 ## Windows (Planned)
 
@@ -61,14 +65,15 @@ Windows 10 1809+ placeholder files. 10 TODOs remain before functional:
 - No CI build matrix for Windows (disabled in release.yml)
 - No Windows test infrastructure
 
-## iOS (Read-only)
+## iOS (Proof-of-Concept)
 
-FileProvider extension with read-only access.
+The iOS direction exists, but it is not yet a continuously proven distribution
+surface.
 
 - **FileProvider**: NSFileProviderExtension with enumeration + hydration
 - **UniFFI**: Swift bindings via uniffi-bindgen
 - **Encryption**: Full E2E decryption support
-- **Build**: Xcode project via xcodegen, type-checked in CI
+- **Build**: Swift sources type-check in CI; Xcode/TestFlight remains a manual lane
 - **Status**: Proof-of-concept, not in App Store
 
 ### Limitations
@@ -76,6 +81,7 @@ FileProvider extension with read-only access.
 - No background sync
 - No conflict resolution UI
 - Requires manual provisioning profile setup
+- No continuously exercised TestFlight or App Store delivery lane
 
 ## Container (K8s Worker)
 
