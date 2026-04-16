@@ -3,6 +3,9 @@
 Operational guide for deploying tcfs across a multi-machine fleet.
 Companion to [RFC 0001: Fleet Sync Integration](../rfc/0001-fleet-sync-integration.md).
 
+For the named live acceptance lane built on this fleet, see
+[Neo-Honey Live Acceptance](neo-honey-acceptance.md).
+
 ## Prerequisites
 
 - tcfs v0.3.0+ installed on all machines
@@ -94,31 +97,27 @@ stack still supports the end-to-end multi-device flow.
 
 What it covers:
 
-- SeaweedFS health check
-- NATS + JetStream connectivity
-- live push → pull roundtrip against the shared bucket
-- two-device sync semantics using the canonical smoke identities `neo` and `honey`
+- `seaweedfs_health_check`
+- `nats_connect_and_jetstream`
+- `neo_honey_two_device_sync_smoke` using the canonical `neo` -> `honey` identities
 
 Run it with:
 
 ```bash
-export AWS_ACCESS_KEY_ID=<from seaweedfs-admin secret>
-export AWS_SECRET_ACCESS_KEY=<from seaweedfs-admin secret>
-just neo-honey-smoke
-```
-
-Optional overrides:
-
-```bash
+export TCFS_E2E_LIVE=1
 export TCFS_S3_ENDPOINT=http://100.120.66.67:8333
 export TCFS_S3_BUCKET=tcfs
-export TCFS_NATS_URL=nats://nats.tcfs.tummycrypt.dev:4222
+export AWS_ACCESS_KEY_ID=<from seaweedfs-admin secret>
+export AWS_SECRET_ACCESS_KEY=<from seaweedfs-admin secret>
+export TCFS_NATS_URL=nats://100.71.19.127:4222
+just neo-honey-smoke
 ```
 
 Implementation notes:
 
 - wrapper script: `scripts/neo-honey-smoke.sh`
 - underlying test file: `tests/e2e/tests/fleet_live.rs`
+- canonical contract and pass/fail criteria: `docs/ops/neo-honey-acceptance.md`
 - this is a manual acceptance lane today, not a continuously scheduled CI lane
 - release readiness can cite this lane explicitly instead of referring to ad hoc live test runs
 
