@@ -6,8 +6,8 @@
 #   brew install Jesssullivan/tummycrypt/tcfs
 #
 # This template is used by CI to generate the versioned formula.
-# Placeholders: 0.12.2, f1985357e67b47d42c66a0ba12a002f0017ac9f169640d6662b5870f12711000, 24fadd9a7e45c2cc30ea07daea02d933d98727cfc20c3f4fc408d5e61df24a3c,
-#               1efc16245f5dbbe5e3657d8c9f253f02b185343528ac919317934a9cc789afb0, b825491d76149c4988600b70ade0772f4f5b64f59d9d6fdbe694164dda380710
+# Placeholders: 0.12.2, 886153e63cfd4edc566c97d5378c7bf3df1ae3a03ea24b0362dfc78725afed08, c47a3ca1bcaf7985846ac5b1bdcd37b506ce7253fc1b376890aa5099775986aa,
+#               aea3db922a30cb90b809b4019ecd980f2edc0c5a2537094bfd2235e035271395, 63904a04d0b034800393a979fb79479aee964746ed411e12f1d389dfaa4a6d02
 
 class Tcfs < Formula
   desc "FOSS self-hosted odrive replacement — FUSE-based, SeaweedFS-backed file sync"
@@ -18,20 +18,20 @@ class Tcfs < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.2/tcfs-0.12.2-macos-aarch64.tar.gz"
-      sha256 "f1985357e67b47d42c66a0ba12a002f0017ac9f169640d6662b5870f12711000"
+      sha256 "886153e63cfd4edc566c97d5378c7bf3df1ae3a03ea24b0362dfc78725afed08"
     else
       url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.2/tcfs-0.12.2-macos-x86_64.tar.gz"
-      sha256 "24fadd9a7e45c2cc30ea07daea02d933d98727cfc20c3f4fc408d5e61df24a3c"
+      sha256 "c47a3ca1bcaf7985846ac5b1bdcd37b506ce7253fc1b376890aa5099775986aa"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.2/tcfs-0.12.2-linux-aarch64.tar.gz"
-      sha256 "b825491d76149c4988600b70ade0772f4f5b64f59d9d6fdbe694164dda380710"
+      sha256 "63904a04d0b034800393a979fb79479aee964746ed411e12f1d389dfaa4a6d02"
     else
       url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.2/tcfs-0.12.2-linux-x86_64.tar.gz"
-      sha256 "1efc16245f5dbbe5e3657d8c9f253f02b185343528ac919317934a9cc789afb0"
+      sha256 "aea3db922a30cb90b809b4019ecd980f2edc0c5a2537094bfd2235e035271395"
     end
   end
 
