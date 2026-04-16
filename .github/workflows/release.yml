@@ -229,6 +229,24 @@ jobs:
             ${EXTRA_FEATURES} \
             -p tcfsd
 
+      - name: Validate tcfsd OpenSSL linkage (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/tcfsd"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::expected tcfsd at ${BIN}"
+            exit 1
+          fi
+
+          echo "Inspecting ${BIN} linkage..."
+          otool -L "$BIN"
+
+          if otool -L "$BIN" | grep -E 'libssl\.3\.dylib|libcrypto\.3\.dylib' >/dev/null; then
+            echo "::error::macOS release tcfsd still links a dynamic OpenSSL dylib"
+            exit 1
+          fi
+
       # ── Build tcfs-tui ────────────────────────────────────────────────────
 
       - name: Build tcfs-tui
