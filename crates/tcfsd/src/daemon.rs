@@ -810,6 +810,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         config.storage.endpoint.clone(),
         state_cache,
         operator.clone(),
+        path_locks.clone(),
         device_id.clone(),
         device_name.clone(),
         master_key,
@@ -1399,6 +1400,7 @@ async fn spawn_state_sync_loop(
                                                 manifest_path,
                                                 &operator,
                                                 &state_cache,
+                                                &path_locks,
                                                 sync_root.as_deref(),
                                                 &storage_prefix,
                                             )
@@ -1555,6 +1557,7 @@ async fn handle_auto_pull(
     manifest_path: &str,
     operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
     state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+    path_locks: &tcfs_sync::state::PathLocks,
     sync_root: Option<&std::path::Path>,
     storage_prefix: &str,
 ) {
@@ -1576,6 +1579,7 @@ async fn handle_auto_pull(
             }
         }
     };
+    let _lock_guard = path_locks.lock(&local_path).await;
 
     // Compare vector clocks
     let (local_blake3, local_vclock) = {
