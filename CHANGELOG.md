@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-04-16
+
+### Added
+
+- **Distribution proof runbook**: added the canonical release smoke matrix and corrected Homebrew tap flow so post-cut install verification has one current operator path.
+
+### Changed
+
+- Apple and iOS support surfaces now point to dated April 15, 2026 evidence instead of generic support claims, and the odrive parity backlog is refreshed against the current Linux-first product posture.
+
+### Fixed
+
+- **macOS release packaging**: release builds now vendor OpenSSL for macOS arm64 artifacts, and release CI fails if `tcfsd` still links a dynamic Homebrew OpenSSL dylib.
+- **Sync state keying**: fixed state-key lookup after delete-through-symlink-parent cases so `remove()` and follow-up reads hit the same cached entry.
+
 ## [0.12.1] - 2026-04-15
 
 ### Added
