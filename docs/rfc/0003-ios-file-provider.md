@@ -1,9 +1,9 @@
 # RFC 0003: iOS File Provider Extension
 
-**Status**: Experimental scaffold (Phase 7b in progress)
+**Status**: Experimental scaffold and reference design
 **Author**: xoxd
-**Date**: 2026-02-22 (updated 2026-03-07)
-**Tracking**: Swift sources + build script exist, but Apple surfaces remain experimental pending stronger acceptance coverage
+**Date**: 2026-02-22 (updated 2026-04-15)
+**Tracking**: Swift sources + build script exist, but the public iOS posture remains read-only proof-of-concept pending stronger acceptance coverage
 
 ---
 
@@ -16,7 +16,8 @@ to Swift for the native FileProviderExtension API.
 
 Current posture note: this is still an experimental surface. The repo has
 working scaffolding and build scripts, but not a continuously proven iOS
-distribution lane. See [`docs/ops/apple-surface-status.md`](../ops/apple-surface-status.md).
+distribution lane. See [iOS Surface Status](../ops/ios-surface-status.md) and
+[Apple Surface Status](../ops/apple-surface-status.md).
 
 ## Motivation
 
@@ -31,6 +32,17 @@ eventually be able to:
 The iOS File Provider framework provides the system integration point, similar to
 how tcfs-fuse provides Linux integration and tcfs-cloudfilter provides Windows
 integration.
+
+## Current Maintenance Scope
+
+As of April 15, 2026:
+
+- keep the iOS Rust and Swift surfaces buildable in CI
+- treat browsing, enumeration, and hydration as the documented product direction
+- treat create, modify, and delete hooks as experimental code paths rather than
+  supported user-facing scope
+- keep TestFlight and App Store tooling manual-only until there is a repeatable
+  distribution lane
 
 ## Architecture
 
@@ -195,7 +207,7 @@ enum ProviderError {
 
 ### Phase 7b: iOS Project Scaffold (IN PROGRESS)
 
-- [x] `FileProviderExtension.swift` — full CRUD via UniFFI (item, fetchContents, createItem, modifyItem, deleteItem)
+- [x] `FileProviderExtension.swift` — read path plus experimental create, modify, and delete hooks via UniFFI
 - [x] `FileProviderEnumerator.swift` — directory listing via `provider.listItems(path:)`
 - [x] `FileProviderItem.swift` — NSFileProviderItem with placeholder support
 - [x] `HostApp.swift` — SwiftUI app with credential config + domain registration
@@ -228,7 +240,7 @@ enum ProviderError {
 - [x] Sync status dashboard in host app (live file count + error display)
 - [x] Host app type-checks with UniFFI bindings
 - [ ] Share extension for uploading
-- [ ] Manual TestFlight beta path (requires Apple Developer Program enrollment)
+- [ ] Manual TestFlight beta path (requires Apple Developer Program enrollment; not a continuously proven release lane)
 
 ## Technical Challenges
 
