@@ -128,6 +128,8 @@ and Nix surfaces, see [docs/ops/distribution-smoke-matrix.md](docs/ops/distribut
 | E2E encryption | Full | Full | Planned | Core crypto path available |
 
 See [docs/platform-support.md](docs/platform-support.md) for details.
+For the dated Apple posture, see
+[docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md).
 
 ## Development
 
