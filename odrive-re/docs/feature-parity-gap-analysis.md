@@ -1,16 +1,16 @@
 # Feature Parity Gap Analysis: odrive vs tummycrypt
 
-**Date**: 2026-04-15
+**Date**: 2026-04-16
 **Source**: Reverse engineering of `odriveagent` Linux ELF binary (Python 2.7/PyInstaller)
-**Target**: tummycrypt workspace v0.12.1 (Rust, 18 crates)
+**Target**: tummycrypt workspace v0.12.2 (Rust workspace)
 
 ---
 
 ## 1. Executive Summary
 
-### 1.1 Refresh For `v0.12.1`
+### 1.1 Refresh For `v0.12.2`
 
-This document originally anchored parity work to `v0.9.1`. As of April 15,
+This document originally anchored parity work to `v0.9.1`. As of April 16,
 2026, that baseline is too stale in three important ways:
 
 1. tummycrypt now has clearer release and platform-truth surfaces:
@@ -23,7 +23,16 @@ This document originally anchored parity work to `v0.9.1`. As of April 15,
    policy, reconciliation, exclusions, and desktop interaction quality rather
    than broadening product claims prematurely.
 
-The matrix below therefore needs to be read through the current `v0.12.1`
+Since the previous refresh, `v0.12.2` also tightened the release-proof story:
+
+- Homebrew fresh install and upgrade are now proved.
+- macOS `.pkg` upgrade is now proved.
+- Ubuntu 24.04 `.deb` fresh install and upgrade are now proved.
+- Fedora `.rpm` fresh install is now proved.
+- container startup is now proved.
+- Nix proof is still not strong enough to count as release-complete.
+
+The matrix below therefore needs to be read through the current `v0.12.2`
 product posture:
 
 - Linux remains the best-supported runtime and the strongest proof surface.
@@ -209,7 +218,7 @@ and a more explicit desktop acceptance story for Finder/FileProvider behavior.
 
 ---
 
-## 3. Executable Backlog As Of `v0.12.1`
+## 3. Executable Backlog As Of `v0.12.2`
 
 These are the highest-value gaps to close if the goal is production parity with
 odrive's sync behavior under the current product posture.
@@ -220,6 +229,11 @@ Priority order:
 2. policy and auto-unsync behavior
 3. reconciliation and exclusion semantics
 4. desktop interaction quality on top of truthful platform claims
+5. accessibility and recovery ergonomics once the desktop path is stronger
+
+This backlog should also be read together with
+[`docs/ops/product-reality-and-priority.md`](../../docs/ops/product-reality-and-priority.md),
+which separates parity work from release-proof and live-ops work.
 
 ### 3.1 Explicit File Sync State Machine
 
