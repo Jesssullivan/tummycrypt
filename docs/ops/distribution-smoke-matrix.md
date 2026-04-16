@@ -204,5 +204,7 @@ using a table like this:
 - Use this matrix for **distribution surface proof**
 - Use [Neo-Honey Live Acceptance](neo-honey-acceptance.md) for the
   **credentialed live fleet sync path**
+- Use [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md) for
+  **real-host operator and end-user-ish acceptance**
 - Use [Apple Surface Status](apple-surface-status.md) for the current limits of
   Finder, FileProvider, and iOS claims

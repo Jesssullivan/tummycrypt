@@ -4,6 +4,10 @@ Date: 2026-04-15
 
 The canonical live fleet acceptance lane is `neo-honey`.
 
+Within the broader acceptance stack, this lane sits between packaged artifact
+smoke and the real-host matrix in
+[Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md).
+
 This lane is meant to answer one operational question:
 
 Can one real device (`neo`) push a change through live SeaweedFS + NATS
