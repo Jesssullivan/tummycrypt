@@ -129,6 +129,7 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 ### Ops Runbooks
 
 - [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md) — canonical post-release install proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container, and Nix
+- [Lab Host Acceptance Matrix](ops/lab-host-acceptance-matrix.md) — real-host acceptance lanes across `honey`, `neo`, and `petting-zoo-mini`
 - [Neo-Honey Live Acceptance](ops/neo-honey-acceptance.md) — named live fleet sync acceptance lane
 - [Fleet Deployment Guide](ops/fleet-deployment.md) — multi-machine fleet deployment and operational checks
 - [Apple Surface Status](ops/apple-surface-status.md) — current reality for macOS and iOS claims
