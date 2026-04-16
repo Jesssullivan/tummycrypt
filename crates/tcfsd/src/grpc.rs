@@ -690,18 +690,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     }
                 }
 
-                // Write index entry for discoverability (same as CLI push)
-                if !upload.skipped {
-                    let index_key =
-                        format!("{}/index/{}", prefix.trim_end_matches('/'), &normalized_rel);
-                    let index_entry = format!(
-                        "manifest_hash={}\nsize={}\nchunks={}\n",
-                        upload.hash, total_bytes, upload.chunks
-                    );
-                    if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
-                        tracing::warn!("failed to write index entry: {e}");
-                    }
-                }
+                // Rel-path publication is owned by upload_file_with_device so
+                // the daemon follows the same crash-aware manifest/index flow
+                // as CLI and tree push.
 
                 // Publish state event if NATS is connected and file was actually uploaded
                 if !upload.skipped {
