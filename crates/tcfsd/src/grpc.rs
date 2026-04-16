@@ -680,12 +680,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         "push: conflict detected"
                     );
                     let mut cache = state_cache.lock().await;
-                    if let Some(entry) = cache.get(&local_path).cloned() {
-                        let updated = tcfs_sync::state::SyncState {
-                            conflict: Some(info.clone()),
-                            ..entry
-                        };
-                        cache.set(&local_path, updated);
+                    if cache.mark_conflict(&local_path, info.clone()) {
                         let _ = cache.flush();
                     }
                 }

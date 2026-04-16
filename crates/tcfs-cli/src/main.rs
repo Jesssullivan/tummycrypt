@@ -793,6 +793,7 @@ enum SyncStatusPathReport {
         chunk_count: usize,
         remote_path: String,
         last_synced_age_secs: u64,
+        sync_status: tcfs_sync::state::FileSyncStatus,
         needs_sync_reason: Option<String>,
     },
     Untracked {
@@ -821,6 +822,7 @@ fn build_sync_status_report(
                 chunk_count: entry.chunk_count,
                 remote_path: entry.remote_path.clone(),
                 last_synced_age_secs: now_epoch().saturating_sub(entry.last_synced),
+                sync_status: entry.status,
                 needs_sync_reason: state.needs_sync(&canonical)?,
             }),
             None => Some(SyncStatusPathReport::Untracked { canonical }),
@@ -1174,6 +1176,7 @@ fn cmd_sync_status(
                 chunk_count,
                 remote_path,
                 last_synced_age_secs,
+                sync_status,
                 needs_sync_reason,
             } => {
                 println!("File: {}", canonical.display());
@@ -1182,9 +1185,10 @@ fn cmd_sync_status(
                 println!("  chunks:     {}", chunk_count);
                 println!("  remote:     {}", remote_path);
                 println!("  last sync:  {} seconds ago", last_synced_age_secs);
+                println!("  sync state: {}", sync_status);
                 match needs_sync_reason {
-                    None => println!("  status:     up to date"),
-                    Some(reason) => println!("  status:     needs sync ({reason})"),
+                    None => println!("  sync check: up to date"),
+                    Some(reason) => println!("  sync check: needs sync ({reason})"),
                 }
             }
             SyncStatusPathReport::Untracked { canonical } => {
@@ -3840,10 +3844,12 @@ mod tests {
         match report.file.unwrap() {
             SyncStatusPathReport::Tracked {
                 remote_path,
+                sync_status,
                 needs_sync_reason,
                 ..
             } => {
                 assert!(remote_path.starts_with("data/manifests/"));
+                assert_eq!(sync_status, tcfs_sync::state::FileSyncStatus::Synced);
                 assert!(needs_sync_reason.is_none());
             }
             other => panic!("expected tracked status, got {other:?}"),
@@ -3892,9 +3898,48 @@ mod tests {
         assert_eq!(report.tracked_files, 2);
         match report.file.unwrap() {
             SyncStatusPathReport::Tracked {
-                needs_sync_reason, ..
+                sync_status,
+                needs_sync_reason,
+                ..
             } => {
+                assert_eq!(sync_status, tcfs_sync::state::FileSyncStatus::Synced);
                 assert!(needs_sync_reason.is_some());
+            }
+            other => panic!("expected tracked status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_sync_status_reports_explicit_sync_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let tracked = sync_root.join("alpha.txt");
+        std::fs::write(&tracked, b"alpha").unwrap();
+
+        let state_path = dir.path().join("state.json");
+        let config = test_config(&sync_root);
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        let mut entry = tcfs_sync::state::make_sync_state(
+            &tracked,
+            "abc123".to_string(),
+            1,
+            "data/manifests/abc123".to_string(),
+        )
+        .unwrap();
+        entry.status = tcfs_sync::state::FileSyncStatus::NotSynced;
+        state.set(&tracked, entry);
+        state.flush().unwrap();
+
+        let report = build_sync_status_report(&config, Some(&tracked), Some(&state_path)).unwrap();
+        match report.file.unwrap() {
+            SyncStatusPathReport::Tracked {
+                sync_status,
+                needs_sync_reason,
+                ..
+            } => {
+                assert_eq!(sync_status, tcfs_sync::state::FileSyncStatus::NotSynced);
+                assert!(needs_sync_reason.is_none());
             }
             other => panic!("expected tracked status, got {other:?}"),
         }

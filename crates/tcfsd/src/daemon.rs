@@ -559,15 +559,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                         "watcher: conflict detected"
                                                     );
                                                     metrics.sync_conflicts.inc();
-                                                    if let Some(entry) =
-                                                        cache.get(&task.path).cloned()
-                                                    {
-                                                        let updated = tcfs_sync::state::SyncState {
-                                                            conflict: Some(info.clone()),
-                                                            ..entry
-                                                        };
-                                                        cache.set(&task.path, updated);
-                                                    }
+                                                    cache.mark_conflict(
+                                                        &task.path,
+                                                        info.clone(),
+                                                    );
                                                     // Emit status change for D-Bus listeners
                                                     let _ = status_tx.try_send((
                                                         task.path.to_string_lossy().to_string(),
