@@ -133,12 +133,13 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 - [Fleet Deployment Guide](ops/fleet-deployment.md) — multi-machine fleet deployment and operational checks
 - [Apple Surface Status](ops/apple-surface-status.md) — current reality for macOS and iOS claims
 - [macOS Finder and FileProvider Reality](ops/macos-fileprovider-reality.md) — current macOS desktop workflow, proof gaps, and manual acceptance lane
+- [iOS Surface Status](ops/ios-surface-status.md) — current iOS scope, proof bar, and maintenance expectation
 
 ### RFCs
 
 - [RFC 0001: Fleet Sync Integration](rfc/0001-fleet-sync-integration.md) — multi-machine sync design and rollout plan
 - [RFC 0002: Darwin FUSE Strategy](rfc/0002-darwin-fuse-strategy.md) — FileProvider as primary macOS/iOS path
-- [RFC 0003: iOS File Provider](rfc/0003-ios-file-provider.md) — UniFFI bridge and .appex architecture
+- [RFC 0003: iOS File Provider](rfc/0003-ios-file-provider.md) — UniFFI bridge and experimental iOS scaffold architecture
 
 ## Platform Support
 
