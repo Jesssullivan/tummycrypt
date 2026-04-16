@@ -1,7 +1,9 @@
 # Homebrew formula for tcfs
 # To use:
-#   brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap
-#   brew install tcfs
+#   brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt.git
+#   git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin homebrew-tap
+#   git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
+#   brew install Jesssullivan/tummycrypt/tcfs
 #
 # This template is used by CI to generate the versioned formula.
 # Placeholders: __VERSION__, __SHA256_DARWIN_ARM64__, __SHA256_DARWIN_X86_64__,

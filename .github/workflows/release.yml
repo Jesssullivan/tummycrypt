@@ -1029,8 +1029,10 @@ jobs:
 
             **Homebrew:**
             ```bash
-            brew tap ${{ github.repository }} https://github.com/${{ github.repository }} --branch homebrew-tap
-            brew install tcfs
+            brew tap --custom-remote ${{ github.repository }} https://github.com/${{ github.repository }}.git
+            git -C "$(brew --repo ${{ github.repository }})" fetch origin homebrew-tap
+            git -C "$(brew --repo ${{ github.repository }})" checkout homebrew-tap
+            brew install ${{ github.repository }}/tcfs
             ```
 
             **Container image:**
@@ -1156,8 +1158,10 @@ jobs:
           ## Usage
 
           ```bash
-          brew tap ${{ github.repository }} https://github.com/${{ github.repository }} --branch homebrew-tap
-          brew install tcfs
+          brew tap --custom-remote ${{ github.repository }} https://github.com/${{ github.repository }}.git
+          git -C "$(brew --repo ${{ github.repository }})" fetch origin homebrew-tap
+          git -C "$(brew --repo ${{ github.repository }})" checkout homebrew-tap
+          brew install ${{ github.repository }}/tcfs
           ```
           EOF
 
