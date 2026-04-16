@@ -8,7 +8,7 @@
 
 2. Check the tcfs-backend deployment:
 
-     kubectl rollout status deployment/tcfs-backend -n {{ .Values.global.namespace }}
+     kubectl rollout status deployment/{{ .Release.Name }}-tcfs-backend-worker -n {{ .Release.Namespace }}
 
 3. Verify the SeaweedFS secret exists:
 
