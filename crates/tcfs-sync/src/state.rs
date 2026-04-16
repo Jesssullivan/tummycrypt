@@ -923,10 +923,20 @@ impl StateCacheBackend for StateBackend {
     }
 }
 
-/// Convert a path to a normalized string key for the HashMap
+/// Convert a path to a normalized string key for the HashMap.
+///
+/// Uses `canonicalize` to resolve symlinks (for example `/var` ->
+/// `/private/var` on macOS). When the file itself is gone, fall back to
+/// canonicalizing the parent directory and reattaching the filename so remove
+/// and lookup still hit the same key that was used while the file existed.
 fn path_key(path: &Path) -> String {
-    // Use the canonicalized absolute path as the key
     std::fs::canonicalize(path)
+        .or_else(|_| {
+            path.parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok())
+                .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent"))
+        })
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
@@ -1061,6 +1071,48 @@ mod tests {
         cache.remove(&fake_path);
         assert_eq!(cache.len(), 0);
         assert!(cache.get(&fake_path).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remove_entry_after_delete_through_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        let real_dir = dir.path().join("real");
+        let link_dir = dir.path().join("link");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        symlink(&real_dir, &link_dir).unwrap();
+
+        let linked_path = link_dir.join("to_remove.txt");
+        let real_path = real_dir.join("to_remove.txt");
+        std::fs::write(&linked_path, b"data").unwrap();
+
+        cache.set(
+            &linked_path,
+            SyncState {
+                blake3: "hash1".into(),
+                size: 4,
+                mtime: 1000,
+                chunk_count: 1,
+                remote_path: "bucket/to_remove.txt".into(),
+                last_synced: 9999,
+                vclock: VectorClock::new(),
+                device_id: String::new(),
+                conflict: None,
+                status: Default::default(),
+            },
+        );
+        assert_eq!(cache.len(), 1);
+
+        std::fs::remove_file(&real_path).unwrap();
+        cache.remove(&linked_path);
+
+        assert_eq!(cache.len(), 0);
+        assert!(cache.get(&linked_path).is_none());
     }
 
     #[test]
