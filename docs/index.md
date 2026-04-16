@@ -132,6 +132,7 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 - [Neo-Honey Live Acceptance](ops/neo-honey-acceptance.md) — named live fleet sync acceptance lane
 - [Fleet Deployment Guide](ops/fleet-deployment.md) — multi-machine fleet deployment and operational checks
 - [Apple Surface Status](ops/apple-surface-status.md) — current reality for macOS and iOS claims
+- [macOS Finder and FileProvider Reality](ops/macos-fileprovider-reality.md) — current macOS desktop workflow, proof gaps, and manual acceptance lane
 
 ### RFCs
 

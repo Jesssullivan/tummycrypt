@@ -50,6 +50,8 @@ Avoid:
 - Keep the Apple CI lanes green.
 - Run post-release distribution smoke from
   [Distribution Smoke Matrix](distribution-smoke-matrix.md).
+- Use [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md) for
+  the current desktop acceptance path and proof gaps.
 - Add a named macOS Finder/FileProvider smoke path before upgrading the public
   posture.
 - Add simulator or device-backed iOS acceptance before claiming an active iOS
