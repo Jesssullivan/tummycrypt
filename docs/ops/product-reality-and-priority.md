@@ -59,7 +59,7 @@ Current CI does **not** prove:
 - accessibility behavior
 - user-facing badges, progress, notifications, or recovery ergonomics
 
-Primary workflow: [ci.yml](/Users/jess/git/tummycrypt/.github/workflows/ci.yml:16).
+Primary workflow: `.github/workflows/ci.yml`.
 
 ### 3. Live Usage Proof
 
