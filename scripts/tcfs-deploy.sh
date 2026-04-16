@@ -8,6 +8,9 @@
 #   ./scripts/tcfs-deploy.sh --dry-run          # template only, no install
 #   ./scripts/tcfs-deploy.sh --set global.imageTag=v0.2.0
 #
+# This is the blank-cluster umbrella path. For reconciling an already-existing
+# direct `tcfs-backend` Helm release, use `scripts/tcfs-backend-deploy.sh`.
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,7 +116,7 @@ echo
 if [[ "${DRY_RUN}" == "false" ]]; then
     echo
     info "Waiting for rollout..."
-    kubectl rollout status deployment/"${RELEASE_NAME}-tcfs-backend" \
+    kubectl rollout status deployment/"${RELEASE_NAME}-tcfs-backend-worker" \
         --namespace "${NAMESPACE}" \
         --timeout=120s 2>/dev/null || warn "tcfs-backend rollout not ready yet"
     echo
