@@ -91,6 +91,10 @@ fleet-check:
 neo-honey-smoke:
     bash scripts/neo-honey-smoke.sh
 
+# Installed-binary smoke for release surfaces that ship tcfsd (and optionally tcfs)
+install-smoke *ARGS:
+    bash scripts/install-smoke.sh {{ARGS}}
+
 # ── Nix ─────────────────────────────────────────────────────────────────────
 
 # Build tcfsd via Nix

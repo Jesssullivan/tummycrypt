@@ -25,9 +25,9 @@ git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
 brew install Jesssullivan/tummycrypt/tcfs
 
 # Debian/Ubuntu
-sudo dpkg -i tcfs-*.deb
+sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 
-# RPM (Fedora/RHEL/Rocky)
+# RPM (Fedora/RHEL/Rocky, daemon-only today)
 sudo rpm -i tcfsd-*.rpm
 ```
 
@@ -125,6 +125,13 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 - [Contributing](CONTRIBUTING.md) — development setup, PR workflow
 - [Benchmarks](BENCHMARKS.md) — performance characteristics
 - [Changelog](../CHANGELOG.md) — release history
+
+### Ops Runbooks
+
+- [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md) — canonical post-release install proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container, and Nix
+- [Neo-Honey Live Acceptance](ops/neo-honey-acceptance.md) — named live fleet sync acceptance lane
+- [Fleet Deployment Guide](ops/fleet-deployment.md) — multi-machine fleet deployment and operational checks
+- [Apple Surface Status](ops/apple-surface-status.md) — current reality for macOS and iOS claims
 
 ### RFCs
 

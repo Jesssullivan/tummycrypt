@@ -50,7 +50,10 @@ git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
 brew install Jesssullivan/tummycrypt/tcfs
 
 # Debian/Ubuntu
-sudo dpkg -i tcfs-*.deb
+sudo dpkg -i tcfsd-*.deb tcfs-*.deb
+
+# RPM (Fedora/RHEL/Rocky, daemon-only today)
+sudo rpm -i tcfsd-*.rpm
 
 # Container (K8s worker mode)
 podman pull ghcr.io/jesssullivan/tcfsd:latest
@@ -107,6 +110,9 @@ crates/
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
+
+For packaged release proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container,
+and Nix surfaces, see [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md).
 
 ## Platform Support
 

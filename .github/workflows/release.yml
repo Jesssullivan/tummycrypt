@@ -1042,11 +1042,12 @@ jobs:
 
             **Debian/Ubuntu:**
             ```bash
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfsd-${{ needs.plan.outputs.version }}-amd64.deb
             curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfs-${{ needs.plan.outputs.version }}-amd64.deb
-            sudo dpkg -i tcfs-${{ needs.plan.outputs.version }}-amd64.deb
+            sudo dpkg -i tcfsd-${{ needs.plan.outputs.version }}-amd64.deb tcfs-${{ needs.plan.outputs.version }}-amd64.deb
             ```
 
-            **RPM (Fedora/RHEL/Rocky):**
+            **RPM (Fedora/RHEL/Rocky, daemon-only today):**
             ```bash
             curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfsd-${{ needs.plan.outputs.version }}-x86_64.rpm
             sudo rpm -i tcfsd-${{ needs.plan.outputs.version }}-x86_64.rpm
