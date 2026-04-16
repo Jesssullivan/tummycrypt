@@ -34,6 +34,15 @@ as a production-proven platform.
 - **Build targets**: aarch64 (.tar.gz, .pkg; notarization attempted but non-blocking), x86_64 (.tar.gz)
 - **Homebrew**: manual tap flow required today because the formula is published on the `homebrew-tap` branch, not the default branch
 - **Current proof**: CI covers Rust builds plus Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts; broader desktop UX proof is still pending
+- **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)
+  and [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md)
+
+### Not Yet Proven
+
+- Fresh-install Finder/FileProvider acceptance from install through register,
+  enumerate, hydrate, mutate, and conflict handling
+- Finder badges, progress UI, or notification behavior as release gates
+- Every published macOS artifact on day zero without explicit post-cut smoke
 
 ## Windows (Planned)
 
@@ -75,6 +84,7 @@ surface.
 - **Encryption**: Full E2E decryption support
 - **Build**: Swift sources type-check in CI; Xcode/TestFlight remains a manual lane
 - **Status**: Proof-of-concept, not in App Store
+- **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)
 
 ### Limitations
 - Read-only (no upload/push from iOS)
