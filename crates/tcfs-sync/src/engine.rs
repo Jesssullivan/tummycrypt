@@ -340,13 +340,37 @@ pub async fn upload_file_with_device(
         // Capture remote vclock for deferred merge (Issue #183)
         remote_vclock_snapshot = remote_manifest_obj.as_ref().map(|m| m.vclock.clone());
 
+        // If local has no sync history (empty vclock, e.g., after delete+recreate
+        // or first upload from a fresh device), absorb the remote vclock and
+        // advance so the upload can proceed. Without this, an empty local clock
+        // vs a populated remote yields RemoteNewer and silently skips the upload.
+        if local_vclock.clocks.is_empty() {
+            if let Some(ref rm) = remote_manifest_obj {
+                if !rm.vclock.clocks.is_empty() {
+                    debug!(
+                        path = %local_path.display(),
+                        remote_vclock = ?rm.vclock,
+                        "absorbing remote vclock for stateless upload"
+                    );
+                    local_vclock.merge(&rm.vclock);
+                }
+            }
+        }
+
         if let Some(remote_manifest_obj) = remote_manifest_obj {
             let local_hash = &file_hash_hex;
             let remote_hash = &remote_manifest_obj.file_hash;
             let rp = rel_path.unwrap_or("");
 
+            // Use a "preview tick" for comparison: the upload will advance this
+            // device's clock, so include that in the comparison to correctly
+            // detect that same-device modifications produce LocalNewer rather
+            // than a spurious Conflict (equal clocks, different content).
+            let mut compare_vclock = local_vclock.clone();
+            compare_vclock.tick(device_id);
+
             let sync_outcome = compare_clocks(
-                &local_vclock,
+                &compare_vclock,
                 &remote_manifest_obj.vclock,
                 local_hash,
                 remote_hash,
@@ -637,6 +661,20 @@ pub async fn upload_file_with_device(
     op.write(&remote_manifest, manifest_bytes)
         .await
         .with_context(|| format!("uploading manifest: {remote_manifest}"))?;
+
+    // Write index entry immediately after manifest to minimize the crash window.
+    // Previously, callers wrote the index separately — a crash between manifest
+    // and index writes left an orphaned manifest with a stale index.
+    if let Some(rp) = rel_path {
+        let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
+        let index_entry = format!(
+            "manifest_hash={}\nsize={}\nchunks={}\n",
+            file_hash_hex, file_size, num_chunks
+        );
+        op.write(&index_key, index_entry.into_bytes())
+            .await
+            .with_context(|| format!("writing index entry: {index_key}"))?;
+    }
 
     // Deferred vclock merge: only merge remote vclock after successful upload
     // to prevent stale vclocks if the upload had failed.
@@ -990,19 +1028,9 @@ pub async fn push_tree_with_device(
                 if result.skipped {
                     skipped += 1;
                 } else {
-                    // Write index entry only when the manifest was actually uploaded.
-                    // Skipped files (RemoteNewer, UpToDate, Conflict) already have
-                    // a valid index entry, and writing one with the local hash would
-                    // create an orphan pointing to a non-existent manifest.
-                    let index_key =
-                        format!("{}/index/{}", remote_path_prefix(remote_prefix), rel_str);
-                    let index_entry = format!(
-                        "manifest_hash={}\nsize={}\nchunks={}\n",
-                        result.hash, result.bytes, result.chunks
-                    );
-                    if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
-                        warn!(path = %path.display(), "failed to write index entry: {e}");
-                    }
+                    // Index entry is now written inside upload_file_with_device
+                    // immediately after the manifest, eliminating the crash window
+                    // that previously left orphaned manifests with stale index entries.
                     uploaded += 1;
                     bytes += result.bytes;
                 }

@@ -886,15 +886,8 @@ async fn cmd_push(
             ));
             println!("  skipped (unchanged since last sync)");
         } else {
-            // Write index entry for FUSE discoverability (same pattern as push_tree_with_device)
-            let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), &rel);
-            let index_entry = format!(
-                "manifest_hash={}\nsize={}\nchunks={}\n",
-                result.hash, result.bytes, result.chunks
-            );
-            if let Err(e) = op.write(&index_key, index_entry.into_bytes()).await {
-                eprintln!("warning: failed to write index entry: {e}");
-            }
+            // Index entry is now written inside upload_file_with_device
+            // immediately after the manifest — no separate write needed.
 
             pb.finish_with_message("done".to_string());
             println!("  hash:    {}", &result.hash[..16.min(result.hash.len())]);
@@ -1555,7 +1548,7 @@ fn fetch_latest_version() -> Option<String> {
             "5",
             "-H",
             "Accept: application/vnd.github+json",
-            "https://api.github.com/repos/tinyland-inc/tummycrypt/releases/latest",
+            "https://api.github.com/repos/Jesssullivan/tummycrypt/releases/latest",
         ])
         .output()
         .ok()?;
@@ -1593,7 +1586,7 @@ fn print_update_notice(current: &str, latest: &str) {
                 "  A newer version (v{}) is available. You are running v{}.",
                 latest, current
             );
-            println!("  Update: curl -fsSL https://github.com/tinyland-inc/tummycrypt/releases/latest/download/install.sh | sh");
+            println!("  Update: curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh");
         }
     }
 }

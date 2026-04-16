@@ -95,7 +95,7 @@ module "tcfs_backend" {
   depends_on = [module.observability]  # CRD: ServiceMonitor
 
   namespace  = var.namespace
-  image      = "ghcr.io/tinyland-inc/tcfsd:${var.image_tag}"
+  image      = "ghcr.io/jesssullivan/tcfsd:${var.image_tag}"
   nats_url   = module.nats.nats_url
 
   # Point workers at the in-cluster SeaweedFS

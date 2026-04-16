@@ -29,7 +29,7 @@ Full feature support. Production-ready.
 - **Notifications**: macOS User Notifications for conflict detection
 - **Encryption**: Full E2E encryption with BIP-39 recovery
 - **Build targets**: aarch64 (.tar.gz, .pkg with notarization), x86_64 (.tar.gz)
-- **Homebrew**: `brew install tinyland-inc/tap/tcfs`
+- **Homebrew**: `brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap && brew install tcfs`
 
 ## Windows (Planned)
 

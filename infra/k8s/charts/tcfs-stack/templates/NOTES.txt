@@ -36,4 +36,4 @@
 
      kubectl logs -l app.kubernetes.io/name=tcfs-backend -n {{ .Values.global.namespace }} -f
 
-For more information visit: https://github.com/tinyland-inc/tummycrypt
+For more information visit: https://github.com/Jesssullivan/tummycrypt

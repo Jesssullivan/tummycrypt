@@ -183,13 +183,12 @@ async fn two_device_modify_and_re_sync() {
     );
 }
 
-/// Test case 3: Both devices modify simultaneously — VectorClock detects conflict.
+/// Test case 3: Both devices modify simultaneously — conflict detected via index.
 ///
-/// Note: The sync engine uses content-addressed manifest paths, so two devices
-/// writing different content get different remote paths (no collision at the
-/// storage layer). Conflict detection happens at the VectorClock/NATS layer.
-/// This test simulates that layer: both devices push independently, then we
-/// compare their vclocks to verify the conflict is detectable.
+/// With index-based conflict detection, the second device to upload sees the
+/// first device's new manifest through the rel_path→manifest index, detecting
+/// the conflict immediately. The first uploader succeeds; the second gets a
+/// Conflict outcome with concurrent vclocks.
 #[tokio::test]
 async fn two_device_simultaneous_conflict_detection() {
     let tmp = TempDir::new().unwrap();
@@ -198,12 +197,12 @@ async fn two_device_simultaneous_conflict_detection() {
 
     // Step 1: Device A uploads initial version
     let content_a_v1 = b"initial content from device-a";
-    let src_a_v1 = write_test_file(tmp.path(), "src_a/shared.txt", content_a_v1);
+    let src_a = write_test_file(tmp.path(), "src_a/shared.txt", content_a_v1);
     let mut state_a = StateCache::open(&tmp.path().join("state_a.db")).expect("open state_a");
 
     let upload_a_v1 = upload_file_with_device(
         &op,
-        &src_a_v1,
+        &src_a,
         prefix,
         &mut state_a,
         None,
@@ -231,30 +230,17 @@ async fn two_device_simultaneous_conflict_detection() {
     .await
     .expect("device-b download v1");
 
-    // Step 3: Both modify and push independently
-    let content_a_v2 = b"device-a made independent changes to the document";
-    let src_a_v2 = write_test_file(tmp.path(), "src_a2/shared.txt", content_a_v2);
-
+    // Step 3: Both modify their copies at paths with existing state
     let content_b_v2 = b"device-b also made different independent changes";
-    let src_b_v2 = write_test_file(tmp.path(), "src_b2/shared.txt", content_b_v2);
+    std::fs::write(&dst_b, content_b_v2).expect("B modifies local copy");
 
-    // Both push (content-addressed, so no storage collision)
-    let upload_a_v2 = upload_file_with_device(
-        &op,
-        &src_a_v2,
-        prefix,
-        &mut state_a,
-        None,
-        "device-a",
-        Some("shared.txt"),
-        None,
-    )
-    .await
-    .expect("device-a upload v2");
+    let content_a_v2 = b"device-a made independent changes to the document";
+    std::fs::write(&src_a, content_a_v2).expect("A modifies local copy");
 
+    // Step 4: Device B pushes first (first uploader succeeds)
     let upload_b_v2 = upload_file_with_device(
         &op,
-        &src_b_v2,
+        &dst_b,
         prefix,
         &mut state_b,
         None,
@@ -265,46 +251,51 @@ async fn two_device_simultaneous_conflict_detection() {
     .await
     .expect("device-b upload v2");
 
-    assert!(!upload_a_v2.skipped);
-    assert!(!upload_b_v2.skipped);
+    assert!(!upload_b_v2.skipped, "B's upload should succeed (first diverger)");
 
-    // Step 4: Simulate NATS-layer conflict detection by comparing vclocks
-    // In production, when device B receives device A's NATS event (or vice versa),
-    // it compares the vclocks to detect the conflict.
-    let vclock_a = state_a.get(&src_a_v2).expect("A state").vclock.clone();
-    let vclock_b = state_b.get(&src_b_v2).expect("B state").vclock.clone();
-
-    // The vclocks should be concurrent (neither dominates)
-    assert!(
-        vclock_a.is_concurrent(&vclock_b),
-        "independent modifications should produce concurrent vclocks: A={:?}, B={:?}",
-        vclock_a,
-        vclock_b
-    );
-
-    // compare_clocks should return Conflict
-    let outcome = tcfs_sync::conflict::compare_clocks(
-        &vclock_b,
-        &vclock_a,
-        &upload_b_v2.hash,
-        &upload_a_v2.hash,
-        "shared.txt",
-        "device-b",
+    // Step 5: Device A pushes — index now points to B's manifest, conflict!
+    let upload_a_v2 = upload_file_with_device(
+        &op,
+        &src_a,
+        prefix,
+        &mut state_a,
+        None,
         "device-a",
+        Some("shared.txt"),
+        None,
+    )
+    .await
+    .expect("device-a upload v2");
+
+    // A's upload detects the conflict via the index
+    assert!(
+        upload_a_v2.skipped,
+        "A's upload should be skipped (conflict detected)"
+    );
+    assert!(
+        matches!(upload_a_v2.outcome, Some(tcfs_sync::conflict::SyncOutcome::Conflict(_))),
+        "A should detect Conflict, got: {:?}",
+        upload_a_v2.outcome
     );
 
-    match outcome {
-        tcfs_sync::conflict::SyncOutcome::Conflict(info) => {
-            assert_eq!(info.rel_path, "shared.txt");
-            assert_eq!(info.local_device, "device-b");
-            assert_eq!(info.remote_device, "device-a");
-            assert_ne!(
-                info.local_blake3, info.remote_blake3,
-                "conflicting versions should have different hashes"
-            );
-        }
-        other => panic!("expected Conflict from vclock comparison, got: {:?}", other),
-    }
+    // Step 6: Verify conflict info has concurrent vclocks
+    let conflict_info = match upload_a_v2.outcome {
+        Some(tcfs_sync::conflict::SyncOutcome::Conflict(ref info)) => info.clone(),
+        _ => unreachable!(),
+    };
+
+    assert!(
+        conflict_info.local_vclock.is_concurrent(&conflict_info.remote_vclock),
+        "conflict should have concurrent vclocks: local={:?}, remote={:?}",
+        conflict_info.local_vclock,
+        conflict_info.remote_vclock
+    );
+
+    assert_eq!(conflict_info.rel_path, "shared.txt");
+    assert_ne!(
+        conflict_info.local_blake3, conflict_info.remote_blake3,
+        "conflicting versions should have different hashes"
+    );
 }
 
 /// Test that multiple sequential syncs between devices maintain consistent vclocks.

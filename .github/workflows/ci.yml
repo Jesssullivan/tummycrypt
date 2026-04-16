@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUST_TOOLCHAIN: 1.93.0
 
 jobs:
   check:
@@ -20,6 +21,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -78,6 +80,12 @@ jobs:
       - name: Nix flake check
         run: nix flake check
 
+      - name: Verify devShell Rust version
+        run: |
+          VERSION="$(nix develop --command rustc --version)"
+          echo "$VERSION"
+          echo "$VERSION" | grep -q "1.93.0"
+
       - name: Build all packages
         run: nix build .#tcfsd .#tcfs-cli .#tcfs-tui .#tcfs-mcp
 
@@ -89,6 +97,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
 
@@ -121,6 +131,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-apple-ios-sim
 
       - uses: Swatinem/rust-cache@v2
@@ -133,6 +144,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

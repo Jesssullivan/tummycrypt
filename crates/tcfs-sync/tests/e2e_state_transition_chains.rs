@@ -228,9 +228,13 @@ async fn push_pull_modify_push_two_device_chain() {
     );
 }
 
-/// Device A and B diverge (both modify after shared baseline). Compare clocks
-/// to detect conflict. Use AutoResolver to pick a winner. Then the winner
-/// pushes, the loser pulls. Verify state is consistent and no further conflict.
+/// Device A and B diverge (both modify after shared baseline). The second
+/// uploader detects the conflict via the index. Use AutoResolver to pick a
+/// winner. Then the loser pulls. Verify state is consistent after resolution.
+///
+/// With index-based conflict detection, the second device to upload discovers
+/// the first device's new manifest via the rel_path index, producing a
+/// Conflict (concurrent vclocks, different content).
 #[tokio::test]
 async fn conflict_detect_resolve_then_continue() {
     let tmp = TempDir::new().unwrap();
@@ -257,7 +261,7 @@ async fn conflict_detect_resolve_then_continue() {
     .await
     .expect("baseline upload");
 
-    // Step 2: Device B pulls baseline
+    // Step 2: Device B pulls baseline (B now has state with A's vclock)
     let dst_b = tmp.path().join("dst_b/doc.txt");
     download_file_with_device(
         &op,
@@ -272,29 +276,13 @@ async fn conflict_detect_resolve_then_continue() {
     .await
     .expect("device-b pull baseline");
 
-    // Step 3: Both devices diverge independently
-    let content_a = b"device A diverged content after baseline";
-    let src_a2 = write_test_file(tmp.path(), "src_a2/doc.txt", content_a);
-
+    // Step 3: Device B modifies and uploads first (at the downloaded path)
     let content_b = b"device B diverged content after baseline";
-    let src_b2 = write_test_file(tmp.path(), "src_b2/doc.txt", content_b);
-
-    let upload_a = upload_file_with_device(
-        &op,
-        &src_a2,
-        prefix,
-        &mut state_a,
-        None,
-        "device-a",
-        Some("doc.txt"),
-        None,
-    )
-    .await
-    .expect("device-a diverged upload");
+    std::fs::write(&dst_b, content_b).expect("B modifies local copy");
 
     let upload_b = upload_file_with_device(
         &op,
-        &src_b2,
+        &dst_b,
         prefix,
         &mut state_b,
         None,
@@ -305,51 +293,94 @@ async fn conflict_detect_resolve_then_continue() {
     .await
     .expect("device-b diverged upload");
 
-    // Step 4: Compare clocks to detect conflict
-    let vclock_a = state_a.get(&src_a2).expect("A state").vclock.clone();
-    let vclock_b = state_b.get(&src_b2).expect("B state").vclock.clone();
+    assert!(!upload_b.skipped, "B's upload should succeed (first diverger)");
 
-    assert!(
-        vclock_a.is_concurrent(&vclock_b),
-        "diverged modifications should produce concurrent vclocks"
-    );
+    // Step 4: Device A modifies and uploads — the index now points to B's
+    // manifest, so A's upload detects a conflict (A's {a:2} is concurrent
+    // with B's {a:1, b:1}).
+    let content_a = b"device A diverged content after baseline";
+    std::fs::write(&src_a, content_a).expect("A modifies local copy");
 
-    let outcome = compare_clocks(
-        &vclock_a,
-        &vclock_b,
-        &upload_a.hash,
-        &upload_b.hash,
-        "doc.txt",
+    let upload_a = upload_file_with_device(
+        &op,
+        &src_a,
+        prefix,
+        &mut state_a,
+        None,
         "device-a",
-        "device-b",
+        Some("doc.txt"),
+        None,
+    )
+    .await
+    .expect("device-a diverged upload");
+
+    // A's upload should be skipped with a Conflict outcome (detected via index)
+    assert!(
+        upload_a.skipped,
+        "A's upload should detect conflict with B's version"
+    );
+    assert!(
+        matches!(upload_a.outcome, Some(SyncOutcome::Conflict(_))),
+        "outcome should be Conflict, got: {:?}",
+        upload_a.outcome
     );
 
-    let conflict_info = match outcome {
-        SyncOutcome::Conflict(info) => info,
-        other => panic!("expected Conflict, got: {:?}", other),
+    // Step 5: Extract conflict info and verify concurrent vclocks
+    let conflict_info = match upload_a.outcome {
+        Some(SyncOutcome::Conflict(ref info)) => info.clone(),
+        _ => unreachable!(),
     };
 
-    // Step 5: Use AutoResolver to pick a winner
+    assert!(
+        conflict_info.local_vclock.is_concurrent(&conflict_info.remote_vclock),
+        "conflict vclocks should be concurrent: local={:?}, remote={:?}",
+        conflict_info.local_vclock,
+        conflict_info.remote_vclock
+    );
+
+    // Step 6: Use AutoResolver to pick a winner
     let resolver = AutoResolver;
     let resolution = resolver
         .resolve(&conflict_info)
         .expect("AutoResolver should produce a resolution");
 
     // AutoResolver: lexicographically smaller device wins
-    // "device-a" < "device-b" => KeepLocal (from A's perspective as local)
+    // "device-a" < "device-b" => KeepLocal (A's content wins)
     assert_eq!(
         resolution,
         Resolution::KeepLocal,
         "device-a should win (lexicographically smaller)"
     );
 
-    // Step 6: Winner (device-a) pushes, loser (device-b) pulls
-    // Device A's upload already exists, device B downloads it
-    let resolved_b = tmp.path().join("resolved_b/doc.txt");
+    // Step 7: Resolution — remove A's stale conflict state so the re-upload
+    // absorbs the remote vclock and advances past it.
+    state_a.remove(&src_a);
+
+    let reupload_a = upload_file_with_device(
+        &op,
+        &src_a,
+        prefix,
+        &mut state_a,
+        None,
+        "device-a",
+        Some("doc.txt"),
+        None,
+    )
+    .await
+    .expect("device-a resolved re-upload");
+
+    assert!(
+        !reupload_a.skipped,
+        "A's re-upload after resolution should succeed"
+    );
+
+    // Step 8: Device B pulls A's winning version to its working path (dst_b).
+    // This updates B's state for dst_b with A's resolved vclock, so the
+    // next upload from dst_b will see LocalNewer rather than a conflict.
     download_file_with_device(
         &op,
-        &upload_a.remote_path,
-        &resolved_b,
+        &reupload_a.remote_path,
+        &dst_b,
         prefix,
         None,
         "device-b",
@@ -359,20 +390,19 @@ async fn conflict_detect_resolve_then_continue() {
     .await
     .expect("device-b pull winner's version");
 
-    // Step 7: Verify state is consistent
-    let resolved_content = std::fs::read(&resolved_b).unwrap();
+    let resolved_content = std::fs::read(&dst_b).unwrap();
     assert_eq!(
         resolved_content, content_a,
         "device B should have device A's content after resolution"
     );
 
-    // Step 8: Verify no further conflict -- device B pushes new content, A pulls
+    // Step 9: Verify no further conflict — B pushes new content, A pulls
     let content_v3 = b"post-resolution content from device-b";
-    let src_b3 = write_test_file(tmp.path(), "src_b3/doc.txt", content_v3);
+    std::fs::write(&dst_b, content_v3).expect("B writes post-resolution content");
 
     let upload_b3 = upload_file_with_device(
         &op,
-        &src_b3,
+        &dst_b,
         prefix,
         &mut state_b,
         None,
@@ -383,7 +413,7 @@ async fn conflict_detect_resolve_then_continue() {
     .await
     .expect("device-b post-resolution upload");
 
-    assert!(!upload_b3.skipped);
+    assert!(!upload_b3.skipped, "B's post-resolution upload should succeed");
 
     let dst_a3 = tmp.path().join("dst_a3/doc.txt");
     download_file_with_device(
@@ -407,7 +437,7 @@ async fn conflict_detect_resolve_then_continue() {
 
     // Verify vclocks are no longer concurrent after resolution flow
     let vc_a_final = state_a.get(&dst_a3).expect("A final state").vclock.clone();
-    let vc_b_final = state_b.get(&src_b3).expect("B final state").vclock.clone();
+    let vc_b_final = state_b.get(&dst_b).expect("B final state").vclock.clone();
 
     // B's clock should dominate or equal A's (B was the last writer)
     assert!(

@@ -4,6 +4,13 @@
 
 Self-hosted encrypted file sync with on-demand hydration. Mounts SeaweedFS as a local directory — files appear as zero-byte `.tc` stubs until accessed, then transparently download and decrypt. FOSS odrive/Dropbox replacement.
 
+## Canonical Home
+
+`Jesssullivan/tummycrypt` is the canonical source repository for tcfs.
+If `tinyland-inc/tummycrypt` exists, treat it as a fork or downstream
+distribution surface rather than the source of truth for planning, issues,
+releases, or contributor workflow.
+
 ## Features
 
 - **On-demand hydration**: Files appear as `.tc` stubs, hydrate transparently on open
@@ -18,8 +25,10 @@ Self-hosted encrypted file sync with on-demand hydration. Mounts SeaweedFS as a 
 ```bash
 # Nix devShell (recommended)
 nix develop
+# Or auto-load the committed devShell + env on cd
+direnv allow
 
-# Or manual: Rust 1.93+, protobuf compiler, fuse3 (Linux)
+# Or manual: install the pinned Rust 1.93.0 toolchain, protobuf compiler, fuse3 (Linux)
 
 # Start local dev infrastructure (SeaweedFS + NATS + Prometheus + Grafana)
 task dev
@@ -34,14 +43,15 @@ task check
 # Linux (installer script)
 curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
 
-# macOS (Homebrew)
-brew install tinyland-inc/tap/tcfs
+# macOS (Homebrew tap from canonical repo)
+brew tap Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt --branch homebrew-tap
+brew install tcfs
 
 # Debian/Ubuntu
 sudo dpkg -i tcfs-*.deb
 
 # Container (K8s worker mode)
-podman pull ghcr.io/tinyland-inc/tcfsd:latest
+podman pull ghcr.io/jesssullivan/tcfsd:latest
 
 # Nix
 nix build github:Jesssullivan/tummycrypt

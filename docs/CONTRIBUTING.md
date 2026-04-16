@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Rust 1.93+ (via rustup or Nix)
+- Rust 1.93.0 (pinned via `rust-toolchain.toml`, rustup, or Nix)
 - protobuf-compiler (`protoc`)
 - pkg-config, libssl-dev, libfuse3-dev (Linux)
 - [Task](https://taskfile.dev) (task runner)
@@ -14,9 +14,11 @@
 
 ```bash
 # Clone and enter devShell
-git clone https://github.com/tinyland-inc/tummycrypt.git
+git clone https://github.com/Jesssullivan/tummycrypt.git
 cd tummycrypt
-nix develop    # or: echo 'use flake' > .envrc && direnv allow
+nix develop
+# Or auto-load the committed .envrc once:
+direnv allow
 
 # Build everything
 task build
@@ -25,13 +27,15 @@ task build
 task test
 ```
 
-> **Rocky Linux note**: `cargo` is not in `$PATH` by default. Use `~/.cargo/bin/cargo` for all cargo commands outside the Nix devShell.
+> **System Rust note**: outside the Nix devShell, ensure rustup's cargo bin dir is on `PATH` (for example `source "$HOME/.cargo/env"`). The committed `.envrc` does this automatically when direnv is enabled.
 
 ### Quick Start without Nix
 
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup toolchain install 1.93.0
+rustup override set 1.93.0
 
 # Install system dependencies (Debian/Ubuntu)
 sudo apt install protobuf-compiler pkg-config libssl-dev libfuse3-dev
@@ -120,11 +124,13 @@ cargo run -p tcfs-cli -- mount seaweedfs://localhost:8333/tcfs /tmp/tcfs-mount
 ## Pull Request Guidelines
 
 1. **Branch from** `main` (use `sid/` prefix for feature branches)
-2. **Run checks locally** before pushing: `task check` (fmt + clippy + test + build)
-3. **Keep PRs focused** - one feature or fix per PR
-4. **Add tests** for new functionality
-5. **Update docs** if you change user-facing behavior
-6. CI runs: `cargo fmt --check`, `cargo clippy`, `cargo test`, `cargo-deny`, security audit
+2. **Treat `Jesssullivan/tummycrypt` as canonical** for PRs, issues, and release flow
+3. **Use org forks as downstreams only** unless a specific distribution task requires them
+4. **Run checks locally** before pushing: `task check` (fmt + clippy + test + build)
+5. **Keep PRs focused** - one feature or fix per PR
+6. **Add tests** for new functionality
+7. **Update docs** if you change user-facing behavior
+8. CI runs: `cargo fmt --check`, `cargo clippy`, `cargo test`, `cargo-deny`, security audit
 
 ## Code Style
 

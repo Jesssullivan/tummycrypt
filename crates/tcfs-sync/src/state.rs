@@ -789,10 +789,21 @@ impl StateCacheBackend for StateBackend {
     }
 }
 
-/// Convert a path to a normalized string key for the HashMap
+/// Convert a path to a normalized string key for the HashMap.
+///
+/// Uses `canonicalize` to resolve symlinks (e.g., macOS `/var` → `/private/var`).
+/// When the file doesn't exist (e.g., after deletion), falls back to
+/// canonicalizing the parent directory + filename so the key is consistent
+/// with entries created while the file existed.
 fn path_key(path: &Path) -> String {
-    // Use the canonicalized absolute path as the key
     std::fs::canonicalize(path)
+        .or_else(|_| {
+            // File gone — try canonicalizing the parent to get a stable prefix
+            path.parent()
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent"))
+        })
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .into_owned()

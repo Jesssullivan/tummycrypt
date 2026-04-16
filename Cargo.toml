@@ -27,7 +27,7 @@ version = "0.12.0"
 edition = "2021"
 authors = ["TummyCrypt Contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/tinyland-inc/tummycrypt"
+repository = "https://github.com/Jesssullivan/tummycrypt"
 rust-version = "1.93"
 
 [workspace.dependencies]

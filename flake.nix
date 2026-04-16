@@ -1,15 +1,14 @@
 {
   description = "tummycrypt/tcfs - FOSS self-hosted odrive replacement";
 
-  # Attic binary cache on honey RKE2 (Tailscale-only access)
-  # Cache was recreated 2026-04-08 with fresh signing key after
-  # the old cache served stale cargoArtifacts missing fuse3 deps.
+  # Public Attic read endpoint used by local dev and CI.
+  # CI/release workflows push with `attic login` separately.
   nixConfig = {
     extra-substituters = [
-      "http://nix-cache-attic/main"
+      "https://nix-cache.fuzzy-dev.tinyland.dev/main"
     ];
     extra-trusted-public-keys = [
-      "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
+      "main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE="
     ];
   };
 
@@ -19,10 +18,7 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    crane = {
-      url = "github:ipetkov/crane";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -31,16 +27,18 @@
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        rustVersion = "1.93.0";
+        rustTargets = [
+          "x86_64-unknown-linux-gnu"
+          "aarch64-unknown-linux-gnu"
+          "x86_64-apple-darwin"
+          "aarch64-apple-darwin"
+          "aarch64-apple-ios"
+          "aarch64-apple-ios-sim"
+        ];
+        rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
           extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
-          targets = [
-            "x86_64-unknown-linux-gnu"
-            "aarch64-unknown-linux-gnu"
-            "x86_64-apple-darwin"
-            "aarch64-apple-darwin"
-            "aarch64-apple-ios"
-            "aarch64-apple-ios-sim"
-          ];
+          targets = rustTargets;
         };
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
@@ -192,9 +190,11 @@
             just
             yq-go
           ]);
+          TCFS_RUST_TOOLCHAIN = rustVersion;
 
           shellHook = ''
             echo "tcfs devShell (tummycrypt monorepo)"
+            echo "  rustc --version  # pinned toolchain should report ${rustVersion}"
             echo "  just --list      # show available recipes"
             echo "  task --list      # show go-task tasks"
             echo "  cargo build      # build workspace"

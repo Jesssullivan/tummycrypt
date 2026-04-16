@@ -17,9 +17,8 @@ on:
   workflow_dispatch:
 
 env:
-  # Attic on honey RKE2 via Tailscale. CI runners can't reach this directly;
-  # push will gracefully fail. Public ingress or Tailscale sidecar needed for CI push.
-  ATTIC_SERVER: http://nix-cache-attic
+  # Public Attic endpoint shared with flake.nix and other workflows.
+  ATTIC_SERVER: https://nix-cache.fuzzy-dev.tinyland.dev
   ATTIC_CACHE: main
 
 jobs:

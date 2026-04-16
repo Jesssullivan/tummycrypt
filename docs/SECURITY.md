@@ -4,7 +4,7 @@ The full security model document is maintained as a LaTeX source file and
 distributed as PDF.
 
 - **Source**: [`docs/tex/security.tex`](tex/security.tex)
-- **PDF**: Built by CI and available as a [release artifact](https://github.com/tinyland-inc/tummycrypt/actions/workflows/docs.yml)
+- **PDF**: Built by CI and available as a [release artifact](https://github.com/Jesssullivan/tummycrypt/actions/workflows/docs.yml)
 
 To build locally:
 
@@ -19,7 +19,7 @@ tcfs encrypts all file content client-side before upload using XChaCha20-Poly130
 
 ## Quick Reference
 
-See the [Security PDF](https://github.com/tinyland-inc/tummycrypt/actions/workflows/docs.yml) for full details including:
+See the [Security PDF](https://github.com/Jesssullivan/tummycrypt/actions/workflows/docs.yml) for full details including:
 
 - Threat model (storage, network, client, credential threats)
 - Encryption architecture (XChaCha20-Poly1305, Argon2id, HKDF)

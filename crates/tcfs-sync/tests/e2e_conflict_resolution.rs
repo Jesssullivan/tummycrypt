@@ -261,14 +261,41 @@ async fn resolve_keep_local_workflow() {
     .await
     .expect("device-a upload");
 
-    // Device B decides to keep its local version and re-upload
+    // Device B decides to keep its local version and re-upload.
+    // In a real resolution flow, B first pulls A's version (absorbing A's vclock),
+    // then overwrites the local file and re-uploads. The upload sees LocalNewer
+    // because B's vclock (merged from A) is incremented on upload.
     let content_b = b"device B's version that wins the conflict resolution";
-    let src_b = write_test_file(tmp.path(), "src_b/notes.txt", content_b);
+    let pull_path = tmp.path().join("pull_b/notes.txt");
     let mut state_b = StateCache::open(&tmp.path().join("state_b.db")).unwrap();
 
+    // Step 1: Pull A's version to absorb vclock
+    download_file_with_device(
+        &op,
+        &_upload_a.remote_path,
+        &pull_path,
+        prefix,
+        None,
+        "device-b",
+        Some(&mut state_b),
+        None,
+    )
+    .await
+    .expect("device-b pull to learn remote vclock");
+
+    // Step 2: Resolve conflict — advance B's vclock past A's to indicate B
+    // has seen A's version and chooses to keep local.
+    {
+        let mut entry = state_b.get(&pull_path).unwrap().clone();
+        entry.vclock.tick("device-b");
+        state_b.set(&pull_path, entry);
+    }
+    std::fs::write(&pull_path, content_b).expect("overwrite with B's content");
+
+    // Step 3: Re-upload — B's vclock {device-a:1, device-b:1} > A's {device-a:1}
     let upload_b = upload_file_with_device(
         &op,
-        &src_b,
+        &pull_path,
         prefix,
         &mut state_b,
         None,
@@ -448,12 +475,17 @@ async fn resolved_conflict_subsequent_sync() {
 
     assert_eq!(std::fs::read(&dst_b).unwrap(), content_v1);
 
-    // Device B now modifies and pushes v2
+    // Device B resolves: advance vclock past A's, then modify and push v2.
+    {
+        let mut entry = state_b.get(&dst_b).unwrap().clone();
+        entry.vclock.tick("device-b");
+        state_b.set(&dst_b, entry);
+    }
     let content_v2 = b"version 2 from device B after resolving";
-    let src_b = write_test_file(tmp.path(), "src_b/v2.txt", content_v2);
+    std::fs::write(&dst_b, content_v2).expect("overwrite with v2");
     let upload_v2 = upload_file_with_device(
         &op,
-        &src_b,
+        &dst_b,
         prefix,
         &mut state_b,
         None,

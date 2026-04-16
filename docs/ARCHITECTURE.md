@@ -4,7 +4,7 @@ The full architecture document is maintained as a LaTeX source file and
 distributed as PDF.
 
 - **Source**: [`docs/tex/architecture.tex`](tex/architecture.tex)
-- **PDF**: Built by CI and available as a [release artifact](https://github.com/tinyland-inc/tummycrypt/actions/workflows/docs.yml)
+- **PDF**: Built by CI and available as a [release artifact](https://github.com/Jesssullivan/tummycrypt/actions/workflows/docs.yml)
 
 To build locally:
 
@@ -19,7 +19,7 @@ tcfs is a Rust monorepo of 14 workspace crates organized around a daemon (`tcfsd
 
 ## Quick Reference
 
-See the [Architecture PDF](https://github.com/tinyland-inc/tummycrypt/actions/workflows/docs.yml) for full details including:
+See the [Architecture PDF](https://github.com/Jesssullivan/tummycrypt/actions/workflows/docs.yml) for full details including:
 
 - System architecture (client + server components)
 - Crate map (14 workspace crates)

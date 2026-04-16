@@ -5,9 +5,9 @@ variable "namespace" {
 }
 
 variable "image" {
-  description = "tcfsd container image (repository:tag)"
+  description = "tcfsd container image (repository:tag). Defaults to the canonical Jesssullivan GHCR image; downstream org deployments can override it."
   type        = string
-  default     = "ghcr.io/tinyland-inc/tcfsd:latest"
+  default     = "ghcr.io/jesssullivan/tcfsd:latest"
 }
 
 variable "worker_replicas" {

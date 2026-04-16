@@ -4,7 +4,7 @@ The full protocol specification is maintained as a LaTeX source file and
 distributed as PDF.
 
 - **Source**: [`docs/tex/protocol.tex`](tex/protocol.tex)
-- **PDF**: Built by CI and available as a [release artifact](https://github.com/tinyland-inc/tummycrypt/actions/workflows/docs.yml)
+- **PDF**: Built by CI and available as a [release artifact](https://github.com/Jesssullivan/tummycrypt/actions/workflows/docs.yml)
 
 To build locally:
 
@@ -15,7 +15,7 @@ task docs:pdf
 
 ## Quick Reference
 
-See the [Protocol PDF](https://github.com/tinyland-inc/tummycrypt/actions/workflows/docs.yml) for full details including:
+See the [Protocol PDF](https://github.com/Jesssullivan/tummycrypt/actions/workflows/docs.yml) for full details including:
 
 - `.tc` file stub format (JSON schema)
 - `.tcf` folder stub format
