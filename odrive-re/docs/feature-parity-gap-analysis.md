@@ -1,12 +1,36 @@
 # Feature Parity Gap Analysis: odrive vs tummycrypt
 
-**Date**: 2026-04-04
+**Date**: 2026-04-15
 **Source**: Reverse engineering of `odriveagent` Linux ELF binary (Python 2.7/PyInstaller)
-**Target**: tummycrypt workspace v0.9.1 (Rust, 18 crates)
+**Target**: tummycrypt workspace v0.12.1 (Rust, 18 crates)
 
 ---
 
 ## 1. Executive Summary
+
+### 1.1 Refresh For `v0.12.1`
+
+This document originally anchored parity work to `v0.9.1`. As of April 15,
+2026, that baseline is too stale in three important ways:
+
+1. tummycrypt now has clearer release and platform-truth surfaces:
+   distribution smoke, Apple surface status, explicit iOS posture, and a named
+   macOS Finder/FileProvider reality runbook.
+2. Apple FileProvider should no longer be treated as "missing" in the codebase,
+   but it also should not be counted as solved parity. It exists as an
+   experimental desktop and mobile surface with limited acceptance coverage.
+3. The next parity backlog should focus on sync lifecycle semantics, folder
+   policy, reconciliation, exclusions, and desktop interaction quality rather
+   than broadening product claims prematurely.
+
+The matrix below therefore needs to be read through the current `v0.12.1`
+product posture:
+
+- Linux remains the best-supported runtime and the strongest proof surface.
+- macOS has real Finder/FileProvider code and packaging, but still lacks
+  continuously exercised desktop acceptance.
+- iOS remains read-only proof-of-concept despite experimental write hooks in the
+  scaffold.
 
 tummycrypt already possesses a fundamentally stronger architecture than odrive in several dimensions: CRDT-based conflict resolution (vector clocks vs timestamp comparison), content-defined chunking (FastCDC vs fixed-size XL splitting), FUSE-based virtual filesystem (vs placeholder file extensions that pollute the namespace), fleet-wide sync via NATS JetStream (vs single-machine polling), and modern cryptography (XChaCha20-Poly1305 with proper key hierarchy vs PyCrypto with plaintext passphrase storage).
 
@@ -14,7 +38,10 @@ However, odrive has ~10 years of iteration on the **sync lifecycle** -- the full
 
 The recommended path is not to replicate odrive's architecture (which is a monolithic Python 2.7 codebase with deep tech debt), but to adopt its **behavioral semantics** -- the user-facing features and sync guarantees -- while maintaining tummycrypt's superior infrastructure.
 
-**Critical gaps** (must-have for parity): three-way merge base tracking, auto-unsync with disk pressure awareness, per-folder sync policies, blacklist/exclude filtering at the event layer, and structured refresh pipeline.
+**Critical gaps** (must-have for parity): three-way merge base tracking,
+auto-unsync with disk pressure awareness, per-folder sync policies,
+blacklist/exclude filtering at the event layer, structured refresh pipeline,
+and a more explicit desktop acceptance story for Finder/FileProvider behavior.
 
 **Already superior** in tummycrypt: conflict detection (CRDTs), encryption (modern AEAD), chunking (CDC), transport (NATS), IPC (gRPC), authentication (MFA/WebAuthn), and FUSE mount (no filesystem pollution).
 
@@ -62,8 +89,8 @@ The recommended path is not to replicate odrive's architecture (which is a monol
 
 | Feature | odrive | tummycrypt | Status | Notes |
 |---------|--------|------------|--------|-------|
-| Placeholder files | `.cloud`/`.cloudf` extensions | `.tc`/`.tcf` stubs via FUSE | **superior** | TC uses FUSE mount; no filename pollution |
-| Expand (hydrate) | `Expand._expand_file` + `_expand_folder` | `Hydrate` gRPC call + `tcfs-vfs::hydrate` | **has** | TC hydrates on FUSE open() transparently |
+| Placeholder files | `.cloud`/`.cloudf` extensions | Linux `.tc`/`.tcf` stubs plus experimental Apple FileProvider placeholders | **superior** | Linux avoids namespace pollution; Apple path uses FileProvider placeholders rather than suffix-based files |
+| Expand (hydrate) | `Expand._expand_file` + `_expand_folder` | Linux `Hydrate` gRPC + `tcfs-vfs::hydrate`; experimental Apple `fetchContents` path | **has** | TC hydrates on Linux today and carries a real FileProvider hydration path on Apple surfaces |
 | Unsync (dehydrate) | `Unsync._unsync_item` + dirty check | `Unsync` gRPC call | **partial** | TC lacks dirty-child check before unsync |
 | XL file (large file splitting) | `.cloudx` extension, segment transfer | FastCDC chunking (no separate concept) | **different** | TC handles large files natively via CDC; no separate "XL" mode |
 | Queued expansion | `QueuedExpand` with `InProgressFiles` concurrency | No explicit queue; direct FUSE hydration | **partial** | TC lacks queued/batched expansion for large dirs |
@@ -138,15 +165,15 @@ The recommended path is not to replicate odrive's architecture (which is a monol
 
 | Feature | odrive | tummycrypt | Status | Notes |
 |---------|--------|------------|--------|-------|
-| macOS Finder badges | `BadgeRefreshService` + Finder Sync Extension | Not implemented | **missing** | Not critical for headless; nice for desktop |
+| macOS Finder badges | `BadgeRefreshService` + Finder Sync Extension | FileProvider decorations and badge identifiers exist, but acceptance is still experimental | **partial** | Badge and decoration code exists, but visible Finder behavior is not yet a release gate |
 | macOS package detection | `MacPackageService`, `is_mac_package_type` | Not implemented | **missing** | .app bundles need special handling |
 | Windows Cloud Files | Not present (uses placeholder extensions) | `tcfs-cloudfilter` crate (Windows Cloud Filter API) | **superior** | TC has native Windows integration |
-| Apple FileProvider | Not present | `tcfs-file-provider` crate (iOS/macOS) | **superior** | TC has native Apple Files.app integration |
+| Apple FileProvider | Not present | `tcfs-file-provider` crate plus packaged macOS host app and experimental iOS scaffold | **partial** | Real code and packaging exist, but current acceptance coverage is still weaker than Linux parity claims would require |
 | D-Bus integration | Not present | `tcfs-dbus` crate | **superior** | TC has Linux desktop integration |
 | System service management | Registry/LaunchAgent/XDG autostart | `service-manager` crate dependency | **has** | Both handle auto-start |
 | Keychain/credential store | `KeyChainService` (Python keyring) | `tcfs-secrets` + `keyring` crate | **has** | Both use platform keychains |
 | OS trash integration | `local_move_to_os_trash` | Not implemented | **missing** | TC hard-deletes; should offer trash option |
-| Context menu integration | Finder extension / shell namespace | Not implemented | **missing** | Right-click sync/unsync actions |
+| Context menu integration | Finder extension / shell namespace | FileProvider action declarations exist (`Free Up Space`, `Always Keep on This Device`), but end-to-end Finder proof is still manual | **partial** | Actions are declared in the extension metadata, but desktop UX proof remains experimental |
 
 ### 2.11 Authentication & Multi-Device
 
@@ -182,9 +209,17 @@ The recommended path is not to replicate odrive's architecture (which is a monol
 
 ---
 
-## 3. High-Priority Gaps to Close
+## 3. Executable Backlog As Of `v0.12.1`
 
-These are features tummycrypt needs for production parity with odrive's sync behavior.
+These are the highest-value gaps to close if the goal is production parity with
+odrive's sync behavior under the current product posture.
+
+Priority order:
+
+1. sync lifecycle correctness and safety
+2. policy and auto-unsync behavior
+3. reconciliation and exclusion semantics
+4. desktop interaction quality on top of truthful platform claims
 
 ### 3.1 Explicit File Sync State Machine
 
