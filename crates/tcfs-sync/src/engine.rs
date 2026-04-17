@@ -24,7 +24,7 @@ use crate::index_entry::{
     write_committed_index_entry, write_preparing_index_entry, PendingIndexEntry, RemoteIndexEntry,
 };
 use crate::manifest::SyncManifest;
-use crate::state::{make_sync_state_full, StateCache};
+use crate::state::{make_sync_state_full, FileSyncStatus, StateCache};
 
 /// Maximum number of retry attempts for chunk upload/download operations.
 const CHUNK_MAX_RETRIES: u32 = 3;
@@ -735,6 +735,7 @@ pub async fn upload_file_with_device(
                         device_id.to_string(),
                     )?;
                     sync_state.conflict = Some(conflict_info.clone());
+                    sync_state.status = FileSyncStatus::Conflict;
                     state.set(local_path, sync_state);
                     return Ok(UploadResult {
                         path: local_path.to_path_buf(),
@@ -2113,6 +2114,75 @@ mod tests {
                 assert_eq!(current.chunks, upload.chunks);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn upload_file_with_device_marks_conflict_status() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let local = dir.path().join("hello.txt");
+        std::fs::write(&local, b"hello base").unwrap();
+
+        let mut local_vclock = crate::conflict::VectorClock::new();
+        local_vclock.tick("device-1");
+        state.set(
+            &local,
+            crate::state::SyncState {
+                blake3: "basehash123".into(),
+                size: 10,
+                mtime: 0,
+                chunk_count: 0,
+                remote_path: "data/manifests/basehash123".into(),
+                last_synced: 0,
+                vclock: local_vclock,
+                device_id: "device-1".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+
+        std::fs::write(&local, b"hello local").unwrap();
+
+        let remote_manifest_hash = "remotehash123";
+        op.write(
+            &format!("data/manifests/{remote_manifest_hash}"),
+            br#"{"version":2,"file_hash":"remotehash123","file_size":12,"chunks":[],"vclock":{"clocks":{"device-2":1}},"written_by":"device-2","written_at":1}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+        write_committed_index_entry(
+            &op,
+            "data/index/hello.txt",
+            &crate::index_entry::RemoteIndexEntry::new(remote_manifest_hash, 12, 0),
+        )
+        .await
+        .unwrap();
+
+        let result = upload_file_with_device(
+            &op,
+            &local,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("hello.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.skipped);
+        assert!(matches!(result.outcome, Some(SyncOutcome::Conflict(_))));
+
+        let entry = state.get(&local).expect("conflicted state entry");
+        assert_eq!(entry.status, FileSyncStatus::Conflict);
+        assert!(
+            entry.conflict.is_some(),
+            "conflict payload should be preserved"
+        );
     }
 
     #[tokio::test]

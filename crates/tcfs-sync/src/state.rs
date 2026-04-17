@@ -461,6 +461,27 @@ impl StateCache {
         }
     }
 
+    /// Mark an entry as conflicted while preserving its existing metadata.
+    ///
+    /// Conflict payload and status must move together. Setting only the conflict
+    /// info leaves callers with an internally inconsistent entry that still
+    /// appears synced.
+    pub fn mark_conflict(
+        &mut self,
+        local_path: &Path,
+        conflict: crate::conflict::ConflictInfo,
+    ) -> bool {
+        let key = path_key(local_path);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.conflict = Some(conflict);
+            entry.status = FileSyncStatus::Conflict;
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Clear conflict state after successful resolution.
     ///
     /// Sets `conflict` to `None` and `status` to `Synced`. Both fields
@@ -1578,6 +1599,52 @@ mod tests {
                 "status must be Synced after reload"
             );
         }
+    }
+
+    #[test]
+    fn mark_conflict_sets_payload_and_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        let file_path = dir.path().join("conflicted.txt");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        cache.set(
+            &file_path,
+            SyncState {
+                blake3: "abc".into(),
+                size: 4,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "data/index/conflicted.txt".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+
+        let conflict = crate::conflict::ConflictInfo {
+            rel_path: "conflicted.txt".into(),
+            local_vclock: VectorClock::new(),
+            remote_vclock: VectorClock::new(),
+            local_blake3: "abc".into(),
+            remote_blake3: "def".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            detected_at: 0,
+        };
+
+        assert!(cache.mark_conflict(&file_path, conflict.clone()));
+
+        let entry = cache.get(&file_path).unwrap();
+        assert_eq!(entry.status, FileSyncStatus::Conflict);
+        let stored = entry.conflict.as_ref().expect("conflict payload");
+        assert_eq!(stored.rel_path, conflict.rel_path);
+        assert_eq!(stored.local_device, conflict.local_device);
+        assert_eq!(stored.remote_device, conflict.remote_device);
     }
 
     #[test]

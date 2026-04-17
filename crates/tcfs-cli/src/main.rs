@@ -793,6 +793,7 @@ enum SyncStatusPathReport {
         chunk_count: usize,
         remote_path: String,
         last_synced_age_secs: u64,
+        sync_status: tcfs_sync::state::FileSyncStatus,
         needs_sync_reason: Option<String>,
     },
     Untracked {
@@ -810,8 +811,8 @@ fn build_sync_status_report(
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
     let file = if let Some(p) = path {
-        let canonical =
-            std::fs::canonicalize(p).with_context(|| format!("resolving path: {}", p.display()))?;
+        let canonical = resolve_sync_status_lookup_path(p)
+            .with_context(|| format!("resolving path: {}", p.display()))?;
 
         match state.get(&canonical) {
             Some(entry) => Some(SyncStatusPathReport::Tracked {
@@ -821,7 +822,14 @@ fn build_sync_status_report(
                 chunk_count: entry.chunk_count,
                 remote_path: entry.remote_path.clone(),
                 last_synced_age_secs: now_epoch().saturating_sub(entry.last_synced),
-                needs_sync_reason: state.needs_sync(&canonical)?,
+                sync_status: entry.status,
+                needs_sync_reason: if entry.status == tcfs_sync::state::FileSyncStatus::NotSynced
+                    || !canonical.exists()
+                {
+                    None
+                } else {
+                    state.needs_sync(&canonical)?
+                },
             }),
             None => Some(SyncStatusPathReport::Untracked { canonical }),
         }
@@ -834,6 +842,41 @@ fn build_sync_status_report(
         tracked_files: state.len(),
         file,
     })
+}
+
+fn resolve_sync_status_lookup_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        if tcfs_vfs::is_stub_path(path) {
+            let stub = std::fs::canonicalize(path)?;
+            let real_name =
+                tcfs_vfs::stub_to_real_name(stub.file_name().context("stub path has no filename")?)
+                    .context("invalid stub filename")?;
+            let parent = stub.parent().context("stub path has no parent")?;
+            return Ok(parent.join(real_name));
+        }
+        return std::fs::canonicalize(path).map_err(Into::into);
+    }
+
+    if !tcfs_vfs::is_stub_path(path) {
+        let stub_candidate =
+            path.parent()
+                .unwrap_or(Path::new("."))
+                .join(tcfs_vfs::real_to_stub_name(
+                    path.file_name().context("path has no filename")?,
+                ));
+
+        if stub_candidate.exists() {
+            let stub = std::fs::canonicalize(&stub_candidate)?;
+            let parent = stub.parent().context("stub path has no parent")?;
+            return Ok(parent.join(
+                path.file_name()
+                    .context("path has no filename")?
+                    .to_os_string(),
+            ));
+        }
+    }
+
+    std::fs::canonicalize(path).map_err(Into::into)
 }
 
 // ── `tcfs push` ───────────────────────────────────────────────────────────────
@@ -1174,6 +1217,7 @@ fn cmd_sync_status(
                 chunk_count,
                 remote_path,
                 last_synced_age_secs,
+                sync_status,
                 needs_sync_reason,
             } => {
                 println!("File: {}", canonical.display());
@@ -1182,9 +1226,10 @@ fn cmd_sync_status(
                 println!("  chunks:     {}", chunk_count);
                 println!("  remote:     {}", remote_path);
                 println!("  last sync:  {} seconds ago", last_synced_age_secs);
+                println!("  sync state: {}", sync_status);
                 match needs_sync_reason {
-                    None => println!("  status:     up to date"),
-                    Some(reason) => println!("  status:     needs sync ({reason})"),
+                    None => println!("  sync check: up to date"),
+                    Some(reason) => println!("  sync check: needs sync ({reason})"),
                 }
             }
             SyncStatusPathReport::Untracked { canonical } => {
@@ -2072,6 +2117,14 @@ async fn cmd_unsync(
         return Ok(());
     }
 
+    let state_path = resolve_state_path(config, None);
+    let state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+    let tracked = state
+        .get(path)
+        .cloned()
+        .with_context(|| format!("{} is not tracked (never pushed)", path.display()))?;
+
     // Read file content and compute hash
     let data = tokio::fs::read(path)
         .await
@@ -2082,22 +2135,23 @@ async fn cmd_unsync(
     let size = data.len() as u64;
 
     if !force {
-        let state_path = resolve_state_path(config, None);
-        let state = tcfs_sync::state::StateCache::open(&state_path)
-            .with_context(|| format!("opening state cache: {}", state_path.display()))?;
-
-        match state.get(path) {
-            None => anyhow::bail!(
-                "{} is not tracked (never pushed). Use --force to unsync anyway.",
-                path.display()
-            ),
-            Some(entry) if entry.blake3 != hash_hex => anyhow::bail!(
+        if tracked.blake3 != hash_hex {
+            anyhow::bail!(
                 "{} has local changes (hash mismatch). Use --force to unsync anyway.",
                 path.display()
-            ),
-            _ => {}
+            );
         }
     }
+
+    let sync_root = config.sync.sync_root.as_deref();
+    let rel_path = tcfs_sync::engine::normalize_rel_path(path, sync_root);
+    let stub = tcfs_vfs::StubMeta::for_upload(
+        &tracked.blake3,
+        tracked.size,
+        tracked.chunk_count,
+        config.storage.resolved_prefix(),
+        &rel_path,
+    );
 
     // Build stub at path.tc
     let stub_path = tcfs_vfs::real_to_stub_name(path.file_name().context("path has no filename")?);
@@ -2105,15 +2159,6 @@ async fn cmd_unsync(
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join(stub_path);
-
-    let stub = tcfs_vfs::StubMeta {
-        chunks: 0, // unknown without state — leave as 0
-        compressed: false,
-        fetched: false,
-        oid: format!("blake3:{}", hash_hex),
-        origin: format!("seaweedfs://{}/{}", config.storage.endpoint, hash_hex),
-        size,
-    };
 
     // Write stub then remove original
     tokio::fs::write(&stub_full, stub.to_bytes())
@@ -2123,8 +2168,18 @@ async fn cmd_unsync(
         .await
         .with_context(|| format!("removing hydrated file: {}", path.display()))?;
 
+    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+    state.set_status(path, tcfs_sync::state::FileSyncStatus::NotSynced);
+    state
+        .flush()
+        .with_context(|| format!("flushing state cache: {}", state_path.display()))?;
+
     println!("Unsynced: {} → {}", path.display(), stub_full.display());
-    println!("  hash: {}", &hash_hex[..16]);
+    println!(
+        "  hash: {}",
+        &tracked.blake3[..16.min(tracked.blake3.len())]
+    );
     println!("  size: {} freed", fmt_bytes(size));
 
     Ok(())
@@ -3840,10 +3895,12 @@ mod tests {
         match report.file.unwrap() {
             SyncStatusPathReport::Tracked {
                 remote_path,
+                sync_status,
                 needs_sync_reason,
                 ..
             } => {
                 assert!(remote_path.starts_with("data/manifests/"));
+                assert_eq!(sync_status, tcfs_sync::state::FileSyncStatus::Synced);
                 assert!(needs_sync_reason.is_none());
             }
             other => panic!("expected tracked status, got {other:?}"),
@@ -3892,12 +3949,169 @@ mod tests {
         assert_eq!(report.tracked_files, 2);
         match report.file.unwrap() {
             SyncStatusPathReport::Tracked {
-                needs_sync_reason, ..
+                sync_status,
+                needs_sync_reason,
+                ..
             } => {
+                assert_eq!(sync_status, tcfs_sync::state::FileSyncStatus::Synced);
                 assert!(needs_sync_reason.is_some());
             }
             other => panic!("expected tracked status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_sync_status_reports_explicit_sync_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let tracked = sync_root.join("alpha.txt");
+        std::fs::write(&tracked, b"alpha").unwrap();
+
+        let state_path = dir.path().join("state.json");
+        let config = test_config(&sync_root);
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        let mut entry = tcfs_sync::state::make_sync_state(
+            &tracked,
+            "abc123".to_string(),
+            1,
+            "data/manifests/abc123".to_string(),
+        )
+        .unwrap();
+        entry.status = tcfs_sync::state::FileSyncStatus::NotSynced;
+        state.set(&tracked, entry);
+        state.flush().unwrap();
+
+        let report = build_sync_status_report(&config, Some(&tracked), Some(&state_path)).unwrap();
+        match report.file.unwrap() {
+            SyncStatusPathReport::Tracked {
+                sync_status,
+                needs_sync_reason,
+                ..
+            } => {
+                assert_eq!(sync_status, tcfs_sync::state::FileSyncStatus::NotSynced);
+                assert!(needs_sync_reason.is_none());
+            }
+            other => panic!("expected tracked status, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_unsync_marks_not_synced_and_reports_via_real_and_stub_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let tracked = sync_root.join("alpha.txt");
+        std::fs::write(&tracked, b"alpha").unwrap();
+
+        let op = memory_op();
+        let state_path = dir.path().join("state.json");
+        let mut config = test_config(&sync_root);
+        config.sync.state_db = dir.path().join("state.db");
+
+        cmd_push_with_operator(&config, &op, &tracked, None, &state_path, "test-device")
+            .await
+            .unwrap();
+
+        cmd_unsync(&config, &tracked, false).await.unwrap();
+
+        let stub_path = sync_root.join("alpha.txt.tc");
+        let canonical_tracked = std::fs::canonicalize(&sync_root).unwrap().join("alpha.txt");
+        assert!(
+            !tracked.exists(),
+            "hydrated file should be removed after unsync"
+        );
+        assert!(stub_path.exists(), "stub should be created after unsync");
+
+        let state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        let entry = state
+            .get(&tracked)
+            .expect("tracked state should be preserved");
+        assert_eq!(entry.status, tcfs_sync::state::FileSyncStatus::NotSynced);
+
+        for lookup in [&tracked, &stub_path] {
+            let report =
+                build_sync_status_report(&config, Some(lookup), Some(&state_path)).unwrap();
+            match report.file.unwrap() {
+                SyncStatusPathReport::Tracked {
+                    canonical,
+                    sync_status,
+                    needs_sync_reason,
+                    ..
+                } => {
+                    assert_eq!(canonical, canonical_tracked);
+                    assert_eq!(sync_status, tcfs_sync::state::FileSyncStatus::NotSynced);
+                    assert!(needs_sync_reason.is_none());
+                }
+                other => panic!("expected tracked status after unsync, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_unsync_force_uses_tracked_remote_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let tracked = sync_root.join("alpha.txt");
+        std::fs::write(&tracked, b"alpha").unwrap();
+
+        let op = memory_op();
+        let state_path = dir.path().join("state.json");
+        let mut config = test_config(&sync_root);
+        config.sync.state_db = dir.path().join("state.db");
+
+        cmd_push_with_operator(&config, &op, &tracked, None, &state_path, "test-device")
+            .await
+            .unwrap();
+
+        let tracked_before = tcfs_sync::state::StateCache::open(&state_path)
+            .unwrap()
+            .get(&tracked)
+            .cloned()
+            .unwrap();
+
+        std::fs::write(&tracked, b"alpha updated locally").unwrap();
+
+        cmd_unsync(&config, &tracked, true).await.unwrap();
+
+        let stub_path = sync_root.join("alpha.txt.tc");
+        let stub =
+            tcfs_vfs::StubMeta::parse(&std::fs::read_to_string(&stub_path).unwrap()).unwrap();
+        assert_eq!(
+            stub.blake3_hex(),
+            Some(tracked_before.blake3.as_str()),
+            "forced unsync should preserve tracked remote hash, not local dirty content"
+        );
+        assert_eq!(stub.size, tracked_before.size);
+        assert_eq!(stub.chunks, tracked_before.chunk_count);
+        assert!(
+            stub.origin.ends_with("/alpha.txt"),
+            "stub origin should point at the logical remote path"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_unsync_force_rejects_untracked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let local = sync_root.join("never-pushed.txt");
+        std::fs::write(&local, b"local only").unwrap();
+
+        let mut config = test_config(&sync_root);
+        config.sync.state_db = dir.path().join("state.db");
+
+        let err = cmd_unsync(&config, &local, true).await.unwrap_err();
+        assert!(
+            err.to_string().contains("is not tracked"),
+            "unexpected error: {err}"
+        );
+        assert!(local.exists(), "untracked file should be left in place");
+        assert!(
+            !sync_root.join("never-pushed.txt.tc").exists(),
+            "force unsync must not create a fake stub for an untracked file"
+        );
     }
 
     #[tokio::test]

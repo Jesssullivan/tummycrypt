@@ -33,6 +33,7 @@ pub struct TcfsDaemonImpl {
     nats_ok: std::sync::atomic::AtomicBool,
     nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
     active_mounts: Arc<TokioMutex<std::collections::HashMap<String, tokio::process::Child>>>,
+    path_locks: tcfs_sync::state::PathLocks,
     /// VFS handle from active FUSE mount — used to invalidate negative cache
     /// on NATS events so remote files appear in readdir immediately.
     pub vfs_handle: tokio::sync::watch::Receiver<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
@@ -78,6 +79,7 @@ impl TcfsDaemonImpl {
         storage_endpoint: String,
         state_cache: Arc<TokioMutex<tcfs_sync::state::StateCache>>,
         operator: Arc<TokioMutex<Option<opendal::Operator>>>,
+        path_locks: tcfs_sync::state::PathLocks,
         device_id: String,
         device_name: String,
         master_key: Option<tcfs_crypto::MasterKey>,
@@ -126,6 +128,7 @@ impl TcfsDaemonImpl {
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
             active_mounts: Arc::new(TokioMutex::new(std::collections::HashMap::new())),
+            path_locks,
             vfs_handle: vfs_rx,
             vfs_tx,
             session_store: tcfs_auth::SessionStore::new(),
@@ -236,6 +239,16 @@ impl TcfsDaemonImpl {
     /// Get a handle to the master key for background tasks (e.g., periodic reconciliation).
     pub fn master_key_handle(&self) -> Arc<TokioMutex<Option<tcfs_crypto::MasterKey>>> {
         self.master_key.clone()
+    }
+
+    fn lock_path_for_request(&self, path: &Path) -> std::path::PathBuf {
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+        if let Some(root) = self.config.sync.sync_root.as_deref() {
+            return root.join(path);
+        }
+        path.to_path_buf()
     }
 
     /// Publish a ConflictResolved event via NATS (best-effort).
@@ -628,6 +641,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         }
 
         let path = sanitize_rel_path(&path).map_err(tonic::Status::invalid_argument)?;
+        let lock_path = self.lock_path_for_request(Path::new(&path));
+        let _lock_guard = self.path_locks.lock(&lock_path).await;
 
         // Write to a temp file and upload via sync engine
         let tmp_dir =
@@ -680,12 +695,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         "push: conflict detected"
                     );
                     let mut cache = state_cache.lock().await;
-                    if let Some(entry) = cache.get(&local_path).cloned() {
-                        let updated = tcfs_sync::state::SyncState {
-                            conflict: Some(info.clone()),
-                            ..entry
-                        };
-                        cache.set(&local_path, updated);
+                    if cache.mark_conflict(&local_path, info.clone()) {
                         let _ = cache.flush();
                     }
                 }
@@ -786,6 +796,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let state_cache = self.state_cache.clone();
 
         let sync_root = self.config.sync.sync_root.as_deref();
+        let _lock_guard = self.path_locks.lock(&local_path).await;
 
         let resolved_manifest =
             tcfs_sync::engine::resolve_manifest_path(&op, &req.remote_path, &prefix, sync_root)
@@ -886,6 +897,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         drop(self.operator.lock().await);
 
         let total_bytes = meta.size;
+        let _lock_guard = self.path_locks.lock(&real_path).await;
 
         let result = {
             let mut cache = self.state_cache.lock().await;
@@ -955,6 +967,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Self::check_permission(&session, "mount")?;
         let req = request.into_inner();
         let path = std::path::PathBuf::from(&req.path);
+        let _lock_guard = self.path_locks.lock(&path).await;
 
         info!(path = %req.path, force = req.force, "unsync requested");
 
@@ -1056,13 +1069,24 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let cache = self.state_cache.lock().await;
 
         match cache.get(&path) {
-            Some(entry) => Ok(tonic::Response::new(SyncStatusResponse {
-                path: req.path,
-                state: "synced".into(),
-                blake3: entry.blake3.clone(),
-                size: entry.size,
-                last_synced: entry.last_synced as i64,
-            })),
+            Some(entry) => {
+                let state = if entry.status == tcfs_sync::state::FileSyncStatus::Synced {
+                    match cache.needs_sync(&path) {
+                        Ok(Some(_)) => "pending".to_string(),
+                        _ => entry.status.to_string(),
+                    }
+                } else {
+                    entry.status.to_string()
+                };
+
+                Ok(tonic::Response::new(SyncStatusResponse {
+                    path: req.path,
+                    state,
+                    blake3: entry.blake3.clone(),
+                    size: entry.size,
+                    last_synced: entry.last_synced as i64,
+                }))
+            }
             None => {
                 // Check if it needs sync
                 let state = match cache.needs_sync(&path) {
@@ -2348,6 +2372,7 @@ mod tests {
             "http://test:8333".into(),
             state_cache,
             operator,
+            tcfs_sync::state::PathLocks::new(),
             "test-device-id".into(),
             "test-device".into(),
             None,
@@ -2547,6 +2572,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_status_reports_explicit_conflict_state() {
+        let daemon = test_daemon();
+        let dir = tempfile::tempdir().unwrap();
+        let tracked = dir.path().join("conflicted.txt");
+        std::fs::write(&tracked, b"conflicted").unwrap();
+
+        {
+            let mut cache = daemon.state_cache.lock().await;
+            let mut entry = tcfs_sync::state::make_sync_state(
+                &tracked,
+                "abc123".to_string(),
+                1,
+                "data/manifests/abc123".to_string(),
+            )
+            .unwrap();
+            entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
+            cache.set(&tracked, entry);
+            cache.flush().unwrap();
+        }
+
+        let resp = daemon
+            .sync_status(tonic::Request::new(SyncStatusRequest {
+                path: tracked.display().to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.state, "conflict");
+    }
+
+    #[tokio::test]
+    async fn sync_status_reports_pending_for_modified_tracked_file() {
+        let daemon = test_daemon();
+        let dir = tempfile::tempdir().unwrap();
+        let tracked = dir.path().join("modified.txt");
+        std::fs::write(&tracked, b"alpha").unwrap();
+
+        {
+            let mut cache = daemon.state_cache.lock().await;
+            let entry = tcfs_sync::state::make_sync_state(
+                &tracked,
+                "tracked-alpha".to_string(),
+                1,
+                "data/manifests/alpha".to_string(),
+            )
+            .unwrap();
+            cache.set(&tracked, entry);
+            cache.flush().unwrap();
+        }
+
+        std::fs::write(&tracked, b"alpha updated").unwrap();
+
+        let resp = daemon
+            .sync_status(tonic::Request::new(SyncStatusRequest {
+                path: tracked.display().to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.state, "pending");
+    }
+
+    #[tokio::test]
     async fn resolve_conflict_invalid_resolution() {
         let daemon = test_daemon();
         let resp = daemon
@@ -2730,6 +2820,59 @@ mod tests {
             server_result.is_ok(),
             "server exited with error: {server_result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn unsync_waits_for_active_path_lock() {
+        let daemon = test_daemon();
+        let dir = tempfile::tempdir().unwrap();
+        let tracked = dir.path().join("tracked.txt");
+        std::fs::write(&tracked, b"tracked").unwrap();
+
+        {
+            let mut cache = daemon.state_cache.lock().await;
+            let entry = tcfs_sync::state::make_sync_state(
+                &tracked,
+                "abc123".to_string(),
+                1,
+                "data/manifests/abc123".to_string(),
+            )
+            .unwrap();
+            cache.set(&tracked, entry);
+            cache.flush().unwrap();
+        }
+
+        let state_cache = daemon.state_cache_handle();
+        let guard = daemon.path_locks.lock(&tracked).await;
+        let tracked_str = tracked.display().to_string();
+
+        let handle = tokio::spawn(async move {
+            daemon
+                .unsync(tonic::Request::new(UnsyncRequest {
+                    path: tracked_str,
+                    force: false,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !handle.is_finished(),
+            "unsync should wait while the path lock is held"
+        );
+
+        drop(guard);
+
+        let resp = handle.await.unwrap();
+        assert!(resp.success, "unsync error: {}", resp.error);
+
+        let cache = state_cache.lock().await;
+        let entry = cache
+            .get(&tracked)
+            .expect("state should still exist after unsync");
+        assert_eq!(entry.status, tcfs_sync::state::FileSyncStatus::NotSynced);
     }
 
     #[test]
