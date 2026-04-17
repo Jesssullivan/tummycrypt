@@ -40,6 +40,8 @@ This is the narrowest and most important truth for public release claims.
 | Nix install | blocked | cache/builder path is still not proving cleanly enough to count as release proof |
 
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
+Per-release evidence freeze for `v0.12.2`:
+[v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md).
 
 ### 2. Continuous CI / Build Proof
 
@@ -193,6 +195,7 @@ than by many open GitHub issues.
 ## Related Documents
 
 - [Distribution Smoke Matrix](distribution-smoke-matrix.md)
+- [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md)
 - [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md)
 - [Neo-Honey Live Acceptance](neo-honey-acceptance.md)
 - [Apple Surface Status](apple-surface-status.md)
