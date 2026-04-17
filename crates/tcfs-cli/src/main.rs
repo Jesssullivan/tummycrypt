@@ -2160,20 +2160,32 @@ async fn cmd_unsync(
         .unwrap_or(std::path::Path::new("."))
         .join(stub_path);
 
-    // Write stub then remove original
+    // Flip persisted state to NotSynced BEFORE destructive fs ops.
+    //
+    // If the stub write or original removal fails below, the on-disk state
+    // already reflects reality (NotSynced, possibly with a missing stub)
+    // and a re-hydration pass can recover. The previous ordering could
+    // leave a stub on disk, the original gone, and status still Synced —
+    // which would make the CLI lie to the daemon.
+    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+    state.set_status(path, tcfs_sync::state::FileSyncStatus::NotSynced);
+    state.flush().with_context(|| {
+        format!(
+            "flushing state cache before unsync: {}",
+            state_path.display()
+        )
+    })?;
+    drop(state);
+
+    // Now safe: any fs failure below leaves a recoverable
+    // NotSynced-with-possibly-missing-stub state.
     tokio::fs::write(&stub_full, stub.to_bytes())
         .await
         .with_context(|| format!("writing stub: {}", stub_full.display()))?;
     tokio::fs::remove_file(path)
         .await
         .with_context(|| format!("removing hydrated file: {}", path.display()))?;
-
-    let mut state = tcfs_sync::state::StateCache::open(&state_path)
-        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
-    state.set_status(path, tcfs_sync::state::FileSyncStatus::NotSynced);
-    state
-        .flush()
-        .with_context(|| format!("flushing state cache: {}", state_path.display()))?;
 
     println!("Unsynced: {} → {}", path.display(), stub_full.display());
     println!(
