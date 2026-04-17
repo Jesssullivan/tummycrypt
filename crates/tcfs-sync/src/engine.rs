@@ -306,12 +306,17 @@ async fn publish_index_reference(
     write_committed_index_entry(op, &index_key, &entry).await
 }
 
+/// Stages of the manifest/index publish pipeline.
+///
+/// Emitted via the `after_stage` hook in `publish_manifest_for_rel_path_with_hook`
+/// so tests can inject failures between steps (see `engine` test module).
+/// Each variant names the artifact that has **just been written**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishStage {
-    StagedManifestWritten,
-    PreparingIndexWritten,
-    FinalManifestWritten,
-    CommittedIndexWritten,
+    StagedManifest,
+    PreparingIndex,
+    FinalManifest,
+    CommittedIndex,
 }
 
 async fn publish_manifest_for_rel_path(
@@ -358,7 +363,7 @@ where
     op.write(&staged_manifest_key, manifest_bytes.clone())
         .await
         .with_context(|| format!("writing staged manifest: {staged_manifest_key}"))?;
-    after_stage(PublishStage::StagedManifestWritten)?;
+    after_stage(PublishStage::StagedManifest)?;
 
     write_preparing_index_entry(
         op,
@@ -372,17 +377,17 @@ where
         ),
     )
     .await?;
-    after_stage(PublishStage::PreparingIndexWritten)?;
+    after_stage(PublishStage::PreparingIndex)?;
 
     if !op.exists(&final_manifest_key).await.unwrap_or(false) {
         op.write(&final_manifest_key, manifest_bytes)
             .await
             .with_context(|| format!("uploading manifest: {final_manifest_key}"))?;
-        after_stage(PublishStage::FinalManifestWritten)?;
+        after_stage(PublishStage::FinalManifest)?;
     }
 
     write_committed_index_entry(op, &index_key, &entry).await?;
-    after_stage(PublishStage::CommittedIndexWritten)?;
+    after_stage(PublishStage::CommittedIndex)?;
     let _ = op.delete(&staged_manifest_key).await;
     Ok(())
 }
@@ -2456,7 +2461,7 @@ mod tests {
             test_manifest_bytes("new456", 11),
             RemoteIndexEntry::new("new456", 11, 1),
             |stage| {
-                if stage == PublishStage::StagedManifestWritten {
+                if stage == PublishStage::StagedManifest {
                     return Err(anyhow::anyhow!("injected crash after staged manifest"));
                 }
                 Ok(())
@@ -2498,7 +2503,7 @@ mod tests {
             test_manifest_bytes("new456", 11),
             RemoteIndexEntry::new("new456", 11, 1),
             |stage| {
-                if stage == PublishStage::PreparingIndexWritten {
+                if stage == PublishStage::PreparingIndex {
                     return Err(anyhow::anyhow!("injected crash after preparing index"));
                 }
                 Ok(())
@@ -2564,7 +2569,7 @@ mod tests {
             test_manifest_bytes("new456", 11),
             RemoteIndexEntry::new("new456", 11, 1),
             |stage| {
-                if stage == PublishStage::FinalManifestWritten {
+                if stage == PublishStage::FinalManifest {
                     return Err(anyhow::anyhow!("injected crash after final manifest"));
                 }
                 Ok(())
@@ -2618,7 +2623,7 @@ mod tests {
             test_manifest_bytes("new456", 11),
             RemoteIndexEntry::new("new456", 11, 1),
             |stage| {
-                if stage == PublishStage::CommittedIndexWritten {
+                if stage == PublishStage::CommittedIndex {
                     return Err(anyhow::anyhow!("injected crash after committed index"));
                 }
                 Ok(())

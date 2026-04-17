@@ -868,11 +868,7 @@ fn resolve_sync_status_lookup_path(path: &Path) -> Result<PathBuf> {
         if stub_candidate.exists() {
             let stub = std::fs::canonicalize(&stub_candidate)?;
             let parent = stub.parent().context("stub path has no parent")?;
-            return Ok(parent.join(
-                path.file_name()
-                    .context("path has no filename")?
-                    .to_os_string(),
-            ));
+            return Ok(parent.join(path.file_name().context("path has no filename")?));
         }
     }
 
@@ -889,7 +885,7 @@ async fn cmd_push_with_operator(
     state_path: &Path,
     device_id: &str,
 ) -> Result<()> {
-    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+    let mut state = tcfs_sync::state::StateCache::open(state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
     let collect_cfg = collect_config_from_sync(config);
 
@@ -1128,7 +1124,7 @@ async fn cmd_pull_with_operator(
     });
 
     // Open state cache for vclock merge during pull
-    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+    let mut state = tcfs_sync::state::StateCache::open(state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
     // Load master key for E2E decryption if configured
@@ -2134,13 +2130,11 @@ async fn cmd_unsync(
     let hash_hex = tcfs_chunks::hash_to_hex(&hash);
     let size = data.len() as u64;
 
-    if !force {
-        if tracked.blake3 != hash_hex {
-            anyhow::bail!(
-                "{} has local changes (hash mismatch). Use --force to unsync anyway.",
-                path.display()
-            );
-        }
+    if !force && tracked.blake3 != hash_hex {
+        anyhow::bail!(
+            "{} has local changes (hash mismatch). Use --force to unsync anyway.",
+            path.display()
+        );
     }
 
     let sync_root = config.sync.sync_root.as_deref();
