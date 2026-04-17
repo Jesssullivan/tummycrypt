@@ -803,7 +803,7 @@ fn test_nats_reconnect_replays_missed_updates() {
         &SimOp::ProcessEvents { machine: 2 },
     );
     assert!(
-        machines[2].files.get("report.txt").is_none(),
+        !machines[2].files.contains_key("report.txt"),
         "machine should not receive replay while NATS is disconnected"
     );
 
@@ -859,7 +859,7 @@ fn test_storage_recovery_allows_retry_and_replay() {
     );
     assert_eq!(failed_push, Some(false));
     assert!(
-        remote.manifests.get("offline.txt").is_none(),
+        !remote.manifests.contains_key("offline.txt"),
         "failed push must not leave a remote manifest behind"
     );
     assert!(
