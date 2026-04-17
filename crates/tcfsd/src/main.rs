@@ -7,11 +7,9 @@
 //!   daemon  - Full local daemon (FUSE + gRPC + sync) [default]
 //!   worker  - Stateless NATS consumer for K8s pods (feature: k8s-worker)
 
-mod cred_store;
-mod daemon;
-mod grpc;
-mod metrics;
-mod worker;
+use tcfsd::daemon;
+#[cfg(feature = "k8s-worker")]
+use tcfsd::worker;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
