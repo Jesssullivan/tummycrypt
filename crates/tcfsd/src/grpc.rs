@@ -1073,7 +1073,15 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 let state = if entry.status == tcfs_sync::state::FileSyncStatus::Synced {
                     match cache.needs_sync(&path) {
                         Ok(Some(_)) => "pending".to_string(),
-                        _ => entry.status.to_string(),
+                        Ok(None) => entry.status.to_string(),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                path = %path.display(),
+                                "needs_sync failed during sync_status; reporting unknown"
+                            );
+                            "unknown".to_string()
+                        }
                     }
                 } else {
                     entry.status.to_string()
@@ -2634,6 +2642,52 @@ mod tests {
             .into_inner();
 
         assert_eq!(resp.state, "pending");
+    }
+
+    /// When a Synced entry exists but `needs_sync` errors (e.g. the path can't
+    /// be stat'd), we must NOT report the stale "synced" state. We report
+    /// "unknown" instead so observers can see the IO failure rather than
+    /// trusting a lie.
+    #[tokio::test]
+    async fn sync_status_surfaces_needs_sync_error_instead_of_synced() {
+        let daemon = test_daemon();
+        let dir = tempfile::tempdir().unwrap();
+        // Path that will never exist — needs_sync's std::fs::metadata will Err.
+        let missing = dir.path().join("vanished.txt");
+
+        {
+            let mut cache = daemon.state_cache.lock().await;
+            cache.set(
+                &missing,
+                tcfs_sync::state::SyncState {
+                    blake3: "deadbeef".into(),
+                    size: 42,
+                    mtime: 1_700_000_000,
+                    chunk_count: 1,
+                    remote_path: "data/manifests/deadbeef".into(),
+                    last_synced: 1_700_000_000,
+                    vclock: tcfs_sync::conflict::VectorClock::default(),
+                    device_id: "test-device-id".into(),
+                    conflict: None,
+                    status: tcfs_sync::state::FileSyncStatus::Synced,
+                },
+            );
+            cache.flush().unwrap();
+        }
+
+        let resp = daemon
+            .sync_status(tonic::Request::new(SyncStatusRequest {
+                path: missing.display().to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_ne!(
+            resp.state, "synced",
+            "needs_sync Err was silently collapsed into \"synced\""
+        );
+        assert_eq!(resp.state, "unknown");
     }
 
     #[tokio::test]
