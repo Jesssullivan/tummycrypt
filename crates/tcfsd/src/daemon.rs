@@ -13,6 +13,62 @@ use tcfs_crypto::MasterKey;
 use crate::cred_store::{new_shared as new_cred_store, SharedCredStore};
 use crate::grpc::TcfsDaemonImpl;
 
+/// Record a watcher-detected conflict in the state cache, inserting a synthetic
+/// entry when the cache has no prior record for `path`.
+///
+/// `StateCache::mark_conflict` returns `false` when the entry is missing. The
+/// watcher path sees files that were never registered (e.g. created and
+/// conflict-detected in a single tick), so we must compensate by inserting a
+/// minimal `SyncState` carrying the conflict payload. Without this, the
+/// conflict metadata is silently lost — the metric increments but the file
+/// never surfaces in conflict UIs or gRPC status queries.
+///
+/// Mirrors the compensating logic used on the gRPC push path.
+pub fn watcher_record_conflict(
+    cache: &mut tcfs_sync::state::StateCache,
+    path: &std::path::Path,
+    info: tcfs_sync::conflict::ConflictInfo,
+) {
+    if cache.mark_conflict(path, info.clone()) {
+        return;
+    }
+
+    warn!(
+        path = %path.display(),
+        "watcher: mark_conflict found no cache entry; inserting synthetic Conflict record"
+    );
+
+    let remote_path = info.rel_path.clone();
+    let local_blake3 = info.local_blake3.clone();
+    let local_vclock = info.local_vclock.clone();
+    let local_device = info.local_device.clone();
+    let detected_at = info.detected_at;
+
+    let synthetic = tcfs_sync::state::SyncState {
+        blake3: local_blake3,
+        size: 0,
+        mtime: 0,
+        chunk_count: 0,
+        remote_path,
+        last_synced: detected_at,
+        vclock: local_vclock,
+        device_id: local_device,
+        conflict: Some(info),
+        status: tcfs_sync::state::FileSyncStatus::Conflict,
+    };
+    cache.set(path, synthetic);
+}
+
+/// Re-export of watcher helpers intended for tests.
+///
+/// Integration tests under `crates/tcfsd/tests/` compile as external crates
+/// and need a stable, public path to the helpers they exercise. Keep this
+/// namespace intentionally narrow — add new items only when a test demands
+/// them.
+pub mod test_support {
+    pub use super::watcher_record_conflict;
+}
+
 pub async fn run(config: TcfsConfig) -> Result<()> {
     info!("daemon starting");
 
@@ -559,7 +615,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                         "watcher: conflict detected"
                                                     );
                                                     metrics.sync_conflicts.inc();
-                                                    cache.mark_conflict(
+                                                    watcher_record_conflict(
+                                                        &mut cache,
                                                         &task.path,
                                                         info.clone(),
                                                     );
