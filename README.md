@@ -11,6 +11,8 @@ If `tinyland-inc/tummycrypt` exists, treat it as a fork or downstream
 distribution surface rather than the source of truth for planning, issues,
 releases, or contributor workflow.
 
+Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance.md).
+
 ## Features
 
 - **On-demand hydration**: Files appear as `.tc` stubs, hydrate transparently on open

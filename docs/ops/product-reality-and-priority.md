@@ -196,6 +196,7 @@ than by many open GitHub issues.
 
 - [Distribution Smoke Matrix](distribution-smoke-matrix.md)
 - [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md)
+- [Remote Governance](remote-governance.md)
 - [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md)
 - [Neo-Honey Live Acceptance](neo-honey-acceptance.md)
 - [Apple Surface Status](apple-surface-status.md)

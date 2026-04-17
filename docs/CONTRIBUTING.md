@@ -124,7 +124,7 @@ cargo run -p tcfs-cli -- mount seaweedfs://localhost:8333/tcfs /tmp/tcfs-mount
 ## Pull Request Guidelines
 
 1. **Branch from** `main` (use `sid/` prefix for feature branches)
-2. **Treat `Jesssullivan/tummycrypt` as canonical** for PRs, issues, and release flow
+2. **Treat `Jesssullivan/tummycrypt` as canonical** for PRs, issues, and release flow — see [Remote Governance](ops/remote-governance.md) for the operational policy
 3. **Use org forks as downstreams only** unless a specific distribution task requires them
 4. **Run checks locally** before pushing: `task check` (fmt + clippy + test + build)
 5. **Keep PRs focused** - one feature or fix per PR
