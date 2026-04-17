@@ -2117,6 +2117,14 @@ async fn cmd_unsync(
         return Ok(());
     }
 
+    let state_path = resolve_state_path(config, None);
+    let state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+    let tracked = state
+        .get(path)
+        .cloned()
+        .with_context(|| format!("{} is not tracked (never pushed)", path.display()))?;
+
     // Read file content and compute hash
     let data = tokio::fs::read(path)
         .await
@@ -2127,22 +2135,23 @@ async fn cmd_unsync(
     let size = data.len() as u64;
 
     if !force {
-        let state_path = resolve_state_path(config, None);
-        let state = tcfs_sync::state::StateCache::open(&state_path)
-            .with_context(|| format!("opening state cache: {}", state_path.display()))?;
-
-        match state.get(path) {
-            None => anyhow::bail!(
-                "{} is not tracked (never pushed). Use --force to unsync anyway.",
-                path.display()
-            ),
-            Some(entry) if entry.blake3 != hash_hex => anyhow::bail!(
+        if tracked.blake3 != hash_hex {
+            anyhow::bail!(
                 "{} has local changes (hash mismatch). Use --force to unsync anyway.",
                 path.display()
-            ),
-            _ => {}
+            );
         }
     }
+
+    let sync_root = config.sync.sync_root.as_deref();
+    let rel_path = tcfs_sync::engine::normalize_rel_path(path, sync_root);
+    let stub = tcfs_vfs::StubMeta::for_upload(
+        &tracked.blake3,
+        tracked.size,
+        tracked.chunk_count,
+        config.storage.resolved_prefix(),
+        &rel_path,
+    );
 
     // Build stub at path.tc
     let stub_path = tcfs_vfs::real_to_stub_name(path.file_name().context("path has no filename")?);
@@ -2150,15 +2159,6 @@ async fn cmd_unsync(
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join(stub_path);
-
-    let stub = tcfs_vfs::StubMeta {
-        chunks: 0, // unknown without state — leave as 0
-        compressed: false,
-        fetched: false,
-        oid: format!("blake3:{}", hash_hex),
-        origin: format!("seaweedfs://{}/{}", config.storage.endpoint, hash_hex),
-        size,
-    };
 
     // Write stub then remove original
     tokio::fs::write(&stub_full, stub.to_bytes())
@@ -2168,7 +2168,6 @@ async fn cmd_unsync(
         .await
         .with_context(|| format!("removing hydrated file: {}", path.display()))?;
 
-    let state_path = resolve_state_path(config, None);
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
     state.set_status(path, tcfs_sync::state::FileSyncStatus::NotSynced);
@@ -2177,7 +2176,10 @@ async fn cmd_unsync(
         .with_context(|| format!("flushing state cache: {}", state_path.display()))?;
 
     println!("Unsynced: {} → {}", path.display(), stub_full.display());
-    println!("  hash: {}", &hash_hex[..16]);
+    println!(
+        "  hash: {}",
+        &tracked.blake3[..16.min(tracked.blake3.len())]
+    );
     println!("  size: {} freed", fmt_bytes(size));
 
     Ok(())
@@ -4044,6 +4046,72 @@ mod tests {
                 other => panic!("expected tracked status after unsync, got {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cli_unsync_force_uses_tracked_remote_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let tracked = sync_root.join("alpha.txt");
+        std::fs::write(&tracked, b"alpha").unwrap();
+
+        let op = memory_op();
+        let state_path = dir.path().join("state.json");
+        let mut config = test_config(&sync_root);
+        config.sync.state_db = dir.path().join("state.db");
+
+        cmd_push_with_operator(&config, &op, &tracked, None, &state_path, "test-device")
+            .await
+            .unwrap();
+
+        let tracked_before = tcfs_sync::state::StateCache::open(&state_path)
+            .unwrap()
+            .get(&tracked)
+            .cloned()
+            .unwrap();
+
+        std::fs::write(&tracked, b"alpha updated locally").unwrap();
+
+        cmd_unsync(&config, &tracked, true).await.unwrap();
+
+        let stub_path = sync_root.join("alpha.txt.tc");
+        let stub =
+            tcfs_vfs::StubMeta::parse(&std::fs::read_to_string(&stub_path).unwrap()).unwrap();
+        assert_eq!(
+            stub.blake3_hex(),
+            Some(tracked_before.blake3.as_str()),
+            "forced unsync should preserve tracked remote hash, not local dirty content"
+        );
+        assert_eq!(stub.size, tracked_before.size);
+        assert_eq!(stub.chunks, tracked_before.chunk_count);
+        assert!(
+            stub.origin.ends_with("/alpha.txt"),
+            "stub origin should point at the logical remote path"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_unsync_force_rejects_untracked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let local = sync_root.join("never-pushed.txt");
+        std::fs::write(&local, b"local only").unwrap();
+
+        let mut config = test_config(&sync_root);
+        config.sync.state_db = dir.path().join("state.db");
+
+        let err = cmd_unsync(&config, &local, true).await.unwrap_err();
+        assert!(
+            err.to_string().contains("is not tracked"),
+            "unexpected error: {err}"
+        );
+        assert!(local.exists(), "untracked file should be left in place");
+        assert!(
+            !sync_root.join("never-pushed.txt.tc").exists(),
+            "force unsync must not create a fake stub for an untracked file"
+        );
     }
 
     #[tokio::test]
