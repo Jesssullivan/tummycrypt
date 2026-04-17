@@ -570,55 +570,60 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     ));
                                                 }
 
-                                                // Set status = Synced after successful upload
-                                                if let Some(entry) = cache.get(&task.path).cloned() {
-                                                    let synced = tcfs_sync::state::SyncState {
-                                                        status: tcfs_sync::state::FileSyncStatus::Synced,
-                                                        ..entry
-                                                    };
-                                                    cache.set(&task.path, synced);
+                                                if !upload_result.skipped {
+                                                    // Set status = Synced after a committed upload
+                                                    if let Some(entry) = cache.get(&task.path).cloned() {
+                                                        let synced = tcfs_sync::state::SyncState {
+                                                            status: tcfs_sync::state::FileSyncStatus::Synced,
+                                                            ..entry
+                                                        };
+                                                        cache.set(&task.path, synced);
+                                                    }
                                                 }
 
                                                 if let Err(e) = cache.flush() {
                                                     warn!(error = %e, "state cache flush failed");
                                                 }
-                                                info!(
-                                                    path = %task.path.display(),
-                                                    "watcher: auto-pushed"
-                                                );
-                                                metrics.files_pushed.inc();
 
-                                                // Publish NATS event so other hosts learn about the change
-                                                let rel_path = task
-                                                    .path
-                                                    .strip_prefix(&root)
-                                                    .unwrap_or(&task.path)
-                                                    .to_string_lossy()
-                                                    .to_string();
-                                                let nats_device = device.clone();
-                                                let nats_hash = upload_result.hash.clone();
-                                                let nats_size = upload_result.bytes;
-                                                let nats_remote = upload_result.remote_path.clone();
-                                                let nats_handle = nats.clone();
-                                                let pub_metrics = metrics.clone();
-                                                tokio::spawn(async move {
-                                                    if let Some(client) = nats_handle.lock().await.as_ref() {
-                                                        let event = tcfs_sync::StateEvent::FileSynced {
-                                                            device_id: nats_device,
-                                                            rel_path,
-                                                            blake3: nats_hash,
-                                                            size: nats_size,
-                                                            vclock: Default::default(),
-                                                            manifest_path: nats_remote,
-                                                            timestamp: tcfs_sync::StateEvent::now(),
-                                                        };
-                                                        if let Err(e) = client.publish_state_event(&event).await {
-                                                            tracing::warn!("watcher: failed to publish NATS event: {e}");
-                                                        } else {
-                                                            pub_metrics.nats_events_published.inc();
+                                                if !upload_result.skipped {
+                                                    info!(
+                                                        path = %task.path.display(),
+                                                        "watcher: auto-pushed"
+                                                    );
+                                                    metrics.files_pushed.inc();
+
+                                                    // Publish NATS event so other hosts learn about the change
+                                                    let rel_path = task
+                                                        .path
+                                                        .strip_prefix(&root)
+                                                        .unwrap_or(&task.path)
+                                                        .to_string_lossy()
+                                                        .to_string();
+                                                    let nats_device = device.clone();
+                                                    let nats_hash = upload_result.hash.clone();
+                                                    let nats_size = upload_result.bytes;
+                                                    let nats_remote = upload_result.remote_path.clone();
+                                                    let nats_handle = nats.clone();
+                                                    let pub_metrics = metrics.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Some(client) = nats_handle.lock().await.as_ref() {
+                                                            let event = tcfs_sync::StateEvent::FileSynced {
+                                                                device_id: nats_device,
+                                                                rel_path,
+                                                                blake3: nats_hash,
+                                                                size: nats_size,
+                                                                vclock: Default::default(),
+                                                                manifest_path: nats_remote,
+                                                                timestamp: tcfs_sync::StateEvent::now(),
+                                                            };
+                                                            if let Err(e) = client.publish_state_event(&event).await {
+                                                                tracing::warn!("watcher: failed to publish NATS event: {e}");
+                                                            } else {
+                                                                pub_metrics.nats_events_published.inc();
+                                                            }
                                                         }
-                                                    }
-                                                });
+                                                    });
+                                                }
 
                                                 Ok(())
                                             }
