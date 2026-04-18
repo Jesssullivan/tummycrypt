@@ -5,7 +5,7 @@ but not yet a continuously proven release-grade desktop surface.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
-manual smoke path for the Finder/FileProvider surface.
+smoke path for the Finder/FileProvider surface.
 
 ## Supported Workflow In The Repo Today
 
@@ -54,17 +54,17 @@ In practical terms, the intended operator flow is:
 
 ## Not Yet Proven
 
-- A continuously exercised Finder/FileProvider acceptance lane from install
-  through register, enumerate, hydrate, mutate, and conflict handling
+- A continuously exercised clean-host Finder/FileProvider acceptance lane from
+  install through register, enumerate, hydrate, mutate, and conflict handling
 - Finder badge visibility as a release gate
 - Conflict UX and notification behavior as a release gate
 - Release-day viability of every published macOS artifact without explicit
   post-cut smoke
 - A stable claim that write flows are supported for end users on macOS
 
-## Highest-Value Manual Smoke Lane
+## Highest-Value Smoke Lane
 
-This is the current best manual acceptance path for the macOS desktop surface.
+This is the current best acceptance path for the macOS desktop surface.
 
 ### Preconditions
 
@@ -74,7 +74,29 @@ This is the current best manual acceptance path for the macOS desktop surface.
   `~/.config/tcfs/fileprovider/config.json`
 - a runnable `tcfsd`
 
-### Procedure
+### Named Harness
+
+The repo now carries a named operator-facing harness for this lane:
+
+```bash
+bash scripts/macos-postinstall-smoke.sh \
+  --expected-version "${VERSION}" \
+  --config "$HOME/.config/tcfs/config.toml" \
+  --expected-file "path/to/known/remote-backed-file"
+```
+
+Notes:
+
+- `--expected-file` should point at a known remote-backed fixture relative to
+  the `~/Library/CloudStorage/TCFS*` root for the current domain
+- the helper assumes `tcfsd` is already runnable with a real config; it does
+  not fabricate temp-home state or start a fake backend
+- `#309` still tracks where this harness runs from a known-clean host per tag
+
+### Manual Procedure
+
+The script above codifies the manual steps below. Keep them here as the
+operator-readable fallback and review path.
 
 1. Verify the expected artifacts exist:
 
@@ -108,7 +130,7 @@ find "$HOME/Library/CloudStorage" -maxdepth 2 -type f | head
 ```
 
 6. Open or read a known remote-backed file and confirm that content hydration
-   succeeds.
+   succeeds. This is the `--expected-file` target in the named harness.
 
 7. Record whether badges or equivalent Finder state are visible, but treat that
    as observational evidence rather than a hard release gate.
@@ -129,6 +151,8 @@ following succeed on the same machine:
 
 - Use [Distribution Smoke Matrix](distribution-smoke-matrix.md) for packaged
   install proof.
+- Use [`scripts/macos-postinstall-smoke.sh`](../../scripts/macos-postinstall-smoke.sh)
+  for the named post-install harness that exercises this lane.
 - Use [Apple Surface Status](apple-surface-status.md) for the broader Apple
   posture.
 - Use this document for the macOS Finder/FileProvider desktop acceptance path

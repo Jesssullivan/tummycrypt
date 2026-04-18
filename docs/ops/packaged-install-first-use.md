@@ -73,6 +73,8 @@ Passing `scripts/install-smoke.sh` alone is not sufficient to claim this bar.
   live-backend sync lane.
 - Use [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md) for
   the Apple desktop path after package install.
+- Use [`scripts/macos-postinstall-smoke.sh`](../../scripts/macos-postinstall-smoke.sh)
+  as the current named harness for the macOS package-to-FileProvider lane.
 
 ## Evidence Capture
 
@@ -91,5 +93,6 @@ Record results using a table like this:
 
 - `install.sh` is published convenience tooling, not part of the canonical
   release-proof surface. See [Distribution Smoke Matrix](distribution-smoke-matrix.md).
-- The macOS clean-host lane remains tracked in `#309`.
+- The macOS clean-host lane remains tracked in `#309`; the harness now exists,
+  but its clean-host executor still needs to be chosen.
 - The Nix install path remains blocked on `#307`.
