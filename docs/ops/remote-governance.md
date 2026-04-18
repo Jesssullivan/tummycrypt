@@ -14,7 +14,7 @@ As of 2026-04-17:
 | Remote | URL | Branches | `main` ahead of `origin/main` | `main` behind `origin/main` | Role |
 |--------|-----|----------|-------------------------------|------------------------------|------|
 | `origin` | `https://github.com/Jesssullivan/tummycrypt.git` | 25 | 0 | 0 | canonical source + release authority |
-| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 70 | 21 | 0 | active downstream dev surface |
+| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 65 | 21 | 0 | active downstream dev surface |
 | `yoga` | `yoga:git/tummycrypt` (bare SSH) | 10 | 137 | 331 | retired legacy mirror |
 
 Divergence points:
@@ -81,7 +81,7 @@ snapshot that predates the current `v0.12.x` line by 331 commits.
 
 ## Branch Lifecycle Rules
 
-These rules apply to `origin`. `tinyland` has its own branch tranche (70 at
+These rules apply to `origin`. `tinyland` has its own branch tranche (65 at
 time of writing) which is triaged separately and tracked under the
 [tinyland branch triage issue](#related-trackers).
 
@@ -161,10 +161,12 @@ list:
   is therefore 19 historical commits plus the 2 sync-merge commits from
   the 2026-04-17 origin→tinyland resync.
 
-- **Triage the tinyland branch tranche**: 70 branches under categories
-  `feat/*` (~30), `chore/bump-*` (~15), `sid/*` (~15), and migration /
-  sprint (~4). A tracker issue proposes per-category disposition
-  (mergeable, supersede, close stale).
+- **Triage the tinyland branch tranche**: 65 branches after two prune
+  tranches removed 7 superseded feature branches. The remaining live mix is
+  `41` `fix/*`, `14` `feat/*`, `4` `test/*`, `3` `chore/*`, `1`
+  `refactor/*`, `1` `homebrew-tap`, and `1` `main`. The tracker issue now
+  focuses on auditing the larger `fix/*` and `chore/*` backlog for
+  "superseded vs. still-needed" status.
 
 - **Retire `yoga` formally**: the remote is already de facto retired.
   A tracker issue decides whether to archive the bare SSH repo,
