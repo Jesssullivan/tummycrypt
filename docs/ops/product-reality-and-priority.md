@@ -1,6 +1,6 @@
 # Product Reality And Priority
 
-As of April 17, 2026, `tummycrypt` is in a much better state operationally than
+As of April 18, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
 The repo is clean, the latest release is `v0.12.2`, and most release-facing
@@ -186,7 +186,7 @@ work should be ordered like this:
 
 ## Open Issue Map
 
-As of April 17, 2026, the narrow GitHub backlog is:
+As of April 18, 2026, the narrow GitHub backlog is:
 
 - M10 release-proof tranche
   - `#280`: distribution install and upgrade proof umbrella
