@@ -122,6 +122,16 @@ sudo installer -pkg "tcfs-${VERSION}-macos-aarch64.pkg" -target /
 bash scripts/install-smoke.sh --expected-version "${VERSION}"
 ```
 
+If this tag also needs packaged-install to first-real-use proof on macOS, follow
+the package smoke with the named FileProvider harness:
+
+```bash
+bash scripts/macos-postinstall-smoke.sh \
+  --expected-version "${VERSION}" \
+  --config "$HOME/.config/tcfs/config.toml" \
+  --expected-file "path/to/known/remote-backed-file"
+```
+
 Upgrade:
 
 ```bash
@@ -220,6 +230,8 @@ using a table like this:
 - Use this matrix for **distribution surface proof**
 - Use [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md)
   for the **install-to-first-action bar** after artifact smoke passes
+- Use [`scripts/macos-postinstall-smoke.sh`](../../scripts/macos-postinstall-smoke.sh)
+  for the current macOS package-to-FileProvider harness
 - Use [Neo-Honey Live Acceptance](neo-honey-acceptance.md) for the
   **credentialed live fleet sync path**
 - Use [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md) for
