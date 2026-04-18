@@ -82,7 +82,11 @@ async fn unmount_fuse(mountpoint: &Path) -> Result<()> {
                 "fusermount3 -u {} failed: {}{}{}",
                 mountpoint.display(),
                 output.status,
-                if stderr.trim().is_empty() { "" } else { " stderr: " },
+                if stderr.trim().is_empty() {
+                    ""
+                } else {
+                    " stderr: "
+                },
                 stderr.trim()
             );
         }
