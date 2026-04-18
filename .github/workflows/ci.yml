@@ -74,6 +74,13 @@ jobs:
       - name: Setup GloriousFlywheel
         uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
 
+      - name: Bootstrap Nix CLI
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = http://attic.nix-cache.svc.cluster.local/main
+            extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+
       - name: Verify runner Nix toolchain
         run: nix --version
 
@@ -147,9 +154,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: cargo deny check
+        run: cargo deny check
 
   secret-scan:
     name: Secret Scan
