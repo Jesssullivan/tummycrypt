@@ -15,7 +15,7 @@ env:
 jobs:
   check:
     name: Build + Lint + Test
-    runs-on: ubuntu-latest
+    runs-on: tummycrypt-docker
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +31,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
+            build-essential \
             protobuf-compiler \
             libfuse3-dev \
             pkg-config \
@@ -67,16 +68,22 @@ jobs:
 
   nix:
     name: Nix Build
-    runs-on: ubuntu-latest
+    runs-on: tummycrypt-nix
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Nix
+      - name: Setup GloriousFlywheel
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
+
+      - name: Bootstrap Nix CLI
         uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
-            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
+            extra-substituters = http://attic.nix-cache.svc.cluster.local/main
             extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+
+      - name: Verify runner Nix toolchain
+        run: nix --version
 
       - name: Nix flake check
         run: nix flake check
@@ -87,8 +94,17 @@ jobs:
           echo "$VERSION"
           echo "$VERSION" | grep -q "1.93.0"
 
-      - name: Build all packages
-        run: nix build .#tcfsd .#tcfs-cli .#tcfs-tui .#tcfs-mcp
+      - name: Build tcfsd
+        run: nix build .#tcfsd
+
+      - name: Build tcfs-cli
+        run: nix build .#tcfs-cli
+
+      - name: Build tcfs-tui
+        run: nix build .#tcfs-tui
+
+      - name: Build tcfs-mcp
+        run: nix build .#tcfs-mcp
 
   fileprovider-staticlib:
     name: FileProvider staticlib (macOS)
@@ -142,19 +158,25 @@ jobs:
 
   deny:
     name: cargo-deny
-    runs-on: ubuntu-latest
+    runs-on: tummycrypt-docker
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: cargo deny check
+        run: cargo deny check
 
   secret-scan:
     name: Secret Scan
-    runs-on: ubuntu-latest
+    runs-on: tummycrypt-docker
     steps:
       - uses: actions/checkout@v4
         with:

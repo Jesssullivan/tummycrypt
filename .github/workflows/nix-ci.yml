@@ -24,33 +24,48 @@ env:
 jobs:
   flake-check:
     name: Flake Check
-    runs-on: ubuntu-latest
+    runs-on: tummycrypt-nix
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Nix
+      - name: Setup GloriousFlywheel
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
+
+      - name: Bootstrap Nix CLI
         uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
-            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
+            extra-substituters = http://attic.nix-cache.svc.cluster.local/main
             extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+
+      - name: Verify runner Nix toolchain
+        run: nix --version
 
       - name: Nix flake check
         run: nix flake check
 
   build-linux-x86_64:
     name: Build Linux x86_64
-    runs-on: ubuntu-latest
+    runs-on: tummycrypt-nix
     needs: flake-check
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Nix
+      - name: Setup GloriousFlywheel
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
+
+      - name: Bootstrap Nix CLI
         uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
-            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
+            extra-substituters = http://attic.nix-cache.svc.cluster.local/main
             extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+
+      - name: Verify runner cache endpoints
+        run: |
+          echo "ATTIC_SERVER=${ATTIC_SERVER}"
+          echo "ATTIC_CACHE=${ATTIC_CACHE}"
+          echo "BAZEL_REMOTE_CACHE=${BAZEL_REMOTE_CACHE:-unset}"
 
       - name: Configure Attic
         run: |
