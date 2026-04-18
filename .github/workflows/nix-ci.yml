@@ -25,10 +25,11 @@ jobs:
   flake-check:
     name: Flake Check
     runs-on: tummycrypt-nix
-    env:
-      ATTIC_SERVER: http://attic.nix-cache.svc.cluster.local
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup GloriousFlywheel
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
 
       - name: Verify runner Nix toolchain
         run: nix --version
@@ -40,10 +41,11 @@ jobs:
     name: Build Linux x86_64
     runs-on: tummycrypt-nix
     needs: flake-check
-    env:
-      ATTIC_SERVER: http://attic.nix-cache.svc.cluster.local
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup GloriousFlywheel
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
 
       - name: Verify runner cache endpoints
         run: |

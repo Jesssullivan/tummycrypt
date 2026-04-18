@@ -71,6 +71,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup GloriousFlywheel
+        uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
+
       - name: Verify runner Nix toolchain
         run: nix --version
 
