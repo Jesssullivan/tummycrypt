@@ -14,15 +14,17 @@ As of 2026-04-17:
 | Remote | URL | Branches | `main` ahead of `origin/main` | `main` behind `origin/main` | Role |
 |--------|-----|----------|-------------------------------|------------------------------|------|
 | `origin` | `https://github.com/Jesssullivan/tummycrypt.git` | 25 | 0 | 0 | canonical source + release authority |
-| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 73 | 19 | 106 | active downstream dev surface |
-| `yoga` | `yoga:git/tummycrypt` (bare SSH) | 10 | 137 | 328 | retired legacy mirror |
+| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 72 | 21 | 0 | active downstream dev surface |
+| `yoga` | `yoga:git/tummycrypt` (bare SSH) | 10 | 137 | 331 | retired legacy mirror |
 
 Divergence points:
 
-- `origin/main` ↔ `tinyland/main`: merge-base is `3b30df6` (#178 streaming
-  chunker, 2026-04-10). Divergence is 7 days old at time of writing. Both
-  sides have merged real work since the split; the two histories are
-  reconcilable but not identical.
+- `origin/main` ↔ `tinyland/main`: merge-base is now `796b42e`
+  (`origin/main`, 2026-04-17). `tinyland/main` merged `origin/main` via
+  tinyland PR #60 on 2026-04-17, so it no longer lags canonical `main`.
+  The remaining 21 tinyland-only commits are the 19 pre-sync historical commits
+  recorded in [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
+  plus the sync merge pair (`6f7841f`, `987a6b4`).
 - `origin/main` ↔ `yoga/main`: severely diverged; yoga represents a
   `v0.9.x`-era tcfs snapshot and is not a current development branch.
 
@@ -52,6 +54,7 @@ merged there first and upstreamed to `origin` afterward.
 - `tinyland/main` may **lead** `origin/main` by a small number of commits
   (integration drift). A lead of **greater than 20 commits** is a
   governance smell and should open a tracker issue for reconciliation.
+  That threshold is currently exceeded; see #312 and the disposition doc.
 - `tinyland/main` must **not fall behind** `origin/main` indefinitely.
   Reconcile at release-cut cadence **or** weekly, whichever is more frequent.
 - Reconciliation is done **into `origin` first**, then `origin → tinyland`
@@ -65,7 +68,7 @@ merged there first and upstreamed to `origin` afterward.
 ### `yoga` — retired legacy mirror
 
 `yoga` is a bare SSH remote on a laptop host. It carries a `v0.9.x`-era
-snapshot that predates the current `v0.12.x` line by 328 commits.
+snapshot that predates the current `v0.12.x` line by 331 commits.
 
 - `yoga` is **not pushed to** from this point forward.
 - `yoga/main` and its 10 branches remain as **read-only historical
@@ -78,7 +81,7 @@ snapshot that predates the current `v0.12.x` line by 328 commits.
 
 ## Branch Lifecycle Rules
 
-These rules apply to `origin`. `tinyland` has its own branch tranche (73 at
+These rules apply to `origin`. `tinyland` has its own branch tranche (72 at
 time of writing) which is triaged separately and tracked under the
 [tinyland branch triage issue](#related-trackers).
 
@@ -109,7 +112,8 @@ Mechanical equivalent:
 
 ```bash
 git fetch origin main
-git checkout tinyland/main -b sync/origin-$(date +%Y-%m-%d)
+git fetch tinyland main
+git checkout -b sync/origin-$(date +%Y-%m-%d) tinyland/main
 git merge --no-ff origin/main
 git push tinyland sync/origin-$(date +%Y-%m-%d)
 # open PR against tinyland/main
@@ -149,16 +153,15 @@ Execution work derived from this policy is tracked as separate issues so
 the governance document itself stays a policy statement and not a punch
 list:
 
-- **Upstream current tinyland-unique commits to `origin`**: 19 commits
-  on `tinyland/main` ahead of `origin/main` as of 2026-04-17 (merge-base
-  `3b30df6`). Features include `feat(sync)` trash + bandwidth throttling,
-  `feat(sync)` selective sync policies + D-Bus gRPC backend, `feat`
-  unsync dehydration + auto-unsync with disk pressure, `fix(vfs)` OOM
-  prevention + bounded negative cache, `fix(fuse)` flush via VFS fsync,
-  `fix(daemon)` race guards + deferred vclock merge, `fix(sync)` panic
-  elimination. A tracker issue enumerates per-commit upstream disposition.
+- **Disposition of tinyland-unique history**: #311 is closed. The 19
+  pre-sync tinyland-only commits were audited in
+  [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
+  and all were classified as superseded or bookkeeping; zero upstream
+  cherry-picks are required. The current 21-commit lead on `tinyland/main`
+  is therefore 19 historical commits plus the 2 sync-merge commits from
+  the 2026-04-17 origin→tinyland resync.
 
-- **Triage the tinyland branch tranche**: 73 branches under categories
+- **Triage the tinyland branch tranche**: 72 branches under categories
   `feat/*` (~30), `chore/bump-*` (~15), `sid/*` (~15), and migration /
   sprint (~4). A tracker issue proposes per-category disposition
   (mergeable, supersede, close stale).
@@ -178,6 +181,8 @@ list:
   declaration; this document makes it operational
 - [Contributing](../CONTRIBUTING.md) — the PR-based workflow that all
   `origin`-targeted work follows
+- [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md) —
+  audited disposition of the pre-sync tinyland-only commits
 - [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md) —
   release-surface consequences of tinyland-hosted infrastructure
 - [Product Reality and Priority](product-reality-and-priority.md) —
@@ -186,5 +191,6 @@ list:
 ## Revision History
 
 - 2026-04-17 — Initial governance doc. Captures the 3-remote topology at
-  its current divergence state (`tinyland` 19 ahead / 106 behind,
-  `yoga` 137 ahead / 328 behind) and declares roles + sync policy.
+  its current divergence state and declares roles + sync policy.
+- 2026-04-17 — Refreshed after tinyland PR #60 merged `origin/main` into
+  `tinyland/main` and #311 closed with zero upstream cherry-picks required.

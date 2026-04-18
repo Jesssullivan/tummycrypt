@@ -1,6 +1,6 @@
 # Product Reality And Priority
 
-As of April 16, 2026, `tummycrypt` is in a much better state operationally than
+As of April 17, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
 The repo is clean, the latest release is `v0.12.2`, and most release-facing
@@ -184,13 +184,23 @@ work should be ordered like this:
 
 ## Open Issue Map
 
-As of April 16, 2026, the narrow GitHub backlog is:
+As of April 17, 2026, the narrow GitHub backlog is:
 
-- `#280`: release-proof completion and support-truth cleanup
+- `#280`: M10 anchor for distribution install and upgrade proof
+- `#307`: Nix cache externality / operator-host install proof
+- `#308`: Debian 12 `.deb` support-floor decision
+- `#309`: macOS `.pkg` clean-host fresh-install lane
 - `#298`: privileged on-prem authority/namespace reconcile on `honey`
+- `#312`: tinyland branch-tranche triage
+- `#313`: yoga retirement decision
 
-The larger product backlog is mostly represented by the parity analysis rather
-than by many open GitHub issues.
+Milestone `#9 M10: Usage Reality & Product Parity` is still open, but only
+because `#280` remains open. The earlier M10 GitHub issues (`#276`-`#279`,
+`#281`) are already closed; the active work has narrowed to release-proof
+follow-through plus governance cleanup.
+
+The broader product backlog still lives mostly in the parity and acceptance
+docs rather than in a large live GitHub issue set.
 
 ## Related Documents
 
