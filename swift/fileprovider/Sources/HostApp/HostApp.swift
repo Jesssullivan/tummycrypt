@@ -4,6 +4,9 @@ import Security
 import os.log
 
 private let hostLogger = Logger(subsystem: "io.tinyland.tcfs", category: "host")
+private let sharedConfigService = "io.tinyland.tcfs.config"
+private let sharedConfigAccount = "configJSON"
+private let sharedConfigAccessGroup = "group.io.tinyland.tcfs"
 
 @main
 struct TCFSProviderApp {
@@ -69,13 +72,12 @@ struct TCFSProviderApp {
 
         guard let data = config.data(using: .utf8) else { return }
 
-        let service = "io.tinyland.tcfs.config"
-        let account = "configJSON"
-
         let updateQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecAttrAccessGroup as String: sharedConfigAccessGroup,
+            kSecAttrService as String: sharedConfigService,
+            kSecAttrAccount as String: sharedConfigAccount,
         ]
         let updateAttrs: [String: Any] = [
             kSecValueData as String: data,
@@ -91,7 +93,13 @@ struct TCFSProviderApp {
         }
 
         if status == errSecSuccess {
-            hostLogger.error("provisionConfig: provisioned \(config.count) bytes to Keychain")
+            hostLogger.error(
+                "provisionConfig: provisioned \(config.count) bytes to shared Keychain group"
+            )
+        } else if status == errSecMissingEntitlement {
+            hostLogger.error(
+                "provisionConfig: Keychain write missing entitlement for \(sharedConfigAccessGroup)"
+            )
         } else {
             hostLogger.error("provisionConfig: Keychain write failed with status \(status)")
         }

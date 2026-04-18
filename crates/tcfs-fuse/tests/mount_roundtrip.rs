@@ -54,13 +54,41 @@ async fn wait_for_mount_state(mountpoint: &Path, mounted: bool) -> Result<()> {
 async fn unmount_fuse(mountpoint: &Path) -> Result<()> {
     let mountpoint = mountpoint.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let status = Command::new("fusermount3")
-            .arg("-u")
-            .arg(&mountpoint)
-            .status()
-            .with_context(|| format!("running fusermount3 -u {}", mountpoint.display()))?;
-        if !status.success() {
-            anyhow::bail!("fusermount3 -u {} failed: {status}", mountpoint.display());
+        // Real FUSE teardown can briefly report EBUSY while the kernel finishes
+        // releasing the mount. Give fusermount3 a short retry window instead of
+        // failing the remount coverage on the first transient race.
+        for attempt in 0..20 {
+            if !is_mounted(&mountpoint)? {
+                return Ok::<(), anyhow::Error>(());
+            }
+
+            let output = Command::new("fusermount3")
+                .arg("-u")
+                .arg(&mountpoint)
+                .output()
+                .with_context(|| format!("running fusermount3 -u {}", mountpoint.display()))?;
+
+            if output.status.success() || !is_mounted(&mountpoint)? {
+                return Ok::<(), anyhow::Error>(());
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("Device or resource busy") && attempt < 19 {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            anyhow::bail!(
+                "fusermount3 -u {} failed: {}{}{}",
+                mountpoint.display(),
+                output.status,
+                if stderr.trim().is_empty() {
+                    ""
+                } else {
+                    " stderr: "
+                },
+                stderr.trim()
+            );
         }
         Ok::<(), anyhow::Error>(())
     })
