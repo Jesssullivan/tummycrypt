@@ -125,7 +125,9 @@ Notes:
   does not require NATS because the post-install enumerate + hydrate lane only
   needs S3-backed manifest and chunk access
 - the remaining unknown is backend reachability from GitHub-hosted macOS
-  runners; Tailscale-only endpoints are not sufficient for this executor
+  runners; Tailscale-only, RFC1918, localhost, and other clearly non-public
+  endpoints are not sufficient for this executor, and the workflow now rejects
+  those classes during preflight
 - a hosted pass still does not prove that the macOS app-group entitlement and
   provisioning story are correct on every clean machine; treat keychain/app
   group failures as a distinct class from storage reachability failures

@@ -48,10 +48,56 @@ jobs:
             exit 1
           fi
 
-          if [[ "${TCFS_S3_ENDPOINT}" =~ ^http://100\. ]] || [[ "${TCFS_S3_ENDPOINT}" =~ ^https://100\. ]]; then
-            echo "::warning::TCFS_S3_ENDPOINT points at a 100.x address. GitHub-hosted runners will usually not reach Tailscale-only endpoints."
-            exit 1
-          fi
+          python3 - "$TCFS_S3_ENDPOINT" <<'PY'
+          import ipaddress
+          import sys
+          from urllib.parse import urlparse
+
+          endpoint = sys.argv[1].strip()
+          parsed = urlparse(endpoint)
+          if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+              print(
+                  f"::error::TCFS_S3_ENDPOINT must be an http(s) URL with a hostname (got {endpoint!r})"
+              )
+              raise SystemExit(1)
+
+          host = parsed.hostname.rstrip(".").lower()
+          blocked_suffixes = (".ts.net", ".local", ".internal", ".home.arpa")
+          if host in {"localhost", "localhost.localdomain"}:
+              print(
+                  f"::error::TCFS_S3_ENDPOINT host {host!r} is local-only and cannot be reached from GitHub-hosted macOS runners."
+              )
+              raise SystemExit(1)
+          if host.endswith(blocked_suffixes):
+              print(
+                  f"::error::TCFS_S3_ENDPOINT host {host!r} looks private to a tailnet or local DNS domain."
+              )
+              raise SystemExit(1)
+          try:
+              ip = ipaddress.ip_address(host)
+          except ValueError:
+              ip = None
+
+          if ip is None:
+              if "." not in host:
+                  print(
+                      f"::error::TCFS_S3_ENDPOINT host {host!r} is a bare hostname; GitHub-hosted runners need a publicly routable DNS name."
+                  )
+                  raise SystemExit(1)
+              raise SystemExit(0)
+
+          blocked = []
+          if ip in ipaddress.ip_network("100.64.0.0/10"):
+              blocked.append("carrier-grade NAT / tailnet")
+          elif not ip.is_global:
+              blocked.append("non-global")
+
+          if blocked:
+              print(
+                  f"::error::TCFS_S3_ENDPOINT host {host!r} is {' and '.join(blocked)}; GitHub-hosted macOS runners need a publicly reachable storage endpoint."
+              )
+              raise SystemExit(1)
+          PY
 
       - name: Derive run paths
         shell: bash
