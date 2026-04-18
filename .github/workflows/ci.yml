@@ -31,6 +31,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
+            build-essential \
             protobuf-compiler \
             libfuse3-dev \
             pkg-config \
@@ -155,6 +156,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       - name: cargo deny check
