@@ -114,10 +114,17 @@ Required repository secrets:
 - `TCFS_S3_BUCKET`
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-- `TCFS_NATS_URL`
 
-Treat this as a clean-host approximation, not as already-proven release truth,
-until at least one tagged run has passed and produced usable logs on GitHub.
+Notes:
+
+- this workflow is intentionally **storage-driven**, not fleet-sync-driven; it
+  does not require NATS because the post-install enumerate + hydrate lane only
+  needs S3-backed manifest and chunk access
+- the remaining unknown is backend reachability from GitHub-hosted macOS
+  runners; Tailscale-only endpoints are not sufficient for this executor
+- treat this as a clean-host approximation, not as already-proven release
+  truth, until at least one tagged run has passed and produced usable logs on
+  GitHub
 
 ### Manual Procedure
 

@@ -96,6 +96,7 @@ Record results using a table like this:
 - The macOS clean-host lane remains tracked in `#309`; the harness now exists,
   and the repo now carries a manual GitHub-hosted approximation in
   [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml),
-  but live backend secrets still need to exist and at least one tagged run
-  still needs to pass before that executor can be treated as proven.
+  but the remaining blocker is reachable storage from the hosted runner plus at
+  least one successful tagged run; NATS is not required for that enumerate +
+  hydrate lane.
 - The Nix install path remains blocked on `#307`.
