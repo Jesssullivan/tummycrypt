@@ -73,21 +73,23 @@ jobs:
                   f"::error::TCFS_S3_ENDPOINT host {host!r} looks private to a tailnet or local DNS domain."
               )
               raise SystemExit(1)
-          if "." not in host:
-              print(
-                  f"::error::TCFS_S3_ENDPOINT host {host!r} is a bare hostname; GitHub-hosted runners need a publicly routable DNS name."
-              )
-              raise SystemExit(1)
-
           try:
               ip = ipaddress.ip_address(host)
           except ValueError:
+              ip = None
+
+          if ip is None:
+              if "." not in host:
+                  print(
+                      f"::error::TCFS_S3_ENDPOINT host {host!r} is a bare hostname; GitHub-hosted runners need a publicly routable DNS name."
+                  )
+                  raise SystemExit(1)
               raise SystemExit(0)
 
           blocked = []
           if ip in ipaddress.ip_network("100.64.0.0/10"):
               blocked.append("carrier-grade NAT / tailnet")
-          if not ip.is_global:
+          elif not ip.is_global:
               blocked.append("non-global")
 
           if blocked:
