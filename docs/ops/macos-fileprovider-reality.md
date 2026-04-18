@@ -93,6 +93,32 @@ Notes:
   not fabricate temp-home state or start a fake backend
 - `#309` still tracks where this harness runs from a known-clean host per tag
 
+### GitHub-Hosted Approximation
+
+The repo now also carries a manual GitHub Actions executor for this lane:
+
+- [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml)
+
+This is a `workflow_dispatch` lane on `macos-14` that:
+
+- downloads the published `.pkg` for a tag
+- runs `scripts/install-smoke.sh`
+- writes a real tcfs config from repository secrets
+- seeds a remote-backed fixture with `tcfs push`
+- starts `tcfsd` with both primary and FileProvider sockets
+- runs `scripts/macos-postinstall-smoke.sh`
+
+Required repository secrets:
+
+- `TCFS_S3_ENDPOINT`
+- `TCFS_S3_BUCKET`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `TCFS_NATS_URL`
+
+Treat this as a clean-host approximation, not as already-proven release truth,
+until at least one tagged run has passed and produced usable logs on GitHub.
+
 ### Manual Procedure
 
 The script above codifies the manual steps below. Keep them here as the

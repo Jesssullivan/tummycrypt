@@ -1,0 +1,205 @@
+name: macOS Post-Install Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to validate (for example v0.12.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  pkg-postinstall:
+    name: macOS .pkg post-install smoke
+    if: github.repository == 'Jesssullivan/tummycrypt'
+    runs-on: macos-14
+    timeout-minutes: 40
+    env:
+      TCFS_S3_ENDPOINT: ${{ secrets.TCFS_S3_ENDPOINT }}
+      TCFS_S3_BUCKET: ${{ secrets.TCFS_S3_BUCKET }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TCFS_NATS_URL: ${{ secrets.TCFS_NATS_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release inputs and backend secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          [[ "$TAG" == v* ]] || {
+            echo "::error::tag must start with 'v' (got '$TAG')"
+            exit 1
+          }
+
+          missing=()
+          for name in TCFS_S3_ENDPOINT TCFS_S3_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TCFS_NATS_URL; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required repository secrets: ${missing[*]}"
+            echo "Set the live backend secrets before using this workflow."
+            exit 1
+          fi
+
+      - name: Derive run paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          VERSION="${TAG#v}"
+          LOG_DIR="$RUNNER_TEMP/tcfs-macos-postinstall"
+          SYNC_ROOT="$RUNNER_TEMP/tcfs-sync-root"
+          CONFIG_DIR="$HOME/.config/tcfs"
+          CONFIG_PATH="$CONFIG_DIR/config.toml"
+          APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
+          REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
+
+          mkdir -p "$LOG_DIR" "$SYNC_ROOT" "$CONFIG_DIR" "$APP_GROUP_DIR"
+
+          {
+            echo "TAG=$TAG"
+            echo "VERSION=$VERSION"
+            echo "LOG_DIR=$LOG_DIR"
+            echo "SYNC_ROOT=$SYNC_ROOT"
+            echo "CONFIG_DIR=$CONFIG_DIR"
+            echo "CONFIG_PATH=$CONFIG_PATH"
+            echo "APP_GROUP_DIR=$APP_GROUP_DIR"
+            echo "REMOTE_PREFIX=$REMOTE_PREFIX"
+            echo "FIXTURE_REL=$FIXTURE_REL"
+          } >> "$GITHUB_ENV"
+
+      - name: Download release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL \
+            -o "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" \
+            "https://github.com/${{ github.repository }}/releases/download/${TAG}/tcfs-${VERSION}-macos-aarch64.pkg"
+
+      - name: Install release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo installer -pkg "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" -target /
+
+      - name: Prove installed-binary smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/install-smoke.sh --expected-version "${VERSION}"
+
+      - name: Write live config
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$CONFIG_PATH" <<EOF
+          [daemon]
+          socket = "/tmp/tcfsd-gha.sock"
+          fileprovider_socket = "${APP_GROUP_DIR}/tcfsd.sock"
+          metrics_addr = "127.0.0.1:19100"
+          log_format = "text"
+
+          [storage]
+          endpoint = "${TCFS_S3_ENDPOINT}"
+          region = "us-east-1"
+          bucket = "${TCFS_S3_BUCKET}"
+          remote_prefix = "${REMOTE_PREFIX}"
+
+          [sync]
+          nats_url = "${TCFS_NATS_URL}"
+          state_db = "${RUNNER_TEMP}/tcfs-state.db"
+          sync_root = "${SYNC_ROOT}"
+          device_name = "gha-macos-postinstall"
+
+          device_id = "gha-macos-postinstall"
+          EOF
+          chmod 600 "$CONFIG_PATH"
+
+      - name: Provision FileProvider config
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash swift/fileprovider/provision-config.sh "$CONFIG_PATH"
+
+      - name: Seed remote fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIXTURE_PATH="${SYNC_ROOT}/${FIXTURE_REL}"
+          mkdir -p "$(dirname "$FIXTURE_PATH")"
+          printf 'tcfs macOS post-install smoke %s run %s\n' "$TAG" "$GITHUB_RUN_ID" > "$FIXTURE_PATH"
+          tcfs --config "$CONFIG_PATH" push "$FIXTURE_PATH"
+
+      - name: Start tcfsd with live config
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup tcfsd --config "$CONFIG_PATH" --mode daemon --log-format text \
+            > "$LOG_DIR/tcfsd.log" 2>&1 &
+          echo "$!" > "$LOG_DIR/tcfsd.pid"
+
+          for socket in /tmp/tcfsd-gha.sock "${APP_GROUP_DIR}/tcfsd.sock"; do
+            ready=0
+            for _ in $(seq 1 60); do
+              if [[ -S "$socket" ]]; then
+                ready=1
+                break
+              fi
+              sleep 1
+            done
+            if [[ "$ready" -ne 1 ]]; then
+              echo "::error::Timed out waiting for socket $socket"
+              cat "$LOG_DIR/tcfsd.log" || true
+              exit 1
+            fi
+          done
+
+      - name: Run macOS post-install harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/macos-postinstall-smoke.sh \
+            --expected-version "${VERSION}" \
+            --config "$CONFIG_PATH" \
+            --expected-file "${FIXTURE_REL}" \
+            --log-dir "$LOG_DIR/harness"
+
+      - name: Capture diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          pluginkit -m -A -D -i io.tinyland.tcfs.fileprovider > "$LOG_DIR/pluginkit.txt" 2>&1
+          if command -v fileproviderctl >/dev/null 2>&1; then
+            fileproviderctl domain list > "$LOG_DIR/fileproviderctl-domains.txt" 2>&1
+          fi
+          log show --style compact --last 5m \
+            --predicate 'subsystem BEGINSWITH "io.tinyland.tcfs"' \
+            > "$LOG_DIR/oslog.txt" 2>&1
+
+      - name: Stop tcfsd
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [[ -f "$LOG_DIR/tcfsd.pid" ]]; then
+            kill "$(cat "$LOG_DIR/tcfsd.pid")" 2>/dev/null || true
+            wait "$(cat "$LOG_DIR/tcfsd.pid")" 2>/dev/null || true
+          fi
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-postinstall-smoke-${{ github.event.inputs.tag }}
+          path: ${{ env.LOG_DIR }}
+          retention-days: 7

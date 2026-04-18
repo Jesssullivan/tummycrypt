@@ -29,6 +29,7 @@ Options:
   --tcfs <path-or-name>       CLI binary to use (default: tcfs)
   --tcfsd <path-or-name>      Daemon binary to use (default: tcfsd)
   --timeout <seconds>         Wait timeout for async steps (default: 45)
+  --log-dir <path>            Persist status logs instead of using a temp dir
   --skip-status               Skip `tcfs status` checks
   -h, --help                  Show this help
 EOF
@@ -44,6 +45,7 @@ DOMAIN_ID="${TCFS_DOMAIN_ID:-io.tinyland.tcfs}"
 TCFS_BIN="${TCFS_BIN:-tcfs}"
 TCFSD_BIN="${TCFSD_BIN:-tcfsd}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-45}"
+LOG_DIR_OVERRIDE=""
 SKIP_STATUS=0
 LOG_DIR=""
 
@@ -87,6 +89,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --timeout)
       TIMEOUT_SECS="$2"
+      shift 2
+      ;;
+    --log-dir)
+      LOG_DIR_OVERRIDE="$2"
       shift 2
       ;;
     --skip-status)
@@ -349,8 +355,13 @@ hydrate_expected_file() {
 }
 
 APP_PATH="$(detect_app_path)"
-LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tcfs-macos-postinstall.XXXXXX")"
-trap 'rm -rf "$LOG_DIR"' EXIT
+if [[ -n "$LOG_DIR_OVERRIDE" ]]; then
+  LOG_DIR="$LOG_DIR_OVERRIDE"
+  mkdir -p "$LOG_DIR"
+else
+  LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tcfs-macos-postinstall.XXXXXX")"
+  trap 'rm -rf "$LOG_DIR"' EXIT
+fi
 
 TCFSD_PATH="$(resolve_bin "$TCFSD_BIN")"
 assert_version "tcfsd" "$TCFSD_PATH"
@@ -364,6 +375,7 @@ else
 fi
 
 require_file "$HOME/.config/tcfs/fileprovider/config.json"
+echo "status logs: $LOG_DIR"
 check_pluginkit
 
 echo "launching host app: $APP_PATH"
