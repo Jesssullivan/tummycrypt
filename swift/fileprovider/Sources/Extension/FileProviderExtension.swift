@@ -4,6 +4,9 @@ import Security
 import os.log
 
 private let logger = Logger(subsystem: "io.tinyland.tcfs.fileprovider", category: "extension")
+private let sharedConfigService = "io.tinyland.tcfs.config"
+private let sharedConfigAccount = "configJSON"
+private let sharedConfigAccessGroup = "group.io.tinyland.tcfs"
 
 /// TCFS FileProvider extension — bridges to Rust via cbindgen C FFI.
 ///
@@ -544,18 +547,19 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return nil
     }
 
-    /// Read config JSON from the macOS login keychain.
+    /// Read config JSON from the shared data-protection keychain.
     /// Keychain access uses securityd XPC — no filesystem I/O, immune to
     /// fileproviderd's file coordination locks.
     ///
-    /// Uses the legacy macOS keychain (NOT data protection keychain) to avoid
-    /// restricted entitlement requirements. Both host app and extension are
-    /// signed with the same Developer ID, so they share keychain access.
+    /// The host app writes this item with an explicit app-group access group so
+    /// the extension can read it without depending on each target's bundle ID.
     private static func readConfigFromKeychain() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "io.tinyland.tcfs.config",
-            kSecAttrAccount as String: "configJSON",
+            kSecUseDataProtectionKeychain as String: true,
+            kSecAttrAccessGroup as String: sharedConfigAccessGroup,
+            kSecAttrService as String: sharedConfigService,
+            kSecAttrAccount as String: sharedConfigAccount,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]

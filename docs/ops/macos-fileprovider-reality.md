@@ -50,7 +50,11 @@ In practical terms, the intended operator flow is:
   `~/Applications/TCFSProvider.app`, so that install path should be treated as
   requiring manual app launch and manual verification.
 - The host app provisions config from `~/.config/tcfs/fileprovider/config.json`
-  into Keychain as a best-effort startup step.
+  into the shared app-group keychain as a best-effort startup step.
+- The repo now uses explicit shared-keychain semantics for that config, but the
+  clean-machine validity of the `group.io.tinyland.tcfs` app-group entitlement
+  is still only as good as the signing and provisioning reality of the shipped
+  app bundle.
 
 ## Not Yet Proven
 
@@ -122,6 +126,9 @@ Notes:
   needs S3-backed manifest and chunk access
 - the remaining unknown is backend reachability from GitHub-hosted macOS
   runners; Tailscale-only endpoints are not sufficient for this executor
+- a hosted pass still does not prove that the macOS app-group entitlement and
+  provisioning story are correct on every clean machine; treat keychain/app
+  group failures as a distinct class from storage reachability failures
 - treat this as a clean-host approximation, not as already-proven release
   truth, until at least one tagged run has passed and produced usable logs on
   GitHub
