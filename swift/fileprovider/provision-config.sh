@@ -34,11 +34,15 @@ extract_toml() {
 }
 S3_ENDPOINT="$(extract_toml endpoint)"
 S3_BUCKET="$(extract_toml bucket)"
+REMOTE_PREFIX="$(extract_toml remote_prefix)"
 DEVICE_ID="$(extract_toml device_id)"
+DEVICE_NAME="$(extract_toml device_name)"
+DAEMON_SOCKET="$(extract_toml fileprovider_socket)"
 
 S3_ENDPOINT="${S3_ENDPOINT:-http://212.2.245.145:8333}"
 S3_BUCKET="${S3_BUCKET:-tcfs}"
-DEVICE_ID="${DEVICE_ID:-$(hostname -s)}"
+DEVICE_ID="${DEVICE_ID:-${DEVICE_NAME:-$(hostname -s)}}"
+REMOTE_PREFIX="${REMOTE_PREFIX:-devices/$DEVICE_ID}"
 
 # --- Resolve S3 credentials ---
 if [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
@@ -77,16 +81,30 @@ GROUP_CONTAINER="$DEV_DIR"
 
 CONFIG_JSON="$GROUP_CONTAINER/config.json"
 
+if [ -n "$DAEMON_SOCKET" ]; then
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
   "s3_bucket": "$S3_BUCKET",
   "s3_access": "$S3_ACCESS",
   "s3_secret": "$S3_SECRET",
-  "remote_prefix": "devices/$DEVICE_ID",
+  "remote_prefix": "$REMOTE_PREFIX",
+  "device_id": "$DEVICE_ID",
+  "daemon_socket": "$DAEMON_SOCKET"
+}
+CONFIGEOF
+else
+cat > "$CONFIG_JSON" <<CONFIGEOF
+{
+  "s3_endpoint": "$S3_ENDPOINT",
+  "s3_bucket": "$S3_BUCKET",
+  "s3_access": "$S3_ACCESS",
+  "s3_secret": "$S3_SECRET",
+  "remote_prefix": "$REMOTE_PREFIX",
   "device_id": "$DEVICE_ID"
 }
 CONFIGEOF
+fi
 
 chmod 600 "$CONFIG_JSON"
 
@@ -94,7 +112,11 @@ echo "==> Config written to $CONFIG_JSON"
 echo "    Endpoint: $S3_ENDPOINT"
 echo "    Bucket:   $S3_BUCKET"
 echo "    Device:   $DEVICE_ID"
-echo "    Credentials: $(echo "$S3_ACCESS" | head -c 4)****"
+echo "    Prefix:   $REMOTE_PREFIX"
+if [ -n "$DAEMON_SOCKET" ]; then
+    echo "    Socket:   $DAEMON_SOCKET"
+fi
+echo "    Credentials: present"
 
 # Also copy to App Group container if it already exists (for sandboxed .appex)
 APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"

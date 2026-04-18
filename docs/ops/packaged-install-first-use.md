@@ -94,5 +94,8 @@ Record results using a table like this:
 - `install.sh` is published convenience tooling, not part of the canonical
   release-proof surface. See [Distribution Smoke Matrix](distribution-smoke-matrix.md).
 - The macOS clean-host lane remains tracked in `#309`; the harness now exists,
-  but its clean-host executor still needs to be chosen.
+  and the repo now carries a manual GitHub-hosted approximation in
+  [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml),
+  but live backend secrets still need to exist and at least one tagged run
+  still needs to pass before that executor can be treated as proven.
 - The Nix install path remains blocked on `#307`.
