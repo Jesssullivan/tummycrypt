@@ -1,6 +1,6 @@
 # Product Reality And Priority
 
-As of April 16, 2026, `tummycrypt` is in a much better state operationally than
+As of April 18, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
 The repo is clean, the latest release is `v0.12.2`, and most release-facing
@@ -40,6 +40,8 @@ This is the narrowest and most important truth for public release claims.
 | Nix install | blocked | cache/builder path is still not proving cleanly enough to count as release proof |
 
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
+Install-to-first-use bridge:
+[Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md).
 Per-release evidence freeze for `v0.12.2`:
 [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md).
 
@@ -184,17 +186,31 @@ work should be ordered like this:
 
 ## Open Issue Map
 
-As of April 16, 2026, the narrow GitHub backlog is:
+As of April 18, 2026, the narrow GitHub backlog is:
 
-- `#280`: release-proof completion and support-truth cleanup
-- `#298`: privileged on-prem authority/namespace reconcile on `honey`
+- M10 release-proof tranche
+  - `#280`: distribution install and upgrade proof umbrella
+  - `#307`: Nix cache externality / operator-host install proof
+  - `#308`: Debian 12 `.deb` support-floor decision
+  - `#309`: macOS `.pkg` clean-host fresh-install lane
+  - `#317`: decide whether published `install.sh` is a supported distribution surface
+  - `#318`: define the packaged-install to first-real-use acceptance bar
+- Adjacent non-M10 lanes
+  - `#298`: privileged on-prem authority/namespace reconcile on `honey`
+  - `#312`: tinyland branch-tranche triage
+  - `#313`: yoga retirement decision
 
-The larger product backlog is mostly represented by the parity analysis rather
-than by many open GitHub issues.
+Milestone `#9 M10: Usage Reality & Product Parity` remains open because the
+release-proof tranche now consists of six active issues, not just the umbrella.
+The earlier M10 GitHub issues (`#276`-`#279`, `#281`) are already closed.
+
+The broader product backlog still lives mostly in the parity and acceptance
+docs rather than in a large live GitHub issue set.
 
 ## Related Documents
 
 - [Distribution Smoke Matrix](distribution-smoke-matrix.md)
+- [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md)
 - [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md)
 - [Remote Governance](remote-governance.md)
 - [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md)

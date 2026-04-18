@@ -1040,7 +1040,7 @@ jobs:
             sudo installer -pkg tcfs-${{ needs.plan.outputs.version }}-macos-aarch64.pkg -target /
             ```
 
-            **Linux / macOS (shell script):**
+            **Linux/macOS tarball convenience installer (CLI-first, not a release-proof surface):**
             ```bash
             curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/install.sh | sh
             ```

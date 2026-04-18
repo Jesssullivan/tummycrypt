@@ -24,6 +24,19 @@ surfaces below have passed their required smoke checks.
   - container upgrades are normally orchestrator rollouts rather than a host-local installer flow
   - Nix installs are immutable and ref-pinned, so the per-tag fresh install gate is the most meaningful baseline
 
+## Out-Of-Scope Published Helpers
+
+The release workflow also publishes helper installers:
+
+- `install.sh` for Linux/macOS tarball convenience installs
+- `install.ps1` for Windows convenience installs
+
+These are **not** canonical release-proof surfaces today.
+
+- `install.sh` remains convenience tooling until a dedicated smoke lane is added
+- `install.ps1` is convenience-only because Windows is not yet a truthful
+  release-grade user surface
+
 ## Shared Installed-Binary Smoke
 
 For any release surface that places `tcfsd` on `PATH`, run:
@@ -50,9 +63,12 @@ What it does **not** prove:
 - live SeaweedFS or NATS connectivity
 - Finder or FileProvider behavior
 - service-manager integration via systemd or launchd
+- truthful first use against reachable storage
 - Kubernetes rollout semantics
 
-Those remain surface-specific follow-on checks, documented below.
+Those remain surface-specific follow-on checks. For the bridge from
+installed-binary smoke to the first truthful user action, use
+[Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md).
 
 ## Surface Matrix
 
@@ -202,6 +218,8 @@ using a table like this:
 ## Relationship To Other Acceptance Lanes
 
 - Use this matrix for **distribution surface proof**
+- Use [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md)
+  for the **install-to-first-action bar** after artifact smoke passes
 - Use [Neo-Honey Live Acceptance](neo-honey-acceptance.md) for the
   **credentialed live fleet sync path**
 - Use [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md) for

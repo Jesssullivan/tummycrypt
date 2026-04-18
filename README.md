@@ -42,7 +42,8 @@ task check
 ## Installation
 
 ```bash
-# Linux (installer script)
+# Linux/macOS tarball convenience installer
+# Fast CLI install, but not part of the canonical release-proof surface.
 curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
 
 # macOS (Homebrew, current manual tap flow)
@@ -63,6 +64,10 @@ podman pull ghcr.io/jesssullivan/tcfsd:latest
 # Nix
 nix build github:Jesssullivan/tummycrypt
 ```
+
+For the supported post-release proof contract across Homebrew, `.pkg`, `.deb`,
+`.rpm`, container, and Nix, see
+[docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md).
 
 ## CLI
 
@@ -115,6 +120,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
 
 For packaged release proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container,
 and Nix surfaces, see [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md).
+For the bar after install succeeds, see
+[docs/ops/packaged-install-first-use.md](docs/ops/packaged-install-first-use.md).
 
 ## Platform Support
 

@@ -15,7 +15,8 @@ default here.
 Download the latest release from [GitHub Releases](https://github.com/Jesssullivan/tummycrypt/releases):
 
 ```bash
-# Linux (x86_64)
+# Linux/macOS tarball convenience installer
+# Fast CLI install, but not part of the canonical release-proof surface.
 curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
 
 # macOS (Homebrew, current manual tap flow)
@@ -129,6 +130,7 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 ### Ops Runbooks
 - [Product Reality and Priority](ops/product-reality-and-priority.md) — current proof surface, honest product posture, and prioritized backlog
 - [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md) — canonical post-release install proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container, and Nix
+- [Packaged Install To First-Real-Use Acceptance](ops/packaged-install-first-use.md) — the bar after artifact smoke passes and before broader host acceptance
 - [Lab Host Acceptance Matrix](ops/lab-host-acceptance-matrix.md) — real-host acceptance lanes across `honey`, `neo`, and `petting-zoo-mini`
 - [Neo-Honey Live Acceptance](ops/neo-honey-acceptance.md) — named live fleet sync acceptance lane
 - [On-Prem Authority Recovery](ops/onprem-authority-recovery.md) — source-of-truth and recovery path for the Helm-managed `tcfs` backend namespace
