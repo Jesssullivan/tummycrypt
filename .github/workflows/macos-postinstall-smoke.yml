@@ -22,11 +22,10 @@ jobs:
       TCFS_S3_BUCKET: ${{ secrets.TCFS_S3_BUCKET }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      TCFS_NATS_URL: ${{ secrets.TCFS_NATS_URL }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate release inputs and backend secrets
+      - name: Validate release inputs and storage secrets
         shell: bash
         run: |
           set -euo pipefail
@@ -37,7 +36,7 @@ jobs:
           }
 
           missing=()
-          for name in TCFS_S3_ENDPOINT TCFS_S3_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TCFS_NATS_URL; do
+          for name in TCFS_S3_ENDPOINT TCFS_S3_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
             if [[ -z "${!name:-}" ]]; then
               missing+=("$name")
             fi
@@ -45,7 +44,12 @@ jobs:
 
           if (( ${#missing[@]} > 0 )); then
             echo "::error::Missing required repository secrets: ${missing[*]}"
-            echo "Set the live backend secrets before using this workflow."
+            echo "Set the storage-side secrets before using this workflow."
+            exit 1
+          fi
+
+          if [[ "${TCFS_S3_ENDPOINT}" =~ ^http://100\. ]] || [[ "${TCFS_S3_ENDPOINT}" =~ ^https://100\. ]]; then
+            echo "::warning::TCFS_S3_ENDPOINT points at a 100.x address. GitHub-hosted runners will usually not reach Tailscale-only endpoints."
             exit 1
           fi
 
@@ -115,7 +119,6 @@ jobs:
           remote_prefix = "${REMOTE_PREFIX}"
 
           [sync]
-          nats_url = "${TCFS_NATS_URL}"
           state_db = "${RUNNER_TEMP}/tcfs-state.db"
           sync_root = "${SYNC_ROOT}"
           device_name = "gha-macos-postinstall"
