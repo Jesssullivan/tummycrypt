@@ -94,8 +94,17 @@ jobs:
           echo "$VERSION"
           echo "$VERSION" | grep -q "1.93.0"
 
-      - name: Build all packages
-        run: nix build .#tcfsd .#tcfs-cli .#tcfs-tui .#tcfs-mcp
+      - name: Build tcfsd
+        run: nix build .#tcfsd
+
+      - name: Build tcfs-cli
+        run: nix build .#tcfs-cli
+
+      - name: Build tcfs-tui
+        run: nix build .#tcfs-tui
+
+      - name: Build tcfs-mcp
+        run: nix build .#tcfs-mcp
 
   fileprovider-staticlib:
     name: FileProvider staticlib (macOS)
