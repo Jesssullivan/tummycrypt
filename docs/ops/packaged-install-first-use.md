@@ -97,7 +97,9 @@ Record results using a table like this:
   and the repo now carries a manual GitHub-hosted approximation in
   [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml),
   but the remaining blocker is reachable storage from the hosted runner plus at
-  least one successful tagged run; NATS is not required for that enumerate +
-  hydrate lane, and keychain/app-group failures should be treated separately
-  from storage reachability failures.
+  least one successful tagged run. That hosted lane now rejects obviously
+  non-public endpoint classes during preflight rather than failing later during
+  fixture seeding; NATS is not required for the enumerate + hydrate lane, and
+  keychain/app-group failures should be treated separately from storage
+  reachability failures.
 - The Nix install path remains blocked on `#307`.
