@@ -5,6 +5,7 @@
 # Usage:
 #   ./scripts/tcfs-backend-deploy.sh
 #   ./scripts/tcfs-backend-deploy.sh --dry-run
+#   ./scripts/tcfs-backend-deploy.sh --rbac-only
 #   TCFS_RELEASE_NAME=tcfs-backend ./scripts/tcfs-backend-deploy.sh --set image.tag=v0.12.2
 #
 set -euo pipefail
@@ -16,12 +17,17 @@ CHART_DIR="${REPO_ROOT}/infra/k8s/charts/tcfs-backend"
 RELEASE_NAME="${TCFS_RELEASE_NAME:-tcfs-backend}"
 NAMESPACE="${TCFS_NAMESPACE:-tcfs}"
 DRY_RUN=false
+RBAC_ONLY=false
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run)
             DRY_RUN=true
+            shift
+            ;;
+        --rbac-only)
+            RBAC_ONLY=true
             shift
             ;;
         *)
@@ -77,6 +83,33 @@ info "  Release:   ${RELEASE_NAME}"
 info "  Namespace: ${NAMESPACE}"
 info "  Chart:     ${CHART_DIR}"
 echo
+
+if [[ "${RBAC_ONLY}" == "true" ]]; then
+    TEMPLATE_CMD=(
+        helm template "${RELEASE_NAME}" "${CHART_DIR}"
+        --namespace "${NAMESPACE}"
+        -f "${CHART_DIR}/values.yaml"
+        --show-only templates/rbac.yaml
+    )
+
+    if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+        TEMPLATE_CMD+=("${EXTRA_ARGS[@]}")
+    fi
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        info "Rendering RBAC-only recovery manifest — no changes will be applied"
+        "${TEMPLATE_CMD[@]}"
+    else
+        info "Applying RBAC-only recovery manifest"
+        "${TEMPLATE_CMD[@]}" | kubectl apply --namespace "${NAMESPACE}" -f -
+        echo
+        info "Validating RBAC-only recovery objects..."
+        kubectl get serviceaccount "${RELEASE_NAME}-tcfs-backend" --namespace "${NAMESPACE}"
+        kubectl get role "${RELEASE_NAME}-tcfs-backend-leases" --namespace "${NAMESPACE}"
+        kubectl get rolebinding "${RELEASE_NAME}-tcfs-backend-leases" --namespace "${NAMESPACE}"
+    fi
+    exit 0
+fi
 
 "${HELM_CMD[@]}"
 

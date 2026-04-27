@@ -82,6 +82,29 @@ TCFS_NAMESPACE=tcfs bash scripts/tcfs-backend-deploy.sh \
   --set image.tag=v0.12.2
 ```
 
+### RBAC-Only Recovery For Missing Helm Release State
+
+Live recovery note, 2026-04-27: the on-prem namespace can contain
+Helm-shaped `tcfs-backend-tcfs-backend-*` objects without Helm release
+secrets. In that state a full `helm upgrade --install` cannot immediately adopt
+the existing ConfigMap / Deployment, and it can also fail before adoption if
+optional CRDs such as KEDA `ScaledObject` or Prometheus `ServiceMonitor` are not
+installed.
+
+If the Deployment exists but pod creation is blocked because the service
+account is missing, restore only the chart-owned RBAC scaffold first:
+
+```bash
+bash scripts/tcfs-backend-deploy.sh --rbac-only --dry-run
+bash scripts/tcfs-backend-deploy.sh --rbac-only
+kubectl rollout restart deployment/tcfs-backend-tcfs-backend-worker -n tcfs
+kubectl rollout status deployment/tcfs-backend-tcfs-backend-worker -n tcfs
+```
+
+This is a repair path, not a complete Helm adoption. After the worker is
+healthy, follow up by either adopting the existing objects into Helm release
+state or deliberately migrating to the OpenTofu object-name family.
+
 ## Validate Recovery
 
 ```bash
