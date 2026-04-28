@@ -28,9 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup GloriousFlywheel
-        uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
-
       - name: Bootstrap Nix CLI
         uses: cachix/install-nix-action@v31
         with:
@@ -50,9 +47,6 @@ jobs:
     needs: flake-check
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup GloriousFlywheel
-        uses: tinyland-inc/GloriousFlywheel/.github/actions/setup-flywheel@main
 
       - name: Bootstrap Nix CLI
         uses: cachix/install-nix-action@v31
