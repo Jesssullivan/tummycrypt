@@ -77,7 +77,7 @@ zstd = { version = "0.13" }
 rocksdb = { version = "0.24" }
 
 # Messaging
-async-nats = { version = "0.46" }
+async-nats = { version = "0.47" }
 futures = { version = "0.3" }
 bytes = { version = "1" }
 

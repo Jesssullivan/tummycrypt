@@ -4,6 +4,7 @@ exclude = [
   "^https://nix-cache.fuzzy-dev.tinyland.dev",
   "^https://docs.tummycrypt.io",
   "^https://developer.apple.com/documentation/fskit$",
+  "^https://developer.apple.com/documentation/fileprovider$",
   "^https://developer.apple.com/documentation/fileprovider/nsfileproviderreplicatedextension$",
   "your-org",
   "localhost",

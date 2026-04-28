@@ -49,3 +49,13 @@ helm list -n tcfs
 kubectl get sa tcfs-backend-tcfs-backend -n tcfs
 kubectl rollout status deployment/tcfs-backend-tcfs-backend-worker -n tcfs
 ```
+
+If live Helm release state is missing but an existing worker Deployment still
+references `tcfs-backend-tcfs-backend`, use the repo script's RBAC-only repair
+path before attempting a full adoption:
+
+```bash
+bash scripts/tcfs-backend-deploy.sh --rbac-only --dry-run
+bash scripts/tcfs-backend-deploy.sh --rbac-only
+kubectl rollout restart deployment/tcfs-backend-tcfs-backend-worker -n tcfs
+```
