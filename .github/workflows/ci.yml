@@ -15,7 +15,7 @@ env:
 jobs:
   check:
     name: Build + Lint + Test
-    runs-on: tummycrypt-docker
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +68,7 @@ jobs:
 
   nix:
     name: Nix Build
-    runs-on: tummycrypt-nix
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -79,7 +79,7 @@ jobs:
         uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
-            extra-substituters = http://attic.nix-cache.svc.cluster.local/main
+            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
             extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
 
       - name: Verify runner Nix toolchain
@@ -158,7 +158,7 @@ jobs:
 
   deny:
     name: cargo-deny
-    runs-on: tummycrypt-docker
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -176,7 +176,7 @@ jobs:
 
   secret-scan:
     name: Secret Scan
-    runs-on: tummycrypt-docker
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
