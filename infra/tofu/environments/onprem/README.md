@@ -21,6 +21,9 @@ This environment does not adopt those objects and does not move data. It only
 adds a source-owned candidate path for tailnet exposure once the migration
 gates are ready.
 
+All migration resources are disabled by default. The target retained PVCs are
+created only when `enable_stateful_migration_target_pvcs=true`.
+
 ## Safe Validation
 
 ```bash
@@ -37,6 +40,13 @@ Storage migration planning:
 
 ```text
 docs/ops/tcfs-onprem-storage-migration.md
+```
+
+Plan target retained PVC creation without enabling tailnet candidate Services:
+
+```bash
+tofu plan \
+  -var='enable_stateful_migration_target_pvcs=true'
 ```
 
 ## Candidate Tailnet Smoke

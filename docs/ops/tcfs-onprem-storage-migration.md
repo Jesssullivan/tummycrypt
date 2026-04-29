@@ -29,6 +29,12 @@ Durable targets now exist:
 - NATS target: `openebs-bumble-messaging-retain`
 - SeaweedFS target: `openebs-bumble-s3-retain`
 
+Source-owned target PVC scaffolding is disabled by default in
+`infra/tofu/environments/onprem`:
+
+- `tcfs-nats-openebs-target` on `openebs-bumble-messaging-retain`
+- `tcfs-seaweedfs-openebs-target` on `openebs-bumble-s3-retain`
+
 ## Non-Negotiable Safety Constraints
 
 - Do not patch `volumeClaimTemplates.storageClassName` in place. StatefulSet
@@ -72,7 +78,8 @@ Before copying state:
 1. Stop external writes and TCFS worker writes.
 2. Capture `just onprem-data-inventory` output.
 3. Record old PVC names, PV names, node, and host paths.
-4. Create target retained PVCs with distinct names.
+4. Create target retained PVCs with distinct names by planning and applying
+   `enable_stateful_migration_target_pvcs=true`.
 5. Confirm rollback path uses the old StatefulSets and old retained PVCs.
 
 ## Recommended Source-Owned Implementation
@@ -83,7 +90,9 @@ that can be planned and reviewed before live use.
 Minimum source-owned resources:
 
 - target retained PVC for NATS on `openebs-bumble-messaging-retain`
+  (`tcfs-nats-openebs-target`)
 - target retained PVC for SeaweedFS on `openebs-bumble-s3-retain`
+  (`tcfs-seaweedfs-openebs-target`)
 - explicit copy/export/import mechanism that handles honey-to-bumble node
   locality
 - replacement or adopted StatefulSet definitions that bind to the target PVCs
