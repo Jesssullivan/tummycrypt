@@ -99,6 +99,20 @@ Minimum source-owned resources:
 - candidate Tailscale Services using `honey-sting-tailnet`
 - rollback notes that preserve the old retained PVs and old canonical Services
 
+Source-owned command rendering now exists for the downtime copy lane:
+
+```bash
+TCFS_CONTEXT=honey just onprem-migration-plan facts
+TCFS_CONTEXT=honey just onprem-migration-plan render-import-pods
+TCFS_CONTEXT=honey just onprem-migration-plan render-transfer-commands
+```
+
+Those commands are render-only. They are meant to create reviewable evidence
+for the maintenance window, not to authorize live mutation. The rendered
+transfer path streams from the source node-local PV path over SSH into a
+target-PVC import Pod, which avoids the unsafe single-Pod honey-to-bumble mount
+assumption.
+
 Acceptable data movement shapes:
 
 - app-native export/import if NATS and SeaweedFS tooling can produce complete
