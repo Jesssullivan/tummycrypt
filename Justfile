@@ -34,6 +34,10 @@ k8s-status ns="tcfs":
     @echo "---"
     kubectl get svc -n {{ns}}
 
+# Read-only on-prem authority/mobility check for tcfs
+onprem-preflight:
+    bash scripts/tcfs-onprem-preflight.sh
+
 # Tail logs from a workload
 k8s-logs app="tcfsd" ns="tcfs":
     kubectl logs -l app.kubernetes.io/name={{app}} -n {{ns}} --tail=50
