@@ -43,8 +43,10 @@ Non-mutating downtime command render:
 
 ```bash
 TCFS_CONTEXT=honey just onprem-migration-plan facts
+TCFS_CONTEXT=honey just onprem-migration-plan render-target-pvc-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-import-pods
 TCFS_CONTEXT=honey just onprem-migration-plan render-transfer-commands
+TCFS_CONTEXT=honey just onprem-migration-plan render-candidate-apply-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-candidate-smoke-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-cutover-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-rollback-commands
@@ -63,6 +65,13 @@ tofu plan \
   -var='enable_stateful_migration_target_pvcs=true'
 ```
 
+For the approved downtime window, prefer rendering the reviewed plan/apply
+pair:
+
+```bash
+TCFS_CONTEXT=honey just onprem-migration-plan render-target-pvc-commands
+```
+
 Plan retained PVCs plus non-canonical candidate workloads and candidate tailnet
 Services:
 
@@ -71,6 +80,13 @@ tofu plan \
   -var='enable_stateful_migration_target_pvcs=true' \
   -var='enable_stateful_migration_candidate_workloads=true' \
   -var='enable_tailnet_candidate_services=true'
+```
+
+For the approved downtime window, prefer rendering the reviewed candidate
+plan/apply pair:
+
+```bash
+TCFS_CONTEXT=honey just onprem-migration-plan render-candidate-apply-commands
 ```
 
 ## Candidate Tailnet Smoke

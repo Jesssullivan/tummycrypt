@@ -82,12 +82,14 @@ Before copying state:
    `enable_stateful_migration_target_pvcs=true`.
 5. Confirm rollback path uses the old StatefulSets and old retained PVCs.
 
-## Recommended Source-Owned Implementation
+## Source-Owned Implementation
 
-The next implementation PR should add migration manifests or OpenTofu resources
-that can be planned and reviewed before live use.
+The source-owned migration lane is now modeled in
+`infra/tofu/environments/onprem` and exposed through render-only operator
+commands. The default OpenTofu environment remains inert until the migration
+variables are explicitly enabled.
 
-Minimum source-owned resources:
+Current source-owned resources:
 
 - target retained PVC for NATS on `openebs-bumble-messaging-retain`
   (`tcfs-nats-openebs-target`)
@@ -103,8 +105,10 @@ Source-owned command rendering now exists for the downtime copy lane:
 
 ```bash
 TCFS_CONTEXT=honey just onprem-migration-plan facts
+TCFS_CONTEXT=honey just onprem-migration-plan render-target-pvc-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-import-pods
 TCFS_CONTEXT=honey just onprem-migration-plan render-transfer-commands
+TCFS_CONTEXT=honey just onprem-migration-plan render-candidate-apply-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-candidate-smoke-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-cutover-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-rollback-commands
@@ -116,13 +120,16 @@ transfer path streams from the source node-local PV path over SSH into a
 target-PVC import Pod, which avoids the unsafe single-Pod honey-to-bumble mount
 assumption.
 
-`render-candidate-smoke-commands` renders checks for the non-canonical
-candidate StatefulSets and candidate tailnet hostnames. `render-cutover-commands`
-renders the reviewed handoff shape: remove canonical annotations from the old
-kubectl-applied Services, review an OpenTofu plan that assigns canonical
-hostnames to the source-owned tailnet Services, then smoke the canonical
-hostnames. `render-rollback-commands` renders the reverse path while preserving
-old and target retained PVCs for comparison.
+`render-target-pvc-commands` renders the reviewed OpenTofu plan/apply pair for
+creating retained target PVCs only. `render-candidate-apply-commands` renders
+the reviewed OpenTofu plan/apply pair for non-canonical candidate workloads and
+candidate tailnet Services. `render-candidate-smoke-commands` renders checks for
+the non-canonical candidate StatefulSets and candidate tailnet hostnames.
+`render-cutover-commands` renders the reviewed handoff shape: remove canonical
+annotations from the old kubectl-applied Services, review an OpenTofu plan that
+assigns canonical hostnames to the source-owned tailnet Services, then smoke the
+canonical hostnames. `render-rollback-commands` renders the reverse path while
+preserving old and target retained PVCs for comparison.
 
 Acceptable data movement shapes:
 
@@ -133,24 +140,26 @@ Acceptable data movement shapes:
 - operator-mediated tar transfer only if the inventory remains small and the
   transfer transcript is kept with the migration evidence.
 
-## Cutover Order
+## Execution Order
 
 Use this order for the eventual live migration:
 
 1. Run preflight and data inventory.
 2. Quiesce writers.
-3. Create target retained PVCs.
-4. Copy or import data to target PVCs.
-5. Start replacement NATS and SeaweedFS workloads against target PVCs.
-6. Run internal cluster smoke against replacement Services.
-7. Enable candidate tailnet Services with `honey-sting-tailnet`.
-8. Smoke candidate tailnet hostnames.
-9. Remove canonical Tailscale annotations from old Services through the chosen
-   authority path.
-10. Assign canonical hostnames to source-owned Services through reviewed
-    OpenTofu plan/apply output.
-11. Run fleet smoke.
-12. Keep old retained PVs until rollback is explicitly declared unnecessary.
+3. Create target retained PVCs with `render-target-pvc-commands`.
+4. Render and apply import Pods with `render-import-pods`.
+5. Stop the worker and source StatefulSets, then copy/import data with
+   `render-transfer-commands`.
+6. Start replacement NATS and SeaweedFS workloads plus non-canonical candidate
+   tailnet Services with `render-candidate-apply-commands`.
+7. Smoke candidate Services and candidate tailnet hostnames with
+   `render-candidate-smoke-commands`.
+8. Remove canonical Tailscale annotations from old Services through the chosen
+   authority path in `render-cutover-commands`.
+9. Assign canonical hostnames to source-owned Services through reviewed
+    OpenTofu plan/apply output from `render-cutover-commands`.
+10. Run fleet smoke.
+11. Keep old retained PVs until rollback is explicitly declared unnecessary.
 
 ## Rollback
 

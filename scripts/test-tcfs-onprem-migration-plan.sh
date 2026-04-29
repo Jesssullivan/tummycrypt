@@ -82,6 +82,12 @@ TCFS_KUBECTL="${FAKE_KUBECTL}" bash "${SCRIPT}" facts >"${FACTS_OUT}"
 assert_contains "${FACTS_OUT}" 'source/nats pvc=data-nats-0 pv=pv-nats storage-class=local-path node=honey path=/opt/local-path-provisioner/nats data target-pvc=tcfs-nats-openebs-target target-storage-class=openebs-bumble-messaging-retain target-present=yes'
 assert_contains "${FACTS_OUT}" 'source/seaweedfs pvc=data-seaweedfs-0 pv=pv-seaweedfs storage-class=local-path node=honey path=/opt/local-path-provisioner/seaweedfs target-pvc=tcfs-seaweedfs-openebs-target target-storage-class=openebs-bumble-s3-retain target-present=no'
 
+TARGET_PVC_OUT="${TMPDIR}/target-pvc.out"
+TCFS_CONTEXT="honey context" TCFS_KUBECTL="${FAKE_KUBECTL}" TCFS_TOFU="/opt/tofu bin/tofu" bash "${SCRIPT}" render-target-pvc-commands >"${TARGET_PVC_OUT}"
+assert_contains "${TARGET_PVC_OUT}" "'/opt/tofu bin/tofu' -chdir='infra/tofu/environments/onprem' plan '-var=enable_stateful_migration_target_pvcs=true' '-var=enable_stateful_migration_candidate_workloads=false'"
+assert_contains "${TARGET_PVC_OUT}" "'/opt/tofu bin/tofu' -chdir='infra/tofu/environments/onprem' apply '-var=enable_stateful_migration_target_pvcs=true' '-var=enable_stateful_migration_candidate_workloads=false'"
+assert_contains "${TARGET_PVC_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' get pvc 'tcfs-nats-openebs-target' 'tcfs-seaweedfs-openebs-target' -o wide"
+
 PODS_OUT="${TMPDIR}/pods.out"
 bash "${SCRIPT}" render-import-pods >"${PODS_OUT}"
 assert_contains "${PODS_OUT}" 'name: tcfs-nats-openebs-import'
@@ -94,6 +100,12 @@ TCFS_CONTEXT="honey context" TCFS_KUBECTL="${FAKE_KUBECTL}" bash "${SCRIPT}" ren
 assert_contains "${COMMANDS_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' scale statefulset/nats statefulset/seaweedfs --replicas=0"
 assert_contains "${COMMANDS_OUT}" "# Transfer nats from honey:/opt/local-path-provisioner/nats data into pod/tcfs-nats-openebs-import:/target"
 assert_contains "${COMMANDS_OUT}" "ssh 'root@honey' 'tar -C '\\''/opt/local-path-provisioner/nats data'\\'' -cpf - .' | '${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' exec -i 'tcfs-nats-openebs-import' -- tar -C /target -xpf -"
+
+CANDIDATE_APPLY_OUT="${TMPDIR}/candidate-apply.out"
+TCFS_CONTEXT="honey context" TCFS_KUBECTL="${FAKE_KUBECTL}" TCFS_TOFU="/opt/tofu bin/tofu" bash "${SCRIPT}" render-candidate-apply-commands >"${CANDIDATE_APPLY_OUT}"
+assert_contains "${CANDIDATE_APPLY_OUT}" "'/opt/tofu bin/tofu' -chdir='infra/tofu/environments/onprem' plan '-var=enable_stateful_migration_target_pvcs=true' '-var=enable_stateful_migration_candidate_workloads=true' '-var=enable_tailnet_candidate_services=true'"
+assert_contains "${CANDIDATE_APPLY_OUT}" "'/opt/tofu bin/tofu' -chdir='infra/tofu/environments/onprem' apply '-var=enable_stateful_migration_target_pvcs=true' '-var=enable_stateful_migration_candidate_workloads=true' '-var=enable_tailnet_candidate_services=true'"
+assert_contains "${CANDIDATE_APPLY_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' get service 'nats-openebs-candidate' 'seaweedfs-openebs-candidate' 'nats-tailnet-candidate' 'seaweedfs-tailnet-candidate' -o wide"
 
 SMOKE_OUT="${TMPDIR}/candidate-smoke.out"
 TCFS_CONTEXT="honey context" TCFS_KUBECTL="${FAKE_KUBECTL}" TCFS_TAILNET_DOMAIN="tail.example" bash "${SCRIPT}" render-candidate-smoke-commands >"${SMOKE_OUT}"
