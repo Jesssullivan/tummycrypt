@@ -522,7 +522,7 @@ jobs:
         run: |
           for pkg in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
             echo "Building ${pkg}..."
-            nix build .#${pkg} -o result-${pkg}
+            nix build --accept-flake-config .#${pkg} -o result-${pkg}
           done
 
       - name: Push to Attic cache
