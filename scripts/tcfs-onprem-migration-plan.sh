@@ -9,8 +9,10 @@
 #
 # Usage:
 #   scripts/tcfs-onprem-migration-plan.sh facts
+#   scripts/tcfs-onprem-migration-plan.sh render-target-pvc-commands
 #   scripts/tcfs-onprem-migration-plan.sh render-import-pods
 #   scripts/tcfs-onprem-migration-plan.sh render-transfer-commands
+#   scripts/tcfs-onprem-migration-plan.sh render-candidate-apply-commands
 #   scripts/tcfs-onprem-migration-plan.sh render-candidate-smoke-commands
 #   scripts/tcfs-onprem-migration-plan.sh render-cutover-commands
 #   scripts/tcfs-onprem-migration-plan.sh render-rollback-commands
@@ -61,8 +63,10 @@ usage() {
     cat <<'EOF'
 Usage:
   tcfs-onprem-migration-plan.sh facts
+  tcfs-onprem-migration-plan.sh render-target-pvc-commands
   tcfs-onprem-migration-plan.sh render-import-pods
   tcfs-onprem-migration-plan.sh render-transfer-commands
+  tcfs-onprem-migration-plan.sh render-candidate-apply-commands
   tcfs-onprem-migration-plan.sh render-candidate-smoke-commands
   tcfs-onprem-migration-plan.sh render-cutover-commands
   tcfs-onprem-migration-plan.sh render-rollback-commands
@@ -160,6 +164,19 @@ target_pvc_storage_class() {
     jsonpath_namespaced "pvc/$1" '{.spec.storageClassName}'
 }
 
+target_pvc_var_args() {
+    printf '%s %s' \
+        "$(tofu_var_arg "enable_stateful_migration_target_pvcs=true")" \
+        "$(tofu_var_arg "enable_stateful_migration_candidate_workloads=false")"
+}
+
+candidate_var_args() {
+    printf '%s %s %s' \
+        "$(tofu_var_arg "enable_stateful_migration_target_pvcs=true")" \
+        "$(tofu_var_arg "enable_stateful_migration_candidate_workloads=true")" \
+        "$(tofu_var_arg "enable_tailnet_candidate_services=true")"
+}
+
 source_fact_line() {
     local name="$1"
     local source_pvc="$2"
@@ -249,6 +266,18 @@ render_import_pods() {
     render_import_pod "${SEAWEEDFS_IMPORT_POD}" seaweedfs "${SEAWEEDFS_TARGET_PVC}"
 }
 
+render_target_pvc_commands() {
+    cat <<EOF
+# Mutating commands for the approved downtime window only. Review the plan
+# before running apply. This creates retained target PVCs only; it does not
+# start candidate workloads or expose tailnet Services.
+
+$(tofu_command) plan $(target_pvc_var_args)
+$(tofu_command) apply $(target_pvc_var_args)
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") get pvc $(shell_quote "${NATS_TARGET_PVC}") $(shell_quote "${SEAWEEDFS_TARGET_PVC}") -o wide
+EOF
+}
+
 transfer_command() {
     local label="$1"
     local source_pvc="$2"
@@ -278,7 +307,8 @@ render_transfer_commands() {
 # Non-mutating render only. Review before running during an approved downtime window.
 # Required setup before these commands:
 # 1. Quiesce external TCFS writers.
-# 2. Apply target PVCs with enable_stateful_migration_target_pvcs=true.
+# 2. Apply target PVCs from:
+#    scripts/tcfs-onprem-migration-plan.sh render-target-pvc-commands
 # 3. Apply import pods from:
 #    scripts/tcfs-onprem-migration-plan.sh render-import-pods | $(kubectl_command) apply -f -
 # 4. Confirm source StatefulSets are scaled down before copying.
@@ -294,6 +324,19 @@ EOF
 
     transfer_command nats "${NATS_SOURCE_PVC}" "${NATS_IMPORT_POD}"
     transfer_command seaweedfs "${SEAWEEDFS_SOURCE_PVC}" "${SEAWEEDFS_IMPORT_POD}"
+}
+
+render_candidate_apply_commands() {
+    cat <<EOF
+# Mutating commands for the approved downtime window only. Run after target
+# PVCs exist and data has been copied into them. Review the plan before running
+# apply. Candidate tailnet hostnames intentionally remain non-canonical.
+
+$(tofu_command) plan $(candidate_var_args)
+$(tofu_command) apply $(candidate_var_args)
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") get statefulset $(shell_quote "${NATS_CANDIDATE_STATEFULSET}") $(shell_quote "${SEAWEEDFS_CANDIDATE_STATEFULSET}") -o wide
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") get service $(shell_quote "${NATS_CANDIDATE_SERVICE}") $(shell_quote "${SEAWEEDFS_CANDIDATE_SERVICE}") $(shell_quote "${NATS_CANDIDATE_TAILNET_SERVICE}") $(shell_quote "${SEAWEEDFS_CANDIDATE_TAILNET_SERVICE}") -o wide
+EOF
 }
 
 render_candidate_smoke_commands() {
@@ -363,12 +406,18 @@ main() {
             require_command
             render_facts
             ;;
+        render-target-pvc-commands)
+            render_target_pvc_commands
+            ;;
         render-import-pods)
             render_import_pods
             ;;
         render-transfer-commands)
             require_command
             render_transfer_commands
+            ;;
+        render-candidate-apply-commands)
+            render_candidate_apply_commands
             ;;
         render-candidate-smoke-commands)
             render_candidate_smoke_commands
