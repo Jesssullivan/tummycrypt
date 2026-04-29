@@ -83,25 +83,25 @@ jobs:
         run: nix --version
 
       - name: Nix flake check
-        run: nix flake check
+        run: nix flake check --accept-flake-config
 
       - name: Verify devShell Rust version
         run: |
-          VERSION="$(nix develop --command rustc --version)"
+          VERSION="$(nix develop --accept-flake-config --command rustc --version)"
           echo "$VERSION"
           echo "$VERSION" | grep -q "1.93.0"
 
       - name: Build tcfsd
-        run: nix build .#tcfsd
+        run: nix build --accept-flake-config .#tcfsd
 
       - name: Build tcfs-cli
-        run: nix build .#tcfs-cli
+        run: nix build --accept-flake-config .#tcfs-cli
 
       - name: Build tcfs-tui
-        run: nix build .#tcfs-tui
+        run: nix build --accept-flake-config .#tcfs-tui
 
       - name: Build tcfs-mcp
-        run: nix build .#tcfs-mcp
+        run: nix build --accept-flake-config .#tcfs-mcp
 
   fileprovider-staticlib:
     name: FileProvider staticlib (macOS)

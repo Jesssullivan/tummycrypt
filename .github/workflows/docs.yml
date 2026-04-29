@@ -41,7 +41,7 @@ jobs:
         uses: cachix/install-nix-action@v30
 
       - name: Build PDF docs
-        run: nix develop --command task docs:pdf
+        run: nix develop --accept-flake-config --command task docs:pdf
 
       - name: Upload PDF artifacts
         uses: actions/upload-artifact@v4
