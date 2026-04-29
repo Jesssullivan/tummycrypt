@@ -34,6 +34,65 @@ The practical consequence is simple: if the live namespace already contains
 Helm-managed `tcfs-backend-tcfs-backend-*` objects, the direct Helm chart is
 the source of truth for restoring that path.
 
+## Current Honey Readback
+
+Live readback from the Tinyland `honey` cluster on 2026-04-28 changed the
+operator call from "repair a broken worker" to "decide authority before moving
+placement":
+
+- `nats-0`, `seaweedfs-0`, and `tcfs-backend-tcfs-backend-worker` are Running.
+- NATS health returns OK, SeaweedFS reports a leader, and the worker logs show
+  a live NATS connection.
+- `helm list -n tcfs` reports no release state.
+- `tcfs/nats` and `tcfs/seaweedfs` have live Tailscale exposure annotations,
+  but their last-applied Service configuration had empty annotations.
+- `data-nats-0` and `data-seaweedfs-0` are `local-path` PVCs whose backing PVs
+  have node affinity to `honey`.
+
+That means a ProxyClass-only patch would be cosmetic. It could move the
+generated Tailscale proxy pods, but it would not source-own the exposure, create
+release state, or make NATS/SeaweedFS data drain-mobile.
+
+## Current Decision
+
+Treat the direct `tcfs-backend` Helm chart as a recovery authority for the
+backend worker objects only. Do not use it as evidence that the whole live
+namespace is Helm-owned.
+
+The durable on-prem path should be OpenTofu migration, not blind Helm adoption,
+unless a future review proves that adopting the manual NATS and SeaweedFS
+objects into Helm is lower risk than replacing them deliberately.
+
+Reasons:
+
+- The backend worker objects are Helm-shaped, but NATS and SeaweedFS are not.
+- The OpenTofu modules already model NATS, SeaweedFS, backend workers, and
+  tailnet exposure as separate source-owned concerns.
+- The live backing state is honey-local `local-path`, so honey/sting mobility
+  requires storage/data planning either way.
+- A migration plan can preserve the current healthy singleton while building
+  new source-owned objects with explicit storage class, Tailscale exposure, and
+  smoke gates.
+
+Minimum migration gates:
+
+1. capture live NATS JetStream and SeaweedFS data inventory;
+2. choose target storage classes for NATS and SeaweedFS instead of inheriting
+   `local-path`;
+3. teach the OpenTofu tailnet surface the current cluster ProxyClass contract or
+   record a named exception;
+4. run a dry-run/plan that does not collide with live object names;
+5. cut over only after smoke tests prove NATS, SeaweedFS, and worker
+   connectivity on the new path;
+6. remove the old live annotations and retained objects through the same
+   source-controlled transition.
+
+Use the read-only preflight before changing either path:
+
+```bash
+bash scripts/tcfs-onprem-preflight.sh
+```
+
 ## Preflight
 
 Confirm which cluster you are talking to before making changes:
