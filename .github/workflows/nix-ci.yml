@@ -18,7 +18,7 @@ on:
 
 env:
   # Public Attic endpoint shared with flake.nix and other workflows.
-  ATTIC_SERVER: https://nix-cache.fuzzy-dev.tinyland.dev
+  ATTIC_SERVER: https://nix-cache.tinyland.dev
   ATTIC_CACHE: main
 
 jobs:
@@ -32,8 +32,8 @@ jobs:
         uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
-            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
-            extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+            extra-substituters = https://nix-cache.tinyland.dev/main
+            extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
 
       - name: Verify runner Nix toolchain
         run: nix --version
@@ -52,8 +52,8 @@ jobs:
         uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
-            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
-            extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+            extra-substituters = https://nix-cache.tinyland.dev/main
+            extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
 
       - name: Verify runner cache endpoints
         run: |
@@ -104,8 +104,8 @@ jobs:
         uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
-            extra-substituters = https://nix-cache.fuzzy-dev.tinyland.dev/main
-            extra-trusted-public-keys = main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE=
+            extra-substituters = https://nix-cache.tinyland.dev/main
+            extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
 
       - name: Configure Attic
         run: |
