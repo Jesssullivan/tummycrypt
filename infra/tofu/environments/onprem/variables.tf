@@ -28,6 +28,12 @@ variable "enable_stateful_migration_target_pvcs" {
   default     = false
 }
 
+variable "enable_stateful_migration_candidate_workloads" {
+  description = "Create non-canonical candidate NATS/SeaweedFS StatefulSets that mount the retained target PVCs."
+  type        = bool
+  default     = false
+}
+
 variable "nats_target_pvc_name" {
   description = "Distinct target PVC name for the NATS migration. Keep separate from live data-nats-0 until cutover."
   type        = string
@@ -46,6 +52,24 @@ variable "nats_target_storage_size" {
   default     = "5Gi"
 }
 
+variable "nats_candidate_workload_name" {
+  description = "Distinct candidate NATS StatefulSet and headless Service name. Keep separate from live nats."
+  type        = string
+  default     = "nats-openebs-candidate"
+}
+
+variable "nats_candidate_app_label" {
+  description = "Distinct app label for the candidate NATS workload and tailnet Service selector."
+  type        = string
+  default     = "nats-openebs-candidate"
+}
+
+variable "nats_image" {
+  description = "NATS image for the on-prem candidate workload. Mirrors current live readback until a pinned production tag is selected."
+  type        = string
+  default     = "nats:2.10-alpine"
+}
+
 variable "seaweedfs_target_pvc_name" {
   description = "Distinct target PVC name for the SeaweedFS migration. Keep separate from live data-seaweedfs-0 until cutover."
   type        = string
@@ -62,6 +86,24 @@ variable "seaweedfs_target_storage_size" {
   description = "Requested size for the SeaweedFS target PVC."
   type        = string
   default     = "10Gi"
+}
+
+variable "seaweedfs_candidate_workload_name" {
+  description = "Distinct candidate SeaweedFS StatefulSet and headless Service name. Keep separate from live seaweedfs."
+  type        = string
+  default     = "seaweedfs-openebs-candidate"
+}
+
+variable "seaweedfs_candidate_app_label" {
+  description = "Distinct app label for the candidate SeaweedFS workload and tailnet Service selector."
+  type        = string
+  default     = "seaweedfs-openebs-candidate"
+}
+
+variable "seaweedfs_image" {
+  description = "SeaweedFS image for the on-prem candidate workload. Mirrors current live readback until a pinned production tag is selected."
+  type        = string
+  default     = "chrislusf/seaweedfs:latest"
 }
 
 variable "tailscale_proxy_class" {

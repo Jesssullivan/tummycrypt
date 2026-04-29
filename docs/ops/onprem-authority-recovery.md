@@ -79,12 +79,14 @@ Minimum migration gates:
 1. capture live NATS JetStream and SeaweedFS data inventory;
 2. choose target storage classes for NATS and SeaweedFS instead of inheriting
    `local-path`;
-3. teach the OpenTofu tailnet surface the current cluster ProxyClass contract or
-   record a named exception;
-4. run a dry-run/plan that does not collide with live object names;
-5. cut over only after smoke tests prove NATS, SeaweedFS, and worker
+3. render or apply retained target PVCs and non-canonical candidate workloads
+   only through `infra/tofu/environments/onprem`;
+4. smoke candidate Tailscale Services with selectors that do not point at the
+   live `app=nats` or `app=seaweedfs` pods;
+5. run a dry-run/plan that does not collide with live object names;
+6. cut over only after smoke tests prove NATS, SeaweedFS, and worker
    connectivity on the new path;
-6. remove the old live annotations and retained objects through the same
+7. remove the old live annotations and retained objects through the same
    source-controlled transition.
 
 Use the read-only preflight before changing either path:
