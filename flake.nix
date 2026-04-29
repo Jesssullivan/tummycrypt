@@ -5,10 +5,10 @@
   # CI/release workflows push with `attic login` separately.
   nixConfig = {
     extra-substituters = [
-      "https://nix-cache.fuzzy-dev.tinyland.dev/main"
+      "https://nix-cache.tinyland.dev/main"
     ];
     extra-trusted-public-keys = [
-      "main:NKRk1XYo/dfd9fcDqgotUJg2DTDHWp5ny+Ba7WzRjgE="
+      "main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA="
     ];
   };
 
