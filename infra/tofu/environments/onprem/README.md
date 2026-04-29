@@ -33,6 +33,12 @@ Read-only data inventory before migration work:
 TCFS_CONTEXT=honey just onprem-data-inventory
 ```
 
+Storage migration planning:
+
+```text
+docs/ops/tcfs-onprem-storage-migration.md
+```
+
 ## Candidate Tailnet Smoke
 
 Only after `scripts/tcfs-onprem-preflight.sh` is clean enough for migration
