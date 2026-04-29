@@ -38,6 +38,10 @@ k8s-status ns="tcfs":
 onprem-preflight:
     bash scripts/tcfs-onprem-preflight.sh
 
+# Read-only on-prem data inventory for NATS and SeaweedFS migration planning
+onprem-data-inventory:
+    bash scripts/tcfs-onprem-data-inventory.sh
+
 # Validate on-prem OpenTofu migration surfaces without applying live changes
 onprem-tofu-validate:
     bash scripts/tcfs-onprem-tofu-validate.sh

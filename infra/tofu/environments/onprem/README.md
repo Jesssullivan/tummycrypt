@@ -13,6 +13,9 @@ Live readback on 2026-04-29 shows:
 - `tcfs/nats` and `tcfs/seaweedfs` carry live Tailscale annotations as drift.
 - `data-nats-0` and `data-seaweedfs-0` are `local-path` PVCs pinned to
   `honey`.
+- Durable storage targets now exist in `blahaj` and live Kubernetes:
+  `openebs-bumble-messaging-retain` for NATS and
+  `openebs-bumble-s3-retain` for SeaweedFS.
 
 This environment does not adopt those objects and does not move data. It only
 adds a source-owned candidate path for tailnet exposure once the migration
@@ -22,6 +25,12 @@ gates are ready.
 
 ```bash
 just onprem-tofu-validate
+```
+
+Read-only data inventory before migration work:
+
+```bash
+TCFS_CONTEXT=honey just onprem-data-inventory
 ```
 
 ## Candidate Tailnet Smoke
@@ -44,7 +53,7 @@ cutover plan.
 Before any live apply:
 
 1. capture NATS JetStream and SeaweedFS data inventory;
-2. choose durable storage classes for NATS and SeaweedFS;
+2. migrate or clone data to the selected retained OpenEBS/ZFS classes;
 3. smoke candidate Tailscale Services with `honey-sting-tailnet` placement;
 4. remove the old live annotations through the selected authority path;
 5. cut over canonical tailnet hostnames only after clients pass smoke;
