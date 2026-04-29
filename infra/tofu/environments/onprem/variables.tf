@@ -22,6 +22,48 @@ variable "enable_tailnet_candidate_services" {
   default     = false
 }
 
+variable "enable_stateful_migration_target_pvcs" {
+  description = "Create retained target PVCs for the downtime-gated NATS/SeaweedFS storage migration."
+  type        = bool
+  default     = false
+}
+
+variable "nats_target_pvc_name" {
+  description = "Distinct target PVC name for the NATS migration. Keep separate from live data-nats-0 until cutover."
+  type        = string
+  default     = "tcfs-nats-openebs-target"
+}
+
+variable "nats_target_storage_class" {
+  description = "Retained OpenEBS/ZFS storage class for the NATS target PVC."
+  type        = string
+  default     = "openebs-bumble-messaging-retain"
+}
+
+variable "nats_target_storage_size" {
+  description = "Requested size for the NATS target PVC."
+  type        = string
+  default     = "5Gi"
+}
+
+variable "seaweedfs_target_pvc_name" {
+  description = "Distinct target PVC name for the SeaweedFS migration. Keep separate from live data-seaweedfs-0 until cutover."
+  type        = string
+  default     = "tcfs-seaweedfs-openebs-target"
+}
+
+variable "seaweedfs_target_storage_class" {
+  description = "Retained OpenEBS/ZFS storage class for the SeaweedFS target PVC."
+  type        = string
+  default     = "openebs-bumble-s3-retain"
+}
+
+variable "seaweedfs_target_storage_size" {
+  description = "Requested size for the SeaweedFS target PVC."
+  type        = string
+  default     = "10Gi"
+}
+
 variable "tailscale_proxy_class" {
   description = "Tailscale operator ProxyClass for honey/sting proxy placement."
   type        = string

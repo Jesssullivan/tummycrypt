@@ -22,6 +22,56 @@ locals {
   }
 }
 
+resource "kubernetes_persistent_volume_claim_v1" "nats_target" {
+  count = var.enable_stateful_migration_target_pvcs ? 1 : 0
+
+  metadata {
+    name      = var.nats_target_pvc_name
+    namespace = var.namespace
+    labels = merge(local.common_labels, {
+      "app.kubernetes.io/name"      = "nats"
+      "app.kubernetes.io/component" = "messaging"
+      "tummycrypt.dev/migration"    = "stateful-openebs-target"
+    })
+  }
+
+  spec {
+    access_modes       = ["ReadWriteOnce"]
+    storage_class_name = var.nats_target_storage_class
+
+    resources {
+      requests = {
+        storage = var.nats_target_storage_size
+      }
+    }
+  }
+}
+
+resource "kubernetes_persistent_volume_claim_v1" "seaweedfs_target" {
+  count = var.enable_stateful_migration_target_pvcs ? 1 : 0
+
+  metadata {
+    name      = var.seaweedfs_target_pvc_name
+    namespace = var.namespace
+    labels = merge(local.common_labels, {
+      "app.kubernetes.io/name"      = "seaweedfs"
+      "app.kubernetes.io/component" = "object-storage"
+      "tummycrypt.dev/migration"    = "stateful-openebs-target"
+    })
+  }
+
+  spec {
+    access_modes       = ["ReadWriteOnce"]
+    storage_class_name = var.seaweedfs_target_storage_class
+
+    resources {
+      requests = {
+        storage = var.seaweedfs_target_storage_size
+      }
+    }
+  }
+}
+
 module "tailnet_nats_candidate" {
   count  = var.enable_tailnet_candidate_services ? 1 : 0
   source = "../../modules/tailscale-service"
