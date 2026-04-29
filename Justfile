@@ -54,6 +54,10 @@ onprem-migration-plan-test:
 onprem-tofu-validate:
     bash scripts/tcfs-onprem-tofu-validate.sh
 
+# Static safety checks for source-owned on-prem candidate workload selectors
+onprem-tofu-candidate-test:
+    bash scripts/test-tcfs-onprem-tofu-candidate-workloads.sh
+
 # Tail logs from a workload
 k8s-logs app="tcfsd" ns="tcfs":
     kubectl logs -l app.kubernetes.io/name={{app}} -n {{ns}} --tail=50

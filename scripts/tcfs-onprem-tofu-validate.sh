@@ -28,5 +28,8 @@ validate_env() {
 
 require_command tofu
 
+tofu fmt -check -recursive "${ROOT}/infra/tofu/environments/onprem"
+bash "${ROOT}/scripts/test-tcfs-onprem-tofu-candidate-workloads.sh"
+
 validate_env onprem
 validate_env civo

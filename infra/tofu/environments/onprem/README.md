@@ -2,7 +2,7 @@
 
 This environment captures the Tinyland on-prem TCFS migration surface. It is
 intentionally inert by default: `enable_tailnet_candidate_services=false`
-creates no resources.
+and `enable_stateful_migration_candidate_workloads=false` create no resources.
 
 ## Current Live Boundary
 
@@ -17,12 +17,15 @@ Live readback on 2026-04-29 shows:
   `openebs-bumble-messaging-retain` for NATS and
   `openebs-bumble-s3-retain` for SeaweedFS.
 
-This environment does not adopt those objects and does not move data. It only
-adds a source-owned candidate path for tailnet exposure once the migration
+This environment does not adopt those objects and does not move data. It adds a
+source-owned candidate path for retained target PVCs, non-canonical
+NATS/SeaweedFS workloads, and candidate tailnet exposure once the migration
 gates are ready.
 
 All migration resources are disabled by default. The target retained PVCs are
-created only when `enable_stateful_migration_target_pvcs=true`.
+created only when `enable_stateful_migration_target_pvcs=true`; candidate
+workloads are created only when
+`enable_stateful_migration_candidate_workloads=true`.
 
 ## Safe Validation
 
@@ -57,6 +60,16 @@ tofu plan \
   -var='enable_stateful_migration_target_pvcs=true'
 ```
 
+Plan retained PVCs plus non-canonical candidate workloads and candidate tailnet
+Services:
+
+```bash
+tofu plan \
+  -var='enable_stateful_migration_target_pvcs=true' \
+  -var='enable_stateful_migration_candidate_workloads=true' \
+  -var='enable_tailnet_candidate_services=true'
+```
+
 ## Candidate Tailnet Smoke
 
 Only after `scripts/tcfs-onprem-preflight.sh` is clean enough for migration
@@ -67,6 +80,11 @@ canonical devices:
 tofu plan \
   -var='enable_tailnet_candidate_services=true'
 ```
+
+The candidate tailnet Services intentionally select the non-canonical candidate
+labels, not the live `app=nats` or `app=seaweedfs` labels. If candidate
+workloads are not enabled, the tailnet Services should have no backend
+endpoints; that is safer than exposing the existing honey-local singleton pods.
 
 Do not switch the candidate hostnames to `nats-tcfs` or `seaweedfs-tcfs` until
 the live Service annotations have been removed through a source-controlled
