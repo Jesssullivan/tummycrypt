@@ -95,6 +95,26 @@ assert_contains "${COMMANDS_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -
 assert_contains "${COMMANDS_OUT}" "# Transfer nats from honey:/opt/local-path-provisioner/nats data into pod/tcfs-nats-openebs-import:/target"
 assert_contains "${COMMANDS_OUT}" "ssh 'root@honey' 'tar -C '\\''/opt/local-path-provisioner/nats data'\\'' -cpf - .' | '${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' exec -i 'tcfs-nats-openebs-import' -- tar -C /target -xpf -"
 
+SMOKE_OUT="${TMPDIR}/candidate-smoke.out"
+TCFS_CONTEXT="honey context" TCFS_KUBECTL="${FAKE_KUBECTL}" TCFS_TAILNET_DOMAIN="tail.example" bash "${SCRIPT}" render-candidate-smoke-commands >"${SMOKE_OUT}"
+assert_contains "${SMOKE_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' rollout status 'statefulset/nats-openebs-candidate' --timeout=180s"
+assert_contains "${SMOKE_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' get service 'nats-tailnet-candidate' 'seaweedfs-tailnet-candidate' -o wide"
+assert_contains "${SMOKE_OUT}" "curl -fsS 'http://nats-tcfs-candidate.tail.example:8222/healthz'"
+assert_contains "${SMOKE_OUT}" "curl -fsS 'http://seaweedfs-tcfs-candidate.tail.example:9333/cluster/status'"
+
+CUTOVER_OUT="${TMPDIR}/cutover.out"
+TCFS_CONTEXT="honey context" TCFS_KUBECTL="${FAKE_KUBECTL}" TCFS_TOFU="/opt/tofu bin/tofu" bash "${SCRIPT}" render-cutover-commands >"${CUTOVER_OUT}"
+assert_contains "${CUTOVER_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' annotate 'service/nats' 'tailscale.com/expose-' 'tailscale.com/hostname-' 'tailscale.com/proxy-class-' --overwrite"
+assert_contains "${CUTOVER_OUT}" "'/opt/tofu bin/tofu' -chdir='infra/tofu/environments/onprem' plan '-var=enable_stateful_migration_target_pvcs=true' '-var=enable_stateful_migration_candidate_workloads=true' '-var=enable_tailnet_candidate_services=true' '-var=nats_tailnet_candidate_hostname=nats-tcfs' '-var=seaweedfs_tailnet_candidate_hostname=seaweedfs-tcfs'"
+assert_contains "${CUTOVER_OUT}" "curl -fsS 'http://nats-tcfs:8222/healthz'"
+
+ROLLBACK_OUT="${TMPDIR}/rollback.out"
+TCFS_CONTEXT="honey context" TCFS_KUBECTL="${FAKE_KUBECTL}" bash "${SCRIPT}" render-rollback-commands >"${ROLLBACK_OUT}"
+assert_contains "${ROLLBACK_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' scale 'statefulset/nats-openebs-candidate' 'statefulset/seaweedfs-openebs-candidate' --replicas=0"
+assert_contains "${ROLLBACK_OUT}" "'tofu' -chdir='infra/tofu/environments/onprem' apply '-var=enable_stateful_migration_target_pvcs=true' '-var=enable_stateful_migration_candidate_workloads=false' '-var=enable_tailnet_candidate_services=false'"
+assert_contains "${ROLLBACK_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' annotate 'service/nats' 'tailscale.com/expose=true' 'tailscale.com/hostname=nats-tcfs' 'tailscale.com/proxy-class-' --overwrite"
+assert_contains "${ROLLBACK_OUT}" "'${FAKE_KUBECTL}' --context 'honey context' -n 'tcfs' scale 'deployment/tcfs-backend-tcfs-backend-worker' --replicas=1"
+
 if FAKE_BAD_TARGET_CLASS=1 TCFS_KUBECTL="${FAKE_KUBECTL}" bash "${SCRIPT}" facts >"${TMPDIR}/bad.out" 2>"${TMPDIR}/bad.err"; then
     printf 'expected mismatched target class to fail\n' >&2
     exit 1

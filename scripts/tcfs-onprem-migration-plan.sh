@@ -11,24 +11,46 @@
 #   scripts/tcfs-onprem-migration-plan.sh facts
 #   scripts/tcfs-onprem-migration-plan.sh render-import-pods
 #   scripts/tcfs-onprem-migration-plan.sh render-transfer-commands
+#   scripts/tcfs-onprem-migration-plan.sh render-candidate-smoke-commands
+#   scripts/tcfs-onprem-migration-plan.sh render-cutover-commands
+#   scripts/tcfs-onprem-migration-plan.sh render-rollback-commands
 #
 set -euo pipefail
 
 NAMESPACE="${TCFS_NAMESPACE:-tcfs}"
 CONTEXT="${TCFS_CONTEXT:-}"
 KUBECTL_BIN="${TCFS_KUBECTL:-kubectl}"
+TOFU_BIN="${TCFS_TOFU:-tofu}"
+TOFU_DIR="${TCFS_TOFU_DIR:-infra/tofu/environments/onprem}"
 TARGET_NODE="${TCFS_TARGET_NODE:-bumble}"
 IMPORT_IMAGE="${TCFS_IMPORT_IMAGE:-docker.io/library/busybox:1.36}"
+TAILNET_DOMAIN="${TCFS_TAILNET_DOMAIN:-}"
 
 NATS_SOURCE_PVC="${TCFS_NATS_SOURCE_PVC:-data-nats-0}"
 NATS_TARGET_PVC="${TCFS_NATS_TARGET_PVC:-tcfs-nats-openebs-target}"
 NATS_IMPORT_POD="${TCFS_NATS_IMPORT_POD:-tcfs-nats-openebs-import}"
 NATS_TARGET_STORAGE_CLASS="${TCFS_NATS_TARGET_STORAGE_CLASS:-openebs-bumble-messaging-retain}"
+NATS_SOURCE_STATEFULSET="${TCFS_NATS_SOURCE_STATEFULSET:-nats}"
+NATS_SOURCE_SERVICE="${TCFS_NATS_SOURCE_SERVICE:-nats}"
+NATS_CANDIDATE_STATEFULSET="${TCFS_NATS_CANDIDATE_STATEFULSET:-nats-openebs-candidate}"
+NATS_CANDIDATE_SERVICE="${TCFS_NATS_CANDIDATE_SERVICE:-nats-openebs-candidate}"
+NATS_CANDIDATE_TAILNET_SERVICE="${TCFS_NATS_CANDIDATE_TAILNET_SERVICE:-nats-tailnet-candidate}"
+NATS_CANDIDATE_HOSTNAME="${TCFS_NATS_CANDIDATE_HOSTNAME:-nats-tcfs-candidate}"
+NATS_CANONICAL_HOSTNAME="${TCFS_NATS_CANONICAL_HOSTNAME:-nats-tcfs}"
 
 SEAWEEDFS_SOURCE_PVC="${TCFS_SEAWEEDFS_SOURCE_PVC:-data-seaweedfs-0}"
 SEAWEEDFS_TARGET_PVC="${TCFS_SEAWEEDFS_TARGET_PVC:-tcfs-seaweedfs-openebs-target}"
 SEAWEEDFS_IMPORT_POD="${TCFS_SEAWEEDFS_IMPORT_POD:-tcfs-seaweedfs-openebs-import}"
 SEAWEEDFS_TARGET_STORAGE_CLASS="${TCFS_SEAWEEDFS_TARGET_STORAGE_CLASS:-openebs-bumble-s3-retain}"
+SEAWEEDFS_SOURCE_STATEFULSET="${TCFS_SEAWEEDFS_SOURCE_STATEFULSET:-seaweedfs}"
+SEAWEEDFS_SOURCE_SERVICE="${TCFS_SEAWEEDFS_SOURCE_SERVICE:-seaweedfs}"
+SEAWEEDFS_CANDIDATE_STATEFULSET="${TCFS_SEAWEEDFS_CANDIDATE_STATEFULSET:-seaweedfs-openebs-candidate}"
+SEAWEEDFS_CANDIDATE_SERVICE="${TCFS_SEAWEEDFS_CANDIDATE_SERVICE:-seaweedfs-openebs-candidate}"
+SEAWEEDFS_CANDIDATE_TAILNET_SERVICE="${TCFS_SEAWEEDFS_CANDIDATE_TAILNET_SERVICE:-seaweedfs-tailnet-candidate}"
+SEAWEEDFS_CANDIDATE_HOSTNAME="${TCFS_SEAWEEDFS_CANDIDATE_HOSTNAME:-seaweedfs-tcfs-candidate}"
+SEAWEEDFS_CANONICAL_HOSTNAME="${TCFS_SEAWEEDFS_CANONICAL_HOSTNAME:-seaweedfs-tcfs}"
+
+BACKEND_WORKER_DEPLOYMENT="${TCFS_BACKEND_WORKER_DEPLOYMENT:-tcfs-backend-tcfs-backend-worker}"
 
 KUBECTL=("${KUBECTL_BIN}")
 if [[ -n "${CONTEXT}" ]]; then
@@ -41,9 +63,13 @@ Usage:
   tcfs-onprem-migration-plan.sh facts
   tcfs-onprem-migration-plan.sh render-import-pods
   tcfs-onprem-migration-plan.sh render-transfer-commands
+  tcfs-onprem-migration-plan.sh render-candidate-smoke-commands
+  tcfs-onprem-migration-plan.sh render-cutover-commands
+  tcfs-onprem-migration-plan.sh render-rollback-commands
 
 This script renders migration evidence and commands only. It does not mutate
-Kubernetes, scale workloads, create PVCs, create Pods, or copy data.
+Kubernetes, scale workloads, create PVCs, create Pods, copy data, or change
+tailnet hostnames.
 EOF
 }
 
@@ -65,6 +91,28 @@ kubectl_command() {
     printf '%s' "$(shell_quote "${KUBECTL_BIN}")"
     if [[ -n "${CONTEXT}" ]]; then
         printf ' --context %s' "$(shell_quote "${CONTEXT}")"
+    fi
+}
+
+tofu_command() {
+    printf '%s -chdir=%s' "$(shell_quote "${TOFU_BIN}")" "$(shell_quote "${TOFU_DIR}")"
+}
+
+tofu_var_arg() {
+    shell_quote "-var=$1"
+}
+
+resource_arg() {
+    shell_quote "$1/$2"
+}
+
+tailnet_host() {
+    local hostname="$1"
+
+    if [[ -n "${TAILNET_DOMAIN}" ]]; then
+        printf '%s.%s' "${hostname}" "${TAILNET_DOMAIN}"
+    else
+        printf '%s' "${hostname}"
     fi
 }
 
@@ -248,6 +296,65 @@ EOF
     transfer_command seaweedfs "${SEAWEEDFS_SOURCE_PVC}" "${SEAWEEDFS_IMPORT_POD}"
 }
 
+render_candidate_smoke_commands() {
+    cat <<EOF
+# Non-mutating render only. Run only after target PVCs, copied data, and
+# candidate workloads/tailnet Services have been applied during an approved
+# downtime window.
+
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") rollout status $(shell_quote "statefulset/${NATS_CANDIDATE_STATEFULSET}") --timeout=180s
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") rollout status $(shell_quote "statefulset/${SEAWEEDFS_CANDIDATE_STATEFULSET}") --timeout=180s
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") get endpoints $(shell_quote "${NATS_CANDIDATE_SERVICE}") $(shell_quote "${SEAWEEDFS_CANDIDATE_SERVICE}") -o wide
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") get service $(shell_quote "${NATS_CANDIDATE_TAILNET_SERVICE}") $(shell_quote "${SEAWEEDFS_CANDIDATE_TAILNET_SERVICE}") -o wide
+
+curl -fsS $(shell_quote "http://$(tailnet_host "${NATS_CANDIDATE_HOSTNAME}"):8222/healthz")
+curl -fsS $(shell_quote "http://$(tailnet_host "${SEAWEEDFS_CANDIDATE_HOSTNAME}"):9333/cluster/status")
+EOF
+}
+
+render_cutover_commands() {
+    cat <<EOF
+# Mutating commands for the approved downtime window only. Run these after
+# candidate workload and candidate tailnet smoke pass. The OpenTofu plan must
+# be reviewed before the apply line is run.
+
+# Remove canonical Tailscale ownership from the old kubectl-applied Services.
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") annotate $(resource_arg service "${NATS_SOURCE_SERVICE}") $(shell_quote "tailscale.com/expose-") $(shell_quote "tailscale.com/hostname-") $(shell_quote "tailscale.com/proxy-class-") --overwrite
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") annotate $(resource_arg service "${SEAWEEDFS_SOURCE_SERVICE}") $(shell_quote "tailscale.com/expose-") $(shell_quote "tailscale.com/hostname-") $(shell_quote "tailscale.com/proxy-class-") --overwrite
+
+# Assign canonical hostnames to the source-owned tailnet Services.
+$(tofu_command) plan $(tofu_var_arg "enable_stateful_migration_target_pvcs=true") $(tofu_var_arg "enable_stateful_migration_candidate_workloads=true") $(tofu_var_arg "enable_tailnet_candidate_services=true") $(tofu_var_arg "nats_tailnet_candidate_hostname=${NATS_CANONICAL_HOSTNAME}") $(tofu_var_arg "seaweedfs_tailnet_candidate_hostname=${SEAWEEDFS_CANONICAL_HOSTNAME}")
+$(tofu_command) apply $(tofu_var_arg "enable_stateful_migration_target_pvcs=true") $(tofu_var_arg "enable_stateful_migration_candidate_workloads=true") $(tofu_var_arg "enable_tailnet_candidate_services=true") $(tofu_var_arg "nats_tailnet_candidate_hostname=${NATS_CANONICAL_HOSTNAME}") $(tofu_var_arg "seaweedfs_tailnet_candidate_hostname=${SEAWEEDFS_CANONICAL_HOSTNAME}")
+
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") get service $(shell_quote "${NATS_CANDIDATE_TAILNET_SERVICE}") $(shell_quote "${SEAWEEDFS_CANDIDATE_TAILNET_SERVICE}") -o jsonpath=$(shell_quote "{range .items[*]}{.metadata.name}{\"\\t\"}{.metadata.annotations.tailscale\\.com/hostname}{\"\\t\"}{.metadata.annotations.tailscale\\.com/proxy-class}{\"\\n\"}{end}")
+curl -fsS $(shell_quote "http://$(tailnet_host "${NATS_CANONICAL_HOSTNAME}"):8222/healthz")
+curl -fsS $(shell_quote "http://$(tailnet_host "${SEAWEEDFS_CANONICAL_HOSTNAME}"):9333/cluster/status")
+EOF
+}
+
+render_rollback_commands() {
+    cat <<EOF
+# Mutating rollback commands for the approved downtime window only. Use before
+# deleting any old PVC/PV. Review which phase failed before running all lines.
+
+# Stop source-owned candidates and remove their tailnet Services while keeping
+# retained target PVCs for forensic comparison.
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") scale $(resource_arg statefulset "${NATS_CANDIDATE_STATEFULSET}") $(resource_arg statefulset "${SEAWEEDFS_CANDIDATE_STATEFULSET}") --replicas=0
+$(tofu_command) apply $(tofu_var_arg "enable_stateful_migration_target_pvcs=true") $(tofu_var_arg "enable_stateful_migration_candidate_workloads=false") $(tofu_var_arg "enable_tailnet_candidate_services=false")
+
+# Restore old canonical annotations if cutover already removed them.
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") annotate $(resource_arg service "${NATS_SOURCE_SERVICE}") $(shell_quote "tailscale.com/expose=true") $(shell_quote "tailscale.com/hostname=${NATS_CANONICAL_HOSTNAME}") $(shell_quote "tailscale.com/proxy-class-") --overwrite
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") annotate $(resource_arg service "${SEAWEEDFS_SOURCE_SERVICE}") $(shell_quote "tailscale.com/expose=true") $(shell_quote "tailscale.com/hostname=${SEAWEEDFS_CANONICAL_HOSTNAME}") $(shell_quote "tailscale.com/proxy-class-") --overwrite
+
+# Restart old honey-local stateful workloads and TCFS writers.
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") scale $(resource_arg statefulset "${NATS_SOURCE_STATEFULSET}") $(resource_arg statefulset "${SEAWEEDFS_SOURCE_STATEFULSET}") --replicas=1
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") rollout status $(resource_arg statefulset "${NATS_SOURCE_STATEFULSET}") --timeout=180s
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") rollout status $(resource_arg statefulset "${SEAWEEDFS_SOURCE_STATEFULSET}") --timeout=180s
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") scale $(resource_arg deployment "${BACKEND_WORKER_DEPLOYMENT}") --replicas=1
+$(kubectl_command) -n $(shell_quote "${NAMESPACE}") rollout status $(resource_arg deployment "${BACKEND_WORKER_DEPLOYMENT}") --timeout=180s
+EOF
+}
+
 main() {
     local command="${1:-}"
 
@@ -262,6 +369,15 @@ main() {
         render-transfer-commands)
             require_command
             render_transfer_commands
+            ;;
+        render-candidate-smoke-commands)
+            render_candidate_smoke_commands
+            ;;
+        render-cutover-commands)
+            render_cutover_commands
+            ;;
+        render-rollback-commands)
+            render_rollback_commands
             ;;
         -h|--help|help)
             usage
