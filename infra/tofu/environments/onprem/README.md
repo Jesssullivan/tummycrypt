@@ -36,6 +36,14 @@ Read-only data inventory before migration work:
 TCFS_CONTEXT=honey just onprem-data-inventory
 ```
 
+Non-mutating downtime command render:
+
+```bash
+TCFS_CONTEXT=honey just onprem-migration-plan facts
+TCFS_CONTEXT=honey just onprem-migration-plan render-import-pods
+TCFS_CONTEXT=honey just onprem-migration-plan render-transfer-commands
+```
+
 Storage migration planning:
 
 ```text

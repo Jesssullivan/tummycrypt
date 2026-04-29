@@ -42,6 +42,14 @@ onprem-preflight:
 onprem-data-inventory:
     bash scripts/tcfs-onprem-data-inventory.sh
 
+# Render non-mutating downtime migration facts, import Pods, or copy commands
+onprem-migration-plan *ARGS:
+    bash scripts/tcfs-onprem-migration-plan.sh {{ARGS}}
+
+# Regression test the non-mutating TCFS migration command renderer
+onprem-migration-plan-test:
+    bash scripts/test-tcfs-onprem-migration-plan.sh
+
 # Validate on-prem OpenTofu migration surfaces without applying live changes
 onprem-tofu-validate:
     bash scripts/tcfs-onprem-tofu-validate.sh
