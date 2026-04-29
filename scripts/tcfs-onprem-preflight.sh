@@ -3,7 +3,7 @@
 # tcfs-onprem-preflight.sh — read-only authority and mobility check for tcfs
 #
 # This script intentionally does not mutate Kubernetes. It summarizes the live
-# facts needed before choosing between Helm adoption and OpenTofu migration.
+# facts needed before executing the downtime-gated OpenTofu migration.
 #
 # Usage:
 #   scripts/tcfs-onprem-preflight.sh
@@ -116,4 +116,5 @@ if [[ -z "${nats_proxy_class}" || -z "${seaweed_proxy_class}" ]]; then
 fi
 
 warn "Do not treat ProxyClass-only movement as a durable fix."
-warn "Choose Helm adoption or OpenTofu migration before changing live authority."
+warn "Use the source-owned OpenTofu migration path before changing live authority."
+warn "Run storage/data movement and canonical hostname cutover only during an approved downtime window."
