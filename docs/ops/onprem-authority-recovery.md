@@ -59,9 +59,11 @@ Treat the direct `tcfs-backend` Helm chart as a recovery authority for the
 backend worker objects only. Do not use it as evidence that the whole live
 namespace is Helm-owned.
 
-The durable on-prem path should be OpenTofu migration, not blind Helm adoption,
-unless a future review proves that adopting the manual NATS and SeaweedFS
-objects into Helm is lower risk than replacing them deliberately.
+The durable on-prem path is OpenTofu migration, not blind Helm adoption. The
+current source-owned on-prem environment records retained target PVCs,
+non-canonical candidate workloads, candidate tailnet Services, and render-only
+cutover/rollback commands. Do not switch canonical tailnet hostnames or move
+data outside an approved downtime window.
 
 Reasons:
 
@@ -77,8 +79,8 @@ Reasons:
 Minimum migration gates:
 
 1. capture live NATS JetStream and SeaweedFS data inventory;
-2. choose target storage classes for NATS and SeaweedFS instead of inheriting
-   `local-path`;
+2. use the retained target storage classes for NATS and SeaweedFS instead of
+   inheriting `local-path`;
 3. render or apply retained target PVCs and non-canonical candidate workloads
    only through `infra/tofu/environments/onprem`;
 4. smoke candidate Tailscale Services with selectors that do not point at the
@@ -163,8 +165,8 @@ kubectl rollout status deployment/tcfs-backend-tcfs-backend-worker -n tcfs
 ```
 
 This is a repair path, not a complete Helm adoption. After the worker is
-healthy, follow up by either adopting the existing objects into Helm release
-state or deliberately migrating to the OpenTofu object-name family.
+healthy, follow the downtime-gated OpenTofu migration path for NATS,
+SeaweedFS, and canonical tailnet ownership.
 
 ## Validate Recovery
 

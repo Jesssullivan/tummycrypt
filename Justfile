@@ -38,6 +38,10 @@ k8s-status ns="tcfs":
 onprem-preflight:
     bash scripts/tcfs-onprem-preflight.sh
 
+# Regression test the read-only on-prem authority/mobility check
+onprem-preflight-test:
+    bash scripts/test-tcfs-onprem-preflight.sh
+
 # Read-only on-prem data inventory for NATS and SeaweedFS migration planning
 onprem-data-inventory:
     bash scripts/tcfs-onprem-data-inventory.sh
