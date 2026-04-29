@@ -45,6 +45,9 @@ Non-mutating downtime command render:
 TCFS_CONTEXT=honey just onprem-migration-plan facts
 TCFS_CONTEXT=honey just onprem-migration-plan render-import-pods
 TCFS_CONTEXT=honey just onprem-migration-plan render-transfer-commands
+TCFS_CONTEXT=honey just onprem-migration-plan render-candidate-smoke-commands
+TCFS_CONTEXT=honey just onprem-migration-plan render-cutover-commands
+TCFS_CONTEXT=honey just onprem-migration-plan render-rollback-commands
 ```
 
 Storage migration planning:
@@ -88,7 +91,9 @@ endpoints; that is safer than exposing the existing honey-local singleton pods.
 
 Do not switch the candidate hostnames to `nats-tcfs` or `seaweedfs-tcfs` until
 the live Service annotations have been removed through a source-controlled
-cutover plan.
+cutover plan. Use `render-cutover-commands` to review that sequence before the
+downtime window; the script only prints commands and does not mutate the
+cluster.
 
 ## Migration Gates
 

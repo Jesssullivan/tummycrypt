@@ -105,6 +105,9 @@ Source-owned command rendering now exists for the downtime copy lane:
 TCFS_CONTEXT=honey just onprem-migration-plan facts
 TCFS_CONTEXT=honey just onprem-migration-plan render-import-pods
 TCFS_CONTEXT=honey just onprem-migration-plan render-transfer-commands
+TCFS_CONTEXT=honey just onprem-migration-plan render-candidate-smoke-commands
+TCFS_CONTEXT=honey just onprem-migration-plan render-cutover-commands
+TCFS_CONTEXT=honey just onprem-migration-plan render-rollback-commands
 ```
 
 Those commands are render-only. They are meant to create reviewable evidence
@@ -112,6 +115,14 @@ for the maintenance window, not to authorize live mutation. The rendered
 transfer path streams from the source node-local PV path over SSH into a
 target-PVC import Pod, which avoids the unsafe single-Pod honey-to-bumble mount
 assumption.
+
+`render-candidate-smoke-commands` renders checks for the non-canonical
+candidate StatefulSets and candidate tailnet hostnames. `render-cutover-commands`
+renders the reviewed handoff shape: remove canonical annotations from the old
+kubectl-applied Services, review an OpenTofu plan that assigns canonical
+hostnames to the source-owned tailnet Services, then smoke the canonical
+hostnames. `render-rollback-commands` renders the reverse path while preserving
+old and target retained PVCs for comparison.
 
 Acceptable data movement shapes:
 
@@ -136,7 +147,8 @@ Use this order for the eventual live migration:
 8. Smoke candidate tailnet hostnames.
 9. Remove canonical Tailscale annotations from old Services through the chosen
    authority path.
-10. Assign canonical hostnames to source-owned Services.
+10. Assign canonical hostnames to source-owned Services through reviewed
+    OpenTofu plan/apply output.
 11. Run fleet smoke.
 12. Keep old retained PVs until rollback is explicitly declared unnecessary.
 
