@@ -1,50 +1,29 @@
-# Tailscale-only NATS exposure
+# Tailscale-only NATS exposure.
 #
-# Creates a LoadBalancer Service that the Tailscale operator picks up,
-# exposing NATS to the tailnet without a public IP.
-#
-# Prerequisites:
-#   - Tailscale operator installed on the cluster
-#   - NATS deployed via the nats module (pods labelled app.kubernetes.io/name=nats)
-#
-# Lab machines connect via MagicDNS:
-#   nats://nats-tcfs:4222
-# Or via the IaC-managed FQDN (Porkbun A record → Tailscale CGNAT IP):
-#   nats://nats.tcfs.tummycrypt.dev:4222
+# This wrapper preserves the historical module API while delegating the Service
+# shape to the generic tailscale-service module so on-prem and Civo use the same
+# ProxyClass-capable exposure contract.
 
-terraform {
-  required_providers {
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = ">= 2.26"
-    }
-  }
-}
+module "nats_tailnet" {
+  source = "../tailscale-service"
 
-resource "kubernetes_service_v1" "nats_tailscale" {
-  metadata {
-    name      = "nats-tailscale"
-    namespace = var.namespace
+  namespace          = var.namespace
+  name               = var.service_name
+  tailscale_hostname = var.tailscale_hostname
+  proxy_class        = var.proxy_class
+  selector           = var.selector
 
-    annotations = {
-      "tailscale.com/expose"   = "true"
-      "tailscale.com/hostname" = var.tailscale_hostname
-    }
+  labels = {
+    "app.kubernetes.io/name"       = "nats"
+    "app.kubernetes.io/component"  = "tailnet"
+    "app.kubernetes.io/managed-by" = "opentofu"
   }
 
-  spec {
-    type                = "LoadBalancer"
-    load_balancer_class = "tailscale"
-
-    selector = {
-      "app.kubernetes.io/name" = "nats"
-    }
-
-    port {
+  ports = [
+    {
       name        = "client"
       port        = 4222
       target_port = 4222
-      protocol    = "TCP"
     }
-  }
+  ]
 }

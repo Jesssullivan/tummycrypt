@@ -3,10 +3,12 @@ output "tailscale_nats_url" {
   value       = "nats://${var.tailscale_hostname}:4222"
 }
 
+output "service_name" {
+  description = "Kubernetes Service name for the tailnet NATS endpoint"
+  value       = module.nats_tailnet.service_name
+}
+
 output "tailscale_ip" {
   description = "Tailscale CGNAT IP assigned to the NATS LoadBalancer (populated after operator reconciles)"
-  value       = try(
-    [for ingress in kubernetes_service_v1.nats_tailscale.status[0].load_balancer[0].ingress : ingress.ip if ingress.ip != ""][0],
-    ""
-  )
+  value       = module.nats_tailnet.tailscale_ip
 }
