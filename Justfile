@@ -38,6 +38,10 @@ k8s-status ns="tcfs":
 onprem-preflight:
     bash scripts/tcfs-onprem-preflight.sh
 
+# Validate on-prem OpenTofu migration surfaces without applying live changes
+onprem-tofu-validate:
+    bash scripts/tcfs-onprem-tofu-validate.sh
+
 # Tail logs from a workload
 k8s-logs app="tcfsd" ns="tcfs":
     kubectl logs -l app.kubernetes.io/name={{app}} -n {{ns}} --tail=50
