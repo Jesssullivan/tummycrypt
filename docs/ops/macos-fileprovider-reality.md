@@ -401,10 +401,9 @@ This is a `workflow_dispatch` lane on GitHub's `macos-15` arm64 runner that:
 - runs `scripts/macos-postinstall-smoke.sh` with exact-content hydration and
   shared-Keychain config-source proof
 - explicitly nudges hosted-runner enumeration by opening/materializing the
-  CloudStorage root and saving `fileproviderctl`/`ls` probe logs before the
-  hard enumeration wait. This covers headless macOS sessions where the domain
-  root appears but the FileProvider extension is not launched by a plain
-  filesystem walk.
+  CloudStorage root and saving `ls` probe logs before the hard enumeration
+  wait. This covers headless macOS sessions where the domain root appears but
+  the FileProvider extension is not launched by a plain filesystem walk.
 
 Required `tcfs-macos-smoke` environment secrets:
 

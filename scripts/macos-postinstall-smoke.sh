@@ -535,14 +535,6 @@ nudge_cloud_root_enumeration() {
       "fileproviderctl-materialize-root" \
       "$LOG_SHOW_TIMEOUT_SECS" \
       fileproviderctl materialize "$root" || true
-    run_bounded_to_log \
-      "fileproviderctl-dump-domain" \
-      "$LOG_SHOW_TIMEOUT_SECS" \
-      fileproviderctl dump "$DOMAIN_ID" || true
-    run_bounded_to_log \
-      "fileproviderctl-dump-provider" \
-      "$LOG_SHOW_TIMEOUT_SECS" \
-      fileproviderctl dump "$PLUGIN_ID" || true
   fi
 }
 

@@ -112,7 +112,7 @@ case "${1:-}" in
   domain)
     printf 'io.tinyland.tcfs\n'
     ;;
-  materialize|dump)
+  materialize)
     printf 'fileproviderctl %s' "$1"
     shift
     printf ' %q' "$@"
@@ -204,8 +204,6 @@ assert_contains "$OPEN_LOG" "$APP_PATH"
 assert_contains "$OPEN_LOG" "$CLOUD_ROOT"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
-assert_contains "$LOG_DIR/fileproviderctl-dump-domain.log" "fileproviderctl dump io.tinyland.tcfs"
-assert_contains "$LOG_DIR/fileproviderctl-dump-provider.log" "fileproviderctl dump io.tinyland.tcfs.fileprovider"
 cmp -s "$EXPECTED_CONTENT_FILE" "$LOG_DIR/hydrated-expected-file"
 [[ -e "$CAT_RETRY_MARKER" ]] || {
   printf 'expected fake cat to fail once before hydration retry succeeded\n' >&2
