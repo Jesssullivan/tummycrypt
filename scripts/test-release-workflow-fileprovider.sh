@@ -322,6 +322,19 @@ assert_contains "$VERIFY_RELEASE_PKG_STEP" "require_current_postinstall"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--allow-postinstall-mismatch"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--expected-postinstall scripts/macos-pkg-postinstall.sh"
 
+INSTALL_BINARY_SMOKE_STEP="${TMPDIR}/prove-installed-binary-smoke.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Prove installed-binary smoke" \
+  "$INSTALL_BINARY_SMOKE_STEP"
+bash -n "$INSTALL_BINARY_SMOKE_STEP"
+assert_contains "$INSTALL_BINARY_SMOKE_STEP" "-u TCFS_S3_ACCESS"
+assert_contains "$INSTALL_BINARY_SMOKE_STEP" "-u TCFS_S3_SECRET"
+assert_contains "$INSTALL_BINARY_SMOKE_STEP" "-u AWS_ACCESS_KEY_ID"
+assert_contains "$INSTALL_BINARY_SMOKE_STEP" "-u AWS_SECRET_ACCESS_KEY"
+assert_contains "$INSTALL_BINARY_SMOKE_STEP" "scripts/install-smoke.sh --expected-version \"\${VERSION}\""
+
 VALIDATE_STORAGE_STEP="${TMPDIR}/validate-release-inputs-and-storage-secrets.sh"
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \

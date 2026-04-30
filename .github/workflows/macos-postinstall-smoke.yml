@@ -222,7 +222,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/install-smoke.sh --expected-version "${VERSION}"
+          env \
+            -u TCFS_S3_ACCESS \
+            -u TCFS_S3_SECRET \
+            -u AWS_ACCESS_KEY_ID \
+            -u AWS_SECRET_ACCESS_KEY \
+            bash scripts/install-smoke.sh --expected-version "${VERSION}"
 
       - name: Write live config
         shell: bash
