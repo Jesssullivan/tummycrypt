@@ -981,6 +981,7 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GH_RELEASE_TOKEN || github.token }}
           tag_name: ${{ needs.plan.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: tcfs ${{ needs.plan.outputs.tag }}

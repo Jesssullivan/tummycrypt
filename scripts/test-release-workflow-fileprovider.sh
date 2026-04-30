@@ -129,6 +129,19 @@ check_postinstall_workflow_environment_and_secrets() {
   ' "$POSTINSTALL_WORKFLOW"
 }
 
+check_release_action_token_override() {
+  ruby -ryaml -e '
+    workflow = YAML.load_file(ARGV[0])
+    steps = workflow.fetch("jobs").fetch("create-release").fetch("steps")
+    step = steps.find { |candidate| candidate["name"] == "Create release" }
+    raise "Create release step not found" unless step
+    with = step.fetch("with")
+    expected = "${{ secrets.GH_RELEASE_TOKEN || github.token }}"
+    actual = with.fetch("token") { raise "Create release step missing token override" }
+    raise "Create release token mismatch: #{actual.inspect}" unless actual == expected
+  ' "$WORKFLOW"
+}
+
 write_profile() {
   local path="$1"
   local name="$2"
@@ -175,6 +188,7 @@ mkdir -p "$FAKE_BIN"
 check_workflow_step_shape
 check_postinstall_workflow_checkout_uses_current_harness
 check_postinstall_workflow_environment_and_secrets
+check_release_action_token_override
 
 cat >"$FAKE_BIN/uname" <<'EOF'
 #!/usr/bin/env bash
