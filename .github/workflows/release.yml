@@ -731,6 +731,42 @@ jobs:
             echo "SIGNING_IDENTITY=-" >> $GITHUB_ENV
           fi
 
+      - name: Import FileProvider provisioning profiles
+        if: env.SIGNING_IDENTITY != '-'
+        env:
+          TCFS_HOST_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_HOST_PROVISIONING_PROFILE_BASE64 }}
+          TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$TCFS_HOST_PROVISIONING_PROFILE_BASE64" ]; then
+            echo "::error::TCFS_HOST_PROVISIONING_PROFILE_BASE64 is required for Developer ID FileProvider signing"
+            exit 1
+          fi
+          if [ -z "$TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64" ]; then
+            echo "::error::TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64 is required for Developer ID FileProvider signing"
+            exit 1
+          fi
+
+          HOST_PROFILE="$RUNNER_TEMP/tcfs-host-developer-id.provisionprofile"
+          EXTENSION_PROFILE="$RUNNER_TEMP/tcfs-fileprovider-developer-id.provisionprofile"
+          mkdir -p "$RUNNER_TEMP"
+
+          echo "$TCFS_HOST_PROVISIONING_PROFILE_BASE64" | base64 -d > "$HOST_PROFILE"
+          echo "$TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64" | base64 -d > "$EXTENSION_PROFILE"
+
+          security cms -D -i "$HOST_PROFILE" >/dev/null
+          security cms -D -i "$EXTENSION_PROFILE" >/dev/null
+          scripts/macos-fileprovider-profile-inventory.sh \
+            --profiles-dir "$RUNNER_TEMP" \
+            --strict
+
+          {
+            echo "TCFS_HOST_PROVISIONING_PROFILE=$HOST_PROFILE"
+            echo "TCFS_EXTENSION_PROVISIONING_PROFILE=$EXTENSION_PROFILE"
+            echo "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
+          } >> "$GITHUB_ENV"
+
       - name: Build FileProvider extension
         run: |
           HEADER=$(find target -name tcfs_file_provider.h -path '*/tcfs-file-provider*/out/*' | head -1)
@@ -848,94 +884,16 @@ jobs:
             echo "PKG_SIGNING_IDENTITY=" >> $GITHUB_ENV
           fi
 
-      - name: Assemble .pkg payload
-        run: |
-          VERSION="${{ needs.plan.outputs.version }}"
-          PKG_ROOT="$RUNNER_TEMP/pkg-root"
-          mkdir -p "${PKG_ROOT}/usr/local/bin"
-          mkdir -p "${PKG_ROOT}/Applications"
-
-          # Extract CLI binaries
-          tar xzf cli-dist/tcfs-${VERSION}-macos-aarch64.tar.gz -C "$RUNNER_TEMP"
-          cp "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64/tcfs" "${PKG_ROOT}/usr/local/bin/"
-          cp "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64/tcfsd" "${PKG_ROOT}/usr/local/bin/" 2>/dev/null || true
-          cp "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64/tcfs-tui" "${PKG_ROOT}/usr/local/bin/" 2>/dev/null || true
-          cp "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64/tcfs-mcp" "${PKG_ROOT}/usr/local/bin/" 2>/dev/null || true
-          chmod +x "${PKG_ROOT}/usr/local/bin/"*
-
-          # Extract FileProvider app
-          FP_ZIP=$(find fp-dist -name 'TCFSProvider-*.zip' | head -1)
-          /usr/bin/ditto -x -k "$FP_ZIP" "${PKG_ROOT}/Applications/"
-
-      - name: Create scripts
-        run: |
-          SCRIPTS="$RUNNER_TEMP/pkg-scripts"
-          mkdir -p "$SCRIPTS"
-
-          cat > "$SCRIPTS/postinstall" << 'SCRIPT'
-          #!/bin/bash
-          # Register FileProvider extension
-          if [ -d "/Applications/TCFSProvider.app" ]; then
-            /usr/bin/pluginkit -a "/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex" 2>/dev/null || true
-          fi
-
-          # Install launchd plist for daemon
-          PLIST_DIR="$HOME/Library/LaunchAgents"
-          PLIST_PATH="${PLIST_DIR}/io.tinyland.tcfsd.plist"
-          mkdir -p "$PLIST_DIR"
-          if [ ! -f "$PLIST_PATH" ]; then
-            cat > "$PLIST_PATH" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>Label</key>
-            <string>io.tinyland.tcfsd</string>
-            <key>ProgramArguments</key>
-            <array>
-              <string>/usr/local/bin/tcfsd</string>
-              <string>--mode</string>
-              <string>daemon</string>
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
-            <key>StandardOutPath</key>
-            <string>/tmp/tcfsd.stdout.log</string>
-            <key>StandardErrorPath</key>
-            <string>/tmp/tcfsd.stderr.log</string>
-          </dict>
-          </plist>
-          PLIST
-          fi
-          exit 0
-          SCRIPT
-          chmod +x "$SCRIPTS/postinstall"
-
       - name: Build .pkg
         run: |
           VERSION="${{ needs.plan.outputs.version }}"
-          PKG_ROOT="$RUNNER_TEMP/pkg-root"
-          SCRIPTS="$RUNNER_TEMP/pkg-scripts"
-          UNSIGNED_PKG="$RUNNER_TEMP/tcfs-${VERSION}-unsigned.pkg"
-          FINAL_PKG="tcfs-${VERSION}-macos-aarch64.pkg"
-
-          pkgbuild \
-            --root "$PKG_ROOT" \
-            --scripts "$SCRIPTS" \
-            --identifier io.tinyland.tcfs \
+          FP_ZIP="$(find fp-dist -name 'TCFSProvider-*.zip' | head -1)"
+          scripts/macos-build-pkg.sh \
             --version "$VERSION" \
-            --install-location / \
-            "$UNSIGNED_PKG"
-
-          if [ -n "$PKG_SIGNING_IDENTITY" ]; then
-            echo "Signing .pkg with: $PKG_SIGNING_IDENTITY"
-            productsign --sign "$PKG_SIGNING_IDENTITY" \
-              "$UNSIGNED_PKG" "$FINAL_PKG"
-          else
-            cp "$UNSIGNED_PKG" "$FINAL_PKG"
-          fi
+            --cli-tar "cli-dist/tcfs-${VERSION}-macos-aarch64.tar.gz" \
+            --fileprovider-zip "$FP_ZIP" \
+            --output "tcfs-${VERSION}-macos-aarch64.pkg" \
+            --sign "${PKG_SIGNING_IDENTITY:-}"
 
       - name: Notarize .pkg
         if: env.PKG_SIGNING_IDENTITY != ''

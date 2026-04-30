@@ -18,14 +18,15 @@
 
 \tcfs{} (TummyCrypt FileSystem) is a FOSS, self-hosted, S3-first synchronization
 system that replaces proprietary cloud storage clients (odrive, Dropbox, etc.)
-with a FUSE-based mount that transparently hydrates files on demand.
+with platform-specific filesystem surfaces that transparently hydrate files on
+demand.
 
 \subsection{Design Goals}
 
 \begin{enumerate}
   \item \textbf{Self-hosted first} --- all data stays on user-controlled infrastructure (SeaweedFS).
-  \item \textbf{On-demand hydration} --- files appear locally as lightweight stubs;
-        only downloaded when accessed.
+  \item \textbf{On-demand hydration} --- remote files appear locally as clean
+        names or platform placeholders and are downloaded only when accessed.
   \item \textbf{End-to-end encryption} --- client-side XChaCha20-Poly1305 encryption
         before upload; storage operator never sees plaintext.
   \item \textbf{Content-addressed deduplication} --- FastCDC chunking with BLAKE3
@@ -74,7 +75,8 @@ The client runs on user machines and consists of:
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Crate Map}
 
-All Rust code lives in \filepath{crates/}. The workspace contains 14 crates:
+All Rust code lives in \filepath{crates/}. The workspace contains 18 product
+crates plus an end-to-end test crate:
 
 \begin{longtable}{llp{8cm}}
   \toprule
@@ -83,14 +85,18 @@ All Rust code lives in \filepath{crates/}. The workspace contains 14 crates:
   \endhead
   \code{tcfs-core}        & library & Shared types, config schema, protobuf defs \\
   \code{tcfs-crypto}      & library & XChaCha20-Poly1305, Argon2id KDF, HKDF, BIP-39 \\
+  \code{tcfs-auth}        & library & TOTP, WebAuthn/FIDO2, session, and enrollment helpers \\
   \code{tcfs-secrets}     & library & SOPS/age/KDBX credential chain \\
   \code{tcfs-storage}     & library & OpenDAL abstraction, SeaweedFS native API \\
   \code{tcfs-chunks}      & library & FastCDC chunking, BLAKE3 hashing, zstd compression \\
   \code{tcfs-sync}        & library & Sync engine, JSON state cache, NATS consumers \\
+  \code{tcfs-vfs}         & library & Shared virtual filesystem, disk cache, stubs, hydration \\
   \code{tcfs-fuse}        & library & Linux FUSE driver (fuse3 crate) \\
+  \code{tcfs-nfs}         & library & NFS loopback mount backend \\
   \code{tcfs-cloudfilter} & library & Windows Cloud Files API (skeleton) \\
   \code{tcfs-sops}        & library & SOPS+age fleet secret propagation \\
   \code{tcfs-file-provider} & library & macOS/iOS FileProvider FFI (RFC 0002) \\
+  \code{tcfs-dbus}        & library & Linux D-Bus desktop status integration \\
   \code{tcfsd}            & binary  & Daemon: gRPC, FUSE, metrics, systemd \\
   \code{tcfs-cli}         & binary  & CLI: push, pull, mount, status, unsync \\
   \code{tcfs-tui}         & binary  & TUI: ratatui dashboard \\
@@ -99,35 +105,35 @@ All Rust code lives in \filepath{crates/}. The workspace contains 14 crates:
 \end{longtable}
 
 % ─────────────────────────────────────────────────────────────────────────────
-\section{Stub File Format}
+\section{Physical Stub File Format}
 
-Files not yet downloaded appear as \code{.tc} stubs. The stub is a JSON file
-containing metadata needed to reconstruct the original:
+Physical sync-root and compatibility paths can represent files as \code{.tc}
+stubs. Mounted VFS views normally expose clean filenames and hydrate from remote
+index entries; macOS FileProvider uses platform placeholders / APFS dataless
+files. A physical \code{.tc} stub is a small sorted key/value text file:
 
-\begin{lstlisting}[language=json]
-{
-  "version": 1,
-  "file_id": "<BLAKE3 hash of original file>",
-  "original_name": "photo.jpg",
-  "original_size": 4194304,
-  "mime_type": "image/jpeg",
-  "modified_at": "2026-02-20T12:00:00Z",
-  "chunk_count": 3,
-  "manifest_key": "chunks/manifests/<file_id>",
-  "remote_prefix": "tcfs/default"
-}
+\begin{lstlisting}
+version https://tummycrypt.io/tcfs/v1
+chunks 23
+compressed 0
+fetched 0
+oid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e239
+origin seaweedfs://filer.example.com/bucket/path/to/file
+size 94371840
 \end{lstlisting}
 
-Directory stubs use the \code{.tcf} extension and list child entries. See the
-Protocol Specification (docs/tex/protocol.tex) for the full format.
+Directory stubs use the \code{.tcf} extension for physical directory
+dehydration/compatibility paths. Mounted directory listings normally come from
+remote \filepath{\{prefix\}/index/...} entries.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Hydration Sequence}
 
-When a FUSE-mounted \code{.tc} stub is opened:
+When a remote-backed file is opened through the mounted VFS:
 
 \begin{enumerate}
-  \item FUSE \code{open()} intercepts the file access request.
+  \item The mount backend's \code{open()} handler intercepts the file access
+        request.
   \item \tcfsd{} fetches the manifest from
         \filepath{\{prefix\}/manifests/\{file\_hash\}}.
   \item Chunks are fetched in parallel from
@@ -135,8 +141,9 @@ When a FUSE-mounted \code{.tc} stub is opened:
   \item Each chunk is decompressed (zstd), decrypted (XChaCha20-Poly1305),
         and verified (BLAKE3).
   \item Chunks are concatenated in order to reconstruct the original file.
-  \item The \code{.tc} stub is atomically replaced with the hydrated file.
-  \item \code{tcfs unsync <path>} converts it back to a stub.
+  \item The file is served to the caller and cached for future reads.
+  \item Unsync/dehydrate evicts cached content or creates a physical
+        \code{.tc} stub, depending on the surface.
 \end{enumerate}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -167,7 +174,7 @@ auto-reloads credentials when the file changes on disk.
   0 & Complete & Repo foundation, SOPS migration, Rust workspace stubs \\
   1 & Complete & Core daemon + secrets + gRPC \\
   2 & Complete & Sync engine + chunking + NATS \\
-  3 & Complete & FUSE driver + \code{.tc} stubs + hydration \\
+  3 & Complete & FUSE driver + clean VFS hydration + physical stubs \\
   4 & Complete & K8s backend + HPA + full OpenTofu deploy \\
   5 & Complete & Release pipeline + packaging + docs site \\
   6 & Complete & macOS FUSE-T + Windows CFAPI skeleton + GitLab mirror \\

@@ -2,7 +2,7 @@
 
 > Under active development. Not yet stable. Expect breaking changes.
 
-Self-hosted encrypted file sync with on-demand hydration. Mounts SeaweedFS as a local directory — files appear as zero-byte `.tc` stubs until accessed, then transparently download and decrypt. FOSS odrive/Dropbox replacement.
+Self-hosted encrypted file sync with on-demand hydration. Mounted views present remote files as normal names and hydrate on open; offline/dehydrated copies can be represented by small `.tc`/`.tcf` stubs. FOSS odrive/Dropbox replacement.
 
 ## Canonical Home
 
@@ -15,7 +15,7 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 
 ## Features
 
-- **On-demand hydration**: Files appear as `.tc` stubs, hydrate transparently on open
+- **On-demand hydration**: Mounted files list as normal names and hydrate transparently on open
 - **E2E encryption**: XChaCha20-Poly1305 per-chunk, Argon2id KDF, BIP-39 recovery keys
 - **Fleet sync**: Multi-machine sync via NATS JetStream with vector clock conflict detection
 - **Content-addressed storage**: FastCDC chunking, BLAKE3 hashing, zstd compression
@@ -75,8 +75,8 @@ For the supported post-release proof contract across Homebrew, `.pkg`, `.deb`,
 tcfs status                    # Daemon status, device identity, NATS connection
 tcfs push <path>               # Upload with encryption + vector clock tick
 tcfs pull <manifest> <local>   # Download with conflict detection + decryption
-tcfs mount <remote> <target>   # FUSE mount with on-demand hydration
-tcfs unsync <path>             # Convert hydrated file back to .tc stub
+tcfs mount <remote> <target>   # FUSE mount with clean-name on-demand hydration
+tcfs unsync <path>             # Convert hydrated file back to a physical .tc stub
 tcfs device enroll             # Register device with age keypair
 tcfs device list               # Show enrolled fleet devices
 ```

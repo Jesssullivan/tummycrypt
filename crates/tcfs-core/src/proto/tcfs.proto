@@ -8,7 +8,7 @@ service TcfsDaemon {
   rpc Unmount(UnmountRequest) returns (UnmountResponse);
   rpc Push(stream PushChunk) returns (stream PushProgress);
   rpc Pull(PullRequest) returns (stream PullProgress);
-  // Called by FUSE driver on open() of a .tc stub
+  // Called by mount or desktop integrations when a remote-backed file is opened.
   rpc Hydrate(HydrateRequest) returns (stream HydrateProgress);
   rpc Unsync(UnsyncRequest) returns (UnsyncResponse);
   rpc SyncStatus(SyncStatusRequest) returns (SyncStatusResponse);

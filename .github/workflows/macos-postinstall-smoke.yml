@@ -17,11 +17,17 @@ jobs:
     if: github.repository == 'Jesssullivan/tummycrypt'
     runs-on: macos-14
     timeout-minutes: 40
+    environment: tcfs-macos-smoke
     env:
-      TCFS_S3_ENDPOINT: ${{ secrets.TCFS_S3_ENDPOINT }}
-      TCFS_S3_BUCKET: ${{ secrets.TCFS_S3_BUCKET }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TCFS_SMOKE_S3_ENDPOINT: ${{ secrets.TCFS_SMOKE_S3_ENDPOINT }}
+      TCFS_SMOKE_S3_BUCKET: ${{ secrets.TCFS_SMOKE_S3_BUCKET }}
+      TCFS_SMOKE_S3_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      TCFS_SMOKE_S3_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      TCFS_SMOKE_MASTER_KEY_B64: ${{ secrets.TCFS_SMOKE_MASTER_KEY_B64 }}
+      TCFS_S3_ACCESS: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      TCFS_S3_SECRET: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
     steps:
       - uses: actions/checkout@v5
 
@@ -44,28 +50,34 @@ jobs:
           }
 
           missing=()
-          for name in TCFS_S3_ENDPOINT TCFS_S3_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+          for name in \
+            TCFS_SMOKE_S3_ENDPOINT \
+            TCFS_SMOKE_S3_BUCKET \
+            TCFS_SMOKE_S3_ACCESS_KEY_ID \
+            TCFS_SMOKE_S3_SECRET_ACCESS_KEY \
+            TCFS_SMOKE_MASTER_KEY_B64
+          do
             if [[ -z "${!name:-}" ]]; then
               missing+=("$name")
             fi
           done
 
           if (( ${#missing[@]} > 0 )); then
-            echo "::error::Missing required repository secrets: ${missing[*]}"
-            echo "Set the storage-side secrets before using this workflow."
+            echo "::error::Missing required tcfs-macos-smoke environment secrets: ${missing[*]}"
+            echo "Set the storage and E2EE smoke secrets before using this workflow."
             exit 1
           fi
 
-          python3 - "$TCFS_S3_ENDPOINT" <<'PY'
+          python3 - "$TCFS_SMOKE_S3_ENDPOINT" <<'PY'
           import ipaddress
           import sys
           from urllib.parse import urlparse
 
           endpoint = sys.argv[1].strip()
           parsed = urlparse(endpoint)
-          if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+          if parsed.scheme != "https" or not parsed.hostname:
               print(
-                  f"::error::TCFS_S3_ENDPOINT must be an http(s) URL with a hostname (got {endpoint!r})"
+                  f"::error::TCFS_SMOKE_S3_ENDPOINT must be an https URL with a hostname (got {endpoint!r})"
               )
               raise SystemExit(1)
 
@@ -73,12 +85,12 @@ jobs:
           blocked_suffixes = (".ts.net", ".local", ".internal", ".home.arpa")
           if host in {"localhost", "localhost.localdomain"}:
               print(
-                  f"::error::TCFS_S3_ENDPOINT host {host!r} is local-only and cannot be reached from GitHub-hosted macOS runners."
+                  f"::error::TCFS_SMOKE_S3_ENDPOINT host {host!r} is local-only and cannot be reached from GitHub-hosted macOS runners."
               )
               raise SystemExit(1)
           if host.endswith(blocked_suffixes):
               print(
-                  f"::error::TCFS_S3_ENDPOINT host {host!r} looks private to a tailnet or local DNS domain."
+                  f"::error::TCFS_SMOKE_S3_ENDPOINT host {host!r} looks private to a tailnet or local DNS domain."
               )
               raise SystemExit(1)
           try:
@@ -89,7 +101,7 @@ jobs:
           if ip is None:
               if "." not in host:
                   print(
-                      f"::error::TCFS_S3_ENDPOINT host {host!r} is a bare hostname; GitHub-hosted runners need a publicly routable DNS name."
+                      f"::error::TCFS_SMOKE_S3_ENDPOINT host {host!r} is a bare hostname; GitHub-hosted runners need a publicly routable DNS name."
                   )
                   raise SystemExit(1)
               raise SystemExit(0)
@@ -102,7 +114,7 @@ jobs:
 
           if blocked:
               print(
-                  f"::error::TCFS_S3_ENDPOINT host {host!r} is {' and '.join(blocked)}; GitHub-hosted macOS runners need a publicly reachable storage endpoint."
+                  f"::error::TCFS_SMOKE_S3_ENDPOINT host {host!r} is {' and '.join(blocked)}; GitHub-hosted macOS runners need a publicly reachable storage endpoint."
               )
               raise SystemExit(1)
           PY
@@ -117,6 +129,9 @@ jobs:
           SYNC_ROOT="$RUNNER_TEMP/tcfs-sync-root"
           CONFIG_DIR="$HOME/.config/tcfs"
           CONFIG_PATH="$CONFIG_DIR/config.toml"
+          NO_CRYPTO_CONFIG_PATH="$RUNNER_TEMP/tcfs-no-crypto.toml"
+          MASTER_KEY_PATH="$RUNNER_TEMP/tcfs-master.key"
+          EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
           APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
           REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
@@ -130,10 +145,42 @@ jobs:
             echo "SYNC_ROOT=$SYNC_ROOT"
             echo "CONFIG_DIR=$CONFIG_DIR"
             echo "CONFIG_PATH=$CONFIG_PATH"
+            echo "NO_CRYPTO_CONFIG_PATH=$NO_CRYPTO_CONFIG_PATH"
+            echo "MASTER_KEY_PATH=$MASTER_KEY_PATH"
+            echo "EXPECTED_CONTENT_FILE=$EXPECTED_CONTENT_FILE"
             echo "APP_GROUP_DIR=$APP_GROUP_DIR"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
             echo "FIXTURE_REL=$FIXTURE_REL"
           } >> "$GITHUB_ENV"
+
+      - name: Install E2EE master key
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$MASTER_KEY_PATH" <<'PY'
+          import base64
+          import binascii
+          import os
+          import sys
+
+          target = sys.argv[1]
+          encoded = os.environ.get("TCFS_SMOKE_MASTER_KEY_B64", "").strip()
+          try:
+              key = base64.b64decode(encoded, validate=True)
+          except binascii.Error as exc:
+              print(f"::error::TCFS_SMOKE_MASTER_KEY_B64 is not valid base64: {exc}")
+              raise SystemExit(1)
+
+          if len(key) != 32:
+              print(
+                  f"::error::TCFS_SMOKE_MASTER_KEY_B64 decoded to {len(key)} bytes; expected 32"
+              )
+              raise SystemExit(1)
+
+          with open(target, "wb") as fh:
+              fh.write(key)
+          PY
+          chmod 600 "$MASTER_KEY_PATH"
 
       - name: Download release package
         shell: bash
@@ -142,6 +189,14 @@ jobs:
           curl -fL \
             -o "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" \
             "https://github.com/${{ github.repository }}/releases/download/${TAG}/tcfs-${VERSION}-macos-aarch64.pkg"
+
+      - name: Verify release package structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/macos-pkg-structure-smoke.sh \
+            --pkg "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" \
+            --require-signature
 
       - name: Install release package
         shell: bash
@@ -167,10 +222,15 @@ jobs:
           log_format = "text"
 
           [storage]
-          endpoint = "${TCFS_S3_ENDPOINT}"
+          endpoint = "${TCFS_SMOKE_S3_ENDPOINT}"
           region = "us-east-1"
-          bucket = "${TCFS_S3_BUCKET}"
+          bucket = "${TCFS_SMOKE_S3_BUCKET}"
           remote_prefix = "${REMOTE_PREFIX}"
+          enforce_tls = true
+
+          [crypto]
+          enabled = true
+          master_key_file = "${MASTER_KEY_PATH}"
 
           [sync]
           state_db = "${RUNNER_TEMP}/tcfs-state.db"
@@ -193,8 +253,43 @@ jobs:
           set -euo pipefail
           FIXTURE_PATH="${SYNC_ROOT}/${FIXTURE_REL}"
           mkdir -p "$(dirname "$FIXTURE_PATH")"
-          printf 'tcfs macOS post-install smoke %s run %s\n' "$TAG" "$GITHUB_RUN_ID" > "$FIXTURE_PATH"
+          printf 'tcfs macOS post-install smoke %s run %s\n' "$TAG" "$GITHUB_RUN_ID" > "$EXPECTED_CONTENT_FILE"
+          cp "$EXPECTED_CONTENT_FILE" "$FIXTURE_PATH"
           tcfs --config "$CONFIG_PATH" push "$FIXTURE_PATH"
+
+      - name: Verify remote fixture requires E2EE key
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIXTURE_PATH="${SYNC_ROOT}/${FIXTURE_REL}"
+          cat > "$NO_CRYPTO_CONFIG_PATH" <<EOF
+          [daemon]
+          socket = "/tmp/tcfsd-gha-no-crypto.sock"
+          metrics_addr = "127.0.0.1:19101"
+          log_format = "text"
+
+          [storage]
+          endpoint = "${TCFS_SMOKE_S3_ENDPOINT}"
+          region = "us-east-1"
+          bucket = "${TCFS_SMOKE_S3_BUCKET}"
+          remote_prefix = "${REMOTE_PREFIX}"
+          enforce_tls = true
+
+          [sync]
+          state_db = "${RUNNER_TEMP}/tcfs-no-crypto-state.db"
+          sync_root = "${SYNC_ROOT}"
+          device_name = "gha-macos-postinstall-no-crypto"
+          EOF
+          chmod 600 "$NO_CRYPTO_CONFIG_PATH"
+
+          if tcfs --config "$NO_CRYPTO_CONFIG_PATH" pull "$FIXTURE_PATH" "$RUNNER_TEMP/no-crypto-pull-check" >"$LOG_DIR/no-crypto-pull.log" 2>&1; then
+            echo "::error::Encrypted smoke fixture was readable without the E2EE master key"
+            cat "$LOG_DIR/no-crypto-pull.log"
+            exit 1
+          fi
+
+          tcfs --config "$CONFIG_PATH" pull "$FIXTURE_PATH" "$RUNNER_TEMP/e2ee-pull-check"
+          cmp -s "$EXPECTED_CONTENT_FILE" "$RUNNER_TEMP/e2ee-pull-check"
 
       - name: Start tcfsd with live config
         shell: bash
@@ -228,6 +323,8 @@ jobs:
             --expected-version "${VERSION}" \
             --config "$CONFIG_PATH" \
             --expected-file "${FIXTURE_REL}" \
+            --expected-content-file "$EXPECTED_CONTENT_FILE" \
+            --require-keychain-config \
             --log-dir "$LOG_DIR/harness"
 
       - name: Capture diagnostics

@@ -1,6 +1,9 @@
 //! Concrete `VirtualFilesystem` implementation for tcfs.
 //!
-//! Maps a SeaweedFS prefix to a virtual directory tree with `.tc` stub files.
+//! Maps a SeaweedFS prefix to a virtual directory tree with clean user-facing
+//! names. Physical `.tc`/`.tcf` stubs are still supported for compatibility and
+//! offline/dehydrated sync-root paths, but mounted VFS entries are not exposed
+//! with a `.tc` suffix.
 //! This is the core filesystem logic, decoupled from any specific mount
 //! protocol (FUSE, NFS, FileProvider).
 //!
@@ -13,8 +16,8 @@
 //!
 //! Virtual tree:
 //!   /src/
-//!     main.rs.tc   (0-byte stub shown as real size from index)
-//!   /README.md.tc
+//!     main.rs      (remote-backed, hydrated on open)
+//!   /README.md     (remote-backed, hydrated on open)
 //! ```
 
 use std::collections::{HashMap, HashSet};
@@ -30,6 +33,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 use tcfs_sync::conflict::VectorClock;
+use tcfs_sync::index_entry::{write_committed_index_entry, RemoteIndexEntry};
 use tcfs_sync::manifest::SyncManifest;
 
 use crate::cache::DiskCache;
@@ -52,7 +56,7 @@ const DIR_MARKER_CONTENT: &[u8] = b"type=directory\n";
 
 /// An open file handle — holds content in memory, tracks write state.
 struct FileHandle {
-    /// Virtual path (e.g., "/src/main.rs.tc")
+    /// Virtual path (e.g., "/src/main.rs")
     path: String,
     /// File content in memory (hydrated on open, modified on write)
     data: Vec<u8>,
@@ -72,7 +76,7 @@ pub struct UnsyncResult {
     pub path: String,
     /// Bytes freed from disk cache.
     pub bytes_freed: u64,
-    /// Whether the file was actually cached (false = already a stub).
+    /// Whether the file was actually cached (false = already dehydrated).
     pub was_cached: bool,
 }
 
@@ -194,8 +198,8 @@ impl TcfsVfs {
 
     /// Unsync (dehydrate) a file: evict it from the disk cache.
     ///
-    /// After this the file appears as a stub in the VFS and will be
-    /// re-hydrated on-demand when next accessed.
+    /// After this the VFS keeps listing the clean path, but its cached content
+    /// is gone and will be re-hydrated on demand when next accessed.
     pub async fn unsync_path(&self, vpath: &str) -> Result<UnsyncResult> {
         let clean = vpath.trim_start_matches('/');
         let index_key = if self.prefix.is_empty() {
@@ -211,15 +215,10 @@ impl TcfsVfs {
             .await
             .with_context(|| format!("unsync: reading index for {vpath}"))?;
         let idx_raw = idx_bytes.to_bytes();
-        let idx_str = String::from_utf8_lossy(&idx_raw);
-
-        // Parse manifest_hash from index entry
-        // Format: "manifest_hash=HASH\nsize=...\nchunks=..."
-        let manifest_hash = idx_str
-            .lines()
-            .find_map(|line| line.strip_prefix("manifest_hash="))
-            .context("unsync: no manifest_hash in index entry")?
-            .to_string();
+        let idx_str = std::str::from_utf8(&idx_raw).context("unsync: index entry is not UTF-8")?;
+        let manifest_hash = IndexEntry::parse(idx_str)
+            .context("unsync: parsing index entry")?
+            .manifest_hash;
 
         // Evict from disk cache
         let bytes_freed = self.disk_cache.evict(&manifest_hash).await?;
@@ -358,14 +357,9 @@ impl TcfsVfs {
         let index_key = self
             .index_key_for(vpath)
             .context("cannot compute index key")?;
-        let index_content = format!(
-            "manifest_hash={}\nsize={}\nchunks={}\n",
-            file_hash,
-            data.len(),
-            chunk_hashes.len()
-        );
-        self.op
-            .write(&index_key, index_content.into_bytes())
+        let index_entry =
+            RemoteIndexEntry::new(file_hash.clone(), data.len() as u64, chunk_hashes.len());
+        write_committed_index_entry(&self.op, &index_key, &index_entry)
             .await
             .context("writing index entry")?;
 
@@ -396,7 +390,8 @@ impl TcfsVfs {
 
     /// Build the index path for a virtual FS path.
     ///
-    /// `/src/main.rs.tc` -> `{prefix}/index/src/main.rs`
+    /// `/src/main.rs` -> `{prefix}/index/src/main.rs`
+    /// `/src/main.rs.tc` -> `{prefix}/index/src/main.rs` (legacy/physical stub compat)
     fn index_key_for(&self, vpath: &str) -> Option<String> {
         let rel = vpath.trim_start_matches('/');
         if rel.is_empty() {
@@ -468,7 +463,7 @@ impl TcfsVfs {
         let data = match self.op.read(&key).await {
             Ok(d) => d,
             Err(e) => {
-                tracing::warn!(vpath = %vpath, key = %key, error = %e, "get_index_entry: S3 read failed");
+                debug!(vpath = %vpath, key = %key, error = %e, "get_index_entry: index key not present");
                 return None;
             }
         };
@@ -483,7 +478,11 @@ impl TcfsVfs {
         match IndexEntry::parse(&text) {
             Ok(entry) => Some(entry),
             Err(e) => {
-                tracing::warn!(vpath = %vpath, key = %key, error = %e, text = %text, "get_index_entry: parse failed");
+                if text.trim().is_empty() {
+                    debug!(vpath = %vpath, key = %key, "get_index_entry: empty index object treated as non-file entry");
+                } else {
+                    tracing::warn!(vpath = %vpath, key = %key, error = %e, text_len = text.len(), "get_index_entry: parse failed");
+                }
                 None
             }
         }
@@ -557,7 +556,7 @@ impl TcfsVfs {
                     },
                 });
             } else {
-                let stub_name = first_component.to_string();
+                let clean_name = first_component.to_string();
                 let attr = if with_attrs {
                     let size = self.read_index_entry_size(&full_path).await;
                     Some(self.file_attr(size))
@@ -565,7 +564,7 @@ impl TcfsVfs {
                     None
                 };
                 entries.push(VfsDirEntry {
-                    name: stub_name,
+                    name: clean_name,
                     kind: VfsFileType::RegularFile,
                     attr,
                 });
@@ -1004,7 +1003,7 @@ mod tests {
     fn test_index_key_empty_prefix() {
         let vfs = make_vfs("");
         assert_eq!(
-            vfs.index_key_for("/file.txt.tc"),
+            vfs.index_key_for("/file.txt"),
             Some("index/file.txt".to_string())
         );
     }
@@ -1013,13 +1012,13 @@ mod tests {
     fn test_index_key_with_prefix() {
         let vfs = make_vfs("data");
         assert_eq!(
-            vfs.index_key_for("/file.txt.tc"),
+            vfs.index_key_for("/file.txt"),
             Some("data/index/file.txt".to_string())
         );
     }
 
     #[test]
-    fn test_index_key_strips_tc_suffix() {
+    fn test_index_key_legacy_tc_suffix_uses_clean_remote_key() {
         let vfs = make_vfs("data");
         assert_eq!(
             vfs.index_key_for("/src/main.rs.tc"),

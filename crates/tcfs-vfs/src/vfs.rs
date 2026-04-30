@@ -1,7 +1,7 @@
 //! The `VirtualFilesystem` trait — platform-agnostic filesystem operations.
 //!
 //! This trait abstracts the filesystem logic shared between all backends:
-//! - FUSE (Linux legacy, macOS legacy)
+//! - FUSE (Linux primary mount backend, macOS legacy)
 //! - NFS loopback (Linux + macOS, no kernel modules)
 //! - FileProvider (macOS + iOS native)
 //! - fanotify pre-content (Linux 6.14+, future)
@@ -50,8 +50,8 @@ pub trait VirtualFilesystem: Send + Sync {
 
     /// Open a file and return its hydrated content.
     ///
-    /// For stub-based filesystems, this triggers hydration (fetching from
-    /// remote storage). Returns the full file content as bytes.
+    /// For remote-backed filesystems, this triggers hydration (fetching from
+    /// remote storage or cache). Returns the full file content as bytes.
     ///
     /// The returned `u64` is a file handle ID for use with `read` and `release`.
     async fn open(&self, path: &str) -> Result<(u64, Vec<u8>)>;
@@ -104,7 +104,7 @@ pub trait VirtualFilesystem: Send + Sync {
     /// Create a directory.
     ///
     /// For SeaweedFS-backed VFS, directories are implicit (derived from
-    /// index entry paths). This creates a placeholder index entry.
+    /// index entry paths). This creates a directory marker index entry.
     async fn mkdir(&self, _parent: &str, _name: &OsStr, _mode: u32) -> Result<VfsAttr> {
         anyhow::bail!("ENOSYS: mkdir not supported")
     }

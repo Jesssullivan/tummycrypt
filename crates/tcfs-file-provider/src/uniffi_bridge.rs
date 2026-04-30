@@ -131,6 +131,14 @@ impl From<opendal::Error> for ProviderError {
     }
 }
 
+fn parse_manifest_hash_from_index(bytes: &[u8], path: &str) -> Result<String, ProviderError> {
+    tcfs_sync::index_entry::parse_index_entry(bytes)
+        .map(|entry| entry.manifest_hash)
+        .map_err(|e| ProviderError::Storage {
+            message: format!("parsing index entry {path}: {e}"),
+        })
+}
+
 /// The TCFS provider — holds a tokio runtime and OpenDAL operator.
 ///
 /// Created once and shared across FileProvider extension calls.
@@ -155,6 +163,13 @@ impl TcfsProviderHandle {
     pub fn new(config: ProviderConfig) -> Result<Arc<Self>, ProviderError> {
         let master_key = if config.encryption_passphrase.is_empty() {
             None
+        } else if config.encryption_passphrase.split_whitespace().count() >= 12 {
+            let key = tcfs_crypto::mnemonic_to_master_key(&config.encryption_passphrase).map_err(
+                |e| ProviderError::Decryption {
+                    message: e.to_string(),
+                },
+            )?;
+            Some(key)
         } else {
             let mut salt = [0u8; 16];
             let salt_bytes = config.encryption_salt.as_bytes();
@@ -276,20 +291,7 @@ impl TcfsProviderHandle {
         self.runtime.block_on(async {
             let data = self.operator.read(item_id).await?;
             let bytes = data.to_bytes();
-            let text = String::from_utf8_lossy(&bytes);
-
-            let mut manifest_hash = String::new();
-            for line in text.lines() {
-                if let Some(val) = line.strip_prefix("manifest_hash=") {
-                    manifest_hash = val.to_string();
-                }
-            }
-
-            if manifest_hash.is_empty() {
-                return Err(ProviderError::NotFound {
-                    path: item_id.to_string(),
-                });
-            }
+            let manifest_hash = parse_manifest_hash_from_index(&bytes, item_id)?;
 
             let manifest_path = format!(
                 "{}/manifests/{}",
@@ -385,20 +387,7 @@ impl TcfsProviderHandle {
             // Read index entry
             let data = self.operator.read(item_id).await?;
             let bytes = data.to_bytes();
-            let text = String::from_utf8_lossy(&bytes);
-
-            let mut manifest_hash = String::new();
-            for line in text.lines() {
-                if let Some(val) = line.strip_prefix("manifest_hash=") {
-                    manifest_hash = val.to_string();
-                }
-            }
-
-            if manifest_hash.is_empty() {
-                return Err(ProviderError::NotFound {
-                    path: item_id.to_string(),
-                });
-            }
+            let manifest_hash = parse_manifest_hash_from_index(&bytes, item_id)?;
 
             // Fetch manifest
             let manifest_path = format!(
@@ -536,20 +525,19 @@ impl TcfsProviderHandle {
             );
             if let Ok(existing_data) = self.operator.read(&existing_index_key).await {
                 let existing_bytes = existing_data.to_bytes();
-                let existing_text = String::from_utf8_lossy(&existing_bytes);
-                for line in existing_text.lines() {
-                    if let Some(hash) = line.strip_prefix("manifest_hash=") {
-                        let manifest_path = format!(
-                            "{}/manifests/{}",
-                            self.remote_prefix.trim_end_matches('/'),
-                            hash
-                        );
-                        if let Ok(mb) = self.operator.read(&manifest_path).await {
-                            if let Ok(existing_manifest) =
-                                tcfs_sync::manifest::SyncManifest::from_bytes(&mb.to_bytes())
-                            {
-                                vclock.merge(&existing_manifest.vclock);
-                            }
+                if let Ok(hash) =
+                    parse_manifest_hash_from_index(&existing_bytes, &existing_index_key)
+                {
+                    let manifest_path = format!(
+                        "{}/manifests/{}",
+                        self.remote_prefix.trim_end_matches('/'),
+                        hash
+                    );
+                    if let Ok(mb) = self.operator.read(&manifest_path).await {
+                        if let Ok(existing_manifest) =
+                            tcfs_sync::manifest::SyncManifest::from_bytes(&mb.to_bytes())
+                        {
+                            vclock.merge(&existing_manifest.vclock);
                         }
                     }
                 }
@@ -601,13 +589,18 @@ impl TcfsProviderHandle {
                 self.remote_prefix.trim_end_matches('/'),
                 remote_path.trim_start_matches('/')
             );
-            let index_entry = format!(
-                "manifest_hash={}\nsize={}\nchunks={}\n",
+            let index_entry = tcfs_sync::index_entry::RemoteIndexEntry::new(
                 file_hash,
-                data.len(),
-                chunks.len()
+                data.len() as u64,
+                chunks.len(),
             );
-            self.operator.write(&index_key, index_entry).await?;
+            tcfs_sync::index_entry::write_committed_index_entry(
+                &self.operator,
+                &index_key,
+                &index_entry,
+            )
+            .await
+            .map_err(ProviderError::from)?;
 
             Ok(())
         })
@@ -618,14 +611,10 @@ impl TcfsProviderHandle {
         self.runtime.block_on(async {
             if let Ok(data) = self.operator.read(item_id).await {
                 let bytes = data.to_bytes();
-                let text = String::from_utf8_lossy(&bytes);
-                for line in text.lines() {
-                    if let Some(hash) = line.strip_prefix("manifest_hash=") {
-                        let manifest_path = format!(
-                            "{}/manifests/{}",
-                            self.remote_prefix.trim_end_matches('/'),
-                            hash
-                        );
+                let manifest_prefix =
+                    format!("{}/manifests", self.remote_prefix.trim_end_matches('/'));
+                if let Ok(entry) = tcfs_sync::index_entry::parse_index_entry_record(&bytes) {
+                    for manifest_path in entry.referenced_object_keys(&manifest_prefix) {
                         let _ = self.operator.delete(&manifest_path).await;
                     }
                 }
@@ -890,18 +879,10 @@ impl TcfsProviderHandle {
             Err(_) => return Ok(None),
         };
         let bytes = data.to_bytes();
-        let text = String::from_utf8_lossy(&bytes);
-
-        let mut manifest_hash = String::new();
-        for line in text.lines() {
-            if let Some(val) = line.strip_prefix("manifest_hash=") {
-                manifest_hash = val.to_string();
-            }
-        }
-
-        if manifest_hash.is_empty() {
-            return Ok(None);
-        }
+        let manifest_hash = match parse_manifest_hash_from_index(&bytes, item_id) {
+            Ok(hash) => hash,
+            Err(_) => return Ok(None),
+        };
 
         let manifest_path = format!(
             "{}/manifests/{}",

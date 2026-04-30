@@ -31,7 +31,7 @@ platforms. FUSE remains the correct approach for Linux via \code{tcfs-fuse}.
 \begin{enumerate}
   \item \textbf{Native Finder integration} --- files appear under Locations in
         the Finder sidebar at \filepath{\textasciitilde/Library/CloudStorage/}.
-  \item \textbf{On-demand hydration} --- files exist as APFS dataless stubs
+  \item \textbf{On-demand hydration} --- files exist as APFS dataless files
         until opened; kernel calls FileProvider extension to fetch content.
   \item \textbf{Reuse existing Rust crates} --- \code{tcfs-storage},
         \code{tcfs-chunks}, \code{tcfs-crypto}, and \code{tcfs-sync} are
@@ -62,9 +62,9 @@ iOS     & FileProvider         & tcfs-fileprovider & APFS dataless files        
 \caption{Per-platform file integration strategy}
 \end{table}
 
-All four platforms share the same hydration concept: a lightweight stub
-represents each remote file; content is fetched on demand from SeaweedFS via
-the CAS chunk store.
+All four platforms share the same hydration concept: a lightweight remote-file
+representation is visible before content is local; content is fetched on
+demand from SeaweedFS via the CAS chunk store.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Architecture}
@@ -425,7 +425,7 @@ The build runs on macOS GitHub Actions runners:
 \toprule
 \textbf{Concept} & \textbf{Linux (tcfs-fuse)} & \textbf{Windows (tcfs-cloudfilter)} & \textbf{macOS/iOS (tcfs-fileprovider)} \\
 \midrule
-Stub file        & \code{.tc} JSON file         & CFAPI placeholder         & APFS dataless file \\
+Pre-hydration representation & Clean VFS entry, or \code{.tc} key/value file in physical sync roots & CFAPI placeholder & APFS dataless file \\
 Hydration trigger & \code{read()} syscall        & \code{CF\_CALLBACK\_FETCH\_DATA} & \code{fetchContents(for:)} \\
 Dehydration      & \code{unsync} command         & \code{CfDehydratePlaceholder}    & System automatic eviction \\
 Directory listing & \code{readdir()}             & \code{CfGetPlaceholders}          & \code{enumerator(for:)} \\

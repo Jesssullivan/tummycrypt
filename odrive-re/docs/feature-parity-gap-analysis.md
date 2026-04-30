@@ -1,6 +1,6 @@
 # Feature Parity Gap Analysis: odrive vs tummycrypt
 
-**Date**: 2026-04-16
+**Date**: 2026-04-16, refreshed 2026-04-29
 **Source**: Reverse engineering of `odriveagent` Linux ELF binary (Python 2.7/PyInstaller)
 **Target**: tummycrypt workspace v0.12.2 (Rust workspace)
 
@@ -41,16 +41,25 @@ product posture:
 - iOS remains read-only proof-of-concept despite experimental write hooks in the
   scaffold.
 
+2026-04-29 correction: several backlog items in this document have since moved
+from "missing" to "implemented primitive, not production-proven UX." TCFS now
+has `FileSyncStatus`, `PathLocks`, `PolicyStore`, auto-unsync sweep code,
+centralized blacklist logic, and reconciliation scaffolding. Those pieces still
+need CLI/desktop controls and acceptance evidence before they count as odrive
+parity, but they should no longer be treated as absent architecture.
+
 tummycrypt already possesses a fundamentally stronger architecture than odrive in several dimensions: CRDT-based conflict resolution (vector clocks vs timestamp comparison), content-defined chunking (FastCDC vs fixed-size XL splitting), FUSE-based virtual filesystem (vs placeholder file extensions that pollute the namespace), fleet-wide sync via NATS JetStream (vs single-machine polling), and modern cryptography (XChaCha20-Poly1305 with proper key hierarchy vs PyCrypto with plaintext passphrase storage).
 
 However, odrive has ~10 years of iteration on the **sync lifecycle** -- the full expand/sync/unsync/auto-unsync pipeline, the refresh/merge eight-stage reconciliation engine, per-folder sync policies, sticky sync settings, blacklist filtering, trash management, and mature error recovery with per-provider backoff. These are the areas where tummycrypt has significant gaps to close.
 
 The recommended path is not to replicate odrive's architecture (which is a monolithic Python 2.7 codebase with deep tech debt), but to adopt its **behavioral semantics** -- the user-facing features and sync guarantees -- while maintaining tummycrypt's superior infrastructure.
 
-**Critical gaps** (must-have for parity): three-way merge base tracking,
-auto-unsync with disk pressure awareness, per-folder sync policies,
-blacklist/exclude filtering at the event layer, structured refresh pipeline,
-and a more explicit desktop acceptance story for Finder/FileProvider behavior.
+**Critical gaps** (must-have for parity): production-proven Finder/FileProvider
+behavior, user-visible status/progress/conflict UX, arbitrary-folder sync and
+backup semantics, diagnostic/recovery tooling, acceptance proof for lifecycle
+primitives, and storage/provider backoff. The lowest-level primitives for
+state, locks, policies, auto-unsync, blacklist filtering, and reconciliation now
+exist but are not yet a polished product surface.
 
 **Already superior** in tummycrypt: conflict detection (CRDTs), encryption (modern AEAD), chunking (CDC), transport (NATS), IPC (gRPC), authentication (MFA/WebAuthn), and FUSE mount (no filesystem pollution).
 
@@ -87,12 +96,12 @@ and a more explicit desktop acceptance story for Finder/FileProvider behavior.
 | Feature | odrive | tummycrypt | Status | Notes |
 |---------|--------|------------|--------|-------|
 | State persistence | SQLite via APSW (19-col SyncTrackingTable) | JSON file or RocksDB (`StateBackend`) | **has** | TC has two backends; odrive has one (SQLite) |
-| File sync state enum | 4 states: NOT_SYNCED, SYNCED, ACTIVE, LOCKED | Implicit via `SyncState` presence/absence | **partial** | TC lacks explicit state machine enum |
+| File sync state enum | 4 states: NOT_SYNCED, SYNCED, ACTIVE, LOCKED | `FileSyncStatus` with not_synced/synced/active/locked/conflict | **partial** | TC has the enum and persistence hooks; desktop/CLI surfacing and transition proofs remain |
 | Tree-structured state | `SyncTrackingNode` tree with parent OID | Flat HashMap keyed by path | **missing** | TC does not model parent-child relationships |
 | Dual local/remote attribute tracking | LocalAttr + RemoteAttr per node | Single `SyncState` (local-centric) | **missing** | TC only tracks local state; no dual-side model |
 | Schema evolution | `_has_column()` + ALTER TABLE | JSON schema evolution via serde defaults | **different** | Both handle versioning; different mechanisms |
 | Index lookup by remote URI | `iterate_tracking_values_by_remote_uri` | `get_by_rel_path()` linear scan | **partial** | TC's lookup is O(n); odrive has SQL index |
-| Timestamp-based aging queries | `iterate_tracking_values_with_timestamp_older_than` | Not implemented | **missing** | Needed for auto-unsync |
+| Timestamp-based aging queries | `iterate_tracking_values_with_timestamp_older_than` | state-cache aging helpers plus auto-unsync sweep inputs | **partial** | Needs disk-pressure policy and product-facing reporting |
 
 ### 2.4 Placeholder / Virtual File System
 
@@ -100,7 +109,7 @@ and a more explicit desktop acceptance story for Finder/FileProvider behavior.
 |---------|--------|------------|--------|-------|
 | Placeholder files | `.cloud`/`.cloudf` extensions | Linux `.tc`/`.tcf` stubs plus experimental Apple FileProvider placeholders | **superior** | Linux avoids namespace pollution; Apple path uses FileProvider placeholders rather than suffix-based files |
 | Expand (hydrate) | `Expand._expand_file` + `_expand_folder` | Linux `Hydrate` gRPC + `tcfs-vfs::hydrate`; experimental Apple `fetchContents` path | **has** | TC hydrates on Linux today and carries a real FileProvider hydration path on Apple surfaces |
-| Unsync (dehydrate) | `Unsync._unsync_item` + dirty check | `Unsync` gRPC call | **partial** | TC lacks dirty-child check before unsync |
+| Unsync (dehydrate) | `Unsync._unsync_item` + dirty check | `Unsync` gRPC/CLI paths plus dirty-child helpers and auto-unsync checks | **partial** | Needs recursive acceptance proof and Finder/CLI UX polish |
 | XL file (large file splitting) | `.cloudx` extension, segment transfer | FastCDC chunking (no separate concept) | **different** | TC handles large files natively via CDC; no separate "XL" mode |
 | Queued expansion | `QueuedExpand` with `InProgressFiles` concurrency | No explicit queue; direct FUSE hydration | **partial** | TC lacks queued/batched expansion for large dirs |
 | Stub metadata | None (extension is the placeholder) | `StubMeta` struct with oid, size, chunks, origin | **superior** | TC stubs carry rich metadata; odrive stubs are empty |
@@ -112,12 +121,12 @@ and a more explicit desktop acceptance story for Finder/FileProvider behavior.
 | Feature | odrive | tummycrypt | Status | Notes |
 |---------|--------|------------|--------|-------|
 | Placeholder threshold (auto-download by size) | `PlaceholderThresholdController`, `SyncThresholdInfinite` | Not implemented | **missing** | Critical for UX: auto-download small files |
-| Per-folder sync mode | `SyncModeTable` (always/on-demand/never) | Not implemented | **missing** | Per-directory behavior configuration |
-| Sticky sync settings | `StickySyncTable` (persistent per-folder config) | Not implemented | **missing** | Settings survive restart |
-| Pro sync folders (always-synced dirs) | `ProSyncFolderTable` | Not implemented | **missing** | Designated "always-current" directories |
-| Auto-unsync (age-based space reclaim) | `AutoUnsyncController` with timestamp sweep | Not implemented | **missing** | Time/access-based dehydration |
-| Auto-unsync disk pressure trigger | Threshold-based check | Not implemented | **missing** | Reclaim space when disk is running low |
-| Blacklist/exclusion patterns | `Blacklist` class with glob + regex | `CollectConfig.exclude_patterns` (push only) | **partial** | TC has exclude for push but not for VFS/events |
+| Per-folder sync mode | `SyncModeTable` (always/on-demand/never) | `PolicyStore` with `SyncMode` always/on_demand/never | **partial** | Needs CLI/desktop controls and watcher/VFS acceptance |
+| Sticky sync settings | `StickySyncTable` (persistent per-folder config) | persisted `FolderPolicy` records | **partial** | Needs UX for pinning/thresholds and clear status reporting |
+| Pro sync folders (always-synced dirs) | `ProSyncFolderTable` | `SyncMode::Always` policy primitive | **partial** | Needs always-hydrated acceptance proof |
+| Auto-unsync (age-based space reclaim) | `AutoUnsyncController` with timestamp sweep | `tcfs-sync::auto_unsync` sweep with dirty checks | **partial** | Needs daemon scheduling, metrics, and user-visible reclaimed-space feedback |
+| Auto-unsync disk pressure trigger | Threshold-based check | config/scaffold exists, pressure UX not production-proven | **partial** | Reclaim-space policy needs host proof |
+| Blacklist/exclusion patterns | `Blacklist` class with glob + regex | centralized `tcfs-sync::blacklist` plus watcher/collect integration work | **partial** | Needs end-to-end event/VFS/reconcile proof |
 | Git directory handling | Not applicable | `git_safety` module, bundle vs raw mode | **superior** | TC has specialized .git handling |
 
 ### 2.6 Refresh / Reconciliation Pipeline
@@ -152,7 +161,7 @@ and a more explicit desktop acceptance story for Finder/FileProvider behavior.
 | Thread pool executor | `OxygenThreadPoolExecutor` | tokio runtime | **has** | TC uses async; odrive uses threads |
 | Concurrency limiter | `InProgressFiles` (max files, max bytes) | `SyncScheduler` with semaphore (max_concurrent) | **partial** | TC limits by task count; odrive also limits by bytes in flight |
 | Priority queue | Not explicit | `SyncScheduler` with `BinaryHeap` (High/Normal/Low) | **superior** | TC has explicit priority scheduling |
-| Per-item locking | `LockedItem` (prevents concurrent ops on same path) | Not implemented | **missing** | TC can race on same file in concurrent tasks |
+| Per-item locking | `LockedItem` (prevents concurrent ops on same path) | `PathLocks` in `tcfs-sync::state` | **partial** | Primitive exists; needs broad operation coverage and concurrency acceptance tests |
 | Retry with backoff | `BackoffChecker` per provider, `QueueWithRetries` | `SyncScheduler` exponential backoff + NATS `process_with_retry` | **has** | Both have retry; TC has two mechanisms |
 | Throughput monitoring | `minThroughput` threshold, dynamic batch sizing | Not implemented | **missing** | odrive adjusts behavior based on transfer speed |
 | Rate limiting response | `secondsToDelayForRateLimiting`, `ConcurrentLimitException` | Not implemented | **missing** | TC lacks provider-side rate limit awareness |
@@ -225,11 +234,13 @@ odrive's sync behavior under the current product posture.
 
 Priority order:
 
-1. sync lifecycle correctness and safety
-2. policy and auto-unsync behavior
-3. reconciliation and exclusion semantics
-4. desktop interaction quality on top of truthful platform claims
-5. accessibility and recovery ergonomics once the desktop path is stronger
+1. prove lazy traversal and FileProvider hydration end to end
+2. surface sync lifecycle state, progress, and conflicts in user tools
+3. prove policy, auto-unsync, blacklist, and reconciliation behavior across
+   watcher/CLI/Finder paths
+4. define arbitrary-folder sync separately from backup semantics
+5. improve accessibility and recovery ergonomics once the desktop path is
+   stronger
 
 This backlog should also be read together with
 [`docs/ops/product-reality-and-priority.md`](../../docs/ops/product-reality-and-priority.md),
@@ -239,40 +250,42 @@ which separates parity work from release-proof and live-ops work.
 
 **What odrive has**: `FileSyncState` enum with four states (NOT_SYNCED, SYNCED, ACTIVE, LOCKED) tracked per-file in `SyncTrackingTable`. Transitions are guarded and badges update on change.
 
-**What TC needs**: A formal `SyncState` enum in `tcfs-sync` or `tcfs-core` that the daemon, FUSE layer, and CLI all reference. Current state is implicit (presence in state cache = synced, absence = not synced, no "active" or "locked" states).
+**Current TCFS state**: `tcfs-sync::state::FileSyncStatus` exists with:
 
-**Implementation**: Add to `tcfs-sync::state`:
 ```rust
 enum FileSyncStatus { NotSynced, Synced, Active, Locked, Conflict }
 ```
-Store alongside `SyncState` in the state cache. The FUSE driver should query this to show appropriate behavior (e.g., return EAGAIN for ACTIVE files).
+
+It is stored with `SyncState` and used in parts of the engine.
+
+**Remaining work**: make status transitions authoritative across daemon, CLI,
+TUI, mounted views, and FileProvider, then prove those states through acceptance
+tests and visible desktop UX.
 
 ### 3.2 Per-Item Locking (`LockedItem` Equivalent)
 
 **What odrive has**: `LockedItem` wrapper prevents concurrent operations on the same file path. Multiple folders can sync concurrently, but a single file cannot be refreshed + synced simultaneously.
 
-**What TC needs**: A `tokio::sync::RwLock`-based path lock manager. The `SyncScheduler` currently does not check if a task's target path is already being processed.
+**Current TCFS state**: `tcfs-sync::state::PathLocks` exists:
 
-**Implementation**: Add to `tcfs-sync::scheduler` or a new `tcfs-sync::locks` module:
 ```rust
 struct PathLocks {
     locks: DashMap<PathBuf, Arc<RwLock<()>>>,
 }
 ```
-Acquire write lock before push/pull/unsync operations; read lock for status queries.
+
+**Remaining work**: audit every push/pull/hydrate/unsync/reconcile entry point
+for consistent lock coverage and add concurrency acceptance tests.
 
 ### 3.3 Auto-Unsync with Timestamp Aging
 
 **What odrive has**: `AutoUnsyncController` runs a background sweep using `NodeTimestamp` column, checking `iterate_tracking_values_with_timestamp_older_than`. Files not accessed within the threshold are dehydrated to placeholders. Delivers OS notification with space saved.
 
-**What TC needs**: A background task in `tcfsd` that:
-1. Periodically scans state cache entries by `last_synced` or file atime
-2. Checks if files exceed an age threshold
-3. Calls the unsync path for eligible files
-4. Respects a "pinned" list (equivalent of StickySyncTable)
-5. Reports space reclaimed
+**Current TCFS state**: `tcfs-sync::auto_unsync` has sweep logic, policy
+exemptions, dirty-file checks, dry-run support, and state updates.
 
-**Implementation location**: New module `tcfsd::auto_unsync` or extend `tcfs-sync::scheduler`.
+**Remaining work**: wire it into daemon scheduling, disk-pressure policy, metrics
+and notifications, and prove reclaimed-space reporting in CLI/TUI/desktop UX.
 
 ### 3.4 Per-Folder Sync Policies
 
@@ -281,12 +294,9 @@ Acquire write lock before push/pull/unsync operations; read lock for status quer
 - `StickySyncTable`: persistent per-folder settings (download threshold, expand subfolders)
 - `ProSyncFolderTable`: designated always-synced folders
 
-**What TC needs**: A policy system that maps folder paths to sync behaviors. This should be stored in the state cache (or a separate config file) and consulted by:
-- The FUSE driver (should it auto-hydrate?)
-- The watcher (should it auto-push changes?)
-- The auto-unsync controller (should it dehydrate old files here?)
+**Current TCFS state**: `tcfs-sync::policy::PolicyStore` persists per-path
+rules:
 
-**Implementation**: Add a `PolicyStore` to `tcfs-core::config` with per-path rules:
 ```rust
 struct FolderPolicy {
     sync_mode: SyncMode,          // Always, OnDemand, Never
@@ -295,40 +305,41 @@ struct FolderPolicy {
 }
 ```
 
+**Remaining work**: add CLI/desktop controls, status reporting, watcher/VFS
+consultation, and acceptance tests for always/on-demand/never/pinned behavior.
+
 ### 3.5 Blacklist/Exclude at Event Layer
 
 **What odrive has**: `Blacklist` class applied at three points: FSEvent ingestion, RefreshChildren scan filtering, and Compare/MergeFiles filtering. Prevents `.DS_Store`, `Thumbs.db`, temp files, VCS directories from entering the sync pipeline at all.
 
-**What TC has**: `CollectConfig.exclude_patterns` in `tcfs-sync::engine::collect_files()` (push only). The FUSE/VFS layer has no exclusion logic. The watcher ignores `.git`, `.DS_Store`, `target`, `node_modules` by name match but has no glob support.
+**Current TCFS state**: `tcfs-sync::blacklist` centralizes default excludes and
+glob handling, and watcher/collection paths have begun consuming it.
 
-**What TC needs**: A centralized `Blacklist` in `tcfs-core` that is consulted by:
-1. `FileWatcher` (skip events for excluded paths)
-2. `collect_files()` (current behavior, consolidate patterns)
-3. `TcfsVfs` (skip excluded entries in readdir)
+**Remaining work**: prove the same blacklist contract through watcher events,
+push collection, reconciliation, and mounted/Finder enumeration so excluded
+files never enter user-visible sync state accidentally.
 
 ### 3.6 Structured Refresh/Reconciliation Pipeline
 
 **What odrive has**: An eight-stage pipeline (Refresh -> RefreshChildren -> GroupByPosition -> Compare -> FileFormats -> MergeFiles -> Operations -> AddFolder) that produces a complete reconciliation plan before executing any operations.
 
-**What TC has**: Point operations -- `upload_file`, `download_file`, `push_tree` -- that execute immediately. No directory-level reconciliation that detects remote-only, local-only, and both-modified items in a single pass.
+**Current TCFS state**: `tcfs-sync::reconcile` scaffolding exists for
+plan-oriented reconciliation.
 
-**What TC needs**: A `Reconciler` that:
-1. Lists remote index entries for a prefix
-2. Walks local filesystem
-3. Aligns items by path (like GroupByPosition)
-4. Compares via vector clocks (like Compare)
-5. Produces an operation plan (upload/download/conflict/delete)
-6. Executes the plan
-
-**Implementation**: New module `tcfs-sync::reconcile` consuming `tcfs-sync::engine` primitives.
+**Remaining work**: prove a full local-only/remote-only/both-modified directory
+plan, connect it to policy and blacklist decisions, and expose safe preview and
+execute flows in CLI/TUI/daemon APIs.
 
 ### 3.7 Unsync Dirty-Child Safety Check
 
 **What odrive has**: Before unsyncing a folder, `_first_item_that_cannot_unsync` iterates children, checks for modified-but-not-uploaded content (`is_content_change`), and prompts the user if dirty children are found.
 
-**What TC has**: `Unsync` gRPC call with a `force` flag but no dirty-child check.
+**Current TCFS state**: dirty-child helpers exist in state/auto-unsync paths,
+and `Unsync` has force semantics.
 
-**What TC needs**: Before unsync, scan the subtree for files where `needs_sync()` returns `Some(reason)`. If any dirty children exist and `force` is false, return an error listing the dirty paths.
+**Remaining work**: make recursive dirty-child rejection an acceptance-tested
+contract for manual unsync, auto-unsync, and any future Finder "Free Up Space"
+action.
 
 ---
 
@@ -441,50 +452,46 @@ TC has Prometheus metrics (`tcfsd::metrics`), structured JSON logging via `traci
 
 Ordered by value-to-effort ratio, with dependencies noted.
 
-### Phase 1: Sync Safety (prerequisite for all else)
+### Phase 1: Acceptance Proof
 
-1. **Per-item path locking** (Section 3.2)
-   - Effort: 1-2 days
-   - Why first: prevents data races in all subsequent features
-   - Crate: `tcfs-sync::locks` or extend `tcfs-sync::scheduler`
+1. **Linux lazy traversal demo**
+   - Run the real-backend FUSE lane from `docs/ops/lazy-hydration-demo.md`.
+   - Prove `ls`/`find` before hydration, `cat` hydration, unsync/dehydrate, and
+     rehydrate.
 
-2. **Explicit FileSyncStatus enum** (Section 3.1)
-   - Effort: 1 day
-   - Why: foundation for all state-dependent features
-   - Crate: `tcfs-sync::state`
+2. **macOS Finder/FileProvider demo**
+   - Run clean-host package install, domain registration, CloudStorage
+     enumeration, open-time hydration, and observable state capture.
+   - Keep this distinct from physical `.tc` / `.tcf` sync-root demos.
 
-3. **Unsync dirty-child check** (Section 3.7)
-   - Effort: 0.5 days
-   - Why: prevents data loss on folder unsync
-   - Crate: `tcfsd::grpc` (Unsync handler)
+3. **Desktop-originated cross-host demo**
+   - Use `~/Desktop/TCFS Demo` as a disposable arbitrary-folder sync root.
+   - Mount the same remote prefix on `honey` under `~/tcfs-demo/Desktop`.
+   - Prove SSH traversal and hydration without risking the real Desktop.
 
-### Phase 2: Reconciliation Engine
+### Phase 2: Productize Existing Primitives
 
-4. **Centralized blacklist** (Section 3.5)
-   - Effort: 1-2 days
-   - Why: prerequisite for reconciliation (must filter before comparing)
-   - Crate: `tcfs-core::blacklist` (new), consumed by `tcfs-sync`, `tcfs-vfs`, `tcfs-fuse`
+4. **Status/progress/conflict surfacing**
+   - Wire `FileSyncStatus`, progress, locks, and conflicts into CLI, TUI,
+     daemon RPC, and FileProvider/Finder UX.
 
-5. **Directory reconciliation pipeline** (Section 3.6)
-   - Effort: 3-5 days
-   - Why: the core missing feature for bidirectional sync
-   - Crate: `tcfs-sync::reconcile` (new)
-   - Depends on: blacklist, path locking, FileSyncStatus
+5. **Policy and auto-unsync controls**
+   - Add set/list/remove controls for folder policy.
+   - Report auto-unsync decisions and reclaimed bytes.
+   - Prove pinned/always/on-demand/never behavior.
 
-### Phase 3: Sync Policies
+6. **Reconciliation and exclusion acceptance**
+   - Prove blacklist filtering through watcher, push, reconcile, and mounted
+     enumeration.
+   - Prove reconciliation preview/execute for local-only, remote-only, and
+     concurrent modifications.
 
-6. **Per-folder sync policies** (Section 3.4)
-   - Effort: 2-3 days
-   - Why: enables placeholder threshold and auto-download
-   - Crate: `tcfs-core::policy` (new)
+7. **Arbitrary-folder sync vs backup**
+   - Define bidirectional sync semantics for existing folders.
+   - Define one-way/versioned backup separately before claiming odrive backup
+     parity.
 
-7. **Auto-unsync controller** (Section 3.3)
-   - Effort: 2 days
-   - Why: automatic space reclamation, high user value
-   - Crate: `tcfsd::auto_unsync` (new)
-   - Depends on: sync policies, FileSyncStatus
-
-### Phase 4: Robustness
+### Phase 3: Robustness
 
 8. **Storage-level backoff/retry** (Section 4.7 related)
    - Effort: 1-2 days
@@ -599,18 +606,18 @@ odrive's `Compare` module uses mtime/size as the primary conflict signal. This f
 
 | tummycrypt Crate | Features It Already Provides | Features It Needs |
 |-----------------|------------------------------|-------------------|
-| `tcfs-core` | Config, proto, types, error | Blacklist, PolicyStore |
-| `tcfs-sync` | Engine, conflict (vclock), NATS, manifest, state, watcher, scheduler | Reconciler, path locks, FileSyncStatus enum, auto-unsync |
-| `tcfs-vfs` | VFS trait, TcfsVfs, DiskCache, NegativeCache, stubs, hydration | Blacklist integration, policy-aware readdir |
+| `tcfs-core` | Config, proto, types, error | Keep shared proto/status surfaces aligned with product UX |
+| `tcfs-sync` | Engine, conflict (vclock), NATS, manifest, state, watcher, scheduler, blacklist, policy, reconcile, path locks, FileSyncStatus, auto-unsync | Acceptance coverage and product controls for those primitives |
+| `tcfs-vfs` | VFS trait, TcfsVfs, DiskCache, NegativeCache, stubs, clean-name hydration | Policy/status-aware readdir and broader mounted acceptance proof |
 | `tcfs-fuse` | FUSE PathFilesystem adapter | FileSyncStatus-aware behavior, queued expansion |
 | `tcfs-crypto` | E2E encryption, KDF, key hierarchy, name encryption, recovery | Middleware/adapter pattern for composability |
 | `tcfs-chunks` | FastCDC, BLAKE3, seekable zstd, delta (stub) | -- (complete) |
 | `tcfs-storage` | OpenDAL operator, multipart, SeaweedFS, health | Retry/backoff middleware |
 | `tcfs-auth` | TOTP, WebAuthn, sessions, enrollment, rate limiting | -- (complete) |
 | `tcfs-secrets` | age, SOPS, KeePassXC integration | -- (complete) |
-| `tcfsd` | Daemon, gRPC server, metrics, worker | Auto-unsync controller, diagnostics RPC |
-| `tcfs-cli` | CLI client | -- (feature-dependent on daemon) |
-| `tcfs-tui` | Terminal UI | Sync status dashboard |
+| `tcfsd` | Daemon, gRPC server, metrics, worker | Diagnostics RPC and scheduled lifecycle controllers |
+| `tcfs-cli` | CLI client | Folder-policy controls and richer lifecycle diagnostics |
+| `tcfs-tui` | Terminal UI | Sync status/progress/conflict dashboard |
 | `tcfs-mcp` | MCP server for AI agents | -- (complete) |
 | `tcfs-cloudfilter` | Windows Cloud Filter API | -- (platform-specific) |
 | `tcfs-file-provider` | Apple FileProvider | -- (platform-specific) |

@@ -38,6 +38,7 @@ REMOTE_PREFIX="$(extract_toml remote_prefix)"
 DEVICE_ID="$(extract_toml device_id)"
 DEVICE_NAME="$(extract_toml device_name)"
 DAEMON_SOCKET="$(extract_toml fileprovider_socket)"
+MASTER_KEY_FILE="$(extract_toml master_key_file)"
 
 S3_ENDPOINT="${S3_ENDPOINT:-http://212.2.245.145:8333}"
 S3_BUCKET="${S3_BUCKET:-tcfs}"
@@ -56,6 +57,7 @@ else
     HM_VARS="$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh"
     if [ -f "$HM_VARS" ]; then
         set +u
+        # shellcheck source=/dev/null
         . "$HM_VARS"
         set -u
     fi
@@ -81,7 +83,20 @@ GROUP_CONTAINER="$DEV_DIR"
 
 CONFIG_JSON="$GROUP_CONTAINER/config.json"
 
-if [ -n "$DAEMON_SOCKET" ]; then
+if [ -n "$DAEMON_SOCKET" ] && [ -n "$MASTER_KEY_FILE" ]; then
+cat > "$CONFIG_JSON" <<CONFIGEOF
+{
+  "s3_endpoint": "$S3_ENDPOINT",
+  "s3_bucket": "$S3_BUCKET",
+  "s3_access": "$S3_ACCESS",
+  "s3_secret": "$S3_SECRET",
+  "remote_prefix": "$REMOTE_PREFIX",
+  "device_id": "$DEVICE_ID",
+  "daemon_socket": "$DAEMON_SOCKET",
+  "master_key_file": "$MASTER_KEY_FILE"
+}
+CONFIGEOF
+elif [ -n "$DAEMON_SOCKET" ]; then
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
@@ -91,6 +106,18 @@ cat > "$CONFIG_JSON" <<CONFIGEOF
   "remote_prefix": "$REMOTE_PREFIX",
   "device_id": "$DEVICE_ID",
   "daemon_socket": "$DAEMON_SOCKET"
+}
+CONFIGEOF
+elif [ -n "$MASTER_KEY_FILE" ]; then
+cat > "$CONFIG_JSON" <<CONFIGEOF
+{
+  "s3_endpoint": "$S3_ENDPOINT",
+  "s3_bucket": "$S3_BUCKET",
+  "s3_access": "$S3_ACCESS",
+  "s3_secret": "$S3_SECRET",
+  "remote_prefix": "$REMOTE_PREFIX",
+  "device_id": "$DEVICE_ID",
+  "master_key_file": "$MASTER_KEY_FILE"
 }
 CONFIGEOF
 else
@@ -116,12 +143,18 @@ echo "    Prefix:   $REMOTE_PREFIX"
 if [ -n "$DAEMON_SOCKET" ]; then
     echo "    Socket:   $DAEMON_SOCKET"
 fi
+if [ -n "$MASTER_KEY_FILE" ]; then
+    echo "    Master key file: present"
+fi
 echo "    Credentials: present"
 
-# Also copy to App Group container if it already exists (for sandboxed .appex)
+# Also copy to App Group container if it already exists (for sandboxed .appex).
+# This remains path-only. Raw key material is handed to the extension through
+# Keychain in properly signed/provisioned builds, not through this file.
 APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
 if [ -d "$APP_GROUP_DIR" ]; then
-    cp "$CONFIG_JSON" "$APP_GROUP_DIR/config.json" 2>/dev/null && \
-        chmod 600 "$APP_GROUP_DIR/config.json" 2>/dev/null && \
-        echo "==> Also written to $APP_GROUP_DIR/config.json" || true
+    APP_GROUP_CONFIG="$APP_GROUP_DIR/config.json"
+    cp "$CONFIG_JSON" "$APP_GROUP_CONFIG" 2>/dev/null && \
+        chmod 600 "$APP_GROUP_CONFIG" 2>/dev/null && \
+        echo "==> Also written to $APP_GROUP_CONFIG" || true
 fi

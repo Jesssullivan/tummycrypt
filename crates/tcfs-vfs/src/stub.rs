@@ -202,27 +202,15 @@ pub struct IndexEntry {
 }
 
 impl IndexEntry {
-    /// Parse an index entry from its text content.
+    /// Parse an index entry from legacy text or versioned JSON content.
     pub fn parse(content: &str) -> Result<Self> {
-        let mut manifest_hash = None;
-        let mut size = None;
-        let mut chunks = None;
-
-        for line in content.lines() {
-            if let Some((k, v)) = line.split_once('=') {
-                match k {
-                    "manifest_hash" => manifest_hash = Some(v.to_string()),
-                    "size" => size = Some(v.parse::<u64>().context("invalid size")?),
-                    "chunks" => chunks = Some(v.parse::<usize>().context("invalid chunks")?),
-                    _ => {}
-                }
-            }
-        }
+        let entry = tcfs_sync::index_entry::parse_index_entry(content.as_bytes())
+            .context("parsing index entry")?;
 
         Ok(IndexEntry {
-            manifest_hash: manifest_hash.context("missing manifest_hash")?,
-            size: size.context("missing size")?,
-            chunks: chunks.unwrap_or(0),
+            manifest_hash: entry.manifest_hash,
+            size: entry.size,
+            chunks: entry.chunks,
         })
     }
 
@@ -314,5 +302,22 @@ size 94371840
         assert_eq!(entry.size, 4096);
         assert_eq!(entry.chunks, 1);
         assert_eq!(entry.manifest_path("mydata"), "mydata/manifests/abc123");
+    }
+
+    #[test]
+    fn parse_versioned_json_index_entry() {
+        let raw = tcfs_sync::index_entry::VersionedIndexEntry::committed(
+            tcfs_sync::index_entry::RemoteIndexEntry::new("json123", 8192, 2),
+        )
+        .to_json_bytes()
+        .unwrap();
+        let raw = String::from_utf8(raw).unwrap();
+
+        let entry = IndexEntry::parse(&raw).unwrap();
+
+        assert_eq!(entry.manifest_hash, "json123");
+        assert_eq!(entry.size, 8192);
+        assert_eq!(entry.chunks, 2);
+        assert_eq!(entry.manifest_path("mydata"), "mydata/manifests/json123");
     }
 }

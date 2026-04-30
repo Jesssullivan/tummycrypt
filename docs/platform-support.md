@@ -11,7 +11,7 @@ coverage and the clearest end-to-end validation story.
 
 - **CLI**: All commands (push, pull, reconcile, policy, resolve, mount, unsync)
 - **Daemon**: systemd user service with auto-restart, metrics (Prometheus), health checks
-- **Filesystem**: FUSE3 mount with on-demand hydration, `.tc` stub files
+- **Filesystem**: FUSE3 mount with clean-name on-demand hydration; physical `.tc` stubs are used by unsync/offline paths
 - **NFS loopback**: Alternative to FUSE (no kernel modules required)
 - **Fleet sync**: NATS JetStream with vector clock conflict detection
 - **D-Bus**: Status change signals for desktop integration

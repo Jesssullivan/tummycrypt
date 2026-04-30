@@ -12,7 +12,7 @@ pub enum BlacklistReason {
     BuiltIn(&'static str),
     /// Matched a user-configured glob pattern.
     GlobPattern(String),
-    /// FUSE stub file (.tc, .tcf extension).
+    /// Physical sync-root stub file (.tc, .tcf extension).
     StubExtension,
     /// Hidden directory when `sync_hidden_dirs` is false.
     HiddenDir,

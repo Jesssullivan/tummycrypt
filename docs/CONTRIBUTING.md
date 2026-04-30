@@ -28,6 +28,12 @@ task test
 ```
 
 > **System Rust note**: outside the Nix devShell, ensure rustup's cargo bin dir is on `PATH` (for example `source "$HOME/.cargo/env"`). The committed `.envrc` does this automatically when direnv is enabled.
+> The repo devShell and `.envrc` also put `target/debug` and `target/release`
+> ahead of user-level installs so local smoke commands can use workspace-built
+> `tcfs` / `tcfsd` binaries after they have been built. Smoke harnesses print
+> the resolved binary paths before checking versions.
+> The devShell also pins the shell helper surface used by lazy/Finder proof
+> tasks, including `shellcheck`, `jq`, `aws`, `s5cmd`, and `mc`.
 
 ### Quick Start without Nix
 
@@ -61,20 +67,26 @@ integration tests (S3 access key, secret key, endpoint, bucket name).
 
 ## Project Structure
 
-The workspace is split into 14 crates under `crates/`:
+The workspace is split into 18 product crates under `crates/` plus the
+`tests/e2e` workspace member:
 
 | Crate | Type | Description |
 |-------|------|-------------|
 | `tcfs-core` | lib | Shared types, config parsing, protobuf definitions |
 | `tcfs-crypto` | lib | XChaCha20-Poly1305 encryption, key derivation, BIP-39 |
+| `tcfs-auth` | lib | TOTP, WebAuthn/FIDO2, session, and enrollment helpers |
 | `tcfs-secrets` | lib | SOPS decryption, age identity, KeePassXC integration |
 | `tcfs-storage` | lib | OpenDAL-based S3/SeaweedFS operator |
 | `tcfs-chunks` | lib | FastCDC chunking, BLAKE3 hashing, zstd compression |
 | `tcfs-sync` | lib | Sync engine, state cache, NATS JetStream |
+| `tcfs-vfs` | lib | Shared virtual filesystem, disk cache, stubs, hydration |
+| `tcfs-fuse` | lib | Linux FUSE3 mount driver |
+| `tcfs-nfs` | lib | NFS loopback mount backend |
 | `tcfs-cloudfilter` | lib | Windows Cloud Files API (skeleton) |
 | `tcfs-sops` | lib | SOPS+age fleet secret propagation |
 | `tcfs-file-provider` | lib | macOS/iOS FileProvider FFI (RFC 0002) |
-| `tcfsd` | bin | Daemon: gRPC, NFS, metrics, systemd notify |
+| `tcfs-dbus` | lib | Linux D-Bus desktop status integration |
+| `tcfsd` | bin | Daemon: gRPC, FUSE/NFS, metrics, systemd notify |
 | `tcfs-cli` | bin | CLI: push, pull, mount, unmount, status, device management |
 | `tcfs-tui` | bin | Interactive terminal UI (ratatui) |
 | `tcfs-mcp` | bin | MCP server for AI agent integration |

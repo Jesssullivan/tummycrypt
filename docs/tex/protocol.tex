@@ -16,27 +16,26 @@
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Stub File Formats}
 
-\tcfs{} uses lightweight stub files to represent remote content locally.
-Stubs are small metadata files that trigger on-demand hydration when accessed.
+\tcfs{} uses lightweight metadata to represent remote content locally. Physical
+sync-root paths may use \code{.tc}/\code{.tcf} stub files, mounted VFS views
+normally expose clean filenames backed by remote index entries, and platform
+integrations such as FileProvider use native placeholders.
 
 \subsection{\code{.tc} File Stub}
 
-A \code{.tc} stub replaces a single file (e.g., \code{photo.jpg} becomes
-\code{photo.jpg.tc}). The stub is a JSON file containing the metadata needed
-to reconstruct the original file.
+A physical \code{.tc} stub replaces a single file in sync-root/dehydrated paths
+(e.g., \code{photo.jpg} becomes \code{photo.jpg.tc}). The stub is a sorted
+key/value text file containing the metadata needed to reconstruct the original
+file.
 
-\begin{lstlisting}[language=json]
-{
-  "version": 1,
-  "file_id": "<BLAKE3 hash of original file, hex>",
-  "original_name": "photo.jpg",
-  "original_size": 4194304,
-  "mime_type": "image/jpeg",
-  "modified_at": "2026-02-20T12:00:00Z",
-  "chunk_count": 3,
-  "manifest_key": "chunks/manifests/<file_id>",
-  "remote_prefix": "tcfs/default"
-}
+\begin{lstlisting}
+version https://tummycrypt.io/tcfs/v1
+chunks 23
+compressed 0
+fetched 0
+oid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e239
+origin seaweedfs://filer.example.com/bucket/path/to/file
+size 94371840
 \end{lstlisting}
 
 \begin{longtable}{lll}
@@ -44,33 +43,21 @@ to reconstruct the original file.
   \textbf{Field} & \textbf{Type} & \textbf{Description} \\
   \midrule
   \endhead
-  \code{version}       & u32    & Stub format version (currently 1) \\
-  \code{file\_id}      & string & BLAKE3 hash of the original file content \\
-  \code{original\_name}& string & Original filename without \code{.tc} extension \\
-  \code{original\_size}& u64    & Original file size in bytes \\
-  \code{mime\_type}    & string & MIME type (optional, for display hints) \\
-  \code{modified\_at}  & string & ISO 8601 timestamp of last modification \\
-  \code{chunk\_count}  & u32    & Number of chunks in the manifest \\
-  \code{manifest\_key} & string & S3 key path to the chunk manifest \\
-  \code{remote\_prefix}& string & S3 prefix where chunks are stored \\
+  \code{version}    & string & Stub format URI \\
+  \code{chunks}     & usize  & Number of chunks in the remote manifest \\
+  \code{compressed} & bool   & Whether content is seekable-zstd compressed \\
+  \code{fetched}    & bool   & \code{0} for dehydrated, \code{1} for hydrated \\
+  \code{oid}        & string & Content OID, normally \code{blake3:\{hex\}} \\
+  \code{origin}     & string & Remote origin URL \\
+  \code{size}       & u64    & Original file size in bytes \\
   \bottomrule
 \end{longtable}
 
 \subsection{\code{.tcf} Folder Stub}
 
-A \code{.tcf} stub represents an unsynced directory. It is a JSON file listing
-the directory's remote contents without downloading them.
-
-\begin{lstlisting}[language=json]
-{
-  "version": 1,
-  "dir_id": "<BLAKE3 hash of directory listing>",
-  "original_name": "photos",
-  "entry_count": 47,
-  "total_size": 1073741824,
-  "remote_prefix": "tcfs/default/photos"
-}
-\end{lstlisting}
+A \code{.tcf} stub is the physical directory-stub counterpart used by
+dehydrated/compatibility paths. Mounted directory traversal should normally use
+the remote index namespace instead of exposing raw \code{.tcf} entries.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Chunk Layout (S3/SeaweedFS)}
@@ -135,16 +122,16 @@ identical chunks, enabling efficient delta sync and deduplication.
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Hydration Flow}
 
-When a FUSE-mounted \code{.tc} stub is opened:
+When a remote-backed file is opened through the mounted VFS:
 
 \begin{enumerate}
-  \item FUSE \code{open()} intercepts the request.
+  \item The mount backend's \code{open()} handler intercepts the request.
   \item Manifest is fetched from \filepath{\{prefix\}/manifests/\{file\_hash\}}.
   \item Chunks are fetched in parallel from
         \filepath{\{prefix\}/chunks/\{chunk\_hash\}}.
   \item Each chunk is decompressed (zstd) and decrypted (XChaCha20-Poly1305).
   \item BLAKE3 hash of the reassembled file is verified against \code{file\_hash}.
-  \item The file is served to the calling process via FUSE \code{read()}.
+  \item The file is cached and served to the calling process via \code{read()}.
 \end{enumerate}
 
 % ─────────────────────────────────────────────────────────────────────────────

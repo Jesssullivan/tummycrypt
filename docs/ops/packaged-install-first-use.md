@@ -60,7 +60,7 @@ Passing `scripts/install-smoke.sh` alone is not sufficient to claim this bar.
 | Debian/Ubuntu `.deb` | every tag | `tcfs status` with `storage [ok]`, then minimal push/pull or sync-status | one of: upgrade carry-forward, unsync/rehydrate, conflict, large file |
 | Fedora/RHEL `.rpm` | sampled | daemon/worker startup against intentional config | worker restart or backend reconnect as needed |
 | Container image | sampled | worker startup against real or disposable backend dependencies | restart/reconnect or rollout-oriented check |
-| Nix | sampled until `#307` is resolved | same bar as CLI surfaces once cache/install is truthful | use the same edge-case menu as `.deb` once the install path is stable |
+| Nix | sampled or scenario-driven | same bar as CLI surfaces once cache/install is truthful | use the same edge-case menu as `.deb` once the install path is stable |
 
 ## Relationship To Existing Runbooks
 
@@ -96,10 +96,38 @@ Record results using a table like this:
 - The macOS clean-host lane remains tracked in `#309`; the harness now exists,
   and the repo now carries a manual GitHub-hosted approximation in
   [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml),
-  but the remaining blocker is reachable storage from the hosted runner plus at
-  least one successful tagged run. That hosted lane now rejects obviously
-  non-public endpoint classes during preflight rather than failing later during
-  fixture seeding; NATS is not required for the enumerate + hydrate lane, and
-  keychain/app-group failures should be treated separately from storage
-  reachability failures.
-- The Nix install path remains blocked on `#307`.
+  but the remaining blocker is at least one successful tagged run. That hosted
+  lane uses the workflow ref's acceptance harness, downloads the requested
+  release tag's published `.pkg`, uses the `tcfs-macos-smoke` GitHub
+  environment secrets, rejects non-public endpoint classes during preflight,
+  decodes a 32-byte E2EE master key for the run, proves the seeded fixture
+  cannot be pulled without that key, and runs the signed package structure
+  smoke before installer runs. NATS is not required for the enumerate + hydrate
+  lane, and keychain/app-group failures should be treated separately from
+  storage reachability failures.
+- The macOS `.pkg` postinstall installs `io.tinyland.tcfsd.plist` under
+  `/Library/LaunchAgents`, not `$HOME/Library/LaunchAgents`, because installer
+  scripts run as root. It also attempts FileProvider registration in the active
+  console user's PlugInKit context. The source of truth is
+  [`scripts/macos-pkg-postinstall.sh`](../../scripts/macos-pkg-postinstall.sh).
+  The LaunchAgent starts `tcfsd` in the user session with
+  `--config "$HOME/.config/tcfs/config.toml"` so first-real-use proof must still
+  provide a real user config before expecting daemon status to go green.
+- The macOS `.pkg` assembly path is
+  [`scripts/macos-build-pkg.sh`](../../scripts/macos-build-pkg.sh). Release CI
+  uses that script to combine the macOS CLI tarball, `TCFSProvider.app` zip, and
+  postinstall script before optional `productsign` signing.
+- Before installing a candidate macOS package on a clean host, run the
+  non-installing package structure check:
+
+```bash
+PKG_PATH=/path/to/tcfs-${VERSION}-macos-aarch64.pkg \
+REQUIRE_SIGNATURE=1 \
+task lazy:macos-pkg-structure-smoke
+```
+
+  This verifies the package payload includes `tcfs`, `tcfsd`,
+  `TCFSProvider.app`, `TCFSFileProvider.appex`, and the repo-managed
+  postinstall script.
+- Nix first-real-use proof follows the sampled/scenario-driven contract above
+  and the current [Distribution Smoke Matrix](distribution-smoke-matrix.md).

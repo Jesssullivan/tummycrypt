@@ -6,7 +6,7 @@ import os.log
 private let logger = Logger(subsystem: "io.tinyland.tcfs.fileprovider", category: "extension")
 private let sharedConfigService = "io.tinyland.tcfs.config"
 private let sharedConfigAccount = "configJSON"
-private let sharedConfigAccessGroup = "group.io.tinyland.tcfs"
+private let sharedConfigAccessGroupFallback = "group.io.tinyland.tcfs"
 
 /// TCFS FileProvider extension — bridges to Rust via cbindgen C FFI.
 ///
@@ -176,7 +176,11 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 self.signalEnumeratorUpdate(for: parentId)
                 completionHandler(tempFile, item, nil)
             } else {
-                completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
+                let backendError = Self.providerLastError(prov)
+                logger.error(
+                    "fetchContents failed for \(itemId, privacy: .public): code=\(result.rawValue), backend=\(backendError, privacy: .public)"
+                )
+                completionHandler(nil, nil, Self.mapError(result))
             }
         }
 
@@ -462,6 +466,14 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
     }
 
+    private static func providerLastError(_ prov: OpaquePointer) -> String {
+        guard let errorPtr = tcfs_provider_last_error(prov) else {
+            return "<none>"
+        }
+        defer { tcfs_string_free(errorPtr) }
+        return String(cString: errorPtr)
+    }
+
     // MARK: - Provider setup
 
     private static func createProvider() -> OpaquePointer? {
@@ -486,6 +498,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// Load TCFS config, trying multiple sources in order of safety.
     ///
     /// Sources (in priority order):
+    /// 0. Diagnostic build-time embedded config, when explicitly enabled
     /// 1. Shared Keychain — provisioned by host app, accessed via securityd XPC
     /// 2. XDG config path — requires sandbox temp-exception entitlement
     /// 3. App Group container file — deadlock-prone, short timeout
@@ -495,8 +508,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// suite stores data in the Group Container, which is file-coordinated
     /// by fileproviderd — reading it during enumeration deadlocks.
     private static func loadConfig() -> String? {
-        // 0. Build-time embedded config (most reliable — no IPC needed).
-        //    build.sh bakes config.json into the binary as base64.
+        // 0. Diagnostic build-time embedded config. Production signing disables
+        //    this by default so Keychain/App Group provisioning is exercised.
         if let b64 = embeddedConfigBase64,
            let data = Data(base64Encoded: b64),
            let config = String(data: data, encoding: .utf8),
@@ -509,7 +522,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         // 1. Shared Keychain — provisioned by the host app.
         //    Uses securityd XPC, no file I/O, no file coordination, no deadlock.
         if let config = readConfigFromKeychain() {
-            logger.info("loadConfig: loaded from shared Keychain")
+            logger.error("loadConfig: loaded from shared Keychain")
             return config
         }
         logger.warning("loadConfig: Keychain empty, trying XDG path")
@@ -531,33 +544,46 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             let configPath = containerURL.appendingPathComponent("config.json")
 
             var result: String?
+            var readError: String?
             let sem = DispatchSemaphore(value: 0)
             DispatchQueue.global(qos: .utility).async {
-                result = try? String(contentsOf: configPath, encoding: .utf8)
+                do {
+                    result = try String(contentsOf: configPath, encoding: .utf8)
+                } catch {
+                    readError = error.localizedDescription
+                }
                 sem.signal()
             }
             if sem.wait(timeout: .now() + 3.0) == .success, let config = result {
                 logger.info("loadConfig: loaded from App Group container file")
                 return config
             }
-            logger.warning("loadConfig: App Group container file read timed out or failed")
+            if let readError = readError {
+                logger.warning(
+                    "loadConfig: App Group container file read failed at \(configPath.path, privacy: .public): \(readError, privacy: .public)"
+                )
+            } else {
+                logger.warning(
+                    "loadConfig: App Group container file read timed out at \(configPath.path, privacy: .public)"
+                )
+            }
         }
 
         logger.error("loadConfig: no config found at any location")
         return nil
     }
 
-    /// Read config JSON from the shared data-protection keychain.
+    /// Read config JSON from the shared macOS keychain.
     /// Keychain access uses securityd XPC — no filesystem I/O, immune to
     /// fileproviderd's file coordination locks.
     ///
     /// The host app writes this item with an explicit app-group access group so
     /// the extension can read it without depending on each target's bundle ID.
     private static func readConfigFromKeychain() -> String? {
+        let accessGroup = resolvedSharedConfigAccessGroup()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecUseDataProtectionKeychain as String: true,
-            kSecAttrAccessGroup as String: sharedConfigAccessGroup,
+            kSecAttrAccessGroup as String: accessGroup,
             kSecAttrService as String: sharedConfigService,
             kSecAttrAccount as String: sharedConfigAccount,
             kSecReturnData as String: true,
@@ -578,6 +604,34 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return nil
         }
         return config
+    }
+
+    private static func resolvedSharedConfigAccessGroup() -> String {
+        guard let task = SecTaskCreateFromSelf(nil),
+              let value = SecTaskCopyValueForEntitlement(
+                  task,
+                  "keychain-access-groups" as CFString,
+                  nil
+              )
+        else {
+            return sharedConfigAccessGroupFallback
+        }
+
+        if let groups = value as? [String],
+           let group = groups.first(where: isSharedConfigAccessGroup) {
+            return group
+        }
+
+        if let group = value as? String, isSharedConfigAccessGroup(group) {
+            return group
+        }
+
+        return sharedConfigAccessGroupFallback
+    }
+
+    private static func isSharedConfigAccessGroup(_ group: String) -> Bool {
+        group == sharedConfigAccessGroupFallback ||
+            group.hasSuffix(".\(sharedConfigAccessGroupFallback)")
     }
 }
 
@@ -622,7 +676,10 @@ extension TCFSFileProviderExtension: NSFileProviderCustomAction {
                         }
                     }
                     if result != TCFS_ERROR_TCFS_ERROR_NONE {
-                        logger.error("action.pin failed for \(itemPath): \(result.rawValue)")
+                        let backendError = Self.providerLastError(prov)
+                        logger.error(
+                            "action.pin failed for \(itemPath, privacy: .public): code=\(result.rawValue), backend=\(backendError, privacy: .public)"
+                        )
                     }
                     // Clean up temp file — the system manages the real materialized copy
                     try? FileManager.default.removeItem(at: dest)

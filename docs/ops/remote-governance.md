@@ -9,24 +9,26 @@ document makes the consequences of that declaration operational.
 
 ## Current Remote Topology
 
-As of 2026-04-17:
+As of 2026-04-29:
 
 | Remote | URL | Branches | `main` ahead of `origin/main` | `main` behind `origin/main` | Role |
 |--------|-----|----------|-------------------------------|------------------------------|------|
-| `origin` | `https://github.com/Jesssullivan/tummycrypt.git` | 25 | 0 | 0 | canonical source + release authority |
-| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 65 | 21 | 0 | active downstream dev surface |
-| `yoga` | `yoga:git/tummycrypt` (bare SSH) | 10 | 137 | 331 | retired legacy mirror |
+| `origin` | `https://github.com/Jesssullivan/tummycrypt.git` | 26 | 0 | 0 | canonical source + release authority |
+| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 65 | 21 | 31 | active downstream dev surface |
+| `yoga` | `yoga:git/tummycrypt` (bare SSH) | 10 | 137 | 362 | retired legacy mirror |
 
 Divergence points:
 
 - `origin/main` ↔ `tinyland/main`: merge-base is now `796b42e`
   (`origin/main`, 2026-04-17). `tinyland/main` merged `origin/main` via
-  tinyland PR #60 on 2026-04-17, so it no longer lags canonical `main`.
-  The remaining 21 tinyland-only commits are the 19 pre-sync historical commits
-  recorded in [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
+  tinyland PR #60 on 2026-04-17, but canonical `origin/main` has since moved
+  31 commits ahead. The remaining 21 tinyland-only commits are the 19 pre-sync
+  historical commits recorded in
+  [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
   plus the sync merge pair (`6f7841f`, `987a6b4`).
-- `origin/main` ↔ `yoga/main`: severely diverged; yoga represents a
-  `v0.9.x`-era tcfs snapshot and is not a current development branch.
+- `origin/main` ↔ `yoga/main`: there is no current merge base in this checkout;
+  yoga represents a `v0.9.x`-era tcfs snapshot and is not a current development
+  branch.
 
 ## Declared Roles
 
@@ -60,15 +62,17 @@ merged there first and upstreamed to `origin` afterward.
 - Reconciliation is done **into `origin` first**, then `origin → tinyland`
   via a sync. Never the reverse (never force-push `tinyland` onto `origin`).
 - `tinyland`-specific infrastructure (binary-signing identifiers such as
-  `io.tinyland.tcfsd`, binary cache host `nix-cache.fuzzy-dev.tinyland.dev`)
+  `io.tinyland.tcfsd`, binary cache host `nix-cache.tinyland.dev`)
   is legitimate downstream coupling, but it is **externalization-sensitive**:
   see [v0.12.2 evidence matrix §Blocker A](../release/v0.12.2-evidence-matrix.md#blocker-a--nix-cache-externality)
-  for the cache-reachability implication, and #307 for the concrete decision.
+  for the cache-reachability implication. The concrete #307 tracker is closed;
+  future Nix proof belongs in the per-tag distribution smoke evidence.
 
 ### `yoga` — retired legacy mirror
 
 `yoga` is a bare SSH remote on a laptop host. It carries a `v0.9.x`-era
-snapshot that predates the current `v0.12.x` line by 331 commits.
+snapshot that predates the current `v0.12.x` line by 362 commits in the current
+remote comparison.
 
 - `yoga` is **not pushed to** from this point forward.
 - `yoga/main` and its 10 branches remain as **read-only historical
@@ -157,9 +161,9 @@ list:
   pre-sync tinyland-only commits were audited in
   [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
   and all were classified as superseded or bookkeeping; zero upstream
-  cherry-picks are required. The current 21-commit lead on `tinyland/main`
-  is therefore 19 historical commits plus the 2 sync-merge commits from
-  the 2026-04-17 origin→tinyland resync.
+  cherry-picks are required. The 2026-04-17 audited 21-commit lead on
+  `tinyland/main` was therefore 19 historical commits plus the 2 sync-merge
+  commits from the 2026-04-17 origin→tinyland resync.
 
 - **Triage the tinyland branch tranche**: 65 branches after two prune
   tranches removed 7 superseded feature branches. The remaining live mix is
@@ -172,10 +176,11 @@ list:
   A tracker issue decides whether to archive the bare SSH repo,
   decommission the host, or leave both in place.
 
-- **Nix cache externalization** (#307): the existing tracker for
-  `nix-cache.fuzzy-dev.tinyland.dev` externality. The infrastructure
-  question is cross-cut; resolving it informs both the release-surface
-  Nix blocker and the tinyland-vs-origin infra coupling.
+- **Nix cache externalization**: #307 is closed. The
+  legacy `nix-cache.fuzzy-dev.tinyland.dev` externality remains useful context.
+  Current flake and CI config point at `nix-cache.tinyland.dev`; future release
+  truth should be captured in per-tag distribution smoke evidence rather than
+  reopening the old tracker.
 
 ## Relationship To Other Documents
 
@@ -196,3 +201,6 @@ list:
   its current divergence state and declares roles + sync policy.
 - 2026-04-17 — Refreshed after tinyland PR #60 merged `origin/main` into
   `tinyland/main` and #311 closed with zero upstream cherry-picks required.
+- 2026-04-29 — Refreshed branch counts and divergence after origin PRs #337
+  through #340 landed; tinyland now trails canonical `origin/main` again while
+  keeping the same 21-commit downstream lead.

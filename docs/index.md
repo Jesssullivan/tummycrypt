@@ -2,7 +2,7 @@
 
 **FOSS self-hosted odrive replacement**
 
-tcfs is a self-hosted encrypted file sync system backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with end-to-end [age](https://age-encryption.org) encryption, content-defined chunking, on-demand hydration via `.tc` stub files, and multi-machine fleet sync with vector clocks. Linux is the best-supported runtime today; Apple desktop and mobile surfaces exist but are still experimental.
+tcfs is a self-hosted encrypted file sync system backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with end-to-end [age](https://age-encryption.org) encryption, content-defined chunking, clean-name on-demand hydration in mounted views, physical `.tc`/`.tcf` stubs for offline/dehydrated paths, and multi-machine fleet sync with vector clocks. Linux is the best-supported runtime today; Apple desktop and mobile surfaces exist but are still experimental.
 
 ## Installation
 
@@ -60,8 +60,8 @@ nix develop github:Jesssullivan/tummycrypt
 
 1. **Push**: Files are split into content-defined chunks (FastCDC), compressed (zstd), encrypted (age), and uploaded to SeaweedFS via S3. Vector clock is ticked and SyncManifest v2 (JSON) is written.
 2. **Pull**: Manifests describe the chunk layout. Chunks are fetched, verified (BLAKE3), decrypted, decompressed, and reassembled. Vector clock is merged with remote.
-3. **Mount**: The local filesystem surface presents remote files as local. On Linux this is exercised primarily through FUSE. Apple desktop surfaces are still evolving and should be treated as experimental.
-4. **Unsync**: Convert hydrated files back to stubs, reclaiming disk space while keeping the remote copy.
+3. **Mount**: The local filesystem surface presents remote files as local names and hydrates on open. On Linux this is exercised primarily through FUSE. Apple desktop surfaces are still evolving and should be treated as experimental.
+4. **Unsync**: Convert hydrated files back to physical `.tc` stubs or platform placeholders, reclaiming disk space while keeping the remote copy.
 5. **Fleet Sync**: NATS JetStream distributes `StateEvent` messages across devices. Vector clocks detect conflicts; pluggable resolvers handle them (auto, interactive, or defer).
 
 ## Architecture
@@ -101,9 +101,9 @@ flowchart TD
 | `tcfs push <path>` | Upload files with chunking, encryption, vector clock tick |
 | `tcfs pull <remote> <local>` | Download files with conflict detection |
 | `tcfs sync-status <path>` | Check sync state of a file |
-| `tcfs mount <source> <target>` | FUSE mount with on-demand hydration |
+| `tcfs mount <source> <target>` | FUSE mount with clean-name on-demand hydration |
 | `tcfs unmount <path>` | Unmount FUSE directory |
-| `tcfs unsync <path>` | Convert hydrated file back to `.tc` stub |
+| `tcfs unsync <path>` | Convert hydrated file back to a physical `.tc` stub |
 | `tcfs device enroll` | Generate keypair and register in S3 |
 | `tcfs device list` | Show all enrolled devices |
 | `tcfs device revoke <name>` | Mark a device as revoked |
@@ -135,6 +135,11 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 - [Neo-Honey Live Acceptance](ops/neo-honey-acceptance.md) — named live fleet sync acceptance lane
 - [On-Prem Authority Recovery](ops/onprem-authority-recovery.md) — source-of-truth and recovery path for the Helm-managed `tcfs` backend namespace
 - [Fleet Deployment Guide](ops/fleet-deployment.md) — multi-machine fleet deployment and operational checks
+- [Lazy Hydration Demo Acceptance](ops/lazy-hydration-demo.md) — terminal and Finder proof target for lazy `ls`/`cat`/dehydrate flows
+- [Lazy Desktop-to-Honey Evidence](release/lazy-desktop-honey-evidence-2026-04-30.md) — live proof of Desktop-originated remote traversal and `cat` hydration on honey
+- [macOS FileProvider Local Evidence](release/macos-fileprovider-local-evidence-2026-04-30.md) — local CloudStorage enumeration and exact-content hydration proof
+- [macOS Hosted Smoke Backend Bootstrap](release/macos-hosted-smoke-backend-bootstrap-2026-04-30.md) — GitHub environment secret and public S3 backend bootstrap for hosted FileProvider smoke
+- [odrive Parity and Product Horizon](ops/odrive-parity-product-horizon.md) — behavioral parity target, Desktop demo boundaries, and productionization backlog
 - [Apple Surface Status](ops/apple-surface-status.md) — current reality for macOS and iOS claims
 - [macOS Finder and FileProvider Reality](ops/macos-fileprovider-reality.md) — current macOS desktop workflow, proof gaps, and manual acceptance lane
 - [iOS Surface Status](ops/ios-surface-status.md) — current iOS scope, proof bar, and maintenance expectation

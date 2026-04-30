@@ -18,6 +18,9 @@ Options:
   --expected-version <ver>    Require tcfs/tcfsd --version output to include this string
   --expected-file <relpath>   Relative path under the CloudStorage root to
                               enumerate and hydrate
+  --expected-content <text>   Exact content expected from --expected-file
+  --expected-content-file <path>
+                              File containing exact expected content
   --app-path <path>           Installed TCFSProvider.app path
                               (default: auto-detect /Applications or ~/Applications)
   --cloud-root <path>         CloudStorage root path
@@ -26,6 +29,12 @@ Options:
                               (default: io.tinyland.tcfs.fileprovider)
   --domain-id <id>            FileProvider domain id
                               (default: io.tinyland.tcfs)
+  --allow-multiple-plugin-registrations
+                              Warn instead of failing if pluginkit shows more
+                              than one registration for --plugin-id
+  --require-keychain-config   Require extension logs to prove config loaded
+                              from shared Keychain, and fail if embedded config
+                              was used
   --tcfs <path-or-name>       CLI binary to use (default: tcfs)
   --tcfsd <path-or-name>      Daemon binary to use (default: tcfsd)
   --timeout <seconds>         Wait timeout for async steps (default: 45)
@@ -38,13 +47,18 @@ EOF
 EXPECTED_VERSION=""
 CONFIG_PATH="${TCFS_CONFIG:-$HOME/.config/tcfs/config.toml}"
 EXPECTED_FILE_REL=""
+EXPECTED_CONTENT=""
+EXPECTED_CONTENT_FILE=""
 APP_PATH="${TCFS_APP_PATH:-}"
 CLOUD_ROOT="${TCFS_CLOUD_ROOT:-}"
 PLUGIN_ID="${TCFS_PLUGIN_ID:-io.tinyland.tcfs.fileprovider}"
 DOMAIN_ID="${TCFS_DOMAIN_ID:-io.tinyland.tcfs}"
+ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS="${TCFS_ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}"
+REQUIRE_KEYCHAIN_CONFIG="${TCFS_REQUIRE_KEYCHAIN_CONFIG:-0}"
 TCFS_BIN="${TCFS_BIN:-tcfs}"
 TCFSD_BIN="${TCFSD_BIN:-tcfsd}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-45}"
+LOG_SHOW_TIMEOUT_SECS="${LOG_SHOW_TIMEOUT_SECS:-5}"
 LOG_DIR_OVERRIDE=""
 SKIP_STATUS=0
 LOG_DIR=""
@@ -63,6 +77,14 @@ while [[ $# -gt 0 ]]; do
       EXPECTED_FILE_REL="$2"
       shift 2
       ;;
+    --expected-content)
+      EXPECTED_CONTENT="$2"
+      shift 2
+      ;;
+    --expected-content-file)
+      EXPECTED_CONTENT_FILE="$2"
+      shift 2
+      ;;
     --app-path)
       APP_PATH="$2"
       shift 2
@@ -78,6 +100,14 @@ while [[ $# -gt 0 ]]; do
     --domain-id)
       DOMAIN_ID="$2"
       shift 2
+      ;;
+    --allow-multiple-plugin-registrations)
+      ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS=1
+      shift
+      ;;
+    --require-keychain-config)
+      REQUIRE_KEYCHAIN_CONFIG=1
+      shift
       ;;
     --tcfs)
       TCFS_BIN="$2"
@@ -116,6 +146,58 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+if [[ -n "$EXPECTED_CONTENT" && -n "$EXPECTED_CONTENT_FILE" ]]; then
+  echo "--expected-content and --expected-content-file are mutually exclusive" >&2
+  exit 2
+fi
+
+if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" && -z "$EXPECTED_FILE_REL" ]]; then
+  echo "--require-keychain-config requires --expected-file so the extension config path is exercised" >&2
+  exit 2
+fi
+
+short_pause() {
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'select undef, undef, undef, 1.0'
+  else
+    python3 -c 'import select; select.select([], [], [], 1.0)'
+  fi
+}
+
+run_log_show() {
+  local out
+  local err
+  local pid
+  local waited=0
+  local status=0
+
+  out="$(mktemp "$LOG_DIR/log-show.XXXXXX")"
+  err="${out}.err"
+
+  log show "$@" >"$out" 2>"$err" &
+  pid="$!"
+
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= LOG_SHOW_TIMEOUT_SECS )); then
+      kill "$pid" 2>/dev/null || true
+      short_pause
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      cat "$out" 2>/dev/null || true
+      rm -f "$out" "$err"
+      return 124
+    fi
+
+    short_pause
+    waited=$((waited + 1))
+  done
+
+  wait "$pid" || status="$?"
+  cat "$out" 2>/dev/null || true
+  rm -f "$out" "$err"
+  return "$status"
+}
+
 resolve_bin() {
   local candidate="$1"
   if [[ "$candidate" == */* ]]; then
@@ -140,6 +222,7 @@ assert_version() {
   local output
 
   output="$("$bin" --version)"
+  echo "$label binary: $bin"
   echo "$label version: $output"
 
   if [[ -n "$EXPECTED_VERSION" && "$output" != *"$EXPECTED_VERSION"* ]]; then
@@ -155,6 +238,10 @@ require_file() {
     exit 1
   }
 }
+
+if [[ -n "$EXPECTED_CONTENT_FILE" ]]; then
+  require_file "$EXPECTED_CONTENT_FILE"
+fi
 
 require_dir() {
   local path="$1"
@@ -227,7 +314,8 @@ run_status() {
 
 check_pluginkit() {
   local output
-  output="$(pluginkit -m -A -D -i "$PLUGIN_ID" 2>&1)" || {
+  local count
+  output="$(pluginkit -m -A -D -vvv -i "$PLUGIN_ID" 2>&1)" || {
     echo "pluginkit lookup failed for $PLUGIN_ID" >&2
     echo "$output" >&2
     exit 1
@@ -240,15 +328,77 @@ check_pluginkit() {
     echo "pluginkit output did not include $PLUGIN_ID" >&2
     exit 1
   }
+
+  count="$(grep -c "$PLUGIN_ID" <<<"$output")"
+  if (( count > 1 )); then
+    if [[ "$ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS" == "1" ]]; then
+      echo "warning: pluginkit shows $count registrations for $PLUGIN_ID" >&2
+    else
+      echo "multiple FileProvider registrations found for $PLUGIN_ID; remove stale app/extension copies or pass --allow-multiple-plugin-registrations for diagnostic runs" >&2
+      print_pluginkit_duplicate_hint "$output"
+      exit 1
+    fi
+  fi
+}
+
+print_pluginkit_duplicate_hint() {
+  local output="$1"
+
+  echo "registered FileProvider extension paths:" >&2
+  awk '
+    /^[[:space:]]*Path = / {
+      path = $0
+      sub(/^[[:space:]]*Path = /, "", path)
+      print "  extension: " path
+    }
+    /^[[:space:]]*Parent Bundle = / {
+      parent = $0
+      sub(/^[[:space:]]*Parent Bundle = /, "", parent)
+      print "  parent app: " parent
+    }
+  ' <<<"$output" >&2
+  echo "cleanup is not performed automatically; remove stale app/extension copies or run pluginkit -r intentionally, then rerun preflight" >&2
 }
 
 check_host_log() {
   local output
-  output="$(log show --style compact --last 45s \
-    --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' 2>/dev/null || true)"
+  output="$(run_log_show --style compact --last 45s \
+    --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true)"
 
   [[ -n "$output" ]] || return 1
   grep -q "add: OK" <<<"$output"
+}
+
+extension_log_path() {
+  printf '%s/extension-config.log\n' "$LOG_DIR"
+}
+
+collect_extension_config_log() {
+  run_log_show --style compact --last 2m \
+    --predicate 'subsystem == "io.tinyland.tcfs.fileprovider" && category == "extension" && eventMessage CONTAINS "loadConfig:"' \
+    || true
+}
+
+check_keychain_config_log() {
+  local output
+
+  output="$(collect_extension_config_log)"
+  printf '%s\n' "$output" >"$(extension_log_path)"
+
+  if grep -q "loadConfig: loaded from build-time embedded config" <<<"$output"; then
+    echo "FileProvider extension used build-time embedded config; production Keychain proof failed" >&2
+    cat "$(extension_log_path)" >&2
+    exit 1
+  fi
+
+  if grep -q "loadConfig: loaded from shared Keychain" <<<"$output"; then
+    echo "FileProvider extension config source: shared Keychain"
+    return
+  fi
+
+  echo "FileProvider extension did not log shared Keychain config load" >&2
+  cat "$(extension_log_path)" >&2
+  exit 1
 }
 
 check_domain_listing() {
@@ -295,7 +445,7 @@ wait_for_cloud_root() {
       printf '%s\n' "$root"
       return
     fi
-    sleep 1
+    short_pause
     attempt=$((attempt + 1))
   done
 
@@ -310,7 +460,7 @@ wait_for_expected_file() {
     if [[ -e "$path" ]]; then
       return
     fi
-    sleep 1
+    short_pause
     attempt=$((attempt + 1))
   done
 
@@ -330,7 +480,7 @@ enumerate_root() {
       echo "$listing"
       return
     fi
-    sleep 1
+    short_pause
     attempt=$((attempt + 1))
   done
 
@@ -340,18 +490,50 @@ enumerate_root() {
 
 hydrate_expected_file() {
   local path="$1"
+  local hydrated_copy="$LOG_DIR/hydrated-expected-file"
+  local expected_copy="$LOG_DIR/expected-content"
+  local cat_error="$LOG_DIR/hydrate-cat-error.log"
+  local hydrated_bytes
+  local attempt=0
+
   [[ -f "$path" ]] || {
     echo "expected path is not a regular file: $path" >&2
     exit 1
   }
 
-  dd if="$path" of=/dev/null bs=4096 count=1 status=none || {
+  while (( attempt < TIMEOUT_SECS )); do
+    if cat "$path" >"$hydrated_copy" 2>"$cat_error"; then
+      break
+    fi
+    rm -f "$hydrated_copy"
+    short_pause
+    attempt=$((attempt + 1))
+  done
+
+  if (( attempt >= TIMEOUT_SECS )); then
+    cat "$cat_error" >&2 || true
     echo "failed to read expected file for hydration: $path" >&2
     exit 1
-  }
+  fi
 
   echo "hydrated file: $path"
-  stat -f '  size: %z bytes' "$path"
+  hydrated_bytes="$(wc -c <"$hydrated_copy" | tr -d '[:space:]')"
+  echo "  size: $hydrated_bytes bytes"
+
+  if [[ -n "$EXPECTED_CONTENT_FILE" ]]; then
+    if ! cmp -s "$EXPECTED_CONTENT_FILE" "$hydrated_copy"; then
+      echo "hydrated file content mismatch against $EXPECTED_CONTENT_FILE" >&2
+      exit 1
+    fi
+    echo "hydrated file content matched expected content file"
+  elif [[ -n "$EXPECTED_CONTENT" ]]; then
+    printf '%s' "$EXPECTED_CONTENT" >"$expected_copy"
+    if ! cmp -s "$expected_copy" "$hydrated_copy"; then
+      echo "hydrated file content mismatch against --expected-content" >&2
+      exit 1
+    fi
+    echo "hydrated file content matched expected content"
+  fi
 }
 
 APP_PATH="$(detect_app_path)"
@@ -383,11 +565,11 @@ open "$APP_PATH"
 
 HOST_LOG_WAIT=0
 until check_host_log; do
-  sleep 1
+  short_pause
   HOST_LOG_WAIT=$((HOST_LOG_WAIT + 1))
   if (( HOST_LOG_WAIT >= TIMEOUT_SECS )); then
     echo "timed out waiting for host app log showing domain re-add" >&2
-    log show --style compact --last 2m \
+    run_log_show --style compact --last 2m \
       --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true
     exit 1
   fi
@@ -409,6 +591,9 @@ if [[ -n "$EXPECTED_FILE_REL" ]]; then
   EXPECTED_PATH="$CLOUD_ROOT/$EXPECTED_FILE_REL"
   wait_for_expected_file "$EXPECTED_PATH"
   hydrate_expected_file "$EXPECTED_PATH"
+  if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" ]]; then
+    check_keychain_config_log
+  fi
 else
   echo "warning: --expected-file not provided; hydration was not exercised" >&2
 fi

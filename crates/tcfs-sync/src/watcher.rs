@@ -151,7 +151,7 @@ fn debounce_loop(
                     if should_ignore(&path, &config.ignore_names) {
                         continue;
                     }
-                    // Skip .tc stub files (FUSE hydration artifacts)
+                    // Skip physical .tc stub files in sync roots.
                     if path.extension().map(|e| e == "tc").unwrap_or(false) {
                         continue;
                     }

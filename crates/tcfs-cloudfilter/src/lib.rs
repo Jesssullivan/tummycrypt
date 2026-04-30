@@ -2,12 +2,12 @@
 //!
 //! Provides native Windows Explorer integration for tcfs:
 //! - Sync root registration (Files show in Explorer with cloud status icons)
-//! - Placeholder creation (dehydrated .tc stubs as CFAPI placeholders)
+//! - Placeholder creation for remote-only files
 //! - On-demand hydration callbacks (fetch from SeaweedFS when file is opened)
 //! - Dehydration (convert back to placeholder, reclaim disk space)
 //!
 //! This crate maps tcfs concepts to Windows CFAPI:
-//!   .tc stub file    → CFAPI placeholder (cloud-only, dehydrated)
+//!   remote-only file → CFAPI placeholder (cloud-only, dehydrated)
 //!   hydrated file    → CFAPI in-sync (locally available)
 //!   unsync           → CFAPI dehydrate
 //!   push             → CFAPI upload

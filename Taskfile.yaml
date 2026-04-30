@@ -65,6 +65,327 @@ tasks:
     cmds:
       - cargo audit
 
+  # ── Lazy hydration demo proof ───────────────────────────────────────────────
+
+  lazy:mounted-smoke:
+    desc: "Verify an already-mounted lazy hydration surface: MOUNT_ROOT=... EXPECTED_FILE=..."
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          : "${MOUNT_ROOT:?set MOUNT_ROOT=/path/to/tcfs-mount}"
+          : "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/to/file}"
+
+          args=(
+            --mount-root "$MOUNT_ROOT"
+            --expected-file "$EXPECTED_FILE"
+          )
+
+          if [[ -n "${EXPECTED_CONTENT:-}" ]]; then
+            args+=(--expected-content "$EXPECTED_CONTENT")
+          fi
+          if [[ -n "${EXPECTED_CONTENT_FILE:-}" ]]; then
+            args+=(--expected-content-file "$EXPECTED_CONTENT_FILE")
+          fi
+          if [[ -n "${EXPECTED_CONTAINS:-}" ]]; then
+            args+=(--expected-contains "$EXPECTED_CONTAINS")
+          fi
+          if [[ -n "${MAX_DEPTH:-}" ]]; then
+            args+=(--max-depth "$MAX_DEPTH")
+          fi
+          for entry in ${EXPECT_ENTRIES:-}; do
+            args+=(--expect-entry "$entry")
+          done
+
+          scripts/lazy-hydration-mounted-smoke.sh "${args[@]}"
+          EOF
+
+  lazy:test-mounted-smoke:
+    desc: Regression-test the mounted lazy hydration smoke helper
+    cmds:
+      - bash scripts/test-lazy-hydration-mounted-smoke.sh
+
+  lazy:check:
+    desc: Run host-runnable lazy hydration proof checks
+    cmds:
+      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - task: lazy:test-mounted-smoke
+      - task: lazy:test-desktop-honey
+      - task: lazy:test-macos-profile-inventory
+      - task: lazy:test-macos-preflight
+      - task: lazy:test-macos-postinstall
+      - task: lazy:test-macos-build-pkg
+      - task: lazy:test-macos-pkg-structure
+      - task: lazy:test-fileprovider-provision
+      - task: lazy:test-release-workflow-fileprovider
+      - cargo test -p tcfs-vfs
+
+  lazy:linux-demo:
+    desc: "Linux lazy proof: set TCFS_LAZY_DEMO_REMOTE=... and optional TCFS_LAZY_DEMO_CREATE_BUCKET=1"
+    cmds:
+      - bash scripts/lazy-hydration-linux-demo.sh
+
+  lazy:desktop-honey-plan:
+    desc: "Prepare safe Desktop-originated honey demo artifacts; add TCFS_DESKTOP_DEMO_PUSH=1 to push"
+    cmds:
+      - bash scripts/lazy-hydration-desktop-honey-demo.sh
+
+  lazy:test-desktop-honey:
+    desc: Regression-test the Desktop-originated honey demo helper
+    cmds:
+      - bash scripts/test-lazy-hydration-desktop-honey-demo.sh
+
+  lazy:test-macos-postinstall:
+    desc: Regression-test the macOS FileProvider post-install smoke helper with fake platform tools
+    cmds:
+      - bash scripts/test-macos-postinstall-smoke.sh
+
+  lazy:test-macos-build-pkg:
+    desc: Regression-test the macOS .pkg builder with fake packaging tools
+    cmds:
+      - bash scripts/test-macos-build-pkg.sh
+
+  lazy:test-macos-pkg-structure:
+    desc: Regression-test the non-installing macOS .pkg structure smoke helper
+    cmds:
+      - bash scripts/test-macos-pkg-structure-smoke.sh
+
+  lazy:macos-pkg-structure-smoke:
+    desc: "Non-installing macOS .pkg structure proof: set PKG_PATH=..."
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          : "${PKG_PATH:?set PKG_PATH=/path/to/tcfs.pkg}"
+
+          args=(--pkg "$PKG_PATH")
+          if [[ -n "${EXPECTED_POSTINSTALL:-}" ]]; then
+            args+=(--expected-postinstall "$EXPECTED_POSTINSTALL")
+          fi
+          if [[ "${REQUIRE_SIGNATURE:-0}" == "1" ]]; then
+            args+=(--require-signature)
+          fi
+
+          scripts/macos-pkg-structure-smoke.sh "${args[@]}"
+          EOF
+
+  lazy:test-macos-preflight:
+    desc: Regression-test the non-mutating macOS FileProvider preflight helper
+    cmds:
+      - bash scripts/test-macos-fileprovider-preflight.sh
+
+  lazy:test-macos-profile-inventory:
+    desc: Regression-test the macOS FileProvider provisioning profile inventory helper
+    cmds:
+      - bash scripts/test-macos-fileprovider-profile-inventory.sh
+
+  lazy:macos-finder-profile-inventory:
+    desc: Non-mutating inventory of matching macOS FileProvider provisioning profiles
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${PROFILES_DIR:-}" ]]; then
+            args+=(--profiles-dir "$PROFILES_DIR")
+          fi
+          if [[ -n "${HOST_BUNDLE_ID:-}" ]]; then
+            args+=(--host-bundle-id "$HOST_BUNDLE_ID")
+          fi
+          if [[ -n "${EXTENSION_BUNDLE_ID:-}" ]]; then
+            args+=(--extension-bundle-id "$EXTENSION_BUNDLE_ID")
+          fi
+          if [[ -n "${APP_GROUP_ID:-}" ]]; then
+            args+=(--app-group "$APP_GROUP_ID")
+          fi
+          if [[ -n "${KEYCHAIN_GROUP_SUFFIX:-}" ]]; then
+            args+=(--keychain-group-suffix "$KEYCHAIN_GROUP_SUFFIX")
+          fi
+          if [[ "${STRICT:-0}" == "1" ]]; then
+            args+=(--strict)
+          fi
+
+          scripts/macos-fileprovider-profile-inventory.sh "${args[@]}"
+          EOF
+
+  lazy:macos-finder-signing-preflight:
+    desc: Non-mutating signing/profile check for a built TCFSProvider.app
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=(--signing-only)
+
+          if [[ -n "${APP_PATH:-}" ]]; then
+            args+=(--app-path "$APP_PATH")
+          fi
+          if [[ "${TCFS_REQUIRE_PRODUCTION_SIGNING:-${REQUIRE_PRODUCTION_SIGNING:-0}}" == "1" ]]; then
+            args+=(--require-production-signing)
+          fi
+
+          scripts/macos-fileprovider-preflight.sh "${args[@]}"
+          EOF
+
+  lazy:test-fileprovider-provision:
+    desc: Regression-test FileProvider config provisioning metadata
+    cmds:
+      - bash scripts/test-fileprovider-provision-config.sh
+
+  lazy:test-release-workflow-fileprovider:
+    desc: Regression-test release workflow FileProvider profile import and package postinstall scripts
+    cmds:
+      - bash scripts/test-release-workflow-fileprovider.sh
+
+  lazy:macos-finder-preflight:
+    desc: Non-mutating readiness check for macOS Finder/FileProvider smoke
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${EXPECTED_VERSION:-}" ]]; then
+            args+=(--expected-version "$EXPECTED_VERSION")
+          fi
+          if [[ -n "${CONFIG_PATH:-}" ]]; then
+            args+=(--config "$CONFIG_PATH")
+          fi
+          if [[ -n "${FILEPROVIDER_CONFIG:-}" ]]; then
+            args+=(--fileprovider-config "$FILEPROVIDER_CONFIG")
+          fi
+          if [[ -n "${APP_PATH:-}" ]]; then
+            args+=(--app-path "$APP_PATH")
+          fi
+          if [[ -n "${CLOUD_ROOT:-}" ]]; then
+            args+=(--cloud-root "$CLOUD_ROOT")
+          fi
+          if [[ -n "${PLUGIN_ID:-}" ]]; then
+            args+=(--plugin-id "$PLUGIN_ID")
+          fi
+          if [[ -n "${DOMAIN_ID:-}" ]]; then
+            args+=(--domain-id "$DOMAIN_ID")
+          fi
+          if [[ "${ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}" == "1" ]]; then
+            args+=(--allow-multiple-plugin-registrations)
+          fi
+          if [[ "${TCFS_REQUIRE_PRODUCTION_SIGNING:-${REQUIRE_PRODUCTION_SIGNING:-0}}" == "1" ]]; then
+            args+=(--require-production-signing)
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs "$TCFS_BIN")
+          fi
+          if [[ -n "${TCFSD_BIN:-}" ]]; then
+            args+=(--tcfsd "$TCFSD_BIN")
+          fi
+
+          scripts/macos-fileprovider-preflight.sh "${args[@]}"
+          EOF
+
+  lazy:macos-finder-preflight-workspace:
+    desc: Build local tcfs/tcfsd and run non-mutating macOS Finder/FileProvider preflight against target/debug
+    cmds:
+      - cargo build -p tcfs-cli -p tcfsd
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          if [[ -z "${EXPECTED_VERSION:-}" ]]; then
+            EXPECTED_VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
+            export EXPECTED_VERSION
+          fi
+
+          export TCFS_BIN="${TCFS_BIN:-target/debug/tcfs}"
+          export TCFSD_BIN="${TCFSD_BIN:-target/debug/tcfsd}"
+
+          task lazy:macos-finder-preflight
+          EOF
+
+  lazy:macos-finder-smoke:
+    desc: Verify macOS Finder/FileProvider enumerate + hydrate after install
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          : "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/under/CloudStorage}"
+
+          args=(--expected-file "$EXPECTED_FILE")
+
+          if [[ -n "${EXPECTED_VERSION:-}" ]]; then
+            args+=(--expected-version "$EXPECTED_VERSION")
+          fi
+          if [[ -n "${EXPECTED_CONTENT:-}" ]]; then
+            args+=(--expected-content "$EXPECTED_CONTENT")
+          fi
+          if [[ -n "${EXPECTED_CONTENT_FILE:-}" ]]; then
+            args+=(--expected-content-file "$EXPECTED_CONTENT_FILE")
+          fi
+          if [[ -n "${CONFIG_PATH:-}" ]]; then
+            args+=(--config "$CONFIG_PATH")
+          fi
+          if [[ -n "${APP_PATH:-}" ]]; then
+            args+=(--app-path "$APP_PATH")
+          fi
+          if [[ -n "${CLOUD_ROOT:-}" ]]; then
+            args+=(--cloud-root "$CLOUD_ROOT")
+          fi
+          if [[ -n "${PLUGIN_ID:-}" ]]; then
+            args+=(--plugin-id "$PLUGIN_ID")
+          fi
+          if [[ -n "${DOMAIN_ID:-}" ]]; then
+            args+=(--domain-id "$DOMAIN_ID")
+          fi
+          if [[ "${ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}" == "1" ]]; then
+            args+=(--allow-multiple-plugin-registrations)
+          fi
+          if [[ "${TCFS_REQUIRE_KEYCHAIN_CONFIG:-${REQUIRE_KEYCHAIN_CONFIG:-0}}" == "1" ]]; then
+            args+=(--require-keychain-config)
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs "$TCFS_BIN")
+          fi
+          if [[ -n "${TCFSD_BIN:-}" ]]; then
+            args+=(--tcfsd "$TCFSD_BIN")
+          fi
+          if [[ -n "${TIMEOUT_SECS:-}" ]]; then
+            args+=(--timeout "$TIMEOUT_SECS")
+          fi
+          if [[ -n "${LOG_DIR:-}" ]]; then
+            args+=(--log-dir "$LOG_DIR")
+          fi
+          if [[ "${SKIP_STATUS:-0}" == "1" ]]; then
+            args+=(--skip-status)
+          fi
+
+          scripts/macos-postinstall-smoke.sh "${args[@]}"
+          EOF
+
+  lazy:macos-finder-smoke-workspace:
+    desc: Build local tcfs/tcfsd and run macOS Finder/FileProvider smoke against target/debug
+    cmds:
+      - cargo build -p tcfs-cli -p tcfsd
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          : "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/under/CloudStorage}"
+
+          if [[ -z "${EXPECTED_VERSION:-}" ]]; then
+            EXPECTED_VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
+            export EXPECTED_VERSION
+          fi
+
+          export TCFS_BIN="${TCFS_BIN:-target/debug/tcfs}"
+          export TCFSD_BIN="${TCFSD_BIN:-target/debug/tcfsd}"
+
+          task lazy:macos-finder-smoke
+          EOF
+
+  lazy:macos-finder-release-smoke:
+    desc: Strict macOS Finder/FileProvider release proof with signing and shared-Keychain config gates
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          : "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/under/CloudStorage}"
+
+          export TCFS_REQUIRE_PRODUCTION_SIGNING=1
+          export TCFS_REQUIRE_KEYCHAIN_CONFIG=1
+
+          task lazy:macos-finder-preflight
+          task lazy:macos-finder-smoke
+          EOF
+
   # ── Local dev stack ─────────────────────────────────────────────────────────
 
   dev:

@@ -17,12 +17,14 @@ task docs:pdf
 
 See the [Protocol PDF](https://github.com/Jesssullivan/tummycrypt/actions/workflows/docs.yml) for full details including:
 
-- `.tc` file stub format (JSON schema)
-- `.tcf` folder stub format
+- Physical `.tc` file stub format (sorted key/value text)
+- Physical `.tcf` folder stub format
+- Remote index layout used by mounted views and FileProvider enumeration
 - S3 chunk layout (content-addressed storage)
 - Chunk manifest format
 - FastCDC chunking parameters
 - Hydration flow
+- The distinction between physical stubs, mounted clean-name entries, and platform placeholders
 - State tracking schema
 - gRPC wire protocol (11 RPCs, including `ResolveConflict`)
 - NATS `StateEvent` types: `FileSynced`, `FileDeleted`, `FileRenamed`, `DeviceOnline`, `DeviceOffline`, `ConflictResolved`

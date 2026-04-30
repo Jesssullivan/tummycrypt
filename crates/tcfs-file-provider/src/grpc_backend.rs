@@ -9,6 +9,7 @@ use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::Mutex;
 
 use tcfs_core::proto::tcfs_daemon_client::TcfsDaemonClient;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -26,6 +27,7 @@ pub struct TcfsProvider {
     remote_prefix: String,
     /// Socket path for lazy reconnection
     socket_path: String,
+    last_error: Mutex<Option<String>>,
 }
 
 /// Connect to the daemon over a Unix domain socket with retry.
@@ -167,6 +169,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             client,
             remote_prefix: prefix,
             socket_path,
+            last_error: Mutex::new(None),
         }))
     }));
 
@@ -174,6 +177,18 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
 }
 
 impl TcfsProvider {
+    fn clear_last_error(&self) {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = None;
+        }
+    }
+
+    fn set_last_error(&self, error: impl Into<String>) {
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(error.into());
+        }
+    }
+
     /// Attempt to reconnect if the daemon connection was lost.
     fn try_reconnect(&mut self) {
         match self.runtime.block_on(connect_once(&self.socket_path)) {
@@ -186,6 +201,32 @@ impl TcfsProvider {
             }
         }
     }
+}
+
+/// Return the last backend error message recorded on this provider.
+///
+/// The caller owns the returned string and must free it with `tcfs_string_free`.
+///
+/// # Safety
+///
+/// `provider` must be a valid pointer from `tcfs_provider_new`.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_last_error(provider: *mut TcfsProvider) -> *mut c_char {
+    if provider.is_null() {
+        return ptr::null_mut();
+    }
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let prov = unsafe { &*provider };
+        prov.last_error
+            .lock()
+            .ok()
+            .and_then(|last_error| last_error.clone())
+            .map(|message| to_c_string(&message))
+            .unwrap_or(ptr::null_mut())
+    }));
+
+    result.unwrap_or(ptr::null_mut())
 }
 
 /// Enumerate files by querying daemon sync status.
@@ -382,6 +423,7 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
         let prov = unsafe { &mut *provider };
         let c_item = unsafe { CStr::from_ptr(item_id) };
         let c_dest = unsafe { CStr::from_ptr(dest_path) };
+        prov.clear_last_error();
 
         let item_str = match c_item.to_str() {
             Ok(s) => s,
@@ -429,7 +471,9 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
         match fetch_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("fetch failed: {e}");
+                let message = e.to_string();
+                tracing::error!("fetch failed: {message}");
+                prov.set_last_error(message);
                 TcfsError::TcfsErrorStorage
             }
         }
@@ -468,6 +512,7 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
         let prov = unsafe { &mut *provider };
         let c_item = unsafe { CStr::from_ptr(item_id) };
         let c_dest = unsafe { CStr::from_ptr(dest_path) };
+        prov.clear_last_error();
 
         let item_str = match c_item.to_str() {
             Ok(s) => s,
@@ -527,7 +572,9 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
         match fetch_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("fetch_with_progress failed: {e}");
+                let message = e.to_string();
+                tracing::error!("fetch_with_progress failed: {message}");
+                prov.set_last_error(message);
                 TcfsError::TcfsErrorStorage
             }
         }
