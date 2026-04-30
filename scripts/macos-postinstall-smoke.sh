@@ -198,6 +198,38 @@ run_log_show() {
   return "$status"
 }
 
+run_bounded_to_log() {
+  local label="$1"
+  local timeout_secs="$2"
+  shift 2
+
+  local out
+  local pid
+  local waited=0
+  local status=0
+
+  out="$LOG_DIR/${label}.log"
+
+  "$@" >"$out" 2>&1 &
+  pid="$!"
+
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= timeout_secs )); then
+      kill "$pid" 2>/dev/null || true
+      short_pause
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+
+    short_pause
+    waited=$((waited + 1))
+  done
+
+  wait "$pid" || status="$?"
+  return "$status"
+}
+
 resolve_bin() {
   local candidate="$1"
   if [[ "$candidate" == */* ]]; then
@@ -485,12 +517,44 @@ wait_for_expected_file() {
   exit 1
 }
 
+nudge_cloud_root_enumeration() {
+  local root="$1"
+
+  echo "nudging CloudStorage enumeration"
+
+  ls -la "$root" >"$LOG_DIR/cloud-root-ls.log" 2>&1 || true
+
+  # A headed workstation usually triggers FileProvider enumeration through
+  # Finder naturally. GitHub-hosted macOS runners can create the CloudStorage
+  # root without launching the extension until something explicitly opens or
+  # materializes it, so use bounded best-effort nudges before the hard wait.
+  open "$root" >/dev/null 2>&1 || true
+
+  if command -v fileproviderctl >/dev/null 2>&1; then
+    run_bounded_to_log \
+      "fileproviderctl-materialize-root" \
+      "$LOG_SHOW_TIMEOUT_SECS" \
+      fileproviderctl materialize "$root" || true
+    run_bounded_to_log \
+      "fileproviderctl-dump-domain" \
+      "$LOG_SHOW_TIMEOUT_SECS" \
+      fileproviderctl dump "$DOMAIN_ID" || true
+    run_bounded_to_log \
+      "fileproviderctl-dump-provider" \
+      "$LOG_SHOW_TIMEOUT_SECS" \
+      fileproviderctl dump "$PLUGIN_ID" || true
+  fi
+}
+
 enumerate_root() {
   local root="$1"
   local listing
   local attempt=0
 
   while (( attempt < TIMEOUT_SECS )); do
+    if (( attempt % 5 == 0 )); then
+      ls -la "$root" >>"$LOG_DIR/cloud-root-ls.log" 2>&1 || true
+    fi
     listing="$(find "$root" -mindepth 1 -maxdepth 4 | head -n 10 || true)"
     if [[ -n "$listing" ]]; then
       echo "enumeration sample:"
@@ -602,6 +666,7 @@ fi
 CLOUD_ROOT="$(wait_for_cloud_root)"
 echo "CloudStorage root: $CLOUD_ROOT"
 
+nudge_cloud_root_enumeration "$CLOUD_ROOT"
 enumerate_root "$CLOUD_ROOT"
 
 if [[ -n "$EXPECTED_FILE_REL" ]]; then
