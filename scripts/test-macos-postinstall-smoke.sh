@@ -109,10 +109,15 @@ EOF
 cat >"$FAKE_BIN/fileproviderctl" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in
+  "")
+    printf 'materialize <item>\n'
+    printf 'evaluate <item>\n'
+    printf 'check | repair\n'
+    ;;
   domain)
     printf 'io.tinyland.tcfs\n'
     ;;
-  materialize)
+  materialize|evaluate|check)
     printf 'fileproviderctl %s' "$1"
     shift
     printf ' %q' "$@"
@@ -204,6 +209,8 @@ assert_contains "$OPEN_LOG" "$APP_PATH"
 assert_contains "$OPEN_LOG" "$CLOUD_ROOT"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
+assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl evaluate"
+assert_contains "$LOG_DIR/fileproviderctl-check-root.log" "fileproviderctl check -P -a"
 cmp -s "$EXPECTED_CONTENT_FILE" "$LOG_DIR/hydrated-expected-file"
 [[ -e "$CAT_RETRY_MARKER" ]] || {
   printf 'expected fake cat to fail once before hydration retry succeeded\n' >&2

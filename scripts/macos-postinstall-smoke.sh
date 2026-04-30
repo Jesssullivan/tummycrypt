@@ -519,6 +519,7 @@ wait_for_expected_file() {
 
 nudge_cloud_root_enumeration() {
   local root="$1"
+  local fileproviderctl_help=""
 
   echo "nudging CloudStorage enumeration"
 
@@ -531,10 +532,31 @@ nudge_cloud_root_enumeration() {
   open "$root" >/dev/null 2>&1 || true
 
   if command -v fileproviderctl >/dev/null 2>&1; then
-    run_bounded_to_log \
-      "fileproviderctl-materialize-root" \
-      "$LOG_SHOW_TIMEOUT_SECS" \
-      fileproviderctl materialize "$root" || true
+    fileproviderctl_help="$(fileproviderctl 2>&1 || true)"
+
+    if grep -q 'materialize' <<<"$fileproviderctl_help"; then
+      run_bounded_to_log \
+        "fileproviderctl-materialize-root" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        fileproviderctl materialize "$root" || true
+    else
+      printf 'fileproviderctl materialize is unavailable on this host\n' \
+        >"$LOG_DIR/fileproviderctl-materialize-root.log"
+    fi
+
+    if grep -q 'evaluate' <<<"$fileproviderctl_help"; then
+      run_bounded_to_log \
+        "fileproviderctl-evaluate-root" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        fileproviderctl evaluate "$root" || true
+    fi
+
+    if grep -q 'check | repair' <<<"$fileproviderctl_help"; then
+      run_bounded_to_log \
+        "fileproviderctl-check-root" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        fileproviderctl check -P -a "$root" || true
+    fi
   fi
 }
 
