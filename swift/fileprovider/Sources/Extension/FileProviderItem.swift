@@ -37,6 +37,7 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDeco
     let parentItemIdentifier: NSFileProviderItemIdentifier
     let filename: String
     let contentType: UTType
+    let isDirectory: Bool
     let documentSize: NSNumber?
     let itemVersion: NSFileProviderItemVersion
 
@@ -66,6 +67,7 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDeco
         self.itemIdentifier = identifier
         self.parentItemIdentifier = parentIdentifier
         self.filename = filename
+        self.isDirectory = isDirectory
         self.contentType = isDirectory ? .folder : (UTType(filenameExtension: (filename as NSString).pathExtension) ?? .data)
         self.documentSize = isDirectory ? nil : NSNumber(value: fileSize)
         self.itemVersion = NSFileProviderItemVersion(
@@ -78,8 +80,15 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDeco
         self.hydrationState = hydrationState
     }
 
+    /// Direct TCFS enumeration can currently identify directories but not their
+    /// exact child counts. Returning a non-zero hint keeps fileproviderd from
+    /// treating lazy remote folders as known-empty before enumeration runs.
+    var childItemCount: NSNumber? {
+        return isDirectory ? NSNumber(value: 1) : nil
+    }
+
     var capabilities: NSFileProviderItemCapabilities {
-        if contentType == .folder {
+        if isDirectory {
             return [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems, .allowsDeleting, .allowsRenaming]
         }
         return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting, .allowsEvicting]
@@ -89,7 +98,7 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDeco
     /// `.downloadLazilyAndEvictOnRemoteUpdate` means files are only downloaded
     /// when opened and automatically evicted when a newer remote version exists.
     var contentPolicy: NSFileProviderContentPolicy {
-        if contentType == .folder {
+        if isDirectory {
             return .inherited
         }
         return .downloadLazilyAndEvictOnRemoteUpdate

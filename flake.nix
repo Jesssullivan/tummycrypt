@@ -132,7 +132,7 @@
         tcfsd-app = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin (
           pkgs.stdenv.mkDerivation {
             pname = "tcfsd-app";
-            version = tcfsd.version or "0.12.3";
+            version = tcfsd.version or "0.12.4";
             dontUnpack = true;
             buildInputs = [ pkgs.darwin.sigtool ];
             installPhase = ''
