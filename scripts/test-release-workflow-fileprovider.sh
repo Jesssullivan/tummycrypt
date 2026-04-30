@@ -100,6 +100,10 @@ check_postinstall_workflow_environment_and_secrets() {
   ruby -ryaml -e '
     workflow = YAML.load_file(ARGV[0])
     job = workflow.fetch("jobs").fetch("pkg-postinstall")
+    expected_runner = "macos-15"
+    actual_runner = job.fetch("runs-on")
+    raise "postinstall runner mismatch: #{actual_runner.inspect}" unless actual_runner == expected_runner
+
     expected_env = "tcfs-macos-smoke"
     actual_env = job.fetch("environment")
     raise "postinstall environment mismatch: #{actual_env.inspect}" unless actual_env == expected_env

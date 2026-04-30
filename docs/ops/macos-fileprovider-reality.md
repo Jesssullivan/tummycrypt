@@ -383,7 +383,7 @@ The repo now also carries a manual GitHub Actions executor for this lane:
 
 - [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml)
 
-This is a `workflow_dispatch` lane on `macos-14` that:
+This is a `workflow_dispatch` lane on GitHub's `macos-15` arm64 runner that:
 
 - uses the workflow ref's current acceptance harness while downloading the
   requested release tag's published `.pkg`

@@ -96,7 +96,9 @@ Record results using a table like this:
 - The macOS clean-host lane remains tracked in `#309`; the harness now exists,
   and the repo now carries a manual GitHub-hosted approximation in
   [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml),
-  but the remaining blocker is at least one successful tagged run. That hosted
+  but the remaining blocker is at least one successful tagged run. It uses
+  GitHub's `macos-15` arm64 runner because the packaged FileProvider app cannot
+  launch on `macos-14`. That hosted
   lane uses the workflow ref's acceptance harness, downloads the requested
   release tag's published `.pkg`, uses the `tcfs-macos-smoke` GitHub
   environment secrets, rejects non-public endpoint classes during preflight,

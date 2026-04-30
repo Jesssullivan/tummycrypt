@@ -20,7 +20,7 @@ jobs:
   pkg-postinstall:
     name: macOS .pkg post-install smoke
     if: github.repository == 'Jesssullivan/tummycrypt'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 40
     environment: tcfs-macos-smoke
     env:
