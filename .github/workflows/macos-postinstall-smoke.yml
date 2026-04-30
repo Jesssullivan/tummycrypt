@@ -218,6 +218,15 @@ jobs:
           set -euo pipefail
           sudo installer -pkg "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" -target /
 
+      - name: Verify installed FileProvider production signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/macos-fileprovider-preflight.sh \
+            --signing-only \
+            --require-production-signing \
+            --app-path /Applications/TCFSProvider.app
+
       - name: Prove installed-binary smoke
         shell: bash
         run: |

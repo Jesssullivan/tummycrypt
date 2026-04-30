@@ -326,6 +326,18 @@ assert_contains "$VERIFY_RELEASE_PKG_STEP" "require_current_postinstall"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--allow-postinstall-mismatch"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--expected-postinstall scripts/macos-pkg-postinstall.sh"
 
+SIGNING_PREFLIGHT_STEP="${TMPDIR}/verify-installed-fileprovider-production-signing.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Verify installed FileProvider production signing" \
+  "$SIGNING_PREFLIGHT_STEP"
+bash -n "$SIGNING_PREFLIGHT_STEP"
+assert_contains "$SIGNING_PREFLIGHT_STEP" "scripts/macos-fileprovider-preflight.sh"
+assert_contains "$SIGNING_PREFLIGHT_STEP" "--signing-only"
+assert_contains "$SIGNING_PREFLIGHT_STEP" "--require-production-signing"
+assert_contains "$SIGNING_PREFLIGHT_STEP" "--app-path /Applications/TCFSProvider.app"
+
 INSTALL_BINARY_SMOKE_STEP="${TMPDIR}/prove-installed-binary-smoke.sh"
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \
