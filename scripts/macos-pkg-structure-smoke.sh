@@ -15,6 +15,8 @@ Options:
   --pkg <path>                   Package artifact to inspect
   --expected-postinstall <path>  Script expected to match package postinstall
                                  (default: scripts/macos-pkg-postinstall.sh)
+  --allow-postinstall-mismatch   Warn instead of failing if the package
+                                 postinstall differs from --expected-postinstall
   --require-signature            Require pkgutil --check-signature to pass
   -h, --help                     Show this help
 EOF
@@ -28,6 +30,7 @@ fail() {
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG_PATH=""
 EXPECTED_POSTINSTALL="${REPO_ROOT}/scripts/macos-pkg-postinstall.sh"
+ALLOW_POSTINSTALL_MISMATCH=0
 REQUIRE_SIGNATURE=0
 PKGUTIL_BIN="${TCFS_PKGUTIL:-pkgutil}"
 UNAME_BIN="${TCFS_UNAME:-uname}"
@@ -43,6 +46,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail "--expected-postinstall requires a value"
       EXPECTED_POSTINSTALL="$2"
       shift 2
+      ;;
+    --allow-postinstall-mismatch)
+      ALLOW_POSTINSTALL_MISMATCH=1
+      shift
       ;;
     --require-signature)
       REQUIRE_SIGNATURE=1
@@ -103,8 +110,14 @@ payload_contains_prefix "Applications/TCFSProvider.app/Contents/Extensions/TCFSF
 postinstall="$(find "$expanded_dir" -path '*/Scripts/postinstall' -type f | head -1)"
 [[ -n "$postinstall" ]] || fail "package expansion did not contain Scripts/postinstall"
 
+postinstall_status="matches $EXPECTED_POSTINSTALL"
 if ! cmp -s "$EXPECTED_POSTINSTALL" "$postinstall"; then
-  fail "package postinstall does not match $EXPECTED_POSTINSTALL"
+  if [[ "$ALLOW_POSTINSTALL_MISMATCH" == "1" ]]; then
+    postinstall_status="differs from $EXPECTED_POSTINSTALL"
+    printf 'warning: package postinstall does not match %s\n' "$EXPECTED_POSTINSTALL" >&2
+  else
+    fail "package postinstall does not match $EXPECTED_POSTINSTALL"
+  fi
 fi
 
 if [[ "$REQUIRE_SIGNATURE" == "1" ]]; then
@@ -116,5 +129,5 @@ printf 'payload: usr/local/bin/tcfs present\n'
 printf 'payload: usr/local/bin/tcfsd present\n'
 printf 'payload: TCFSProvider.app present\n'
 printf 'payload: TCFSFileProvider.appex present\n'
-printf 'postinstall: matches %s\n' "$EXPECTED_POSTINSTALL"
+printf 'postinstall: %s\n' "$postinstall_status"
 printf 'macOS package structure smoke passed\n'

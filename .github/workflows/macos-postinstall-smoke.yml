@@ -7,6 +7,11 @@ on:
         description: "Release tag to validate (for example v0.12.2)"
         required: true
         type: string
+      require_current_postinstall:
+        description: "Require the package postinstall script to match current main"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -194,9 +199,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/macos-pkg-structure-smoke.sh \
+          args=(
             --pkg "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" \
             --require-signature
+          )
+
+          if [[ "${{ github.event.inputs.require_current_postinstall }}" == "true" ]]; then
+            args+=(--expected-postinstall scripts/macos-pkg-postinstall.sh)
+          else
+            args+=(--allow-postinstall-mismatch)
+          fi
+
+          bash scripts/macos-pkg-structure-smoke.sh "${args[@]}"
 
       - name: Install release package
         shell: bash

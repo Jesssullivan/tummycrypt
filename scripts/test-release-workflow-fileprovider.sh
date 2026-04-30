@@ -318,6 +318,9 @@ bash -n "$VERIFY_RELEASE_PKG_STEP"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "scripts/macos-pkg-structure-smoke.sh"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--pkg \"\$RUNNER_TEMP/tcfs-\${VERSION}-macos-aarch64.pkg\""
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--require-signature"
+assert_contains "$VERIFY_RELEASE_PKG_STEP" "require_current_postinstall"
+assert_contains "$VERIFY_RELEASE_PKG_STEP" "--allow-postinstall-mismatch"
+assert_contains "$VERIFY_RELEASE_PKG_STEP" "--expected-postinstall scripts/macos-pkg-postinstall.sh"
 
 VALIDATE_STORAGE_STEP="${TMPDIR}/validate-release-inputs-and-storage-secrets.sh"
 extract_step_from_workflow \

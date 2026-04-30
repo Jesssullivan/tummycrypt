@@ -388,7 +388,9 @@ This is a `workflow_dispatch` lane on `macos-14` that:
 - uses the workflow ref's current acceptance harness while downloading the
   requested release tag's published `.pkg`
 - runs `scripts/macos-pkg-structure-smoke.sh --require-signature` before
-  installing the package
+  installing the package. Current-postinstall equality is opt-in through
+  `require_current_postinstall`; older already-published tags can continue
+  through install/Finder proof while still checking payload shape and signature.
 - runs `scripts/install-smoke.sh`
 - writes a real tcfs config from the `tcfs-macos-smoke` GitHub
   environment secrets, including a run-only E2EE master key

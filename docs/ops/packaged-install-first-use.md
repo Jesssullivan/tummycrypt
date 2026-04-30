@@ -102,9 +102,10 @@ Record results using a table like this:
   environment secrets, rejects non-public endpoint classes during preflight,
   decodes a 32-byte E2EE master key for the run, proves the seeded fixture
   cannot be pulled without that key, and runs the signed package structure
-  smoke before installer runs. NATS is not required for the enumerate + hydrate
-  lane, and keychain/app-group failures should be treated separately from
-  storage reachability failures.
+  smoke before installer runs. Current-postinstall equality is opt-in so older
+  published tags can still reach install/Finder proof. NATS is not required for
+  the enumerate + hydrate lane, and keychain/app-group failures should be
+  treated separately from storage reachability failures.
 - The macOS `.pkg` postinstall installs `io.tinyland.tcfsd.plist` under
   `/Library/LaunchAgents`, not `$HOME/Library/LaunchAgents`, because installer
   scripts run as root. It also attempts FileProvider registration in the active

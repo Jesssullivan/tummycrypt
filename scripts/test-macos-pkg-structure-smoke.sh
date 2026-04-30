@@ -124,6 +124,15 @@ assert_fails_contains \
   "package postinstall does not match" \
   env PATH="$FAKE_BIN:$PATH" bash "$SCRIPT" --pkg "$BAD_POSTINSTALL_PKG"
 
+ALLOW_MISMATCH_OUT="${TMPDIR}/allow-mismatch.out"
+ALLOW_MISMATCH_ERR="${TMPDIR}/allow-mismatch.err"
+PATH="$FAKE_BIN:$PATH" \
+  bash "$SCRIPT" --pkg "$BAD_POSTINSTALL_PKG" --allow-postinstall-mismatch \
+  >"$ALLOW_MISMATCH_OUT" 2>"$ALLOW_MISMATCH_ERR"
+assert_contains "$ALLOW_MISMATCH_OUT" "postinstall: differs from $POSTINSTALL"
+assert_contains "$ALLOW_MISMATCH_OUT" "macOS package structure smoke passed"
+assert_contains "$ALLOW_MISMATCH_ERR" "warning: package postinstall does not match $POSTINSTALL"
+
 assert_fails_contains \
   "only inspects packages with macOS pkgutil" \
   env TCFS_UNAME=/bin/echo PATH="$FAKE_BIN:$PATH" bash "$SCRIPT" --pkg "$GOOD_PKG"
