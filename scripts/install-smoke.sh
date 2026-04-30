@@ -90,7 +90,10 @@ assert_version() {
   fi
 }
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tcfs-install-smoke.XXXXXX")"
+# Keep the default short on macOS. GitHub-hosted macOS exposes a long
+# /var/folders/... TMPDIR, and daemon Unix sockets can exceed SUN_LEN there.
+TMP_BASE="${TCFS_INSTALL_SMOKE_TMPDIR:-/tmp}"
+TMP_DIR="$(mktemp -d "${TMP_BASE%/}/tcfs-install-smoke.XXXXXX")"
 CONFIG_PATH="$TMP_DIR/missing-config.toml"
 HOME_DIR="$TMP_DIR/home"
 STATE_DIR="$HOME_DIR/.local/state"
