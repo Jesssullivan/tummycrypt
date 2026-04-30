@@ -314,7 +314,9 @@ run_status() {
 
 check_pluginkit() {
   local output
-  local count
+  local record_count
+  local path_count
+  local plugin_paths
   output="$(pluginkit -m -A -D -vvv -i "$PLUGIN_ID" 2>&1)" || {
     echo "pluginkit lookup failed for $PLUGIN_ID" >&2
     echo "$output" >&2
@@ -329,12 +331,27 @@ check_pluginkit() {
     exit 1
   }
 
-  count="$(grep -c "$PLUGIN_ID" <<<"$output")"
-  if (( count > 1 )); then
+  record_count="$(grep -c "$PLUGIN_ID" <<<"$output")"
+  plugin_paths="$(
+    awk '
+      /^[[:space:]]*Path = / {
+        path = $0
+        sub(/^[[:space:]]*Path = /, "", path)
+        print path
+      }
+    ' <<<"$output" | sort -u
+  )"
+  path_count="$(grep -c . <<<"$plugin_paths" || true)"
+
+  if (( record_count > 1 && path_count == 1 )); then
+    echo "warning: pluginkit shows $record_count records for one FileProvider path" >&2
+  fi
+
+  if (( path_count > 1 )); then
     if [[ "$ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS" == "1" ]]; then
-      echo "warning: pluginkit shows $count registrations for $PLUGIN_ID" >&2
+      echo "warning: pluginkit shows $path_count FileProvider extension paths for $PLUGIN_ID" >&2
     else
-      echo "multiple FileProvider registrations found for $PLUGIN_ID; remove stale app/extension copies or pass --allow-multiple-plugin-registrations for diagnostic runs" >&2
+      echo "multiple FileProvider extension paths found for $PLUGIN_ID; remove stale app/extension copies or pass --allow-multiple-plugin-registrations for diagnostic runs" >&2
       print_pluginkit_duplicate_hint "$output"
       exit 1
     fi

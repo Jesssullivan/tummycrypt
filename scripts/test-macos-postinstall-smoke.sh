@@ -101,6 +101,10 @@ if [[ "${TCFS_FAKE_PLUGIN_DUPES:-0}" == "1" ]]; then
   printf 'com.apple.FileProvider.NonUI extension io.tinyland.tcfs.fileprovider\n'
   printf '            Path = /Users/test/git/tummycrypt/build/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex\n'
 fi
+if [[ "${TCFS_FAKE_PLUGIN_SAME_PATH_DUPES:-0}" == "1" ]]; then
+  printf 'com.apple.FileProvider.NonUI extension io.tinyland.tcfs.fileprovider\n'
+  printf '            Path = /Users/test/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex\n'
+fi
 EOF
 cat >"$FAKE_BIN/fileproviderctl" <<'EOF'
 #!/usr/bin/env bash
@@ -237,6 +241,23 @@ assert_fails_contains \
       --log-dir "${TMPDIR}/mismatch-logs" \
       --timeout 2
 
+SAME_PATH_DUPES_OUT="${TMPDIR}/same-path-dupes.out"
+SAME_PATH_DUPES_ERR="${TMPDIR}/same-path-dupes.err"
+env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" TCFS_FAKE_PLUGIN_SAME_PATH_DUPES=1 \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --expected-file "$EXPECTED_REL" \
+    --expected-content-file "$EXPECTED_CONTENT_FILE" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/same-path-dupe-logs" \
+    --timeout 2 \
+    >"$SAME_PATH_DUPES_OUT" \
+    2>"$SAME_PATH_DUPES_ERR"
+assert_contains "$SAME_PATH_DUPES_OUT" "macOS post-install FileProvider smoke passed"
+assert_contains "$SAME_PATH_DUPES_ERR" "warning: pluginkit shows 2 records for one FileProvider path"
+
 DUPES_OUT="${TMPDIR}/dupes.out"
 DUPES_ERR="${TMPDIR}/dupes.err"
 if env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" TCFS_FAKE_PLUGIN_DUPES=1 \
@@ -255,7 +276,7 @@ if env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" TC
   exit 1
 fi
 cat "$DUPES_OUT" "$DUPES_ERR" >"${TMPDIR}/dupes.combined"
-assert_contains "${TMPDIR}/dupes.combined" "multiple FileProvider registrations found"
+assert_contains "${TMPDIR}/dupes.combined" "multiple FileProvider extension paths found"
 assert_contains "${TMPDIR}/dupes.combined" "registered FileProvider extension paths:"
 assert_contains "${TMPDIR}/dupes.combined" "/Users/test/git/tummycrypt/build/TCFSProvider.app"
 assert_contains "${TMPDIR}/dupes.combined" "cleanup is not performed automatically"
