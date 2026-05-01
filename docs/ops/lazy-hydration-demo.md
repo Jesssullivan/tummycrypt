@@ -272,13 +272,15 @@ shared Keychain` and fails if the diagnostic embedded-config path was used.
 Required proof:
 
 1. Install the released `.pkg` or app bundle on a known-clean macOS host.
-2. Register or re-add the `io.tinyland.tcfs` FileProvider domain.
+2. Add/update the `io.tinyland.tcfs` FileProvider domain and signal the
+   FileProvider working set.
 3. Confirm a `~/Library/CloudStorage/TCFS*` root appears.
 4. Enumerate remote-backed fixture entries in Finder or via the CloudStorage path.
-5. Open/read a placeholder-backed file and verify exact content hydration.
-6. Prove extension config loaded from the shared Keychain, not build-time
+5. Request download of the expected placeholder through the containing host app.
+6. Open/read a placeholder-backed file and verify exact content hydration.
+7. Prove extension config loaded from the shared Keychain, not build-time
    embedded diagnostic config.
-7. Record Finder state such as badges or progress as observational evidence until
+8. Record Finder state such as badges or progress as observational evidence until
    those become release gates.
 
 GitHub-hosted macOS runners need a public reachable S3-compatible endpoint for

@@ -7,7 +7,7 @@ set -euo pipefail
 
 REPO="${TCFS_GITHUB_REPO:-Jesssullivan/tummycrypt}"
 REF="${TCFS_GITHUB_REF:-main}"
-TAG="${TAG:-v0.12.6}"
+TAG="${TAG:-v0.12.7}"
 ARTIFACT_NAME="${ARTIFACT_NAME:-dist-testing-mode-pkg}"
 PACKAGE_WORKFLOW="macos-fileprovider-testing-mode-pkg.yml"
 SMOKE_WORKFLOW="macos-postinstall-smoke.yml"
@@ -24,7 +24,7 @@ usage() {
 Usage: scripts/macos-fileprovider-testing-mode-dispatch.sh [options]
 
 Options:
-  --tag <tag>             Release tag whose CLI tarball supplies tcfs/tcfsd (default: v0.12.6)
+  --tag <tag>             Release tag whose CLI tarball supplies tcfs/tcfsd (default: v0.12.7)
   --repo <owner/name>     GitHub repository (default: Jesssullivan/tummycrypt)
   --ref <ref>             Workflow ref to dispatch (default: main)
   --artifact-name <name>  Package artifact name (default: dist-testing-mode-pkg)

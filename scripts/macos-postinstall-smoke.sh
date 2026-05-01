@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+COORDINATED_READ="${TCFS_COORDINATED_READ:-1}"
+
 usage() {
   cat <<'EOF'
 Usage: scripts/macos-postinstall-smoke.sh [options]
 
 Verify the installed macOS FileProvider path after package/app install:
-artifact presence, pluginkit registration, host-app launch, domain re-add,
+artifact presence, pluginkit registration, host-app launch, domain add,
 CloudStorage appearance, enumeration, and optional hydration of a known file.
 
 This helper assumes a real operator config and a running tcfsd. It does not
@@ -476,6 +480,10 @@ clear_fileprovider_testing_mode() {
   launchctl unsetenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED >/dev/null 2>&1 || true
 }
 
+clear_fileprovider_request_download() {
+  launchctl unsetenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER >/dev/null 2>&1 || true
+}
+
 print_pluginkit_duplicate_hint() {
   local output="$1"
 
@@ -502,6 +510,25 @@ check_host_log() {
 
   [[ -n "$output" ]] || return 1
   grep -q "add: OK" <<<"$output"
+}
+
+check_host_download_request_log() {
+  local item_identifier="$1"
+  local output
+  output="$(run_log_show --style compact --last 45s \
+    --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true)"
+
+  [[ -n "$output" ]] || return 1
+  if grep -Fq "requestDownload: $item_identifier: OK" <<<"$output"; then
+    return 0
+  fi
+
+  if grep -F "requestDownload: $item_identifier:" <<<"$output" >&2; then
+    echo "FileProvider host app download request failed" >&2
+    exit 1
+  fi
+
+  return 1
 }
 
 extension_log_path() {
@@ -613,6 +640,24 @@ wait_for_expected_file() {
   exit 1
 }
 
+wait_for_expected_parent() {
+  local path="$1"
+  local attempt=0
+
+  [[ "$path" == "$CLOUD_ROOT" ]] && return
+
+  while (( attempt < TIMEOUT_SECS )); do
+    if [[ -d "$path" ]]; then
+      return
+    fi
+    short_pause
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for expected file parent: $path" >&2
+  exit 1
+}
+
 nudge_cloud_root_enumeration() {
   local root="$1"
   local fileproviderctl_help=""
@@ -656,6 +701,40 @@ nudge_cloud_root_enumeration() {
   fi
 }
 
+nudge_expected_parent_enumeration() {
+  local parent="$1"
+  local fileproviderctl_help=""
+
+  [[ "$parent" == "$CLOUD_ROOT" ]] && return
+
+  echo "nudging expected parent enumeration: $parent"
+
+  run_bounded_to_log \
+    "expected-parent-ls" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    ls -la "$parent" || true
+
+  open "$parent" >/dev/null 2>&1 || true
+
+  if command -v fileproviderctl >/dev/null 2>&1; then
+    fileproviderctl_help="$(fileproviderctl 2>&1 || true)"
+
+    if grep -q 'evaluate' <<<"$fileproviderctl_help"; then
+      run_bounded_to_log \
+        "fileproviderctl-evaluate-expected-parent" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        fileproviderctl evaluate "$parent" || true
+    fi
+
+    if grep -q 'check | repair' <<<"$fileproviderctl_help"; then
+      run_bounded_to_log \
+        "fileproviderctl-check-expected-parent" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        fileproviderctl check -P -a "$parent" || true
+    fi
+  fi
+}
+
 enumerate_root() {
   local root="$1"
   local listing
@@ -690,11 +769,53 @@ enumerate_root() {
   exit 1
 }
 
+read_fileprovider_file() {
+  local path="$1"
+  local hydrated_copy="$2"
+  local helper="$REPO_ROOT/scripts/macos-fileprovider-coordinated-read.swift"
+
+  if [[ "$COORDINATED_READ" != "0" && -f "$helper" ]] && command -v swift >/dev/null 2>&1; then
+    swift "$helper" "$path" "$hydrated_copy"
+  else
+    cat "$path" >"$hydrated_copy"
+  fi
+}
+
+request_expected_file_download() {
+  local item_identifier="$1"
+  local wait_count=0
+
+  echo "requesting FileProvider download for expected file: $item_identifier"
+
+  clear_fileprovider_request_download
+  launchctl setenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER "$item_identifier" || {
+    echo "failed to set FileProvider request-download launch environment" >&2
+    exit 1
+  }
+
+  open "$APP_PATH"
+
+  until check_host_download_request_log "$item_identifier"; do
+    short_pause
+    wait_count=$((wait_count + 1))
+    if (( wait_count >= TIMEOUT_SECS )); then
+      clear_fileprovider_request_download
+      echo "timed out waiting for host app download request log: $item_identifier" >&2
+      run_log_show --style compact --last 2m \
+        --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true
+      exit 1
+    fi
+  done
+
+  clear_fileprovider_request_download
+  echo "host app requested FileProvider download for expected file"
+}
+
 hydrate_expected_file() {
   local path="$1"
   local hydrated_copy="$LOG_DIR/hydrated-expected-file"
   local expected_copy="$LOG_DIR/expected-content"
-  local cat_error="$LOG_DIR/hydrate-cat-error.log"
+  local read_error="$LOG_DIR/hydrate-read-error.log"
   local hydrated_bytes
   local attempt=0
 
@@ -704,7 +825,7 @@ hydrate_expected_file() {
   }
 
   while (( attempt < TIMEOUT_SECS )); do
-    if cat "$path" >"$hydrated_copy" 2>"$cat_error"; then
+    if read_fileprovider_file "$path" "$hydrated_copy" 2>"$read_error"; then
       break
     fi
     rm -f "$hydrated_copy"
@@ -713,7 +834,7 @@ hydrate_expected_file() {
   done
 
   if (( attempt >= TIMEOUT_SECS )); then
-    cat "$cat_error" >&2 || true
+    cat "$read_error" >&2 || true
     echo "failed to read expected file for hydration: $path" >&2
     exit 1
   fi
@@ -772,7 +893,7 @@ until check_host_log; do
   short_pause
   HOST_LOG_WAIT=$((HOST_LOG_WAIT + 1))
   if (( HOST_LOG_WAIT >= TIMEOUT_SECS )); then
-    echo "timed out waiting for host app log showing domain re-add" >&2
+    echo "timed out waiting for host app log showing domain add" >&2
     run_log_show --style compact --last 2m \
       --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true
     exit 1
@@ -780,7 +901,7 @@ until check_host_log; do
 done
 
 clear_fileprovider_testing_mode
-echo "host app log confirmed domain re-add"
+echo "host app log confirmed domain add"
 if check_domain_listing; then
   echo "fileproviderctl domain listing includes $DOMAIN_ID"
 else
@@ -795,7 +916,11 @@ enumerate_root "$CLOUD_ROOT"
 
 if [[ -n "$EXPECTED_FILE_REL" ]]; then
   EXPECTED_PATH="$CLOUD_ROOT/$EXPECTED_FILE_REL"
+  EXPECTED_PARENT="$(dirname "$EXPECTED_PATH")"
+  wait_for_expected_parent "$EXPECTED_PARENT"
+  nudge_expected_parent_enumeration "$EXPECTED_PARENT"
   wait_for_expected_file "$EXPECTED_PATH"
+  request_expected_file_download "$EXPECTED_FILE_REL"
   hydrate_expected_file "$EXPECTED_PATH"
   if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" ]]; then
     check_keychain_config_log

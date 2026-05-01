@@ -49,6 +49,7 @@ EXPECTED_CONTENT_FILE="${TMPDIR}/expected-content.txt"
 OPEN_LOG="${TMPDIR}/open.log"
 PLUGINKIT_LOG="${TMPDIR}/pluginkit.log"
 LAUNCHCTL_LOG="${TMPDIR}/launchctl.log"
+SWIFT_LOG="${TMPDIR}/swift.log"
 
 mkdir -p \
   "$FAKE_BIN" \
@@ -185,6 +186,7 @@ elif [[ "$args" == *"com.apple.FileProvider"* || "$args" == *"fileproviderd"* ||
   fi
 else
   printf '2026-04-30 TCFSProvider host add: OK\n'
+  printf '2026-04-30 TCFSProvider host requestDownload: Projects/tcfs-odrive-parity/honey-readme.txt: OK\n'
 fi
 EOF
 cat >"$FAKE_BIN/open" <<'EOF'
@@ -195,9 +197,11 @@ printf '\n' >>"$TCFS_FAKE_OPEN_LOG"
 EOF
 cat >"$FAKE_BIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
-printf 'launchctl' >>"$TCFS_FAKE_LAUNCHCTL_LOG"
-printf ' %q' "$@" >>"$TCFS_FAKE_LAUNCHCTL_LOG"
-printf '\n' >>"$TCFS_FAKE_LAUNCHCTL_LOG"
+if [[ -n "${TCFS_FAKE_LAUNCHCTL_LOG:-}" ]]; then
+  printf 'launchctl' >>"$TCFS_FAKE_LAUNCHCTL_LOG"
+  printf ' %q' "$@" >>"$TCFS_FAKE_LAUNCHCTL_LOG"
+  printf '\n' >>"$TCFS_FAKE_LAUNCHCTL_LOG"
+fi
 EOF
 cat >"$FAKE_BIN/cat" <<'EOF'
 #!/usr/bin/env bash
@@ -209,6 +213,35 @@ if [[ -n "$marker" && -n "$target" && "${1:-}" == "$target" && ! -e "$marker" ]]
   exit 1
 fi
 exec /bin/cat "$@"
+EOF
+cat >"$FAKE_BIN/swift" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${TCFS_FAKE_SWIFT_LOG:-}" ]]; then
+  printf 'swift' >>"$TCFS_FAKE_SWIFT_LOG"
+  printf ' %q' "$@" >>"$TCFS_FAKE_SWIFT_LOG"
+  printf '\n' >>"$TCFS_FAKE_SWIFT_LOG"
+fi
+
+helper="${1:-}"
+source="${2:-}"
+destination="${3:-}"
+marker="${TCFS_FAKE_SWIFT_MARKER:-}"
+target="${TCFS_FAKE_SWIFT_TARGET:-}"
+
+if [[ "$helper" != *"macos-fileprovider-coordinated-read.swift" || -z "$source" || -z "$destination" ]]; then
+  printf 'unexpected swift invocation:'
+  printf ' %q' "$@"
+  printf '\n'
+  exit 1
+fi
+
+if [[ -n "$marker" && -n "$target" && "$source" == "$target" && ! -e "$marker" ]]; then
+  : >"$marker"
+  printf 'coordinated read timed out\n' >&2
+  exit 1
+fi
+
+/bin/cat "$source" >"$destination"
 EOF
 cat >"$FAKE_BIN/stat" <<'EOF'
 #!/usr/bin/env bash
@@ -222,15 +255,16 @@ EOF
 chmod +x "$FAKE_BIN"/*
 
 OUT="${TMPDIR}/positive.out"
-CAT_RETRY_MARKER="${TMPDIR}/cat-failed-once"
+READ_RETRY_MARKER="${TMPDIR}/read-failed-once"
 PATH="$FAKE_BIN:$PATH" \
 HOME="$HOME_DIR" \
 TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
 TCFS_FAKE_PLUGINKIT_LOG="$PLUGINKIT_LOG" \
 TCFS_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
+TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
 TCFS_FAKE_TESTING_MODE_ENTITLEMENT=1 \
-TCFS_FAKE_CAT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
-TCFS_FAKE_CAT_MARKER="$CAT_RETRY_MARKER" \
+TCFS_FAKE_SWIFT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
+TCFS_FAKE_SWIFT_MARKER="$READ_RETRY_MARKER" \
 bash "$SCRIPT" \
   --expected-version 0.12.2 \
   --config "$CONFIG_PATH" \
@@ -250,28 +284,37 @@ assert_contains "$OUT" "tcfs version: tcfs 0.12.2"
 assert_contains "$OUT" "tcfsd binary: $FAKE_BIN/tcfsd"
 assert_contains "$OUT" "tcfs binary: $FAKE_BIN/tcfs"
 assert_contains "$OUT" "pluginkit registration:"
-assert_contains "$OUT" "host app log confirmed domain re-add"
+assert_contains "$OUT" "host app log confirmed domain add"
 assert_contains "$OUT" "fileproviderctl domain listing includes io.tinyland.tcfs"
 assert_contains "$OUT" "CloudStorage root: $CLOUD_ROOT"
 assert_contains "$OUT" "nudging CloudStorage enumeration"
+assert_contains "$OUT" "nudging expected parent enumeration: $(dirname "$CLOUD_ROOT/$EXPECTED_REL")"
 assert_contains "$OUT" "electing FileProvider plug-in for current user: io.tinyland.tcfs.fileprovider"
 assert_contains "$OUT" "host app FileProvider testing-mode entitlement present"
 assert_contains "$OUT" "requesting FileProvider testing mode: always enabled"
+assert_contains "$OUT" "requesting FileProvider download for expected file: $EXPECTED_REL"
+assert_contains "$OUT" "host app requested FileProvider download for expected file"
 assert_contains "$OUT" "hydrated file content matched expected content file"
 assert_contains "$OUT" "FileProvider extension config source: shared Keychain"
 assert_contains "$OUT" "macOS post-install FileProvider smoke passed"
 assert_contains "$OPEN_LOG" "$APP_PATH"
 assert_contains "$OPEN_LOG" "$CLOUD_ROOT"
+assert_contains "$OPEN_LOG" "$(dirname "$CLOUD_ROOT/$EXPECTED_REL")"
 assert_contains "$PLUGINKIT_LOG" "pluginkit -e use -i io.tinyland.tcfs.fileprovider"
 assert_contains "$LAUNCHCTL_LOG" "launchctl setenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED 1"
 assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED"
+assert_contains "$LAUNCHCTL_LOG" "launchctl setenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER $EXPECTED_REL"
+assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER"
+assert_contains "$SWIFT_LOG" "macos-fileprovider-coordinated-read.swift"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl evaluate"
 assert_contains "$LOG_DIR/fileproviderctl-check-root.log" "fileproviderctl check -P -a"
+assert_contains "$LOG_DIR/fileproviderctl-evaluate-expected-parent.log" "fileproviderctl evaluate"
+assert_contains "$LOG_DIR/fileproviderctl-check-expected-parent.log" "fileproviderctl check -P -a"
 cmp -s "$EXPECTED_CONTENT_FILE" "$LOG_DIR/hydrated-expected-file"
-[[ -e "$CAT_RETRY_MARKER" ]] || {
-  printf 'expected fake cat to fail once before hydration retry succeeded\n' >&2
+[[ -e "$READ_RETRY_MARKER" ]] || {
+  printf 'expected coordinated read to fail once before hydration retry succeeded\n' >&2
   exit 1
 }
 

@@ -47,62 +47,39 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             let path: String
             if containerId == .rootContainer {
                 path = ""
+            } else if containerId == .workingSet {
+                path = ""
             } else {
                 path = containerId.rawValue
             }
 
-            enumLogger.info("enumerateItems: calling tcfs_provider_enumerate for path='\(path)'")
+            let recursive = containerId == .workingSet
+            let parentIdentifier: NSFileProviderItemIdentifier = containerId == .workingSet
+                ? .rootContainer : containerId
+            let enumeration = Self.enumerateProviderItems(
+                provider: prov,
+                path: path,
+                parentIdentifier: parentIdentifier,
+                recursive: recursive
+            )
 
-            var outItems: UnsafeMutablePointer<TcfsFileItem>?
-            var outCount: UInt = 0
+            enumLogger.info(
+                "enumerateItems: enumerate returned \(enumeration.result.rawValue), count=\(enumeration.items.count)"
+            )
 
-            let result = path.withCString { pathPtr in
-                tcfs_provider_enumerate(prov, pathPtr, &outItems, &outCount)
+            guard enumeration.result == TCFS_ERROR_TCFS_ERROR_NONE else {
+                enumLogger.error("enumerateItems: enumerate failed with code \(enumeration.result.rawValue)")
+                observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
+                return
             }
 
-            enumLogger.info("enumerateItems: enumerate returned \(result.rawValue), count=\(outCount)")
-
-            guard result == TCFS_ERROR_TCFS_ERROR_NONE, let items = outItems, outCount > 0 else {
-                if result != TCFS_ERROR_TCFS_ERROR_NONE {
-                    enumLogger.error("enumerateItems: enumerate failed with code \(result.rawValue)")
-                }
+            guard !enumeration.items.isEmpty else {
                 observer.finishEnumerating(upTo: nil)
                 return
             }
 
-            var providerItems: [NSFileProviderItem] = []
-            let count = Int(outCount)
-
-            for i in 0..<count {
-                let item = items[i]
-
-                let itemId = item.item_id.map { String(cString: $0) } ?? ""
-                let filename = item.filename.map { String(cString: $0) } ?? ""
-                let contentHash = item.content_hash.map { String(cString: $0) } ?? "1"
-                let hydration = item.hydration_state.map { String(cString: $0) } ?? ""
-
-                // Items are created as placeholders (downloaded: false).
-                // Content will be fetched on demand via fetchContents.
-                providerItems.append(
-                    TCFSFileProviderItem(
-                        identifier: NSFileProviderItemIdentifier(itemId),
-                        parentIdentifier: containerId,
-                        filename: filename,
-                        isDirectory: item.is_directory,
-                        fileSize: item.file_size,
-                        downloaded: false,
-                        uploaded: true,
-                        versionTag: contentHash,
-                        hydrationState: hydration
-                    )
-                )
-            }
-
-            // Free the C array
-            tcfs_file_items_free(outItems, outCount)
-
-            enumLogger.info("enumerateItems: returning \(providerItems.count) placeholder items")
-            observer.didEnumerate(providerItems)
+            enumLogger.info("enumerateItems: returning \(enumeration.items.count) placeholder items")
+            observer.didEnumerate(enumeration.items)
             observer.finishEnumerating(upTo: nil)
         }
     }
@@ -125,6 +102,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
             let path: String
             if containerId == .rootContainer {
+                path = ""
+            } else if containerId == .workingSet {
                 path = ""
             } else {
                 path = containerId.rawValue
@@ -160,16 +139,20 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     let filename = event.filename.map { String(cString: $0) } ?? ""
                     let eventType = event.event_type.map { String(cString: $0) } ?? ""
                     let contentHash = event.content_hash.map { String(cString: $0) } ?? "1"
+                    let itemIdentifier = Self.normalizedItemIdentifier(
+                        itemPath,
+                        isDirectory: event.is_directory
+                    )
 
                     maxTimestamp = max(maxTimestamp, event.timestamp)
 
                     if eventType == "deleted" {
-                        deletedIds.append(NSFileProviderItemIdentifier(itemPath))
+                        deletedIds.append(NSFileProviderItemIdentifier(itemIdentifier))
                     } else {
                         updatedItems.append(
                             TCFSFileProviderItem(
-                                identifier: NSFileProviderItemIdentifier(itemPath),
-                                parentIdentifier: containerId,
+                                identifier: NSFileProviderItemIdentifier(itemIdentifier),
+                                parentIdentifier: TCFSFileProviderExtension.parentIdentifier(forPath: itemIdentifier),
                                 filename: filename,
                                 isDirectory: event.is_directory,
                                 fileSize: event.file_size,
@@ -181,6 +164,25 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     }
                 }
                 tcfs_change_events_free(outEvents, outCount)
+            }
+
+            if containerId == .workingSet && updatedItems.isEmpty && deletedIds.isEmpty {
+                let enumeration = Self.enumerateProviderItems(
+                    provider: prov,
+                    path: "",
+                    parentIdentifier: .rootContainer,
+                    recursive: true
+                )
+                if enumeration.result != TCFS_ERROR_TCFS_ERROR_NONE {
+                    enumLogger.warning(
+                        "enumerateChanges: working-set full import failed (\(enumeration.result.rawValue))"
+                    )
+                    let newAnchor = Self.makeAnchor()
+                    observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
+                    return
+                }
+                updatedItems = enumeration.items
+                enumLogger.info("enumerateChanges: working-set full import returned \(updatedItems.count) items")
             }
 
             enumLogger.info("enumerateChanges: \(updatedItems.count) updated, \(deletedIds.count) deleted (since \(sinceTimestamp))")
@@ -224,5 +226,89 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         guard data.count == MemoryLayout<UInt64>.size else { return 0 }
         let millis = data.withUnsafeBytes { $0.load(as: UInt64.self) }
         return Int64(millis / 1000)
+    }
+
+    private static func enumerateProviderItems(
+        provider prov: OpaquePointer,
+        path: String,
+        parentIdentifier: NSFileProviderItemIdentifier,
+        recursive: Bool,
+        depth: Int = 0
+    ) -> (result: TcfsError, items: [NSFileProviderItem]) {
+        if depth > 32 {
+            enumLogger.warning("enumerateProviderItems: stopping at recursion depth \(depth)")
+            return (TCFS_ERROR_TCFS_ERROR_NONE, [])
+        }
+
+        enumLogger.info("enumerateProviderItems: calling tcfs_provider_enumerate for path='\(path)'")
+
+        var outItems: UnsafeMutablePointer<TcfsFileItem>?
+        var outCount: UInt = 0
+
+        let result = path.withCString { pathPtr in
+            tcfs_provider_enumerate(prov, pathPtr, &outItems, &outCount)
+        }
+
+        guard result == TCFS_ERROR_TCFS_ERROR_NONE else {
+            tcfs_file_items_free(outItems, outCount)
+            return (result, [])
+        }
+
+        guard let items = outItems, outCount > 0 else {
+            tcfs_file_items_free(outItems, outCount)
+            return (result, [])
+        }
+
+        var providerItems: [NSFileProviderItem] = []
+        let count = Int(outCount)
+
+        for i in 0..<count {
+            let item = items[i]
+
+            let itemId = item.item_id.map { String(cString: $0) } ?? ""
+            let filename = item.filename.map { String(cString: $0) } ?? ""
+            let contentHash = item.content_hash.map { String(cString: $0) } ?? "1"
+            let hydration = item.hydration_state.map { String(cString: $0) } ?? ""
+            let itemIdentifier = normalizedItemIdentifier(itemId, isDirectory: item.is_directory)
+
+            providerItems.append(
+                TCFSFileProviderItem(
+                    identifier: NSFileProviderItemIdentifier(itemIdentifier),
+                    parentIdentifier: parentIdentifier,
+                    filename: filename,
+                    isDirectory: item.is_directory,
+                    fileSize: item.file_size,
+                    downloaded: false,
+                    uploaded: true,
+                    versionTag: contentHash,
+                    hydrationState: hydration
+                )
+            )
+
+            if recursive && item.is_directory && !itemId.isEmpty {
+                let childEnumeration = enumerateProviderItems(
+                    provider: prov,
+                    path: itemId,
+                    parentIdentifier: NSFileProviderItemIdentifier(itemIdentifier),
+                    recursive: true,
+                    depth: depth + 1
+                )
+                if childEnumeration.result != TCFS_ERROR_TCFS_ERROR_NONE {
+                    tcfs_file_items_free(outItems, outCount)
+                    return childEnumeration
+                }
+                providerItems.append(contentsOf: childEnumeration.items)
+            }
+        }
+
+        tcfs_file_items_free(outItems, outCount)
+        return (result, providerItems)
+    }
+
+    private static func normalizedItemIdentifier(_ raw: String, isDirectory: Bool) -> String {
+        guard isDirectory, !raw.isEmpty, !raw.hasSuffix("/") else {
+            return raw
+        }
+        return "\(raw)/"
     }
 }

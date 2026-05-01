@@ -6,7 +6,7 @@ on:
       tag:
         description: "Release tag whose macOS CLI tarball supplies tcfs/tcfsd"
         required: true
-        default: "v0.12.6"
+        default: "v0.12.7"
         type: string
 
 permissions:

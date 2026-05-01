@@ -21,37 +21,37 @@ struct TCFSProviderApp {
         provisionConfig()
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // Always remove then re-add the domain. This triggers a fresh
-            // domainCreation in fileproviderd, which forces initial enumeration.
-            //
-            // IMPORTANT: Do NOT use NSFileProviderManager(for:) after add.
-            // That constructor accesses the Group Container to find domain
-            // metadata, which deadlocks because fileproviderd holds a
-            // permanent file coordination lock on the Group Container.
-            let removeSem = DispatchSemaphore(value: 0)
-            NSFileProviderManager.remove(domain) { error in
-                if let error = error {
-                    hostLogger.error("remove: \(error.localizedDescription)")
-                } else {
-                    hostLogger.error("remove: OK")
-                }
-                removeSem.signal()
-            }
-            removeSem.wait()
-
-            // Brief pause for fileproviderd to clean up.
-            Thread.sleep(forTimeInterval: 2.0)
-
+            // Add/update is idempotent and avoids racing fileproviderd while
+            // macOS is also reloading this extension after app registration.
             let addSem = DispatchSemaphore(value: 0)
             NSFileProviderManager.add(domain) { error in
                 if let error = error {
                     hostLogger.error("add: \(error.localizedDescription)")
                 } else {
-                    hostLogger.error("add: OK — domain created, enumeration will start")
+                    hostLogger.error("add: OK - domain available")
                 }
                 addSem.signal()
             }
             addSem.wait()
+
+            if let manager = NSFileProviderManager(for: domain) {
+                let signalSem = DispatchSemaphore(value: 0)
+                manager.signalEnumerator(for: .workingSet) { error in
+                    if let error = error {
+                        hostLogger.error("signal workingSet: \(error.localizedDescription)")
+                    } else {
+                        hostLogger.error("signal workingSet: OK")
+                    }
+                    signalSem.signal()
+                }
+                if signalSem.wait(timeout: .now() + 5.0) == .timedOut {
+                    hostLogger.error("signal workingSet: timed out")
+                }
+
+                requestDownloadIfRequested(manager)
+            } else {
+                hostLogger.error("signal workingSet: manager unavailable")
+            }
 
             // Give fileproviderd time to start initial enumeration.
             Thread.sleep(forTimeInterval: 5.0)
@@ -60,6 +60,32 @@ struct TCFSProviderApp {
         }
 
         RunLoop.current.run()
+    }
+
+    private static func requestDownloadIfRequested(_ manager: NSFileProviderManager) {
+        guard let rawIdentifier = ProcessInfo.processInfo.environment[
+            "TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER"
+        ], !rawIdentifier.isEmpty else {
+            return
+        }
+
+        let itemIdentifier = NSFileProviderItemIdentifier(rawIdentifier)
+        let requestSem = DispatchSemaphore(value: 0)
+        manager.requestDownloadForItem(
+            withIdentifier: itemIdentifier,
+            requestedRange: NSRange(location: NSNotFound, length: 0)
+        ) { error in
+            if let error = error {
+                hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): \(error.localizedDescription)")
+            } else {
+                hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): OK")
+            }
+            requestSem.signal()
+        }
+
+        if requestSem.wait(timeout: .now() + 15.0) == .timedOut {
+            hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): timed out")
+        }
     }
 
     private static func provisionConfig() {

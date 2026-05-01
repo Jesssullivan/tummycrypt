@@ -45,9 +45,15 @@ sync-root stub representation, not the desired primary Finder UX.
   [`scripts/macos-build-pkg.sh`](../../scripts/macos-build-pkg.sh), and the
   postinstall script source is
   [`scripts/macos-pkg-postinstall.sh`](../../scripts/macos-pkg-postinstall.sh).
-- The host app does contain a real domain-registration path:
-  it removes then re-adds `NSFileProviderDomainIdentifier("io.tinyland.tcfs")`
-  on launch.
+- The host app contains a real domain-registration path: it adds/updates
+  `NSFileProviderDomainIdentifier("io.tinyland.tcfs")` on launch without
+  removing the existing domain, then signals the replicated FileProvider
+  working set so existing domains refresh from remote state.
+- For harness-driven hydration, the host app can request a full FileProvider
+  download for `TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER`. This uses
+  `NSFileProviderManager.requestDownloadForItem` from the containing app after
+  the expected placeholder exists, then the harness verifies the hydrated bytes
+  through a coordinated read.
 - The extension contains real enumeration, hydration, watch, and badge
   decoration code paths.
 
@@ -407,6 +413,10 @@ This is a `workflow_dispatch` lane on GitHub's `macos-15` arm64 runner that:
   the hard enumeration wait. This covers headless macOS sessions where the
   domain root appears but the FileProvider extension is not launched by a plain
   filesystem walk.
+- after the expected placeholder appears, re-launches the host app with
+  `TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER` so the containing app asks
+  FileProvider to download the file before the harness performs its coordinated
+  content read.
 - by default, sets the current user's PlugInKit election to `use` for
   `io.tinyland.tcfs.fileprovider` before launching the host app. This is a
   hosted-runner approximation of the user enabling the File Provider in System
@@ -522,7 +532,7 @@ Testing-mode support is intentionally opt-in:
   supplied through `package_artifact_run_id` or `package_url`
 
 Use that path only with an Apple provisioning profile that grants the
-testing-mode entitlement. A normal production `v0.12.6` package is expected to
+testing-mode entitlement. A normal production `v0.12.7` package is expected to
 fail that preflight.
 
 Once Apple has granted a testing-mode host profile, store it separately from the
@@ -536,7 +546,7 @@ base64 -i ~/Downloads/tcfs-host-testing-mode-developer-id.provisionprofile \
 Then use the dispatch helper:
 
 ```bash
-scripts/macos-fileprovider-testing-mode-dispatch.sh --tag v0.12.6
+scripts/macos-fileprovider-testing-mode-dispatch.sh --tag v0.12.7
 ```
 
 That helper checks for the testing-mode host profile secret, dispatches the
@@ -548,7 +558,7 @@ The manual form is:
 
 ```bash
 gh workflow run macos-fileprovider-testing-mode-pkg.yml \
-  -f tag=v0.12.6
+  -f tag=v0.12.7
 
 TESTING_PKG_RUN_ID="$(gh run list \
   --workflow macos-fileprovider-testing-mode-pkg.yml \
@@ -565,7 +575,7 @@ post-install smoke:
 
 ```bash
 gh workflow run macos-postinstall-smoke.yml \
-  -f tag=v0.12.6 \
+  -f tag=v0.12.7 \
   -f package_artifact_run_id="$TESTING_PKG_RUN_ID" \
   -f package_artifact_name=dist-testing-mode-pkg \
   -f fileprovider_testing_mode=true
@@ -634,9 +644,10 @@ Treat the current macOS desktop lane as materially proven only when all of the
 following succeed on the same machine:
 
 - extension registration is visible
-- host app launch successfully re-adds the FileProvider domain
+- host app launch successfully adds/updates the FileProvider domain
 - a CloudStorage root appears
 - enumeration works
+- the host app can request download of the expected placeholder
 - opening a placeholder-backed file hydrates content successfully
 - extension logs prove runtime config loaded from the shared Keychain, not a
   build-time embedded diagnostic config
