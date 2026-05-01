@@ -113,10 +113,25 @@ print_dry_run() {
   if [[ -z "$package_run_id" ]]; then
     package_run_id="<testing-mode-package-run-id>"
 
-    cat <<EOF
+    if [[ "$SKIP_SECRET_CHECK" != "1" ]]; then
+      cat <<EOF
 gh secret list --repo "$REPO" --json name --jq '.[].name' | grep -Fx "$TESTING_MODE_SECRET"
+EOF
+    fi
+
+    cat <<EOF
 gh release view "$TAG" --repo "$REPO" --json isDraft,assets --jq '. as \$release | select(\$release.isDraft == false) | .assets[].name' | grep -Fx "tcfs-${TAG#v}-macos-aarch64.tar.gz"
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" -f tag="$TAG"
+EOF
+
+    if [[ "$WATCH" != "1" ]]; then
+      cat <<EOF
+# Package run dispatched. After it succeeds, rerun with --package-run-id $package_run_id
+EOF
+      return 0
+    fi
+
+    cat <<EOF
 gh run watch "$package_run_id" --repo "$REPO" --exit-status
 EOF
   fi
@@ -127,6 +142,16 @@ gh workflow run "$SMOKE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f package_artifact_run_id="$package_run_id" \\
   -f package_artifact_name="$ARTIFACT_NAME" \\
   -f fileprovider_testing_mode=true
+EOF
+
+  if [[ "$WATCH" != "1" ]]; then
+    cat <<EOF
+# Post-install smoke dispatched. Watch with: gh run watch "<postinstall-smoke-run-id>" --repo "$REPO" --exit-status
+EOF
+    return 0
+  fi
+
+  cat <<EOF
 gh run watch "<postinstall-smoke-run-id>" --repo "$REPO" --exit-status
 EOF
 }

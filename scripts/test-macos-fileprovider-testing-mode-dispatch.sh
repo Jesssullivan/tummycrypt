@@ -62,6 +62,34 @@ assert_contains "$DRY_RUN_OUT" "gh workflow run \"macos-fileprovider-testing-mod
 assert_contains "$DRY_RUN_OUT" "grep -Fx \"tcfs-9.9.9-macos-aarch64.tar.gz\""
 assert_contains "$DRY_RUN_OUT" "-f package_artifact_run_id=\"<testing-mode-package-run-id>\""
 assert_contains "$DRY_RUN_OUT" "-f fileprovider_testing_mode=true"
+assert_contains "$DRY_RUN_OUT" "gh run watch \"<postinstall-smoke-run-id>\""
+
+DRY_RUN_NO_WATCH_OUT="${TMPDIR}/dry-run-no-watch.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --no-watch \
+  >"$DRY_RUN_NO_WATCH_OUT"
+assert_contains "$DRY_RUN_NO_WATCH_OUT" "gh secret list"
+assert_contains "$DRY_RUN_NO_WATCH_OUT" "gh release view"
+assert_contains "$DRY_RUN_NO_WATCH_OUT" "gh workflow run \"macos-fileprovider-testing-mode-pkg.yml\""
+assert_not_contains "$DRY_RUN_NO_WATCH_OUT" "macos-postinstall-smoke.yml"
+assert_not_contains "$DRY_RUN_NO_WATCH_OUT" "gh run watch"
+assert_contains "$DRY_RUN_NO_WATCH_OUT" "rerun with --package-run-id <testing-mode-package-run-id>"
+
+DRY_RUN_SKIP_SECRET_OUT="${TMPDIR}/dry-run-skip-secret.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --skip-secret-check \
+  >"$DRY_RUN_SKIP_SECRET_OUT"
+assert_not_contains "$DRY_RUN_SKIP_SECRET_OUT" "gh secret list"
+assert_contains "$DRY_RUN_SKIP_SECRET_OUT" "gh release view"
+assert_contains "$DRY_RUN_SKIP_SECRET_OUT" "macos-fileprovider-testing-mode-pkg.yml"
 
 DRY_RUN_EXISTING_OUT="${TMPDIR}/dry-run-existing.out"
 bash "$SCRIPT" \
@@ -76,6 +104,22 @@ assert_not_contains "$DRY_RUN_EXISTING_OUT" "gh release view"
 assert_not_contains "$DRY_RUN_EXISTING_OUT" "macos-fileprovider-testing-mode-pkg.yml"
 assert_contains "$DRY_RUN_EXISTING_OUT" "-f package_artifact_run_id=\"123456\""
 assert_contains "$DRY_RUN_EXISTING_OUT" "-f fileprovider_testing_mode=true"
+assert_contains "$DRY_RUN_EXISTING_OUT" "gh run watch \"<postinstall-smoke-run-id>\""
+
+DRY_RUN_EXISTING_NO_WATCH_OUT="${TMPDIR}/dry-run-existing-no-watch.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --package-run-id 123456 \
+  --no-watch \
+  >"$DRY_RUN_EXISTING_NO_WATCH_OUT"
+assert_not_contains "$DRY_RUN_EXISTING_NO_WATCH_OUT" "gh secret list"
+assert_not_contains "$DRY_RUN_EXISTING_NO_WATCH_OUT" "gh release view"
+assert_not_contains "$DRY_RUN_EXISTING_NO_WATCH_OUT" "macos-fileprovider-testing-mode-pkg.yml"
+assert_contains "$DRY_RUN_EXISTING_NO_WATCH_OUT" "-f package_artifact_run_id=\"123456\""
+assert_contains "$DRY_RUN_EXISTING_NO_WATCH_OUT" "Post-install smoke dispatched"
 
 assert_fails_contains \
   "tag must start with 'v'" \
