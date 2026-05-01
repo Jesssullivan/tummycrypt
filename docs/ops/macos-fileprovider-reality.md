@@ -462,6 +462,30 @@ Notes:
   truth, until at least one tagged run has passed and produced usable logs on
   GitHub
 
+May 1, 2026 hosted evidence narrowed the current blocker:
+
+- `v0.12.6` built, notarized, and published automatically from release run
+  `25197243787`.
+- The published `.pkg` installs cleanly on the GitHub `macos-15` runner, passes
+  production signing checks, provisions shared-Keychain config, starts `tcfsd`,
+  reaches the public S3 backend, and proves the seeded E2EE fixture via CLI.
+- The package postinstall LaunchServices registration fix works: hosted smoke
+  run `25197861348` shows exactly one parented PlugInKit record for
+  `io.tinyland.tcfs.fileprovider` under
+  `/Applications/TCFSProvider.app`.
+- FileProvider enumeration still fails before TCFS extension logs appear because
+  macOS reports `NSFileProviderErrorDomainDisabled` (`-2011`): Finder and
+  `fileproviderd` log `Sync is not enabled for "TCFSProvider"`.
+
+That is a user-enable/consent boundary on the hosted runner, not another
+package assembly, signing, storage, or duplicate PlugInKit registration failure.
+Apple exposes `NSFileProviderDomainTestingModeAlwaysEnabled` for test
+environments, but the SDK requires the
+`com.apple.developer.fileprovider.testing-mode` entitlement to set it. Do not
+keep cutting production release tags solely to retry this hosted lane until the
+next attempt either uses an allowed testing-mode build or runs on a clean lab Mac
+where the File Provider can be user-enabled.
+
 ### Manual Procedure
 
 The script above codifies the manual steps below. Keep them here as the

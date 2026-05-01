@@ -134,13 +134,17 @@ EOF
 cat >"$FAKE_BIN/log" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
-if [[ "$args" == *"io.tinyland.tcfs.fileprovider"* ]]; then
+if [[ "$args" == *"io.tinyland.tcfs.fileprovider"* && "$args" == *"loadConfig:"* ]]; then
   if [[ -v TCFS_FAKE_EXTENSION_LOG ]]; then
     if [[ -n "$TCFS_FAKE_EXTENSION_LOG" ]]; then
       printf '%s\n' "$TCFS_FAKE_EXTENSION_LOG"
     fi
   else
     printf '2026-04-30 TCFSFileProvider extension loadConfig: loaded from shared Keychain\n'
+  fi
+elif [[ "$args" == *"com.apple.FileProvider"* || "$args" == *"fileproviderd"* || "$args" == *"Sync is not enabled"* ]]; then
+  if [[ -v TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG && -n "$TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG" ]]; then
+    printf '%s\n' "$TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG"
   fi
 else
   printf '2026-04-30 TCFSProvider host add: OK\n'
@@ -310,5 +314,23 @@ assert_contains "${TMPDIR}/dupes.combined" "multiple FileProvider extension path
 assert_contains "${TMPDIR}/dupes.combined" "registered FileProvider extension paths:"
 assert_contains "${TMPDIR}/dupes.combined" "/Users/test/git/tummycrypt/build/TCFSProvider.app"
 assert_contains "${TMPDIR}/dupes.combined" "cleanup is not performed automatically"
+
+DISABLED_ROOT="${HOME_DIR}/Library/CloudStorage/TCFSDisabled"
+mkdir -p "$DISABLED_ROOT"
+assert_fails_contains \
+  "FileProvider domain is disabled by macOS (NSFileProviderErrorDomain -2011)" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG='2026-05-01 fileproviderd FP -2011 "Sync is not enabled for TCFSProvider."' \
+    bash "$SCRIPT" \
+      --expected-version 0.12.2 \
+      --config "$CONFIG_PATH" \
+      --app-path "$APP_PATH" \
+      --cloud-root "$DISABLED_ROOT" \
+      --log-dir "${TMPDIR}/domain-disabled-logs" \
+      --timeout 2
+
+assert_contains \
+  "${TMPDIR}/domain-disabled-logs/fileprovider-system.log" \
+  'Sync is not enabled for TCFSProvider'
 
 printf 'macOS post-install smoke tests passed\n'

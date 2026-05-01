@@ -428,9 +428,19 @@ extension_log_path() {
   printf '%s/extension-config.log\n' "$LOG_DIR"
 }
 
+fileprovider_system_log_path() {
+  printf '%s/fileprovider-system.log\n' "$LOG_DIR"
+}
+
 collect_extension_config_log() {
   run_log_show --style compact --last 2m \
     --predicate 'subsystem == "io.tinyland.tcfs.fileprovider" && category == "extension" && eventMessage CONTAINS "loadConfig:"' \
+    || true
+}
+
+collect_fileprovider_system_log() {
+  run_log_show --style compact --last 2m \
+    --predicate '(subsystem == "com.apple.FileProvider" || process == "fileproviderd" || process == "Finder" || process == "filecoordinationd") && (eventMessage CONTAINS[c] "io.tinyland.tcfs" || eventMessage CONTAINS[c] "TCFSProvider" || eventMessage CONTAINS[c] "Sync is not enabled" || eventMessage CONTAINS[c] "FP -2011" || eventMessage CONTAINS[c] "DomainDisabled")' \
     || true
 }
 
@@ -570,6 +580,7 @@ enumerate_root() {
   local root="$1"
   local listing
   local attempt=0
+  local system_log
 
   while (( attempt < TIMEOUT_SECS )); do
     if (( attempt % 5 == 0 )); then
@@ -584,6 +595,16 @@ enumerate_root() {
     short_pause
     attempt=$((attempt + 1))
   done
+
+  system_log="$(collect_fileprovider_system_log)"
+  printf '%s\n' "$system_log" >"$(fileprovider_system_log_path)"
+  if grep -Eqi 'Sync is not enabled|FP -2011|NSFileProviderErrorDomain Code=-2011|NSFileProviderErrorDomainDisabled|DomainDisabled' <<<"$system_log"; then
+    echo "FileProvider domain is disabled by macOS (NSFileProviderErrorDomain -2011)" >&2
+    echo "The package installed and registered, but macOS has not user-enabled the provider for this account." >&2
+    echo "Enable the File Provider in System Settings/Login Items & Extensions, or use a test build with Apple's FileProvider testing-mode entitlement for headless CI." >&2
+    echo "diagnostic log: $(fileprovider_system_log_path)" >&2
+    exit 1
+  fi
 
   echo "enumeration found no entries under $root" >&2
   exit 1
