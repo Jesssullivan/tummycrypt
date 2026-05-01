@@ -32,6 +32,10 @@ Options:
   --allow-multiple-plugin-registrations
                               Warn instead of failing if pluginkit shows more
                               than one registration for --plugin-id
+  --elect-plugin-use          Set PlugInKit user election to "use" for
+                              --plugin-id before launching the host app. This
+                              is intended for hosted/diagnostic runners where
+                              System Settings cannot be clicked.
   --require-keychain-config   Require extension logs to prove config loaded
                               from shared Keychain, and fail if embedded config
                               was used
@@ -54,6 +58,7 @@ CLOUD_ROOT="${TCFS_CLOUD_ROOT:-}"
 PLUGIN_ID="${TCFS_PLUGIN_ID:-io.tinyland.tcfs.fileprovider}"
 DOMAIN_ID="${TCFS_DOMAIN_ID:-io.tinyland.tcfs}"
 ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS="${TCFS_ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}"
+ELECT_PLUGIN_USE="${TCFS_ELECT_PLUGIN_USE:-0}"
 REQUIRE_KEYCHAIN_CONFIG="${TCFS_REQUIRE_KEYCHAIN_CONFIG:-0}"
 TCFS_BIN="${TCFS_BIN:-tcfs}"
 TCFSD_BIN="${TCFSD_BIN:-tcfsd}"
@@ -103,6 +108,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --allow-multiple-plugin-registrations)
       ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS=1
+      shift
+      ;;
+    --elect-plugin-use)
+      ELECT_PLUGIN_USE=1
       shift
       ;;
     --require-keychain-config)
@@ -396,6 +405,16 @@ check_pluginkit() {
   fi
 }
 
+elect_plugin_use() {
+  [[ "$ELECT_PLUGIN_USE" == "1" ]] || return 0
+
+  echo "electing FileProvider plug-in for current user: $PLUGIN_ID"
+  pluginkit -e use -i "$PLUGIN_ID" 2>&1 || {
+    echo "pluginkit user election failed for $PLUGIN_ID" >&2
+    exit 1
+  }
+}
+
 print_pluginkit_duplicate_hint() {
   local output="$1"
 
@@ -681,6 +700,7 @@ fi
 require_file "$HOME/.config/tcfs/fileprovider/config.json"
 echo "status logs: $LOG_DIR"
 check_pluginkit
+elect_plugin_use
 
 echo "launching host app: $APP_PATH"
 open "$APP_PATH"

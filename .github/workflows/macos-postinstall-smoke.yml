@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      elect_plugin_use:
+        description: "Set PlugInKit user election to use for the FileProvider before the harness"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -347,13 +352,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/macos-postinstall-smoke.sh \
+          args=(
             --expected-version "${VERSION}" \
             --config "$CONFIG_PATH" \
             --expected-file "${FIXTURE_REL}" \
             --expected-content-file "$EXPECTED_CONTENT_FILE" \
             --require-keychain-config \
             --log-dir "$LOG_DIR/harness"
+          )
+
+          if [[ "${{ github.event.inputs.elect_plugin_use }}" == "true" ]]; then
+            args+=(--elect-plugin-use)
+          fi
+
+          bash scripts/macos-postinstall-smoke.sh "${args[@]}"
 
       - name: Capture diagnostics
         if: always()

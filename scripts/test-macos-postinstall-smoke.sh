@@ -47,6 +47,7 @@ FILEPROVIDER_CONFIG="${HOME_DIR}/.config/tcfs/fileprovider/config.json"
 EXPECTED_REL="Projects/tcfs-odrive-parity/honey-readme.txt"
 EXPECTED_CONTENT_FILE="${TMPDIR}/expected-content.txt"
 OPEN_LOG="${TMPDIR}/open.log"
+PLUGINKIT_LOG="${TMPDIR}/pluginkit.log"
 
 mkdir -p \
   "$FAKE_BIN" \
@@ -95,6 +96,15 @@ fi
 EOF
 cat >"$FAKE_BIN/pluginkit" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${TCFS_FAKE_PLUGINKIT_LOG:-}" ]]; then
+  printf 'pluginkit' >>"$TCFS_FAKE_PLUGINKIT_LOG"
+  printf ' %q' "$@" >>"$TCFS_FAKE_PLUGINKIT_LOG"
+  printf '\n' >>"$TCFS_FAKE_PLUGINKIT_LOG"
+fi
+if [[ "${1:-}" == "-e" && "${2:-}" == "use" ]]; then
+  printf 'elected use for %s\n' "${4:-unknown}"
+  exit 0
+fi
 printf 'com.apple.FileProvider.NonUI extension io.tinyland.tcfs.fileprovider\n'
 printf '            Path = /Users/test/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex\n'
 if [[ "${TCFS_FAKE_PLUGIN_DUPES:-0}" == "1" ]]; then
@@ -183,6 +193,7 @@ CAT_RETRY_MARKER="${TMPDIR}/cat-failed-once"
 PATH="$FAKE_BIN:$PATH" \
 HOME="$HOME_DIR" \
 TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+TCFS_FAKE_PLUGINKIT_LOG="$PLUGINKIT_LOG" \
 TCFS_FAKE_CAT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
 TCFS_FAKE_CAT_MARKER="$CAT_RETRY_MARKER" \
 bash "$SCRIPT" \
@@ -193,6 +204,7 @@ bash "$SCRIPT" \
   --app-path "$APP_PATH" \
   --cloud-root "$CLOUD_ROOT" \
   --log-dir "$LOG_DIR" \
+  --elect-plugin-use \
   --require-keychain-config \
   --timeout 2 \
   >"$OUT"
@@ -206,11 +218,13 @@ assert_contains "$OUT" "host app log confirmed domain re-add"
 assert_contains "$OUT" "fileproviderctl domain listing includes io.tinyland.tcfs"
 assert_contains "$OUT" "CloudStorage root: $CLOUD_ROOT"
 assert_contains "$OUT" "nudging CloudStorage enumeration"
+assert_contains "$OUT" "electing FileProvider plug-in for current user: io.tinyland.tcfs.fileprovider"
 assert_contains "$OUT" "hydrated file content matched expected content file"
 assert_contains "$OUT" "FileProvider extension config source: shared Keychain"
 assert_contains "$OUT" "macOS post-install FileProvider smoke passed"
 assert_contains "$OPEN_LOG" "$APP_PATH"
 assert_contains "$OPEN_LOG" "$CLOUD_ROOT"
+assert_contains "$PLUGINKIT_LOG" "pluginkit -e use -i io.tinyland.tcfs.fileprovider"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl evaluate"

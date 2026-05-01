@@ -407,6 +407,10 @@ This is a `workflow_dispatch` lane on GitHub's `macos-15` arm64 runner that:
   the hard enumeration wait. This covers headless macOS sessions where the
   domain root appears but the FileProvider extension is not launched by a plain
   filesystem walk.
+- by default, sets the current user's PlugInKit election to `use` for
+  `io.tinyland.tcfs.fileprovider` before launching the host app. This is a
+  hosted-runner approximation of the user enabling the File Provider in System
+  Settings, not package postinstall behavior.
 
 Required `tcfs-macos-smoke` environment secrets:
 
@@ -479,12 +483,14 @@ May 1, 2026 hosted evidence narrowed the current blocker:
 
 That is a user-enable/consent boundary on the hosted runner, not another
 package assembly, signing, storage, or duplicate PlugInKit registration failure.
-Apple exposes `NSFileProviderDomainTestingModeAlwaysEnabled` for test
-environments, but the SDK requires the
-`com.apple.developer.fileprovider.testing-mode` entitlement to set it. Do not
-keep cutting production release tags solely to retry this hosted lane until the
-next attempt either uses an allowed testing-mode build or runs on a clean lab Mac
-where the File Provider can be user-enabled.
+The next hosted attempt should first prove whether `pluginkit -e use` is enough
+to model that user election in CI. If not, Apple exposes
+`NSFileProviderDomainTestingModeAlwaysEnabled` for test environments, but the
+SDK requires the `com.apple.developer.fileprovider.testing-mode` entitlement to
+set it. Do not keep cutting production release tags solely to retry this hosted
+lane until the next attempt either clears the user-enable boundary with explicit
+PlugInKit election, uses an allowed testing-mode build, or runs on a clean lab
+Mac where the File Provider can be user-enabled.
 
 ### Manual Procedure
 

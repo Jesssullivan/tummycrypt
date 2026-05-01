@@ -457,6 +457,8 @@ extract_step_from_workflow \
 bash -n "$POSTINSTALL_HARNESS_STEP"
 assert_contains "$POSTINSTALL_HARNESS_STEP" "--expected-content-file \"\$EXPECTED_CONTENT_FILE\""
 assert_contains "$POSTINSTALL_HARNESS_STEP" "--require-keychain-config"
+assert_contains "$POSTINSTALL_HARNESS_STEP" "elect_plugin_use"
+assert_contains "$POSTINSTALL_HARNESS_STEP" "--elect-plugin-use"
 
 bash -n "$PKG_POSTINSTALL"
 
