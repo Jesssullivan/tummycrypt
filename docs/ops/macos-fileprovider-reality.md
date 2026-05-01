@@ -497,6 +497,22 @@ May 1, 2026 hosted evidence narrowed the current blocker:
   `pluginkit -e use -i io.tinyland.tcfs.fileprovider`; `pluginkit.txt` shows a
   `+` election for the extension, but FileProvider still reports
   `state:disabled` and `FP -2011`.
+- `v0.12.7` shipped the FileProvider-side fixes proven locally: working-set
+  import, directory identifier normalization, host-app
+  `requestDownloadForItem`, and a coordinated placeholder read in the harness.
+  Release run `25223938357` built the FileProvider app, binary matrix, `.pkg`,
+  GitHub Release, and Homebrew formula successfully.
+- A local real FileProvider smoke on a user-enabled Mac passed with a fresh
+  remote fixture: root enumeration, host-app download request, `fetchContents`,
+  hydration, and content match all completed. On the same machine,
+  `fileproviderctl evaluate ~/Library/CloudStorage/TCFSProvider-TCFS` reports a
+  non-empty root, and FPCK passes over the TCFS root.
+- Hosted smoke run `25224523480` against the published `v0.12.7` production
+  `.pkg` passed install, production signing, storage connectivity, daemon
+  startup, and E2EE fixture proof. It still failed at the FileProvider gate with
+  `NSFileProviderErrorDomain -2011`; diagnostics show PlugInKit registration
+  and host domain add succeeded, while `fileproviderd` kept the provider
+  `state:disabled` and logged `Sync is not enabled for "TCFSProvider"`.
 
 That is a user-enable/consent boundary on the hosted runner, not another
 package assembly, signing, storage, or duplicate PlugInKit registration failure.
@@ -504,10 +520,10 @@ package assembly, signing, storage, or duplicate PlugInKit registration failure.
 GitHub-hosted `macos-15` executor. Apple exposes
 `NSFileProviderDomainTestingModeAlwaysEnabled` for test environments, but the
 SDK requires the `com.apple.developer.fileprovider.testing-mode` entitlement to
-set it. Do not keep cutting production release tags solely to retry this hosted
-lane; the remaining useful paths are a clean lab Mac where the File Provider can
-be user-enabled, or an allowed testing-mode build that carries Apple's
-FileProvider testing-mode entitlement.
+set it. After `v0.12.7`, do not keep cutting production release tags solely to
+retry this hosted lane; the remaining useful paths are a clean lab Mac where the
+File Provider can be user-enabled, or an allowed testing-mode build that carries
+Apple's FileProvider testing-mode entitlement.
 
 Testing-mode support is intentionally opt-in:
 
