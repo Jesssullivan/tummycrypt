@@ -137,6 +137,7 @@ EOF
   fi
 
   cat <<EOF
+gh api "repos/$REPO/actions/runs/$package_run_id/artifacts" --jq '.artifacts[] | select(.expired == false) | .name' | grep -Fx "$ARTIFACT_NAME"
 gh workflow run "$SMOKE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
   -f package_artifact_run_id="$package_run_id" \\
