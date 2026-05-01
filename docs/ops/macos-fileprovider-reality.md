@@ -480,17 +480,24 @@ May 1, 2026 hosted evidence narrowed the current blocker:
 - FileProvider enumeration still fails before TCFS extension logs appear because
   macOS reports `NSFileProviderErrorDomainDisabled` (`-2011`): Finder and
   `fileproviderd` log `Sync is not enabled for "TCFSProvider"`.
+- The classification retry at `25198428805` now fails with an explicit
+  `NSFileProviderErrorDomain -2011` diagnosis and captures the supporting Apple
+  FileProvider logs in the workflow artifact.
+- The explicit user-election retry at `25198592232` ran
+  `pluginkit -e use -i io.tinyland.tcfs.fileprovider`; `pluginkit.txt` shows a
+  `+` election for the extension, but FileProvider still reports
+  `state:disabled` and `FP -2011`.
 
 That is a user-enable/consent boundary on the hosted runner, not another
 package assembly, signing, storage, or duplicate PlugInKit registration failure.
-The next hosted attempt should first prove whether `pluginkit -e use` is enough
-to model that user election in CI. If not, Apple exposes
+`pluginkit -e use` is not enough to model FileProvider sync enablement on the
+GitHub-hosted `macos-15` executor. Apple exposes
 `NSFileProviderDomainTestingModeAlwaysEnabled` for test environments, but the
 SDK requires the `com.apple.developer.fileprovider.testing-mode` entitlement to
 set it. Do not keep cutting production release tags solely to retry this hosted
-lane until the next attempt either clears the user-enable boundary with explicit
-PlugInKit election, uses an allowed testing-mode build, or runs on a clean lab
-Mac where the File Provider can be user-enabled.
+lane; the remaining useful paths are a clean lab Mac where the File Provider can
+be user-enabled, or an allowed testing-mode build that carries Apple's
+FileProvider testing-mode entitlement.
 
 ### Manual Procedure
 
