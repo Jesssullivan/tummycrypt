@@ -110,8 +110,9 @@ Record results using a table like this:
   treated separately from storage reachability failures.
 - The macOS `.pkg` postinstall installs `io.tinyland.tcfsd.plist` under
   `/Library/LaunchAgents`, not `$HOME/Library/LaunchAgents`, because installer
-  scripts run as root. It also attempts FileProvider registration in the active
-  console user's PlugInKit context. The source of truth is
+  scripts run as root. It also asks LaunchServices to register the containing
+  app in the active console user's context so PlugInKit discovers one parented
+  FileProvider extension record. The source of truth is
   [`scripts/macos-pkg-postinstall.sh`](../../scripts/macos-pkg-postinstall.sh).
   The LaunchAgent starts `tcfsd` in the user session with
   `--config "$HOME/.config/tcfs/config.toml"` so first-real-use proof must still

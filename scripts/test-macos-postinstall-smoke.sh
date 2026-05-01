@@ -269,7 +269,7 @@ assert_fails_contains \
 
 SAME_PATH_DUPES_OUT="${TMPDIR}/same-path-dupes.out"
 SAME_PATH_DUPES_ERR="${TMPDIR}/same-path-dupes.err"
-env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" TCFS_FAKE_PLUGIN_SAME_PATH_DUPES=1 \
+if env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" TCFS_FAKE_PLUGIN_SAME_PATH_DUPES=1 \
   bash "$SCRIPT" \
     --expected-version 0.12.2 \
     --config "$CONFIG_PATH" \
@@ -280,9 +280,13 @@ env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" TCFS_
     --log-dir "${TMPDIR}/same-path-dupe-logs" \
     --timeout 2 \
     >"$SAME_PATH_DUPES_OUT" \
-    2>"$SAME_PATH_DUPES_ERR"
-assert_contains "$SAME_PATH_DUPES_OUT" "macOS post-install FileProvider smoke passed"
-assert_contains "$SAME_PATH_DUPES_ERR" "warning: pluginkit shows 2 records for one FileProvider path"
+    2>"$SAME_PATH_DUPES_ERR"; then
+  printf 'expected same-path duplicate pluginkit registrations to fail\n' >&2
+  exit 1
+fi
+cat "$SAME_PATH_DUPES_OUT" "$SAME_PATH_DUPES_ERR" >"${TMPDIR}/same-path-dupes.combined"
+assert_contains "${TMPDIR}/same-path-dupes.combined" "multiple FileProvider registrations found for one path"
+assert_contains "${TMPDIR}/same-path-dupes.combined" "registered FileProvider extension paths:"
 
 DUPES_OUT="${TMPDIR}/dupes.out"
 DUPES_ERR="${TMPDIR}/dupes.err"

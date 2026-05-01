@@ -8,17 +8,12 @@
 set -u
 
 APP_PATH="${TCFS_POSTINSTALL_APP_PATH:-/Applications/TCFSProvider.app}"
-FP_APPEX="${APP_PATH}/Contents/Extensions/TCFSFileProvider.appex"
-PLUGINKIT_BIN="${TCFS_POSTINSTALL_PLUGINKIT:-/usr/bin/pluginkit}"
+LSREGISTER_BIN="${TCFS_POSTINSTALL_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
 LAUNCHCTL_BIN="${TCFS_POSTINSTALL_LAUNCHCTL:-/bin/launchctl}"
 SUDO_BIN="${TCFS_POSTINSTALL_SUDO:-/usr/bin/sudo}"
 STAT_BIN="${TCFS_POSTINSTALL_STAT:-/usr/bin/stat}"
 ID_BIN="${TCFS_POSTINSTALL_ID:-/usr/bin/id}"
 CHOWN_BIN="${TCFS_POSTINSTALL_CHOWN:-/usr/sbin/chown}"
-
-if [ -d "$FP_APPEX" ]; then
-  "$PLUGINKIT_BIN" -a "$FP_APPEX" 2>/dev/null || true
-fi
 
 # A LaunchAgent under /Library/LaunchAgents runs in each user session and can
 # resolve that user's ~/.config/tcfs/config.toml. Do not write into $HOME here:
@@ -57,10 +52,10 @@ CONSOLE_USER="$("$STAT_BIN" -f %Su /dev/console 2>/dev/null || true)"
 if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
   CONSOLE_UID="$("$ID_BIN" -u "$CONSOLE_USER" 2>/dev/null || true)"
   if [ -n "$CONSOLE_UID" ]; then
-    if [ -d "$FP_APPEX" ]; then
+    if [ -d "$APP_PATH" ] && [ -x "$LSREGISTER_BIN" ]; then
       "$LAUNCHCTL_BIN" asuser "$CONSOLE_UID" \
         "$SUDO_BIN" -u "$CONSOLE_USER" \
-        "$PLUGINKIT_BIN" -a "$FP_APPEX" 2>/dev/null || true
+        "$LSREGISTER_BIN" -f "$APP_PATH" 2>/dev/null || true
     fi
     "$LAUNCHCTL_BIN" bootout "gui/${CONSOLE_UID}" "$PLIST_PATH" 2>/dev/null || true
     "$LAUNCHCTL_BIN" bootstrap "gui/${CONSOLE_UID}" "$PLIST_PATH" 2>/dev/null || true

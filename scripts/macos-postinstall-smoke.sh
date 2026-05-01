@@ -376,7 +376,13 @@ check_pluginkit() {
   path_count="$(grep -c . <<<"$plugin_paths" || true)"
 
   if (( record_count > 1 && path_count == 1 )); then
-    echo "warning: pluginkit shows $record_count records for one FileProvider path" >&2
+    if [[ "$ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS" == "1" ]]; then
+      echo "warning: pluginkit shows $record_count records for one FileProvider path" >&2
+    else
+      echo "multiple FileProvider registrations found for one path; remove duplicate PlugInKit records or pass --allow-multiple-plugin-registrations for diagnostic runs" >&2
+      print_pluginkit_duplicate_hint "$output"
+      exit 1
+    fi
   fi
 
   if (( path_count > 1 )); then

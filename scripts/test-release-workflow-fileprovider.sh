@@ -231,6 +231,12 @@ printf 'pluginkit' >>"$TCFS_FAKE_POSTINSTALL_LOG"
 printf ' %q' "$@" >>"$TCFS_FAKE_POSTINSTALL_LOG"
 printf '\n' >>"$TCFS_FAKE_POSTINSTALL_LOG"
 EOF
+cat >"$FAKE_BIN/lsregister" <<'EOF'
+#!/usr/bin/env bash
+printf 'lsregister' >>"$TCFS_FAKE_POSTINSTALL_LOG"
+printf ' %q' "$@" >>"$TCFS_FAKE_POSTINSTALL_LOG"
+printf '\n' >>"$TCFS_FAKE_POSTINSTALL_LOG"
+EOF
 cat >"$FAKE_BIN/stat" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "-f" && "${2:-}" == "%Su" && "${3:-}" == "/dev/console" ]]; then
@@ -454,20 +460,20 @@ assert_contains "$POSTINSTALL_HARNESS_STEP" "--require-keychain-config"
 
 bash -n "$PKG_POSTINSTALL"
 
-assert_contains "$PKG_POSTINSTALL" "FP_APPEX=\"\${APP_PATH}/Contents/Extensions/TCFSFileProvider.appex\""
+assert_contains "$PKG_POSTINSTALL" "LSREGISTER_BIN=\"\${TCFS_POSTINSTALL_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}\""
 assert_contains "$PKG_POSTINSTALL" "\"\$LAUNCHCTL_BIN\" asuser \"\$CONSOLE_UID\""
-assert_contains "$PKG_POSTINSTALL" "\"\$PLUGINKIT_BIN\" -a \"\$FP_APPEX\""
+assert_contains "$PKG_POSTINSTALL" "\"\$LSREGISTER_BIN\" -f \"\$APP_PATH\""
 assert_contains "$PKG_POSTINSTALL" "PLIST_DIR=\"\${TCFS_POSTINSTALL_LAUNCHAGENTS_DIR:-/Library/LaunchAgents}\""
 assert_contains "$PKG_POSTINSTALL" "exec /usr/local/bin/tcfsd --config \"\$HOME/.config/tcfs/config.toml\" --mode daemon"
 
 POSTINSTALL_APP="${TMPDIR}/Applications/TCFSProvider.app"
-POSTINSTALL_APPEX="${POSTINSTALL_APP}/Contents/Extensions/TCFSFileProvider.appex"
 POSTINSTALL_LAUNCHAGENTS="${TMPDIR}/LaunchAgents"
 POSTINSTALL_LOG="${TMPDIR}/postinstall.log"
-mkdir -p "$POSTINSTALL_APPEX"
+mkdir -p "$POSTINSTALL_APP/Contents/Extensions/TCFSFileProvider.appex"
 TCFS_POSTINSTALL_APP_PATH="$POSTINSTALL_APP" \
 TCFS_POSTINSTALL_LAUNCHAGENTS_DIR="$POSTINSTALL_LAUNCHAGENTS" \
 TCFS_POSTINSTALL_PLUGINKIT="$FAKE_BIN/pluginkit" \
+TCFS_POSTINSTALL_LSREGISTER="$FAKE_BIN/lsregister" \
 TCFS_POSTINSTALL_LAUNCHCTL="$FAKE_BIN/launchctl" \
 TCFS_POSTINSTALL_SUDO="$FAKE_BIN/sudo" \
 TCFS_POSTINSTALL_STAT="$FAKE_BIN/stat" \
@@ -483,7 +489,7 @@ PLIST_PATH="${POSTINSTALL_LAUNCHAGENTS}/io.tinyland.tcfsd.plist"
 }
 assert_contains "$PLIST_PATH" "io.tinyland.tcfsd"
 assert_contains "$PLIST_PATH" "exec /usr/local/bin/tcfsd --config \"\$HOME/.config/tcfs/config.toml\" --mode daemon"
-assert_contains "$POSTINSTALL_LOG" "pluginkit -a $POSTINSTALL_APPEX"
+assert_contains "$POSTINSTALL_LOG" "lsregister -f $POSTINSTALL_APP"
 assert_contains "$POSTINSTALL_LOG" "launchctl asuser 501"
 assert_contains "$POSTINSTALL_LOG" "launchctl bootstrap gui/501 $PLIST_PATH"
 assert_contains "$POSTINSTALL_LOG" "launchctl enable gui/501/io.tinyland.tcfsd"
@@ -493,6 +499,7 @@ NO_SESSION_LOG="${TMPDIR}/no-session-postinstall.log"
 TCFS_POSTINSTALL_APP_PATH="${TMPDIR}/missing-app/TCFSProvider.app" \
 TCFS_POSTINSTALL_LAUNCHAGENTS_DIR="$NO_SESSION_LAUNCHAGENTS" \
 TCFS_POSTINSTALL_PLUGINKIT="$FAKE_BIN/pluginkit" \
+TCFS_POSTINSTALL_LSREGISTER="$FAKE_BIN/lsregister" \
 TCFS_POSTINSTALL_LAUNCHCTL="$FAKE_BIN/launchctl" \
 TCFS_POSTINSTALL_SUDO="$FAKE_BIN/sudo" \
 TCFS_POSTINSTALL_STAT="$FAKE_BIN/stat" \
@@ -507,6 +514,11 @@ bash "$PKG_POSTINSTALL"
 }
 if [[ -f "$NO_SESSION_LOG" ]] && grep -Fq "pluginkit" "$NO_SESSION_LOG"; then
   printf 'postinstall attempted pluginkit without installed app\n' >&2
+  cat "$NO_SESSION_LOG" >&2
+  exit 1
+fi
+if [[ -f "$NO_SESSION_LOG" ]] && grep -Fq "lsregister" "$NO_SESSION_LOG"; then
+  printf 'postinstall attempted lsregister without installed app/session\n' >&2
   cat "$NO_SESSION_LOG" >&2
   exit 1
 fi

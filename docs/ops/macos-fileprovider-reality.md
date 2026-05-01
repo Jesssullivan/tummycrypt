@@ -23,7 +23,8 @@ In practical terms, the intended operator flow is:
 
 1. install the macOS package or app bundle
 2. ensure `tcfsd` is present and can start with the needed config
-3. ensure the FileProvider extension is registered with `pluginkit`
+3. ensure the containing app is registered with LaunchServices so PlugInKit
+   discovers one parented FileProvider extension record
 4. launch `TCFSProvider.app` so the host app provisions config and re-adds the
    FileProvider domain
 5. let `fileproviderd` enumerate the domain into `~/Library/CloudStorage/`
@@ -38,8 +39,8 @@ sync-root stub representation, not the desired primary Finder UX.
 - CI proves the Rust staticlib, Swift sources, and macOS FileProvider build
   surfaces compile.
 - Release automation builds `TCFSProvider.app`, packages it into the Apple
-  Silicon `.pkg`, and runs `pluginkit -a` during package install, including a
-  best-effort registration in the active console user's PlugInKit context. The
+  Silicon `.pkg`, and asks LaunchServices to register the containing app in the
+  active console user's context. The
   package builder source is
   [`scripts/macos-build-pkg.sh`](../../scripts/macos-build-pkg.sh), and the
   postinstall script source is
@@ -52,7 +53,7 @@ sync-root stub representation, not the desired primary Finder UX.
 
 ## Important Constraints
 
-- The package postinstall script only auto-registers the extension if the app is
+- The package postinstall script only auto-registers the containing app if it is
   installed at `/Applications/TCFSProvider.app`.
 - The April 15, 2026 smoke path that used
   `installer -target CurrentUserHomeDirectory` landed the app at
