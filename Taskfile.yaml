@@ -107,8 +107,8 @@ tasks:
   lazy:check:
     desc: Run host-runnable lazy hydration proof checks
     cmds:
-      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
-      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
       - task: lazy:test-mounted-smoke
       - task: lazy:test-desktop-honey
       - task: lazy:test-macos-profile-inventory
@@ -116,6 +116,7 @@ tasks:
       - task: lazy:test-macos-postinstall
       - task: lazy:test-macos-build-pkg
       - task: lazy:test-macos-pkg-structure
+      - task: lazy:test-macos-fileprovider-testing-mode-dispatch
       - task: lazy:test-fileprovider-provision
       - task: lazy:test-release-workflow-fileprovider
       - cargo test -p tcfs-vfs
@@ -149,6 +150,11 @@ tasks:
     desc: Regression-test the non-installing macOS .pkg structure smoke helper
     cmds:
       - bash scripts/test-macos-pkg-structure-smoke.sh
+
+  lazy:test-macos-fileprovider-testing-mode-dispatch:
+    desc: Regression-test the hosted macOS FileProvider testing-mode dispatch helper
+    cmds:
+      - bash scripts/test-macos-fileprovider-testing-mode-dispatch.sh
 
   lazy:macos-pkg-structure-smoke:
     desc: "Non-installing macOS .pkg structure proof: set PKG_PATH=..."

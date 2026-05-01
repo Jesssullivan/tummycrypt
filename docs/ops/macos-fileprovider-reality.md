@@ -533,7 +533,18 @@ base64 -i ~/Downloads/tcfs-host-testing-mode-developer-id.provisionprofile \
   | gh secret set TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64
 ```
 
-Then build the non-release testing package from an existing release tag:
+Then use the dispatch helper:
+
+```bash
+scripts/macos-fileprovider-testing-mode-dispatch.sh --tag v0.12.6
+```
+
+That helper checks for the testing-mode host profile secret, dispatches the
+non-release testing package workflow, waits for it by default, then dispatches
+the hosted post-install smoke with the package artifact run id. To inspect the
+GitHub Actions calls without dispatching anything, use `--dry-run`.
+
+The manual form is:
 
 ```bash
 gh workflow run macos-fileprovider-testing-mode-pkg.yml \
