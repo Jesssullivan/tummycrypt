@@ -85,6 +85,13 @@ case "${1:-} ${2:-}" in
   "run list")
     case "$*" in
       *macos-fileprovider-testing-mode-pkg.yml*)
+        package_counter="$TCFS_FAKE_STATE/package-counter"
+        package_count="$(cat "$package_counter" 2>/dev/null || printf '0')"
+        package_count="$((package_count + 1))"
+        printf '%s\n' "$package_count" >"$package_counter"
+        if [[ "$package_count" == "1" ]]; then
+          exit 0
+        fi
         printf '123456\n'
         ;;
       *macos-postinstall-smoke.yml*)
@@ -107,6 +114,8 @@ chmod +x "$FAKE_BIN/gh"
 FAKE_LOG="${TMPDIR}/gh.log"
 PATH="$FAKE_BIN:$PATH" \
 TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+TCFS_FAKE_STATE="$TMPDIR" \
+TCFS_GH_RUN_ID_POLL_SECONDS=0 \
 bash "$SCRIPT" \
   --tag v1.2.3 \
   --repo owner/repo \
@@ -118,12 +127,15 @@ bash "$SCRIPT" \
 assert_contains "$FAKE_LOG" "gh secret list --repo owner/repo --json name --jq"
 assert_contains "$FAKE_LOG" "gh workflow run macos-fileprovider-testing-mode-pkg.yml --repo owner/repo --ref main -f tag=v1.2.3"
 assert_contains "$FAKE_LOG" "gh run list --repo owner/repo --workflow macos-fileprovider-testing-mode-pkg.yml"
+assert_contains "${TMPDIR}/no-watch.err" "Waiting for macos-fileprovider-testing-mode-pkg.yml run to appear (1/10)"
 assert_not_contains "$FAKE_LOG" "macos-postinstall-smoke.yml --repo owner/repo --ref main"
 assert_contains "${TMPDIR}/no-watch.err" "Package run dispatched. After it succeeds, rerun with --package-run-id 123456"
 
 FAKE_LOG="${TMPDIR}/gh-existing.log"
 PATH="$FAKE_BIN:$PATH" \
 TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+TCFS_FAKE_STATE="$TMPDIR" \
+TCFS_GH_RUN_ID_POLL_SECONDS=0 \
 bash "$SCRIPT" \
   --tag v1.2.3 \
   --repo owner/repo \

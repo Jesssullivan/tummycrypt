@@ -12,6 +12,8 @@ ARTIFACT_NAME="${ARTIFACT_NAME:-dist-testing-mode-pkg}"
 PACKAGE_WORKFLOW="macos-fileprovider-testing-mode-pkg.yml"
 SMOKE_WORKFLOW="macos-postinstall-smoke.yml"
 TESTING_MODE_SECRET="TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64"
+RUN_ID_POLL_ATTEMPTS="${TCFS_GH_RUN_ID_POLL_ATTEMPTS:-10}"
+RUN_ID_POLL_SECONDS="${TCFS_GH_RUN_ID_POLL_SECONDS:-2}"
 DRY_RUN=0
 WATCH=1
 SKIP_SECRET_CHECK=0
@@ -157,6 +159,37 @@ latest_dispatch_run_id() {
     --jq '.[0].databaseId // empty'
 }
 
+pause_between_run_id_polls() {
+  if [[ "$RUN_ID_POLL_SECONDS" == "0" ]]; then
+    return 0
+  fi
+
+  sleep "$RUN_ID_POLL_SECONDS" &
+  wait "$!"
+}
+
+wait_for_dispatch_run_id() {
+  local workflow="$1"
+  local created_after="$2"
+  local attempt
+  local run_id
+
+  for ((attempt = 1; attempt <= RUN_ID_POLL_ATTEMPTS; attempt += 1)); do
+    run_id="$(latest_dispatch_run_id "$workflow" "$created_after")"
+    if [[ -n "$run_id" ]]; then
+      printf '%s\n' "$run_id"
+      return 0
+    fi
+
+    if (( attempt < RUN_ID_POLL_ATTEMPTS )); then
+      log "Waiting for $workflow run to appear ($attempt/$RUN_ID_POLL_ATTEMPTS)"
+      pause_between_run_id_polls
+    fi
+  done
+
+  return 1
+}
+
 dispatch_and_capture_run_id() {
   local workflow="$1"
   shift
@@ -168,9 +201,8 @@ dispatch_and_capture_run_id() {
   gh workflow run "$workflow" --repo "$REPO" --ref "$REF" "$@" >&2
 
   local run_id
-  run_id="$(latest_dispatch_run_id "$workflow" "$created_after")"
-  if [[ -z "$run_id" ]]; then
-    die "dispatched $workflow but could not locate its run id; inspect with gh run list --repo $REPO --workflow $workflow --event workflow_dispatch"
+  if ! run_id="$(wait_for_dispatch_run_id "$workflow" "$created_after")"; then
+    die "dispatched $workflow but could not locate its run id after $RUN_ID_POLL_ATTEMPTS attempts; inspect with gh run list --repo $REPO --workflow $workflow --event workflow_dispatch"
   fi
 
   printf '%s\n' "$run_id"
