@@ -8,6 +8,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${REPO_ROOT}/.github/workflows/release.yml"
 POSTINSTALL_WORKFLOW="${REPO_ROOT}/.github/workflows/macos-postinstall-smoke.yml"
+TESTING_MODE_PKG_WORKFLOW="${REPO_ROOT}/.github/workflows/macos-fileprovider-testing-mode-pkg.yml"
 PKG_POSTINSTALL="${REPO_ROOT}/scripts/macos-pkg-postinstall.sh"
 TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/tcfs-release-workflow-test.XXXXXX")"
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -83,7 +84,7 @@ check_workflow_step_shape() {
       warn errors.join("\n")
       exit 1
     end
-  ' "$WORKFLOW" "$POSTINSTALL_WORKFLOW"
+  ' "$WORKFLOW" "$POSTINSTALL_WORKFLOW" "$TESTING_MODE_PKG_WORKFLOW"
 }
 
 check_postinstall_workflow_checkout_uses_current_harness() {
@@ -168,6 +169,86 @@ check_testing_mode_is_explicit_opt_in() {
   fi
 }
 
+check_testing_mode_package_workflow() {
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "com.apple.developer.fileprovider.testing-mode"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "tcfs-\${VERSION}-macos-aarch64-fileprovider-testing-mode.pkg"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "dist-testing-mode-pkg"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "releases/download/\${TAG}/tcfs-\${VERSION}-macos-aarch64.tar.gz"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "scripts/macos-build-pkg.sh"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "scripts/macos-pkg-structure-smoke.sh"
+
+  local validate_step="${TMPDIR}/testing-mode-validate-inputs-and-secrets.sh"
+  local import_profiles_step="${TMPDIR}/testing-mode-import-profiles.sh"
+  local build_app_step="${TMPDIR}/testing-mode-build-fileprovider-app.sh"
+  local verify_signing_step="${TMPDIR}/testing-mode-verify-signing.sh"
+  local download_cli_step="${TMPDIR}/testing-mode-download-cli-tarball.sh"
+  local build_pkg_step="${TMPDIR}/testing-mode-build-pkg.sh"
+  local verify_pkg_step="${TMPDIR}/testing-mode-verify-package.sh"
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Validate inputs and secrets" \
+    "$validate_step"
+  bash -n "$validate_step"
+  assert_contains "$validate_step" "Missing required testing-mode package secrets"
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Import FileProvider testing-mode profiles" \
+    "$import_profiles_step"
+  bash -n "$import_profiles_step"
+  assert_contains "$import_profiles_step" "TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64"
+  assert_contains "$import_profiles_step" "com.apple.developer.fileprovider.testing-mode"
+  assert_contains "$import_profiles_step" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Build FileProvider app" \
+    "$build_app_step"
+  bash -n "$build_app_step"
+  assert_contains "$build_app_step" "swift/fileprovider/build.sh"
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Verify FileProvider signing and testing entitlement" \
+    "$verify_signing_step"
+  bash -n "$verify_signing_step"
+  assert_contains "$verify_signing_step" "scripts/macos-fileprovider-preflight.sh"
+  assert_contains "$verify_signing_step" "com.apple.developer.fileprovider.testing-mode"
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Download release CLI tarball" \
+    "$download_cli_step"
+  bash -n "$download_cli_step"
+  assert_contains "$download_cli_step" "releases/download/\${TAG}/tcfs-\${VERSION}-macos-aarch64.tar.gz"
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Build testing-mode .pkg" \
+    "$build_pkg_step"
+  bash -n "$build_pkg_step"
+  assert_contains "$build_pkg_step" "scripts/macos-build-pkg.sh"
+  assert_contains "$build_pkg_step" "--sign \"\$PKG_SIGNING_IDENTITY\""
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Verify testing-mode package structure" \
+    "$verify_pkg_step"
+  bash -n "$verify_pkg_step"
+  assert_contains "$verify_pkg_step" "--require-signature"
+  assert_contains "$verify_pkg_step" "--expected-postinstall scripts/macos-pkg-postinstall.sh"
+}
+
 write_profile() {
   local path="$1"
   local name="$2"
@@ -217,6 +298,7 @@ check_postinstall_workflow_environment_and_secrets
 check_release_action_token_override
 check_macos_fileprovider_principal_class
 check_testing_mode_is_explicit_opt_in
+check_testing_mode_package_workflow
 
 cat >"$FAKE_BIN/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -364,11 +446,11 @@ VERIFY_RELEASE_PKG_STEP="${TMPDIR}/verify-release-package-structure.sh"
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \
   "pkg-postinstall" \
-  "Verify release package structure" \
+  "Verify package structure" \
   "$VERIFY_RELEASE_PKG_STEP"
 bash -n "$VERIFY_RELEASE_PKG_STEP"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "scripts/macos-pkg-structure-smoke.sh"
-assert_contains "$VERIFY_RELEASE_PKG_STEP" "--pkg \"\$RUNNER_TEMP/tcfs-\${VERSION}-macos-aarch64.pkg\""
+assert_contains "$VERIFY_RELEASE_PKG_STEP" "--pkg \"\$PACKAGE_PATH\""
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--require-signature"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "require_current_postinstall"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--allow-postinstall-mismatch"
@@ -412,6 +494,24 @@ assert_contains "$VALIDATE_STORAGE_STEP" "TCFS_SMOKE_S3_SECRET_ACCESS_KEY"
 assert_contains "$VALIDATE_STORAGE_STEP" "TCFS_SMOKE_MASTER_KEY_B64"
 assert_contains "$VALIDATE_STORAGE_STEP" "Missing required tcfs-macos-smoke environment secrets"
 assert_contains "$VALIDATE_STORAGE_STEP" "parsed.scheme != \"https\""
+assert_contains "$VALIDATE_STORAGE_STEP" "set only one of package_url or package_artifact_run_id"
+
+DOWNLOAD_PACKAGE_STEP="${TMPDIR}/download-package.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Download package" \
+  "$DOWNLOAD_PACKAGE_STEP"
+bash -n "$DOWNLOAD_PACKAGE_STEP"
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "PACKAGE_PATH=\"\$RUNNER_TEMP/tcfs-\${VERSION}-macos-aarch64.pkg\""
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "package_artifact_run_id"
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "package_artifact_name"
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "gh run download \"\$PACKAGE_ARTIFACT_RUN_ID\""
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "--name \"\$PACKAGE_ARTIFACT_NAME\""
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "package_url"
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "curl -fL -o \"\$PACKAGE_PATH\" \"\$PACKAGE_URL\""
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "releases/download/\${TAG}/tcfs-\${VERSION}-macos-aarch64.pkg"
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "PACKAGE_PATH=\$PACKAGE_PATH"
 
 INSTALL_MASTER_KEY_STEP="${TMPDIR}/install-e2ee-master-key.sh"
 extract_step_from_workflow \

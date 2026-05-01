@@ -510,6 +510,14 @@ Testing-mode support is intentionally opt-in:
 - the post-install harness option `--fileprovider-testing-mode` verifies the
   installed host app carries the testing-mode entitlement before setting the
   launch environment and launching the app
+- `.github/workflows/macos-fileprovider-testing-mode-pkg.yml` can build a
+  non-release testing-mode `.pkg` artifact named `dist-testing-mode-pkg` when
+  `TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64` is present; it reuses the
+  production FileProvider extension profile and release CLI tarball, but signs
+  the host app with the testing-mode host profile
+- `.github/workflows/macos-postinstall-smoke.yml` can install that package via
+  `package_artifact_run_id` plus `fileprovider_testing_mode=true`, so this proof
+  does not require publishing a testing-mode package as a GitHub Release
 
 Use that path only with an Apple provisioning profile that grants the
 testing-mode entitlement. A normal production `v0.12.6` package is expected to

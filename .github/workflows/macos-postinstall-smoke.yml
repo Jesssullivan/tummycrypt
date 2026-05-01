@@ -22,9 +22,25 @@ on:
         required: false
         default: false
         type: boolean
+      package_url:
+        description: "Optional direct .pkg URL to install instead of the release asset for tag"
+        required: false
+        default: ""
+        type: string
+      package_artifact_run_id:
+        description: "Optional Actions run ID containing a .pkg artifact to install instead of the release asset"
+        required: false
+        default: ""
+        type: string
+      package_artifact_name:
+        description: "Artifact name to download when package_artifact_run_id is set"
+        required: false
+        default: "dist-testing-mode-pkg"
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   pkg-postinstall:
@@ -59,10 +75,17 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ github.event.inputs.tag }}"
+          PACKAGE_URL="${{ github.event.inputs.package_url }}"
+          PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
           [[ "$TAG" == v* ]] || {
             echo "::error::tag must start with 'v' (got '$TAG')"
             exit 1
           }
+
+          if [[ -n "$PACKAGE_URL" && -n "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
+            echo "::error::set only one of package_url or package_artifact_run_id"
+            exit 1
+          fi
 
           missing=()
           for name in \
@@ -197,20 +220,47 @@ jobs:
           PY
           chmod 600 "$MASTER_KEY_PATH"
 
-      - name: Download release package
+      - name: Download package
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          curl -fL \
-            -o "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" \
-            "https://github.com/${{ github.repository }}/releases/download/${TAG}/tcfs-${VERSION}-macos-aarch64.pkg"
+          PACKAGE_PATH="$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg"
+          PACKAGE_URL="${{ github.event.inputs.package_url }}"
+          PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
+          PACKAGE_ARTIFACT_NAME="${{ github.event.inputs.package_artifact_name }}"
 
-      - name: Verify release package structure
+          if [[ -n "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
+            artifact_dir="$RUNNER_TEMP/package-artifact"
+            mkdir -p "$artifact_dir"
+            gh run download "$PACKAGE_ARTIFACT_RUN_ID" \
+              --repo "${{ github.repository }}" \
+              --name "$PACKAGE_ARTIFACT_NAME" \
+              --dir "$artifact_dir"
+            artifact_pkg="$(find "$artifact_dir" -type f -name '*.pkg' -print -quit)"
+            if [[ -z "$artifact_pkg" ]]; then
+              echo "::error::artifact $PACKAGE_ARTIFACT_NAME from run $PACKAGE_ARTIFACT_RUN_ID did not contain a .pkg"
+              find "$artifact_dir" -type f -print
+              exit 1
+            fi
+            cp "$artifact_pkg" "$PACKAGE_PATH"
+          elif [[ -n "$PACKAGE_URL" ]]; then
+            curl -fL -o "$PACKAGE_PATH" "$PACKAGE_URL"
+          else
+            curl -fL \
+              -o "$PACKAGE_PATH" \
+              "https://github.com/${{ github.repository }}/releases/download/${TAG}/tcfs-${VERSION}-macos-aarch64.pkg"
+          fi
+
+          echo "PACKAGE_PATH=$PACKAGE_PATH" >> "$GITHUB_ENV"
+
+      - name: Verify package structure
         shell: bash
         run: |
           set -euo pipefail
           args=(
-            --pkg "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" \
+            --pkg "$PACKAGE_PATH" \
             --require-signature
           )
 
@@ -222,11 +272,11 @@ jobs:
 
           bash scripts/macos-pkg-structure-smoke.sh "${args[@]}"
 
-      - name: Install release package
+      - name: Install package
         shell: bash
         run: |
           set -euo pipefail
-          sudo installer -pkg "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.pkg" -target /
+          sudo installer -pkg "$PACKAGE_PATH" -target /
 
       - name: Verify installed FileProvider production signing
         shell: bash
