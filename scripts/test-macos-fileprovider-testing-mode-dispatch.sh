@@ -63,6 +63,20 @@ assert_contains "$DRY_RUN_OUT" "grep -Fx \"tcfs-9.9.9-macos-aarch64.tar.gz\""
 assert_contains "$DRY_RUN_OUT" "-f package_artifact_run_id=\"<testing-mode-package-run-id>\""
 assert_contains "$DRY_RUN_OUT" "-f fileprovider_testing_mode=true"
 
+DRY_RUN_EXISTING_OUT="${TMPDIR}/dry-run-existing.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --package-run-id 123456 \
+  >"$DRY_RUN_EXISTING_OUT"
+assert_not_contains "$DRY_RUN_EXISTING_OUT" "gh secret list"
+assert_not_contains "$DRY_RUN_EXISTING_OUT" "gh release view"
+assert_not_contains "$DRY_RUN_EXISTING_OUT" "macos-fileprovider-testing-mode-pkg.yml"
+assert_contains "$DRY_RUN_EXISTING_OUT" "-f package_artifact_run_id=\"123456\""
+assert_contains "$DRY_RUN_EXISTING_OUT" "-f fileprovider_testing_mode=true"
+
 assert_fails_contains \
   "tag must start with 'v'" \
   bash "$SCRIPT" --dry-run --tag 9.9.9

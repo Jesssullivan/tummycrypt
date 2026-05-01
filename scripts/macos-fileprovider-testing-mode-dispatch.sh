@@ -112,13 +112,16 @@ print_dry_run() {
 
   if [[ -z "$package_run_id" ]]; then
     package_run_id="<testing-mode-package-run-id>"
-  fi
 
-  cat <<EOF
+    cat <<EOF
 gh secret list --repo "$REPO" --json name --jq '.[].name' | grep -Fx "$TESTING_MODE_SECRET"
 gh release view "$TAG" --repo "$REPO" --json isDraft,assets --jq '. as \$release | select(\$release.isDraft == false) | .assets[].name' | grep -Fx "tcfs-${TAG#v}-macos-aarch64.tar.gz"
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" -f tag="$TAG"
 gh run watch "$package_run_id" --repo "$REPO" --exit-status
+EOF
+  fi
+
+  cat <<EOF
 gh workflow run "$SMOKE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
   -f package_artifact_run_id="$package_run_id" \\
