@@ -360,13 +360,50 @@ jobs:
         shell: bash
         run: |
           set +e
+          run_bounded() {
+            local label="$1"
+            local timeout_secs="$2"
+            shift 2
+
+            local out="$LOG_DIR/$label"
+            local pid
+            local waited=0
+
+            "$@" > "$out" 2>&1 &
+            pid="$!"
+
+            while kill -0 "$pid" 2>/dev/null; do
+              if (( waited >= timeout_secs )); then
+                kill "$pid" 2>/dev/null || true
+                perl -e 'select undef, undef, undef, 1.0'
+                kill -KILL "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                echo "timed out after ${timeout_secs}s" >> "$out"
+                return 124
+              fi
+              perl -e 'select undef, undef, undef, 1.0'
+              waited=$((waited + 1))
+            done
+
+            wait "$pid"
+          }
+
           pluginkit -m -A -D -i io.tinyland.tcfs.fileprovider > "$LOG_DIR/pluginkit.txt" 2>&1
           if command -v fileproviderctl >/dev/null 2>&1; then
             fileproviderctl domain list > "$LOG_DIR/fileproviderctl-domains.txt" 2>&1
+            run_bounded fileproviderctl-dump.txt 10 fileproviderctl dump || true
+            mkdir -p "$LOG_DIR/fileproviderctl-diagnose"
+            run_bounded fileproviderctl-diagnose.log 20 \
+              fileproviderctl diagnose -o "$LOG_DIR/fileproviderctl-diagnose" || true
           fi
-          log show --style compact --last 5m \
+          run_bounded oslog.txt 10 \
+            log show --style compact --last 5m \
             --predicate 'subsystem BEGINSWITH "io.tinyland.tcfs"' \
-            > "$LOG_DIR/oslog.txt" 2>&1
+            || true
+          run_bounded apple-fileprovider-oslog.txt 15 \
+            log show --style compact --last 5m \
+            --predicate 'process == "fileproviderd" OR process == "pkd" OR process == "amfid" OR subsystem BEGINSWITH "com.apple.FileProvider" OR eventMessage CONTAINS[c] "TCFS" OR eventMessage CONTAINS "io.tinyland.tcfs"' \
+            || true
 
       - name: Stop tcfsd
         if: always()
