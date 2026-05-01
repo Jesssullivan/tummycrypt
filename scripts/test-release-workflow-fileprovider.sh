@@ -495,6 +495,7 @@ assert_contains "$VALIDATE_STORAGE_STEP" "TCFS_SMOKE_MASTER_KEY_B64"
 assert_contains "$VALIDATE_STORAGE_STEP" "Missing required tcfs-macos-smoke environment secrets"
 assert_contains "$VALIDATE_STORAGE_STEP" "parsed.scheme != \"https\""
 assert_contains "$VALIDATE_STORAGE_STEP" "set only one of package_url or package_artifact_run_id"
+assert_contains "$VALIDATE_STORAGE_STEP" "fileprovider_testing_mode=true requires package_artifact_run_id or package_url"
 
 DOWNLOAD_PACKAGE_STEP="${TMPDIR}/download-package.sh"
 extract_step_from_workflow \

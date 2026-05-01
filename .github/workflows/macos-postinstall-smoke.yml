@@ -77,6 +77,7 @@ jobs:
           TAG="${{ github.event.inputs.tag }}"
           PACKAGE_URL="${{ github.event.inputs.package_url }}"
           PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
+          FILEPROVIDER_TESTING_MODE="${{ github.event.inputs.fileprovider_testing_mode }}"
           [[ "$TAG" == v* ]] || {
             echo "::error::tag must start with 'v' (got '$TAG')"
             exit 1
@@ -84,6 +85,11 @@ jobs:
 
           if [[ -n "$PACKAGE_URL" && -n "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
             echo "::error::set only one of package_url or package_artifact_run_id"
+            exit 1
+          fi
+
+          if [[ "$FILEPROVIDER_TESTING_MODE" == "true" && -z "$PACKAGE_URL" && -z "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
+            echo "::error::fileprovider_testing_mode=true requires package_artifact_run_id or package_url for a testing-mode package"
             exit 1
           fi
 

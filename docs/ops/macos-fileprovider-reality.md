@@ -517,7 +517,9 @@ Testing-mode support is intentionally opt-in:
   the host app with the testing-mode host profile
 - `.github/workflows/macos-postinstall-smoke.yml` can install that package via
   `package_artifact_run_id` plus `fileprovider_testing_mode=true`, so this proof
-  does not require publishing a testing-mode package as a GitHub Release
+  does not require publishing a testing-mode package as a GitHub Release; the
+  workflow rejects `fileprovider_testing_mode=true` unless a testing package is
+  supplied through `package_artifact_run_id` or `package_url`
 
 Use that path only with an Apple provisioning profile that grants the
 testing-mode entitlement. A normal production `v0.12.6` package is expected to
