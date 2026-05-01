@@ -12,7 +12,6 @@ private let sharedConfigAccessGroupFallback = "group.io.tinyland.tcfs"
 ///
 /// Implements NSFileProviderReplicatedExtension for on-demand hydration
 /// of files stored in SeaweedFS S3 via the tcfs-file-provider Rust crate.
-@objc(TCFSFileProviderExtension)
 class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     let domain: NSFileProviderDomain

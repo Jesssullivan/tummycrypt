@@ -130,6 +130,7 @@ check_postinstall_workflow_environment_and_secrets() {
 }
 
 check_release_action_token_override() {
+  # shellcheck disable=SC2016 # Keep the GitHub expression literal intact for YAML comparison.
   ruby -ryaml -e '
     workflow = YAML.load_file(ARGV[0])
     steps = workflow.fetch("jobs").fetch("create-release").fetch("steps")
@@ -140,6 +141,17 @@ check_release_action_token_override() {
     actual = with.fetch("token") { raise "Create release step missing token override" }
     raise "Create release token mismatch: #{actual.inspect}" unless actual == expected
   ' "$WORKFLOW"
+}
+
+check_macos_fileprovider_principal_class() {
+  local plist="$REPO_ROOT/swift/fileprovider/resources/Extension-Info.plist"
+  local source="$REPO_ROOT/swift/fileprovider/Sources/Extension/FileProviderExtension.swift"
+
+  assert_contains "$plist" "<string>TCFSFileProvider.TCFSFileProviderExtension</string>"
+  if grep -Fq "@objc(TCFSFileProviderExtension)" "$source"; then
+    printf 'macOS FileProvider principal class should use the Swift module name, not a custom @objc runtime name\n' >&2
+    exit 1
+  fi
 }
 
 write_profile() {
@@ -189,6 +201,7 @@ check_workflow_step_shape
 check_postinstall_workflow_checkout_uses_current_harness
 check_postinstall_workflow_environment_and_secrets
 check_release_action_token_override
+check_macos_fileprovider_principal_class
 
 cat >"$FAKE_BIN/uname" <<'EOF'
 #!/usr/bin/env bash
