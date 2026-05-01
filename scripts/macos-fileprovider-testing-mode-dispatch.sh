@@ -190,6 +190,16 @@ wait_for_dispatch_run_id() {
   return 1
 }
 
+verify_package_artifact() {
+  local run_id="$1"
+
+  if ! gh api "repos/$REPO/actions/runs/$run_id/artifacts" \
+    --jq '.artifacts[] | select(.expired == false) | .name' \
+    | grep -Fxq "$ARTIFACT_NAME"; then
+    die "run $run_id does not expose a non-expired $ARTIFACT_NAME artifact"
+  fi
+}
+
 dispatch_and_capture_run_id() {
   local workflow="$1"
   shift
@@ -221,6 +231,8 @@ if [[ -z "$PACKAGE_RUN_ID" ]]; then
 else
   log "Using existing testing-mode package run: $PACKAGE_RUN_ID"
 fi
+
+verify_package_artifact "$PACKAGE_RUN_ID"
 
 SMOKE_RUN_ID="$(dispatch_and_capture_run_id \
   "$SMOKE_WORKFLOW" \

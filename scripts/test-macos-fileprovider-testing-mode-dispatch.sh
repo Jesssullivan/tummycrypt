@@ -104,6 +104,12 @@ case "${1:-} ${2:-}" in
     ;;
   "run watch")
     ;;
+  "api repos/owner/repo/actions/runs/123456/artifacts")
+    if [[ "${TCFS_FAKE_MISSING_ARTIFACT:-0}" == "1" ]]; then
+      exit 0
+    fi
+    printf 'dist-testing-mode-pkg\n'
+    ;;
   *)
     exit 1
     ;;
@@ -147,7 +153,23 @@ bash "$SCRIPT" \
 
 assert_not_contains "$FAKE_LOG" "gh secret list"
 assert_not_contains "$FAKE_LOG" "macos-fileprovider-testing-mode-pkg.yml --repo owner/repo --ref main"
+assert_contains "$FAKE_LOG" "gh api repos/owner/repo/actions/runs/123456/artifacts --jq"
 assert_contains "$FAKE_LOG" "gh workflow run macos-postinstall-smoke.yml --repo owner/repo --ref main -f tag=v1.2.3 -f package_artifact_run_id=123456"
 assert_contains "${TMPDIR}/existing.err" "Post-install smoke dispatched. Watch with: gh run watch 654321 --repo owner/repo --exit-status"
+
+FAKE_LOG="${TMPDIR}/gh-missing-artifact.log"
+assert_fails_contains \
+  "run 123456 does not expose a non-expired dist-testing-mode-pkg artifact" \
+  env PATH="$FAKE_BIN:$PATH" \
+    TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+    TCFS_FAKE_STATE="$TMPDIR" \
+    TCFS_FAKE_MISSING_ARTIFACT=1 \
+    TCFS_GH_RUN_ID_POLL_SECONDS=0 \
+    bash "$SCRIPT" \
+      --tag v1.2.3 \
+      --repo owner/repo \
+      --ref main \
+      --package-run-id 123456 \
+      --no-watch
 
 echo "macOS FileProvider testing-mode dispatch tests passed"
