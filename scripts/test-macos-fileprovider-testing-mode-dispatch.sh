@@ -59,6 +59,7 @@ bash "$SCRIPT" \
   --ref main \
   >"$DRY_RUN_OUT"
 assert_contains "$DRY_RUN_OUT" "gh workflow run \"macos-fileprovider-testing-mode-pkg.yml\" --repo \"owner/repo\" --ref \"main\" -f tag=\"v9.9.9\""
+assert_contains "$DRY_RUN_OUT" "grep -Fx \"tcfs-9.9.9-macos-aarch64.tar.gz\""
 assert_contains "$DRY_RUN_OUT" "-f package_artifact_run_id=\"<testing-mode-package-run-id>\""
 assert_contains "$DRY_RUN_OUT" "-f fileprovider_testing_mode=true"
 
@@ -81,6 +82,12 @@ case "${1:-} ${2:-}" in
   "workflow view")
     ;;
   "workflow run")
+    ;;
+  "release view")
+    if [[ "${TCFS_FAKE_MISSING_RELEASE_ASSET:-0}" == "1" ]]; then
+      exit 0
+    fi
+    printf 'tcfs-1.2.3-macos-aarch64.tar.gz\n'
     ;;
   "run list")
     case "$*" in
@@ -131,11 +138,26 @@ bash "$SCRIPT" \
   2>"${TMPDIR}/no-watch.err"
 
 assert_contains "$FAKE_LOG" "gh secret list --repo owner/repo --json name --jq"
+assert_contains "$FAKE_LOG" "gh release view v1.2.3 --repo owner/repo --json"
 assert_contains "$FAKE_LOG" "gh workflow run macos-fileprovider-testing-mode-pkg.yml --repo owner/repo --ref main -f tag=v1.2.3"
 assert_contains "$FAKE_LOG" "gh run list --repo owner/repo --workflow macos-fileprovider-testing-mode-pkg.yml"
 assert_contains "${TMPDIR}/no-watch.err" "Waiting for macos-fileprovider-testing-mode-pkg.yml run to appear (1/10)"
 assert_not_contains "$FAKE_LOG" "macos-postinstall-smoke.yml --repo owner/repo --ref main"
 assert_contains "${TMPDIR}/no-watch.err" "Package run dispatched. After it succeeds, rerun with --package-run-id 123456"
+
+FAKE_LOG="${TMPDIR}/gh-missing-release-asset.log"
+assert_fails_contains \
+  "release v1.2.3 does not expose required asset tcfs-1.2.3-macos-aarch64.tar.gz" \
+  env PATH="$FAKE_BIN:$PATH" \
+    TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+    TCFS_FAKE_STATE="$TMPDIR" \
+    TCFS_FAKE_MISSING_RELEASE_ASSET=1 \
+    TCFS_GH_RUN_ID_POLL_SECONDS=0 \
+    bash "$SCRIPT" \
+      --tag v1.2.3 \
+      --repo owner/repo \
+      --ref main \
+      --no-watch
 
 FAKE_LOG="${TMPDIR}/gh-existing.log"
 PATH="$FAKE_BIN:$PATH" \
@@ -153,6 +175,7 @@ bash "$SCRIPT" \
 
 assert_not_contains "$FAKE_LOG" "gh secret list"
 assert_not_contains "$FAKE_LOG" "macos-fileprovider-testing-mode-pkg.yml --repo owner/repo --ref main"
+assert_not_contains "$FAKE_LOG" "gh release view"
 assert_contains "$FAKE_LOG" "gh api repos/owner/repo/actions/runs/123456/artifacts --jq"
 assert_contains "$FAKE_LOG" "gh workflow run macos-postinstall-smoke.yml --repo owner/repo --ref main -f tag=v1.2.3 -f package_artifact_run_id=123456"
 assert_contains "${TMPDIR}/existing.err" "Post-install smoke dispatched. Watch with: gh run watch 654321 --repo owner/repo --exit-status"

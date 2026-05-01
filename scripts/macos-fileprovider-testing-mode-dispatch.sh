@@ -116,6 +116,7 @@ print_dry_run() {
 
   cat <<EOF
 gh secret list --repo "$REPO" --json name --jq '.[].name' | grep -Fx "$TESTING_MODE_SECRET"
+gh release view "$TAG" --repo "$REPO" --json isDraft,assets --jq '. as \$release | select(\$release.isDraft == false) | .assets[].name' | grep -Fx "tcfs-${TAG#v}-macos-aarch64.tar.gz"
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" -f tag="$TAG"
 gh run watch "$package_run_id" --repo "$REPO" --exit-status
 gh workflow run "$SMOKE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
@@ -143,6 +144,20 @@ fi
 
 gh workflow view "$PACKAGE_WORKFLOW" --repo "$REPO" >/dev/null
 gh workflow view "$SMOKE_WORKFLOW" --repo "$REPO" >/dev/null
+
+verify_release_cli_asset() {
+  local version="${TAG#v}"
+  local asset="tcfs-${version}-macos-aarch64.tar.gz"
+
+  # shellcheck disable=SC2016 # Keep the jq expression literal.
+  if ! gh release view "$TAG" \
+    --repo "$REPO" \
+    --json isDraft,assets \
+    --jq '. as $release | select($release.isDraft == false) | .assets[].name' \
+    | grep -Fxq "$asset"; then
+    die "release $TAG does not expose required asset $asset"
+  fi
+}
 
 latest_dispatch_run_id() {
   local workflow="$1"
@@ -219,6 +234,7 @@ dispatch_and_capture_run_id() {
 }
 
 if [[ -z "$PACKAGE_RUN_ID" ]]; then
+  verify_release_cli_asset
   PACKAGE_RUN_ID="$(dispatch_and_capture_run_id "$PACKAGE_WORKFLOW" -f tag="$TAG")"
   log "Testing-mode package run: $PACKAGE_RUN_ID"
 
