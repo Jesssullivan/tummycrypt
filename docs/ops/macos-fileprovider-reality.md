@@ -499,6 +499,22 @@ lane; the remaining useful paths are a clean lab Mac where the File Provider can
 be user-enabled, or an allowed testing-mode build that carries Apple's
 FileProvider testing-mode entitlement.
 
+Testing-mode support is intentionally opt-in:
+
+- production entitlements do not include
+  `com.apple.developer.fileprovider.testing-mode`
+- `swift/fileprovider/build.sh` only injects that entitlement when
+  `TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1`
+- the host app only requests `NSFileProviderDomainTestingModeAlwaysEnabled` when
+  launched with `TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1`
+- the post-install harness option `--fileprovider-testing-mode` verifies the
+  installed host app carries the testing-mode entitlement before setting the
+  launch environment and launching the app
+
+Use that path only with an Apple provisioning profile that grants the
+testing-mode entitlement. A normal production `v0.12.6` package is expected to
+fail that preflight.
+
 ### Manual Procedure
 
 The script above codifies the manual steps below. Keep them here as the

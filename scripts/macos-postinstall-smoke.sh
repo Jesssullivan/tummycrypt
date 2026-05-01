@@ -36,6 +36,11 @@ Options:
                               --plugin-id before launching the host app. This
                               is intended for hosted/diagnostic runners where
                               System Settings cannot be clicked.
+  --fileprovider-testing-mode Request NSFileProvider testing mode
+                              alwaysEnabled when launching the host app. The
+                              installed host app must carry Apple's
+                              com.apple.developer.fileprovider.testing-mode
+                              entitlement.
   --require-keychain-config   Require extension logs to prove config loaded
                               from shared Keychain, and fail if embedded config
                               was used
@@ -59,6 +64,7 @@ PLUGIN_ID="${TCFS_PLUGIN_ID:-io.tinyland.tcfs.fileprovider}"
 DOMAIN_ID="${TCFS_DOMAIN_ID:-io.tinyland.tcfs}"
 ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS="${TCFS_ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}"
 ELECT_PLUGIN_USE="${TCFS_ELECT_PLUGIN_USE:-0}"
+FILEPROVIDER_TESTING_MODE="${TCFS_FILEPROVIDER_TESTING_MODE:-0}"
 REQUIRE_KEYCHAIN_CONFIG="${TCFS_REQUIRE_KEYCHAIN_CONFIG:-0}"
 TCFS_BIN="${TCFS_BIN:-tcfs}"
 TCFSD_BIN="${TCFSD_BIN:-tcfsd}"
@@ -112,6 +118,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --elect-plugin-use)
       ELECT_PLUGIN_USE=1
+      shift
+      ;;
+    --fileprovider-testing-mode)
+      FILEPROVIDER_TESTING_MODE=1
       shift
       ;;
     --require-keychain-config)
@@ -415,6 +425,57 @@ elect_plugin_use() {
   }
 }
 
+require_fileprovider_testing_mode_entitlement() {
+  local entitlements_file="$LOG_DIR/host-entitlements.plist"
+  local err_file="$LOG_DIR/host-entitlements.err"
+
+  codesign -d --entitlements :- "$APP_PATH" >"$entitlements_file" 2>"$err_file" || {
+    echo "could not read host app entitlements for FileProvider testing mode: $APP_PATH" >&2
+    cat "$err_file" >&2 || true
+    exit 1
+  }
+
+  awk '
+    /<key>com\.apple\.developer\.fileprovider\.testing-mode<\/key>/ {
+      found = 1
+      next
+    }
+    found && /<true[[:space:]]*\/>/ {
+      ok = 1
+      exit
+    }
+    found && /<key>/ {
+      exit
+    }
+    END {
+      exit ok ? 0 : 1
+    }
+  ' "$entitlements_file" || {
+    echo "host app missing com.apple.developer.fileprovider.testing-mode entitlement" >&2
+    echo "rebuild with TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1 and an Apple profile that grants the entitlement" >&2
+    exit 1
+  }
+
+  echo "host app FileProvider testing-mode entitlement present"
+}
+
+enable_fileprovider_testing_mode() {
+  [[ "$FILEPROVIDER_TESTING_MODE" == "1" ]] || return 0
+
+  require_fileprovider_testing_mode_entitlement
+  echo "requesting FileProvider testing mode: always enabled"
+  launchctl setenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED 1 || {
+    echo "failed to set FileProvider testing-mode launch environment" >&2
+    exit 1
+  }
+}
+
+clear_fileprovider_testing_mode() {
+  [[ "$FILEPROVIDER_TESTING_MODE" == "1" ]] || return 0
+
+  launchctl unsetenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED >/dev/null 2>&1 || true
+}
+
 print_pluginkit_duplicate_hint() {
   local output="$1"
 
@@ -701,6 +762,7 @@ require_file "$HOME/.config/tcfs/fileprovider/config.json"
 echo "status logs: $LOG_DIR"
 check_pluginkit
 elect_plugin_use
+enable_fileprovider_testing_mode
 
 echo "launching host app: $APP_PATH"
 open "$APP_PATH"
@@ -717,6 +779,7 @@ until check_host_log; do
   fi
 done
 
+clear_fileprovider_testing_mode
 echo "host app log confirmed domain re-add"
 if check_domain_listing; then
   echo "fileproviderctl domain listing includes $DOMAIN_ID"

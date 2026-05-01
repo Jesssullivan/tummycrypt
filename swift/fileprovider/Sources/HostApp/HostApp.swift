@@ -15,6 +15,7 @@ struct TCFSProviderApp {
             identifier: NSFileProviderDomainIdentifier("io.tinyland.tcfs"),
             displayName: "TCFS"
         )
+        configureTestingModeIfRequested(domain)
 
         // Provision config to Keychain (best-effort fallback for pre-built binaries).
         provisionConfig()
@@ -104,6 +105,15 @@ struct TCFSProviderApp {
         } else {
             hostLogger.error("provisionConfig: Keychain write failed with status \(status)")
         }
+    }
+
+    private static func configureTestingModeIfRequested(_ domain: NSFileProviderDomain) {
+        guard ProcessInfo.processInfo.environment["TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED"] == "1" else {
+            return
+        }
+
+        domain.testingModes = [.alwaysEnabled]
+        hostLogger.error("testingMode: requested alwaysEnabled for FileProvider domain")
     }
 
     private static func configForKeychain(_ config: String) -> String {

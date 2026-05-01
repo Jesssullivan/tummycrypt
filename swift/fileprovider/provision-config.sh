@@ -154,7 +154,8 @@ echo "    Credentials: present"
 APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
 if [ -d "$APP_GROUP_DIR" ]; then
     APP_GROUP_CONFIG="$APP_GROUP_DIR/config.json"
-    cp "$CONFIG_JSON" "$APP_GROUP_CONFIG" 2>/dev/null && \
-        chmod 600 "$APP_GROUP_CONFIG" 2>/dev/null && \
-        echo "==> Also written to $APP_GROUP_CONFIG" || true
+    if cp "$CONFIG_JSON" "$APP_GROUP_CONFIG" 2>/dev/null \
+        && chmod 600 "$APP_GROUP_CONFIG" 2>/dev/null; then
+        echo "==> Also written to $APP_GROUP_CONFIG"
+    fi
 fi

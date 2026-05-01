@@ -154,6 +154,20 @@ check_macos_fileprovider_principal_class() {
   fi
 }
 
+check_testing_mode_is_explicit_opt_in() {
+  local build_script="$REPO_ROOT/swift/fileprovider/build.sh"
+
+  assert_contains "$build_script" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT"
+  assert_contains "$build_script" "com.apple.developer.fileprovider.testing-mode"
+
+  if grep -Fq "com.apple.developer.fileprovider.testing-mode" \
+    "$REPO_ROOT/swift/fileprovider/resources/HostApp.entitlements" \
+    "$REPO_ROOT/swift/fileprovider/resources/Extension.entitlements"; then
+    printf 'FileProvider testing-mode entitlement must stay out of default production entitlements\n' >&2
+    exit 1
+  fi
+}
+
 write_profile() {
   local path="$1"
   local name="$2"
@@ -202,6 +216,7 @@ check_postinstall_workflow_checkout_uses_current_harness
 check_postinstall_workflow_environment_and_secrets
 check_release_action_token_override
 check_macos_fileprovider_principal_class
+check_testing_mode_is_explicit_opt_in
 
 cat >"$FAKE_BIN/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -459,6 +474,8 @@ assert_contains "$POSTINSTALL_HARNESS_STEP" "--expected-content-file \"\$EXPECTE
 assert_contains "$POSTINSTALL_HARNESS_STEP" "--require-keychain-config"
 assert_contains "$POSTINSTALL_HARNESS_STEP" "elect_plugin_use"
 assert_contains "$POSTINSTALL_HARNESS_STEP" "--elect-plugin-use"
+assert_contains "$POSTINSTALL_HARNESS_STEP" "fileprovider_testing_mode"
+assert_contains "$POSTINSTALL_HARNESS_STEP" "--fileprovider-testing-mode"
 
 bash -n "$PKG_POSTINSTALL"
 

@@ -25,6 +25,7 @@ HOST_PROVISIONING_PROFILE="${TCFS_HOST_PROVISIONING_PROFILE:-${TCFS_PROVISIONING
 EXTENSION_PROVISIONING_PROFILE="${TCFS_EXTENSION_PROVISIONING_PROFILE:-${TCFS_FILEPROVIDER_PROVISIONING_PROFILE:-${TCFS_PROVISIONING_PROFILE:-}}}"
 AUTO_PROVISIONING_PROFILES="${TCFS_AUTO_PROVISIONING_PROFILES:-0}"
 EMBED_FILEPROVIDER_CONFIG="${TCFS_EMBED_FILEPROVIDER_CONFIG:-}"
+FILEPROVIDER_TESTING_MODE_ENTITLEMENT="${TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -112,6 +113,15 @@ case "$EMBED_FILEPROVIDER_CONFIG" in
     0|false|no|off) EMBED_FILEPROVIDER_CONFIG=0 ;;
     *)
         echo "ERROR: TCFS_EMBED_FILEPROVIDER_CONFIG must be 0/1, got: $EMBED_FILEPROVIDER_CONFIG" >&2
+        exit 1
+        ;;
+esac
+
+case "$FILEPROVIDER_TESTING_MODE_ENTITLEMENT" in
+    1|true|yes|on) FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1 ;;
+    0|false|no|off) FILEPROVIDER_TESTING_MODE_ENTITLEMENT=0 ;;
+    *)
+        echo "ERROR: TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT must be 0/1, got: $FILEPROVIDER_TESTING_MODE_ENTITLEMENT" >&2
         exit 1
         ;;
 esac
@@ -343,6 +353,16 @@ else
     cp "$SCRIPT_DIR/resources/HostApp.entitlements" "$HOST_ENTITLEMENTS"
     /usr/libexec/PlistBuddy -c 'Delete :keychain-access-groups' "$EXT_ENTITLEMENTS" 2>/dev/null || true
     /usr/libexec/PlistBuddy -c 'Delete :keychain-access-groups' "$HOST_ENTITLEMENTS" 2>/dev/null || true
+fi
+
+if [ "$FILEPROVIDER_TESTING_MODE_ENTITLEMENT" = "1" ]; then
+    echo "==> Enabling host app FileProvider testing-mode entitlement"
+    /usr/libexec/PlistBuddy \
+        -c 'Add :com.apple.developer.fileprovider.testing-mode bool true' \
+        "$HOST_ENTITLEMENTS" 2>/dev/null \
+        || /usr/libexec/PlistBuddy \
+            -c 'Set :com.apple.developer.fileprovider.testing-mode true' \
+            "$HOST_ENTITLEMENTS"
 fi
 
 # --- Code sign (inside-out: extensions first, then host app) ---

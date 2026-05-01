@@ -17,6 +17,11 @@ on:
         required: false
         default: true
         type: boolean
+      fileprovider_testing_mode:
+        description: "Request FileProvider testing-mode alwaysEnabled; package must carry Apple's testing entitlement"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -363,6 +368,10 @@ jobs:
 
           if [[ "${{ github.event.inputs.elect_plugin_use }}" == "true" ]]; then
             args+=(--elect-plugin-use)
+          fi
+
+          if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" == "true" ]]; then
+            args+=(--fileprovider-testing-mode)
           fi
 
           bash scripts/macos-postinstall-smoke.sh "${args[@]}"

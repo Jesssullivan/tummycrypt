@@ -48,6 +48,7 @@ EXPECTED_REL="Projects/tcfs-odrive-parity/honey-readme.txt"
 EXPECTED_CONTENT_FILE="${TMPDIR}/expected-content.txt"
 OPEN_LOG="${TMPDIR}/open.log"
 PLUGINKIT_LOG="${TMPDIR}/pluginkit.log"
+LAUNCHCTL_LOG="${TMPDIR}/launchctl.log"
 
 mkdir -p \
   "$FAKE_BIN" \
@@ -116,6 +117,32 @@ if [[ "${TCFS_FAKE_PLUGIN_SAME_PATH_DUPES:-0}" == "1" ]]; then
   printf '            Path = /Users/test/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex\n'
 fi
 EOF
+cat >"$FAKE_BIN/codesign" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"--entitlements :-"* ]]; then
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+PLIST
+  if [[ "${TCFS_FAKE_TESTING_MODE_ENTITLEMENT:-0}" == "1" ]]; then
+    cat <<PLIST
+  <key>com.apple.developer.fileprovider.testing-mode</key>
+  <true/>
+PLIST
+  fi
+  cat <<PLIST
+</dict>
+</plist>
+PLIST
+  exit 0
+fi
+
+printf 'unexpected codesign invocation:'
+printf ' %q' "$@"
+printf '\n'
+exit 1
+EOF
 cat >"$FAKE_BIN/fileproviderctl" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -166,6 +193,12 @@ printf 'open' >>"$TCFS_FAKE_OPEN_LOG"
 printf ' %q' "$@" >>"$TCFS_FAKE_OPEN_LOG"
 printf '\n' >>"$TCFS_FAKE_OPEN_LOG"
 EOF
+cat >"$FAKE_BIN/launchctl" <<'EOF'
+#!/usr/bin/env bash
+printf 'launchctl' >>"$TCFS_FAKE_LAUNCHCTL_LOG"
+printf ' %q' "$@" >>"$TCFS_FAKE_LAUNCHCTL_LOG"
+printf '\n' >>"$TCFS_FAKE_LAUNCHCTL_LOG"
+EOF
 cat >"$FAKE_BIN/cat" <<'EOF'
 #!/usr/bin/env bash
 marker="${TCFS_FAKE_CAT_MARKER:-}"
@@ -194,6 +227,8 @@ PATH="$FAKE_BIN:$PATH" \
 HOME="$HOME_DIR" \
 TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
 TCFS_FAKE_PLUGINKIT_LOG="$PLUGINKIT_LOG" \
+TCFS_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
+TCFS_FAKE_TESTING_MODE_ENTITLEMENT=1 \
 TCFS_FAKE_CAT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
 TCFS_FAKE_CAT_MARKER="$CAT_RETRY_MARKER" \
 bash "$SCRIPT" \
@@ -205,6 +240,7 @@ bash "$SCRIPT" \
   --cloud-root "$CLOUD_ROOT" \
   --log-dir "$LOG_DIR" \
   --elect-plugin-use \
+  --fileprovider-testing-mode \
   --require-keychain-config \
   --timeout 2 \
   >"$OUT"
@@ -219,12 +255,16 @@ assert_contains "$OUT" "fileproviderctl domain listing includes io.tinyland.tcfs
 assert_contains "$OUT" "CloudStorage root: $CLOUD_ROOT"
 assert_contains "$OUT" "nudging CloudStorage enumeration"
 assert_contains "$OUT" "electing FileProvider plug-in for current user: io.tinyland.tcfs.fileprovider"
+assert_contains "$OUT" "host app FileProvider testing-mode entitlement present"
+assert_contains "$OUT" "requesting FileProvider testing mode: always enabled"
 assert_contains "$OUT" "hydrated file content matched expected content file"
 assert_contains "$OUT" "FileProvider extension config source: shared Keychain"
 assert_contains "$OUT" "macOS post-install FileProvider smoke passed"
 assert_contains "$OPEN_LOG" "$APP_PATH"
 assert_contains "$OPEN_LOG" "$CLOUD_ROOT"
 assert_contains "$PLUGINKIT_LOG" "pluginkit -e use -i io.tinyland.tcfs.fileprovider"
+assert_contains "$LAUNCHCTL_LOG" "launchctl setenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED 1"
+assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl evaluate"
@@ -240,6 +280,20 @@ assert_fails_contains \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
     bash "$SCRIPT" \
       --require-keychain-config
+
+assert_fails_contains \
+  "host app missing com.apple.developer.fileprovider.testing-mode entitlement" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" TCFS_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
+    bash "$SCRIPT" \
+      --expected-version 0.12.2 \
+      --config "$CONFIG_PATH" \
+      --expected-file "$EXPECTED_REL" \
+      --expected-content-file "$EXPECTED_CONTENT_FILE" \
+      --app-path "$APP_PATH" \
+      --cloud-root "$CLOUD_ROOT" \
+      --log-dir "${TMPDIR}/missing-testing-mode-entitlement-logs" \
+      --fileprovider-testing-mode \
+      --timeout 2
 
 assert_fails_contains \
   "FileProvider extension used build-time embedded config" \
