@@ -1,8 +1,11 @@
 # Lazy Hydration Demo Acceptance
 
-As of April 29, 2026, the core lazy traversal and hydration code exists, but the
-project does not yet have one continuously repeatable demo that proves the
-terminal and Finder user stories end to end.
+As of May 1, 2026, the core lazy traversal and hydration code exists and the
+repo has named harnesses for Linux terminal, mounted-view, Desktop-to-honey,
+and macOS Finder/FileProvider proof. The remaining gap is evidence coverage:
+Linux still needs an archived FUSE-capable host run, and GitHub-hosted macOS is
+blocked at Apple's FileProvider user-enable boundary unless the package carries
+Apple's testing-mode entitlement.
 
 This runbook is the acceptance target for the persistent demo goal:
 
@@ -130,6 +133,28 @@ That task runs shell syntax checks, shellcheck, the mounted-smoke helper
 regression suite, and the `tcfs-vfs` tests that lock the clean-name and
 lazy-cache contract. It does not replace the Linux FUSE demo or clean-host
 Finder acceptance runs; those still need the appropriate host surface.
+
+## Linux <> Finder Parity Contract
+
+Linux and Finder should prove the same user story even though the platform
+representations differ. Treat Linux FUSE/NFS as the scriptable reference lane
+and Finder/FileProvider as the native desktop lane.
+
+| User behavior | Linux mounted surface | macOS Finder/FileProvider | Current proof state |
+| --- | --- | --- | --- |
+| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | Core code and mounted helper are covered; Linux FUSE evidence and clean-host Finder evidence are still pending |
+| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | Local Finder pass exists on a user-enabled Mac; hosted production package reaches FileProvider but is disabled by macOS |
+| Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | Linux harness covers cache-clear rehydrate; Finder evict/unsync remains follow-on evidence |
+| Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder and prove daemon/FileProvider conflict/status behavior | Not yet release-gated on either desktop surface |
+| Observe health | CLI status, daemon logs, mounted-smoke transcript | Finder state, FileProvider logs, badges/progress when available | CLI/log evidence exists; Finder badges/progress are observational only |
+
+This means the FileProvider blocker does not freeze all parity work. The next
+non-Apple proof is to run `task lazy:linux-demo` on a FUSE-capable Linux host
+against a disposable remote prefix and archive its evidence directory. The next
+Apple proof is either a lab/self-hosted Mac where `TCFSProvider` can be enabled
+in System Settings, or a non-production testing-mode package signed with an
+Apple-granted host profile containing
+`com.apple.developer.fileprovider.testing-mode`.
 
 Required proof:
 
@@ -287,6 +312,14 @@ GitHub-hosted macOS runners need a public reachable S3-compatible endpoint for
 this lane. Tailscale-only, RFC1918, localhost, and CGNAT endpoints are not
 sufficient for the hosted executor.
 
+As of the `v0.12.7` hosted smoke, that endpoint/config/package portion is no
+longer the observed blocker. The published production `.pkg` installed,
+passed signing, reached storage, started the daemon, and proved the seeded E2EE
+fixture. The remaining hosted failure was
+`NSFileProviderErrorDomainDisabled` (`-2011`) / `Sync is not enabled for
+"TCFSProvider"` because macOS kept the provider disabled for that runner user.
+Do not keep cutting production release tags solely to retry this state.
+
 ## Hygiene TODO
 
 - [x] Add a mounted-surface smoke helper for clean `ls`/`cat` hydration proof.
@@ -331,8 +364,10 @@ sufficient for the hosted executor.
       signing so Keychain provisioning is actually exercised.
 - [x] Add a Finder smoke gate that requires extension logs proving shared
       Keychain config and rejects embedded diagnostic config.
-- [ ] Provision/sign the macOS FileProvider host app and extension so the
-      Keychain access group works without embedded diagnostic config.
+- [x] Provision/sign the production macOS FileProvider host app and extension
+      so the Keychain access group works without embedded diagnostic config.
+- [ ] Obtain an Apple testing-mode host profile or use a lab/self-hosted Mac
+      where `TCFSProvider` can be enabled for clean-host Finder proof.
 - [x] Decide whether the non-`TIN-133` M10 Linear mirrors should remain open or
       be closed/superseded.
 - [x] Decide whether the demo backend is disposable public S3 or the on-prem

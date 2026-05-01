@@ -1,6 +1,6 @@
 # odrive Parity And Product Horizon
 
-As of April 29, 2026, `tummycrypt` should treat odrive parity as a product
+As of May 1, 2026, `tummycrypt` should treat odrive parity as a product
 behavior target, not an implementation target.
 
 The useful odrive lessons are visible user workflows:
@@ -69,6 +69,31 @@ polished desktop product. The strongest current proof is still Linux CLI/daemon
 and real-host backend sync. The weakest proof remains macOS Finder from package
 install through register, enumerate, hydrate, mutate, conflict, and visible
 status.
+
+The `v0.12.7` evidence tightened that boundary. The production `.pkg` installs
+on GitHub-hosted macOS, passes signing/profile checks, provisions storage
+config, starts `tcfsd`, reaches the public S3 backend, and proves the seeded
+E2EE fixture. A local user-enabled Mac also proves FileProvider enumeration and
+exact-content hydration. Hosted Finder proof is still blocked because macOS
+keeps the provider disabled for the runner user unless TCFS gets an
+Apple-granted FileProvider testing-mode host profile or runs on a lab Mac where
+the provider can be enabled.
+
+## Linux <> Finder Parity Evidence
+
+Parity should be assessed at the user-behavior level:
+
+| Behavior | Linux expectation | Finder expectation |
+| --- | --- | --- |
+| Browse remote trees before download | `find` / `ls` over a mounted TCFS view shows clean names from remote index entries | Finder/CloudStorage shows FileProvider items/placeholders without raw `.tc` names |
+| Hydrate on open | `cat` streams exact content and fills the VFS cache | opening or requesting download hydrates exact content through FileProvider |
+| Free space safely | unsync/dehydrate or cache clear returns the mounted item to remote-backed state | evict/dehydrate returns to placeholder/dataless state |
+| Repeat hydration | a second open rehydrates exact content | a second Finder open or coordinated read rehydrates exact content |
+| Show lifecycle state | CLI/TUI/daemon status reports active/synced/conflict states | Finder badges/progress/notifications reflect the same status classes |
+| Keep scriptability | every desktop action has a CLI/headless equivalent | Finder is native UX, not the only control plane |
+
+The Linux proof lane can continue without waiting for Apple. The Finder lane is
+the one gated on FileProvider enablement in the hosted environment.
 
 ## Product Pillars
 

@@ -1,9 +1,9 @@
 # Product Reality And Priority
 
-As of April 29, 2026, `tummycrypt` is in a much better state operationally than
+As of May 1, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
-The latest release is `v0.12.2`, and most release-facing surfaces now have
+The latest release is `v0.12.7`, and most release-facing surfaces now have
 explicit proof paths. The important distinction is that `buildable`,
 `packaged`, and `actually proven in user-facing flows` are still different
 things.
@@ -20,8 +20,8 @@ Use this document as the short answer to:
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
-| Lazy traversal / hydration | core code exists; end-to-end demo proof is still pending | `tcfs-vfs`/FUSE implementation plus the lazy hydration demo runbook |
-| macOS | experimental but real | build + packaging + partial release smoke + manual desktop path |
+| Lazy traversal / hydration | core code and harnesses exist; archived Linux FUSE and clean-host Finder evidence are still pending | `tcfs-vfs`/FUSE implementation plus the lazy hydration demo runbook |
+| macOS | experimental but real; `v0.12.7` proves package/signing/storage/daemon and local user-enabled FileProvider hydration, while hosted FileProvider is blocked by Apple's disabled-domain boundary | build + packaging + hosted smoke diagnostics + manual desktop path |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
 
@@ -34,7 +34,7 @@ This is the narrowest and most important truth for public release claims.
 | Surface | Status | Current reality |
 | --- | --- | --- |
 | Homebrew | pass | fresh install and upgrade proved on `v0.12.2` |
-| macOS `.pkg` | partial pass | upgrade proved on `v0.12.2`; fresh clean-machine install still needs its own lane |
+| macOS `.pkg` | partial pass | `v0.12.7` installs, signs, provisions storage config, starts the daemon, and proves E2EE on GitHub-hosted macOS; Finder/FileProvider remains gated by provider enablement |
 | `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; Debian 12 is not currently a truthful target for the shipped package deps |
 | `.rpm` | pass | fresh install proved in Fedora container |
 | container image | pass | version and worker-mode startup proved |
@@ -43,7 +43,7 @@ This is the narrowest and most important truth for public release claims.
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
 Install-to-first-use bridge:
 [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md).
-Per-release evidence freeze for `v0.12.2`:
+Historical per-release evidence freeze for `v0.12.2`:
 [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md).
 
 ### 2. Continuous CI / Build Proof
@@ -104,9 +104,10 @@ Canonical docs:
 ### Lazy Traversal And Hydration Demo
 
 The filesystem implementation can list remote index entries and hydrate content
-on open, but the repo still needs a named demo lane that proves the exact user
-story: `cd`, `ls`, `cat`, dehydrate/unsync, and rehydrate against real remote
-state. The canonical acceptance target is now
+on open, and the repo now has named Linux, mounted-view, Desktop-to-honey, and
+Finder/FileProvider harnesses. The repo still needs archived host evidence that
+proves the exact user story: `cd`, `ls`, `cat`, dehydrate/unsync, and rehydrate
+against real remote state. The canonical acceptance target is now
 [Lazy Hydration Demo Acceptance](lazy-hydration-demo.md).
 
 The representation contract for that demo is:
@@ -179,15 +180,15 @@ Today’s weakest user story is:
 If the goal is better product reality rather than more code surface, the next
 work should be ordered like this:
 
-1. **Lazy traversal and hydration demo acceptance**
+1. **Linux lazy traversal and hydration evidence**
    - seed a real backend fixture
    - prove `cd`/`ls` before hydration
    - prove `cat` hydrates and returns exact content
    - prove dehydrate/unsync followed by rehydrate
 2. **Apple desktop acceptance**
-   - clean-machine `.pkg` install lane
-   - named Finder/FileProvider smoke from install through mutate/conflict
-   - make desktop proof more than manual spot-checking
+   - stop retrying hosted production packages until FileProvider can be enabled
+   - obtain Apple's FileProvider testing-mode host profile or use a lab/self-hosted Mac
+   - extend the named Finder/FileProvider smoke from read/hydrate into mutate/conflict
 3. **odrive-style lifecycle productionization**
    - surface `FileSyncStatus`, progress, and conflict state in CLI/TUI/Finder
    - prove `PathLocks`, dirty-child unsync, auto-unsync, and blacklist behavior
@@ -256,11 +257,13 @@ The current parity summary and Desktop/honey demo contract live in
 
 ## Linear Mirror State
 
-As of April 29, 2026, Linear is a useful management mirror but is not the
+As of May 1, 2026, Linear is a useful management mirror but is not the
 freshest truth source for `tummycrypt`.
 
 - `TIN-133` has been retitled to `Prove lazy traversal and Finder/FileProvider
   hydration reality` and now points at GitHub `#309` plus the current repo docs.
+  The latest comments mirror the `v0.12.7` release/smoke evidence and the
+  remaining Apple testing-mode or lab-Mac dependency.
 - `TIN-131` and `TIN-132` remain in Backlog under `Tummycrypt M10: Usage
   Reality & Product Parity`; their descriptions were refreshed on April 29,
   2026 to separate current repo truth from the older GitHub issue framing they
