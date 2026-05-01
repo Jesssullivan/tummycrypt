@@ -525,6 +525,54 @@ Use that path only with an Apple provisioning profile that grants the
 testing-mode entitlement. A normal production `v0.12.6` package is expected to
 fail that preflight.
 
+Once Apple has granted a testing-mode host profile, store it separately from the
+production host profile:
+
+```bash
+base64 -i ~/Downloads/tcfs-host-testing-mode-developer-id.provisionprofile \
+  | gh secret set TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64
+```
+
+Then build the non-release testing package from an existing release tag:
+
+```bash
+gh workflow run macos-fileprovider-testing-mode-pkg.yml \
+  -f tag=v0.12.6
+
+TESTING_PKG_RUN_ID="$(gh run list \
+  --workflow macos-fileprovider-testing-mode-pkg.yml \
+  --event workflow_dispatch \
+  --limit 1 \
+  --json databaseId \
+  --jq '.[0].databaseId')"
+
+gh run watch "$TESTING_PKG_RUN_ID" --exit-status
+```
+
+If that run uploads `dist-testing-mode-pkg`, feed that run id into the hosted
+post-install smoke:
+
+```bash
+gh workflow run macos-postinstall-smoke.yml \
+  -f tag=v0.12.6 \
+  -f package_artifact_run_id="$TESTING_PKG_RUN_ID" \
+  -f package_artifact_name=dist-testing-mode-pkg \
+  -f fileprovider_testing_mode=true
+
+SMOKE_RUN_ID="$(gh run list \
+  --workflow macos-postinstall-smoke.yml \
+  --event workflow_dispatch \
+  --limit 1 \
+  --json databaseId \
+  --jq '.[0].databaseId')"
+
+gh run watch "$SMOKE_RUN_ID" --exit-status
+```
+
+Do not point `fileprovider_testing_mode=true` at the default release package.
+That is intentionally a production artifact and should not carry Apple's
+testing-mode entitlement.
+
 ### Manual Procedure
 
 The script above codifies the manual steps below. Keep them here as the
