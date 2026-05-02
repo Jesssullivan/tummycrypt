@@ -142,6 +142,7 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 - [odrive Parity and Product Horizon](ops/odrive-parity-product-horizon.md) — behavioral parity target, Desktop demo boundaries, and productionization backlog
 - [Apple Surface Status](ops/apple-surface-status.md) — current reality for macOS and iOS claims
 - [macOS Finder and FileProvider Reality](ops/macos-fileprovider-reality.md) — current macOS desktop workflow, proof gaps, and manual acceptance lane
+- [macOS FileProvider Testing-Mode Strategy](ops/macos-fileprovider-testing-mode-strategy.md) — Apple profile-type constraints, registered-Mac CI plan, and testing-mode proof gates
 - [iOS Surface Status](ops/ios-surface-status.md) — current iOS scope, proof bar, and maintenance expectation
 
 ### RFCs

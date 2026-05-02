@@ -551,26 +551,51 @@ Use that path only with an Apple provisioning profile that grants the
 testing-mode entitlement. A normal production `v0.12.7` package is expected to
 fail that preflight.
 
-Once Apple has granted a testing-mode host profile, store it separately from the
-production host profile:
+May 1, 2026 Apple Developer follow-up changed the shape of this lane:
+
+- enabling FileProvider Testing Mode on the host App ID invalidated and required
+  regenerating the production host profile
+- the regenerated production Developer ID host profile is valid for
+  `io.tinyland.tcfs`, App Groups, and Keychain access, and is now the correct
+  production host profile input
+- a separate `tcfs-host-testing-mode-developer-id` Developer ID profile was also
+  generated as a probe, but the decoded profile still did not include
+  `com.apple.developer.fileprovider.testing-mode`
+- Apple documentation allows managed capabilities to be limited to a subset of
+  distribution options such as development or ad hoc; that matches the observed
+  TCFS profile behavior
+
+So the remaining testing-mode path is no longer a Developer ID hosted package.
+It needs a registered Mac plus Mac App Development or Ad Hoc host/extension
+profiles that actually carry the entitlement. The detailed plan is
+[macOS FileProvider Testing-Mode Strategy](macos-fileprovider-testing-mode-strategy.md).
+
+Once a Mac App Development or Ad Hoc host profile exists and terminal decoding
+proves it carries the entitlement, store it separately from the production host
+profile:
 
 ```bash
-base64 -i ~/Downloads/tcfs-host-testing-mode-developer-id.provisionprofile \
+base64 -i ~/Downloads/tcfs-host-development-testing-mode.provisionprofile \
   | gh secret set TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64
 ```
 
-Then use the dispatch helper:
+The current helper still represents the earlier Developer ID hosted-runner
+assumption:
 
 ```bash
 scripts/macos-fileprovider-testing-mode-dispatch.sh --tag v0.12.7
 ```
 
-That helper checks for the testing-mode host profile secret, dispatches the
-non-release testing package workflow, waits for it by default, then dispatches
-the hosted post-install smoke with the package artifact run id. To inspect the
-GitHub Actions calls without dispatching anything, use `--dry-run`.
+Do not use it for live proof until the workflow has been refactored for a
+registered-Mac development/ad hoc lane. Today it checks for the testing-mode
+host profile secret, dispatches the non-release testing package workflow, waits
+for it by default, then dispatches the hosted post-install smoke with the
+package artifact run id. That shape will still fail for development/ad hoc
+profiles because the build and smoke run are not targeted at a registered Mac.
+To inspect the current GitHub Actions calls without dispatching anything, use
+`--dry-run`.
 
-The manual form is:
+The legacy manual form for the current, not-yet-refactored workflow is:
 
 ```bash
 gh workflow run macos-fileprovider-testing-mode-pkg.yml \
@@ -586,8 +611,8 @@ TESTING_PKG_RUN_ID="$(gh run list \
 gh run watch "$TESTING_PKG_RUN_ID" --exit-status
 ```
 
-If that run uploads `dist-testing-mode-pkg`, feed that run id into the hosted
-post-install smoke:
+If that run uploads `dist-testing-mode-pkg`, the old hosted shape feeds that
+run id into the hosted post-install smoke:
 
 ```bash
 gh workflow run macos-postinstall-smoke.yml \
