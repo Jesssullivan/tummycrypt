@@ -597,6 +597,13 @@ then dispatches the post-install smoke with the package artifact run id and
 `fileprovider_testing_mode=true`. To inspect the GitHub Actions calls without
 dispatching anything, use `--dry-run`.
 
+Before dispatching, the helper checks GitHub's self-hosted runner API for an
+online macOS runner carrying the requested label. If
+`repos/Jesssullivan/tummycrypt/actions/runners` returns no matching
+`petting-zoo-mini` runner, enroll the repository-scoped macOS runner first or
+rerun with `--skip-runner-check` only when you intentionally want the job to
+queue.
+
 The equivalent manual form is:
 
 ```bash

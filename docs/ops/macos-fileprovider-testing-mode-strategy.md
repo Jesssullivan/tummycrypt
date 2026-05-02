@@ -178,6 +178,58 @@ As of May 2, 2026, the repo has a first lab-lane implementation:
 - `scripts/macos-fileprovider-testing-mode-dispatch.sh` dispatches both the
   package build and smoke to `petting-zoo-mini` by default
 
+## Lab Runner Enrollment
+
+The `../blahaj` runner material is useful context, but it should not be the
+control plane for this lane:
+
+- Blahaj's current GitHub self-hosted runner path is the cluster/OpenTofu
+  `tinyland-nix` lane, backed by ARC and `arc-systems`.
+- Blahaj's petting-zoo-mini runner notes are GitLab/Colima-era diagnostics,
+  including a historical containerd failure mode. They are not current
+  GitHub Actions enrollment guidance.
+- Blahaj explicitly routes petting-zoo-mini host/network authority to adjacent
+  host and network repos. TCFS can consume the host as a lab runner, but should
+  keep the FileProvider workflow contract in this repo.
+
+Use a native repository-scoped GitHub Actions runner on petting-zoo-mini for
+Finder/FileProvider proof. Do not use ARC for this job: ARC runs Kubernetes
+runner pods, while this proof needs the actual macOS user session, Keychain,
+provisioning profiles, `/Applications` install path, Finder/FileProvider
+services, and local `launchd` runner service.
+
+Enrollment shape:
+
+1. In `Jesssullivan/tummycrypt`, open
+   `Settings -> Actions -> Runners -> New self-hosted runner -> macOS`.
+2. On petting-zoo-mini, install the runner under the dedicated runner user.
+   Keep the GitHub registration token out of the repo and logs.
+3. Configure it as a repository runner with default labels plus custom labels:
+   `petting-zoo-mini,tcfs-fileprovider-lab`.
+4. Install it as a macOS service with the runner's `svc.sh`, then verify
+   `./svc.sh status` reports the `launchd` service as started.
+5. Install the Apple Development certificate and Mac App Development
+   provisioning profiles under the same runner user's Keychain and
+   `~/Library/MobileDevice/Provisioning Profiles`.
+6. Confirm GitHub sees the runner before dispatch:
+
+   ```bash
+   gh api repos/Jesssullivan/tummycrypt/actions/runners \
+     --jq '.runners[]? | [.name, .os, .status, ([.labels[].name] | join(","))] | @tsv'
+   ```
+
+The dispatch helper now performs this runner-visibility check by default and
+fails before dispatch if GitHub cannot see an online macOS runner with the
+requested label. Use `--skip-runner-check` only when intentionally queueing a
+job while the runner is being enrolled.
+
+GitHub references for this runner model:
+
+- <https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow>
+- <https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job>
+- <https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/monitor-and-troubleshoot?platform=mac>
+- <https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/use-arc-in-a-workflow>
+
 Once the Mac App Development profiles exist on `petting-zoo-mini`, run:
 
 ```bash

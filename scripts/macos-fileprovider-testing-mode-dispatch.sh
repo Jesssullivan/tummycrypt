@@ -18,6 +18,7 @@ RUN_ID_POLL_SECONDS="${TCFS_GH_RUN_ID_POLL_SECONDS:-2}"
 DRY_RUN=0
 WATCH=1
 SKIP_SECRET_CHECK=0
+SKIP_RUNNER_CHECK="${TCFS_SKIP_LAB_RUNNER_CHECK:-0}"
 PACKAGE_RUN_ID=""
 
 usage() {
@@ -34,6 +35,7 @@ Options:
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion
   --skip-secret-check     Deprecated no-op; the lab lane uses local runner profiles
+  --skip-runner-check     Allow dispatch even if GitHub does not currently see the runner
   -h, --help              Show this help
 USAGE
 }
@@ -100,6 +102,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_SECRET_CHECK=1
       shift
       ;;
+    --skip-runner-check)
+      SKIP_RUNNER_CHECK=1
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -126,6 +132,11 @@ fi
 
 print_dry_run() {
   local package_run_id="$PACKAGE_RUN_ID"
+
+  cat <<EOF
+# Preflight: require an online macOS self-hosted runner in $REPO with label $RUNNER_LABEL
+gh api --paginate "repos/$REPO/actions/runners" --jq '.runners[]? | [.name, .os, .status, (.labels | map(.name) | join(","))] | @tsv'
+EOF
 
   if [[ -z "$package_run_id" ]]; then
     package_run_id="<testing-mode-package-run-id>"
@@ -193,6 +204,89 @@ verify_release_cli_asset() {
     | grep -Fxq "$asset"; then
     die "release $TAG does not expose required asset $asset"
   fi
+}
+
+label_list_contains() {
+  local labels="$1"
+  local wanted="$2"
+  local label
+  local -a label_array
+
+  IFS=',' read -r -a label_array <<< "$labels"
+  for label in "${label_array[@]}"; do
+    if [[ "$label" == "$wanted" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+verify_lab_runner_available() {
+  if [[ "$SKIP_RUNNER_CHECK" == "1" ]]; then
+    log "Skipping runner visibility check for $RUNNER_LABEL"
+    return 0
+  fi
+
+  local rows
+  if ! rows="$(gh api --paginate "repos/$REPO/actions/runners" \
+    --jq '.runners[]? | [.name, .os, .status, (.labels | map(.name) | join(","))] | @tsv')"; then
+    die "could not list self-hosted runners for $REPO; rerun with --skip-runner-check only if you intentionally want GitHub to queue the job"
+  fi
+
+  local saw_runner=0
+  local saw_label=0
+  local saw_macos=0
+  local runner_name
+  local runner_os
+  local runner_status
+  local runner_labels
+  local candidates=()
+
+  while IFS=$'\t' read -r runner_name runner_os runner_status runner_labels; do
+    if [[ -z "$runner_name" ]]; then
+      continue
+    fi
+
+    saw_runner=1
+
+    if ! label_list_contains "$runner_labels" "$RUNNER_LABEL"; then
+      continue
+    fi
+
+    saw_label=1
+    candidates+=("$runner_name os=$runner_os status=$runner_status labels=$runner_labels")
+
+    if [[ "$runner_os" != "macos" ]]; then
+      continue
+    fi
+
+    saw_macos=1
+
+    if [[ "$runner_status" != "online" ]]; then
+      continue
+    fi
+
+    log "Found online macOS runner $runner_name with label $RUNNER_LABEL"
+    return 0
+  done <<< "$rows"
+
+  if [[ "$saw_runner" == "0" ]]; then
+    die "GitHub sees no self-hosted runners for $REPO. Enroll petting-zoo-mini as a repository runner with label $RUNNER_LABEL before dispatching."
+  fi
+
+  if [[ "$saw_label" == "0" ]]; then
+    die "GitHub sees self-hosted runners for $REPO, but none has label $RUNNER_LABEL"
+  fi
+
+  printf 'Candidates with label %s:\n' "$RUNNER_LABEL" >&2
+  printf '  %s\n' "${candidates[@]}" >&2
+
+  if [[ "$saw_macos" == "0" ]]; then
+    die "runner label $RUNNER_LABEL exists, but not on a macOS runner"
+  fi
+
+  die "runner label $RUNNER_LABEL exists on macOS, but no matching runner is online"
 }
 
 latest_dispatch_run_id() {
@@ -268,6 +362,8 @@ dispatch_and_capture_run_id() {
 
   printf '%s\n' "$run_id"
 }
+
+verify_lab_runner_available
 
 if [[ -z "$PACKAGE_RUN_ID" ]]; then
   verify_release_cli_asset
