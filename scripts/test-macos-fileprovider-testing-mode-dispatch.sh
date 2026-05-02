@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Regression tests for the hosted FileProvider testing-mode dispatch helper.
+# Regression tests for the lab FileProvider testing-mode dispatch helper.
 #
 set -euo pipefail
 
@@ -58,13 +58,16 @@ bash "$SCRIPT" \
   --repo owner/repo \
   --ref main \
   >"$DRY_RUN_OUT"
-assert_contains "$DRY_RUN_OUT" "gh workflow run \"macos-fileprovider-testing-mode-pkg.yml\" --repo \"owner/repo\" --ref \"main\" -f tag=\"v9.9.9\""
+assert_contains "$DRY_RUN_OUT" "gh workflow run \"macos-fileprovider-testing-mode-pkg.yml\" --repo \"owner/repo\" --ref \"main\""
+assert_contains "$DRY_RUN_OUT" "-f tag=\"v9.9.9\""
+assert_contains "$DRY_RUN_OUT" "-f runner_label=\"petting-zoo-mini\""
 assert_contains "$DRY_RUN_OUT" "grep -Fx \"tcfs-9.9.9-macos-aarch64.tar.gz\""
 assert_contains "$DRY_RUN_OUT" "gh api \"repos/owner/repo/actions/runs/<testing-mode-package-run-id>/artifacts\""
 assert_contains "$DRY_RUN_OUT" "grep -Fx \"dist-testing-mode-pkg\""
 assert_contains "$DRY_RUN_OUT" "-f package_artifact_run_id=\"<testing-mode-package-run-id>\""
 assert_contains "$DRY_RUN_OUT" "-f fileprovider_testing_mode=true"
 assert_contains "$DRY_RUN_OUT" "gh run watch \"<postinstall-smoke-run-id>\""
+assert_not_contains "$DRY_RUN_OUT" "gh secret list"
 
 DRY_RUN_NO_WATCH_OUT="${TMPDIR}/dry-run-no-watch.out"
 bash "$SCRIPT" \
@@ -74,7 +77,7 @@ bash "$SCRIPT" \
   --ref main \
   --no-watch \
   >"$DRY_RUN_NO_WATCH_OUT"
-assert_contains "$DRY_RUN_NO_WATCH_OUT" "gh secret list"
+assert_not_contains "$DRY_RUN_NO_WATCH_OUT" "gh secret list"
 assert_contains "$DRY_RUN_NO_WATCH_OUT" "gh release view"
 assert_contains "$DRY_RUN_NO_WATCH_OUT" "gh workflow run \"macos-fileprovider-testing-mode-pkg.yml\""
 assert_not_contains "$DRY_RUN_NO_WATCH_OUT" "actions/runs/<testing-mode-package-run-id>/artifacts"
@@ -109,6 +112,7 @@ assert_contains "$DRY_RUN_EXISTING_OUT" "gh api \"repos/owner/repo/actions/runs/
 assert_contains "$DRY_RUN_EXISTING_OUT" "grep -Fx \"dist-testing-mode-pkg\""
 assert_contains "$DRY_RUN_EXISTING_OUT" "-f package_artifact_run_id=\"123456\""
 assert_contains "$DRY_RUN_EXISTING_OUT" "-f fileprovider_testing_mode=true"
+assert_contains "$DRY_RUN_EXISTING_OUT" "-f runner_label=\"petting-zoo-mini\""
 assert_contains "$DRY_RUN_EXISTING_OUT" "gh run watch \"<postinstall-smoke-run-id>\""
 
 DRY_RUN_EXISTING_NO_WATCH_OUT="${TMPDIR}/dry-run-existing-no-watch.out"
@@ -132,6 +136,10 @@ assert_fails_contains \
   "tag must start with 'v'" \
   bash "$SCRIPT" --dry-run --tag 9.9.9
 
+assert_fails_contains \
+  "FileProvider testing-mode requires a registered self-hosted Mac runner label" \
+  bash "$SCRIPT" --dry-run --tag v9.9.9 --runner-label macos-15
+
 FAKE_BIN="${TMPDIR}/fake-bin"
 mkdir -p "$FAKE_BIN"
 cat >"$FAKE_BIN/gh" <<'EOF'
@@ -141,9 +149,6 @@ printf ' %q' "$@" >>"$TCFS_FAKE_GH_LOG"
 printf '\n' >>"$TCFS_FAKE_GH_LOG"
 
 case "${1:-} ${2:-}" in
-  "secret list")
-    printf 'TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64\n'
-    ;;
   "workflow view")
     ;;
   "workflow run")
@@ -202,9 +207,9 @@ bash "$SCRIPT" \
   >"${TMPDIR}/no-watch.out" \
   2>"${TMPDIR}/no-watch.err"
 
-assert_contains "$FAKE_LOG" "gh secret list --repo owner/repo --json name --jq"
+assert_not_contains "$FAKE_LOG" "gh secret list"
 assert_contains "$FAKE_LOG" "gh release view v1.2.3 --repo owner/repo --json"
-assert_contains "$FAKE_LOG" "gh workflow run macos-fileprovider-testing-mode-pkg.yml --repo owner/repo --ref main -f tag=v1.2.3"
+assert_contains "$FAKE_LOG" "gh workflow run macos-fileprovider-testing-mode-pkg.yml --repo owner/repo --ref main -f tag=v1.2.3 -f runner_label=petting-zoo-mini"
 assert_contains "$FAKE_LOG" "gh run list --repo owner/repo --workflow macos-fileprovider-testing-mode-pkg.yml"
 assert_contains "${TMPDIR}/no-watch.err" "Waiting for macos-fileprovider-testing-mode-pkg.yml run to appear (1/10)"
 assert_not_contains "$FAKE_LOG" "macos-postinstall-smoke.yml --repo owner/repo --ref main"
@@ -243,6 +248,7 @@ assert_not_contains "$FAKE_LOG" "macos-fileprovider-testing-mode-pkg.yml --repo 
 assert_not_contains "$FAKE_LOG" "gh release view"
 assert_contains "$FAKE_LOG" "gh api repos/owner/repo/actions/runs/123456/artifacts --jq"
 assert_contains "$FAKE_LOG" "gh workflow run macos-postinstall-smoke.yml --repo owner/repo --ref main -f tag=v1.2.3 -f package_artifact_run_id=123456"
+assert_contains "$FAKE_LOG" "-f runner_label=petting-zoo-mini"
 assert_contains "${TMPDIR}/existing.err" "Post-install smoke dispatched. Watch with: gh run watch 654321 --repo owner/repo --exit-status"
 
 FAKE_LOG="${TMPDIR}/gh-missing-artifact.log"

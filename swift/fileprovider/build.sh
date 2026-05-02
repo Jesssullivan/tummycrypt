@@ -9,10 +9,12 @@
 #   ./build.sh target/release include/tcfs_file_provider.h build/
 #   ./build.sh target/release include/tcfs_file_provider.h build/ "Developer ID Application: ..."
 #   ./build.sh target/release include/tcfs_file_provider.h build/ auto
+#   ./build.sh target/release include/tcfs_file_provider.h build/ auto-development
 #
 # Signing identity:
 #   - omitted or "-":   ad-hoc signing (development)
 #   - "auto":           auto-detect Developer ID Application from Keychain
+#   - "auto-development": auto-detect Apple Development from Keychain
 #   - other string:     use as explicit codesign identity
 
 set -euo pipefail
@@ -58,11 +60,17 @@ else
 fi
 unset SDKROOT
 
-# Auto-detect Developer ID from Keychain
-if [ "$SIGNING_IDENTITY" = "auto" ]; then
-  SIGNING_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
+# Auto-detect a signing identity from Keychain.
+if [ "$SIGNING_IDENTITY" = "auto" ] || [ "$SIGNING_IDENTITY" = "auto-development" ]; then
+  if [ "$SIGNING_IDENTITY" = "auto-development" ]; then
+    IDENTITY_PATTERN="Apple Development"
+  else
+    IDENTITY_PATTERN="Developer ID Application"
+  fi
+
+  SIGNING_IDENTITY=$(security find-identity -v -p codesigning | grep "$IDENTITY_PATTERN" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
   if [ -z "$SIGNING_IDENTITY" ]; then
-    echo "WARNING: No Developer ID Application found in Keychain, falling back to ad-hoc" >&2
+    echo "WARNING: No $IDENTITY_PATTERN identity found in Keychain, falling back to ad-hoc" >&2
     SIGNING_IDENTITY="-"
   else
     echo "==> Auto-detected signing identity: $SIGNING_IDENTITY"
@@ -370,7 +378,7 @@ echo "==> Signing..."
 FINDER_SYNC_ENTITLEMENTS="$SCRIPT_DIR/resources/FinderSync.entitlements"
 
 if [ "$SIGNING_IDENTITY" != "-" ]; then
-    echo "    Identity: $SIGNING_IDENTITY (Developer ID)"
+    echo "    Identity: $SIGNING_IDENTITY"
     /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
         --options runtime "$CODESIGN_TIMESTAMP_ARG" \
         --entitlements "$EXT_ENTITLEMENTS" \

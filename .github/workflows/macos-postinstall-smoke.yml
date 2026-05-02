@@ -37,6 +37,11 @@ on:
         required: false
         default: "dist-testing-mode-pkg"
         type: string
+      runner_label:
+        description: "Runner label. Use petting-zoo-mini for FileProvider testing-mode."
+        required: false
+        default: "macos-15"
+        type: string
 
 permissions:
   contents: read
@@ -46,7 +51,7 @@ jobs:
   pkg-postinstall:
     name: macOS .pkg post-install smoke
     if: github.repository == 'Jesssullivan/tummycrypt'
-    runs-on: macos-15
+    runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 40
     environment: tcfs-macos-smoke
     env:
@@ -78,6 +83,7 @@ jobs:
           PACKAGE_URL="${{ github.event.inputs.package_url }}"
           PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
           FILEPROVIDER_TESTING_MODE="${{ github.event.inputs.fileprovider_testing_mode }}"
+          RUNNER_LABEL="${{ github.event.inputs.runner_label }}"
           [[ "$TAG" == v* ]] || {
             echo "::error::tag must start with 'v' (got '$TAG')"
             exit 1
@@ -90,6 +96,11 @@ jobs:
 
           if [[ "$FILEPROVIDER_TESTING_MODE" == "true" && -z "$PACKAGE_URL" && -z "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
             echo "::error::fileprovider_testing_mode=true requires package_artifact_run_id or package_url for a testing-mode package"
+            exit 1
+          fi
+
+          if [[ "$FILEPROVIDER_TESTING_MODE" == "true" && "$RUNNER_LABEL" == macos-* ]]; then
+            echo "::error::fileprovider_testing_mode=true requires a registered self-hosted Mac runner label, not $RUNNER_LABEL"
             exit 1
           fi
 
@@ -110,6 +121,11 @@ jobs:
             echo "::error::Missing required tcfs-macos-smoke environment secrets: ${missing[*]}"
             echo "Set the storage and E2EE smoke secrets before using this workflow."
             exit 1
+          fi
+
+          if [[ "$RUNNER_LABEL" != macos-* ]]; then
+            echo "Self-hosted runner label $RUNNER_LABEL: allowing private storage endpoint classes."
+            exit 0
           fi
 
           python3 - "$TCFS_SMOKE_S3_ENDPOINT" <<'PY'
@@ -266,9 +282,12 @@ jobs:
         run: |
           set -euo pipefail
           args=(
-            --pkg "$PACKAGE_PATH" \
-            --require-signature
+            --pkg "$PACKAGE_PATH"
           )
+
+          if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" != "true" ]]; then
+            args+=(--require-signature)
+          fi
 
           if [[ "${{ github.event.inputs.require_current_postinstall }}" == "true" ]]; then
             args+=(--expected-postinstall scripts/macos-pkg-postinstall.sh)
@@ -284,7 +303,7 @@ jobs:
           set -euo pipefail
           sudo installer -pkg "$PACKAGE_PATH" -target /
 
-      - name: Verify installed FileProvider production signing
+      - name: Verify installed FileProvider signing
         shell: bash
         run: |
           set -euo pipefail

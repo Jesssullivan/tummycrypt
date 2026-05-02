@@ -152,7 +152,7 @@ tasks:
       - bash scripts/test-macos-pkg-structure-smoke.sh
 
   lazy:test-macos-fileprovider-testing-mode-dispatch:
-    desc: Regression-test the hosted macOS FileProvider testing-mode dispatch helper
+    desc: Regression-test the lab macOS FileProvider testing-mode dispatch helper
     cmds:
       - bash scripts/test-macos-fileprovider-testing-mode-dispatch.sh
 

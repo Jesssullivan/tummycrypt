@@ -25,6 +25,18 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local file="$1"
+  local unexpected="$2"
+
+  if grep -Fq -- "$unexpected" "$file"; then
+    printf 'did not expect to find %s in %s\n' "$unexpected" "$file" >&2
+    printf '%s\n' '--- output ---' >&2
+    cat "$file" >&2
+    exit 1
+  fi
+}
+
 assert_fails_contains() {
   local expected="$1"
   shift
@@ -98,10 +110,11 @@ check_postinstall_workflow_checkout_uses_current_harness() {
 }
 
 check_postinstall_workflow_environment_and_secrets() {
+  # shellcheck disable=SC2016 # Keep the GitHub expression literal intact for YAML comparison.
   ruby -ryaml -e '
     workflow = YAML.load_file(ARGV[0])
     job = workflow.fetch("jobs").fetch("pkg-postinstall")
-    expected_runner = "macos-15"
+    expected_runner = "${{ github.event.inputs.runner_label }}"
     actual_runner = job.fetch("runs-on")
     raise "postinstall runner mismatch: #{actual_runner.inspect}" unless actual_runner == expected_runner
 
@@ -170,17 +183,29 @@ check_testing_mode_is_explicit_opt_in() {
 }
 
 check_testing_mode_package_workflow() {
-  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64"
+  assert_contains "$POSTINSTALL_WORKFLOW" "runner_label:"
+  assert_contains "$POSTINSTALL_WORKFLOW" 'default: "macos-15"'
+  assert_contains "$POSTINSTALL_WORKFLOW" "fileprovider_testing_mode=true requires a registered self-hosted Mac runner label"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "runner_label:"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" 'default: "petting-zoo-mini"'
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "auto-development"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "Apple Development"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "--require-host-entitlement com.apple.developer.fileprovider.testing-mode"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "com.apple.developer.fileprovider.testing-mode"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_CODESIGN_TIMESTAMP=0"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "tcfs-\${VERSION}-macos-aarch64-fileprovider-testing-mode.pkg"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "dist-testing-mode-pkg"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "releases/download/\${TAG}/tcfs-\${VERSION}-macos-aarch64.tar.gz"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "scripts/macos-build-pkg.sh"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "scripts/macos-pkg-structure-smoke.sh"
+  assert_not_contains "$TESTING_MODE_PKG_WORKFLOW" "APPLE_CERTIFICATE_BASE64"
+  assert_not_contains "$TESTING_MODE_PKG_WORKFLOW" "APPLE_INSTALLER_CERTIFICATE_BASE64"
+  assert_not_contains "$TESTING_MODE_PKG_WORKFLOW" "APPLE_NOTARIZE_PASSWORD"
+  assert_not_contains "$TESTING_MODE_PKG_WORKFLOW" "notarytool"
 
-  local validate_step="${TMPDIR}/testing-mode-validate-inputs-and-secrets.sh"
-  local import_profiles_step="${TMPDIR}/testing-mode-import-profiles.sh"
+  local validate_step="${TMPDIR}/testing-mode-validate-inputs-and-runner.sh"
+  local resolve_assets_step="${TMPDIR}/testing-mode-resolve-assets.sh"
   local build_app_step="${TMPDIR}/testing-mode-build-fileprovider-app.sh"
   local verify_signing_step="${TMPDIR}/testing-mode-verify-signing.sh"
   local download_cli_step="${TMPDIR}/testing-mode-download-cli-tarball.sh"
@@ -190,20 +215,24 @@ check_testing_mode_package_workflow() {
   extract_step_from_workflow \
     "$TESTING_MODE_PKG_WORKFLOW" \
     "build-testing-mode-pkg" \
-    "Validate inputs and secrets" \
+    "Validate inputs and runner" \
     "$validate_step"
   bash -n "$validate_step"
-  assert_contains "$validate_step" "Missing required testing-mode package secrets"
+  assert_contains "$validate_step" "FileProvider testing-mode must run on a registered self-hosted Mac"
+  assert_contains "$validate_step" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+  assert_contains "$validate_step" "TCFS_CODESIGN_TIMESTAMP=0"
 
   extract_step_from_workflow \
     "$TESTING_MODE_PKG_WORKFLOW" \
     "build-testing-mode-pkg" \
-    "Import FileProvider testing-mode profiles" \
-    "$import_profiles_step"
-  bash -n "$import_profiles_step"
-  assert_contains "$import_profiles_step" "TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64"
-  assert_contains "$import_profiles_step" "com.apple.developer.fileprovider.testing-mode"
-  assert_contains "$import_profiles_step" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+    "Resolve local Apple Development signing assets" \
+    "$resolve_assets_step"
+  bash -n "$resolve_assets_step"
+  assert_contains "$resolve_assets_step" "Apple Development"
+  assert_contains "$resolve_assets_step" "No local host/extension provisioning profile pair grants FileProvider testing mode"
+  assert_contains "$resolve_assets_step" "--require-host-entitlement com.apple.developer.fileprovider.testing-mode"
+  assert_contains "$resolve_assets_step" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+  assert_contains "$resolve_assets_step" "TCFS_CODESIGN_TIMESTAMP=0"
 
   extract_step_from_workflow \
     "$TESTING_MODE_PKG_WORKFLOW" \
@@ -237,7 +266,7 @@ check_testing_mode_package_workflow() {
     "$build_pkg_step"
   bash -n "$build_pkg_step"
   assert_contains "$build_pkg_step" "scripts/macos-build-pkg.sh"
-  assert_contains "$build_pkg_step" "--sign \"\$PKG_SIGNING_IDENTITY\""
+  assert_not_contains "$build_pkg_step" "--sign"
 
   extract_step_from_workflow \
     "$TESTING_MODE_PKG_WORKFLOW" \
@@ -245,7 +274,7 @@ check_testing_mode_package_workflow() {
     "Verify testing-mode package structure" \
     "$verify_pkg_step"
   bash -n "$verify_pkg_step"
-  assert_contains "$verify_pkg_step" "--require-signature"
+  assert_not_contains "$verify_pkg_step" "--require-signature"
   assert_contains "$verify_pkg_step" "--expected-postinstall scripts/macos-pkg-postinstall.sh"
 }
 
@@ -460,7 +489,7 @@ SIGNING_PREFLIGHT_STEP="${TMPDIR}/verify-installed-fileprovider-production-signi
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \
   "pkg-postinstall" \
-  "Verify installed FileProvider production signing" \
+  "Verify installed FileProvider signing" \
   "$SIGNING_PREFLIGHT_STEP"
 bash -n "$SIGNING_PREFLIGHT_STEP"
 assert_contains "$SIGNING_PREFLIGHT_STEP" "scripts/macos-fileprovider-preflight.sh"

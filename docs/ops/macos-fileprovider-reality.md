@@ -536,16 +536,16 @@ Testing-mode support is intentionally opt-in:
 - the post-install harness option `--fileprovider-testing-mode` verifies the
   installed host app carries the testing-mode entitlement before setting the
   launch environment and launching the app
-- `.github/workflows/macos-fileprovider-testing-mode-pkg.yml` can build a
-  non-release testing-mode `.pkg` artifact named `dist-testing-mode-pkg` when
-  `TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64` is present; it reuses the
-  production FileProvider extension profile and release CLI tarball, but signs
-  the host app with the testing-mode host profile
+- `.github/workflows/macos-fileprovider-testing-mode-pkg.yml` now builds a
+  non-release testing-mode `.pkg` artifact named `dist-testing-mode-pkg` on the
+  registered `petting-zoo-mini` runner; it reuses the release CLI tarball, but
+  signs the FileProvider app with local Apple Development identity/profiles
 - `.github/workflows/macos-postinstall-smoke.yml` can install that package via
   `package_artifact_run_id` plus `fileprovider_testing_mode=true`, so this proof
   does not require publishing a testing-mode package as a GitHub Release; the
   workflow rejects `fileprovider_testing_mode=true` unless a testing package is
-  supplied through `package_artifact_run_id` or `package_url`
+  supplied through `package_artifact_run_id` or `package_url`, and unless the
+  run targets a non-hosted runner label
 
 Use that path only with an Apple provisioning profile that grants the
 testing-mode entitlement. A normal production `v0.12.7` package is expected to
@@ -570,36 +570,39 @@ It needs a registered Mac plus Mac App Development or Ad Hoc host/extension
 profiles that actually carry the entitlement. The detailed plan is
 [macOS FileProvider Testing-Mode Strategy](macos-fileprovider-testing-mode-strategy.md).
 
-Once a Mac App Development or Ad Hoc host profile exists and terminal decoding
-proves it carries the entitlement, store it separately from the production host
-profile:
+Once a Mac App Development host profile exists and terminal decoding proves it
+carries the entitlement, install it on `petting-zoo-mini` for the GitHub runner
+user. The current lab lane deliberately resolves local profiles from the runner
+machine instead of storing development signing material as GitHub repository
+secrets:
 
 ```bash
-base64 -i ~/Downloads/tcfs-host-development-testing-mode.provisionprofile \
-  | gh secret set TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64
+mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+cp path/to/tcfs-host-development-testing-mode.provisionprofile \
+  "$HOME/Library/MobileDevice/Provisioning Profiles/"
+cp path/to/tcfs-fileprovider-development.provisionprofile \
+  "$HOME/Library/MobileDevice/Provisioning Profiles/"
 ```
 
-The current helper still represents the earlier Developer ID hosted-runner
-assumption:
+The helper now targets the `petting-zoo-mini` registered lab Mac by default:
 
 ```bash
-scripts/macos-fileprovider-testing-mode-dispatch.sh --tag v0.12.7
+scripts/macos-fileprovider-testing-mode-dispatch.sh \
+  --tag v0.12.7 \
+  --runner-label petting-zoo-mini
 ```
 
-Do not use it for live proof until the workflow has been refactored for a
-registered-Mac development/ad hoc lane. Today it checks for the testing-mode
-host profile secret, dispatches the non-release testing package workflow, waits
-for it by default, then dispatches the hosted post-install smoke with the
-package artifact run id. That shape will still fail for development/ad hoc
-profiles because the build and smoke run are not targeted at a registered Mac.
-To inspect the current GitHub Actions calls without dispatching anything, use
-`--dry-run`.
+It dispatches the non-release testing package workflow, waits for it by default,
+then dispatches the post-install smoke with the package artifact run id and
+`fileprovider_testing_mode=true`. To inspect the GitHub Actions calls without
+dispatching anything, use `--dry-run`.
 
-The legacy manual form for the current, not-yet-refactored workflow is:
+The equivalent manual form is:
 
 ```bash
 gh workflow run macos-fileprovider-testing-mode-pkg.yml \
-  -f tag=v0.12.7
+  -f tag=v0.12.7 \
+  -f runner_label=petting-zoo-mini
 
 TESTING_PKG_RUN_ID="$(gh run list \
   --workflow macos-fileprovider-testing-mode-pkg.yml \
@@ -619,7 +622,8 @@ gh workflow run macos-postinstall-smoke.yml \
   -f tag=v0.12.7 \
   -f package_artifact_run_id="$TESTING_PKG_RUN_ID" \
   -f package_artifact_name=dist-testing-mode-pkg \
-  -f fileprovider_testing_mode=true
+  -f fileprovider_testing_mode=true \
+  -f runner_label=petting-zoo-mini
 
 SMOKE_RUN_ID="$(gh run list \
   --workflow macos-postinstall-smoke.yml \

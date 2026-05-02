@@ -44,6 +44,7 @@ write_profile() {
   local team="$4"
   local bundle_id="$5"
   local keychain_suffix="$6"
+  local testing_mode="${7:-0}"
 
   cat >"$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -67,6 +68,16 @@ write_profile() {
     <array>
       <string>${team}.${keychain_suffix}</string>
     </array>
+EOF
+
+  if [[ "$testing_mode" == "1" ]]; then
+    cat >>"$path" <<'EOF'
+    <key>com.apple.developer.fileprovider.testing-mode</key>
+    <true/>
+EOF
+  fi
+
+  cat >>"$path" <<'EOF'
   </dict>
 </dict>
 </plist>
@@ -109,7 +120,8 @@ write_profile \
   "HOST-UUID" \
   "QP994XQKNH" \
   "io.tinyland.tcfs" \
-  "group.io.tinyland.tcfs"
+  "group.io.tinyland.tcfs" \
+  1
 write_profile \
   "$PROFILES_DIR/extension.provisionprofile" \
   "TCFS FileProvider Extension" \
@@ -141,6 +153,39 @@ assert_contains "$OUT" "team_prefix: QP994XQKNH"
 assert_contains "$OUT" "TCFS_HOST_PROVISIONING_PROFILE=$PROFILES_DIR/host.provisionprofile"
 assert_contains "$OUT" "TCFS_EXTENSION_PROVISIONING_PROFILE=$PROFILES_DIR/extension.provisionprofile"
 assert_contains "$OUT" "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
+
+TESTING_MODE_OUT="${TMPDIR}/testing-mode.out"
+PATH="$FAKE_BIN:$PATH" bash "$SCRIPT" \
+  --profiles-dir "$PROFILES_DIR" \
+  --require-host-entitlement com.apple.developer.fileprovider.testing-mode \
+  --strict \
+  >"$TESTING_MODE_OUT"
+assert_contains "$TESTING_MODE_OUT" "required host entitlement: com.apple.developer.fileprovider.testing-mode=true"
+assert_contains "$TESTING_MODE_OUT" "host candidates: 1"
+assert_contains "$TESTING_MODE_OUT" "compatible pair: found"
+
+NO_TESTING_PROFILES_DIR="${TMPDIR}/no-testing-mode-profiles"
+mkdir -p "$NO_TESTING_PROFILES_DIR"
+write_profile \
+  "$NO_TESTING_PROFILES_DIR/host.provisionprofile" \
+  "TCFS Host Without Testing Mode" \
+  "HOST-NO-TESTING-UUID" \
+  "QP994XQKNH" \
+  "io.tinyland.tcfs" \
+  "group.io.tinyland.tcfs"
+write_profile \
+  "$NO_TESTING_PROFILES_DIR/extension.provisionprofile" \
+  "TCFS FileProvider Extension" \
+  "EXT-NO-TESTING-UUID" \
+  "QP994XQKNH" \
+  "io.tinyland.tcfs.fileprovider" \
+  "group.io.tinyland.tcfs"
+assert_fails_contains \
+  "compatible pair: not found" \
+  env PATH="$FAKE_BIN:$PATH" bash "$SCRIPT" \
+    --profiles-dir "$NO_TESTING_PROFILES_DIR" \
+    --require-host-entitlement com.apple.developer.fileprovider.testing-mode \
+    --strict
 
 ENV_ONLY_OUT="${TMPDIR}/env-only.out"
 PATH="$FAKE_BIN:$PATH" bash "$SCRIPT" \

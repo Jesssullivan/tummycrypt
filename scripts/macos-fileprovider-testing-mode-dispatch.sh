@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Dispatch the non-production FileProvider testing-mode package workflow, then
-# feed its package artifact into the hosted macOS post-install smoke.
+# Dispatch the non-production FileProvider testing-mode package workflow on a
+# registered self-hosted Mac, then feed its package artifact into the same lab
+# macOS post-install smoke lane.
 #
 set -euo pipefail
 
@@ -11,7 +12,7 @@ TAG="${TAG:-v0.12.7}"
 ARTIFACT_NAME="${ARTIFACT_NAME:-dist-testing-mode-pkg}"
 PACKAGE_WORKFLOW="macos-fileprovider-testing-mode-pkg.yml"
 SMOKE_WORKFLOW="macos-postinstall-smoke.yml"
-TESTING_MODE_SECRET="TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64"
+RUNNER_LABEL="${TCFS_FILEPROVIDER_LAB_RUNNER_LABEL:-petting-zoo-mini}"
 RUN_ID_POLL_ATTEMPTS="${TCFS_GH_RUN_ID_POLL_ATTEMPTS:-10}"
 RUN_ID_POLL_SECONDS="${TCFS_GH_RUN_ID_POLL_SECONDS:-2}"
 DRY_RUN=0
@@ -28,10 +29,11 @@ Options:
   --repo <owner/name>     GitHub repository (default: Jesssullivan/tummycrypt)
   --ref <ref>             Workflow ref to dispatch (default: main)
   --artifact-name <name>  Package artifact name (default: dist-testing-mode-pkg)
+  --runner-label <label>  Registered self-hosted Mac runner label (default: petting-zoo-mini)
   --package-run-id <id>   Skip package workflow dispatch and smoke an existing package run
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion
-  --skip-secret-check     Do not verify TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64
+  --skip-secret-check     Deprecated no-op; the lab lane uses local runner profiles
   -h, --help              Show this help
 USAGE
 }
@@ -76,6 +78,11 @@ while [[ $# -gt 0 ]]; do
       ARTIFACT_NAME="$2"
       shift 2
       ;;
+    --runner-label)
+      require_value "$1" "${2:-}"
+      RUNNER_LABEL="$2"
+      shift 2
+      ;;
     --package-run-id)
       require_value "$1" "${2:-}"
       PACKAGE_RUN_ID="$2"
@@ -106,6 +113,16 @@ done
 if [[ "$TAG" != v* ]]; then
   die "tag must start with 'v' (got '$TAG')"
 fi
+if [[ -z "$RUNNER_LABEL" ]]; then
+  die "runner label must not be empty"
+fi
+if [[ "$RUNNER_LABEL" == macos-* ]]; then
+  die "FileProvider testing-mode requires a registered self-hosted Mac runner label, not $RUNNER_LABEL"
+fi
+
+if [[ "$SKIP_SECRET_CHECK" == "1" ]]; then
+  log "Ignoring --skip-secret-check; testing-mode profiles are resolved locally on $RUNNER_LABEL"
+fi
 
 print_dry_run() {
   local package_run_id="$PACKAGE_RUN_ID"
@@ -113,15 +130,11 @@ print_dry_run() {
   if [[ -z "$package_run_id" ]]; then
     package_run_id="<testing-mode-package-run-id>"
 
-    if [[ "$SKIP_SECRET_CHECK" != "1" ]]; then
-      cat <<EOF
-gh secret list --repo "$REPO" --json name --jq '.[].name' | grep -Fx "$TESTING_MODE_SECRET"
-EOF
-    fi
-
     cat <<EOF
 gh release view "$TAG" --repo "$REPO" --json isDraft,assets --jq '. as \$release | select(\$release.isDraft == false) | .assets[].name' | grep -Fx "tcfs-${TAG#v}-macos-aarch64.tar.gz"
-gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" -f tag="$TAG"
+gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
+  -f tag="$TAG" \\
+  -f runner_label="$RUNNER_LABEL"
 EOF
 
     if [[ "$WATCH" != "1" ]]; then
@@ -142,7 +155,8 @@ gh workflow run "$SMOKE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
   -f package_artifact_run_id="$package_run_id" \\
   -f package_artifact_name="$ARTIFACT_NAME" \\
-  -f fileprovider_testing_mode=true
+  -f fileprovider_testing_mode=true \\
+  -f runner_label="$RUNNER_LABEL"
 EOF
 
   if [[ "$WATCH" != "1" ]]; then
@@ -163,13 +177,6 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 command -v gh >/dev/null 2>&1 || die "gh is required"
-
-if [[ "$SKIP_SECRET_CHECK" != "1" && -z "$PACKAGE_RUN_ID" ]]; then
-  if ! gh secret list --repo "$REPO" --json name --jq '.[].name' \
-    | grep -Fxq "$TESTING_MODE_SECRET"; then
-    die "missing repository secret $TESTING_MODE_SECRET"
-  fi
-fi
 
 gh workflow view "$PACKAGE_WORKFLOW" --repo "$REPO" >/dev/null
 gh workflow view "$SMOKE_WORKFLOW" --repo "$REPO" >/dev/null
@@ -264,7 +271,10 @@ dispatch_and_capture_run_id() {
 
 if [[ -z "$PACKAGE_RUN_ID" ]]; then
   verify_release_cli_asset
-  PACKAGE_RUN_ID="$(dispatch_and_capture_run_id "$PACKAGE_WORKFLOW" -f tag="$TAG")"
+  PACKAGE_RUN_ID="$(dispatch_and_capture_run_id \
+    "$PACKAGE_WORKFLOW" \
+    -f tag="$TAG" \
+    -f runner_label="$RUNNER_LABEL")"
   log "Testing-mode package run: $PACKAGE_RUN_ID"
 
   if [[ "$WATCH" == "1" ]]; then
@@ -284,7 +294,8 @@ SMOKE_RUN_ID="$(dispatch_and_capture_run_id \
   -f tag="$TAG" \
   -f package_artifact_run_id="$PACKAGE_RUN_ID" \
   -f package_artifact_name="$ARTIFACT_NAME" \
-  -f fileprovider_testing_mode=true)"
+  -f fileprovider_testing_mode=true \
+  -f runner_label="$RUNNER_LABEL")"
 log "Post-install smoke run: $SMOKE_RUN_ID"
 
 if [[ "$WATCH" == "1" ]]; then

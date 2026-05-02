@@ -108,6 +108,10 @@ Record results using a table like this:
   published tags can still reach install/Finder proof. NATS is not required for
   the enumerate + hydrate lane, and keychain/app-group failures should be
   treated separately from storage reachability failures.
+- The FileProvider testing-mode lane is separate from that production hosted
+  approximation. It targets the registered `petting-zoo-mini` self-hosted Mac
+  through the same post-install workflow's `runner_label` input and installs a
+  non-release testing package artifact, not a published Developer ID package.
 - The macOS `.pkg` postinstall installs `io.tinyland.tcfsd.plist` under
   `/Library/LaunchAgents`, not `$HOME/Library/LaunchAgents`, because installer
   scripts run as root. It also asks LaunchServices to register the containing

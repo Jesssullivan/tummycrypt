@@ -8,6 +8,21 @@ on:
         required: true
         default: "v0.12.7"
         type: string
+      runner_label:
+        description: "Registered self-hosted Mac runner label"
+        required: true
+        default: "petting-zoo-mini"
+        type: string
+      signing_identity:
+        description: "Apple Development codesigning identity, or auto-development"
+        required: false
+        default: "auto-development"
+        type: string
+      profiles_dir:
+        description: "Optional local provisioning profile directory on the runner"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -19,51 +34,35 @@ jobs:
   build-testing-mode-pkg:
     name: Build testing-mode .pkg
     if: github.repository == 'Jesssullivan/tummycrypt'
-    runs-on: macos-14
+    runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
-      - name: Validate inputs and secrets
+      - name: Validate inputs and runner
         shell: bash
-        env:
-          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
-          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
-          TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64 }}
-          TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
           TAG="${{ github.event.inputs.tag }}"
+          RUNNER_LABEL="${{ github.event.inputs.runner_label }}"
           [[ "$TAG" == v* ]] || {
             echo "::error::tag must start with 'v' (got '$TAG')"
             exit 1
           }
 
-          missing=()
-          for name in \
-            APPLE_CERTIFICATE_BASE64 \
-            APPLE_CERTIFICATE_PASSWORD \
-            APPLE_INSTALLER_CERTIFICATE_BASE64 \
-            APPLE_INSTALLER_CERTIFICATE_PASSWORD \
-            TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64 \
-            TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64
-          do
-            if [[ -z "${!name:-}" ]]; then
-              missing+=("$name")
-            fi
-          done
-
-          if (( ${#missing[@]} > 0 )); then
-            echo "::error::Missing required testing-mode package secrets: ${missing[*]}"
-            echo "Set a host provisioning profile that grants com.apple.developer.fileprovider.testing-mode before running this workflow."
-            exit 1
-          fi
+          case "$RUNNER_LABEL" in
+            macos-*|ubuntu-*|windows-*)
+              echo "::error::FileProvider testing-mode must run on a registered self-hosted Mac, not $RUNNER_LABEL"
+              exit 1
+              ;;
+          esac
 
           {
             echo "TAG=$TAG"
             echo "VERSION=${TAG#v}"
+            echo "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+            echo "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
+            echo "TCFS_CODESIGN_TIMESTAMP=0"
           } >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
@@ -77,109 +76,76 @@ jobs:
         shell: bash
         run: cargo build -p tcfs-file-provider --release --no-default-features --features grpc
 
-      - name: Import signing certificates
+      - name: Resolve local Apple Development signing assets
         shell: bash
-        env:
-          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
-          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
-          APPLE_DEVELOPER_ID_CA_G2: ${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}
-          APPLE_WWDR_CA_G2: ${{ secrets.APPLE_WWDR_CA_G2 }}
         run: |
           set -euo pipefail
-          KEYCHAIN_PATH="$RUNNER_TEMP/testing-mode-signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          SIGNING_IDENTITY_INPUT="${{ github.event.inputs.signing_identity }}"
+          PROFILES_DIR_INPUT="${{ github.event.inputs.profiles_dir }}"
+          profile_args=()
 
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          echo "$APPLE_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/app-cert.p12"
-          security import "$RUNNER_TEMP/app-cert.p12" \
-            -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH"
-          rm "$RUNNER_TEMP/app-cert.p12"
-
-          echo "$APPLE_INSTALLER_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/installer-cert.p12"
-          security import "$RUNNER_TEMP/installer-cert.p12" \
-            -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH"
-          rm "$RUNNER_TEMP/installer-cert.p12"
-
-          if [[ -n "$APPLE_DEVELOPER_ID_CA_G2" ]]; then
-            echo "$APPLE_DEVELOPER_ID_CA_G2" | base64 -d > "$RUNNER_TEMP/developer-id-ca.cer"
-            security import "$RUNNER_TEMP/developer-id-ca.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
-            rm "$RUNNER_TEMP/developer-id-ca.cer"
-          fi
-          if [[ -n "$APPLE_WWDR_CA_G2" ]]; then
-            echo "$APPLE_WWDR_CA_G2" | base64 -d > "$RUNNER_TEMP/wwdr.cer"
-            security import "$RUNNER_TEMP/wwdr.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/productsign
-            rm "$RUNNER_TEMP/wwdr.cer"
+          if [[ -n "$PROFILES_DIR_INPUT" ]]; then
+            case "$PROFILES_DIR_INPUT" in
+              "~/"*) PROFILES_DIR="${HOME}/${PROFILES_DIR_INPUT#"~/"}" ;;
+              *) PROFILES_DIR="$PROFILES_DIR_INPUT" ;;
+            esac
+            profile_args+=(--profiles-dir "$PROFILES_DIR")
           fi
 
-          security set-key-partition-list -S apple-tool:,apple:,codesign:,productsign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
-
-          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
-            | grep "Developer ID Application" | head -1 \
-            | sed 's/.*"\(.*\)".*/\1/' || true)"
-          PKG_SIGNING_IDENTITY="$(security find-identity -v "$KEYCHAIN_PATH" \
-            | grep "Developer ID Installer" | head -1 \
-            | sed 's/.*"\(.*\)".*/\1/' || true)"
+          case "$SIGNING_IDENTITY_INPUT" in
+            auto-development)
+              SIGNING_IDENTITY="$(security find-identity -v -p codesigning \
+                | grep "Apple Development" | head -1 \
+                | sed 's/.*"\(.*\)".*/\1/' || true)"
+              ;;
+            auto)
+              echo "::error::Developer ID auto-detection is not valid for the testing-mode lane; use auto-development or an Apple Development identity"
+              exit 1
+              ;;
+            *)
+              SIGNING_IDENTITY="$SIGNING_IDENTITY_INPUT"
+              ;;
+          esac
 
           if [[ -z "$SIGNING_IDENTITY" ]]; then
-            echo "::error::No Developer ID Application identity found"
-            exit 1
-          fi
-          if [[ -z "$PKG_SIGNING_IDENTITY" ]]; then
-            echo "::error::No Developer ID Installer identity found"
+            echo "::error::No Apple Development signing identity found on this runner"
+            security find-identity -v -p codesigning || true
             exit 1
           fi
 
+          if ! security find-identity -v -p codesigning \
+            | grep -F "\"$SIGNING_IDENTITY\"" >/dev/null; then
+            echo "::error::Signing identity is not available in this runner keychain: $SIGNING_IDENTITY"
+            security find-identity -v -p codesigning || true
+            exit 1
+          fi
+
+          if ! PROFILE_ENV="$(bash scripts/macos-fileprovider-profile-inventory.sh \
+              "${profile_args[@]}" \
+              --env-only \
+              --strict \
+              --require-host-entitlement com.apple.developer.fileprovider.testing-mode)"; then
+            echo "::error::No local host/extension provisioning profile pair grants FileProvider testing mode"
+            bash scripts/macos-fileprovider-profile-inventory.sh \
+              "${profile_args[@]}" \
+              --require-host-entitlement com.apple.developer.fileprovider.testing-mode \
+              || true
+            exit 1
+          fi
+          eval "$PROFILE_ENV"
+
+          bash scripts/macos-fileprovider-profile-inventory.sh \
+            "${profile_args[@]}" \
+            --strict \
+            --require-host-entitlement com.apple.developer.fileprovider.testing-mode
+
           {
-            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
             echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
-            echo "PKG_SIGNING_IDENTITY=$PKG_SIGNING_IDENTITY"
-          } >> "$GITHUB_ENV"
-
-      - name: Import FileProvider testing-mode profiles
-        shell: bash
-        env:
-          TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64 }}
-          TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64 }}
-        run: |
-          set -euo pipefail
-          HOST_PROFILE="$RUNNER_TEMP/tcfs-host-testing-mode-developer-id.provisionprofile"
-          EXTENSION_PROFILE="$RUNNER_TEMP/tcfs-fileprovider-developer-id.provisionprofile"
-          HOST_PROFILE_PLIST="$RUNNER_TEMP/tcfs-host-testing-mode-developer-id.plist"
-          mkdir -p "$RUNNER_TEMP"
-
-          echo "$TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64" | base64 -d > "$HOST_PROFILE"
-          echo "$TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64" | base64 -d > "$EXTENSION_PROFILE"
-
-          security cms -D -i "$HOST_PROFILE" > "$HOST_PROFILE_PLIST"
-          security cms -D -i "$EXTENSION_PROFILE" >/dev/null
-
-          if ! /usr/libexec/PlistBuddy \
-            -c 'Print :Entitlements:com.apple.developer.fileprovider.testing-mode' \
-            "$HOST_PROFILE_PLIST" | grep -Fxq 'true'; then
-            echo "::error::host testing-mode provisioning profile does not grant com.apple.developer.fileprovider.testing-mode"
-            exit 1
-          fi
-
-          scripts/macos-fileprovider-profile-inventory.sh \
-            --profiles-dir "$RUNNER_TEMP" \
-            --strict
-
-          {
-            echo "TCFS_HOST_PROVISIONING_PROFILE=$HOST_PROFILE"
-            echo "TCFS_EXTENSION_PROVISIONING_PROFILE=$EXTENSION_PROFILE"
+            echo "TCFS_HOST_PROVISIONING_PROFILE=$TCFS_HOST_PROVISIONING_PROFILE"
+            echo "TCFS_EXTENSION_PROVISIONING_PROFILE=$TCFS_EXTENSION_PROVISIONING_PROFILE"
             echo "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
             echo "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+            echo "TCFS_CODESIGN_TIMESTAMP=0"
           } >> "$GITHUB_ENV"
 
       - name: Build FileProvider app
@@ -218,17 +184,6 @@ jobs:
             exit 1
           fi
 
-      - name: Notarize FileProvider app
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          swift/fileprovider/notarize.sh build/TCFSProvider.app \
-            || echo "::warning::FileProvider testing-mode app notarization failed (non-fatal)"
-
       - name: Archive FileProvider app
         shell: bash
         run: |
@@ -253,28 +208,7 @@ jobs:
             --version "$VERSION" \
             --cli-tar "$RUNNER_TEMP/tcfs-${VERSION}-macos-aarch64.tar.gz" \
             --fileprovider-zip "build/TCFSProvider-${VERSION}-macos-aarch64-fileprovider-testing-mode.zip" \
-            --output "tcfs-${VERSION}-macos-aarch64-fileprovider-testing-mode.pkg" \
-            --sign "$PKG_SIGNING_IDENTITY"
-
-      - name: Notarize testing-mode .pkg
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          PKG="tcfs-${VERSION}-macos-aarch64-fileprovider-testing-mode.pkg"
-          if xcrun notarytool submit "$PKG" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_NOTARIZE_PASSWORD" \
-            --wait; then
-            xcrun stapler staple "$PKG" \
-              || echo "::warning::testing-mode .pkg stapling failed (non-fatal)"
-          else
-            echo "::warning::testing-mode .pkg notarization failed (non-fatal)"
-          fi
+            --output "tcfs-${VERSION}-macos-aarch64-fileprovider-testing-mode.pkg"
 
       - name: Verify testing-mode package structure
         shell: bash
@@ -282,7 +216,6 @@ jobs:
           set -euo pipefail
           bash scripts/macos-pkg-structure-smoke.sh \
             --pkg "tcfs-${VERSION}-macos-aarch64-fileprovider-testing-mode.pkg" \
-            --require-signature \
             --expected-postinstall scripts/macos-pkg-postinstall.sh
 
       - name: Upload testing-mode package artifact
@@ -293,11 +226,3 @@ jobs:
             tcfs-*-macos-aarch64-fileprovider-testing-mode.pkg
             build/TCFSProvider-*-macos-aarch64-fileprovider-testing-mode.zip
           retention-days: 7
-
-      - name: Cleanup keychain
-        if: always()
-        shell: bash
-        run: |
-          if [[ -n "${KEYCHAIN_PATH:-}" ]]; then
-            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
-          fi

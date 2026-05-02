@@ -16,7 +16,9 @@ The production lane and testing-mode lane must stay separate:
 Do not set `TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64` to a Developer
 ID Application profile. Apple can show FileProvider Testing Mode as an enabled
 App ID capability while still omitting the entitlement from Developer ID
-profiles. The workflow correctly rejects that profile shape.
+profiles. The first lab implementation uses locally installed profiles on the
+registered Mac instead of exporting the development profile through a GitHub
+secret.
 
 ## Apple Constraints
 
@@ -141,8 +143,8 @@ properties:
 
 Preferred first implementation:
 
-- a self-hosted runner with labels such as `self-hosted`, `macOS`, `ARM64`, and
-  `tcfs-fileprovider-lab`
+- a self-hosted runner on `petting-zoo-mini`, using the custom runner label
+  `petting-zoo-mini`
 - Apple Development certificate and profiles installed in that runner's
   Keychain/profile directory, not exported to GitHub secrets
 - repository secrets continue to hold storage/E2EE test credentials
@@ -158,6 +160,34 @@ Possible later implementation:
 
 Do not run a development/ad hoc testing-mode package on unregistered hosted
 macOS. The profile device list is part of the trust model.
+
+## Repository Implementation
+
+As of May 2, 2026, the repo has a first lab-lane implementation:
+
+- `.github/workflows/macos-fileprovider-testing-mode-pkg.yml` defaults to the
+  `petting-zoo-mini` runner label, resolves an `Apple Development` signing
+  identity from the local keychain, and selects local profiles with
+  `scripts/macos-fileprovider-profile-inventory.sh --require-host-entitlement
+  com.apple.developer.fileprovider.testing-mode`
+- the testing-mode package workflow skips Developer ID certificate import,
+  package signing, and notarization
+- `.github/workflows/macos-postinstall-smoke.yml` still defaults to
+  `macos-15` for production release proof, but accepts `runner_label` and
+  requires a non-hosted runner when `fileprovider_testing_mode=true`
+- `scripts/macos-fileprovider-testing-mode-dispatch.sh` dispatches both the
+  package build and smoke to `petting-zoo-mini` by default
+
+Once the Mac App Development profiles exist on `petting-zoo-mini`, run:
+
+```bash
+scripts/macos-fileprovider-testing-mode-dispatch.sh \
+  --tag v0.12.7 \
+  --runner-label petting-zoo-mini
+```
+
+Use `--dry-run` first if you want to inspect the exact `gh workflow run`
+commands without dispatching.
 
 ## Developer Loop
 
@@ -223,13 +253,10 @@ Feature goals remain:
 2. Create Mac App Development profiles for host and extension.
 3. Verify the host profile contains
    `com.apple.developer.fileprovider.testing-mode = true`.
-4. Add a development signing mode to
-   `.github/workflows/macos-fileprovider-testing-mode-pkg.yml` or create a
-   separate workflow with self-hosted runner labels.
-5. Update `scripts/test-release-workflow-fileprovider.sh` so regression coverage
-   reflects the development-signing testing-mode lane.
-6. Update `scripts/macos-fileprovider-testing-mode-dispatch.sh` so it refuses
-   GitHub-hosted execution unless a valid development/ad hoc package artifact is
-   explicitly supplied for a registered Mac.
-7. Run the self-hosted FileProvider testing-mode smoke against `v0.12.7`.
-
+4. Install the profiles on `petting-zoo-mini` under the runner user's
+   provisioning profile directory, or pass the directory through the workflow
+   input.
+5. Confirm the runner keychain has an `Apple Development` codesigning identity.
+6. Run the self-hosted FileProvider testing-mode smoke against `v0.12.7`.
+7. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
+   gates.

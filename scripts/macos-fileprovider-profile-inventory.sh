@@ -22,6 +22,9 @@ Options:
                               (default: group.io.tinyland.tcfs)
   --keychain-group-suffix <s> Required Keychain group suffix
                               (default: group.io.tinyland.tcfs)
+  --require-host-entitlement <key>
+                              Require a boolean true entitlement on the host
+                              profile. Intended for FileProvider testing mode.
   --env-only                  Print only shell assignments for the compatible
                               pair; intended for build automation
   --strict                    Fail unless a compatible host/extension pair exists
@@ -39,6 +42,7 @@ HOST_BUNDLE_ID="${TCFS_HOST_BUNDLE_ID:-io.tinyland.tcfs}"
 EXTENSION_BUNDLE_ID="${TCFS_EXTENSION_BUNDLE_ID:-io.tinyland.tcfs.fileprovider}"
 APP_GROUP_ID="${TCFS_APP_GROUP_ID:-group.io.tinyland.tcfs}"
 KEYCHAIN_GROUP_SUFFIX="${TCFS_KEYCHAIN_GROUP_SUFFIX:-group.io.tinyland.tcfs}"
+REQUIRED_HOST_ENTITLEMENT="${TCFS_REQUIRED_HOST_ENTITLEMENT:-}"
 ENV_ONLY=0
 STRICT=0
 
@@ -67,6 +71,11 @@ while [[ $# -gt 0 ]]; do
     --keychain-group-suffix)
       [[ $# -ge 2 ]] || fail "--keychain-group-suffix requires a value"
       KEYCHAIN_GROUP_SUFFIX="$2"
+      shift 2
+      ;;
+    --require-host-entitlement)
+      [[ $# -ge 2 ]] || fail "--require-host-entitlement requires a value"
+      REQUIRED_HOST_ENTITLEMENT="$2"
       shift 2
       ;;
     --env-only)
@@ -197,6 +206,16 @@ profile_matches_bundle() {
   plist_array_contains "$plist" "Entitlements:com.apple.security.application-groups" "$APP_GROUP_ID" || return 1
 }
 
+profile_entitlement_true() {
+  local plist="$1"
+  local entitlement="$2"
+  local value
+
+  [[ -n "$entitlement" ]] || return 0
+  value="$(plist_print "$plist" "Entitlements:$entitlement" || true)"
+  [[ "$value" == "true" ]]
+}
+
 profile_name() {
   local plist="$1"
 
@@ -255,7 +274,8 @@ for profile in "${profile_files[@]}"; do
     continue
   fi
 
-  if profile_matches_bundle "$plist" "$HOST_BUNDLE_ID"; then
+  if profile_matches_bundle "$plist" "$HOST_BUNDLE_ID" \
+    && profile_entitlement_true "$plist" "$REQUIRED_HOST_ENTITLEMENT"; then
     host_profiles+=("$profile")
     host_plists+=("$plist")
   fi
@@ -270,6 +290,9 @@ if [[ "$ENV_ONLY" != "1" ]]; then
   printf 'profiles scanned: %s\n' "${#profile_files[@]}"
   printf 'required app group: %s\n' "$APP_GROUP_ID"
   printf 'required keychain suffix: %s\n' "$KEYCHAIN_GROUP_SUFFIX"
+  if [[ -n "$REQUIRED_HOST_ENTITLEMENT" ]]; then
+    printf 'required host entitlement: %s=true\n' "$REQUIRED_HOST_ENTITLEMENT"
+  fi
   printf 'host bundle id: %s\n' "$HOST_BUNDLE_ID"
   printf 'extension bundle id: %s\n' "$EXTENSION_BUNDLE_ID"
   printf 'host candidates: %s\n' "${#host_profiles[@]}"
