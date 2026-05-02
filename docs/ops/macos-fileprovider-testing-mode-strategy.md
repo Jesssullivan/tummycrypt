@@ -206,8 +206,9 @@ Enrollment shape:
    Keep the GitHub registration token out of the repo and logs.
 3. Configure it as a repository runner with default labels plus custom labels:
    `petting-zoo-mini,tcfs-fileprovider-lab`.
-4. Install it as a macOS service with the runner's `svc.sh`, then verify
-   `./svc.sh status` reports the `launchd` service as started.
+4. Install it as a macOS service with the runner's `svc.sh`, then verify the
+   service is running in the runner user's GUI `launchd` domain, not only the
+   SSH session's background domain.
 5. Install the Apple Development certificate and Mac App Development
    provisioning profiles under the same runner user's Keychain and
    `~/Library/MobileDevice/Provisioning Profiles`.
@@ -222,6 +223,25 @@ The dispatch helper now performs this runner-visibility check by default and
 fails before dispatch if GitHub cannot see an online macOS runner with the
 requested label. Use `--skip-runner-check` only when intentionally queueing a
 job while the runner is being enrolled.
+
+On petting-zoo-mini, the stock `./svc.sh start` path can report success from an
+SSH session while loading the runner into the `Background` launchd manager. If
+GitHub later shows the runner offline, bootstrap the generated LaunchAgent into
+the logged-in user's GUI domain and verify the runner log reaches
+`Listening for Jobs`:
+
+```bash
+label="actions.runner.Jesssullivan-tummycrypt.petting-zoo-mini-tcfs"
+uid="$(id -u)"
+plist="$HOME/Library/LaunchAgents/${label}.plist"
+
+launchctl bootout "gui/${uid}" "$plist" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/${uid}" "$plist"
+launchctl enable "gui/${uid}/${label}"
+launchctl kickstart -k "gui/${uid}/${label}"
+launchctl print "gui/${uid}/${label}" | sed -n '1,80p'
+tail -n 20 "$HOME/github-actions-runners/tummycrypt-tcfs/_diag/Runner_*.log"
+```
 
 GitHub references for this runner model:
 

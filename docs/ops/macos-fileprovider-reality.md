@@ -604,6 +604,14 @@ online macOS runner carrying the requested label. If
 rerun with `--skip-runner-check` only when you intentionally want the job to
 queue.
 
+Operational note from the May 2, 2026 enrollment: starting the service through
+the runner's stock `svc.sh` from SSH can load it into the SSH session's
+`Background` launchd manager, after which GitHub may show the runner offline
+when that session lifecycle ends. For petting-zoo-mini, bootstrap the generated
+LaunchAgent into `gui/$(id -u)` for the dedicated runner user and verify
+`launchctl print gui/$(id -u)/actions.runner.Jesssullivan-tummycrypt.petting-zoo-mini-tcfs`
+shows `state = running`.
+
 The equivalent manual form is:
 
 ```bash
