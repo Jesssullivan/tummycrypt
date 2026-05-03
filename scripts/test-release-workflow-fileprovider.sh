@@ -210,6 +210,7 @@ check_testing_mode_package_workflow() {
 
   local validate_step="${TMPDIR}/testing-mode-validate-inputs-and-runner.sh"
   local resolve_assets_step="${TMPDIR}/testing-mode-resolve-assets.sh"
+  local expose_rustup_step="${TMPDIR}/testing-mode-expose-rustup.sh"
   local build_app_step="${TMPDIR}/testing-mode-build-fileprovider-app.sh"
   local verify_signing_step="${TMPDIR}/testing-mode-verify-signing.sh"
   local download_cli_step="${TMPDIR}/testing-mode-download-cli-tarball.sh"
@@ -225,6 +226,15 @@ check_testing_mode_package_workflow() {
   assert_contains "$validate_step" "FileProvider testing-mode must run on a registered self-hosted Mac"
   assert_contains "$validate_step" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
   assert_contains "$validate_step" "TCFS_CODESIGN_TIMESTAMP=0"
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Expose existing Rust toolchain manager" \
+    "$expose_rustup_step"
+  bash -n "$expose_rustup_step"
+  assert_contains "$expose_rustup_step" '$HOME/.cargo/bin/rustup'
+  assert_contains "$expose_rustup_step" '$GITHUB_PATH'
 
   extract_step_from_workflow \
     "$TESTING_MODE_PKG_WORKFLOW" \
