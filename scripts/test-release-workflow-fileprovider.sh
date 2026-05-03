@@ -245,6 +245,8 @@ check_testing_mode_package_workflow() {
   assert_contains "$resolve_assets_step" "Apple Development"
   assert_contains "$resolve_assets_step" "find_identities"
   assert_contains "$resolve_assets_step" "signing_keychain does not exist"
+  assert_contains "$resolve_assets_step" "signing_p12_path does not exist"
+  assert_contains "$resolve_assets_step" 'security import "$SIGNING_P12_PATH"'
   assert_contains "$resolve_assets_step" "security unlock-keychain"
   assert_contains "$resolve_assets_step" "security set-key-partition-list"
   assert_contains "$resolve_assets_step" "codesign cannot use its private key noninteractively"

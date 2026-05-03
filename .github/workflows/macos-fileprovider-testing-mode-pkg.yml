@@ -23,6 +23,16 @@ on:
         required: false
         default: "~/Library/Keychains/login.keychain-db"
         type: string
+      signing_p12_path:
+        description: "Optional runner-local Apple Development .p12 to import into an ephemeral keychain"
+        required: false
+        default: ""
+        type: string
+      signing_p12_password:
+        description: "Optional password for signing_p12_path"
+        required: false
+        default: ""
+        type: string
       signing_keychain_password:
         description: "Optional password for the local signing keychain"
         required: false
@@ -102,10 +112,40 @@ jobs:
           set -euo pipefail
           SIGNING_IDENTITY_INPUT="${{ github.event.inputs.signing_identity }}"
           SIGNING_KEYCHAIN_INPUT="${{ github.event.inputs.signing_keychain }}"
+          SIGNING_P12_PATH_INPUT="${{ github.event.inputs.signing_p12_path }}"
+          SIGNING_P12_PASSWORD="${{ github.event.inputs.signing_p12_password }}"
           SIGNING_KEYCHAIN_PASSWORD="${{ github.event.inputs.signing_keychain_password }}"
           PROFILES_DIR_INPUT="${{ github.event.inputs.profiles_dir }}"
 
-          if [[ -n "$SIGNING_KEYCHAIN_INPUT" ]]; then
+          if [[ -n "$SIGNING_P12_PATH_INPUT" ]]; then
+            case "$SIGNING_P12_PATH_INPUT" in
+              "~/"*) SIGNING_P12_PATH="${HOME}/${SIGNING_P12_PATH_INPUT#"~/"}" ;;
+              *) SIGNING_P12_PATH="$SIGNING_P12_PATH_INPUT" ;;
+            esac
+            if [[ ! -f "$SIGNING_P12_PATH" ]]; then
+              echo "::error::signing_p12_path does not exist: $SIGNING_P12_PATH"
+              exit 1
+            fi
+
+            SIGNING_KEYCHAIN="${RUNNER_TEMP:-/tmp}/tcfs-fileprovider-lab-signing.keychain-db"
+            security create-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+            security unlock-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+            security set-keychain-settings -lut 21600 "$SIGNING_KEYCHAIN"
+            security import "$SIGNING_P12_PATH" \
+              -f pkcs12 \
+              -k "$SIGNING_KEYCHAIN" \
+              -P "$SIGNING_P12_PASSWORD" \
+              -A \
+              -T /usr/bin/codesign \
+              -T /usr/bin/security \
+              >/dev/null
+            security set-key-partition-list \
+              -S apple-tool:,apple:,codesign: \
+              -s \
+              -k "$SIGNING_KEYCHAIN_PASSWORD" \
+              "$SIGNING_KEYCHAIN" \
+              >/dev/null
+          elif [[ -n "$SIGNING_KEYCHAIN_INPUT" ]]; then
             case "$SIGNING_KEYCHAIN_INPUT" in
               "~/"*) SIGNING_KEYCHAIN="${HOME}/${SIGNING_KEYCHAIN_INPUT#"~/"}" ;;
               *) SIGNING_KEYCHAIN="$SIGNING_KEYCHAIN_INPUT" ;;

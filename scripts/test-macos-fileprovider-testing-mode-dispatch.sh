@@ -80,6 +80,16 @@ bash "$SCRIPT" \
   >"$DRY_RUN_KEYCHAIN_OUT"
 assert_contains "$DRY_RUN_KEYCHAIN_OUT" "-f signing_keychain=\"~/Library/Keychains/tcfs-fileprovider-lab.keychain-db\""
 
+DRY_RUN_P12_OUT="${TMPDIR}/dry-run-p12.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --signing-p12-path '~/Certificates.p12' \
+  >"$DRY_RUN_P12_OUT"
+assert_contains "$DRY_RUN_P12_OUT" "-f signing_p12_path=\"~/Certificates.p12\""
+
 DRY_RUN_NO_WATCH_OUT="${TMPDIR}/dry-run-no-watch.out"
 bash "$SCRIPT" \
   --dry-run \
@@ -151,6 +161,12 @@ assert_fails_contains \
 assert_fails_contains \
   "FileProvider testing-mode requires a registered self-hosted Mac runner label" \
   bash "$SCRIPT" --dry-run --tag v9.9.9 --runner-label macos-15
+
+assert_fails_contains \
+  "--signing-keychain and --signing-p12-path are mutually exclusive" \
+  bash "$SCRIPT" --dry-run --tag v9.9.9 \
+    --signing-keychain '~/Library/Keychains/tcfs-fileprovider-lab.keychain-db' \
+    --signing-p12-path '~/Certificates.p12'
 
 FAKE_BIN="${TMPDIR}/fake-bin"
 mkdir -p "$FAKE_BIN"
@@ -248,6 +264,21 @@ bash "$SCRIPT" \
   >"${TMPDIR}/keychain.out" \
   2>"${TMPDIR}/keychain.err"
 assert_contains "$FAKE_LOG" "-f signing_keychain=\\~/Library/Keychains/tcfs-fileprovider-lab.keychain-db"
+
+FAKE_LOG="${TMPDIR}/gh-p12.log"
+PATH="$FAKE_BIN:$PATH" \
+TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+TCFS_FAKE_STATE="$TMPDIR" \
+TCFS_GH_RUN_ID_POLL_SECONDS=0 \
+bash "$SCRIPT" \
+  --tag v1.2.3 \
+  --repo owner/repo \
+  --ref main \
+  --signing-p12-path '~/Certificates.p12' \
+  --no-watch \
+  >"${TMPDIR}/p12.out" \
+  2>"${TMPDIR}/p12.err"
+assert_contains "$FAKE_LOG" "-f signing_p12_path=\\~/Certificates.p12"
 
 FAKE_LOG="${TMPDIR}/gh-no-runner.log"
 assert_fails_contains \

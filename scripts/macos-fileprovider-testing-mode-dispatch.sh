@@ -16,6 +16,7 @@ RUNNER_LABEL="${TCFS_FILEPROVIDER_LAB_RUNNER_LABEL:-petting-zoo-mini}"
 RUN_ID_POLL_ATTEMPTS="${TCFS_GH_RUN_ID_POLL_ATTEMPTS:-10}"
 RUN_ID_POLL_SECONDS="${TCFS_GH_RUN_ID_POLL_SECONDS:-2}"
 SIGNING_KEYCHAIN="${TCFS_FILEPROVIDER_LAB_SIGNING_KEYCHAIN:-}"
+SIGNING_P12_PATH="${TCFS_FILEPROVIDER_LAB_SIGNING_P12_PATH:-}"
 DRY_RUN=0
 WATCH=1
 SKIP_SECRET_CHECK=0
@@ -33,6 +34,7 @@ Options:
   --artifact-name <name>  Package artifact name (default: dist-testing-mode-pkg)
   --runner-label <label>  Registered self-hosted Mac runner label (default: petting-zoo-mini)
   --signing-keychain <p>  Optional runner-local keychain path for Apple Development signing
+  --signing-p12-path <p>  Optional runner-local .p12 to import into an ephemeral keychain
   --package-run-id <id>   Skip package workflow dispatch and smoke an existing package run
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion
@@ -92,6 +94,11 @@ while [[ $# -gt 0 ]]; do
       SIGNING_KEYCHAIN="$2"
       shift 2
       ;;
+    --signing-p12-path)
+      require_value "$1" "${2:-}"
+      SIGNING_P12_PATH="$2"
+      shift 2
+      ;;
     --package-run-id)
       require_value "$1" "${2:-}"
       PACKAGE_RUN_ID="$2"
@@ -132,6 +139,9 @@ fi
 if [[ "$RUNNER_LABEL" == macos-* ]]; then
   die "FileProvider testing-mode requires a registered self-hosted Mac runner label, not $RUNNER_LABEL"
 fi
+if [[ -n "$SIGNING_KEYCHAIN" && -n "$SIGNING_P12_PATH" ]]; then
+  die "--signing-keychain and --signing-p12-path are mutually exclusive"
+fi
 
 if [[ "$SKIP_SECRET_CHECK" == "1" ]]; then
   log "Ignoring --skip-secret-check; testing-mode profiles are resolved locally on $RUNNER_LABEL"
@@ -151,7 +161,14 @@ EOF
     cat <<EOF
 gh release view "$TAG" --repo "$REPO" --json isDraft,assets --jq '. as \$release | select(\$release.isDraft == false) | .assets[].name' | grep -Fx "tcfs-${TAG#v}-macos-aarch64.tar.gz"
 EOF
-    if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+    if [[ -n "$SIGNING_P12_PATH" ]]; then
+      cat <<EOF
+gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
+  -f tag="$TAG" \\
+  -f runner_label="$RUNNER_LABEL" \\
+  -f signing_p12_path="$SIGNING_P12_PATH"
+EOF
+    elif [[ -n "$SIGNING_KEYCHAIN" ]]; then
       cat <<EOF
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
@@ -394,6 +411,9 @@ if [[ -z "$PACKAGE_RUN_ID" ]]; then
   )
   if [[ -n "$SIGNING_KEYCHAIN" ]]; then
     package_inputs+=(-f signing_keychain="$SIGNING_KEYCHAIN")
+  fi
+  if [[ -n "$SIGNING_P12_PATH" ]]; then
+    package_inputs+=(-f signing_p12_path="$SIGNING_P12_PATH")
   fi
   PACKAGE_RUN_ID="$(dispatch_and_capture_run_id \
     "$PACKAGE_WORKFLOW" \
