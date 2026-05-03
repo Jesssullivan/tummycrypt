@@ -189,7 +189,7 @@ check_testing_mode_package_workflow() {
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "runner_label:"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" 'default: "petting-zoo-mini"'
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "auto-development"
-  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "GIT_CONFIG_GLOBAL: /dev/null"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "GIT_CONFIG_GLOBAL: \${{ runner.temp }}/tcfs-lab-gitconfig"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "GIT_CONFIG_NOSYSTEM"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "signing_keychain:"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_CODESIGN_KEYCHAIN"
