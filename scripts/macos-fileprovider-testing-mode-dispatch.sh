@@ -354,7 +354,9 @@ dispatch_and_capture_run_id() {
   created_after="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
   log "Dispatching $workflow on $REF for $TAG"
-  gh workflow run "$workflow" --repo "$REPO" --ref "$REF" "$@" >&2
+  if ! gh workflow run "$workflow" --repo "$REPO" --ref "$REF" "$@" >&2; then
+    die "failed to dispatch $workflow"
+  fi
 
   local run_id
   if ! run_id="$(wait_for_dispatch_run_id "$workflow" "$created_after")"; then

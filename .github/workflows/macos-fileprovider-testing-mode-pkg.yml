@@ -34,7 +34,7 @@ permissions:
 
 env:
   RUST_TOOLCHAIN: 1.93.0
-  GIT_CONFIG_GLOBAL: ${{ runner.temp }}/tcfs-lab-gitconfig
+  GIT_CONFIG_GLOBAL: /tmp/tcfs-fileprovider-lab-gitconfig
   GIT_CONFIG_NOSYSTEM: "1"
 
 jobs:
