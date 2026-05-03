@@ -155,7 +155,7 @@ case "${1:-} ${2:-}" in
     if [[ "${TCFS_FAKE_NO_RUNNER:-0}" == "1" ]]; then
       exit 0
     fi
-    printf 'petting-zoo-mini\tmacos\tonline\tself-hosted,macOS,ARM64,petting-zoo-mini\n'
+    printf 'petting-zoo-mini\tmacOS\tonline\tself-hosted,macOS,ARM64,petting-zoo-mini\n'
     ;;
   "workflow view")
     ;;

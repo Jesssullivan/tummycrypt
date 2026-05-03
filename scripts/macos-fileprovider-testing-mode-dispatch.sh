@@ -257,9 +257,10 @@ verify_lab_runner_available() {
     saw_label=1
     candidates+=("$runner_name os=$runner_os status=$runner_status labels=$runner_labels")
 
-    if [[ "$runner_os" != "macos" ]]; then
-      continue
-    fi
+    case "$runner_os" in
+      macos | macOS) ;;
+      *) continue ;;
+    esac
 
     saw_macos=1
 
