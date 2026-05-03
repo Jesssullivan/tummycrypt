@@ -98,8 +98,6 @@ jobs:
           SIGNING_IDENTITY_INPUT="${{ github.event.inputs.signing_identity }}"
           SIGNING_KEYCHAIN_INPUT="${{ github.event.inputs.signing_keychain }}"
           PROFILES_DIR_INPUT="${{ github.event.inputs.profiles_dir }}"
-          profile_args=()
-          identity_args=()
 
           if [[ -n "$SIGNING_KEYCHAIN_INPUT" ]]; then
             case "$SIGNING_KEYCHAIN_INPUT" in
@@ -110,13 +108,16 @@ jobs:
               echo "::error::signing_keychain does not exist: $SIGNING_KEYCHAIN"
               exit 1
             fi
-            identity_args+=("$SIGNING_KEYCHAIN")
           else
             SIGNING_KEYCHAIN=""
           fi
 
           find_identities() {
-            security find-identity -v -p codesigning "${identity_args[@]}"
+            if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+              security find-identity -v -p codesigning "$SIGNING_KEYCHAIN"
+            else
+              security find-identity -v -p codesigning
+            fi
           }
 
           if [[ -n "$PROFILES_DIR_INPUT" ]]; then
@@ -124,8 +125,21 @@ jobs:
               "~/"*) PROFILES_DIR="${HOME}/${PROFILES_DIR_INPUT#"~/"}" ;;
               *) PROFILES_DIR="$PROFILES_DIR_INPUT" ;;
             esac
-            profile_args+=(--profiles-dir "$PROFILES_DIR")
+          else
+            PROFILES_DIR=""
           fi
+
+          find_profiles() {
+            if [[ -n "$PROFILES_DIR" ]]; then
+              bash scripts/macos-fileprovider-profile-inventory.sh --profiles-dir "$PROFILES_DIR" "$@"
+            else
+              bash scripts/macos-fileprovider-profile-inventory.sh "$@"
+            fi
+          }
+
+          profile_env() {
+            find_profiles --env-only --strict --require-host-entitlement com.apple.developer.fileprovider.testing-mode
+          }
 
           case "$SIGNING_IDENTITY_INPUT" in
             auto-development)
@@ -155,24 +169,14 @@ jobs:
             exit 1
           fi
 
-          if ! PROFILE_ENV="$(bash scripts/macos-fileprovider-profile-inventory.sh \
-              "${profile_args[@]}" \
-              --env-only \
-              --strict \
-              --require-host-entitlement com.apple.developer.fileprovider.testing-mode)"; then
+          if ! PROFILE_ENV="$(profile_env)"; then
             echo "::error::No local host/extension provisioning profile pair grants FileProvider testing mode"
-            bash scripts/macos-fileprovider-profile-inventory.sh \
-              "${profile_args[@]}" \
-              --require-host-entitlement com.apple.developer.fileprovider.testing-mode \
-              || true
+            find_profiles --require-host-entitlement com.apple.developer.fileprovider.testing-mode || true
             exit 1
           fi
           eval "$PROFILE_ENV"
 
-          bash scripts/macos-fileprovider-profile-inventory.sh \
-            "${profile_args[@]}" \
-            --strict \
-            --require-host-entitlement com.apple.developer.fileprovider.testing-mode
+          find_profiles --strict --require-host-entitlement com.apple.developer.fileprovider.testing-mode
 
           {
             echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"

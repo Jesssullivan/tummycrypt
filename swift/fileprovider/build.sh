@@ -61,16 +61,38 @@ else
 fi
 unset SDKROOT
 
-SECURITY_IDENTITY_ARGS=()
-CODESIGN_KEYCHAIN_ARGS=()
 if [ -n "$CODESIGN_KEYCHAIN" ]; then
     if [ ! -f "$CODESIGN_KEYCHAIN" ]; then
         echo "ERROR: TCFS_CODESIGN_KEYCHAIN does not exist: $CODESIGN_KEYCHAIN" >&2
         exit 1
     fi
-    SECURITY_IDENTITY_ARGS=("$CODESIGN_KEYCHAIN")
-    CODESIGN_KEYCHAIN_ARGS=(--keychain "$CODESIGN_KEYCHAIN")
 fi
+
+find_codesign_identities() {
+    if [ -n "$CODESIGN_KEYCHAIN" ]; then
+        security find-identity -v -p codesigning "$CODESIGN_KEYCHAIN"
+    else
+        security find-identity -v -p codesigning
+    fi
+}
+
+codesign_with_identity() {
+    local entitlements="$1"
+    local target="$2"
+
+    if [ -n "$CODESIGN_KEYCHAIN" ]; then
+        /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
+            --keychain "$CODESIGN_KEYCHAIN" \
+            --options runtime "$CODESIGN_TIMESTAMP_ARG" \
+            --entitlements "$entitlements" \
+            "$target"
+    else
+        /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
+            --options runtime "$CODESIGN_TIMESTAMP_ARG" \
+            --entitlements "$entitlements" \
+            "$target"
+    fi
+}
 
 # Auto-detect a signing identity from Keychain.
 if [ "$SIGNING_IDENTITY" = "auto" ] || [ "$SIGNING_IDENTITY" = "auto-development" ]; then
@@ -80,7 +102,7 @@ if [ "$SIGNING_IDENTITY" = "auto" ] || [ "$SIGNING_IDENTITY" = "auto-development
     IDENTITY_PATTERN="Developer ID Application"
   fi
 
-  SIGNING_IDENTITY=$(security find-identity -v -p codesigning "${SECURITY_IDENTITY_ARGS[@]}" | grep "$IDENTITY_PATTERN" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
+  SIGNING_IDENTITY=$(find_codesign_identities | grep "$IDENTITY_PATTERN" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
   if [ -z "$SIGNING_IDENTITY" ]; then
     echo "WARNING: No $IDENTITY_PATTERN identity found in Keychain, falling back to ad-hoc" >&2
     SIGNING_IDENTITY="-"
@@ -348,8 +370,7 @@ HOST_ENTITLEMENTS="$SCRIPT_DIR/resources/HostApp.entitlements"
 
 if [ "$SIGNING_IDENTITY" != "-" ]; then
     # Extract TeamID from the signing certificate.
-    TEAM_ID=$(/usr/bin/security find-identity -v -p codesigning \
-        "${SECURITY_IDENTITY_ARGS[@]}" \
+    TEAM_ID=$(find_codesign_identities \
         | grep "$SIGNING_IDENTITY" \
         | head -1 \
         | sed -E 's/.*\(([A-Z0-9]{10})\).*/\1/')
@@ -392,25 +413,13 @@ FINDER_SYNC_ENTITLEMENTS="$SCRIPT_DIR/resources/FinderSync.entitlements"
 
 if [ "$SIGNING_IDENTITY" != "-" ]; then
     echo "    Identity: $SIGNING_IDENTITY"
-    /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
-        "${CODESIGN_KEYCHAIN_ARGS[@]}" \
-        --options runtime "$CODESIGN_TIMESTAMP_ARG" \
-        --entitlements "$EXT_ENTITLEMENTS" \
-        "$APP/Extensions/TCFSFileProvider.appex"
+    codesign_with_identity "$EXT_ENTITLEMENTS" "$APP/Extensions/TCFSFileProvider.appex"
 
     if [ "$HAVE_FINDER_SYNC" = "true" ]; then
-        /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
-            "${CODESIGN_KEYCHAIN_ARGS[@]}" \
-            --options runtime "$CODESIGN_TIMESTAMP_ARG" \
-            --entitlements "$FINDER_SYNC_ENTITLEMENTS" \
-            "$APP/Extensions/TCFSFinderSync.appex"
+        codesign_with_identity "$FINDER_SYNC_ENTITLEMENTS" "$APP/Extensions/TCFSFinderSync.appex"
     fi
 
-    /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
-        "${CODESIGN_KEYCHAIN_ARGS[@]}" \
-        --options runtime "$CODESIGN_TIMESTAMP_ARG" \
-        --entitlements "$HOST_ENTITLEMENTS" \
-        "$OUTPUT_DIR/TCFSProvider.app"
+    codesign_with_identity "$HOST_ENTITLEMENTS" "$OUTPUT_DIR/TCFSProvider.app"
 else
     echo "    Identity: ad-hoc (development)"
     /usr/bin/codesign -f -s - \
