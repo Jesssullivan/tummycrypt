@@ -23,6 +23,11 @@ on:
         required: false
         default: "~/Library/Keychains/login.keychain-db"
         type: string
+      signing_keychain_password:
+        description: "Optional password for the local signing keychain"
+        required: false
+        default: ""
+        type: string
       profiles_dir:
         description: "Optional local provisioning profile directory on the runner"
         required: false
@@ -97,6 +102,7 @@ jobs:
           set -euo pipefail
           SIGNING_IDENTITY_INPUT="${{ github.event.inputs.signing_identity }}"
           SIGNING_KEYCHAIN_INPUT="${{ github.event.inputs.signing_keychain }}"
+          SIGNING_KEYCHAIN_PASSWORD="${{ github.event.inputs.signing_keychain_password }}"
           PROFILES_DIR_INPUT="${{ github.event.inputs.profiles_dir }}"
 
           if [[ -n "$SIGNING_KEYCHAIN_INPUT" ]]; then
@@ -110,6 +116,27 @@ jobs:
             fi
           else
             SIGNING_KEYCHAIN=""
+          fi
+
+          if [[ -n "$SIGNING_KEYCHAIN" && "$SIGNING_KEYCHAIN_INPUT" != "~/Library/Keychains/login.keychain-db" ]]; then
+            KEYCHAIN_ERR="${RUNNER_TEMP:-/tmp}/tcfs-keychain-access.err"
+            if ! security unlock-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN" 2>"$KEYCHAIN_ERR"; then
+              echo "::error::failed to unlock signing_keychain: $SIGNING_KEYCHAIN"
+              cat "$KEYCHAIN_ERR"
+              exit 1
+            fi
+            security set-keychain-settings -lut 21600 "$SIGNING_KEYCHAIN" || true
+            if ! security set-key-partition-list \
+              -S apple-tool:,apple:,codesign: \
+              -s \
+              -k "$SIGNING_KEYCHAIN_PASSWORD" \
+              "$SIGNING_KEYCHAIN" \
+              >/dev/null \
+              2>"$KEYCHAIN_ERR"; then
+              echo "::error::failed to grant noninteractive codesign access for signing_keychain: $SIGNING_KEYCHAIN"
+              cat "$KEYCHAIN_ERR"
+              exit 1
+            fi
           fi
 
           find_identities() {

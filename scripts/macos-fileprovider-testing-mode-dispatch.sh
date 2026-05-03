@@ -15,6 +15,7 @@ SMOKE_WORKFLOW="macos-postinstall-smoke.yml"
 RUNNER_LABEL="${TCFS_FILEPROVIDER_LAB_RUNNER_LABEL:-petting-zoo-mini}"
 RUN_ID_POLL_ATTEMPTS="${TCFS_GH_RUN_ID_POLL_ATTEMPTS:-10}"
 RUN_ID_POLL_SECONDS="${TCFS_GH_RUN_ID_POLL_SECONDS:-2}"
+SIGNING_KEYCHAIN="${TCFS_FILEPROVIDER_LAB_SIGNING_KEYCHAIN:-}"
 DRY_RUN=0
 WATCH=1
 SKIP_SECRET_CHECK=0
@@ -31,6 +32,7 @@ Options:
   --ref <ref>             Workflow ref to dispatch (default: main)
   --artifact-name <name>  Package artifact name (default: dist-testing-mode-pkg)
   --runner-label <label>  Registered self-hosted Mac runner label (default: petting-zoo-mini)
+  --signing-keychain <p>  Optional runner-local keychain path for Apple Development signing
   --package-run-id <id>   Skip package workflow dispatch and smoke an existing package run
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion
@@ -83,6 +85,11 @@ while [[ $# -gt 0 ]]; do
     --runner-label)
       require_value "$1" "${2:-}"
       RUNNER_LABEL="$2"
+      shift 2
+      ;;
+    --signing-keychain)
+      require_value "$1" "${2:-}"
+      SIGNING_KEYCHAIN="$2"
       shift 2
       ;;
     --package-run-id)
@@ -143,10 +150,21 @@ EOF
 
     cat <<EOF
 gh release view "$TAG" --repo "$REPO" --json isDraft,assets --jq '. as \$release | select(\$release.isDraft == false) | .assets[].name' | grep -Fx "tcfs-${TAG#v}-macos-aarch64.tar.gz"
+EOF
+    if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+      cat <<EOF
+gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
+  -f tag="$TAG" \\
+  -f runner_label="$RUNNER_LABEL" \\
+  -f signing_keychain="$SIGNING_KEYCHAIN"
+EOF
+    else
+      cat <<EOF
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
   -f runner_label="$RUNNER_LABEL"
 EOF
+    fi
 
     if [[ "$WATCH" != "1" ]]; then
       cat <<EOF
@@ -370,10 +388,16 @@ verify_lab_runner_available
 
 if [[ -z "$PACKAGE_RUN_ID" ]]; then
   verify_release_cli_asset
+  package_inputs=(
+    -f tag="$TAG"
+    -f runner_label="$RUNNER_LABEL"
+  )
+  if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+    package_inputs+=(-f signing_keychain="$SIGNING_KEYCHAIN")
+  fi
   PACKAGE_RUN_ID="$(dispatch_and_capture_run_id \
     "$PACKAGE_WORKFLOW" \
-    -f tag="$TAG" \
-    -f runner_label="$RUNNER_LABEL")"
+    "${package_inputs[@]}")"
   log "Testing-mode package run: $PACKAGE_RUN_ID"
 
   if [[ "$WATCH" == "1" ]]; then

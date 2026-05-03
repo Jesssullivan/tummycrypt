@@ -70,6 +70,16 @@ assert_contains "$DRY_RUN_OUT" "-f fileprovider_testing_mode=true"
 assert_contains "$DRY_RUN_OUT" "gh run watch \"<postinstall-smoke-run-id>\""
 assert_not_contains "$DRY_RUN_OUT" "gh secret list"
 
+DRY_RUN_KEYCHAIN_OUT="${TMPDIR}/dry-run-keychain.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --signing-keychain '~/Library/Keychains/tcfs-fileprovider-lab.keychain-db' \
+  >"$DRY_RUN_KEYCHAIN_OUT"
+assert_contains "$DRY_RUN_KEYCHAIN_OUT" "-f signing_keychain=\"~/Library/Keychains/tcfs-fileprovider-lab.keychain-db\""
+
 DRY_RUN_NO_WATCH_OUT="${TMPDIR}/dry-run-no-watch.out"
 bash "$SCRIPT" \
   --dry-run \
@@ -223,6 +233,21 @@ assert_contains "$FAKE_LOG" "gh run list --repo owner/repo --workflow macos-file
 assert_contains "${TMPDIR}/no-watch.err" "Waiting for macos-fileprovider-testing-mode-pkg.yml run to appear (1/10)"
 assert_not_contains "$FAKE_LOG" "macos-postinstall-smoke.yml --repo owner/repo --ref main"
 assert_contains "${TMPDIR}/no-watch.err" "Package run dispatched. After it succeeds, rerun with --package-run-id 123456"
+
+FAKE_LOG="${TMPDIR}/gh-keychain.log"
+PATH="$FAKE_BIN:$PATH" \
+TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+TCFS_FAKE_STATE="$TMPDIR" \
+TCFS_GH_RUN_ID_POLL_SECONDS=0 \
+bash "$SCRIPT" \
+  --tag v1.2.3 \
+  --repo owner/repo \
+  --ref main \
+  --signing-keychain '~/Library/Keychains/tcfs-fileprovider-lab.keychain-db' \
+  --no-watch \
+  >"${TMPDIR}/keychain.out" \
+  2>"${TMPDIR}/keychain.err"
+assert_contains "$FAKE_LOG" "-f signing_keychain=\\~/Library/Keychains/tcfs-fileprovider-lab.keychain-db"
 
 FAKE_LOG="${TMPDIR}/gh-no-runner.log"
 assert_fails_contains \
