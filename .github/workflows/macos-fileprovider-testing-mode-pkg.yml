@@ -18,6 +18,11 @@ on:
         required: false
         default: "auto-development"
         type: string
+      signing_keychain:
+        description: "Optional local keychain to search for Apple Development identity"
+        required: false
+        default: "~/Library/Keychains/login.keychain-db"
+        type: string
       profiles_dir:
         description: "Optional local provisioning profile directory on the runner"
         required: false
@@ -81,8 +86,28 @@ jobs:
         run: |
           set -euo pipefail
           SIGNING_IDENTITY_INPUT="${{ github.event.inputs.signing_identity }}"
+          SIGNING_KEYCHAIN_INPUT="${{ github.event.inputs.signing_keychain }}"
           PROFILES_DIR_INPUT="${{ github.event.inputs.profiles_dir }}"
           profile_args=()
+          identity_args=()
+
+          if [[ -n "$SIGNING_KEYCHAIN_INPUT" ]]; then
+            case "$SIGNING_KEYCHAIN_INPUT" in
+              "~/"*) SIGNING_KEYCHAIN="${HOME}/${SIGNING_KEYCHAIN_INPUT#"~/"}" ;;
+              *) SIGNING_KEYCHAIN="$SIGNING_KEYCHAIN_INPUT" ;;
+            esac
+            if [[ ! -f "$SIGNING_KEYCHAIN" ]]; then
+              echo "::error::signing_keychain does not exist: $SIGNING_KEYCHAIN"
+              exit 1
+            fi
+            identity_args+=("$SIGNING_KEYCHAIN")
+          else
+            SIGNING_KEYCHAIN=""
+          fi
+
+          find_identities() {
+            security find-identity -v -p codesigning "${identity_args[@]}"
+          }
 
           if [[ -n "$PROFILES_DIR_INPUT" ]]; then
             case "$PROFILES_DIR_INPUT" in
@@ -94,7 +119,7 @@ jobs:
 
           case "$SIGNING_IDENTITY_INPUT" in
             auto-development)
-              SIGNING_IDENTITY="$(security find-identity -v -p codesigning \
+              SIGNING_IDENTITY="$(find_identities \
                 | grep "Apple Development" | head -1 \
                 | sed 's/.*"\(.*\)".*/\1/' || true)"
               ;;
@@ -109,14 +134,14 @@ jobs:
 
           if [[ -z "$SIGNING_IDENTITY" ]]; then
             echo "::error::No Apple Development signing identity found on this runner"
-            security find-identity -v -p codesigning || true
+            find_identities || true
             exit 1
           fi
 
-          if ! security find-identity -v -p codesigning \
+          if ! find_identities \
             | grep -F "\"$SIGNING_IDENTITY\"" >/dev/null; then
             echo "::error::Signing identity is not available in this runner keychain: $SIGNING_IDENTITY"
-            security find-identity -v -p codesigning || true
+            find_identities || true
             exit 1
           fi
 
@@ -146,6 +171,9 @@ jobs:
             echo "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
             echo "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
             echo "TCFS_CODESIGN_TIMESTAMP=0"
+            if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+              echo "TCFS_CODESIGN_KEYCHAIN=$SIGNING_KEYCHAIN"
+            fi
           } >> "$GITHUB_ENV"
 
       - name: Build FileProvider app

@@ -28,6 +28,7 @@ EXTENSION_PROVISIONING_PROFILE="${TCFS_EXTENSION_PROVISIONING_PROFILE:-${TCFS_FI
 AUTO_PROVISIONING_PROFILES="${TCFS_AUTO_PROVISIONING_PROFILES:-0}"
 EMBED_FILEPROVIDER_CONFIG="${TCFS_EMBED_FILEPROVIDER_CONFIG:-}"
 FILEPROVIDER_TESTING_MODE_ENTITLEMENT="${TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT:-0}"
+CODESIGN_KEYCHAIN="${TCFS_CODESIGN_KEYCHAIN:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -60,6 +61,17 @@ else
 fi
 unset SDKROOT
 
+SECURITY_IDENTITY_ARGS=()
+CODESIGN_KEYCHAIN_ARGS=()
+if [ -n "$CODESIGN_KEYCHAIN" ]; then
+    if [ ! -f "$CODESIGN_KEYCHAIN" ]; then
+        echo "ERROR: TCFS_CODESIGN_KEYCHAIN does not exist: $CODESIGN_KEYCHAIN" >&2
+        exit 1
+    fi
+    SECURITY_IDENTITY_ARGS=("$CODESIGN_KEYCHAIN")
+    CODESIGN_KEYCHAIN_ARGS=(--keychain "$CODESIGN_KEYCHAIN")
+fi
+
 # Auto-detect a signing identity from Keychain.
 if [ "$SIGNING_IDENTITY" = "auto" ] || [ "$SIGNING_IDENTITY" = "auto-development" ]; then
   if [ "$SIGNING_IDENTITY" = "auto-development" ]; then
@@ -68,7 +80,7 @@ if [ "$SIGNING_IDENTITY" = "auto" ] || [ "$SIGNING_IDENTITY" = "auto-development
     IDENTITY_PATTERN="Developer ID Application"
   fi
 
-  SIGNING_IDENTITY=$(security find-identity -v -p codesigning | grep "$IDENTITY_PATTERN" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
+  SIGNING_IDENTITY=$(security find-identity -v -p codesigning "${SECURITY_IDENTITY_ARGS[@]}" | grep "$IDENTITY_PATTERN" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
   if [ -z "$SIGNING_IDENTITY" ]; then
     echo "WARNING: No $IDENTITY_PATTERN identity found in Keychain, falling back to ad-hoc" >&2
     SIGNING_IDENTITY="-"
@@ -337,6 +349,7 @@ HOST_ENTITLEMENTS="$SCRIPT_DIR/resources/HostApp.entitlements"
 if [ "$SIGNING_IDENTITY" != "-" ]; then
     # Extract TeamID from the signing certificate.
     TEAM_ID=$(/usr/bin/security find-identity -v -p codesigning \
+        "${SECURITY_IDENTITY_ARGS[@]}" \
         | grep "$SIGNING_IDENTITY" \
         | head -1 \
         | sed -E 's/.*\(([A-Z0-9]{10})\).*/\1/')
@@ -380,18 +393,21 @@ FINDER_SYNC_ENTITLEMENTS="$SCRIPT_DIR/resources/FinderSync.entitlements"
 if [ "$SIGNING_IDENTITY" != "-" ]; then
     echo "    Identity: $SIGNING_IDENTITY"
     /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
+        "${CODESIGN_KEYCHAIN_ARGS[@]}" \
         --options runtime "$CODESIGN_TIMESTAMP_ARG" \
         --entitlements "$EXT_ENTITLEMENTS" \
         "$APP/Extensions/TCFSFileProvider.appex"
 
     if [ "$HAVE_FINDER_SYNC" = "true" ]; then
         /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
+            "${CODESIGN_KEYCHAIN_ARGS[@]}" \
             --options runtime "$CODESIGN_TIMESTAMP_ARG" \
             --entitlements "$FINDER_SYNC_ENTITLEMENTS" \
             "$APP/Extensions/TCFSFinderSync.appex"
     fi
 
     /usr/bin/codesign -f -s "$SIGNING_IDENTITY" \
+        "${CODESIGN_KEYCHAIN_ARGS[@]}" \
         --options runtime "$CODESIGN_TIMESTAMP_ARG" \
         --entitlements "$HOST_ENTITLEMENTS" \
         "$OUTPUT_DIR/TCFSProvider.app"
