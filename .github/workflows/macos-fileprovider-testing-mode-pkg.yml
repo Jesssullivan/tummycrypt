@@ -169,6 +169,29 @@ jobs:
             exit 1
           fi
 
+          PROBE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/tcfs-codesign-probe.XXXXXX")"
+          PROBE_BIN="$PROBE_DIR/probe"
+          PROBE_ERR="$PROBE_DIR/codesign.err"
+          cp /bin/echo "$PROBE_BIN"
+          if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+            if ! codesign -f -s "$SIGNING_IDENTITY" --keychain "$SIGNING_KEYCHAIN" --timestamp=none "$PROBE_BIN" 2>"$PROBE_ERR"; then
+              echo "::error::Apple Development signing identity is visible, but codesign cannot use its private key noninteractively"
+              cat "$PROBE_ERR"
+              echo "Unlock the runner keychain and allow apple-tool:, apple:, and codesign: key partition access for this identity."
+              rm -rf "$PROBE_DIR"
+              exit 1
+            fi
+          else
+            if ! codesign -f -s "$SIGNING_IDENTITY" --timestamp=none "$PROBE_BIN" 2>"$PROBE_ERR"; then
+              echo "::error::Apple Development signing identity is visible, but codesign cannot use its private key noninteractively"
+              cat "$PROBE_ERR"
+              echo "Unlock the runner keychain and allow apple-tool:, apple:, and codesign: key partition access for this identity."
+              rm -rf "$PROBE_DIR"
+              exit 1
+            fi
+          fi
+          rm -rf "$PROBE_DIR"
+
           if ! PROFILE_ENV="$(profile_env)"; then
             echo "::error::No local host/extension provisioning profile pair grants FileProvider testing mode"
             find_profiles --require-host-entitlement com.apple.developer.fileprovider.testing-mode || true

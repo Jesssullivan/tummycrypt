@@ -245,6 +245,8 @@ check_testing_mode_package_workflow() {
   assert_contains "$resolve_assets_step" "Apple Development"
   assert_contains "$resolve_assets_step" "find_identities"
   assert_contains "$resolve_assets_step" "signing_keychain does not exist"
+  assert_contains "$resolve_assets_step" "codesign cannot use its private key noninteractively"
+  assert_contains "$resolve_assets_step" "apple-tool:, apple:, and codesign:"
   assert_contains "$resolve_assets_step" "No local host/extension provisioning profile pair grants FileProvider testing mode"
   assert_contains "$resolve_assets_step" "--require-host-entitlement com.apple.developer.fileprovider.testing-mode"
   assert_contains "$resolve_assets_step" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
