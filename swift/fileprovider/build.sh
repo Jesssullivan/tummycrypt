@@ -94,6 +94,29 @@ codesign_with_identity() {
     fi
 }
 
+team_id_from_profile() {
+    local profile="$1"
+    local tmp
+    local app_id
+
+    tmp="$(mktemp "${TMPDIR:-/tmp}/tcfs-profile-team.XXXXXX")"
+    if ! /usr/bin/security cms -D -i "$profile" > "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$tmp" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$tmp" 2>/dev/null \
+        || true)"
+    rm -f "$tmp"
+
+    if [ -z "$app_id" ] || [ "$app_id" = "${app_id#*.}" ]; then
+        return 1
+    fi
+
+    printf '%s\n' "${app_id%%.*}"
+}
+
 # Auto-detect a signing identity from Keychain.
 if [ "$SIGNING_IDENTITY" = "auto" ] || [ "$SIGNING_IDENTITY" = "auto-development" ]; then
   if [ "$SIGNING_IDENTITY" = "auto-development" ]; then
@@ -369,11 +392,19 @@ EXT_ENTITLEMENTS="$SCRIPT_DIR/resources/Extension.entitlements"
 HOST_ENTITLEMENTS="$SCRIPT_DIR/resources/HostApp.entitlements"
 
 if [ "$SIGNING_IDENTITY" != "-" ]; then
-    # Extract TeamID from the signing certificate.
-    TEAM_ID=$(find_codesign_identities \
-        | grep "$SIGNING_IDENTITY" \
-        | head -1 \
-        | sed -E 's/.*\(([A-Z0-9]{10})\).*/\1/')
+    TEAM_ID=""
+    if [ -n "$HOST_PROVISIONING_PROFILE" ]; then
+        TEAM_ID="$(team_id_from_profile "$HOST_PROVISIONING_PROFILE" || true)"
+    fi
+    if [ -z "$TEAM_ID" ]; then
+        # Fall back to the signing certificate display name. This is correct for
+        # Developer ID certificates, but Apple Development certificates can show
+        # a personal identifier while profiles use the App Identifier Prefix.
+        TEAM_ID=$(find_codesign_identities \
+            | grep "$SIGNING_IDENTITY" \
+            | head -1 \
+            | sed -E 's/.*\(([A-Z0-9]{10})\).*/\1/')
+    fi
     if [ -n "$TEAM_ID" ]; then
         echo "    TeamID: $TEAM_ID"
         # Generate entitlements with resolved keychain-access-groups
