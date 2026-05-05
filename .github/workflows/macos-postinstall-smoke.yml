@@ -254,9 +254,31 @@ jobs:
           PACKAGE_ARTIFACT_NAME="${{ github.event.inputs.package_artifact_name }}"
 
           if [[ -n "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
+            GH_BIN="${TCFS_GH:-}"
+            if [[ -z "$GH_BIN" ]]; then
+              for candidate in \
+                gh \
+                "$HOME/.nix-profile/bin/gh" \
+                /opt/homebrew/bin/gh \
+                /usr/local/bin/gh
+              do
+                if command -v "$candidate" >/dev/null 2>&1; then
+                  GH_BIN="$(command -v "$candidate")"
+                  break
+                elif [[ -x "$candidate" ]]; then
+                  GH_BIN="$candidate"
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$GH_BIN" ]]; then
+              echo "::error::gh is required to download package artifacts by run ID"
+              exit 1
+            fi
+
             artifact_dir="$RUNNER_TEMP/package-artifact"
             mkdir -p "$artifact_dir"
-            gh run download "$PACKAGE_ARTIFACT_RUN_ID" \
+            "$GH_BIN" run download "$PACKAGE_ARTIFACT_RUN_ID" \
               --repo "${{ github.repository }}" \
               --name "$PACKAGE_ARTIFACT_NAME" \
               --dir "$artifact_dir"
