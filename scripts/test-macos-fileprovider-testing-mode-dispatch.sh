@@ -71,22 +71,26 @@ assert_contains "$DRY_RUN_OUT" "gh run watch \"<postinstall-smoke-run-id>\""
 assert_not_contains "$DRY_RUN_OUT" "gh secret list"
 
 DRY_RUN_KEYCHAIN_OUT="${TMPDIR}/dry-run-keychain.out"
+# shellcheck disable=SC2088 # The test intentionally passes a literal tilde.
+LITERAL_KEYCHAIN='~/Library/Keychains/tcfs-fileprovider-lab.keychain-db'
 bash "$SCRIPT" \
   --dry-run \
   --tag v9.9.9 \
   --repo owner/repo \
   --ref main \
-  --signing-keychain '~/Library/Keychains/tcfs-fileprovider-lab.keychain-db' \
+  --signing-keychain "$LITERAL_KEYCHAIN" \
   >"$DRY_RUN_KEYCHAIN_OUT"
 assert_contains "$DRY_RUN_KEYCHAIN_OUT" "-f signing_keychain=\"~/Library/Keychains/tcfs-fileprovider-lab.keychain-db\""
 
 DRY_RUN_P12_OUT="${TMPDIR}/dry-run-p12.out"
+# shellcheck disable=SC2088 # The test intentionally passes a literal tilde.
+LITERAL_P12='~/Certificates.p12'
 bash "$SCRIPT" \
   --dry-run \
   --tag v9.9.9 \
   --repo owner/repo \
   --ref main \
-  --signing-p12-path '~/Certificates.p12' \
+  --signing-p12-path "$LITERAL_P12" \
   >"$DRY_RUN_P12_OUT"
 assert_contains "$DRY_RUN_P12_OUT" "-f signing_p12_path=\"~/Certificates.p12\""
 
@@ -165,8 +169,8 @@ assert_fails_contains \
 assert_fails_contains \
   "--signing-keychain and --signing-p12-path are mutually exclusive" \
   bash "$SCRIPT" --dry-run --tag v9.9.9 \
-    --signing-keychain '~/Library/Keychains/tcfs-fileprovider-lab.keychain-db' \
-    --signing-p12-path '~/Certificates.p12'
+    --signing-keychain "$LITERAL_KEYCHAIN" \
+    --signing-p12-path "$LITERAL_P12"
 
 FAKE_BIN="${TMPDIR}/fake-bin"
 mkdir -p "$FAKE_BIN"
@@ -259,7 +263,7 @@ bash "$SCRIPT" \
   --tag v1.2.3 \
   --repo owner/repo \
   --ref main \
-  --signing-keychain '~/Library/Keychains/tcfs-fileprovider-lab.keychain-db' \
+  --signing-keychain "$LITERAL_KEYCHAIN" \
   --no-watch \
   >"${TMPDIR}/keychain.out" \
   2>"${TMPDIR}/keychain.err"
@@ -274,7 +278,7 @@ bash "$SCRIPT" \
   --tag v1.2.3 \
   --repo owner/repo \
   --ref main \
-  --signing-p12-path '~/Certificates.p12' \
+  --signing-p12-path "$LITERAL_P12" \
   --no-watch \
   >"${TMPDIR}/p12.out" \
   2>"${TMPDIR}/p12.err"

@@ -96,7 +96,8 @@ system_profiler SPHardwareDataType \
 ```
 
 Create or select an Apple Development certificate available to the build
-machine. Then create two Mac App Development profiles for the registered Mac:
+machine. Then create two Mac App Development profiles for the registered Mac.
+Prefer the ASC-backed automation below over manual portal profile downloads:
 
 | Bundle | Profile type | Required profile contents |
 | --- | --- | --- |
@@ -122,6 +123,96 @@ true
 
 If that check does not print `true`, the profile is not valid for the
 testing-mode lane regardless of its display name.
+
+## ASC Desired-State Provisioning
+
+As of May 5, 2026, the lab lane has repo-owned ASC scaffolding instead of a
+manual portal/download loop:
+
+- desired state lives in `config/macos-fileprovider-lab.asc.json`
+- `scripts/asc-fileprovider-lab-provision.py` plans or applies ASC
+  certificate/profile state
+- `scripts/macos-codesign-p12-probe.sh` imports a p12 into an isolated
+  temporary keychain and proves `codesign` can use it before a GitHub Actions
+  dispatch
+
+The provisioner uses the existing ASC key defaults from the iOS pipeline:
+
+- key id: `ZV65L9B864`
+- issuer id: `d5db1c0a-0a82-4a50-9490-7d86be080506`
+- private key path: `~/.private_keys/AuthKey_ZV65L9B864.p8`
+
+These can be overridden with `ASC_KEY_ID`, `ASC_ISSUER_ID`, and either
+`ASC_PRIVATE_KEY_PATH`, `ASC_PRIVATE_KEY_P8`, or `ASC_PRIVATE_KEY_BASE64`.
+The same ASC key is also kept in encrypted form at
+`credentials/app-store-connect.yaml`; decrypt it with SOPS only into a local
+environment or temporary file. Do not commit a plaintext `.p8` key or generated
+p12 files.
+
+Plan against an existing Apple Development certificate fingerprint:
+
+```bash
+scripts/asc-fileprovider-lab-provision.py \
+  --certificate-sha1 <apple-development-cert-sha1>
+```
+
+Apply with an existing certificate, download the profiles, and install them
+under the current user's provisioning profile directory:
+
+```bash
+scripts/asc-fileprovider-lab-provision.py \
+  --apply \
+  --replace \
+  --install \
+  --certificate-sha1 <apple-development-cert-sha1>
+```
+
+The more repeatable path is to let PZM generate a fresh private key and CSR,
+have ASC issue the Apple Development certificate, and bind the generated Mac
+App Development profiles to that new certificate:
+
+```bash
+export TCFS_FILEPROVIDER_LAB_P12_PASSWORD="$(openssl rand -hex 16)"
+
+scripts/asc-fileprovider-lab-provision.py \
+  --apply \
+  --replace \
+  --install \
+  --create-certificate
+```
+
+That writes:
+
+- a private key and CSR under `build/asc-fileprovider-lab/`
+- a downloaded Apple Development certificate
+- `tcfs-fileprovider-lab-<sha>.p12` (`security export` on macOS, with an
+  OpenSSL fallback elsewhere)
+- stable installed profile filenames:
+  `tcfshostdevelopmenttestingmodepzm.provisionprofile` and
+  `tcfsfileproviderdevelopmentpzm.provisionprofile`
+
+Before dispatching CI, prove the p12 is usable by `codesign` in the same
+security context that will run the build. SSH can list identities while still
+failing private-key use, so a failing SSH probe is evidence about that session,
+not necessarily about the GitHub runner LaunchAgent.
+
+```bash
+scripts/macos-codesign-p12-probe.sh \
+  --p12 build/asc-fileprovider-lab/tcfs-fileprovider-lab-<sha>.p12
+```
+
+Then dispatch the lab package lane with the generated p12:
+
+```bash
+scripts/macos-fileprovider-testing-mode-dispatch.sh \
+  --tag v0.12.7 \
+  --runner-label petting-zoo-mini \
+  --signing-p12-path ~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-<sha>.p12
+```
+
+The default mode is non-mutating. `--apply` is required before the ASC script
+creates certificates, creates profiles, deletes stale same-name profiles, writes
+profile files, or installs profiles.
 
 ## CI Topology
 
@@ -177,6 +268,10 @@ As of May 2, 2026, the repo has a first lab-lane implementation:
   requires a non-hosted runner when `fileprovider_testing_mode=true`
 - `scripts/macos-fileprovider-testing-mode-dispatch.sh` dispatches both the
   package build and smoke to `petting-zoo-mini` by default
+- `config/macos-fileprovider-lab.asc.json`,
+  `scripts/asc-fileprovider-lab-provision.py`, and
+  `scripts/macos-codesign-p12-probe.sh` supersede ad hoc portal profile
+  regeneration for the lab lane
 
 ## Lab Runner Enrollment
 
@@ -321,14 +416,18 @@ Feature goals remain:
 
 ## Immediate Work Items
 
-1. Register the selected lab Mac as an Apple Developer Device.
-2. Create Mac App Development profiles for host and extension.
-3. Verify the host profile contains
-   `com.apple.developer.fileprovider.testing-mode = true`.
-4. Install the profiles on `petting-zoo-mini` under the runner user's
-   provisioning profile directory, or pass the directory through the workflow
-   input.
-5. Confirm the runner keychain has an `Apple Development` codesigning identity.
-6. Run the self-hosted FileProvider testing-mode smoke against `v0.12.7`.
+1. Run `scripts/asc-fileprovider-lab-provision.py --validate-config`.
+2. Keep `config/macos-fileprovider-lab.asc.json` pointed at PZM's registered
+   Provisioning UDID.
+3. On `petting-zoo-mini`, run the ASC provisioner with
+   `--apply --replace --install --create-certificate` so the private key,
+   certificate, p12, and profiles are generated from one controlled lane.
+4. Run `scripts/macos-codesign-p12-probe.sh --p12 <generated.p12>` from the
+   runner/GUI security context where possible.
+5. Run the streamed profile inventory gate with
+   `--require-host-entitlement com.apple.developer.fileprovider.testing-mode
+   --strict`.
+6. Dispatch the self-hosted FileProvider testing-mode smoke against `v0.12.7`
+   with `--signing-p12-path <generated.p12>`.
 7. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
    gates.

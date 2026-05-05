@@ -116,6 +116,24 @@ jobs:
           SIGNING_P12_PASSWORD="${{ github.event.inputs.signing_p12_password }}"
           SIGNING_KEYCHAIN_PASSWORD="${{ github.event.inputs.signing_keychain_password }}"
           PROFILES_DIR_INPUT="${{ github.event.inputs.profiles_dir }}"
+          ORIGINAL_KEYCHAINS=()
+
+          while IFS= read -r keychain_path; do
+            [[ -n "$keychain_path" ]] || continue
+            ORIGINAL_KEYCHAINS+=("$keychain_path")
+          done < <(
+            security list-keychains -d user 2>/dev/null \
+              | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//; s/^[[:space:]]+//; s/[[:space:]]+$//'
+          )
+
+          add_signing_keychain_to_search_list() {
+            [[ -n "${SIGNING_KEYCHAIN:-}" ]] || return 0
+            if ((${#ORIGINAL_KEYCHAINS[@]} > 0)); then
+              security list-keychains -d user -s "$SIGNING_KEYCHAIN" "${ORIGINAL_KEYCHAINS[@]}"
+            else
+              security list-keychains -d user -s "$SIGNING_KEYCHAIN"
+            fi
+          }
 
           if [[ -n "$SIGNING_P12_PATH_INPUT" ]]; then
             case "$SIGNING_P12_PATH_INPUT" in
@@ -131,6 +149,7 @@ jobs:
             security create-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
             security unlock-keychain -p "$SIGNING_KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
             security set-keychain-settings -lut 21600 "$SIGNING_KEYCHAIN"
+            add_signing_keychain_to_search_list
             security import "$SIGNING_P12_PATH" \
               -f pkcs12 \
               -k "$SIGNING_KEYCHAIN" \
@@ -154,6 +173,7 @@ jobs:
               echo "::error::signing_keychain does not exist: $SIGNING_KEYCHAIN"
               exit 1
             fi
+            add_signing_keychain_to_search_list
           else
             SIGNING_KEYCHAIN=""
           fi
@@ -211,8 +231,7 @@ jobs:
           case "$SIGNING_IDENTITY_INPUT" in
             auto-development)
               SIGNING_IDENTITY="$(find_identities \
-                | grep "Apple Development" | head -1 \
-                | sed 's/.*"\(.*\)".*/\1/' || true)"
+                | awk '/Apple Development/ { sub(/^[[:space:]]*[0-9]+\) /, ""); print $1; exit }' || true)"
               ;;
             auto)
               echo "::error::Developer ID auto-detection is not valid for the testing-mode lane; use auto-development or an Apple Development identity"
@@ -230,7 +249,7 @@ jobs:
           fi
 
           if ! find_identities \
-            | grep -F "\"$SIGNING_IDENTITY\"" >/dev/null; then
+            | grep -F "$SIGNING_IDENTITY" >/dev/null; then
             echo "::error::Signing identity is not available in this runner keychain: $SIGNING_IDENTITY"
             find_identities || true
             exit 1

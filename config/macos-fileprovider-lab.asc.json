@@ -1,0 +1,46 @@
+{
+  "team_id": "QP994XQKNH",
+  "runner": {
+    "name": "petting-zoo-mini",
+    "label": "petting-zoo-mini",
+    "device_udid": "00008132-001240C80138801C"
+  },
+  "app_store_connect": {
+    "key_id": "ZV65L9B864",
+    "issuer_id": "d5db1c0a-0a82-4a50-9490-7d86be080506",
+    "private_key_path": "~/.private_keys/AuthKey_ZV65L9B864.p8"
+  },
+  "signing": {
+    "certificate_types": [
+      "DEVELOPMENT",
+      "MAC_APP_DEVELOPMENT"
+    ],
+    "certificate_sha1": "",
+    "create_certificate_type": "DEVELOPMENT",
+    "p12_password_env": "TCFS_FILEPROVIDER_LAB_P12_PASSWORD"
+  },
+  "profiles": [
+    {
+      "role": "host",
+      "name": "tcfs-host-development-testing-mode-pzm",
+      "install_filename": "tcfshostdevelopmenttestingmodepzm.provisionprofile",
+      "bundle_id": "io.tinyland.tcfs",
+      "profile_type": "MAC_APP_DEVELOPMENT",
+      "required_capabilities": [
+        "FILEPROVIDER_TESTINGMODE"
+      ],
+      "required_entitlements": {
+        "com.apple.developer.fileprovider.testing-mode": true
+      }
+    },
+    {
+      "role": "extension",
+      "name": "tcfs-fileprovider-development-pzm",
+      "install_filename": "tcfsfileproviderdevelopmentpzm.provisionprofile",
+      "bundle_id": "io.tinyland.tcfs.fileprovider",
+      "profile_type": "MAC_APP_DEVELOPMENT",
+      "required_capabilities": [],
+      "required_entitlements": {}
+    }
+  ]
+}

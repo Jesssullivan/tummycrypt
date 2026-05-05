@@ -233,7 +233,9 @@ check_testing_mode_package_workflow() {
     "Expose existing Rust toolchain manager" \
     "$expose_rustup_step"
   bash -n "$expose_rustup_step"
+  # shellcheck disable=SC2016 # Intentional literal assertions against workflow shell.
   assert_contains "$expose_rustup_step" '$HOME/.cargo/bin/rustup'
+  # shellcheck disable=SC2016 # Intentional literal assertions against workflow shell.
   assert_contains "$expose_rustup_step" '$GITHUB_PATH'
 
   extract_step_from_workflow \
@@ -246,7 +248,11 @@ check_testing_mode_package_workflow() {
   assert_contains "$resolve_assets_step" "find_identities"
   assert_contains "$resolve_assets_step" "signing_keychain does not exist"
   assert_contains "$resolve_assets_step" "signing_p12_path does not exist"
+  # shellcheck disable=SC2016 # Intentional literal assertion against workflow shell.
   assert_contains "$resolve_assets_step" 'security import "$SIGNING_P12_PATH"'
+  # shellcheck disable=SC2016 # Intentional literal assertion against workflow shell.
+  assert_contains "$resolve_assets_step" 'security list-keychains -d user -s "$SIGNING_KEYCHAIN"'
+  assert_contains "$resolve_assets_step" "awk '/Apple Development/"
   assert_contains "$resolve_assets_step" "security unlock-keychain"
   assert_contains "$resolve_assets_step" "security set-key-partition-list"
   assert_contains "$resolve_assets_step" "codesign cannot use its private key noninteractively"
