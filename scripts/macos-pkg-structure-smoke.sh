@@ -32,7 +32,7 @@ PKG_PATH=""
 EXPECTED_POSTINSTALL="${REPO_ROOT}/scripts/macos-pkg-postinstall.sh"
 ALLOW_POSTINSTALL_MISMATCH=0
 REQUIRE_SIGNATURE=0
-PKGUTIL_BIN="${TCFS_PKGUTIL:-pkgutil}"
+PKGUTIL_BIN="${TCFS_PKGUTIL:-}"
 UNAME_BIN="${TCFS_UNAME:-uname}"
 
 while [[ $# -gt 0 ]]; do
@@ -73,6 +73,16 @@ done
 
 if [[ "$("$UNAME_BIN" -s)" != "Darwin" ]]; then
   fail "scripts/macos-pkg-structure-smoke.sh only inspects packages with macOS pkgutil"
+fi
+
+if [[ -z "$PKGUTIL_BIN" ]]; then
+  if command -v pkgutil >/dev/null 2>&1; then
+    PKGUTIL_BIN="$(command -v pkgutil)"
+  elif [[ -x /usr/sbin/pkgutil ]]; then
+    PKGUTIL_BIN="/usr/sbin/pkgutil"
+  else
+    PKGUTIL_BIN="pkgutil"
+  fi
 fi
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/tcfs-pkg-structure.XXXXXX")"

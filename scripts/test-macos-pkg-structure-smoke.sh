@@ -10,6 +10,11 @@ POSTINSTALL="${REPO_ROOT}/scripts/macos-pkg-postinstall.sh"
 TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/tcfs-pkg-structure-test.XXXXXX")"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+grep -Fq "/usr/sbin/pkgutil" "$SCRIPT" || {
+  printf 'macOS pkgutil fallback should include /usr/sbin/pkgutil for non-login runner shells\n' >&2
+  exit 1
+}
+
 assert_contains() {
   local file="$1"
   local expected="$2"
