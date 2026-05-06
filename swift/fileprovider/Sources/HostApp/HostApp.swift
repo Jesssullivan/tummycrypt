@@ -106,6 +106,7 @@ struct TCFSProviderApp {
             kSecAttrAccessGroup as String: accessGroup,
             kSecAttrService as String: sharedConfigService,
             kSecAttrAccount as String: sharedConfigAccount,
+            kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
         ]
         let updateAttrs: [String: Any] = [
             kSecValueData as String: data,

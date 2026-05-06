@@ -585,6 +585,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             kSecAttrAccessGroup as String: accessGroup,
             kSecAttrService as String: sharedConfigService,
             kSecAttrAccount as String: sharedConfigAccount,
+            kSecUseDataProtectionKeychain as String: kCFBooleanTrue as Any,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
