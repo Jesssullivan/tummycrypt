@@ -16,6 +16,10 @@ struct TCFSProviderApp {
             displayName: "TCFS"
         )
         configureTestingModeIfRequested(domain)
+        if policyProbeOnlyRequested() {
+            hostEvent("policyProbe: OK")
+            exit(0)
+        }
 
         // Provision config to Keychain (best-effort fallback for pre-built binaries).
         provisionConfig()
@@ -141,6 +145,10 @@ struct TCFSProviderApp {
         }
 
         return parsed
+    }
+
+    private static func policyProbeOnlyRequested() -> Bool {
+        ProcessInfo.processInfo.environment["TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY"] == "1"
     }
 
     private static func fileProviderActionNonceLogSuffix() -> String {

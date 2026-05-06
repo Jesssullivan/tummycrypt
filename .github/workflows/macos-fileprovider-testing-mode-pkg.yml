@@ -367,6 +367,109 @@ jobs:
             exit 1
           fi
 
+      - name: Probe development app launch policy
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          POLICY_DIR="${RUNNER_TEMP:-/tmp}/tcfs-fileprovider-testing-policy"
+          mkdir -p "$POLICY_DIR"
+
+          run_bounded() {
+            local label="$1"
+            local timeout_secs="$2"
+            shift 2
+
+            local out="$POLICY_DIR/$label"
+            local pid
+            local waited=0
+
+            "$@" > "$out" 2>&1 &
+            pid="$!"
+
+            while kill -0 "$pid" 2>/dev/null; do
+              if (( waited >= timeout_secs )); then
+                kill "$pid" 2>/dev/null || true
+                perl -e 'select undef, undef, undef, 1.0'
+                kill -KILL "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                echo "timed out after ${timeout_secs}s" >> "$out"
+                return 124
+              fi
+              perl -e 'select undef, undef, undef, 1.0'
+              waited=$((waited + 1))
+            done
+
+            wait "$pid"
+          }
+
+          capture_bundle_policy() {
+            local label="$1"
+            local bundle="$2"
+
+            if [[ ! -e "$bundle" ]]; then
+              echo "$bundle not found" > "$POLICY_DIR/${label}-missing.txt"
+              return
+            fi
+
+            codesign --verify --deep --strict --verbose=4 "$bundle" \
+              > "$POLICY_DIR/${label}-codesign-verify.txt" 2>&1 || true
+            codesign -dvvv --entitlements :- "$bundle" \
+              > "$POLICY_DIR/${label}-codesign-detail.txt" 2>&1 || true
+            if command -v xattr >/dev/null 2>&1; then
+              xattr -lr "$bundle" > "$POLICY_DIR/${label}-xattrs.txt" 2>&1 || true
+            fi
+
+            local spctl_bin
+            spctl_bin="$(command -v spctl || true)"
+            if [[ -z "$spctl_bin" && -x /usr/sbin/spctl ]]; then
+              spctl_bin=/usr/sbin/spctl
+            fi
+            if [[ -n "$spctl_bin" ]]; then
+              "$spctl_bin" --assess --type execute --verbose=4 --raw "$bundle" \
+                > "$POLICY_DIR/${label}-spctl-execute.txt" 2>&1 || true
+            else
+              echo "spctl not found" > "$POLICY_DIR/${label}-spctl-execute.txt"
+            fi
+
+            if command -v syspolicy_check >/dev/null 2>&1; then
+              syspolicy_check distribution "$bundle" \
+                > "$POLICY_DIR/${label}-syspolicy-distribution.txt" 2>&1 || true
+              syspolicy_check notary-submission "$bundle" \
+                > "$POLICY_DIR/${label}-syspolicy-notary-submission.txt" 2>&1 || true
+            else
+              echo "syspolicy_check not found" \
+                > "$POLICY_DIR/${label}-syspolicy-distribution.txt"
+              echo "syspolicy_check not found" \
+                > "$POLICY_DIR/${label}-syspolicy-notary-submission.txt"
+            fi
+          }
+
+          capture_bundle_policy host-app build/TCFSProvider.app
+          capture_bundle_policy fileprovider-extension build/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+
+          HOST_BIN="build/TCFSProvider.app/Contents/MacOS/TCFSProvider"
+          if [[ -x "$HOST_BIN" ]]; then
+            run_bounded host-policy-probe.log 15 \
+              env \
+              TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
+              TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY=1 \
+              TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1 \
+              "$HOST_BIN"
+            printf 'exit=%s\n' "$?" > "$POLICY_DIR/host-policy-probe.exit"
+          else
+            echo "$HOST_BIN not executable" > "$POLICY_DIR/host-policy-probe.log"
+            echo "exit=127" > "$POLICY_DIR/host-policy-probe.exit"
+          fi
+
+      - name: Upload testing policy diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fileprovider-testing-policy-${{ github.run_id }}
+          path: ${{ runner.temp }}/tcfs-fileprovider-testing-policy
+          if-no-files-found: ignore
+
       - name: Archive FileProvider app
         shell: bash
         run: |

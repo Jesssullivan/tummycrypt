@@ -222,6 +222,8 @@ check_testing_mode_package_workflow() {
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "com.apple.developer.fileprovider.testing-mode"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_CODESIGN_TIMESTAMP=0"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY=1"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "fileprovider-testing-policy-"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "tcfs-\${VERSION}-macos-aarch64-fileprovider-testing-mode.pkg"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "dist-testing-mode-pkg"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "releases/download/\${TAG}/tcfs-\${VERSION}-macos-aarch64.tar.gz"
@@ -237,6 +239,7 @@ check_testing_mode_package_workflow() {
   local expose_rustup_step="${TMPDIR}/testing-mode-expose-rustup.sh"
   local build_app_step="${TMPDIR}/testing-mode-build-fileprovider-app.sh"
   local verify_signing_step="${TMPDIR}/testing-mode-verify-signing.sh"
+  local probe_policy_step="${TMPDIR}/testing-mode-probe-policy.sh"
   local download_cli_step="${TMPDIR}/testing-mode-download-cli-tarball.sh"
   local build_pkg_step="${TMPDIR}/testing-mode-build-pkg.sh"
   local verify_pkg_step="${TMPDIR}/testing-mode-verify-package.sh"
@@ -306,6 +309,17 @@ check_testing_mode_package_workflow() {
   bash -n "$verify_signing_step"
   assert_contains "$verify_signing_step" "scripts/macos-fileprovider-preflight.sh"
   assert_contains "$verify_signing_step" "com.apple.developer.fileprovider.testing-mode"
+
+  extract_step_from_workflow \
+    "$TESTING_MODE_PKG_WORKFLOW" \
+    "build-testing-mode-pkg" \
+    "Probe development app launch policy" \
+    "$probe_policy_step"
+  bash -n "$probe_policy_step"
+  assert_contains "$probe_policy_step" "spctl"
+  assert_contains "$probe_policy_step" "syspolicy_check"
+  assert_contains "$probe_policy_step" "TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY=1"
+  assert_contains "$probe_policy_step" "host-policy-probe.exit"
 
   extract_step_from_workflow \
     "$TESTING_MODE_PKG_WORKFLOW" \
