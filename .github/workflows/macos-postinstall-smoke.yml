@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      lab_gatekeeper_override:
+        description: "PZM-only non-production lab: add temporary Gatekeeper assessment rules for the installed testing-mode app"
+        required: false
+        default: false
+        type: boolean
       package_url:
         description: "Optional direct .pkg URL to install instead of the release asset for tag"
         required: false
@@ -84,6 +89,7 @@ jobs:
           PACKAGE_URL="${{ github.event.inputs.package_url }}"
           PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
           FILEPROVIDER_TESTING_MODE="${{ github.event.inputs.fileprovider_testing_mode }}"
+          LAB_GATEKEEPER_OVERRIDE="${{ github.event.inputs.lab_gatekeeper_override }}"
           RUNNER_LABEL="${{ github.event.inputs.runner_label }}"
           [[ "$TAG" == v* ]] || {
             echo "::error::tag must start with 'v' (got '$TAG')"
@@ -103,6 +109,21 @@ jobs:
           if [[ "$FILEPROVIDER_TESTING_MODE" == "true" && "$RUNNER_LABEL" == macos-* ]]; then
             echo "::error::fileprovider_testing_mode=true requires a registered self-hosted Mac runner label, not $RUNNER_LABEL"
             exit 1
+          fi
+
+          if [[ "$LAB_GATEKEEPER_OVERRIDE" == "true" && "$FILEPROVIDER_TESTING_MODE" != "true" ]]; then
+            echo "::error::lab_gatekeeper_override=true requires fileprovider_testing_mode=true"
+            exit 1
+          fi
+
+          if [[ "$LAB_GATEKEEPER_OVERRIDE" == "true" ]]; then
+            case "$RUNNER_LABEL" in
+              petting-zoo-mini | petting-zoo-mini-tcfs) ;;
+              *)
+                echo "::error::lab_gatekeeper_override=true is restricted to the petting-zoo-mini lab runner, not $RUNNER_LABEL"
+                exit 1
+                ;;
+            esac
           fi
 
           missing=()
@@ -380,6 +401,14 @@ jobs:
             -u AWS_ACCESS_KEY_ID \
             -u AWS_SECRET_ACCESS_KEY \
             bash scripts/install-smoke.sh --expected-version "${VERSION}"
+
+      - name: Apply PZM lab Gatekeeper override
+        if: ${{ github.event.inputs.lab_gatekeeper_override == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/macos-fileprovider-lab-gatekeeper-override.sh apply \
+            --log-dir "$LOG_DIR/lab-gatekeeper-override"
 
       - name: Probe installed FileProvider app launch policy
         if: ${{ github.event.inputs.fileprovider_testing_mode == 'true' }}
@@ -816,6 +845,14 @@ jobs:
             kill "$(cat "$LOG_DIR/tcfsd.pid")" 2>/dev/null || true
             wait "$(cat "$LOG_DIR/tcfsd.pid")" 2>/dev/null || true
           fi
+
+      - name: Remove PZM lab Gatekeeper override
+        if: always() && github.event.inputs.lab_gatekeeper_override == 'true'
+        shell: bash
+        run: |
+          set +e
+          bash scripts/macos-fileprovider-lab-gatekeeper-override.sh cleanup \
+            --log-dir "$LOG_DIR/lab-gatekeeper-override-cleanup" || true
 
       - name: Upload smoke logs
         if: always()

@@ -118,10 +118,11 @@ Current lab blocker:
   AppleSystemPolicy denies the host process
 - `fileproviderd` launches the extension process, then AppleSystemPolicy also
   terminates the extension before the evict/rehydrate lifecycle can complete
-- the next engineering choice is the lab trust model: reproduce Xcode's local
-  development launch path, find an Apple-approved distribution shape that can
-  still carry testing mode, or explicitly mark the PZM lane as a non-production
-  Gatekeeper-bypassed lab
+- the next engineering choice is now an explicit workflow experiment:
+  `lab_gatekeeper_override=true` on the PZM testing-mode smoke applies a
+  temporary `TCFSFileProviderLab` assessment label, captures before/after policy
+  evidence, and cleans it up. This can only prove the non-production lab path;
+  production Finder still needs separate Developer ID clean-host evidence.
 
 Still manual or weakly proven:
 

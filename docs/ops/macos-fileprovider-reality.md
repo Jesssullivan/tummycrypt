@@ -633,6 +633,16 @@ remaining macOS product work is production Developer ID clean-host enablement
 plus richer Finder lifecycle behavior: evict/rehydrate, mutation,
 conflict/status visibility, and recovery UX.
 
+The next PZM experiment is now encoded as a workflow input instead of a manual
+operator step: dispatch `macos-postinstall-smoke.yml` with
+`fileprovider_testing_mode=true` and `lab_gatekeeper_override=true`. That path
+is restricted to the PZM lab runner, runs
+`scripts/macos-fileprovider-lab-gatekeeper-override.sh`, captures before/after
+`spctl` and `syspolicy_check` logs, and removes the temporary
+`TCFSFileProviderLab` label after diagnostics. A pass would prove only the
+non-production Mac Development lab trust path, not production Developer ID
+Finder enablement.
+
 May 1, 2026 Apple Developer follow-up changed the shape of this lane:
 
 - enabling FileProvider Testing Mode on the host App ID invalidated and required
@@ -682,6 +692,17 @@ It dispatches the non-release testing package workflow, waits for it by default,
 then dispatches the post-install smoke with the package artifact run id and
 `fileprovider_testing_mode=true`. To inspect the GitHub Actions calls without
 dispatching anything, use `--dry-run`.
+
+For the current installed-app policy blocker, reuse the green package artifact
+and add the guarded lab trust experiment:
+
+```bash
+scripts/macos-fileprovider-testing-mode-dispatch.sh \
+  --tag v0.12.12 \
+  --runner-label petting-zoo-mini \
+  --package-run-id 25456290021 \
+  --lab-gatekeeper-override
+```
 
 Before dispatching, the helper checks GitHub's self-hosted runner API for an
 online macOS runner carrying the requested label. If

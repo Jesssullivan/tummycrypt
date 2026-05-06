@@ -19,6 +19,7 @@ SIGNING_KEYCHAIN="${TCFS_FILEPROVIDER_LAB_SIGNING_KEYCHAIN:-}"
 SIGNING_P12_PATH="${TCFS_FILEPROVIDER_LAB_SIGNING_P12_PATH:-}"
 SIGNING_P12_PASSWORD_FILE="${TCFS_FILEPROVIDER_LAB_P12_PASSWORD_FILE:-}"
 PROFILES_DIR="${TCFS_FILEPROVIDER_LAB_PROFILES_DIR:-}"
+LAB_GATEKEEPER_OVERRIDE="${TCFS_FILEPROVIDER_LAB_GATEKEEPER_OVERRIDE:-0}"
 DRY_RUN=0
 WATCH=1
 SKIP_SECRET_CHECK=0
@@ -40,6 +41,8 @@ Options:
   --signing-p12-password-file <p>
                           Optional runner-local file containing the .p12 import password
   --profiles-dir <p>      Optional runner-local provisioning profile directory
+  --lab-gatekeeper-override
+                          PZM-only non-production spctl label experiment for installed testing-mode app
   --package-run-id <id>   Skip package workflow dispatch and smoke an existing package run
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion
@@ -114,6 +117,10 @@ while [[ $# -gt 0 ]]; do
       PROFILES_DIR="$2"
       shift 2
       ;;
+    --lab-gatekeeper-override)
+      LAB_GATEKEEPER_OVERRIDE=1
+      shift
+      ;;
     --package-run-id)
       require_value "$1" "${2:-}"
       PACKAGE_RUN_ID="$2"
@@ -153,6 +160,14 @@ if [[ -z "$RUNNER_LABEL" ]]; then
 fi
 if [[ "$RUNNER_LABEL" == macos-* ]]; then
   die "FileProvider testing-mode requires a registered self-hosted Mac runner label, not $RUNNER_LABEL"
+fi
+if [[ "$LAB_GATEKEEPER_OVERRIDE" == "1" ]]; then
+  case "$RUNNER_LABEL" in
+    petting-zoo-mini | petting-zoo-mini-tcfs) ;;
+    *)
+      die "--lab-gatekeeper-override is restricted to the petting-zoo-mini lab runner, not $RUNNER_LABEL"
+      ;;
+  esac
 fi
 if [[ -n "$SIGNING_KEYCHAIN" && -n "$SIGNING_P12_PATH" ]]; then
   die "--signing-keychain and --signing-p12-path are mutually exclusive"
@@ -220,7 +235,7 @@ gh workflow run "$SMOKE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f package_artifact_run_id="$package_run_id" \\
   -f package_artifact_name="$ARTIFACT_NAME" \\
   -f fileprovider_testing_mode=true \\
-  -f runner_label="$RUNNER_LABEL"
+  -f runner_label="$RUNNER_LABEL"$(if [[ "$LAB_GATEKEEPER_OVERRIDE" == "1" ]]; then printf ' \\\n  -f lab_gatekeeper_override=true'; fi)
 EOF
 
   if [[ "$WATCH" != "1" ]]; then
@@ -456,13 +471,20 @@ fi
 
 verify_package_artifact "$PACKAGE_RUN_ID"
 
-SMOKE_RUN_ID="$(dispatch_and_capture_run_id \
-  "$SMOKE_WORKFLOW" \
+smoke_inputs=(
   -f tag="$TAG" \
   -f package_artifact_run_id="$PACKAGE_RUN_ID" \
   -f package_artifact_name="$ARTIFACT_NAME" \
   -f fileprovider_testing_mode=true \
-  -f runner_label="$RUNNER_LABEL")"
+  -f runner_label="$RUNNER_LABEL"
+)
+if [[ "$LAB_GATEKEEPER_OVERRIDE" == "1" ]]; then
+  smoke_inputs+=(-f lab_gatekeeper_override=true)
+fi
+
+SMOKE_RUN_ID="$(dispatch_and_capture_run_id \
+  "$SMOKE_WORKFLOW" \
+  "${smoke_inputs[@]}")"
 log "Post-install smoke run: $SMOKE_RUN_ID"
 
 if [[ "$WATCH" == "1" ]]; then

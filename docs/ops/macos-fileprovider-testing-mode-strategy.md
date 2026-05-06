@@ -94,6 +94,16 @@ AppleSystemPolicy, while the same build output reaches Swift `main()` in
 policy-probe mode before install. Treat that as a lab trust-model problem, not
 as a storage or FileProvider implementation failure.
 
+The current controlled experiment for that trust-model problem is
+`lab_gatekeeper_override=true` on `macos-postinstall-smoke.yml`. The input is
+restricted to the `petting-zoo-mini` testing-mode lane, applies a temporary
+`TCFSFileProviderLab` `spctl` assessment label to the installed host app and
+extension, records before/after `spctl` and `syspolicy_check` output, and
+removes the label after diagnostics. Use it only to decide whether the
+non-production Mac Development lab can continue into FileProvider lifecycle
+coverage; it is not evidence that the production Developer ID package is
+accepted by Gatekeeper.
+
 ## Required Apple Assets
 
 Register the Mac that will run the FileProvider smoke as a team Device. On that
@@ -249,6 +259,23 @@ scripts/macos-fileprovider-testing-mode-dispatch.sh \
   --signing-p12-password-file ~/git/tummycrypt/build/asc-fileprovider-lab/p12-password.txt
 ```
 
+To run the explicit PZM trust experiment against an already-built testing-mode
+package, reuse its package run id and ask the smoke workflow to apply the
+temporary lab assessment label:
+
+```bash
+scripts/macos-fileprovider-testing-mode-dispatch.sh \
+  --tag v0.12.12 \
+  --runner-label petting-zoo-mini \
+  --package-run-id 25456290021 \
+  --lab-gatekeeper-override
+```
+
+That flag passes `lab_gatekeeper_override=true` to the smoke workflow. The
+workflow rejects it outside the PZM testing-mode lane, records the override
+logs under `lab-gatekeeper-override/`, and removes the label in an `always()`
+cleanup step.
+
 The default mode is non-mutating. `--apply` is required before the ASC script
 creates certificates, creates profiles, deletes stale same-name profiles, writes
 profile files, or installs profiles.
@@ -303,8 +330,9 @@ Apple runtime policy boundary:
 - the testing-mode package workflow skips Developer ID certificate import,
   package signing, and notarization
 - `.github/workflows/macos-postinstall-smoke.yml` still defaults to
-  `macos-15` for production release proof, but accepts `runner_label` and
-  requires a non-hosted runner when `fileprovider_testing_mode=true`
+  `macos-15` for production release proof, but accepts `runner_label`, requires
+  a non-hosted runner when `fileprovider_testing_mode=true`, and exposes the
+  PZM-only `lab_gatekeeper_override` trust experiment
 - `scripts/macos-fileprovider-testing-mode-dispatch.sh` dispatches both the
   package build and smoke to `petting-zoo-mini` by default
 - `config/macos-fileprovider-lab.asc.json`,
@@ -481,10 +509,12 @@ Feature goals remain:
 
 ## Immediate Work Items
 
-1. Decide the PZM Mac Development trust model. Current options are:
-   reproduce an Xcode/local-development launch shape, identify an Apple-approved
-   distribution shape that can still carry testing mode, or make the PZM lane
-   an explicitly non-production Gatekeeper-bypassed lab.
+1. Run the explicit PZM-only `lab_gatekeeper_override` smoke against
+   `dist-testing-mode-pkg` from run `25456290021`. If it allows the installed
+   host and extension to launch, continue lifecycle proof under that clearly
+   marked non-production lane. If it does not, pivot to Xcode-style local
+   development launch or an Apple-approved distribution shape that can still
+   carry testing mode.
 2. Keep `spctl`, `syspolicy_check`, xattr, codesign, embedded-profile,
    `taskgated-helper`, `amfid`, and AppleSystemPolicy diagnostics attached to
    every FileProvider lab failure.

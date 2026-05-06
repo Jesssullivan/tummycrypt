@@ -10,6 +10,7 @@ WORKFLOW="${REPO_ROOT}/.github/workflows/release.yml"
 POSTINSTALL_WORKFLOW="${REPO_ROOT}/.github/workflows/macos-postinstall-smoke.yml"
 TESTING_MODE_PKG_WORKFLOW="${REPO_ROOT}/.github/workflows/macos-fileprovider-testing-mode-pkg.yml"
 PKG_POSTINSTALL="${REPO_ROOT}/scripts/macos-pkg-postinstall.sh"
+LAB_GATEKEEPER_OVERRIDE="${REPO_ROOT}/scripts/macos-fileprovider-lab-gatekeeper-override.sh"
 TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/tcfs-release-workflow-test.XXXXXX")"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -617,6 +618,30 @@ assert_contains "$INSTALLED_POLICY_PROBE_STEP" "TCFS_FILEPROVIDER_TESTING_MODE_A
 assert_contains "$INSTALLED_POLICY_PROBE_STEP" "exit=skipped"
 assert_contains "$INSTALLED_POLICY_PROBE_STEP" "exit 0"
 
+APPLY_LAB_GATEKEEPER_OVERRIDE_STEP="${TMPDIR}/apply-pzm-lab-gatekeeper-override.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Apply PZM lab Gatekeeper override" \
+  "$APPLY_LAB_GATEKEEPER_OVERRIDE_STEP"
+bash -n "$APPLY_LAB_GATEKEEPER_OVERRIDE_STEP"
+assert_contains "$POSTINSTALL_WORKFLOW" "lab_gatekeeper_override"
+assert_contains "$POSTINSTALL_WORKFLOW" "lab_gatekeeper_override=true requires fileprovider_testing_mode=true"
+assert_contains "$POSTINSTALL_WORKFLOW" "lab_gatekeeper_override=true is restricted to the petting-zoo-mini lab runner"
+assert_contains "$POSTINSTALL_WORKFLOW" "github.event.inputs.lab_gatekeeper_override == 'true'"
+assert_contains "$APPLY_LAB_GATEKEEPER_OVERRIDE_STEP" "scripts/macos-fileprovider-lab-gatekeeper-override.sh apply"
+assert_contains "$APPLY_LAB_GATEKEEPER_OVERRIDE_STEP" "--log-dir \"\$LOG_DIR/lab-gatekeeper-override\""
+
+REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP="${TMPDIR}/remove-pzm-lab-gatekeeper-override.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Remove PZM lab Gatekeeper override" \
+  "$REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP"
+bash -n "$REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP"
+assert_contains "$REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP" "scripts/macos-fileprovider-lab-gatekeeper-override.sh cleanup"
+assert_contains "$REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP" "--log-dir \"\$LOG_DIR/lab-gatekeeper-override-cleanup\""
+
 VALIDATE_STORAGE_STEP="${TMPDIR}/validate-release-inputs-and-storage-secrets.sh"
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \
@@ -632,6 +657,8 @@ assert_contains "$VALIDATE_STORAGE_STEP" "Missing required tcfs-macos-smoke envi
 assert_contains "$VALIDATE_STORAGE_STEP" "parsed.scheme != \"https\""
 assert_contains "$VALIDATE_STORAGE_STEP" "set only one of package_url or package_artifact_run_id"
 assert_contains "$VALIDATE_STORAGE_STEP" "fileprovider_testing_mode=true requires package_artifact_run_id or package_url"
+assert_contains "$VALIDATE_STORAGE_STEP" "lab_gatekeeper_override=true requires fileprovider_testing_mode=true"
+assert_contains "$VALIDATE_STORAGE_STEP" "lab_gatekeeper_override=true is restricted to the petting-zoo-mini lab runner"
 
 DOWNLOAD_PACKAGE_STEP="${TMPDIR}/download-package.sh"
 extract_step_from_workflow \
@@ -763,6 +790,15 @@ assert_contains "$POSTINSTALL_HARNESS_STEP" "--fileprovider-testing-mode"
 assert_contains "$POSTINSTALL_HARNESS_STEP" "--exercise-evict-rehydrate"
 
 bash -n "$PKG_POSTINSTALL"
+bash -n "$LAB_GATEKEEPER_OVERRIDE"
+
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "TCFSFileProviderLab"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "spctl"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "--add --label"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "--remove --label"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "TCFS_RUNNER_SUDO_PASSWORD"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" ".config/sops-nix/secrets/become/password"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "syspolicy_check"
 
 assert_contains "$PKG_POSTINSTALL" "LSREGISTER_BIN=\"\${TCFS_POSTINSTALL_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}\""
 assert_contains "$PKG_POSTINSTALL" "\"\$LAUNCHCTL_BIN\" asuser \"\$CONSOLE_UID\""
