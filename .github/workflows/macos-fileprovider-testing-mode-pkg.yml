@@ -87,13 +87,24 @@ jobs:
             echo "TCFS_CODESIGN_TIMESTAMP=0"
           } >> "$GITHUB_ENV"
 
-      - name: Expose existing Rust toolchain manager
+      - name: Prepare Rust toolchain manager
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -x "$HOME/.cargo/bin/rustup" ]]; then
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+            curl \
+              --proto '=https' \
+              --tlsv1.2 \
+              --retry 10 \
+              --retry-connrefused \
+              --location \
+              --silent \
+              --show-error \
+              --fail \
+              https://sh.rustup.rs \
+              | sh -s -- --default-toolchain none -y --no-modify-path
           fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

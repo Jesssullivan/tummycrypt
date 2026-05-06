@@ -249,11 +249,12 @@ check_testing_mode_package_workflow() {
   extract_step_from_workflow \
     "$TESTING_MODE_PKG_WORKFLOW" \
     "build-testing-mode-pkg" \
-    "Expose existing Rust toolchain manager" \
+    "Prepare Rust toolchain manager" \
     "$expose_rustup_step"
   bash -n "$expose_rustup_step"
   # shellcheck disable=SC2016 # Intentional literal assertions against workflow shell.
   assert_contains "$expose_rustup_step" '$HOME/.cargo/bin/rustup'
+  assert_contains "$expose_rustup_step" "--no-modify-path"
   # shellcheck disable=SC2016 # Intentional literal assertions against workflow shell.
   assert_contains "$expose_rustup_step" '$GITHUB_PATH'
 
