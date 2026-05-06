@@ -1,19 +1,19 @@
 //! Fleet E2E: Live NATS + SeaweedFS on CIVO K3s
 //!
 //! These tests connect to REAL infrastructure via Tailscale:
-//! - SeaweedFS S3: seaweedfs-filer-ts (100.120.66.67:8333)
-//! - NATS JetStream: nats-tcfs (100.71.19.127:4222)
+//! - SeaweedFS S3: seaweedfs-tcfs (MagicDNS, port 8333)
+//! - NATS JetStream: nats-tcfs (MagicDNS, port 4222)
 //!
 //! Gated by TCFS_E2E_LIVE=1. Skips automatically otherwise.
 //! The canonical live acceptance lane is `neo-honey`.
 //!
 //! Run:
 //!   TCFS_E2E_LIVE=1 \
-//!   TCFS_S3_ENDPOINT=http://100.120.66.67:8333 \
+//!   TCFS_S3_ENDPOINT=http://seaweedfs-tcfs:8333 \
 //!   TCFS_S3_BUCKET=tcfs \
 //!   AWS_ACCESS_KEY_ID=<from k8s secret seaweedfs-admin> \
 //!   AWS_SECRET_ACCESS_KEY=<from k8s secret seaweedfs-admin> \
-//!   TCFS_NATS_URL=nats://100.71.19.127:4222 \
+//!   TCFS_NATS_URL=nats://nats-tcfs:4222 \
 //!   cargo test -p tcfs-e2e --test fleet_live -- --nocapture
 //!
 //! Or run the named smoke lane wrapper:
@@ -39,9 +39,9 @@ fn live_enabled() -> bool {
     std::env::var("TCFS_E2E_LIVE").unwrap_or_default() == "1"
 }
 
-/// Get S3 endpoint from env or default to CIVO Tailscale IP
+/// Get S3 endpoint from env or default to the tailnet MagicDNS service name.
 fn s3_endpoint() -> String {
-    std::env::var("TCFS_S3_ENDPOINT").unwrap_or_else(|_| "http://100.120.66.67:8333".into())
+    std::env::var("TCFS_S3_ENDPOINT").unwrap_or_else(|_| "http://seaweedfs-tcfs:8333".into())
 }
 
 fn broken_s3_endpoint() -> String {
@@ -53,7 +53,7 @@ fn s3_bucket() -> String {
 }
 
 fn nats_url() -> String {
-    std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| "nats://100.71.19.127:4222".into())
+    std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| "nats://nats-tcfs:4222".into())
 }
 
 fn sample_state_event(

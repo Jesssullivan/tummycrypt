@@ -20,11 +20,11 @@ Set these before running the lane:
 
 ```bash
 export TCFS_E2E_LIVE=1
-export TCFS_S3_ENDPOINT=http://100.120.66.67:8333
+export TCFS_S3_ENDPOINT=http://seaweedfs-tcfs:8333
 export TCFS_S3_BUCKET=tcfs
 export AWS_ACCESS_KEY_ID=<from seaweedfs-admin secret>
 export AWS_SECRET_ACCESS_KEY=<from seaweedfs-admin secret>
-export TCFS_NATS_URL=nats://100.71.19.127:4222
+export TCFS_NATS_URL=nats://nats-tcfs:4222
 ```
 
 ## Canonical operator command
