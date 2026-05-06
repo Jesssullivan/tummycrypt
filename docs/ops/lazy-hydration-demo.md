@@ -251,6 +251,15 @@ FileProvider proof:
 That is a lab/testing-mode proof, not a production Developer ID clean-host
 claim.
 
+The current `v0.12.12` PZM lifecycle extension attempted to add
+evict/rehydrate to that same lane. Package install, Mac App Development
+signing/profile checks, live S3/E2EE fixture proof, and daemon startup pass.
+The failure is narrower: `taskgated-helper` accepts the FileProvider extension
+profile, `fileproviderd` starts the extension process, and AppleSystemPolicy
+then terminates the extension before the lifecycle gate can complete. Treat the
+next retry as a runtime-policy diagnosis run, not another profile/certificate
+bootstrap loop.
+
 Local source-tree evidence from April 30, 2026 is recorded in
 [macOS FileProvider Local Evidence](../release/macos-fileprovider-local-evidence-2026-04-30.md).
 That run proved CloudStorage enumeration and exact-content `cat` hydration
@@ -378,8 +387,10 @@ Do not keep cutting production release tags solely to retry this state.
       Keychain config and rejects embedded diagnostic config.
 - [x] Provision/sign the production macOS FileProvider host app and extension
       so the Keychain access group works without embedded diagnostic config.
-- [ ] Obtain an Apple testing-mode host profile or use a lab/self-hosted Mac
-      where `TCFSProvider` can be enabled for clean-host Finder proof.
+- [x] Provision a PZM Mac App Development testing-mode host profile and matching
+      FileProvider extension profile.
+- [ ] Resolve the PZM runtime-policy termination of the FileProvider extension
+      after launch, then rerun the current-tag lifecycle smoke.
 - [x] Decide whether the non-`TIN-133` M10 Linear mirrors should remain open or
       be closed/superseded.
 - [x] Decide whether the demo backend is disposable public S3 or the on-prem

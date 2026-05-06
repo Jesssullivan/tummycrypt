@@ -3,7 +3,7 @@
 As of May 6, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
-The latest release is `v0.12.11`, and most release-facing surfaces now have
+The latest release is `v0.12.12`, and most release-facing surfaces now have
 explicit proof paths. The important distinction is that `buildable`,
 `packaged`, and `actually proven in user-facing flows` are still different
 things.
@@ -20,8 +20,8 @@ Use this document as the short answer to:
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
-| Lazy traversal / hydration | core code and harnesses exist; PZM now proves macOS FileProvider enumerate + hydrate under testing mode; archived Linux FUSE and production Finder lifecycle evidence are still pending | `tcfs-vfs`/FUSE implementation, PZM testing-mode smoke, and the lazy hydration demo runbook |
-| macOS | experimental but real; `v0.12.11` proves package/signing/storage/daemon plus lab FileProvider enumeration and exact-content hydration under Apple's testing-mode entitlement; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
+| Lazy traversal / hydration | core code and harnesses exist; PZM proves macOS FileProvider enumerate + hydrate under testing mode on `v0.12.11`; the `v0.12.12` evict/rehydrate attempt is blocked by extension runtime policy; archived Linux FUSE and production Finder lifecycle evidence are still pending | `tcfs-vfs`/FUSE implementation, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and `v0.12.11` proves lab FileProvider enumeration/exact-content hydration under Apple's testing-mode entitlement; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
 
@@ -34,7 +34,7 @@ This is the narrowest and most important truth for public release claims.
 | Surface | Status | Current reality |
 | --- | --- | --- |
 | Homebrew | pass | fresh install and upgrade proved on `v0.12.2` |
-| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package now proves FileProvider enumerate + hydrate; production Finder enablement and write/conflict UX remain separate |
+| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proved FileProvider enumerate + hydrate on `v0.12.11`; `v0.12.12` adds an evict/rehydrate gate but is currently blocked by AppleSystemPolicy terminating the extension after launch |
 | `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; Debian 12 is not currently a truthful target for the shipped package deps |
 | `.rpm` | pass | fresh install proved in Fedora container |
 | container image | pass | version and worker-mode startup proved |
@@ -97,6 +97,16 @@ Now proven in the lab:
   access, daemon startup, FileProvider registration, CloudStorage enumeration,
   host-app `requestDownload`, and exact-content hydration
 
+Current lab blocker:
+
+- `v0.12.12` package/signing/storage/daemon stages pass on PZM
+- the current Mac App Development certificate/profile pair is valid enough for
+  `taskgated-helper` to allow the FileProvider extension entitlements
+- `fileproviderd` launches the extension process, then AppleSystemPolicy
+  terminates it before the evict/rehydrate lifecycle can complete
+- the next lab package must capture direct host stderr, `spctl`, codesign,
+  embedded profile, `taskgated`, `amfid`, and AppleSystemPolicy diagnostics
+
 Still manual or weakly proven:
 
 - production Finder/FileProvider enablement on arbitrary clean machines
@@ -107,6 +117,7 @@ Canonical docs:
 
 - [Apple Surface Status](apple-surface-status.md)
 - [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md)
+- [TCFS Usage Reality Sprint Plan](usage-reality-sprint-plan-2026-05-06.md)
 
 ### Lazy Traversal And Hydration Demo
 

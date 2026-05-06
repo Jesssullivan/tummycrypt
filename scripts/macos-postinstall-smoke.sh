@@ -549,6 +549,8 @@ launch_host_app_for_domain_add() {
   if [[ "$FILEPROVIDER_TESTING_MODE" == "1" && -x "$app_binary" ]]; then
     echo "launching host app binary for domain add: $app_binary"
     TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1 \
+    TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
+    TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
       "$app_binary" >"$LOG_DIR/host-domain-launch.log" 2>&1 &
     host_launch_pid="$!"
   else
@@ -565,6 +567,10 @@ launch_host_app_for_domain_add() {
       if [[ -f "$LOG_DIR/host-domain-launch.log" ]]; then
         echo "host app domain-launch log: $LOG_DIR/host-domain-launch.log" >&2
         cat "$LOG_DIR/host-domain-launch.log" >&2 || true
+      fi
+      if [[ -n "$host_launch_pid" ]]; then
+        kill "$host_launch_pid" 2>/dev/null || true
+        wait "$host_launch_pid" 2>/dev/null || true
       fi
       run_log_show --style compact --last 2m \
         --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true
@@ -597,20 +603,62 @@ print_pluginkit_duplicate_hint() {
 }
 
 check_host_log() {
+  local direct_log="$LOG_DIR/host-domain-launch.log"
   local output
+
+  if [[ -f "$direct_log" ]]; then
+    if grep -Fq "add: OK" "$direct_log"; then
+      return 0
+    fi
+    if grep -Eq '^add: ' "$direct_log"; then
+      cat "$direct_log" >&2 || true
+      echo "FileProvider host app domain add failed" >&2
+      exit 1
+    fi
+  fi
+
   output="$(run_log_show --style compact --last 45s \
     --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true)"
 
   [[ -n "$output" ]] || return 1
-  grep -q "add: OK" <<<"$output"
+  if grep -q "add: OK" <<<"$output"; then
+    return 0
+  fi
+  if grep -Eq 'add: ' <<<"$output"; then
+    printf '%s\n' "$output" >&2
+    echo "FileProvider host app domain add failed" >&2
+    exit 1
+  fi
+  return 1
 }
 
 check_host_download_request_log() {
   local item_identifier="$1"
   local action_nonce="${2:-}"
+  local direct_log="$LOG_DIR/host-request-launch.log"
   local success_pattern="requestDownload: $item_identifier: OK"
   local failure_output
   local output
+
+  if [[ -f "$direct_log" ]]; then
+    if [[ -n "$action_nonce" ]]; then
+      if grep -Fq "$success_pattern nonce=$action_nonce" "$direct_log"; then
+        return 0
+      fi
+      failure_output="$(grep -F "requestDownload: $item_identifier:" "$direct_log" | grep -F "nonce=$action_nonce" || true)"
+    else
+      if grep -Fq "$success_pattern" "$direct_log"; then
+        return 0
+      fi
+      failure_output="$(grep -F "requestDownload: $item_identifier:" "$direct_log" || true)"
+    fi
+    if [[ -n "$failure_output" ]]; then
+      printf '%s\n' "$failure_output" >&2
+      echo "FileProvider host app download request failed" >&2
+      exit 1
+    fi
+  fi
+
   output="$(run_log_show --style compact --last 45s \
     --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true)"
 
@@ -638,9 +686,30 @@ check_host_download_request_log() {
 check_host_evict_log() {
   local item_identifier="$1"
   local action_nonce="${2:-}"
+  local direct_log="$LOG_DIR/host-evict-launch.log"
   local success_pattern="evict: $item_identifier: OK"
   local failure_output
   local output
+
+  if [[ -f "$direct_log" ]]; then
+    if [[ -n "$action_nonce" ]]; then
+      if grep -Fq "$success_pattern nonce=$action_nonce" "$direct_log"; then
+        return 0
+      fi
+      failure_output="$(grep -F "evict: $item_identifier:" "$direct_log" | grep -F "nonce=$action_nonce" || true)"
+    else
+      if grep -Fq "$success_pattern" "$direct_log"; then
+        return 0
+      fi
+      failure_output="$(grep -F "evict: $item_identifier:" "$direct_log" || true)"
+    fi
+    if [[ -n "$failure_output" ]]; then
+      printf '%s\n' "$failure_output" >&2
+      echo "FileProvider host app eviction request failed" >&2
+      exit 1
+    fi
+  fi
+
   output="$(run_log_show --style compact --last 45s \
     --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true)"
 
@@ -681,7 +750,7 @@ collect_extension_config_log() {
 
 collect_fileprovider_system_log() {
   run_log_show --style compact --last 2m \
-    --predicate '(subsystem == "com.apple.FileProvider" || process == "fileproviderd" || process == "Finder" || process == "filecoordinationd") && (eventMessage CONTAINS[c] "io.tinyland.tcfs" || eventMessage CONTAINS[c] "TCFSProvider" || eventMessage CONTAINS[c] "Sync is not enabled" || eventMessage CONTAINS[c] "FP -2011" || eventMessage CONTAINS[c] "DomainDisabled")' \
+    --predicate '((subsystem == "com.apple.FileProvider" || process == "fileproviderd" || process == "Finder" || process == "filecoordinationd" || process == "amfid" || process == "taskgated-helper" || process == "syspolicyd" || process == "sandboxd" || process == "tccd" || process == "pkd" || process == "lsd") && (eventMessage CONTAINS[c] "io.tinyland.tcfs" || eventMessage CONTAINS[c] "TCFSProvider" || eventMessage CONTAINS[c] "Sync is not enabled" || eventMessage CONTAINS[c] "FP -2011" || eventMessage CONTAINS[c] "DomainDisabled" || eventMessage CONTAINS[c] "AppleSystemPolicy" || eventMessage CONTAINS[c] "Security policy would not allow")) || (eventMessage CONTAINS[c] "Security policy would not allow process" && eventMessage CONTAINS[c] "TCFSFileProvider")' \
     || true
 }
 
@@ -962,6 +1031,8 @@ request_expected_file_download() {
     echo "launching host app binary for download request: $app_binary"
     TCFS_FILEPROVIDER_ACTION_NONCE="$action_nonce" \
     TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER="$item_identifier" \
+    TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
+    TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
       "$app_binary" >"$LOG_DIR/host-request-launch.log" 2>&1 &
     host_request_pid="$!"
   else
@@ -1025,6 +1096,8 @@ request_expected_file_eviction() {
     echo "launching host app binary for eviction request: $app_binary"
     TCFS_FILEPROVIDER_ACTION_NONCE="$action_nonce" \
     TCFS_FILEPROVIDER_EVICT_IDENTIFIER="$item_identifier" \
+    TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
+    TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
       "$app_binary" >"$LOG_DIR/host-evict-launch.log" 2>&1 &
     host_request_pid="$!"
   else

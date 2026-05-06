@@ -657,6 +657,38 @@ jobs:
           }
 
           pluginkit -m -A -D -i io.tinyland.tcfs.fileprovider > "$LOG_DIR/pluginkit.txt" 2>&1
+          capture_bundle_signing() {
+            local label="$1"
+            local bundle="$2"
+            local profile="$bundle/Contents/embedded.provisionprofile"
+
+            if [[ ! -e "$bundle" ]]; then
+              echo "$bundle not found" > "$LOG_DIR/${label}-missing.txt"
+              return
+            fi
+
+            codesign --verify --deep --strict --verbose=4 "$bundle" \
+              > "$LOG_DIR/${label}-codesign-verify.txt" 2>&1 || true
+            codesign -dvvv --entitlements :- "$bundle" \
+              > "$LOG_DIR/${label}-codesign-detail.txt" 2>&1 || true
+            if command -v spctl >/dev/null 2>&1; then
+              spctl --assess --type execute --verbose=4 "$bundle" \
+                > "$LOG_DIR/${label}-spctl-execute.txt" 2>&1 || true
+            fi
+
+            if [[ -f "$profile" ]]; then
+              security cms -D -i "$profile" \
+                > "$LOG_DIR/${label}-embedded-profile.plist" 2>&1 || true
+              if [[ -s "$LOG_DIR/${label}-embedded-profile.plist" ]]; then
+                plutil -extract Entitlements xml1 -o "$LOG_DIR/${label}-profile-entitlements.plist" \
+                  "$LOG_DIR/${label}-embedded-profile.plist" 2>/dev/null || true
+                plutil -extract DeveloperCertificates.0 raw -o "$LOG_DIR/${label}-profile-cert-0.b64" \
+                  "$LOG_DIR/${label}-embedded-profile.plist" 2>/dev/null || true
+              fi
+            fi
+          }
+          capture_bundle_signing host-app /Applications/TCFSProvider.app
+          capture_bundle_signing fileprovider-extension /Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
           if command -v fileproviderctl >/dev/null 2>&1; then
             fileproviderctl domain list > "$LOG_DIR/fileproviderctl-domains.txt" 2>&1
             run_bounded fileproviderctl-dump.txt 10 fileproviderctl dump || true
@@ -671,6 +703,10 @@ jobs:
           run_bounded apple-fileprovider-oslog.txt 15 \
             log show --style compact --last 5m \
             --predicate 'process == "fileproviderd" OR process == "pkd" OR process == "amfid" OR subsystem BEGINSWITH "com.apple.FileProvider" OR eventMessage CONTAINS[c] "TCFS" OR eventMessage CONTAINS "io.tinyland.tcfs"' \
+            || true
+          run_bounded apple-security-policy-oslog.txt 15 \
+            log show --style compact --last 5m \
+            --predicate 'process == "amfid" OR process == "taskgated-helper" OR process == "syspolicyd" OR process == "sandboxd" OR process == "tccd" OR eventMessage CONTAINS[c] "Security policy would not allow" OR eventMessage CONTAINS[c] "restricted entitlements" OR eventMessage CONTAINS[c] "io.tinyland.tcfs" OR eventMessage CONTAINS[c] "TCFSProvider"' \
             || true
 
       - name: Stop tcfsd

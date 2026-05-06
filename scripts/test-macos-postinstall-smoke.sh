@@ -239,6 +239,20 @@ if [[ -n "${TCFS_FAKE_HOST_BINARY_LOG:-}" ]]; then
   fi
   printf '\n' >>"$TCFS_FAKE_HOST_BINARY_LOG"
 fi
+if [[ "${TCFS_FILEPROVIDER_HOST_STDERR_LOG:-0}" == "1" ]]; then
+  if [[ -n "${TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER:-}" ]]; then
+    printf 'requestDownload: %s: OK' "$TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER"
+    [[ -z "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]] || printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE"
+    printf '\n'
+  elif [[ -n "${TCFS_FILEPROVIDER_EVICT_IDENTIFIER:-}" ]]; then
+    printf 'evict: %s: OK' "$TCFS_FILEPROVIDER_EVICT_IDENTIFIER"
+    [[ -z "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]] || printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE"
+    printf '\n'
+  else
+    [[ "${TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED:-0}" != "1" ]] || printf 'testingMode: requested alwaysEnabled for FileProvider domain\n'
+    printf 'add: OK - domain available\n'
+  fi
+fi
 if [[ -n "${TCFS_FAKE_REQUEST_MARKER:-}" && -n "${TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER:-}" ]]; then
   printf '%s|%s\n' "$TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER" "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" >"$TCFS_FAKE_REQUEST_MARKER"
 fi
@@ -379,6 +393,9 @@ assert_contains "$HOST_BINARY_LOG" "host-binary"
 assert_contains "$HOST_BINARY_LOG" "host-binary requestDownload=$EXPECTED_REL"
 assert_contains "$HOST_BINARY_LOG" "host-binary evict=$EXPECTED_REL"
 assert_contains "$HOST_BINARY_LOG" "nonce=tcfs-smoke-"
+assert_contains "$LOG_DIR/host-domain-launch.log" "add: OK - domain available"
+assert_contains "$LOG_DIR/host-request-launch.log" "requestDownload: $EXPECTED_REL: OK"
+assert_contains "$LOG_DIR/host-evict-launch.log" "evict: $EXPECTED_REL: OK"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl evaluate"

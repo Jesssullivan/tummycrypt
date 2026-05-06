@@ -1,8 +1,10 @@
 # macOS Finder and FileProvider Reality
 
 As of May 6, 2026, macOS is a real packaging and integration lane for tcfs.
-The lab testing-mode FileProvider read/hydrate path is now proven end to end,
-but production Finder lifecycle behavior is still not a continuously proven
+The lab testing-mode FileProvider read/hydrate path is proven end to end on
+`v0.12.11`, but the current `v0.12.12` lifecycle attempt is blocked by a
+runtime policy termination of the FileProvider extension after launch.
+Production Finder lifecycle behavior is still not a continuously proven
 release-grade desktop surface.
 
 This document defines the actual workflow the repo supports today, separates
@@ -61,6 +63,11 @@ sync-root stub representation, not the desired primary Finder UX.
   decoration code paths.
 - The non-production `petting-zoo-mini` testing-mode lane has passed a full
   package-to-FileProvider read/hydrate smoke on `v0.12.11`.
+- The `v0.12.12` PZM testing-mode package passes package install, signing,
+  profile, E2EE, storage, and daemon startup gates. Its FileProvider lifecycle
+  attempt currently fails after `fileproviderd` starts the extension process:
+  `taskgated-helper` accepts the extension provisioning profile, then
+  AppleSystemPolicy terminates the extension before evict/rehydrate can run.
 
 ## Important Constraints
 
@@ -82,6 +89,9 @@ sync-root stub representation, not the desired primary Finder UX.
 - A continuously exercised production clean-host Finder/FileProvider acceptance
   lane from Developer ID package install through user enablement, register,
   enumerate, hydrate, mutate, and conflict handling
+- A current-tag PZM lifecycle smoke beyond read/hydrate; the immediate blocker
+  is extension runtime policy, not missing S3/E2EE config or missing PZM
+  provisioning profiles
 - Finder badge visibility as a release gate
 - Conflict UX and notification behavior as a release gate
 - Release-day viability of every published macOS artifact without explicit

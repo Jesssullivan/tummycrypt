@@ -26,37 +26,41 @@ struct TCFSProviderApp {
             let addSem = DispatchSemaphore(value: 0)
             NSFileProviderManager.add(domain) { error in
                 if let error = error {
-                    hostLogger.error("add: \(error.localizedDescription)")
+                    hostEvent("add: \(error.localizedDescription)")
                 } else {
-                    hostLogger.error("add: OK - domain available")
+                    hostEvent("add: OK - domain available")
                 }
                 addSem.signal()
             }
-            addSem.wait()
+            let addTimeoutSeconds = hostActionTimeoutSeconds()
+            if addSem.wait(timeout: .now() + .seconds(addTimeoutSeconds)) == .timedOut {
+                hostEvent("add: timed out after \(addTimeoutSeconds)s")
+                exit(2)
+            }
 
             if let manager = NSFileProviderManager(for: domain) {
                 let signalSem = DispatchSemaphore(value: 0)
                 manager.signalEnumerator(for: .workingSet) { error in
                     if let error = error {
-                        hostLogger.error("signal workingSet: \(error.localizedDescription)")
+                        hostEvent("signal workingSet: \(error.localizedDescription)")
                     } else {
-                        hostLogger.error("signal workingSet: OK")
+                        hostEvent("signal workingSet: OK")
                     }
                     signalSem.signal()
                 }
                 if signalSem.wait(timeout: .now() + 5.0) == .timedOut {
-                    hostLogger.error("signal workingSet: timed out")
+                    hostEvent("signal workingSet: timed out")
                 }
 
                 requestDownloadIfRequested(manager)
                 evictIfRequested(manager)
             } else {
-                hostLogger.error("signal workingSet: manager unavailable")
+                hostEvent("signal workingSet: manager unavailable")
             }
 
             // Give fileproviderd time to start initial enumeration.
             Thread.sleep(forTimeInterval: 5.0)
-            hostLogger.error("host app exiting")
+            hostEvent("host app exiting")
             exit(0)
         }
 
@@ -78,15 +82,15 @@ struct TCFSProviderApp {
             requestedRange: NSRange(location: NSNotFound, length: 0)
         ) { error in
             if let error = error {
-                hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): \(error.localizedDescription)\(nonceSuffix, privacy: .public)")
+                hostEvent("requestDownload: \(rawIdentifier): \(error.localizedDescription)\(nonceSuffix)")
             } else {
-                hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): OK\(nonceSuffix, privacy: .public)")
+                hostEvent("requestDownload: \(rawIdentifier): OK\(nonceSuffix)")
             }
             requestSem.signal()
         }
 
         if requestSem.wait(timeout: .now() + 15.0) == .timedOut {
-            hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): timed out\(nonceSuffix, privacy: .public)")
+            hostEvent("requestDownload: \(rawIdentifier): timed out\(nonceSuffix)")
         }
     }
 
@@ -102,16 +106,41 @@ struct TCFSProviderApp {
         let evictSem = DispatchSemaphore(value: 0)
         manager.evictItem(identifier: itemIdentifier) { error in
             if let error = error {
-                hostLogger.error("evict: \(rawIdentifier, privacy: .public): \(error.localizedDescription)\(nonceSuffix, privacy: .public)")
+                hostEvent("evict: \(rawIdentifier): \(error.localizedDescription)\(nonceSuffix)")
             } else {
-                hostLogger.error("evict: \(rawIdentifier, privacy: .public): OK\(nonceSuffix, privacy: .public)")
+                hostEvent("evict: \(rawIdentifier): OK\(nonceSuffix)")
             }
             evictSem.signal()
         }
 
         if evictSem.wait(timeout: .now() + 15.0) == .timedOut {
-            hostLogger.error("evict: \(rawIdentifier, privacy: .public): timed out\(nonceSuffix, privacy: .public)")
+            hostEvent("evict: \(rawIdentifier): timed out\(nonceSuffix)")
         }
+    }
+
+    private static func hostEvent(_ message: String) {
+        hostLogger.error("\(message, privacy: .public)")
+
+        guard ProcessInfo.processInfo.environment["TCFS_FILEPROVIDER_HOST_STDERR_LOG"] == "1",
+              let data = "\(message)\n".data(using: .utf8)
+        else {
+            return
+        }
+
+        FileHandle.standardError.write(data)
+    }
+
+    private static func hostActionTimeoutSeconds() -> Int {
+        guard let raw = ProcessInfo.processInfo.environment[
+            "TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS"
+        ],
+              let parsed = Int(raw),
+              parsed > 0
+        else {
+            return 30
+        }
+
+        return parsed
     }
 
     private static func fileProviderActionNonceLogSuffix() -> String {
@@ -128,7 +157,7 @@ struct TCFSProviderApp {
         let xdgPath = home.appendingPathComponent(".config/tcfs/fileprovider/config.json")
 
         guard let config = try? String(contentsOf: xdgPath, encoding: .utf8) else {
-            hostLogger.error("provisionConfig: no config at \(xdgPath.path)")
+            hostEvent("provisionConfig: no config at \(xdgPath.path)")
             return
         }
 
@@ -174,15 +203,11 @@ struct TCFSProviderApp {
         }
 
         if status == errSecSuccess {
-            hostLogger.error(
-                "provisionConfig: provisioned \(keychainConfig.count) bytes to shared Keychain group"
-            )
+            hostEvent("provisionConfig: provisioned \(keychainConfig.count) bytes to shared Keychain group")
         } else if status == errSecMissingEntitlement {
-            hostLogger.error(
-                "provisionConfig: Keychain write missing entitlement for configured access group"
-            )
+            hostEvent("provisionConfig: Keychain write missing entitlement for configured access group")
         } else {
-            hostLogger.error("provisionConfig: Keychain write failed with status \(status)")
+            hostEvent("provisionConfig: Keychain write failed with status \(status)")
         }
     }
 
@@ -192,7 +217,7 @@ struct TCFSProviderApp {
         }
 
         domain.testingModes = [.alwaysEnabled]
-        hostLogger.error("testingMode: requested alwaysEnabled for FileProvider domain")
+        hostEvent("testingMode: requested alwaysEnabled for FileProvider domain")
     }
 
     private static func configForKeychain(_ config: String) -> String {
@@ -215,19 +240,17 @@ struct TCFSProviderApp {
         let expandedKeyPath = (keyPath as NSString).expandingTildeInPath
         let keyURL = URL(fileURLWithPath: expandedKeyPath)
         guard let keyData = try? Data(contentsOf: keyURL) else {
-            hostLogger.error("provisionConfig: master_key_file could not be read")
+            hostEvent("provisionConfig: master_key_file could not be read")
             return serializeConfigObject(object, fallback: config)
         }
 
         guard keyData.count == 32 else {
-            hostLogger.error(
-                "provisionConfig: master_key_file has invalid byte length \(keyData.count)"
-            )
+            hostEvent("provisionConfig: master_key_file has invalid byte length \(keyData.count)")
             return serializeConfigObject(object, fallback: config)
         }
 
         object["master_key_base64"] = keyData.base64EncodedString()
-        hostLogger.error("provisionConfig: added master key material to Keychain copy")
+        hostEvent("provisionConfig: added master key material to Keychain copy")
         return serializeConfigObject(object, fallback: config)
     }
 
