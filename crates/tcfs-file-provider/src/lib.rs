@@ -8,8 +8,8 @@
 //!
 //! - `direct` (default): Talks directly to S3/SeaweedFS via OpenDAL.
 //!   No daemon needed but no fleet sync, no NATS events.
-//! - `grpc`: Delegates all operations to tcfsd via Unix domain socket gRPC.
-//!   Full fleet sync, NATS events, conflict resolution.
+//! - `grpc`: Delegates metadata/watch operations to tcfsd via gRPC while
+//!   downloading FileProvider content in-process to avoid cross-sandbox writes.
 
 use std::ffi::CString;
 use std::os::raw::c_char;

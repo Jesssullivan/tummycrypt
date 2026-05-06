@@ -236,12 +236,17 @@ source="${2:-}"
 destination="${3:-}"
 marker="${TCFS_FAKE_SWIFT_MARKER:-}"
 target="${TCFS_FAKE_SWIFT_TARGET:-}"
+hang_target="${TCFS_FAKE_SWIFT_HANG_TARGET:-}"
 
 if [[ "$helper" != *"macos-fileprovider-coordinated-read.swift" || -z "$source" || -z "$destination" ]]; then
   printf 'unexpected swift invocation:'
   printf ' %q' "$@"
   printf '\n'
   exit 1
+fi
+
+if [[ -n "$hang_target" && "$source" == "$hang_target" ]]; then
+  exec perl -e 'select undef, undef, undef, 60'
 fi
 
 if [[ -n "$marker" && -n "$target" && "$source" == "$target" && ! -e "$marker" ]]; then
@@ -392,6 +397,21 @@ assert_fails_contains \
       --app-path "$APP_PATH" \
       --cloud-root "$CLOUD_ROOT" \
       --log-dir "${TMPDIR}/mismatch-logs" \
+      --timeout 2
+
+assert_fails_contains \
+  "coordinated FileProvider read timed out after 1s" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_FAKE_SWIFT_HANG_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
+    TCFS_FILEPROVIDER_READ_TIMEOUT_SECS=1 \
+    bash "$SCRIPT" \
+      --expected-version 0.12.2 \
+      --config "$CONFIG_PATH" \
+      --expected-file "$EXPECTED_REL" \
+      --expected-content-file "$EXPECTED_CONTENT_FILE" \
+      --app-path "$APP_PATH" \
+      --cloud-root "$CLOUD_ROOT" \
+      --log-dir "${TMPDIR}/hung-read-logs" \
       --timeout 2
 
 SAME_PATH_DUPES_OUT="${TMPDIR}/same-path-dupes.out"

@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::Mutex;
 
+use anyhow::Context;
+use base64::Engine;
 use tcfs_core::proto::tcfs_daemon_client::TcfsDaemonClient;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
@@ -25,6 +27,12 @@ pub struct TcfsProvider {
     client: TcfsDaemonClient<Channel>,
     /// Remote prefix for path construction
     remote_prefix: String,
+    device_id: String,
+    /// Direct storage handle used for FileProvider content fetches. The daemon
+    /// remains authoritative for enumeration and watch events, but it must not
+    /// write into the extension's sandbox temp container.
+    direct_operator: Option<opendal::Operator>,
+    direct_master_key: Option<tcfs_crypto::MasterKey>,
     /// Daemon connection target for lazy reconnection.
     target: DaemonTarget,
     last_error: Mutex<Option<String>>,
@@ -158,6 +166,105 @@ fn target_from_config(config: &serde_json::Value) -> DaemonTarget {
         .unwrap_or_else(|| DaemonTarget::Unix(default_socket_path()))
 }
 
+fn build_direct_operator(config: &serde_json::Value) -> Option<opendal::Operator> {
+    let endpoint = config["s3_endpoint"].as_str().unwrap_or_default();
+    let bucket = config["s3_bucket"].as_str().unwrap_or("tcfs");
+    let access = config["s3_access"].as_str().unwrap_or_default();
+    let secret = config["s3_secret"].as_str().unwrap_or_default();
+
+    if endpoint.is_empty() || access.is_empty() || secret.is_empty() {
+        return None;
+    }
+
+    tcfs_storage::operator::build_operator(&tcfs_storage::operator::StorageConfig {
+        endpoint: endpoint.to_string(),
+        region: "us-east-1".to_string(),
+        bucket: bucket.to_string(),
+        access_key_id: access.to_string(),
+        secret_access_key: secret.to_string(),
+    })
+    .ok()
+}
+
+fn master_key_from_bytes(bytes: &[u8]) -> anyhow::Result<tcfs_crypto::MasterKey> {
+    if bytes.len() != tcfs_crypto::KEY_SIZE {
+        anyhow::bail!(
+            "master key must be {} bytes, got {}",
+            tcfs_crypto::KEY_SIZE,
+            bytes.len()
+        );
+    }
+
+    let mut key = [0u8; tcfs_crypto::KEY_SIZE];
+    key.copy_from_slice(bytes);
+    Ok(tcfs_crypto::MasterKey::from_bytes(key))
+}
+
+fn master_key_from_config(config: &serde_json::Value) -> Option<tcfs_crypto::MasterKey> {
+    if let Some(encoded) = config["master_key_base64"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .ok()?;
+        return master_key_from_bytes(&decoded).ok();
+    }
+
+    if let Some(path) = config["master_key_file"].as_str().filter(|s| !s.is_empty()) {
+        let bytes = std::fs::read(path).ok()?;
+        return master_key_from_bytes(&bytes).ok();
+    }
+
+    None
+}
+
+fn error_code_for_fetch_error(error: &anyhow::Error) -> TcfsError {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<opendal::Error>()
+            .is_some_and(|e| e.kind() == opendal::ErrorKind::NotFound)
+    }) {
+        TcfsError::TcfsErrorNotFound
+    } else {
+        TcfsError::TcfsErrorStorage
+    }
+}
+
+async fn fetch_direct_to_file(
+    operator: opendal::Operator,
+    remote_prefix: String,
+    device_id: String,
+    master_key: Option<tcfs_crypto::MasterKey>,
+    remote_path: String,
+    dest_path: PathBuf,
+    progress: Option<tcfs_sync::engine::ProgressFn>,
+) -> anyhow::Result<()> {
+    let resolved_manifest =
+        tcfs_sync::engine::resolve_manifest_path(&operator, &remote_path, &remote_prefix, None)
+            .await
+            .with_context(|| format!("resolving manifest for: {remote_path}"))?;
+
+    let enc_ctx = master_key
+        .as_ref()
+        .map(|mk| tcfs_sync::engine::EncryptionContext {
+            master_key: mk.clone(),
+        });
+
+    tcfs_sync::engine::download_file_with_device(
+        &operator,
+        &resolved_manifest,
+        &dest_path,
+        &remote_prefix,
+        progress.as_ref(),
+        &device_id,
+        None,
+        enc_ctx.as_ref(),
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Create a new provider from a JSON configuration string.
 ///
 /// The JSON should contain:
@@ -199,6 +306,12 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             .as_str()
             .unwrap_or("tcfs") // match StorageConfig::default().bucket
             .to_string();
+        let device_id = config["device_id"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
+        let direct_operator = build_direct_operator(&config);
+        let direct_master_key = master_key_from_config(&config);
 
         // Multi-threaded runtime with 2 workers — one for the background watch
         // stream, one for synchronous FFI calls (enumerate, fetch, upload).
@@ -225,6 +338,9 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             runtime,
             client,
             remote_prefix: prefix,
+            device_id,
+            direct_operator,
+            direct_master_key,
             target,
             last_error: Mutex::new(None),
         }))
@@ -491,47 +607,68 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
 
-        // Use a fresh connection per fetch to avoid channel contention
-        // with the background watch stream on the shared HTTP/2 connection.
-        let target = prov.target.clone();
         let remote = item_str.to_string();
-        let dest = dest_str.to_string();
+        let dest = PathBuf::from(dest_str);
+        let direct_operator = prov.direct_operator.clone();
+        let remote_prefix = prov.remote_prefix.clone();
+        let device_id = prov.device_id.clone();
+        let direct_master_key = prov.direct_master_key.clone();
+        let target = prov.target.clone();
 
-        let handle = prov.runtime.handle().clone();
         let fetch_result = std::thread::spawn(move || {
-            handle.block_on(async {
-                let mut client = connect_once(&target)
-                    .await
-                    .map_err(|e| tonic::Status::unavailable(format!("connect: {e}")))?;
+            if let Some(operator) = direct_operator {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                return runtime.block_on(fetch_direct_to_file(
+                    operator,
+                    remote_prefix,
+                    device_id,
+                    direct_master_key,
+                    remote,
+                    dest,
+                    None,
+                ));
+            }
+
+            // Fallback for minimal configs. Production FileProvider configs
+            // should include direct storage credentials so the extension writes
+            // its own FileProvider temp file instead of asking tcfsd to write
+            // into the extension container.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                let mut client = connect_once(&target).await?;
                 let mut stream = client
                     .pull(tonic::Request::new(tcfs_core::proto::PullRequest {
                         remote_path: remote,
-                        local_path: dest,
+                        local_path: dest.display().to_string(),
                     }))
                     .await?
                     .into_inner();
 
                 while let Some(progress) = stream.message().await? {
                     if !progress.error.is_empty() {
-                        return Err(tonic::Status::internal(progress.error));
+                        anyhow::bail!("{}", progress.error);
                     }
                     if progress.done {
                         break;
                     }
                 }
-                Ok::<(), tonic::Status>(())
+                Ok::<(), anyhow::Error>(())
             })
         })
         .join()
-        .unwrap_or_else(|_| Err(tonic::Status::internal("fetch thread panicked")));
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("fetch thread panicked")));
 
         match fetch_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                let message = e.to_string();
+                let message = format!("{e:#}");
                 tracing::error!("fetch failed: {message}");
                 prov.set_last_error(message);
-                TcfsError::TcfsErrorStorage
+                error_code_for_fetch_error(&e)
             }
         }
     }));
@@ -580,31 +717,55 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
 
-        let target = prov.target.clone();
         let remote = item_str.to_string();
-        let dest = dest_str.to_string();
+        let dest = PathBuf::from(dest_str);
+        let direct_operator = prov.direct_operator.clone();
+        let remote_prefix = prov.remote_prefix.clone();
+        let device_id = prov.device_id.clone();
+        let direct_master_key = prov.direct_master_key.clone();
+        let target = prov.target.clone();
 
-        let handle = prov.runtime.handle().clone();
         let fetch_result = std::thread::spawn(move || {
-            handle.block_on(async {
-                let mut client = connect_once(&target)
-                    .await
-                    .map_err(|e| tonic::Status::unavailable(format!("connect: {e}")))?;
+            if let Some(cb) = callback {
+                unsafe { cb(0, 0, ctx as *const std::ffi::c_void) };
+            }
+
+            if let Some(operator) = direct_operator {
+                let progress: Option<tcfs_sync::engine::ProgressFn> = callback.map(|cb| {
+                    Box::new(move |done: u64, total: u64, _message: &str| unsafe {
+                        cb(done, total, ctx as *const std::ffi::c_void)
+                    }) as tcfs_sync::engine::ProgressFn
+                });
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                return runtime.block_on(fetch_direct_to_file(
+                    operator,
+                    remote_prefix,
+                    device_id,
+                    direct_master_key,
+                    remote,
+                    dest,
+                    progress,
+                ));
+            }
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                let mut client = connect_once(&target).await?;
                 let mut stream = client
                     .pull(tonic::Request::new(tcfs_core::proto::PullRequest {
                         remote_path: remote,
-                        local_path: dest,
+                        local_path: dest.display().to_string(),
                     }))
                     .await?
                     .into_inner();
 
-                if let Some(cb) = callback {
-                    unsafe { cb(0, 0, ctx as *const std::ffi::c_void) };
-                }
-
                 while let Some(progress) = stream.message().await? {
                     if !progress.error.is_empty() {
-                        return Err(tonic::Status::internal(progress.error));
+                        anyhow::bail!("{}", progress.error);
                     }
                     if let Some(cb) = callback {
                         unsafe {
@@ -620,19 +781,19 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
                     }
                 }
 
-                Ok::<(), tonic::Status>(())
+                Ok::<(), anyhow::Error>(())
             })
         })
         .join()
-        .unwrap_or_else(|_| Err(tonic::Status::internal("fetch thread panicked")));
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("fetch thread panicked")));
 
         match fetch_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                let message = e.to_string();
+                let message = format!("{e:#}");
                 tracing::error!("fetch_with_progress failed: {message}");
                 prov.set_last_error(message);
-                TcfsError::TcfsErrorStorage
+                error_code_for_fetch_error(&e)
             }
         }
     }));
@@ -986,5 +1147,35 @@ mod tests {
             target_from_config(&config),
             DaemonTarget::Unix(PathBuf::from("/tmp/tcfsd.sock"))
         );
+    }
+
+    #[test]
+    fn direct_operator_requires_storage_credentials() {
+        let config = serde_json::json!({
+            "s3_endpoint": "https://example.invalid",
+            "s3_bucket": "tcfs"
+        });
+
+        assert!(build_direct_operator(&config).is_none());
+    }
+
+    #[test]
+    fn master_key_reads_base64_config() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let config = serde_json::json!({
+            "master_key_base64": encoded
+        });
+
+        assert!(master_key_from_config(&config).is_some());
+    }
+
+    #[test]
+    fn master_key_rejects_wrong_length_base64_config() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode([7u8; 31]);
+        let config = serde_json::json!({
+            "master_key_base64": encoded
+        });
+
+        assert!(master_key_from_config(&config).is_none());
     }
 }

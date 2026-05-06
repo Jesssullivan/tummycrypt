@@ -13,8 +13,10 @@ crate-type = ["lib", "staticlib"]
 default = ["direct"]
 ## Direct S3/OpenDAL backend (current, no daemon needed)
 direct = ["dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:tcfs-sync", "dep:opendal", "dep:secrecy", "dep:base64"]
-## gRPC backend — delegates all operations to tcfsd daemon
-grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream", "dep:futures"]
+## gRPC backend — delegates metadata/watch operations to tcfsd daemon and
+## downloads file content in-process so FileProvider temp files are written by
+## the extension, not by the daemon.
+grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream", "dep:futures", "dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:tcfs-sync", "tcfs-sync/crypto", "dep:opendal", "dep:base64"]
 ## UniFFI bindings for iOS (proc-macro based, no UDL needed)
 uniffi = ["direct", "dep:uniffi", "dep:tcfs-auth", "dep:blake3"]
 

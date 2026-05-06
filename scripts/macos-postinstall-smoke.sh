@@ -164,6 +164,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+READ_TIMEOUT_SECS="${TCFS_FILEPROVIDER_READ_TIMEOUT_SECS:-$TIMEOUT_SECS}"
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "scripts/macos-postinstall-smoke.sh only runs on macOS" >&2
   exit 1
@@ -191,7 +193,6 @@ run_log_show() {
   local out
   local err
   local pid
-  local waited=0
   local status=0
 
   out="$(mktemp "$LOG_DIR/log-show.XXXXXX")"
@@ -200,22 +201,7 @@ run_log_show() {
   log show "$@" >"$out" 2>"$err" &
   pid="$!"
 
-  while kill -0 "$pid" 2>/dev/null; do
-    if (( waited >= LOG_SHOW_TIMEOUT_SECS )); then
-      kill "$pid" 2>/dev/null || true
-      short_pause
-      kill -KILL "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      cat "$out" 2>/dev/null || true
-      rm -f "$out" "$err"
-      return 124
-    fi
-
-    short_pause
-    waited=$((waited + 1))
-  done
-
-  wait "$pid" || status="$?"
+  wait_for_pid_with_timeout "$pid" "$LOG_SHOW_TIMEOUT_SECS" "log show" || status="$?"
   cat "$out" 2>/dev/null || true
   rm -f "$out" "$err"
   return "$status"
@@ -228,7 +214,6 @@ run_bounded_to_log() {
 
   local out
   local pid
-  local waited=0
   local status=0
 
   out="$LOG_DIR/${label}.log"
@@ -236,20 +221,43 @@ run_bounded_to_log() {
   "$@" >"$out" 2>&1 &
   pid="$!"
 
-  while kill -0 "$pid" 2>/dev/null; do
-    if (( waited >= timeout_secs )); then
+  wait_for_pid_with_timeout "$pid" "$timeout_secs" "$label" || status="$?"
+  return "$status"
+}
+
+wait_for_pid_with_timeout() {
+  local pid="$1"
+  local timeout_secs="$2"
+  local label="$3"
+  local timeout_marker="${LOG_DIR:-${TMPDIR:-/tmp}}/tcfs-read-timeout.$$.$pid"
+  local watchdog_pid
+  local waited=0
+  local status=0
+
+  (
+    while (( waited < timeout_secs )); do
+      short_pause
+      waited=$((waited + 1))
+    done
+    : >"$timeout_marker"
+    if kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       short_pause
       kill -KILL "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      return 124
     fi
-
-    short_pause
-    waited=$((waited + 1))
-  done
+  ) &
+  watchdog_pid="$!"
 
   wait "$pid" || status="$?"
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+
+  if [[ -e "$timeout_marker" ]]; then
+    rm -f "$timeout_marker"
+    echo "$label timed out after ${timeout_secs}s" >&2
+    return 124
+  fi
+
   return "$status"
 }
 
@@ -805,11 +813,16 @@ read_fileprovider_file() {
   local path="$1"
   local hydrated_copy="$2"
   local helper="$REPO_ROOT/scripts/macos-fileprovider-coordinated-read.swift"
+  local pid
 
   if [[ "$COORDINATED_READ" != "0" && -f "$helper" ]] && command -v swift >/dev/null 2>&1; then
-    swift "$helper" "$path" "$hydrated_copy"
+    swift "$helper" "$path" "$hydrated_copy" &
+    pid="$!"
+    wait_for_pid_with_timeout "$pid" "$READ_TIMEOUT_SECS" "coordinated FileProvider read"
   else
-    cat "$path" >"$hydrated_copy"
+    cat "$path" >"$hydrated_copy" &
+    pid="$!"
+    wait_for_pid_with_timeout "$pid" "$READ_TIMEOUT_SECS" "FileProvider read"
   fi
 }
 
@@ -849,6 +862,7 @@ hydrate_expected_file() {
   local expected_copy="$LOG_DIR/expected-content"
   local read_error="$LOG_DIR/hydrate-read-error.log"
   local hydrated_bytes
+  local read_status
   local attempt=0
 
   [[ -f "$path" ]] || {
@@ -859,8 +873,14 @@ hydrate_expected_file() {
   while (( attempt < TIMEOUT_SECS )); do
     if read_fileprovider_file "$path" "$hydrated_copy" 2>"$read_error"; then
       break
+    else
+      read_status="$?"
     fi
     rm -f "$hydrated_copy"
+    if [[ "$read_status" == "124" ]]; then
+      attempt="$TIMEOUT_SECS"
+      break
+    fi
     short_pause
     attempt=$((attempt + 1))
   done
