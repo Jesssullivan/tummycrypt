@@ -652,7 +652,8 @@ extract_step_from_workflow \
 bash -n "$SEED_REMOTE_FIXTURE_STEP"
 assert_contains "$SEED_REMOTE_FIXTURE_STEP" "> \"\$EXPECTED_CONTENT_FILE\""
 assert_contains "$SEED_REMOTE_FIXTURE_STEP" "cp \"\$EXPECTED_CONTENT_FILE\" \"\$FIXTURE_PATH\""
-assert_contains "$SEED_REMOTE_FIXTURE_STEP" "tcfs --config \"\$CONFIG_PATH\" push \"\$FIXTURE_PATH\""
+assert_contains "$SEED_REMOTE_FIXTURE_STEP" "run_bounded tcfs-push.log 120 tcfs --config \"\$CONFIG_PATH\" push \"\$FIXTURE_PATH\""
+assert_contains "$SEED_REMOTE_FIXTURE_STEP" "tcfs push failed or timed out"
 
 VERIFY_E2EE_STEP="${TMPDIR}/verify-remote-fixture-requires-e2ee-key.sh"
 extract_step_from_workflow \
@@ -662,9 +663,11 @@ extract_step_from_workflow \
   "$VERIFY_E2EE_STEP"
 bash -n "$VERIFY_E2EE_STEP"
 assert_contains "$VERIFY_E2EE_STEP" "NO_CRYPTO_CONFIG_PATH"
-assert_contains "$VERIFY_E2EE_STEP" "if tcfs --config \"\$NO_CRYPTO_CONFIG_PATH\" pull \"\$FIXTURE_PATH\""
+assert_contains "$VERIFY_E2EE_STEP" "run_bounded no-crypto-pull.log 60"
 assert_contains "$VERIFY_E2EE_STEP" "Encrypted smoke fixture was readable without the E2EE master key"
-assert_contains "$VERIFY_E2EE_STEP" "tcfs --config \"\$CONFIG_PATH\" pull \"\$FIXTURE_PATH\""
+assert_contains "$VERIFY_E2EE_STEP" "No-crypto pull timed out"
+assert_contains "$VERIFY_E2EE_STEP" "run_bounded e2ee-pull.log 120"
+assert_contains "$VERIFY_E2EE_STEP" "E2EE pull failed or timed out"
 assert_contains "$VERIFY_E2EE_STEP" "cmp -s \"\$EXPECTED_CONTENT_FILE\" \"\$RUNNER_TEMP/e2ee-pull-check\""
 
 POSTINSTALL_HARNESS_STEP="${TMPDIR}/run-macos-postinstall-harness.sh"

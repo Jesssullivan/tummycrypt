@@ -411,16 +411,80 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          run_bounded() {
+            local label="$1"
+            local timeout_secs="$2"
+            shift 2
+
+            local out="$LOG_DIR/$label"
+            local pid
+            local waited=0
+            local status=0
+
+            "$@" > "$out" 2>&1 &
+            pid="$!"
+
+            while kill -0 "$pid" 2>/dev/null; do
+              if (( waited >= timeout_secs )); then
+                kill "$pid" 2>/dev/null || true
+                perl -e 'select undef, undef, undef, 1.0'
+                kill -KILL "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                echo "timed out after ${timeout_secs}s" >> "$out"
+                return 124
+              fi
+              perl -e 'select undef, undef, undef, 1.0'
+              waited=$((waited + 1))
+            done
+
+            wait "$pid" || status=$?
+            return "$status"
+          }
+
           FIXTURE_PATH="${SYNC_ROOT}/${FIXTURE_REL}"
           mkdir -p "$(dirname "$FIXTURE_PATH")"
           printf 'tcfs macOS post-install smoke %s run %s\n' "$TAG" "$GITHUB_RUN_ID" > "$EXPECTED_CONTENT_FILE"
           cp "$EXPECTED_CONTENT_FILE" "$FIXTURE_PATH"
-          tcfs --config "$CONFIG_PATH" push "$FIXTURE_PATH"
+          if ! run_bounded tcfs-push.log 120 tcfs --config "$CONFIG_PATH" push "$FIXTURE_PATH"; then
+            echo "::error::tcfs push failed or timed out"
+            cat "$LOG_DIR/tcfs-push.log" || true
+            exit 1
+          fi
 
       - name: Verify remote fixture requires E2EE key
         shell: bash
         run: |
           set -euo pipefail
+          run_bounded() {
+            local label="$1"
+            local timeout_secs="$2"
+            shift 2
+
+            local out="$LOG_DIR/$label"
+            local pid
+            local waited=0
+            local status=0
+
+            "$@" > "$out" 2>&1 &
+            pid="$!"
+
+            while kill -0 "$pid" 2>/dev/null; do
+              if (( waited >= timeout_secs )); then
+                kill "$pid" 2>/dev/null || true
+                perl -e 'select undef, undef, undef, 1.0'
+                kill -KILL "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                echo "timed out after ${timeout_secs}s" >> "$out"
+                return 124
+              fi
+              perl -e 'select undef, undef, undef, 1.0'
+              waited=$((waited + 1))
+            done
+
+            wait "$pid" || status=$?
+            return "$status"
+          }
+
           FIXTURE_PATH="${SYNC_ROOT}/${FIXTURE_REL}"
           cat > "$NO_CRYPTO_CONFIG_PATH" <<EOF
           [daemon]
@@ -442,13 +506,27 @@ jobs:
           EOF
           chmod 600 "$NO_CRYPTO_CONFIG_PATH"
 
-          if tcfs --config "$NO_CRYPTO_CONFIG_PATH" pull "$FIXTURE_PATH" "$RUNNER_TEMP/no-crypto-pull-check" >"$LOG_DIR/no-crypto-pull.log" 2>&1; then
+          no_crypto_status=0
+          run_bounded no-crypto-pull.log 60 \
+            tcfs --config "$NO_CRYPTO_CONFIG_PATH" pull "$FIXTURE_PATH" "$RUNNER_TEMP/no-crypto-pull-check" \
+            || no_crypto_status=$?
+          if [[ "$no_crypto_status" -eq 0 ]]; then
             echo "::error::Encrypted smoke fixture was readable without the E2EE master key"
             cat "$LOG_DIR/no-crypto-pull.log"
             exit 1
           fi
+          if [[ "$no_crypto_status" -eq 124 ]]; then
+            echo "::error::No-crypto pull timed out; this does not prove E2EE rejection"
+            cat "$LOG_DIR/no-crypto-pull.log" || true
+            exit 1
+          fi
 
-          tcfs --config "$CONFIG_PATH" pull "$FIXTURE_PATH" "$RUNNER_TEMP/e2ee-pull-check"
+          if ! run_bounded e2ee-pull.log 120 \
+            tcfs --config "$CONFIG_PATH" pull "$FIXTURE_PATH" "$RUNNER_TEMP/e2ee-pull-check"; then
+            echo "::error::E2EE pull failed or timed out"
+            cat "$LOG_DIR/e2ee-pull.log" || true
+            exit 1
+          fi
           cmp -s "$EXPECTED_CONTENT_FILE" "$RUNNER_TEMP/e2ee-pull-check"
 
       - name: Start tcfsd with live config
