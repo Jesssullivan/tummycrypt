@@ -111,13 +111,30 @@ struct TCFSProviderApp {
             kSecValueData as String: data,
         ]
 
-        var status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
-
-        if status == errSecItemNotFound {
+        let addItem: () -> OSStatus = {
             var addQuery = updateQuery
             addQuery[kSecValueData as String] = data
             addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            status = SecItemAdd(addQuery as CFDictionary, nil)
+            return SecItemAdd(addQuery as CFDictionary, nil)
+        }
+
+        var status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+
+        if status == errSecItemNotFound {
+            status = addItem()
+        }
+
+        if status == errSecDuplicateItem {
+            hostLogger.warning("provisionConfig: replacing duplicate shared Keychain config item")
+            _ = SecItemDelete(updateQuery as CFDictionary)
+
+            let legacyQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: sharedConfigService,
+                kSecAttrAccount as String: sharedConfigAccount,
+            ]
+            _ = SecItemDelete(legacyQuery as CFDictionary)
+            status = addItem()
         }
 
         if status == errSecSuccess {
