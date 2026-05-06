@@ -121,6 +121,15 @@ EOF
 cat >"$FAKE_BIN/codesign" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == *"--entitlements :-"* ]]; then
+  if [[ "${TCFS_FAKE_COMPACT_ENTITLEMENTS:-0}" == "1" ]]; then
+    if [[ "${TCFS_FAKE_TESTING_MODE_ENTITLEMENT:-0}" == "1" ]]; then
+      printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>com.apple.developer.fileprovider.testing-mode</key><true/></dict></plist>'
+    else
+      printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict></dict></plist>'
+    fi
+    exit 0
+  fi
+
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
@@ -263,6 +272,7 @@ TCFS_FAKE_PLUGINKIT_LOG="$PLUGINKIT_LOG" \
 TCFS_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
 TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
 TCFS_FAKE_TESTING_MODE_ENTITLEMENT=1 \
+TCFS_FAKE_COMPACT_ENTITLEMENTS=1 \
 TCFS_FAKE_SWIFT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
 TCFS_FAKE_SWIFT_MARKER="$READ_RETRY_MARKER" \
 bash "$SCRIPT" \

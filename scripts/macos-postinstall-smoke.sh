@@ -432,6 +432,7 @@ elect_plugin_use() {
 require_fileprovider_testing_mode_entitlement() {
   local entitlements_file="$LOG_DIR/host-entitlements.plist"
   local err_file="$LOG_DIR/host-entitlements.err"
+  local plutil_bin=""
 
   codesign -d --entitlements :- "$APP_PATH" >"$entitlements_file" 2>"$err_file" || {
     echo "could not read host app entitlements for FileProvider testing mode: $APP_PATH" >&2
@@ -439,17 +440,24 @@ require_fileprovider_testing_mode_entitlement() {
     exit 1
   }
 
+  if command -v plutil >/dev/null 2>&1; then
+    plutil_bin="$(command -v plutil)"
+  elif [[ -x /usr/bin/plutil ]]; then
+    plutil_bin="/usr/bin/plutil"
+  fi
+
+  if [[ -n "$plutil_bin" ]] &&
+    [[ "$("$plutil_bin" -extract 'com\.apple\.developer\.fileprovider\.testing-mode' raw -o - "$entitlements_file" 2>/dev/null || true)" == "true" ]]; then
+    echo "host app FileProvider testing-mode entitlement present"
+    return 0
+  fi
+
   awk '
-    /<key>com\.apple\.developer\.fileprovider\.testing-mode<\/key>/ {
-      found = 1
-      next
+    BEGIN {
+      RS = "\0"
     }
-    found && /<true[[:space:]]*\/>/ {
+    /<key>com[.]apple[.]developer[.]fileprovider[.]testing-mode<\/key>[[:space:]]*<true[[:space:]]*\/>/ {
       ok = 1
-      exit
-    }
-    found && /<key>/ {
-      exit
     }
     END {
       exit ok ? 0 : 1
