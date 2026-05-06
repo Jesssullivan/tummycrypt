@@ -67,8 +67,10 @@ sync-root stub representation, not the desired primary Finder UX.
   profile, E2EE, storage, and daemon startup gates. Its FileProvider lifecycle
   attempt currently fails at runtime policy: codesign verification and embedded
   profile evidence pass for both bundles, `taskgated-helper` accepts the host
-  and extension provisioning profiles, the direct host launch is denied before
-  the instrumented Swift startup path emits stderr, and AppleSystemPolicy also
+  and extension provisioning profiles, `spctl` rejects both bundles,
+  `syspolicy_check` reports the app lacks a notarization ticket and has a fatal
+  Gatekeeper rejection, the direct host launch is denied before the
+  instrumented Swift startup path emits stderr, and AppleSystemPolicy also
   terminates the extension after `fileproviderd` starts it.
 
 ## Important Constraints
@@ -593,11 +595,20 @@ May 6, 2026 testing-mode evidence updated the current blocker:
   `tcfsd` startup, FileProvider registration, CloudStorage enumeration,
   host-app `requestDownload`, 55-byte hydration, exact-content match, and
   shared-Keychain config proof.
+- PZM testing-mode package run `25453041957` rebuilt the current `v0.12.12`
+  package from `a201c1e`.
+- PZM smoke run `25453088909` passed install/signing/profile/E2EE/daemon gates,
+  then failed the FileProvider lifecycle harness because `spctl` rejected both
+  the Mac Development-signed host app and extension, `syspolicy_check` reported
+  the installed app lacks a notarization ticket and has a fatal Gatekeeper
+  rejection, and AppleSystemPolicy denied both `TCFSProvider` and
+  `TCFSFileProvider`.
 
-So the testing-mode read/hydrate lane is green. The remaining macOS product
-work is production Developer ID clean-host enablement plus richer Finder
-lifecycle behavior: evict/rehydrate, mutation, conflict/status visibility, and
-recovery UX.
+So the testing-mode read/hydrate lane is proven, but the current
+evict/rehydrate package is blocked by the Mac Development lab trust model. The
+remaining macOS product work is production Developer ID clean-host enablement
+plus richer Finder lifecycle behavior: evict/rehydrate, mutation,
+conflict/status visibility, and recovery UX.
 
 May 1, 2026 Apple Developer follow-up changed the shape of this lane:
 
@@ -610,12 +621,13 @@ May 1, 2026 Apple Developer follow-up changed the shape of this lane:
   generated as a probe, but the decoded profile still did not include
   `com.apple.developer.fileprovider.testing-mode`
 - Apple documentation allows managed capabilities to be limited to a subset of
-  distribution options such as development or ad hoc; that matches the observed
-  TCFS profile behavior
+  distribution options, and the observed TCFS profile behavior shows the
+  testing-mode entitlement is available to Mac App Development profiles but not
+  Developer ID profiles
 
 So the remaining testing-mode path is no longer a Developer ID hosted package.
-It needs a registered Mac plus Mac App Development or Ad Hoc host/extension
-profiles that actually carry the entitlement. The detailed plan is
+It needs a registered Mac plus Mac App Development host/extension profiles that
+actually carry the entitlement. The detailed plan is
 [macOS FileProvider Testing-Mode Strategy](macos-fileprovider-testing-mode-strategy.md).
 
 Once a Mac App Development host profile exists and terminal decoding proves it
@@ -632,12 +644,15 @@ cp path/to/tcfs-fileprovider-development.provisionprofile \
   "$HOME/Library/MobileDevice/Provisioning Profiles/"
 ```
 
-The helper now targets the `petting-zoo-mini` registered lab Mac by default:
+The helper now targets the `petting-zoo-mini` registered lab Mac by default.
+Use the generated PZM p12/profiles when dispatching the current lane:
 
 ```bash
 scripts/macos-fileprovider-testing-mode-dispatch.sh \
-  --tag v0.12.7 \
-  --runner-label petting-zoo-mini
+  --tag v0.12.12 \
+  --runner-label petting-zoo-mini \
+  --signing-p12-path ~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-4EC8EA7A.p12 \
+  --profiles-dir ~/git/tummycrypt/build/asc-fileprovider-lab
 ```
 
 It dispatches the non-release testing package workflow, waits for it by default,
@@ -664,8 +679,10 @@ The equivalent manual form is:
 
 ```bash
 gh workflow run macos-fileprovider-testing-mode-pkg.yml \
-  -f tag=v0.12.7 \
-  -f runner_label=petting-zoo-mini
+  -f tag=v0.12.12 \
+  -f runner_label=petting-zoo-mini \
+  -f signing_p12_path=~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-4EC8EA7A.p12 \
+  -f profiles_dir=~/git/tummycrypt/build/asc-fileprovider-lab
 
 TESTING_PKG_RUN_ID="$(gh run list \
   --workflow macos-fileprovider-testing-mode-pkg.yml \
@@ -682,7 +699,7 @@ run id into the hosted post-install smoke:
 
 ```bash
 gh workflow run macos-postinstall-smoke.yml \
-  -f tag=v0.12.7 \
+  -f tag=v0.12.12 \
   -f package_artifact_run_id="$TESTING_PKG_RUN_ID" \
   -f package_artifact_name=dist-testing-mode-pkg \
   -f fileprovider_testing_mode=true \

@@ -15,7 +15,7 @@ M10 usage-reality issues are closed.
 | Linux mounted FS | Code and in-process VFS tests are strong; real-host FUSE evidence is not yet archived for the full user story | `tcfs-vfs` tests and mounted helper regressions | Run `task lazy:linux-demo` on a FUSE-capable host and archive evidence |
 | Physical `.tc` / `.tcf` stubs | Stub wire format, parse/write, and compatibility are tested | `tcfs-vfs` and daemon unsync tests | Product-level recursive safe-unsync acceptance, including dirty-child refusal |
 | macOS CLI + daemon | Package install, signing, E2EE, storage, and daemon startup are repeatedly proven | `v0.12.12` release and PZM smoke pre-harness stages | Keep install smoke green while FileProvider lab work continues |
-| macOS Finder/FileProvider, lab | `v0.12.11` proved testing-mode enumerate/hydrate; `v0.12.12` evict/rehydrate attempt is blocked by AppleSystemPolicy before the direct host launch reaches Swift `main()` and after `fileproviderd` starts the extension | PZM run `25446601375` green for read/hydrate; run `25452596455` shows valid host/extension signatures and profiles, `taskgated-helper` profile acceptance, then AppleSystemPolicy denial for both host and extension processes | Capture `spctl`/xattr/provenance evidence, then decide Mac App Development trust remediation vs Ad Hoc lab shape |
+| macOS Finder/FileProvider, lab | `v0.12.11` proved testing-mode enumerate/hydrate; `v0.12.12` evict/rehydrate attempt is blocked by Gatekeeper/AppleSystemPolicy for the Mac Development app, before the direct host launch reaches Swift `main()` and after `fileproviderd` starts the extension | PZM run `25446601375` green for read/hydrate; run `25453088909` shows valid host/extension signatures and profiles, `taskgated-helper` profile acceptance, `spctl` rejection, provenance xattrs, and AppleSystemPolicy denial for both host and extension processes | Decide the lab trust model: Xcode/local-development launch path, a dedicated Apple-approved distribution shape, or an explicit non-production Gatekeeper bypass on PZM |
 | macOS Finder/FileProvider, production | Not proven on arbitrary clean Developer ID hosts | Local `neo` source-tree proof and production package install/signing gates | Separate clean-host production Finder enablement from PZM testing-mode evidence |
 | iOS | Proof-of-concept only | Swift build/type-check scaffold | Decide whether to keep as scaffold or create a real Files.app device lane |
 | On-prem backend | Live endpoint client smoke works; source-owned migration is still open | `neo-honey` smoke using MagicDNS endpoints | Complete `#327`/`#298` migration and archive post-cutover storage/NATS proof |
@@ -51,12 +51,19 @@ Current blocker:
    `io.tinyland.tcfs` and `io.tinyland.tcfs.fileprovider`.
 2. The direct host-app launch writes no host stderr event, so it is not reaching
    the instrumented Swift startup path.
-3. `fileproviderd` starts the extension process.
-4. AppleSystemPolicy terminates both processes:
+3. `spctl --assess --type execute` rejects both the host app and extension.
+4. The installed app tree carries `com.apple.provenance` xattrs, but stripping
+   provenance/quarantine from a temporary copy does not make Gatekeeper accept
+   the Mac Development signature.
+5. `syspolicy_check distribution` reports a missing notarization ticket.
+6. `syspolicy_check notary-submission` reports a fatal Gatekeeper rejection for
+   `TCFSProvider.app/Contents/MacOS/TCFSProvider`.
+7. `fileproviderd` starts the extension process.
+8. AppleSystemPolicy terminates both processes:
    `Security policy would not allow process ... TCFSProvider` and
    `Security policy would not allow process ... TCFSFileProvider`.
-5. The package now captures profile/codesign proof. The remaining diagnostic
-   gap is Gatekeeper/provenance/quarantine evidence from `spctl` and xattrs.
+9. The current evidence points to a Mac Development-vs-Gatekeeper trust-model
+   issue, not to the TCFS storage, E2EE, daemon, profile, or entitlement layers.
 
 ## Parallel Work Packets
 
@@ -64,7 +71,7 @@ Each packet should produce an archived evidence directory or a linked CI run.
 
 | Packet | Scope | Acceptance bar | Can run in parallel with |
 | --- | --- | --- | --- |
-| A. PZM runtime-policy diagnosis | macOS lab package only | Run PZM smoke with host stderr diagnostics, `spctl`, xattrs, codesign, embedded profile, `taskgated`, `amfid`, and AppleSystemPolicy logs attached | B, C, D |
+| A. PZM runtime-policy diagnosis | macOS lab package only | Run PZM smoke with host stderr diagnostics, `spctl`, `syspolicy_check`, xattrs, codesign, embedded profile, `taskgated`, `amfid`, and AppleSystemPolicy logs attached | B, C, D |
 | B. Linux FUSE proof | Linux real host | `find`/`ls` before hydration, exact `cat`, cache clear or unsync, exact rehydrate, evidence archived | A, C, D |
 | C. Safe-unsync product proof | CLI/daemon/VFS | Recursive unsync refuses dirty children without force, succeeds after clean state, and rehydrates exact content | A, B, D |
 | D. Distribution refresh | release surfaces | Homebrew fresh install/upgrade refreshed, Debian 12 posture decided, Nix proof recorded or explicitly scoped | A, B, C |

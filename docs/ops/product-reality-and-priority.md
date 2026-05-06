@@ -103,12 +103,18 @@ Current lab blocker:
 - the current Mac App Development certificate/profile pair is valid: codesign
   verification passes for the host and extension, embedded profiles decode, and
   `taskgated-helper` allows both host and extension entitlements
+- `spctl` rejects both bundles, and `syspolicy_check` reports the installed app
+  is not distribution-ready because it has no notarization ticket
+- `syspolicy_check notary-submission` also reports a fatal Gatekeeper rejection
+  for `TCFSProvider.app/Contents/MacOS/TCFSProvider`
 - the direct host-app launch emits no instrumented stderr, then
   AppleSystemPolicy denies the host process
 - `fileproviderd` launches the extension process, then AppleSystemPolicy also
   terminates the extension before the evict/rehydrate lifecycle can complete
-- the next lab package must capture `spctl`, xattrs, and filesystem provenance
-  flags so the remaining policy source is explicit
+- the next engineering choice is the lab trust model: reproduce Xcode's local
+  development launch path, find an Apple-approved distribution shape that can
+  still carry testing mode, or explicitly mark the PZM lane as a non-production
+  Gatekeeper-bypassed lab
 
 Still manual or weakly proven:
 

@@ -1,10 +1,11 @@
 # macOS FileProvider Testing-Mode Strategy
 
 As of May 6, 2026, the hosted production FileProvider proof is blocked by
-Apple's profile/user-enable boundary, but the registered-Mac testing-mode lane
-is green on `petting-zoo-mini`. The remaining distinction is product posture:
-testing-mode read/hydrate proof is not the same as production Developer ID
-Finder lifecycle acceptance.
+Apple's profile/user-enable boundary. The registered-Mac testing-mode lane has
+one green read/hydrate proof on `petting-zoo-mini`, but the current
+evict/rehydrate lifecycle package is blocked by Gatekeeper/AppleSystemPolicy
+rejecting the Mac Development-signed app at launch. Testing-mode proof is still
+not the same as production Developer ID Finder lifecycle acceptance.
 
 The production lane and testing-mode lane must stay separate:
 
@@ -12,7 +13,7 @@ The production lane and testing-mode lane must stay separate:
   Installer signing, production host and extension provisioning profiles, and
   notarization
 - FileProvider testing-mode proof uses a registered Mac plus Mac App
-  Development or Ad Hoc provisioning profiles that actually include
+  Development provisioning profiles that actually include
   `com.apple.developer.fileprovider.testing-mode`
 
 Do not set `TCFS_HOST_TESTING_MODE_PROVISIONING_PROFILE_BASE64` to a Developer
@@ -30,13 +31,14 @@ The relevant Apple behavior is:
   entitlement. It is required before setting a non-empty
   `NSFileProviderDomain.testingModes` value.
 - Apple managed capabilities can be limited to only some distribution options,
-  such as development or ad hoc.
+  such as development.
 - Eligible provisioning profiles include enabled managed entitlements
   automatically, but ineligible profile types do not.
 - Mac App Development profiles require registered devices.
-- Notarization is for Developer ID distribution. Apple's notary requirements
-  explicitly call for Developer ID signing, not Apple Development or ad hoc
-  signing.
+- Gatekeeper outside the Mac App Store is a Developer ID/notarization boundary.
+  Apple's distribution guidance says Developer ID is the outside-Mac-App-Store
+  identity Gatekeeper verifies, while Mac App Development profiles are for
+  registered development computers.
 
 Primary Apple references:
 
@@ -80,12 +82,13 @@ Why:
 - it is the common path for FileProvider domain testing on a developer or lab
   Mac
 - it avoids pretending the artifact is a production distribution package
-- it does not require notarization
+- it can carry the testing-mode entitlement that Developer ID profiles omit
 
-Use Ad Hoc only if the goal becomes distributing the testing-mode artifact to a
-small fixed set of registered Macs without requiring the local development
-trust posture. Ad Hoc still requires registered devices and is not a substitute
-for the public Developer ID release lane.
+This does not make the packaged artifact a Gatekeeper-accepted distribution
+artifact. Current PZM evidence shows a Mac Development-signed app installed
+from the lab package is rejected by `spctl` and then killed by
+AppleSystemPolicy. Treat that as a lab trust-model problem, not as a storage or
+FileProvider implementation failure.
 
 ## Required Apple Assets
 
@@ -280,12 +283,13 @@ Possible later implementation:
 - upload it as an artifact
 - run installation and smoke only on a registered self-hosted Mac
 
-Do not run a development/ad hoc testing-mode package on unregistered hosted
-macOS. The profile device list is part of the trust model.
+Do not run a development testing-mode package on unregistered hosted macOS. The
+profile device list is part of the trust model.
 
 ## Repository Implementation
 
-As of May 6, 2026, the repo has a green lab-lane implementation:
+As of May 6, 2026, the repo has a working lab-lane implementation up to the
+Apple runtime policy boundary:
 
 - `.github/workflows/macos-fileprovider-testing-mode-pkg.yml` defaults to the
   `petting-zoo-mini` runner label, resolves an `Apple Development` signing
@@ -309,6 +313,12 @@ As of May 6, 2026, the repo has a green lab-lane implementation:
   signing/profile checks, shared-Keychain config, live S3/E2EE access,
   `tcfsd` startup, CloudStorage enumeration, host-app `requestDownload`,
   55-byte hydration, and exact-content match
+- testing-mode package run `25453041957` rebuilt the current `v0.12.12`
+  package from `a201c1e`
+- post-install smoke run `25453088909` proved install/signing/profile/E2EE/
+  daemon startup again, then failed the FileProvider lifecycle harness because
+  `spctl` rejected both bundles and AppleSystemPolicy denied both
+  `TCFSProvider` and `TCFSFileProvider`
 
 ## Lab Runner Enrollment
 
@@ -386,8 +396,10 @@ Once the Mac App Development profiles exist on `petting-zoo-mini`, run:
 
 ```bash
 scripts/macos-fileprovider-testing-mode-dispatch.sh \
-  --tag v0.12.7 \
-  --runner-label petting-zoo-mini
+  --tag v0.12.12 \
+  --runner-label petting-zoo-mini \
+  --signing-p12-path ~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-4EC8EA7A.p12 \
+  --profiles-dir ~/git/tummycrypt/build/asc-fileprovider-lab
 ```
 
 Use `--dry-run` first if you want to inspect the exact `gh workflow run`
@@ -433,6 +445,7 @@ Use these gates in order:
 | Entitlement split | Protect production builds | production app lacks testing-mode; development app includes it |
 | Package structure | Verify installer payload shape | package contains CLI, daemon, app, appex, and repo postinstall |
 | Install/start | Prove the package runs on the registered Mac | install succeeds, `tcfsd` starts, shared Keychain config is provisioned |
+| Runtime policy | Prove the lab trust model allows the Mac Development app to launch | `spctl`/`syspolicy_check` do not reject the installed host app before harness launch |
 | FileProvider enablement | Prove the Apple boundary is crossed | harness sets testing mode and FileProvider does not fail with `FP -2011` |
 | Read/hydrate | Prove product behavior | enumerate remote fixture and hydrate exact content |
 | Parity follow-on | Move beyond read-only proof | unsync/evict+rehydrate, mutate/conflict, badges/progress/status evidence |
@@ -447,27 +460,21 @@ Feature goals remain:
 1. production `v0.12.x` packages stay Developer ID signed and notarized
 2. user-enabled lab Mac proves production Finder behavior without testing mode
 3. development testing-mode lane proves repeatable CI FileProvider behavior
+   only after its Mac Development trust model is explicit
 4. Linux FUSE lane proves the scriptable reference behavior independently
 5. parity evidence expands from read/hydrate into lifecycle, mutation,
    conflict, status, badges, and recovery
 
 ## Immediate Work Items
 
-1. Run `scripts/asc-fileprovider-lab-provision.py --validate-config`.
-2. Keep `config/macos-fileprovider-lab.asc.json` pointed at PZM's registered
-   Provisioning UDID.
-3. On `petting-zoo-mini`, run the ASC provisioner with
-   `--apply --replace --install --create-certificate` so the private key, Mac
-   App Development certificate, p12, and profiles are generated from one
-   controlled lane.
-4. Run `scripts/macos-codesign-p12-probe.sh --p12 <generated.p12>
-   --p12-password-file <password-file>` from the runner/GUI security context
-   where possible.
-5. Run the streamed profile inventory gate with
-   `--require-host-entitlement com.apple.developer.fileprovider.testing-mode
-   --strict`.
-6. Dispatch the self-hosted FileProvider testing-mode smoke against `v0.12.7`
-   with `--signing-p12-path <generated.p12>` and
-   `--signing-p12-password-file <password-file>`.
-7. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
+1. Decide the PZM Mac Development trust model. Current options are:
+   reproduce an Xcode/local-development launch shape, identify an Apple-approved
+   distribution shape that can still carry testing mode, or make the PZM lane
+   an explicitly non-production Gatekeeper-bypassed lab.
+2. Keep `spctl`, `syspolicy_check`, xattr, codesign, embedded-profile,
+   `taskgated-helper`, `amfid`, and AppleSystemPolicy diagnostics attached to
+   every FileProvider lab failure.
+3. Once the trust model is explicit, rerun the `v0.12.12` PZM dispatch with the
+   generated p12 and profiles.
+4. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
    gates.

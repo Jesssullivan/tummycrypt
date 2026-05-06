@@ -695,6 +695,17 @@ jobs:
             else
               echo "spctl not found" > "$LOG_DIR/${label}-spctl-execute.txt"
             fi
+            if command -v syspolicy_check >/dev/null 2>&1; then
+              syspolicy_check distribution "$bundle" \
+                > "$LOG_DIR/${label}-syspolicy-distribution.txt" 2>&1 || true
+              syspolicy_check notary-submission "$bundle" \
+                > "$LOG_DIR/${label}-syspolicy-notary-submission.txt" 2>&1 || true
+            else
+              echo "syspolicy_check not found" \
+                > "$LOG_DIR/${label}-syspolicy-distribution.txt"
+              echo "syspolicy_check not found" \
+                > "$LOG_DIR/${label}-syspolicy-notary-submission.txt"
+            fi
 
             if [[ -f "$profile" ]]; then
               security cms -D -i "$profile" \
