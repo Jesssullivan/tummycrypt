@@ -541,9 +541,11 @@ extract_step_from_workflow \
   "$INSTALL_PACKAGE_STEP"
 bash -n "$INSTALL_PACKAGE_STEP"
 assert_contains "$INSTALL_PACKAGE_STEP" "sudo -n true"
+assert_contains "$INSTALL_PACKAGE_STEP" "TCFS_INSTALLER"
+assert_contains "$INSTALL_PACKAGE_STEP" "/usr/sbin/installer"
 assert_contains "$INSTALL_PACKAGE_STEP" "TCFS_RUNNER_SUDO_PASSWORD"
 assert_contains "$INSTALL_PACKAGE_STEP" ".config/sops-nix/secrets/become/password"
-assert_contains "$INSTALL_PACKAGE_STEP" "sudo -S -p '' installer -pkg \"\$PACKAGE_PATH\" -target /"
+assert_contains "$INSTALL_PACKAGE_STEP" "sudo -S -p '' \"\$INSTALLER_BIN\" -pkg \"\$PACKAGE_PATH\" -target /"
 
 SIGNING_PREFLIGHT_STEP="${TMPDIR}/verify-installed-fileprovider-production-signing.sh"
 extract_step_from_workflow \

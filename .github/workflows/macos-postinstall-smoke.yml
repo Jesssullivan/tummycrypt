@@ -325,14 +325,26 @@ jobs:
         run: |
           set -euo pipefail
           SUDO_PASSWORD_FILE="${TCFS_RUNNER_SUDO_PASSWORD_FILE:-$HOME/.config/sops-nix/secrets/become/password}"
+          INSTALLER_BIN="${TCFS_INSTALLER:-}"
+
+          if [[ -z "$INSTALLER_BIN" ]]; then
+            if command -v installer >/dev/null 2>&1; then
+              INSTALLER_BIN="$(command -v installer)"
+            elif [[ -x /usr/sbin/installer ]]; then
+              INSTALLER_BIN="/usr/sbin/installer"
+            else
+              echo "::error::installer command not found"
+              exit 1
+            fi
+          fi
 
           if sudo -n true 2>/dev/null; then
-            sudo installer -pkg "$PACKAGE_PATH" -target /
+            sudo "$INSTALLER_BIN" -pkg "$PACKAGE_PATH" -target /
           elif [[ -n "${TCFS_RUNNER_SUDO_PASSWORD:-}" ]]; then
             printf '%s\n' "$TCFS_RUNNER_SUDO_PASSWORD" \
-              | sudo -S -p '' installer -pkg "$PACKAGE_PATH" -target /
+              | sudo -S -p '' "$INSTALLER_BIN" -pkg "$PACKAGE_PATH" -target /
           elif [[ -r "$SUDO_PASSWORD_FILE" ]]; then
-            sudo -S -p '' installer -pkg "$PACKAGE_PATH" -target / < "$SUDO_PASSWORD_FILE"
+            sudo -S -p '' "$INSTALLER_BIN" -pkg "$PACKAGE_PATH" -target / < "$SUDO_PASSWORD_FILE"
           else
             echo "::error::sudo requires a password; set TCFS_RUNNER_SUDO_PASSWORD secret or provide $SUDO_PASSWORD_FILE on the runner"
             exit 1
