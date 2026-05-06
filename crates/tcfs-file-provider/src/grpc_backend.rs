@@ -1,6 +1,6 @@
 //! gRPC backend for the FileProvider FFI.
 //!
-//! Delegates all operations to the tcfsd daemon via Unix domain socket gRPC.
+//! Delegates all operations to the tcfsd daemon via gRPC.
 //! This enables full fleet sync, NATS events, and conflict resolution —
 //! the daemon handles E2EE, chunking, and storage internally.
 
@@ -25,18 +25,33 @@ pub struct TcfsProvider {
     client: TcfsDaemonClient<Channel>,
     /// Remote prefix for path construction
     remote_prefix: String,
-    /// Socket path for lazy reconnection
-    socket_path: String,
+    /// Daemon connection target for lazy reconnection.
+    target: DaemonTarget,
     last_error: Mutex<Option<String>>,
 }
 
-/// Connect to the daemon over a Unix domain socket with retry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DaemonTarget {
+    Unix(PathBuf),
+    Endpoint(String),
+}
+
+impl DaemonTarget {
+    fn label(&self) -> String {
+        match self {
+            Self::Unix(path) => path.display().to_string(),
+            Self::Endpoint(endpoint) => endpoint.clone(),
+        }
+    }
+}
+
+/// Connect to the daemon with retry.
 ///
 /// Retries up to `max_retries` times with exponential backoff (200ms base).
 /// This handles the case where the daemon hasn't started yet when the
 /// FileProvider extension is loaded by fileproviderd.
 async fn connect_with_retry(
-    socket_path: &str,
+    target: &DaemonTarget,
     max_retries: u32,
 ) -> Result<TcfsDaemonClient<Channel>, anyhow::Error> {
     let mut last_err = None;
@@ -47,7 +62,7 @@ async fn connect_with_retry(
             tokio::time::sleep(backoff).await;
         }
 
-        match connect_once(socket_path).await {
+        match connect_once(target).await {
             Ok(client) => return Ok(client),
             Err(e) => {
                 tracing::warn!(
@@ -63,21 +78,84 @@ async fn connect_with_retry(
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("connect failed")))
 }
 
-/// Single connection attempt to the daemon over a Unix domain socket.
-async fn connect_once(socket_path: &str) -> Result<TcfsDaemonClient<Channel>, anyhow::Error> {
-    let path = PathBuf::from(socket_path);
-
-    let channel = Endpoint::from_static("http://[::]:0")
-        .connect_with_connector(service_fn(move |_: Uri| {
+/// Single connection attempt to the daemon.
+async fn connect_once(target: &DaemonTarget) -> Result<TcfsDaemonClient<Channel>, anyhow::Error> {
+    match target {
+        DaemonTarget::Unix(path) => {
             let path = path.clone();
-            async move {
-                let stream = tokio::net::UnixStream::connect(&path).await?;
-                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
-            }
-        }))
-        .await?;
+            let channel = Endpoint::from_static("http://[::]:0")
+                .connect_with_connector(service_fn(move |_: Uri| {
+                    let path = path.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(&path).await?;
+                        Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+                    }
+                }))
+                .await?;
+            Ok(TcfsDaemonClient::new(channel))
+        }
+        DaemonTarget::Endpoint(endpoint) => {
+            let channel = Endpoint::from_shared(endpoint.clone())?.connect().await?;
+            Ok(TcfsDaemonClient::new(channel))
+        }
+    }
+}
 
-    Ok(TcfsDaemonClient::new(channel))
+fn normalize_endpoint(endpoint: &str) -> String {
+    if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    }
+}
+
+fn endpoint_from_config(config: &serde_json::Value) -> Option<String> {
+    config["daemon_endpoint"]
+        .as_str()
+        .map(normalize_endpoint)
+        .or_else(|| {
+            std::env::var("TCFS_ENDPOINT")
+                .ok()
+                .map(|endpoint| normalize_endpoint(&endpoint))
+        })
+}
+
+fn default_socket_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let state_home =
+        std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| format!("{home}/.local/state"));
+    let xdg_path = PathBuf::from(format!("{state_home}/tcfsd/tcfsd.sock"));
+
+    if xdg_path.exists() {
+        return xdg_path;
+    }
+
+    // Sandboxed macOS extensions: try App Group container.
+    let app_group = PathBuf::from(format!(
+        "{home}/Library/Group Containers/group.io.tinyland.tcfs/tcfsd.sock"
+    ));
+    if app_group.exists() {
+        return app_group;
+    }
+
+    xdg_path
+}
+
+fn target_from_config(config: &serde_json::Value) -> DaemonTarget {
+    if let Some(endpoint) = endpoint_from_config(config) {
+        return DaemonTarget::Endpoint(endpoint);
+    }
+
+    config["daemon_socket"]
+        .as_str()
+        .map(|path| DaemonTarget::Unix(PathBuf::from(path)))
+        .or_else(|| {
+            std::env::var("TCFS_SOCKET")
+                .ok()
+                .map(PathBuf::from)
+                .map(DaemonTarget::Unix)
+        })
+        .unwrap_or_else(|| DaemonTarget::Unix(default_socket_path()))
 }
 
 /// Create a new provider from a JSON configuration string.
@@ -86,12 +164,13 @@ async fn connect_once(socket_path: &str) -> Result<TcfsDaemonClient<Channel>, an
 /// ```json
 /// {
 ///   "daemon_socket": "/path/to/tcfsd.sock",
+///   "daemon_endpoint": "http://127.0.0.1:19101",
 ///   "remote_prefix": "devices/mydevice"
 /// }
 /// ```
 ///
-/// Falls back to `$TCFS_SOCKET` env var, then
-/// `$XDG_STATE_HOME/tcfsd/tcfsd.sock` if `daemon_socket` is not set.
+/// `daemon_endpoint` is preferred when present. Otherwise the provider falls
+/// back to `daemon_socket`, `$TCFS_SOCKET`, and then the local default socket.
 ///
 /// # Safety
 ///
@@ -114,29 +193,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             Err(_) => return ptr::null_mut(),
         };
 
-        let socket_path = config["daemon_socket"]
-            .as_str()
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("TCFS_SOCKET").ok())
-            .unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                let state_home = std::env::var("XDG_STATE_HOME")
-                    .unwrap_or_else(|_| format!("{home}/.local/state"));
-                let xdg_path = format!("{state_home}/tcfsd/tcfsd.sock");
-
-                if std::path::Path::new(&xdg_path).exists() {
-                    return xdg_path;
-                }
-
-                // Sandboxed macOS extensions: try App Group container
-                let app_group =
-                    format!("{home}/Library/Group Containers/group.io.tinyland.tcfs/tcfsd.sock");
-                if std::path::Path::new(&app_group).exists() {
-                    return app_group;
-                }
-
-                xdg_path
-            });
+        let target = target_from_config(&config);
 
         let prefix = config["remote_prefix"]
             .as_str()
@@ -156,10 +213,10 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             Err(_) => return ptr::null_mut(),
         };
 
-        let client = match runtime.block_on(connect_with_retry(&socket_path, 8)) {
+        let client = match runtime.block_on(connect_with_retry(&target, 8)) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("failed to connect to tcfsd at {}: {}", socket_path, e);
+                tracing::error!("failed to connect to tcfsd at {}: {}", target.label(), e);
                 return ptr::null_mut();
             }
         };
@@ -168,7 +225,7 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             runtime,
             client,
             remote_prefix: prefix,
-            socket_path,
+            target,
             last_error: Mutex::new(None),
         }))
     }));
@@ -191,9 +248,9 @@ impl TcfsProvider {
 
     /// Attempt to reconnect if the daemon connection was lost.
     fn try_reconnect(&mut self) {
-        match self.runtime.block_on(connect_once(&self.socket_path)) {
+        match self.runtime.block_on(connect_once(&self.target)) {
             Ok(new_client) => {
-                tracing::info!("reconnected to tcfsd at {}", self.socket_path);
+                tracing::info!("reconnected to tcfsd at {}", self.target.label());
                 self.client = new_client;
             }
             Err(e) => {
@@ -436,14 +493,14 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
 
         // Use a fresh connection per fetch to avoid channel contention
         // with the background watch stream on the shared HTTP/2 connection.
-        let socket = prov.socket_path.clone();
+        let target = prov.target.clone();
         let remote = item_str.to_string();
         let dest = dest_str.to_string();
 
         let handle = prov.runtime.handle().clone();
         let fetch_result = std::thread::spawn(move || {
             handle.block_on(async {
-                let mut client = connect_once(&socket)
+                let mut client = connect_once(&target)
                     .await
                     .map_err(|e| tonic::Status::unavailable(format!("connect: {e}")))?;
                 let mut stream = client
@@ -523,14 +580,14 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
 
-        let socket = prov.socket_path.clone();
+        let target = prov.target.clone();
         let remote = item_str.to_string();
         let dest = dest_str.to_string();
 
         let handle = prov.runtime.handle().clone();
         let fetch_result = std::thread::spawn(move || {
             handle.block_on(async {
-                let mut client = connect_once(&socket)
+                let mut client = connect_once(&target)
                     .await
                     .map_err(|e| tonic::Status::unavailable(format!("connect: {e}")))?;
                 let mut stream = client
@@ -825,12 +882,12 @@ pub unsafe extern "C" fn tcfs_provider_start_watch(
 
     let ctx = callback_context as usize;
     let prov = unsafe { &mut *provider };
-    let socket_path = prov.socket_path.clone();
+    let target = prov.target.clone();
 
     // Create a SEPARATE gRPC client for the watch stream.
     // Sharing the main client's HTTP/2 channel can cause contention
     // with synchronous block_on() calls from fetchContents.
-    let watch_client = match prov.runtime.block_on(connect_once(&socket_path)) {
+    let watch_client = match prov.runtime.block_on(connect_once(&target)) {
         Ok(c) => c,
         Err(_) => return TcfsError::TcfsErrorStorage,
     };
@@ -863,7 +920,7 @@ pub unsafe extern "C" fn tcfs_provider_start_watch(
                 Err(e) => {
                     tracing::warn!("background watch failed: {e}, reconnecting in 5s");
                     // Try to reconnect the client
-                    if let Ok(new_client) = connect_once(&socket_path).await {
+                    if let Ok(new_client) = connect_once(&target).await {
                         client = new_client;
                     }
                 }
@@ -887,5 +944,47 @@ pub unsafe extern "C" fn tcfs_provider_free(provider: *mut TcfsProvider) {
         unsafe {
             drop(Box::from_raw(provider));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_prefers_daemon_endpoint() {
+        let config = serde_json::json!({
+            "daemon_endpoint": "127.0.0.1:19101",
+            "daemon_socket": "/tmp/ignored.sock"
+        });
+
+        assert_eq!(
+            target_from_config(&config),
+            DaemonTarget::Endpoint("http://127.0.0.1:19101".to_string())
+        );
+    }
+
+    #[test]
+    fn target_preserves_endpoint_scheme() {
+        let config = serde_json::json!({
+            "daemon_endpoint": "http://127.0.0.1:19101"
+        });
+
+        assert_eq!(
+            target_from_config(&config),
+            DaemonTarget::Endpoint("http://127.0.0.1:19101".to_string())
+        );
+    }
+
+    #[test]
+    fn target_uses_daemon_socket_without_endpoint() {
+        let config = serde_json::json!({
+            "daemon_socket": "/tmp/tcfsd.sock"
+        });
+
+        assert_eq!(
+            target_from_config(&config),
+            DaemonTarget::Unix(PathBuf::from("/tmp/tcfsd.sock"))
+        );
     }
 }

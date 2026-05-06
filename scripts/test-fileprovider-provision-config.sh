@@ -20,7 +20,7 @@ printf '01234567890123456789012345678901' >"$MASTER_KEY_FILE"
 
 cat >"$CONFIG_TOML" <<EOF
 [daemon]
-fileprovider_socket = "/tmp/tcfs-fileprovider.sock"
+fileprovider_endpoint = "http://127.0.0.1:19101"
 
 [storage]
 endpoint = "http://example.invalid:8333"
@@ -42,7 +42,7 @@ jq -e \
   --arg access "test-access" \
   --arg secret "test-secret" \
   --arg prefix "data" \
-  --arg socket "/tmp/tcfs-fileprovider.sock" \
+  --arg endpoint_target "http://127.0.0.1:19101" \
   --arg master_key_file "$MASTER_KEY_FILE" \
   '
     .s3_endpoint == $endpoint and
@@ -50,12 +50,14 @@ jq -e \
     .s3_access == $access and
     .s3_secret == $secret and
     .remote_prefix == $prefix and
-    .daemon_socket == $socket and
+    .daemon_endpoint == $endpoint_target and
+    (has("daemon_socket") | not) and
     .master_key_file == $master_key_file and
     (has("master_key_base64") | not)
   ' "$OUTPUT_JSON" >/dev/null
 
 grep -Fq "Master key file: present" "${TMPDIR}/provision.out"
+grep -Fq "Endpoint: http://127.0.0.1:19101" "${TMPDIR}/provision.out"
 grep -Fq "Also written to $APP_GROUP_JSON" "${TMPDIR}/provision.out"
 grep -Fq "TCFS_FILEPROVIDER_APP_GROUP_COPY_TIMEOUT" "$SCRIPT"
 grep -Fq "TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY" "$SCRIPT"

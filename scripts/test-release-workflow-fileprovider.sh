@@ -637,9 +637,11 @@ extract_step_from_workflow \
 bash -n "$DERIVE_RUN_PATHS_STEP"
 assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$RUNNER_TEMP/tcfs-config\""
 assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_PATH=\"\$CONFIG_DIR/config.toml\""
-assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"/tmp/tcfsd-fileprovider-gha.sock\""
+assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_LISTEN_ADDR=\"127.0.0.1:19101\""
+assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_ENDPOINT=\"http://\${FILEPROVIDER_LISTEN_ADDR}\""
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\$HOME/Library/Application Support/io.tinyland.tcfs/tcfsd.sock\""
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\${APP_GROUP_DIR}/tcfsd-gha.sock\""
+assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"/tmp/tcfsd-fileprovider-gha.sock\""
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$HOME/.config/tcfs\""
 
 WRITE_LIVE_CONFIG_STEP="${TMPDIR}/write-live-config.sh"
@@ -650,7 +652,9 @@ extract_step_from_workflow \
   "$WRITE_LIVE_CONFIG_STEP"
 bash -n "$WRITE_LIVE_CONFIG_STEP"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "endpoint = \"\${TCFS_SMOKE_S3_ENDPOINT}\""
-assert_contains "$WRITE_LIVE_CONFIG_STEP" "fileprovider_socket = \"\${FILEPROVIDER_SOCKET}\""
+assert_contains "$WRITE_LIVE_CONFIG_STEP" "listen = \"\${FILEPROVIDER_LISTEN_ADDR}\""
+assert_contains "$WRITE_LIVE_CONFIG_STEP" "fileprovider_endpoint = \"\${FILEPROVIDER_ENDPOINT}\""
+assert_not_contains "$WRITE_LIVE_CONFIG_STEP" "fileprovider_socket = "
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "bucket = \"\${TCFS_SMOKE_S3_BUCKET}\""
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "enforce_tls = true"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "[crypto]"
@@ -701,7 +705,9 @@ extract_step_from_workflow \
   "Start tcfsd with live config" \
   "$START_DAEMON_STEP"
 bash -n "$START_DAEMON_STEP"
-assert_contains "$START_DAEMON_STEP" "for socket in /tmp/tcfsd-gha.sock \"\${FILEPROVIDER_SOCKET}\""
+assert_contains "$START_DAEMON_STEP" "for socket in /tmp/tcfsd-gha.sock"
+assert_contains "$START_DAEMON_STEP" "socket.create_connection((host, int(port)), timeout=1)"
+assert_contains "$START_DAEMON_STEP" "Timed out waiting for TCP listener \$FILEPROVIDER_LISTEN_ADDR"
 
 POSTINSTALL_HARNESS_STEP="${TMPDIR}/run-macos-postinstall-harness.sh"
 extract_step_from_workflow \

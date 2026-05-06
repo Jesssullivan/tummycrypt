@@ -194,11 +194,12 @@ jobs:
           MASTER_KEY_PATH="$RUNNER_TEMP/tcfs-master.key"
           EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
           APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
-          FILEPROVIDER_SOCKET="/tmp/tcfsd-fileprovider-gha.sock"
+          FILEPROVIDER_LISTEN_ADDR="127.0.0.1:19101"
+          FILEPROVIDER_ENDPOINT="http://${FILEPROVIDER_LISTEN_ADDR}"
           REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
 
-          mkdir -p "$LOG_DIR" "$SYNC_ROOT" "$CONFIG_DIR" "$(dirname "$FILEPROVIDER_SOCKET")"
+          mkdir -p "$LOG_DIR" "$SYNC_ROOT" "$CONFIG_DIR"
 
           {
             echo "TAG=$TAG"
@@ -211,7 +212,8 @@ jobs:
             echo "MASTER_KEY_PATH=$MASTER_KEY_PATH"
             echo "EXPECTED_CONTENT_FILE=$EXPECTED_CONTENT_FILE"
             echo "APP_GROUP_DIR=$APP_GROUP_DIR"
-            echo "FILEPROVIDER_SOCKET=$FILEPROVIDER_SOCKET"
+            echo "FILEPROVIDER_LISTEN_ADDR=$FILEPROVIDER_LISTEN_ADDR"
+            echo "FILEPROVIDER_ENDPOINT=$FILEPROVIDER_ENDPOINT"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
             echo "FIXTURE_REL=$FIXTURE_REL"
           } >> "$GITHUB_ENV"
@@ -386,7 +388,8 @@ jobs:
           cat > "$CONFIG_PATH" <<EOF
           [daemon]
           socket = "/tmp/tcfsd-gha.sock"
-          fileprovider_socket = "${FILEPROVIDER_SOCKET}"
+          listen = "${FILEPROVIDER_LISTEN_ADDR}"
+          fileprovider_endpoint = "${FILEPROVIDER_ENDPOINT}"
           metrics_addr = "127.0.0.1:19100"
           log_format = "text"
 
@@ -551,7 +554,7 @@ jobs:
             > "$LOG_DIR/tcfsd.log" 2>&1 &
           echo "$!" > "$LOG_DIR/tcfsd.pid"
 
-          for socket in /tmp/tcfsd-gha.sock "${FILEPROVIDER_SOCKET}"; do
+          for socket in /tmp/tcfsd-gha.sock; do
             ready=0
             for _ in $(seq 1 60); do
               if [[ -S "$socket" ]]; then
@@ -566,6 +569,28 @@ jobs:
               exit 1
             fi
           done
+
+          ready=0
+          for _ in $(seq 1 60); do
+            if python3 - "$FILEPROVIDER_LISTEN_ADDR" <<'PY'
+          import socket
+          import sys
+
+          host, port = sys.argv[1].rsplit(":", 1)
+          with socket.create_connection((host, int(port)), timeout=1):
+              pass
+          PY
+            then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" -ne 1 ]]; then
+            echo "::error::Timed out waiting for TCP listener $FILEPROVIDER_LISTEN_ADDR"
+            cat "$LOG_DIR/tcfsd.log" || true
+            exit 1
+          fi
 
       - name: Run macOS post-install harness
         shell: bash

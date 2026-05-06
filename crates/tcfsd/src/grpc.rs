@@ -1,11 +1,11 @@
-//! tonic gRPC server over Unix domain socket
+//! tonic gRPC server over Unix domain socket and optional TCP
 
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::Mutex as TokioMutex;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::transport::Server;
 use tracing::{info, warn};
 
@@ -2299,6 +2299,7 @@ async fn bind_uds(socket_path: &Path) -> Result<UnixListenerStream> {
 pub async fn serve(
     socket_path: &Path,
     fileprovider_socket: Option<&Path>,
+    listen: Option<&str>,
     impl_: TcfsDaemonImpl,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
@@ -2306,6 +2307,33 @@ pub async fn serve(
     info!(socket = %socket_path.display(), "gRPC server ready");
 
     let service = TcfsDaemonServer::new(impl_);
+
+    let tcp_handle = if let Some(addr) = listen {
+        let listener = TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?;
+        info!(addr = %local_addr, "gRPC TCP listener ready");
+
+        let tcp_service = service.clone();
+        let tcp_shutdown = Arc::new(tokio::sync::Notify::new());
+        let tcp_shutdown_clone = tcp_shutdown.clone();
+
+        let handle = tokio::spawn(async move {
+            if let Err(e) = Server::builder()
+                .add_service(tcp_service)
+                .serve_with_incoming_shutdown(
+                    TcpListenerStream::new(listener),
+                    tcp_shutdown_clone.notified(),
+                )
+                .await
+            {
+                tracing::warn!("TCP gRPC server error: {e}");
+            }
+        });
+
+        Some((handle, tcp_shutdown))
+    } else {
+        None
+    };
 
     // Spawn a second gRPC server on the FileProvider socket if configured.
     // Uses a separate tokio task with a shared shutdown notify.
@@ -2340,6 +2368,10 @@ pub async fn serve(
 
     // Stop the FileProvider server when the primary shuts down
     if let Some((handle, notify)) = fp_handle {
+        notify.notify_one();
+        let _ = handle.await;
+    }
+    if let Some((handle, notify)) = tcp_handle {
         notify.notify_one();
         let _ = handle.await;
     }
@@ -2441,7 +2473,14 @@ mod tests {
         let shutdown_for_server = shutdown.clone();
 
         let handle = tokio::spawn(async move {
-            serve(&socket_path, None, daemon, shutdown_for_server.notified()).await
+            serve(
+                &socket_path,
+                None,
+                None,
+                daemon,
+                shutdown_for_server.notified(),
+            )
+            .await
         });
 
         (dir, handle, shutdown)

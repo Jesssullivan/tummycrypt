@@ -446,8 +446,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // On macOS with FileProvider active, the watcher is skipped because
     // ~/Library/CloudStorage/TCFSProvider-TCFS/ is the primary interface.
     // The FileProvider extension handles uploads/downloads via gRPC RPCs.
-    let fileprovider_active =
-        cfg!(target_os = "macos") && config.daemon.fileprovider_socket.is_some();
+    let fileprovider_active = cfg!(target_os = "macos")
+        && (config.daemon.fileprovider_socket.is_some()
+            || config.daemon.fileprovider_endpoint.is_some());
 
     let _watcher_handle = if let Some(ref sync_root) = config.sync.sync_root {
         if fileprovider_active {
@@ -864,6 +865,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // Start gRPC server
     let socket_path = config.daemon.socket.clone();
     let fp_socket_path = config.daemon.fileprovider_socket.clone();
+    let listen_addr = config.daemon.listen.clone();
     let config = Arc::new(config);
     let impl_ = TcfsDaemonImpl::new(
         cred_store,
@@ -1333,10 +1335,14 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     if let Some(ref fp) = fp_socket_path {
         info!(socket = %fp.display(), "gRPC: FileProvider socket");
     }
+    if let Some(ref addr) = listen_addr {
+        info!(addr = %addr, "gRPC: TCP listening");
+    }
 
     crate::grpc::serve(
         &socket_path,
         fp_socket_path.as_deref(),
+        listen_addr.as_deref(),
         impl_,
         shutdown_signal,
     )

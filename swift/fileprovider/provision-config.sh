@@ -68,6 +68,7 @@ REMOTE_PREFIX="$(extract_toml remote_prefix)"
 DEVICE_ID="$(extract_toml device_id)"
 DEVICE_NAME="$(extract_toml device_name)"
 DAEMON_SOCKET="$(extract_toml fileprovider_socket)"
+DAEMON_ENDPOINT="$(extract_toml fileprovider_endpoint)"
 MASTER_KEY_FILE="$(extract_toml master_key_file)"
 
 S3_ENDPOINT="${S3_ENDPOINT:-http://212.2.245.145:8333}"
@@ -113,7 +114,32 @@ GROUP_CONTAINER="$DEV_DIR"
 
 CONFIG_JSON="$GROUP_CONTAINER/config.json"
 
-if [ -n "$DAEMON_SOCKET" ] && [ -n "$MASTER_KEY_FILE" ]; then
+if [ -n "$DAEMON_ENDPOINT" ] && [ -n "$MASTER_KEY_FILE" ]; then
+cat > "$CONFIG_JSON" <<CONFIGEOF
+{
+  "s3_endpoint": "$S3_ENDPOINT",
+  "s3_bucket": "$S3_BUCKET",
+  "s3_access": "$S3_ACCESS",
+  "s3_secret": "$S3_SECRET",
+  "remote_prefix": "$REMOTE_PREFIX",
+  "device_id": "$DEVICE_ID",
+  "daemon_endpoint": "$DAEMON_ENDPOINT",
+  "master_key_file": "$MASTER_KEY_FILE"
+}
+CONFIGEOF
+elif [ -n "$DAEMON_ENDPOINT" ]; then
+cat > "$CONFIG_JSON" <<CONFIGEOF
+{
+  "s3_endpoint": "$S3_ENDPOINT",
+  "s3_bucket": "$S3_BUCKET",
+  "s3_access": "$S3_ACCESS",
+  "s3_secret": "$S3_SECRET",
+  "remote_prefix": "$REMOTE_PREFIX",
+  "device_id": "$DEVICE_ID",
+  "daemon_endpoint": "$DAEMON_ENDPOINT"
+}
+CONFIGEOF
+elif [ -n "$DAEMON_SOCKET" ] && [ -n "$MASTER_KEY_FILE" ]; then
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
@@ -172,6 +198,9 @@ echo "    Device:   $DEVICE_ID"
 echo "    Prefix:   $REMOTE_PREFIX"
 if [ -n "$DAEMON_SOCKET" ]; then
     echo "    Socket:   $DAEMON_SOCKET"
+fi
+if [ -n "$DAEMON_ENDPOINT" ]; then
+    echo "    Endpoint: $DAEMON_ENDPOINT"
 fi
 if [ -n "$MASTER_KEY_FILE" ]; then
     echo "    Master key file: present"

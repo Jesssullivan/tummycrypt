@@ -149,6 +149,11 @@ pub struct DaemonConfig {
     /// The sandboxed FileProvider .appex cannot reach the primary socket, so the daemon
     /// binds a second listener here (e.g. ~/Library/Group Containers/group.io.tinyland.tcfs/tcfsd.sock).
     pub fileprovider_socket: Option<PathBuf>,
+    /// HTTP endpoint handed to the macOS FileProvider extension.
+    ///
+    /// This is consumed by the provisioning script and used by tcfsd only to
+    /// identify FileProvider mode; the actual TCP bind address is `listen`.
+    pub fileprovider_endpoint: Option<String>,
     /// TCP listen address for remote gRPC (optional)
     pub listen: Option<String>,
     /// Prometheus metrics endpoint (default: 127.0.0.1:9100)
@@ -370,6 +375,7 @@ impl Default for DaemonConfig {
         Self {
             socket,
             fileprovider_socket: None,
+            fileprovider_endpoint: None,
             listen: None,
             metrics_addr: Some("127.0.0.1:9100".into()),
             log_level: "info".into(),

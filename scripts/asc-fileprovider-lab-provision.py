@@ -905,7 +905,7 @@ def main() -> int:
             print(f"  scripts/macos-codesign-p12-probe.sh --p12 {p12_path}")
             print(
                 "  scripts/macos-fileprovider-testing-mode-dispatch.sh "
-                "--tag v0.12.7 --runner-label petting-zoo-mini "
+                "--tag v0.12.8 --runner-label petting-zoo-mini "
                 f"--signing-p12-path {p12_path}"
             )
     return 0

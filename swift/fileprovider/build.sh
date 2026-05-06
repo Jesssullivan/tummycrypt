@@ -229,10 +229,10 @@ SWIFT
     echo "    Extension will fall back to Keychain/XDG/App Group"
 fi
 
-# Validate config has daemon_socket for gRPC backend
+# Validate config has a daemon connection target for gRPC backend
 if [ "$EMBED_FILEPROVIDER_CONFIG" = "1" ] && [ -f "$CONFIG_PATH" ]; then
-    if ! grep -q '"daemon_socket"' "$CONFIG_PATH" 2>/dev/null; then
-        echo "WARNING: config.json has no daemon_socket — gRPC backend needs a socket path" >&2
+    if ! grep -Eq '"daemon_(socket|endpoint)"' "$CONFIG_PATH" 2>/dev/null; then
+        echo "WARNING: config.json has no daemon_socket or daemon_endpoint — gRPC backend needs a daemon target" >&2
         echo "         Extension will fall back to XDG or App Group container path" >&2
     fi
 fi
