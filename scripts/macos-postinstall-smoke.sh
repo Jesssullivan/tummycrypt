@@ -500,6 +500,18 @@ clear_fileprovider_request_download() {
   launchctl unsetenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER >/dev/null 2>&1 || true
 }
 
+host_app_binary_path() {
+  local info_plist="$APP_PATH/Contents/Info.plist"
+  local executable_name
+
+  if [[ -f "$info_plist" ]] && [[ -x /usr/libexec/PlistBuddy ]]; then
+    executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist" 2>/dev/null || true)"
+  fi
+  [[ -n "${executable_name:-}" ]] || executable_name="$(basename "$APP_PATH" .app)"
+
+  printf '%s/Contents/MacOS/%s\n' "$APP_PATH" "$executable_name"
+}
+
 print_pluginkit_duplicate_hint() {
   local output="$1"
 
@@ -828,17 +840,29 @@ read_fileprovider_file() {
 
 request_expected_file_download() {
   local item_identifier="$1"
+  local app_binary
+  local host_request_pid=""
+  local used_launchctl_env=0
   local wait_count=0
 
   echo "requesting FileProvider download for expected file: $item_identifier"
 
   clear_fileprovider_request_download
-  launchctl setenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER "$item_identifier" || {
-    echo "failed to set FileProvider request-download launch environment" >&2
-    exit 1
-  }
-
-  open "$APP_PATH"
+  app_binary="$(host_app_binary_path)"
+  if [[ -x "$app_binary" ]]; then
+    echo "launching host app binary for download request: $app_binary"
+    TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER="$item_identifier" \
+      "$app_binary" >"$LOG_DIR/host-request-launch.log" 2>&1 &
+    host_request_pid="$!"
+  else
+    echo "warning: host app binary not executable at $app_binary; falling back to LaunchServices" >&2
+    used_launchctl_env=1
+    launchctl setenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER "$item_identifier" || {
+      echo "failed to set FileProvider request-download launch environment" >&2
+      exit 1
+    }
+    open -n "$APP_PATH" || open "$APP_PATH"
+  fi
 
   until check_host_download_request_log "$item_identifier"; do
     short_pause
@@ -846,6 +870,10 @@ request_expected_file_download() {
     if (( wait_count >= TIMEOUT_SECS )); then
       clear_fileprovider_request_download
       echo "timed out waiting for host app download request log: $item_identifier" >&2
+      if [[ -f "$LOG_DIR/host-request-launch.log" ]]; then
+        echo "host app request-launch log: $LOG_DIR/host-request-launch.log" >&2
+        cat "$LOG_DIR/host-request-launch.log" >&2 || true
+      fi
       run_log_show --style compact --last 2m \
         --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true
       exit 1
@@ -853,6 +881,12 @@ request_expected_file_download() {
   done
 
   clear_fileprovider_request_download
+  if [[ -n "$host_request_pid" ]]; then
+    wait_for_pid_with_timeout "$host_request_pid" 20 "host app download request helper" || true
+  fi
+  if [[ "$used_launchctl_env" == "1" ]]; then
+    clear_fileprovider_request_download
+  fi
   echo "host app requested FileProvider download for expected file"
 }
 

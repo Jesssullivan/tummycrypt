@@ -50,7 +50,8 @@ sync-root stub representation, not the desired primary Finder UX.
   removing the existing domain, then signals the replicated FileProvider
   working set so existing domains refresh from remote state.
 - For harness-driven hydration, the host app can request a full FileProvider
-  download for `TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER`. This uses
+  download when launched with
+  `TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER`. This uses
   `NSFileProviderManager.requestDownloadForItem` from the containing app after
   the expected placeholder exists, then the harness verifies the hydrated bytes
   through a coordinated read.
@@ -413,10 +414,12 @@ This is a `workflow_dispatch` lane on GitHub's `macos-15` arm64 runner that:
   the hard enumeration wait. This covers headless macOS sessions where the
   domain root appears but the FileProvider extension is not launched by a plain
   filesystem walk.
-- after the expected placeholder appears, re-launches the host app with
-  `TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER` so the containing app asks
-  FileProvider to download the file before the harness performs its coordinated
-  content read.
+- after the expected placeholder appears, launches the installed host app
+  binary with `TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER` so the containing
+  app asks FileProvider to download the file before the harness performs its
+  coordinated content read. The harness uses direct process environment for
+  this step because `open` plus `launchctl` environment propagation is not
+  reliable in headless lab sessions.
 - by default, sets the current user's PlugInKit election to `use` for
   `io.tinyland.tcfs.fileprovider` before launching the host app. This is a
   hosted-runner approximation of the user enabling the File Provider in System

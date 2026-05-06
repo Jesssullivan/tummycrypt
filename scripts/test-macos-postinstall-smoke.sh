@@ -50,10 +50,12 @@ OPEN_LOG="${TMPDIR}/open.log"
 PLUGINKIT_LOG="${TMPDIR}/pluginkit.log"
 LAUNCHCTL_LOG="${TMPDIR}/launchctl.log"
 SWIFT_LOG="${TMPDIR}/swift.log"
+HOST_BINARY_LOG="${TMPDIR}/host-binary.log"
+REQUEST_MARKER="${TMPDIR}/host-request-download.marker"
 
 mkdir -p \
   "$FAKE_BIN" \
-  "$APP_PATH" \
+  "$APP_PATH/Contents/MacOS" \
   "$(dirname "$CONFIG_PATH")" \
   "$(dirname "$FILEPROVIDER_CONFIG")" \
   "$(dirname "$CLOUD_ROOT/$EXPECTED_REL")" \
@@ -195,7 +197,10 @@ elif [[ "$args" == *"com.apple.FileProvider"* || "$args" == *"fileproviderd"* ||
   fi
 else
   printf '2026-04-30 TCFSProvider host add: OK\n'
-  printf '2026-04-30 TCFSProvider host requestDownload: Projects/tcfs-odrive-parity/honey-readme.txt: OK\n'
+  if [[ -n "${TCFS_FAKE_REQUEST_MARKER:-}" && -s "$TCFS_FAKE_REQUEST_MARKER" ]]; then
+    item="$(cat "$TCFS_FAKE_REQUEST_MARKER")"
+    printf '2026-04-30 TCFSProvider host requestDownload: %s: OK\n' "$item"
+  fi
 fi
 EOF
 cat >"$FAKE_BIN/open" <<'EOF'
@@ -203,6 +208,19 @@ cat >"$FAKE_BIN/open" <<'EOF'
 printf 'open' >>"$TCFS_FAKE_OPEN_LOG"
 printf ' %q' "$@" >>"$TCFS_FAKE_OPEN_LOG"
 printf '\n' >>"$TCFS_FAKE_OPEN_LOG"
+EOF
+cat >"$APP_PATH/Contents/MacOS/TCFSProvider" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${TCFS_FAKE_HOST_BINARY_LOG:-}" ]]; then
+  printf 'host-binary' >>"$TCFS_FAKE_HOST_BINARY_LOG"
+  if [[ -n "${TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER:-}" ]]; then
+    printf ' requestDownload=%s' "$TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER" >>"$TCFS_FAKE_HOST_BINARY_LOG"
+  fi
+  printf '\n' >>"$TCFS_FAKE_HOST_BINARY_LOG"
+fi
+if [[ -n "${TCFS_FAKE_REQUEST_MARKER:-}" && -n "${TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER:-}" ]]; then
+  printf '%s\n' "$TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER" >"$TCFS_FAKE_REQUEST_MARKER"
+fi
 EOF
 cat >"$FAKE_BIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
@@ -266,7 +284,9 @@ else
   /usr/bin/stat "$@"
 fi
 EOF
-chmod +x "$FAKE_BIN"/*
+chmod +x "$FAKE_BIN"/* "$APP_PATH/Contents/MacOS/TCFSProvider"
+export TCFS_FAKE_HOST_BINARY_LOG="$HOST_BINARY_LOG"
+export TCFS_FAKE_REQUEST_MARKER="$REQUEST_MARKER"
 
 OUT="${TMPDIR}/positive.out"
 READ_RETRY_MARKER="${TMPDIR}/read-failed-once"
@@ -309,6 +329,7 @@ assert_contains "$OUT" "electing FileProvider plug-in for current user: io.tinyl
 assert_contains "$OUT" "host app FileProvider testing-mode entitlement present"
 assert_contains "$OUT" "requesting FileProvider testing mode: always enabled"
 assert_contains "$OUT" "requesting FileProvider download for expected file: $EXPECTED_REL"
+assert_contains "$OUT" "launching host app binary for download request: $APP_PATH/Contents/MacOS/TCFSProvider"
 assert_contains "$OUT" "host app requested FileProvider download for expected file"
 assert_contains "$OUT" "hydrated file content matched expected content file"
 assert_contains "$OUT" "FileProvider extension config source: shared Keychain"
@@ -320,9 +341,9 @@ assert_contains "$OPEN_LOG" "$(dirname "$CLOUD_ROOT/$EXPECTED_REL")"
 assert_contains "$PLUGINKIT_LOG" "pluginkit -e use -i io.tinyland.tcfs.fileprovider"
 assert_contains "$LAUNCHCTL_LOG" "launchctl setenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED 1"
 assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED"
-assert_contains "$LAUNCHCTL_LOG" "launchctl setenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER $EXPECTED_REL"
 assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER"
 assert_contains "$SWIFT_LOG" "macos-fileprovider-coordinated-read.swift"
+assert_contains "$HOST_BINARY_LOG" "host-binary requestDownload=$EXPECTED_REL"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl evaluate"
