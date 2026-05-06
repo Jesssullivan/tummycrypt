@@ -84,7 +84,7 @@ config = json.load(open(sys.argv[1], encoding="utf-8"))
 assert config["team_id"] == "QP994XQKNH"
 assert config["runner"]["name"] == "petting-zoo-mini"
 assert config["runner"]["device_udid"] == "00008132-001240C80138801C"
-assert config["signing"]["create_certificate_type"] == "MAC_APP_DEVELOPMENT"
+assert config["signing"]["create_certificate_type"] == "DEVELOPMENT"
 profiles = {profile["role"]: profile for profile in config["profiles"]}
 assert profiles["host"]["bundle_id"] == "io.tinyland.tcfs"
 assert profiles["extension"]["bundle_id"] == "io.tinyland.tcfs.fileprovider"
