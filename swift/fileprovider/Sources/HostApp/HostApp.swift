@@ -49,6 +49,7 @@ struct TCFSProviderApp {
                 }
 
                 requestDownloadIfRequested(manager)
+                evictIfRequested(manager)
             } else {
                 hostLogger.error("signal workingSet: manager unavailable")
             }
@@ -70,22 +71,56 @@ struct TCFSProviderApp {
         }
 
         let itemIdentifier = NSFileProviderItemIdentifier(rawIdentifier)
+        let nonceSuffix = fileProviderActionNonceLogSuffix()
         let requestSem = DispatchSemaphore(value: 0)
         manager.requestDownloadForItem(
             withIdentifier: itemIdentifier,
             requestedRange: NSRange(location: NSNotFound, length: 0)
         ) { error in
             if let error = error {
-                hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): \(error.localizedDescription)")
+                hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): \(error.localizedDescription)\(nonceSuffix, privacy: .public)")
             } else {
-                hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): OK")
+                hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): OK\(nonceSuffix, privacy: .public)")
             }
             requestSem.signal()
         }
 
         if requestSem.wait(timeout: .now() + 15.0) == .timedOut {
-            hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): timed out")
+            hostLogger.error("requestDownload: \(rawIdentifier, privacy: .public): timed out\(nonceSuffix, privacy: .public)")
         }
+    }
+
+    private static func evictIfRequested(_ manager: NSFileProviderManager) {
+        guard let rawIdentifier = ProcessInfo.processInfo.environment[
+            "TCFS_FILEPROVIDER_EVICT_IDENTIFIER"
+        ], !rawIdentifier.isEmpty else {
+            return
+        }
+
+        let itemIdentifier = NSFileProviderItemIdentifier(rawIdentifier)
+        let nonceSuffix = fileProviderActionNonceLogSuffix()
+        let evictSem = DispatchSemaphore(value: 0)
+        manager.evictItem(identifier: itemIdentifier) { error in
+            if let error = error {
+                hostLogger.error("evict: \(rawIdentifier, privacy: .public): \(error.localizedDescription)\(nonceSuffix, privacy: .public)")
+            } else {
+                hostLogger.error("evict: \(rawIdentifier, privacy: .public): OK\(nonceSuffix, privacy: .public)")
+            }
+            evictSem.signal()
+        }
+
+        if evictSem.wait(timeout: .now() + 15.0) == .timedOut {
+            hostLogger.error("evict: \(rawIdentifier, privacy: .public): timed out\(nonceSuffix, privacy: .public)")
+        }
+    }
+
+    private static func fileProviderActionNonceLogSuffix() -> String {
+        guard let nonce = ProcessInfo.processInfo.environment[
+            "TCFS_FILEPROVIDER_ACTION_NONCE"
+        ], !nonce.isEmpty else {
+            return ""
+        }
+        return " nonce=\(nonce)"
     }
 
     private static func provisionConfig() {

@@ -25,6 +25,8 @@ Options:
   --expected-content <text>   Exact content expected from --expected-file
   --expected-content-file <path>
                               File containing exact expected content
+  --exercise-evict-rehydrate  After initial exact hydration, request provider
+                              eviction and verify a second exact rehydrate
   --app-path <path>           Installed TCFSProvider.app path
                               (default: auto-detect /Applications or ~/Applications)
   --cloud-root <path>         CloudStorage root path
@@ -62,6 +64,7 @@ CONFIG_PATH="${TCFS_CONFIG:-$HOME/.config/tcfs/config.toml}"
 EXPECTED_FILE_REL=""
 EXPECTED_CONTENT=""
 EXPECTED_CONTENT_FILE=""
+EXERCISE_EVICT_REHYDRATE="${TCFS_EXERCISE_EVICT_REHYDRATE:-0}"
 APP_PATH="${TCFS_APP_PATH:-}"
 CLOUD_ROOT="${TCFS_CLOUD_ROOT:-}"
 PLUGIN_ID="${TCFS_PLUGIN_ID:-io.tinyland.tcfs.fileprovider}"
@@ -99,6 +102,10 @@ while [[ $# -gt 0 ]]; do
     --expected-content-file)
       EXPECTED_CONTENT_FILE="$2"
       shift 2
+      ;;
+    --exercise-evict-rehydrate)
+      EXERCISE_EVICT_REHYDRATE=1
+      shift
       ;;
     --app-path)
       APP_PATH="$2"
@@ -178,6 +185,16 @@ fi
 
 if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" && -z "$EXPECTED_FILE_REL" ]]; then
   echo "--require-keychain-config requires --expected-file so the extension config path is exercised" >&2
+  exit 2
+fi
+
+if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" && -z "$EXPECTED_FILE_REL" ]]; then
+  echo "--exercise-evict-rehydrate requires --expected-file" >&2
+  exit 2
+fi
+
+if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" && -z "$EXPECTED_CONTENT" && -z "$EXPECTED_CONTENT_FILE" ]]; then
+  echo "--exercise-evict-rehydrate requires --expected-content or --expected-content-file" >&2
   exit 2
 fi
 
@@ -500,6 +517,18 @@ clear_fileprovider_request_download() {
   launchctl unsetenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER >/dev/null 2>&1 || true
 }
 
+clear_fileprovider_evict() {
+  launchctl unsetenv TCFS_FILEPROVIDER_EVICT_IDENTIFIER >/dev/null 2>&1 || true
+}
+
+clear_fileprovider_action_nonce() {
+  launchctl unsetenv TCFS_FILEPROVIDER_ACTION_NONCE >/dev/null 2>&1 || true
+}
+
+new_fileprovider_action_nonce() {
+  printf 'tcfs-smoke-%s-%s-%s\n' "$$" "${RANDOM:-0}" "${RANDOM:-0}"
+}
+
 host_app_binary_path() {
   local info_plist="$APP_PATH/Contents/Info.plist"
   local executable_name
@@ -542,17 +571,58 @@ check_host_log() {
 
 check_host_download_request_log() {
   local item_identifier="$1"
+  local action_nonce="${2:-}"
+  local success_pattern="requestDownload: $item_identifier: OK"
+  local failure_output
   local output
   output="$(run_log_show --style compact --last 45s \
     --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true)"
 
   [[ -n "$output" ]] || return 1
-  if grep -Fq "requestDownload: $item_identifier: OK" <<<"$output"; then
+  if [[ -n "$action_nonce" ]]; then
+    success_pattern="$success_pattern nonce=$action_nonce"
+  fi
+  if grep -Fq "$success_pattern" <<<"$output"; then
     return 0
   fi
 
-  if grep -F "requestDownload: $item_identifier:" <<<"$output" >&2; then
+  failure_output="$(grep -F "requestDownload: $item_identifier:" <<<"$output" || true)"
+  if [[ -n "$action_nonce" && -n "$failure_output" ]]; then
+    failure_output="$(grep -F "nonce=$action_nonce" <<<"$failure_output" || true)"
+  fi
+  if [[ -n "$failure_output" ]]; then
+    printf '%s\n' "$failure_output" >&2
     echo "FileProvider host app download request failed" >&2
+    exit 1
+  fi
+
+  return 1
+}
+
+check_host_evict_log() {
+  local item_identifier="$1"
+  local action_nonce="${2:-}"
+  local success_pattern="evict: $item_identifier: OK"
+  local failure_output
+  local output
+  output="$(run_log_show --style compact --last 45s \
+    --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true)"
+
+  [[ -n "$output" ]] || return 1
+  if [[ -n "$action_nonce" ]]; then
+    success_pattern="$success_pattern nonce=$action_nonce"
+  fi
+  if grep -Fq "$success_pattern" <<<"$output"; then
+    return 0
+  fi
+
+  failure_output="$(grep -F "evict: $item_identifier:" <<<"$output" || true)"
+  if [[ -n "$action_nonce" && -n "$failure_output" ]]; then
+    failure_output="$(grep -F "nonce=$action_nonce" <<<"$failure_output" || true)"
+  fi
+  if [[ -n "$failure_output" ]]; then
+    printf '%s\n' "$failure_output" >&2
+    echo "FileProvider host app eviction request failed" >&2
     exit 1
   fi
 
@@ -841,6 +911,7 @@ read_fileprovider_file() {
 request_expected_file_download() {
   local item_identifier="$1"
   local app_binary
+  local action_nonce
   local host_request_pid=""
   local used_launchctl_env=0
   local wait_count=0
@@ -848,15 +919,22 @@ request_expected_file_download() {
   echo "requesting FileProvider download for expected file: $item_identifier"
 
   clear_fileprovider_request_download
+  clear_fileprovider_action_nonce
+  action_nonce="$(new_fileprovider_action_nonce)"
   app_binary="$(host_app_binary_path)"
   if [[ -x "$app_binary" ]]; then
     echo "launching host app binary for download request: $app_binary"
+    TCFS_FILEPROVIDER_ACTION_NONCE="$action_nonce" \
     TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER="$item_identifier" \
       "$app_binary" >"$LOG_DIR/host-request-launch.log" 2>&1 &
     host_request_pid="$!"
   else
     echo "warning: host app binary not executable at $app_binary; falling back to LaunchServices" >&2
     used_launchctl_env=1
+    launchctl setenv TCFS_FILEPROVIDER_ACTION_NONCE "$action_nonce" || {
+      echo "failed to set FileProvider action nonce launch environment" >&2
+      exit 1
+    }
     launchctl setenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER "$item_identifier" || {
       echo "failed to set FileProvider request-download launch environment" >&2
       exit 1
@@ -864,11 +942,12 @@ request_expected_file_download() {
     open -n "$APP_PATH" || open "$APP_PATH"
   fi
 
-  until check_host_download_request_log "$item_identifier"; do
+  until check_host_download_request_log "$item_identifier" "$action_nonce"; do
     short_pause
     wait_count=$((wait_count + 1))
     if (( wait_count >= TIMEOUT_SECS )); then
       clear_fileprovider_request_download
+      clear_fileprovider_action_nonce
       echo "timed out waiting for host app download request log: $item_identifier" >&2
       if [[ -f "$LOG_DIR/host-request-launch.log" ]]; then
         echo "host app request-launch log: $LOG_DIR/host-request-launch.log" >&2
@@ -881,13 +960,78 @@ request_expected_file_download() {
   done
 
   clear_fileprovider_request_download
+  clear_fileprovider_action_nonce
   if [[ -n "$host_request_pid" ]]; then
     wait_for_pid_with_timeout "$host_request_pid" 20 "host app download request helper" || true
   fi
   if [[ "$used_launchctl_env" == "1" ]]; then
     clear_fileprovider_request_download
+    clear_fileprovider_action_nonce
   fi
   echo "host app requested FileProvider download for expected file"
+}
+
+request_expected_file_eviction() {
+  local item_identifier="$1"
+  local app_binary
+  local action_nonce
+  local host_request_pid=""
+  local used_launchctl_env=0
+  local wait_count=0
+
+  echo "requesting FileProvider eviction for expected file: $item_identifier"
+
+  clear_fileprovider_evict
+  clear_fileprovider_action_nonce
+  action_nonce="$(new_fileprovider_action_nonce)"
+  app_binary="$(host_app_binary_path)"
+  if [[ -x "$app_binary" ]]; then
+    echo "launching host app binary for eviction request: $app_binary"
+    TCFS_FILEPROVIDER_ACTION_NONCE="$action_nonce" \
+    TCFS_FILEPROVIDER_EVICT_IDENTIFIER="$item_identifier" \
+      "$app_binary" >"$LOG_DIR/host-evict-launch.log" 2>&1 &
+    host_request_pid="$!"
+  else
+    echo "warning: host app binary not executable at $app_binary; falling back to LaunchServices" >&2
+    used_launchctl_env=1
+    launchctl setenv TCFS_FILEPROVIDER_ACTION_NONCE "$action_nonce" || {
+      echo "failed to set FileProvider action nonce launch environment" >&2
+      exit 1
+    }
+    launchctl setenv TCFS_FILEPROVIDER_EVICT_IDENTIFIER "$item_identifier" || {
+      echo "failed to set FileProvider eviction launch environment" >&2
+      exit 1
+    }
+    open -n "$APP_PATH" || open "$APP_PATH"
+  fi
+
+  until check_host_evict_log "$item_identifier" "$action_nonce"; do
+    short_pause
+    wait_count=$((wait_count + 1))
+    if (( wait_count >= TIMEOUT_SECS )); then
+      clear_fileprovider_evict
+      clear_fileprovider_action_nonce
+      echo "timed out waiting for host app eviction log: $item_identifier" >&2
+      if [[ -f "$LOG_DIR/host-evict-launch.log" ]]; then
+        echo "host app evict-launch log: $LOG_DIR/host-evict-launch.log" >&2
+        cat "$LOG_DIR/host-evict-launch.log" >&2 || true
+      fi
+      run_log_show --style compact --last 2m \
+        --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true
+      exit 1
+    fi
+  done
+
+  clear_fileprovider_evict
+  clear_fileprovider_action_nonce
+  if [[ -n "$host_request_pid" ]]; then
+    wait_for_pid_with_timeout "$host_request_pid" 20 "host app eviction request helper" || true
+  fi
+  if [[ "$used_launchctl_env" == "1" ]]; then
+    clear_fileprovider_evict
+    clear_fileprovider_action_nonce
+  fi
+  echo "host app requested FileProvider eviction for expected file"
 }
 
 hydrate_expected_file() {
@@ -1007,6 +1151,12 @@ if [[ -n "$EXPECTED_FILE_REL" ]]; then
   wait_for_expected_file "$EXPECTED_PATH"
   request_expected_file_download "$EXPECTED_FILE_REL"
   hydrate_expected_file "$EXPECTED_PATH"
+  if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" ]]; then
+    request_expected_file_eviction "$EXPECTED_FILE_REL"
+    request_expected_file_download "$EXPECTED_FILE_REL"
+    hydrate_expected_file "$EXPECTED_PATH"
+    echo "FileProvider evict/rehydrate cycle passed"
+  fi
   if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" ]]; then
     check_keychain_config_log
   fi

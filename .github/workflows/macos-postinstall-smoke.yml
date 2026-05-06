@@ -618,6 +618,7 @@ jobs:
 
           if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" == "true" ]]; then
             args+=(--fileprovider-testing-mode)
+            args+=(--exercise-evict-rehydrate)
           fi
 
           bash scripts/macos-postinstall-smoke.sh "${args[@]}"

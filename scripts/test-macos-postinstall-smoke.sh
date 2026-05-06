@@ -52,6 +52,7 @@ LAUNCHCTL_LOG="${TMPDIR}/launchctl.log"
 SWIFT_LOG="${TMPDIR}/swift.log"
 HOST_BINARY_LOG="${TMPDIR}/host-binary.log"
 REQUEST_MARKER="${TMPDIR}/host-request-download.marker"
+EVICT_MARKER="${TMPDIR}/host-evict.marker"
 
 mkdir -p \
   "$FAKE_BIN" \
@@ -198,8 +199,22 @@ elif [[ "$args" == *"com.apple.FileProvider"* || "$args" == *"fileproviderd"* ||
 else
   printf '2026-04-30 TCFSProvider host add: OK\n'
   if [[ -n "${TCFS_FAKE_REQUEST_MARKER:-}" && -s "$TCFS_FAKE_REQUEST_MARKER" ]]; then
-    item="$(cat "$TCFS_FAKE_REQUEST_MARKER")"
-    printf '2026-04-30 TCFSProvider host requestDownload: %s: OK\n' "$item"
+    marker_content="$(cat "$TCFS_FAKE_REQUEST_MARKER")"
+    item="${marker_content%%|*}"
+    nonce="${marker_content#*|}"
+    [[ "$nonce" == "$marker_content" ]] && nonce=""
+    printf '2026-04-30 TCFSProvider host requestDownload: %s: OK' "$item"
+    [[ -z "$nonce" ]] || printf ' nonce=%s' "$nonce"
+    printf '\n'
+  fi
+  if [[ -n "${TCFS_FAKE_EVICT_MARKER:-}" && -s "$TCFS_FAKE_EVICT_MARKER" ]]; then
+    marker_content="$(cat "$TCFS_FAKE_EVICT_MARKER")"
+    item="${marker_content%%|*}"
+    nonce="${marker_content#*|}"
+    [[ "$nonce" == "$marker_content" ]] && nonce=""
+    printf '2026-04-30 TCFSProvider host evict: %s: OK' "$item"
+    [[ -z "$nonce" ]] || printf ' nonce=%s' "$nonce"
+    printf '\n'
   fi
 fi
 EOF
@@ -216,10 +231,19 @@ if [[ -n "${TCFS_FAKE_HOST_BINARY_LOG:-}" ]]; then
   if [[ -n "${TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER:-}" ]]; then
     printf ' requestDownload=%s' "$TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER" >>"$TCFS_FAKE_HOST_BINARY_LOG"
   fi
+  if [[ -n "${TCFS_FILEPROVIDER_EVICT_IDENTIFIER:-}" ]]; then
+    printf ' evict=%s' "$TCFS_FILEPROVIDER_EVICT_IDENTIFIER" >>"$TCFS_FAKE_HOST_BINARY_LOG"
+  fi
+  if [[ -n "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]]; then
+    printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE" >>"$TCFS_FAKE_HOST_BINARY_LOG"
+  fi
   printf '\n' >>"$TCFS_FAKE_HOST_BINARY_LOG"
 fi
 if [[ -n "${TCFS_FAKE_REQUEST_MARKER:-}" && -n "${TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER:-}" ]]; then
-  printf '%s\n' "$TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER" >"$TCFS_FAKE_REQUEST_MARKER"
+  printf '%s|%s\n' "$TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER" "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" >"$TCFS_FAKE_REQUEST_MARKER"
+fi
+if [[ -n "${TCFS_FAKE_EVICT_MARKER:-}" && -n "${TCFS_FILEPROVIDER_EVICT_IDENTIFIER:-}" ]]; then
+  printf '%s|%s\n' "$TCFS_FILEPROVIDER_EVICT_IDENTIFIER" "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" >"$TCFS_FAKE_EVICT_MARKER"
 fi
 EOF
 cat >"$FAKE_BIN/launchctl" <<'EOF'
@@ -287,6 +311,7 @@ EOF
 chmod +x "$FAKE_BIN"/* "$APP_PATH/Contents/MacOS/TCFSProvider"
 export TCFS_FAKE_HOST_BINARY_LOG="$HOST_BINARY_LOG"
 export TCFS_FAKE_REQUEST_MARKER="$REQUEST_MARKER"
+export TCFS_FAKE_EVICT_MARKER="$EVICT_MARKER"
 
 OUT="${TMPDIR}/positive.out"
 READ_RETRY_MARKER="${TMPDIR}/read-failed-once"
@@ -311,6 +336,7 @@ bash "$SCRIPT" \
   --elect-plugin-use \
   --fileprovider-testing-mode \
   --require-keychain-config \
+  --exercise-evict-rehydrate \
   --timeout 2 \
   >"$OUT"
 
@@ -331,6 +357,10 @@ assert_contains "$OUT" "requesting FileProvider testing mode: always enabled"
 assert_contains "$OUT" "requesting FileProvider download for expected file: $EXPECTED_REL"
 assert_contains "$OUT" "launching host app binary for download request: $APP_PATH/Contents/MacOS/TCFSProvider"
 assert_contains "$OUT" "host app requested FileProvider download for expected file"
+assert_contains "$OUT" "requesting FileProvider eviction for expected file: $EXPECTED_REL"
+assert_contains "$OUT" "launching host app binary for eviction request: $APP_PATH/Contents/MacOS/TCFSProvider"
+assert_contains "$OUT" "host app requested FileProvider eviction for expected file"
+assert_contains "$OUT" "FileProvider evict/rehydrate cycle passed"
 assert_contains "$OUT" "hydrated file content matched expected content file"
 assert_contains "$OUT" "FileProvider extension config source: shared Keychain"
 assert_contains "$OUT" "macOS post-install FileProvider smoke passed"
@@ -342,8 +372,12 @@ assert_contains "$PLUGINKIT_LOG" "pluginkit -e use -i io.tinyland.tcfs.fileprovi
 assert_contains "$LAUNCHCTL_LOG" "launchctl setenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED 1"
 assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED"
 assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER"
+assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_EVICT_IDENTIFIER"
+assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_ACTION_NONCE"
 assert_contains "$SWIFT_LOG" "macos-fileprovider-coordinated-read.swift"
 assert_contains "$HOST_BINARY_LOG" "host-binary requestDownload=$EXPECTED_REL"
+assert_contains "$HOST_BINARY_LOG" "host-binary evict=$EXPECTED_REL"
+assert_contains "$HOST_BINARY_LOG" "nonce=tcfs-smoke-"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl evaluate"
@@ -361,6 +395,19 @@ assert_fails_contains \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
     bash "$SCRIPT" \
       --require-keychain-config
+
+assert_fails_contains \
+  "--exercise-evict-rehydrate requires --expected-file" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --exercise-evict-rehydrate
+
+assert_fails_contains \
+  "--exercise-evict-rehydrate requires --expected-content or --expected-content-file" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --expected-file "$EXPECTED_REL" \
+      --exercise-evict-rehydrate
 
 assert_fails_contains \
   "host app missing com.apple.developer.fileprovider.testing-mode entitlement" \

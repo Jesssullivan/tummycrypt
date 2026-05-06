@@ -724,6 +724,7 @@ assert_contains "$POSTINSTALL_HARNESS_STEP" "elect_plugin_use"
 assert_contains "$POSTINSTALL_HARNESS_STEP" "--elect-plugin-use"
 assert_contains "$POSTINSTALL_HARNESS_STEP" "fileprovider_testing_mode"
 assert_contains "$POSTINSTALL_HARNESS_STEP" "--fileprovider-testing-mode"
+assert_contains "$POSTINSTALL_HARNESS_STEP" "--exercise-evict-rehydrate"
 
 bash -n "$PKG_POSTINSTALL"
 
