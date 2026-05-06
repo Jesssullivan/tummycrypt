@@ -18,6 +18,7 @@ RUN_ID_POLL_SECONDS="${TCFS_GH_RUN_ID_POLL_SECONDS:-2}"
 SIGNING_KEYCHAIN="${TCFS_FILEPROVIDER_LAB_SIGNING_KEYCHAIN:-}"
 SIGNING_P12_PATH="${TCFS_FILEPROVIDER_LAB_SIGNING_P12_PATH:-}"
 SIGNING_P12_PASSWORD_FILE="${TCFS_FILEPROVIDER_LAB_P12_PASSWORD_FILE:-}"
+PROFILES_DIR="${TCFS_FILEPROVIDER_LAB_PROFILES_DIR:-}"
 DRY_RUN=0
 WATCH=1
 SKIP_SECRET_CHECK=0
@@ -38,6 +39,7 @@ Options:
   --signing-p12-path <p>  Optional runner-local .p12 to import into an ephemeral keychain
   --signing-p12-password-file <p>
                           Optional runner-local file containing the .p12 import password
+  --profiles-dir <p>      Optional runner-local provisioning profile directory
   --package-run-id <id>   Skip package workflow dispatch and smoke an existing package run
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion
@@ -105,6 +107,11 @@ while [[ $# -gt 0 ]]; do
     --signing-p12-password-file)
       require_value "$1" "${2:-}"
       SIGNING_P12_PASSWORD_FILE="$2"
+      shift 2
+      ;;
+    --profiles-dir)
+      require_value "$1" "${2:-}"
+      PROFILES_DIR="$2"
       shift 2
       ;;
     --package-run-id)
@@ -177,20 +184,20 @@ EOF
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
   -f runner_label="$RUNNER_LABEL" \\
-  -f signing_p12_path="$SIGNING_P12_PATH"$(if [[ -n "$SIGNING_P12_PASSWORD_FILE" ]]; then printf ' \\\n  -f signing_p12_password_file="%s"' "$SIGNING_P12_PASSWORD_FILE"; fi)
+  -f signing_p12_path="$SIGNING_P12_PATH"$(if [[ -n "$SIGNING_P12_PASSWORD_FILE" ]]; then printf ' \\\n  -f signing_p12_password_file="%s"' "$SIGNING_P12_PASSWORD_FILE"; fi)$(if [[ -n "$PROFILES_DIR" ]]; then printf ' \\\n  -f profiles_dir="%s"' "$PROFILES_DIR"; fi)
 EOF
     elif [[ -n "$SIGNING_KEYCHAIN" ]]; then
       cat <<EOF
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
   -f runner_label="$RUNNER_LABEL" \\
-  -f signing_keychain="$SIGNING_KEYCHAIN"
+  -f signing_keychain="$SIGNING_KEYCHAIN"$(if [[ -n "$PROFILES_DIR" ]]; then printf ' \\\n  -f profiles_dir="%s"' "$PROFILES_DIR"; fi)
 EOF
     else
       cat <<EOF
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
-  -f runner_label="$RUNNER_LABEL"
+  -f runner_label="$RUNNER_LABEL"$(if [[ -n "$PROFILES_DIR" ]]; then printf ' \\\n  -f profiles_dir="%s"' "$PROFILES_DIR"; fi)
 EOF
     fi
 
@@ -428,6 +435,9 @@ if [[ -z "$PACKAGE_RUN_ID" ]]; then
   fi
   if [[ -n "$SIGNING_P12_PASSWORD_FILE" ]]; then
     package_inputs+=(-f signing_p12_password_file="$SIGNING_P12_PASSWORD_FILE")
+  fi
+  if [[ -n "$PROFILES_DIR" ]]; then
+    package_inputs+=(-f profiles_dir="$PROFILES_DIR")
   fi
   PACKAGE_RUN_ID="$(dispatch_and_capture_run_id \
     "$PACKAGE_WORKFLOW" \

@@ -541,6 +541,42 @@ host_app_binary_path() {
   printf '%s/Contents/MacOS/%s\n' "$APP_PATH" "$executable_name"
 }
 
+launch_host_app_for_domain_add() {
+  local app_binary
+  local host_launch_pid=""
+
+  app_binary="$(host_app_binary_path)"
+  if [[ "$FILEPROVIDER_TESTING_MODE" == "1" && -x "$app_binary" ]]; then
+    echo "launching host app binary for domain add: $app_binary"
+    TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1 \
+      "$app_binary" >"$LOG_DIR/host-domain-launch.log" 2>&1 &
+    host_launch_pid="$!"
+  else
+    echo "launching host app: $APP_PATH"
+    open "$APP_PATH"
+  fi
+
+  HOST_LOG_WAIT=0
+  until check_host_log; do
+    short_pause
+    HOST_LOG_WAIT=$((HOST_LOG_WAIT + 1))
+    if (( HOST_LOG_WAIT >= TIMEOUT_SECS )); then
+      echo "timed out waiting for host app log showing domain add" >&2
+      if [[ -f "$LOG_DIR/host-domain-launch.log" ]]; then
+        echo "host app domain-launch log: $LOG_DIR/host-domain-launch.log" >&2
+        cat "$LOG_DIR/host-domain-launch.log" >&2 || true
+      fi
+      run_log_show --style compact --last 2m \
+        --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true
+      exit 1
+    fi
+  done
+
+  if [[ -n "$host_launch_pid" ]]; then
+    wait_for_pid_with_timeout "$host_launch_pid" 20 "host app domain add helper" || true
+  fi
+}
+
 print_pluginkit_duplicate_hint() {
   local output="$1"
 
@@ -1115,21 +1151,7 @@ check_pluginkit
 elect_plugin_use
 enable_fileprovider_testing_mode
 
-echo "launching host app: $APP_PATH"
-open "$APP_PATH"
-
-HOST_LOG_WAIT=0
-until check_host_log; do
-  short_pause
-  HOST_LOG_WAIT=$((HOST_LOG_WAIT + 1))
-  if (( HOST_LOG_WAIT >= TIMEOUT_SECS )); then
-    echo "timed out waiting for host app log showing domain add" >&2
-    run_log_show --style compact --last 2m \
-      --predicate 'subsystem == "io.tinyland.tcfs" && category == "host"' || true
-    exit 1
-  fi
-done
-
+launch_host_app_for_domain_add
 clear_fileprovider_testing_mode
 echo "host app log confirmed domain add"
 if check_domain_listing; then

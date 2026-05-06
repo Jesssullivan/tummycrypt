@@ -87,6 +87,8 @@ DRY_RUN_P12_OUT="${TMPDIR}/dry-run-p12.out"
 LITERAL_P12='~/Certificates.p12'
 # shellcheck disable=SC2088 # The test intentionally passes a literal tilde.
 LITERAL_P12_PASSWORD_FILE='~/tcfs-fileprovider-lab.p12-password'
+# shellcheck disable=SC2088 # The test intentionally passes a literal tilde.
+LITERAL_PROFILES_DIR='~/git/tummycrypt/build/asc-fileprovider-lab'
 bash "$SCRIPT" \
   --dry-run \
   --tag v9.9.9 \
@@ -107,6 +109,18 @@ bash "$SCRIPT" \
   >"$DRY_RUN_P12_PASSWORD_FILE_OUT"
 assert_contains "$DRY_RUN_P12_PASSWORD_FILE_OUT" "-f signing_p12_path=\"~/Certificates.p12\""
 assert_contains "$DRY_RUN_P12_PASSWORD_FILE_OUT" "-f signing_p12_password_file=\"~/tcfs-fileprovider-lab.p12-password\""
+
+DRY_RUN_PROFILES_DIR_OUT="${TMPDIR}/dry-run-profiles-dir.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --signing-p12-path "$LITERAL_P12" \
+  --profiles-dir "$LITERAL_PROFILES_DIR" \
+  >"$DRY_RUN_PROFILES_DIR_OUT"
+assert_contains "$DRY_RUN_PROFILES_DIR_OUT" "-f signing_p12_path=\"~/Certificates.p12\""
+assert_contains "$DRY_RUN_PROFILES_DIR_OUT" "-f profiles_dir=\"~/git/tummycrypt/build/asc-fileprovider-lab\""
 
 DRY_RUN_NO_WATCH_OUT="${TMPDIR}/dry-run-no-watch.out"
 bash "$SCRIPT" \
@@ -319,6 +333,23 @@ bash "$SCRIPT" \
   2>"${TMPDIR}/p12-password-file.err"
 assert_contains "$FAKE_LOG" "-f signing_p12_path=\\~/Certificates.p12"
 assert_contains "$FAKE_LOG" "-f signing_p12_password_file=\\~/tcfs-fileprovider-lab.p12-password"
+
+FAKE_LOG="${TMPDIR}/gh-profiles-dir.log"
+PATH="$FAKE_BIN:$PATH" \
+TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+TCFS_FAKE_STATE="$TMPDIR" \
+TCFS_GH_RUN_ID_POLL_SECONDS=0 \
+bash "$SCRIPT" \
+  --tag v1.2.3 \
+  --repo owner/repo \
+  --ref main \
+  --signing-p12-path "$LITERAL_P12" \
+  --profiles-dir "$LITERAL_PROFILES_DIR" \
+  --no-watch \
+  >"${TMPDIR}/profiles-dir.out" \
+  2>"${TMPDIR}/profiles-dir.err"
+assert_contains "$FAKE_LOG" "-f signing_p12_path=\\~/Certificates.p12"
+assert_contains "$FAKE_LOG" "-f profiles_dir=\\~/git/tummycrypt/build/asc-fileprovider-lab"
 
 FAKE_LOG="${TMPDIR}/gh-no-runner.log"
 assert_fails_contains \
