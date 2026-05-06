@@ -79,11 +79,21 @@ cat >"$FAKE_BIN/pkgbuild" <<'EOF'
 #!/usr/bin/env bash
 root=""
 scripts=""
+component_plist=""
 out=""
+analyze=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --analyze)
+      analyze=1
+      shift
+      ;;
     --root)
       root="$2"
+      shift 2
+      ;;
+    --component-plist)
+      component_plist="$2"
       shift 2
       ;;
     --scripts)
@@ -103,9 +113,29 @@ done
 [[ -f "$root/usr/local/bin/tcfs" ]] || exit 11
 [[ -f "$root/usr/local/bin/tcfsd" ]] || exit 12
 [[ -d "$root/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex" ]] || exit 13
+if [[ "$analyze" == "1" ]]; then
+  cat >"$out" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+  <dict>
+    <key>BundleIsRelocatable</key>
+    <true/>
+    <key>RootRelativeBundlePath</key>
+    <string>Applications/TCFSProvider.app</string>
+  </dict>
+</array>
+</plist>
+PLIST
+  printf 'pkgbuild analyze root=%s out=%s\n' "$root" "$out" >>"$TCFS_FAKE_BUILD_PKG_LOG"
+  exit 0
+fi
 [[ -f "$scripts/postinstall" ]] || exit 14
+[[ -f "$component_plist" ]] || exit 15
+grep -Fq "<false/>" "$component_plist" || exit 16
 printf 'unsigned package\n' >"$out"
-printf 'pkgbuild root=%s scripts=%s out=%s\n' "$root" "$scripts" "$out" >>"$TCFS_FAKE_BUILD_PKG_LOG"
+printf 'pkgbuild root=%s component_plist=%s scripts=%s out=%s\n' "$root" "$component_plist" "$scripts" "$out" >>"$TCFS_FAKE_BUILD_PKG_LOG"
 EOF
 cat >"$FAKE_BIN/productsign" <<'EOF'
 #!/usr/bin/env bash
@@ -182,6 +212,8 @@ bash "$SCRIPT" \
   exit 1
 }
 assert_contains "$LOG" "pkgbuild root="
+assert_contains "$LOG" "pkgbuild analyze root="
+assert_contains "$LOG" "component_plist="
 assert_contains "$LOG" "structure-smoke pkg=$OUT_PKG postinstall=$POSTINSTALL"
 assert_contains "${TMPDIR}/unsigned.out" "macOS package built: $OUT_PKG"
 

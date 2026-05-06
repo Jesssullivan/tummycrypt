@@ -127,6 +127,7 @@ extract_dir="${WORK_DIR}/cli-extract"
 pkg_root="${WORK_DIR}/pkg-root"
 pkg_scripts="${WORK_DIR}/pkg-scripts"
 unsigned_pkg="${WORK_DIR}/tcfs-${VERSION}-unsigned.pkg"
+component_plist="${WORK_DIR}/components.plist"
 
 rm -rf "$extract_dir" "$pkg_root" "$pkg_scripts"
 mkdir -p "$extract_dir" "$pkg_root/usr/local/bin" "$pkg_root/Applications" "$pkg_scripts"
@@ -163,8 +164,26 @@ chmod +x "$pkg_root/usr/local/bin/"*
 
 install -m 755 "$POSTINSTALL" "$pkg_scripts/postinstall"
 
+"$PKGBUILD_BIN" --analyze --root "$pkg_root" "$component_plist"
+python3 - "$component_plist" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as fh:
+    components = plistlib.load(fh)
+
+for component in components:
+    if "BundleIsRelocatable" in component:
+        component["BundleIsRelocatable"] = False
+
+with open(path, "wb") as fh:
+    plistlib.dump(components, fh)
+PY
+
 "$PKGBUILD_BIN" \
   --root "$pkg_root" \
+  --component-plist "$component_plist" \
   --scripts "$pkg_scripts" \
   --identifier "$IDENTIFIER" \
   --version "$VERSION" \
