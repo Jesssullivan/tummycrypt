@@ -110,8 +110,9 @@ Current lab blocker:
   is not distribution-ready because it has no notarization ticket
 - `syspolicy_check notary-submission` also reports a fatal Gatekeeper rejection
   for `TCFSProvider.app/Contents/MacOS/TCFSProvider`
-- postinstall smoke run `25454681083` shows the installed host-app launch emits
-  no instrumented stderr, then
+- postinstall smoke run `25455202200` shows the installed host-app policy probe
+  times out after 15s with no instrumented stderr; the later harness host
+  launch also emits no instrumented stderr, then
   AppleSystemPolicy denies the host process
 - `fileproviderd` launches the extension process, then AppleSystemPolicy also
   terminates the extension before the evict/rehydrate lifecycle can complete
@@ -219,8 +220,9 @@ work should be ordered like this:
 2. **Apple desktop acceptance**
   - stop retrying hosted production packages until FileProvider can be enabled
   - treat PZM testing-mode read/hydrate as green
-  - use the installed-host policy probe in the PZM postinstall workflow to
-    classify install/provenance failures before deeper Finder assertions
+  - use the installed-host policy probe plus process/sample capture in the PZM
+    postinstall workflow to classify install/provenance failures before deeper
+    Finder assertions
   - extend the named Finder/FileProvider smoke into evict/rehydrate,
     mutate/conflict, and visible status
   - keep production Developer ID clean-host Finder acceptance separate from

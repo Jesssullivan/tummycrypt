@@ -403,6 +403,14 @@ jobs:
 
             while kill -0 "$pid" 2>/dev/null; do
               if (( waited >= timeout_secs )); then
+                {
+                  echo "pid=$pid"
+                  ps -p "$pid" -o pid,ppid,stat,etime,command || true
+                } > "$LOG_DIR/installed-host-policy-probe.ps" 2>&1 || true
+                if command -v sample >/dev/null 2>&1; then
+                  sample "$pid" 3 -file "$LOG_DIR/installed-host-policy-probe.sample.txt" \
+                    >/dev/null 2>&1 || true
+                fi
                 kill "$pid" 2>/dev/null || true
                 perl -e 'select undef, undef, undef, 1.0'
                 kill -KILL "$pid" 2>/dev/null || true

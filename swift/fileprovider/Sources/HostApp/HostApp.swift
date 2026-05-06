@@ -11,10 +11,17 @@ private let sharedConfigAccessGroupFallback = "group.io.tinyland.tcfs"
 @main
 struct TCFSProviderApp {
     static func main() {
+        if policyProbeOnlyRequested() {
+            hostEvent("policyProbe: main entered")
+        }
+
         let domain = NSFileProviderDomain(
             identifier: NSFileProviderDomainIdentifier("io.tinyland.tcfs"),
             displayName: "TCFS"
         )
+        if policyProbeOnlyRequested() {
+            hostEvent("policyProbe: domain created")
+        }
         configureTestingModeIfRequested(domain)
         if policyProbeOnlyRequested() {
             hostEvent("policyProbe: OK")

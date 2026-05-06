@@ -70,9 +70,10 @@ sync-root stub representation, not the desired primary Finder UX.
   and extension provisioning profiles, and the build-output app reaches Swift
   `main()` in policy-probe mode. After package install, `spctl` rejects both
   bundles, `syspolicy_check` reports the app lacks a notarization ticket and
-  has a fatal Gatekeeper rejection, AppleSystemPolicy denies the installed host
-  before Swift startup logs, and AppleSystemPolicy also terminates the
-  extension after `fileproviderd` starts it.
+  has a fatal Gatekeeper rejection, the installed host policy probe times out
+  before Swift startup logs, AppleSystemPolicy later denies the installed host,
+  and AppleSystemPolicy also terminates the extension after `fileproviderd`
+  starts it.
 
 ## Important Constraints
 
@@ -616,6 +617,13 @@ May 6, 2026 testing-mode evidence updated the current blocker:
   `/Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider`, and
   AppleSystemPolicy denial for
   `/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/MacOS/TCFSFileProvider`.
+- Commit `8594727` added an installed-host policy probe to the postinstall
+  workflow before live config and domain mutation.
+- PZM smoke run `25455202200` used the same package artifact and current
+  postinstall workflow. The installed-host policy probe wrote `exit=124` and
+  `timed out after 15s`, with no Swift stderr. The full harness then failed in
+  the same place, with an empty `harness/host-domain-launch.log` and
+  AppleSystemPolicy denial for both the installed host and extension.
 
 So the testing-mode read/hydrate lane is proven, but the current
 evict/rehydrate package is blocked by the Mac Development lab trust model. The

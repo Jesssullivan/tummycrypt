@@ -331,6 +331,11 @@ Apple runtime policy boundary:
   `harness/host-domain-launch.log`, AppleSystemPolicy denial for the installed
   host binary, and AppleSystemPolicy denial for the extension from
   `fileproviderd`
+- post-install smoke run `25455202200` used the same package artifact with a
+  newer postinstall workflow. The installed-host policy probe timed out after
+  15s with no Swift stderr before live config/domain mutation, and the full
+  harness again produced an empty `harness/host-domain-launch.log` plus
+  AppleSystemPolicy denial for the installed host and extension.
 
 ## Lab Runner Enrollment
 
@@ -486,8 +491,9 @@ Feature goals remain:
 2. Keep `spctl`, `syspolicy_check`, xattr, codesign, embedded-profile,
    `taskgated-helper`, `amfid`, and AppleSystemPolicy diagnostics attached to
    every FileProvider lab failure.
-3. Rerun the `v0.12.12` PZM dispatch with the installed-host policy probe now
-   present in the postinstall workflow, so the artifact records whether the
-   installed host can reach Swift `main()` before the full FileProvider harness.
+3. Rebuild the `v0.12.12` PZM package with the earlier policy-probe markers in
+   `HostApp.main()` and rerun the PZM dispatch. The next artifact should show
+   whether the installed host reaches Swift entry, hangs while creating the
+   `NSFileProviderDomain`, or is blocked before Swift code runs.
 4. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
    gates.

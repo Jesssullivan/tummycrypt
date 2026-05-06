@@ -186,11 +186,15 @@ check_macos_fileprovider_principal_class() {
 
 check_testing_mode_is_explicit_opt_in() {
   local build_script="$REPO_ROOT/swift/fileprovider/build.sh"
+  local host_app="$REPO_ROOT/swift/fileprovider/Sources/HostApp/HostApp.swift"
 
   assert_contains "$build_script" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT"
   assert_contains "$build_script" "com.apple.developer.fileprovider.testing-mode"
   assert_contains "$build_script" "com.apple.security.temporary-exception.files.home-relative-path.read-write"
   assert_contains "$build_script" "/Library/Application Support/io.tinyland.tcfs/"
+  assert_contains "$host_app" "policyProbe: main entered"
+  assert_contains "$host_app" "policyProbe: domain created"
+  assert_contains "$host_app" "policyProbe: OK"
 
   if grep -Fq "com.apple.developer.fileprovider.testing-mode" \
     "$REPO_ROOT/swift/fileprovider/resources/HostApp.entitlements" \
@@ -605,6 +609,8 @@ bash -n "$INSTALLED_POLICY_PROBE_STEP"
 assert_contains "$INSTALLED_POLICY_PROBE_STEP" "/Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider"
 assert_contains "$INSTALLED_POLICY_PROBE_STEP" "installed-host-policy-probe.log"
 assert_contains "$INSTALLED_POLICY_PROBE_STEP" "installed-host-policy-probe.exit"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "installed-host-policy-probe.ps"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "installed-host-policy-probe.sample.txt"
 assert_contains "$INSTALLED_POLICY_PROBE_STEP" "TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY"
 assert_contains "$INSTALLED_POLICY_PROBE_STEP" "TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY=1"
 assert_contains "$INSTALLED_POLICY_PROBE_STEP" "TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1"
