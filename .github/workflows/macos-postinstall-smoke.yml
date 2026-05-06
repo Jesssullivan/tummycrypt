@@ -194,7 +194,7 @@ jobs:
           MASTER_KEY_PATH="$RUNNER_TEMP/tcfs-master.key"
           EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
           APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
-          FILEPROVIDER_SOCKET="${APP_GROUP_DIR}/tcfsd.sock"
+          FILEPROVIDER_SOCKET="/tmp/tcfsd-fileprovider-gha.sock"
           REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
 
