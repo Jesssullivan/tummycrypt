@@ -618,6 +618,17 @@ assert_contains "$INSTALL_MASTER_KEY_STEP" "base64.b64decode(encoded, validate=T
 assert_contains "$INSTALL_MASTER_KEY_STEP" "if len(key) != 32:"
 assert_contains "$INSTALL_MASTER_KEY_STEP" "chmod 600 \"\$MASTER_KEY_PATH\""
 
+DERIVE_RUN_PATHS_STEP="${TMPDIR}/derive-run-paths.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Derive run paths" \
+  "$DERIVE_RUN_PATHS_STEP"
+bash -n "$DERIVE_RUN_PATHS_STEP"
+assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$RUNNER_TEMP/tcfs-config\""
+assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_PATH=\"\$CONFIG_DIR/config.toml\""
+assert_not_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$HOME/.config/tcfs\""
+
 WRITE_LIVE_CONFIG_STEP="${TMPDIR}/write-live-config.sh"
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \

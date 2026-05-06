@@ -188,7 +188,7 @@ jobs:
           VERSION="${TAG#v}"
           LOG_DIR="${LOG_DIR:-$RUNNER_TEMP/tcfs-macos-postinstall}"
           SYNC_ROOT="$RUNNER_TEMP/tcfs-sync-root"
-          CONFIG_DIR="$HOME/.config/tcfs"
+          CONFIG_DIR="$RUNNER_TEMP/tcfs-config"
           CONFIG_PATH="$CONFIG_DIR/config.toml"
           NO_CRYPTO_CONFIG_PATH="$RUNNER_TEMP/tcfs-no-crypto.toml"
           MASTER_KEY_PATH="$RUNNER_TEMP/tcfs-master.key"
