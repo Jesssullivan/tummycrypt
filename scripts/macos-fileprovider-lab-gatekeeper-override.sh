@@ -1,36 +1,45 @@
 #!/usr/bin/env bash
 #
-# Add or remove a non-production Gatekeeper assessment label for the TCFS
-# FileProvider lab app installed on a registered development Mac.
+# Generate and verify the non-production Gatekeeper SystemPolicyRule profile
+# needed by the TCFS FileProvider lab app on a registered development Mac.
 #
-# This is intentionally not a production distribution path. It exists so the
-# petting-zoo-mini testing-mode lane can prove FileProvider lifecycle behavior
-# when a Mac App Development-signed .pkg is blocked by AppleSystemPolicy before
-# Swift entry.
+# macOS 15 no longer supports mutating Gatekeeper's assessment rule database
+# with spctl --add/--remove. Apple points that path at configuration profiles.
+# This helper therefore does not change system policy directly: it writes the
+# desired .mobileconfig into the run logs, verifies whether that profile is
+# already installed, and fails with a clear operator action if it is missing.
 #
 set -euo pipefail
 
 APP_PATH="${TCFS_FILEPROVIDER_APP_PATH:-/Applications/TCFSProvider.app}"
 EXTENSION_PATH="${TCFS_FILEPROVIDER_EXTENSION_PATH:-${APP_PATH}/Contents/Extensions/TCFSFileProvider.appex}"
-LABEL="${TCFS_FILEPROVIDER_LAB_GATEKEEPER_LABEL:-TCFSFileProviderLab}"
+PROFILE_IDENTIFIER="${TCFS_FILEPROVIDER_LAB_SYSTEM_POLICY_PROFILE_ID:-io.tinyland.tcfs.fileprovider.lab.system-policy}"
 LOG_DIR="${LOG_DIR:-${RUNNER_TEMP:-/tmp}/tcfs-fileprovider-lab-gatekeeper}"
+PROFILE_OUTPUT="${TCFS_FILEPROVIDER_LAB_SYSTEM_POLICY_PROFILE:-}"
 SUDO_PASSWORD_FILE="${TCFS_RUNNER_SUDO_PASSWORD_FILE:-$HOME/.config/sops-nix/secrets/become/password}"
 MODE=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/macos-fileprovider-lab-gatekeeper-override.sh <apply|cleanup> [options]
+Usage: scripts/macos-fileprovider-lab-gatekeeper-override.sh <apply|generate|verify|cleanup> [options]
 
 Options:
   --app-path <path>       Installed host app path (default: /Applications/TCFSProvider.app)
   --extension-path <path> Installed FileProvider extension path
-  --label <label>         Gatekeeper assessment label (default: TCFSFileProviderLab)
-  --log-dir <path>        Directory for before/after assessment logs
+  --profile-id <id>       Configuration profile PayloadIdentifier
+  --profile-output <path> Output .mobileconfig path
+  --log-dir <path>        Directory for generated profile and verification logs
   -h, --help              Show this help
 
-The apply mode requires sudo. It records spctl/syspolicy_check evidence before
-and after adding a labeled assessment rule for the host app and extension.
-cleanup removes every rule with the chosen label.
+Modes:
+  generate  Write the desired SystemPolicyRule .mobileconfig from installed bundle requirements.
+  verify    Verify the profile identifier is installed on this Mac.
+  apply     Generate the desired profile, then verify it is installed.
+  cleanup   No-op marker; profile installation/removal is manual or MDM-managed.
+
+On macOS 15+, install configuration profiles through System Settings or MDM.
+The profiles CLI can list/remove profiles, but it cannot install configuration
+profiles.
 USAGE
 }
 
@@ -68,9 +77,14 @@ while [[ $# -gt 0 ]]; do
       EXTENSION_PATH="$2"
       shift 2
       ;;
-    --label)
+    --profile-id)
       require_value "$1" "${2:-}"
-      LABEL="$2"
+      PROFILE_IDENTIFIER="$2"
+      shift 2
+      ;;
+    --profile-output)
+      require_value "$1" "${2:-}"
+      PROFILE_OUTPUT="$2"
       shift 2
       ;;
     --log-dir)
@@ -89,20 +103,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$MODE" in
-  apply | cleanup) ;;
+  apply | generate | verify | cleanup) ;;
   *)
     usage >&2
-    die "mode must be apply or cleanup"
+    die "mode must be apply, generate, verify, or cleanup"
     ;;
 esac
 
 mkdir -p "$LOG_DIR"
-
-SPCTL_BIN="$(command -v spctl || true)"
-if [[ -z "$SPCTL_BIN" && -x /usr/sbin/spctl ]]; then
-  SPCTL_BIN=/usr/sbin/spctl
+if [[ -z "$PROFILE_OUTPUT" ]]; then
+  PROFILE_OUTPUT="$LOG_DIR/tcfs-fileprovider-lab-system-policy.mobileconfig"
 fi
-[[ -n "$SPCTL_BIN" ]] || die "spctl not found"
 
 sudo_run() {
   if sudo -n true 2>/dev/null; then
@@ -113,7 +124,7 @@ sudo_run() {
     # shellcheck disable=SC2024 # The redirection intentionally feeds sudo's password prompt.
     sudo -S -p '' "$@" < "$SUDO_PASSWORD_FILE"
   else
-    die "sudo requires a password; set TCFS_RUNNER_SUDO_PASSWORD or provide $SUDO_PASSWORD_FILE on the runner"
+    return 125
   fi
 }
 
@@ -127,62 +138,155 @@ bundle_exists() {
   fi
 }
 
-assess_bundle() {
+designated_requirement() {
   local label="$1"
-  local phase="$2"
-  local path="$3"
-  local out="$LOG_DIR/${label}-${phase}-spctl-execute.txt"
+  local path="$2"
+  local out="$LOG_DIR/${label}-designated-requirement.txt"
+  local raw
+  local requirement
+
+  bundle_exists "$label" "$path"
+  if ! raw="$(codesign -dr - "$path" 2>&1)"; then
+    printf '%s\n' "$raw" > "$out"
+    die "codesign could not read the designated requirement for $path"
+  fi
+
+  printf '%s\n' "$raw" > "$out"
+  requirement="$(printf '%s\n' "$raw" | sed -n 's/^designated => //p' | head -n 1)"
+  if [[ -z "$requirement" ]]; then
+    die "codesign did not print a designated requirement for $path"
+  fi
+
+  printf '%s\n' "$requirement"
+}
+
+generate_profile() {
+  local host_requirement
+  local extension_requirement
+
+  host_requirement="$(designated_requirement host-app "$APP_PATH")"
+  extension_requirement="$(designated_requirement fileprovider-extension "$EXTENSION_PATH")"
+
+  python3 - "$PROFILE_OUTPUT" "$PROFILE_IDENTIFIER" "$host_requirement" "$extension_requirement" <<'PY'
+import plistlib
+import sys
+import uuid
+
+output, profile_id, host_requirement, extension_requirement = sys.argv[1:5]
+
+profile_uuid = str(uuid.uuid4()).upper()
+host_uuid = str(uuid.uuid4()).upper()
+extension_uuid = str(uuid.uuid4()).upper()
+
+profile = {
+    "PayloadContent": [
+        {
+            "PayloadType": "com.apple.systempolicy.rule",
+            "PayloadIdentifier": f"{profile_id}.host",
+            "PayloadUUID": host_uuid,
+            "PayloadVersion": 1,
+            "PayloadDisplayName": "TCFSProvider Host Lab Gatekeeper Rule",
+            "Comment": "Allow TCFSProvider host app execution in the PZM FileProvider testing-mode lab.",
+            "OperationType": "operation:execute",
+            "Priority": 1000.0,
+            "Requirement": host_requirement,
+        },
+        {
+            "PayloadType": "com.apple.systempolicy.rule",
+            "PayloadIdentifier": f"{profile_id}.extension",
+            "PayloadUUID": extension_uuid,
+            "PayloadVersion": 1,
+            "PayloadDisplayName": "TCFS FileProvider Extension Lab Gatekeeper Rule",
+            "Comment": "Allow TCFS FileProvider extension execution in the PZM FileProvider testing-mode lab.",
+            "OperationType": "operation:execute",
+            "Priority": 1000.0,
+            "Requirement": extension_requirement,
+        },
+    ],
+    "PayloadDescription": "Non-production TCFS FileProvider lab Gatekeeper execution rules for petting-zoo-mini.",
+    "PayloadDisplayName": "TCFS FileProvider Lab Gatekeeper Rules",
+    "PayloadIdentifier": profile_id,
+    "PayloadOrganization": "Tinyland",
+    "PayloadScope": "System",
+    "PayloadType": "Configuration",
+    "PayloadUUID": profile_uuid,
+    "PayloadVersion": 1,
+}
+
+with open(output, "wb") as handle:
+    plistlib.dump(profile, handle, sort_keys=False)
+PY
+
+  {
+    printf 'mode=generate\n'
+    printf 'profile_identifier=%s\n' "$PROFILE_IDENTIFIER"
+    printf 'profile_output=%s\n' "$PROFILE_OUTPUT"
+    printf 'app=%s\n' "$APP_PATH"
+    printf 'extension=%s\n' "$EXTENSION_PATH"
+  } > "$LOG_DIR/summary.txt"
+}
+
+show_profiles() {
+  local out="$LOG_DIR/profiles-show.txt"
   local status=0
 
-  "$SPCTL_BIN" --assess --type execute --verbose=4 "$path" > "$out" 2>&1 || status=$?
-  printf 'exit=%s\n' "$status" >> "$out"
-
-  if command -v syspolicy_check >/dev/null 2>&1; then
-    syspolicy_check distribution "$path" \
-      > "$LOG_DIR/${label}-${phase}-syspolicy-distribution.txt" 2>&1 || true
-    syspolicy_check notary-submission "$path" \
-      > "$LOG_DIR/${label}-${phase}-syspolicy-notary-submission.txt" 2>&1 || true
-  else
-    printf 'syspolicy_check not found\n' \
-      > "$LOG_DIR/${label}-${phase}-syspolicy-distribution.txt"
-    printf 'syspolicy_check not found\n' \
-      > "$LOG_DIR/${label}-${phase}-syspolicy-notary-submission.txt"
+  if command -v profiles >/dev/null 2>&1; then
+    if sudo_run profiles show -type configuration -all > "$out" 2>&1; then
+      printf 'sudo profiles show -type configuration -all\n' > "$LOG_DIR/profiles-show-command.txt"
+      return 0
+    fi
+    status=$?
+    printf 'sudo profiles show exit=%s\n' "$status" > "$LOG_DIR/profiles-show-command.txt"
+    profiles show -type configuration > "$out" 2>&1 || true
+    printf 'profiles show -type configuration fallback\n' >> "$LOG_DIR/profiles-show-command.txt"
+    return 0
   fi
+
+  printf 'profiles command not found\n' > "$out"
+  return 0
+}
+
+verify_profile_installed() {
+  show_profiles
+
+  if grep -Fq "$PROFILE_IDENTIFIER" "$LOG_DIR/profiles-show.txt"; then
+    {
+      printf 'mode=verify\n'
+      printf 'profile_identifier=%s\n' "$PROFILE_IDENTIFIER"
+      printf 'installed=true\n'
+    } > "$LOG_DIR/verify-summary.txt"
+    return 0
+  fi
+
+  {
+    printf 'mode=verify\n'
+    printf 'profile_identifier=%s\n' "$PROFILE_IDENTIFIER"
+    printf 'installed=false\n'
+    printf 'generated_profile=%s\n' "$PROFILE_OUTPUT"
+  } > "$LOG_DIR/verify-summary.txt"
+
+  printf 'TCFS lab SystemPolicyRule configuration profile is not installed.\n' >&2
+  printf 'Generated desired profile: %s\n' "$PROFILE_OUTPUT" >&2
+  printf 'Install it on petting-zoo-mini via System Settings > Privacy & Security > Profiles, then rerun this smoke.\n' >&2
+  return 4
 }
 
 case "$MODE" in
+  generate)
+    generate_profile
+    ;;
+  verify)
+    verify_profile_installed
+    ;;
   apply)
-    bundle_exists host-app "$APP_PATH"
-    bundle_exists fileprovider-extension "$EXTENSION_PATH"
-
-    {
-      printf 'mode=apply\n'
-      printf 'label=%s\n' "$LABEL"
-      printf 'app=%s\n' "$APP_PATH"
-      printf 'extension=%s\n' "$EXTENSION_PATH"
-      printf 'spctl=%s\n' "$SPCTL_BIN"
-    } > "$LOG_DIR/summary.txt"
-
-    assess_bundle host-app before "$APP_PATH"
-    assess_bundle fileprovider-extension before "$EXTENSION_PATH"
-
-    sudo_run "$SPCTL_BIN" --add --label "$LABEL" "$APP_PATH" \
-      > "$LOG_DIR/spctl-add-host-app.txt" 2>&1
-    sudo_run "$SPCTL_BIN" --add --label "$LABEL" "$EXTENSION_PATH" \
-      > "$LOG_DIR/spctl-add-fileprovider-extension.txt" 2>&1
-    sudo_run "$SPCTL_BIN" --enable --label "$LABEL" \
-      > "$LOG_DIR/spctl-enable-label.txt" 2>&1
-
-    assess_bundle host-app after "$APP_PATH"
-    assess_bundle fileprovider-extension after "$EXTENSION_PATH"
+    generate_profile
+    verify_profile_installed
     ;;
   cleanup)
     {
       printf 'mode=cleanup\n'
-      printf 'label=%s\n' "$LABEL"
-      printf 'spctl=%s\n' "$SPCTL_BIN"
+      printf 'profile_identifier=%s\n' "$PROFILE_IDENTIFIER"
+      printf 'note=configuration profile install/remove is manual or MDM-managed on macOS 15+\n'
     } > "$LOG_DIR/cleanup-summary.txt"
-    sudo_run "$SPCTL_BIN" --remove --label "$LABEL" \
-      > "$LOG_DIR/spctl-remove-label.txt" 2>&1 || true
     ;;
 esac

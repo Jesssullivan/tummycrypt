@@ -119,9 +119,9 @@ Current lab blocker:
 - `fileproviderd` launches the extension process, then AppleSystemPolicy also
   terminates the extension before the evict/rehydrate lifecycle can complete
 - the next engineering choice is now an explicit workflow experiment:
-  `lab_gatekeeper_override=true` on the PZM testing-mode smoke applies a
-  temporary `TCFSFileProviderLab` assessment label, captures before/after policy
-  evidence, and cleans it up. This can only prove the non-production lab path;
+  `lab_gatekeeper_override=true` on the PZM testing-mode smoke generates and
+  requires a `SystemPolicyRule` configuration profile for the installed host
+  app and extension. This can only prove the non-production lab path;
   production Finder still needs separate Developer ID clean-host evidence.
 
 Still manual or weakly proven:

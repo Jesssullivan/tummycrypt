@@ -96,13 +96,14 @@ as a storage or FileProvider implementation failure.
 
 The current controlled experiment for that trust-model problem is
 `lab_gatekeeper_override=true` on `macos-postinstall-smoke.yml`. The input is
-restricted to the `petting-zoo-mini` testing-mode lane, applies a temporary
-`TCFSFileProviderLab` `spctl` assessment label to the installed host app and
-extension, records before/after `spctl` and `syspolicy_check` output, and
-removes the label after diagnostics. Use it only to decide whether the
-non-production Mac Development lab can continue into FileProvider lifecycle
-coverage; it is not evidence that the production Developer ID package is
-accepted by Gatekeeper.
+restricted to the `petting-zoo-mini` testing-mode lane. On macOS 15,
+`spctl --add`/`--remove` rule mutation is no longer supported, so the helper
+generates a `SystemPolicyRule` configuration profile from the installed host
+and extension designated requirements, verifies that profile is installed, and
+fails early with the generated `.mobileconfig` attached when it is missing.
+Use it only to decide whether the non-production Mac Development lab can
+continue into FileProvider lifecycle coverage; it is not evidence that the
+production Developer ID package is accepted by Gatekeeper.
 
 ## Required Apple Assets
 
@@ -260,8 +261,8 @@ scripts/macos-fileprovider-testing-mode-dispatch.sh \
 ```
 
 To run the explicit PZM trust experiment against an already-built testing-mode
-package, reuse its package run id and ask the smoke workflow to apply the
-temporary lab assessment label:
+package, reuse its package run id and ask the smoke workflow to require the
+lab `SystemPolicyRule` profile:
 
 ```bash
 scripts/macos-fileprovider-testing-mode-dispatch.sh \
@@ -273,8 +274,11 @@ scripts/macos-fileprovider-testing-mode-dispatch.sh \
 
 That flag passes `lab_gatekeeper_override=true` to the smoke workflow. The
 workflow rejects it outside the PZM testing-mode lane, records the override
-logs under `lab-gatekeeper-override/`, and removes the label in an `always()`
-cleanup step.
+logs under `lab-gatekeeper-override/`, and uploads the generated
+`tcfs-fileprovider-lab-system-policy.mobileconfig` when the profile is missing.
+Install that profile through System Settings or MDM on PZM, then rerun the same
+dispatch. The macOS `profiles` tool can list and remove configuration profiles,
+but Apple no longer supports installing configuration profiles with it.
 
 The default mode is non-mutating. `--apply` is required before the ASC script
 creates certificates, creates profiles, deletes stale same-name profiles, writes
@@ -509,7 +513,8 @@ Feature goals remain:
 
 ## Immediate Work Items
 
-1. Run the explicit PZM-only `lab_gatekeeper_override` smoke against
+1. Install the generated PZM `SystemPolicyRule` profile from the
+   `lab_gatekeeper_override` run artifact, then rerun the same smoke against
    `dist-testing-mode-pkg` from run `25456290021`. If it allows the installed
    host and extension to launch, continue lifecycle proof under that clearly
    marked non-production lane. If it does not, pivot to Xcode-style local

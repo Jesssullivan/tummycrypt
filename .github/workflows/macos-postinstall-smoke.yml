@@ -23,7 +23,7 @@ on:
         default: false
         type: boolean
       lab_gatekeeper_override:
-        description: "PZM-only non-production lab: add temporary Gatekeeper assessment rules for the installed testing-mode app"
+        description: "PZM-only non-production lab: require a SystemPolicyRule profile for the installed testing-mode app"
         required: false
         default: false
         type: boolean
@@ -402,7 +402,7 @@ jobs:
             -u AWS_SECRET_ACCESS_KEY \
             bash scripts/install-smoke.sh --expected-version "${VERSION}"
 
-      - name: Apply PZM lab Gatekeeper override
+      - name: Verify PZM lab Gatekeeper profile
         if: ${{ github.event.inputs.lab_gatekeeper_override == 'true' }}
         shell: bash
         run: |
@@ -846,7 +846,7 @@ jobs:
             wait "$(cat "$LOG_DIR/tcfsd.pid")" 2>/dev/null || true
           fi
 
-      - name: Remove PZM lab Gatekeeper override
+      - name: Record PZM lab Gatekeeper profile cleanup
         if: always() && github.event.inputs.lab_gatekeeper_override == 'true'
         shell: bash
         run: |

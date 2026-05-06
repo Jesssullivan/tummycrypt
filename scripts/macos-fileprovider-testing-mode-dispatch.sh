@@ -42,7 +42,7 @@ Options:
                           Optional runner-local file containing the .p12 import password
   --profiles-dir <p>      Optional runner-local provisioning profile directory
   --lab-gatekeeper-override
-                          PZM-only non-production spctl label experiment for installed testing-mode app
+                          PZM-only non-production SystemPolicyRule profile gate for installed testing-mode app
   --package-run-id <id>   Skip package workflow dispatch and smoke an existing package run
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion

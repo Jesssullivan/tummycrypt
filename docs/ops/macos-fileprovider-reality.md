@@ -637,11 +637,12 @@ The next PZM experiment is now encoded as a workflow input instead of a manual
 operator step: dispatch `macos-postinstall-smoke.yml` with
 `fileprovider_testing_mode=true` and `lab_gatekeeper_override=true`. That path
 is restricted to the PZM lab runner, runs
-`scripts/macos-fileprovider-lab-gatekeeper-override.sh`, captures before/after
-`spctl` and `syspolicy_check` logs, and removes the temporary
-`TCFSFileProviderLab` label after diagnostics. A pass would prove only the
-non-production Mac Development lab trust path, not production Developer ID
-Finder enablement.
+`scripts/macos-fileprovider-lab-gatekeeper-override.sh`, generates the desired
+`SystemPolicyRule` `.mobileconfig`, and verifies that profile is installed
+before the harness. A pass would prove only the non-production Mac Development
+lab trust path, not production Developer ID Finder enablement. If the profile
+is missing, the run fails early and uploads the generated `.mobileconfig` for
+manual System Settings or MDM installation on PZM.
 
 May 1, 2026 Apple Developer follow-up changed the shape of this lane:
 

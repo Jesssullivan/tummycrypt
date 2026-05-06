@@ -622,7 +622,7 @@ APPLY_LAB_GATEKEEPER_OVERRIDE_STEP="${TMPDIR}/apply-pzm-lab-gatekeeper-override.
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \
   "pkg-postinstall" \
-  "Apply PZM lab Gatekeeper override" \
+  "Verify PZM lab Gatekeeper profile" \
   "$APPLY_LAB_GATEKEEPER_OVERRIDE_STEP"
 bash -n "$APPLY_LAB_GATEKEEPER_OVERRIDE_STEP"
 assert_contains "$POSTINSTALL_WORKFLOW" "lab_gatekeeper_override"
@@ -636,7 +636,7 @@ REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP="${TMPDIR}/remove-pzm-lab-gatekeeper-overrid
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \
   "pkg-postinstall" \
-  "Remove PZM lab Gatekeeper override" \
+  "Record PZM lab Gatekeeper profile cleanup" \
   "$REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP"
 bash -n "$REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP"
 assert_contains "$REMOVE_LAB_GATEKEEPER_OVERRIDE_STEP" "scripts/macos-fileprovider-lab-gatekeeper-override.sh cleanup"
@@ -792,13 +792,14 @@ assert_contains "$POSTINSTALL_HARNESS_STEP" "--exercise-evict-rehydrate"
 bash -n "$PKG_POSTINSTALL"
 bash -n "$LAB_GATEKEEPER_OVERRIDE"
 
-assert_contains "$LAB_GATEKEEPER_OVERRIDE" "TCFSFileProviderLab"
-assert_contains "$LAB_GATEKEEPER_OVERRIDE" "spctl"
-assert_contains "$LAB_GATEKEEPER_OVERRIDE" "--add --label"
-assert_contains "$LAB_GATEKEEPER_OVERRIDE" "--remove --label"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "io.tinyland.tcfs.fileprovider.lab.system-policy"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "com.apple.systempolicy.rule"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "PayloadScope"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "profiles show -type configuration -all"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "SystemPolicyRule configuration profile is not installed"
 assert_contains "$LAB_GATEKEEPER_OVERRIDE" "TCFS_RUNNER_SUDO_PASSWORD"
 assert_contains "$LAB_GATEKEEPER_OVERRIDE" ".config/sops-nix/secrets/become/password"
-assert_contains "$LAB_GATEKEEPER_OVERRIDE" "syspolicy_check"
+assert_contains "$LAB_GATEKEEPER_OVERRIDE" "macOS 15"
 
 assert_contains "$PKG_POSTINSTALL" "LSREGISTER_BIN=\"\${TCFS_POSTINSTALL_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}\""
 assert_contains "$PKG_POSTINSTALL" "\"\$LAUNCHCTL_BIN\" asuser \"\$CONSOLE_UID\""
