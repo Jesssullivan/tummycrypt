@@ -1,9 +1,9 @@
 # Product Reality And Priority
 
-As of May 1, 2026, `tummycrypt` is in a much better state operationally than
+As of May 6, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
-The latest release is `v0.12.7`, and most release-facing surfaces now have
+The latest release is `v0.12.11`, and most release-facing surfaces now have
 explicit proof paths. The important distinction is that `buildable`,
 `packaged`, and `actually proven in user-facing flows` are still different
 things.
@@ -20,8 +20,8 @@ Use this document as the short answer to:
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
-| Lazy traversal / hydration | core code and harnesses exist; archived Linux FUSE and clean-host Finder evidence are still pending | `tcfs-vfs`/FUSE implementation plus the lazy hydration demo runbook |
-| macOS | experimental but real; `v0.12.7` proves package/signing/storage/daemon and local user-enabled FileProvider hydration, while hosted FileProvider is blocked by Apple's disabled-domain boundary | build + packaging + hosted smoke diagnostics + manual desktop path |
+| Lazy traversal / hydration | core code and harnesses exist; PZM now proves macOS FileProvider enumerate + hydrate under testing mode; archived Linux FUSE and production Finder lifecycle evidence are still pending | `tcfs-vfs`/FUSE implementation, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| macOS | experimental but real; `v0.12.11` proves package/signing/storage/daemon plus lab FileProvider enumeration and exact-content hydration under Apple's testing-mode entitlement; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
 
@@ -34,7 +34,7 @@ This is the narrowest and most important truth for public release claims.
 | Surface | Status | Current reality |
 | --- | --- | --- |
 | Homebrew | pass | fresh install and upgrade proved on `v0.12.2` |
-| macOS `.pkg` | partial pass | `v0.12.7` installs, signs, provisions storage config, starts the daemon, and proves E2EE on GitHub-hosted macOS; Finder/FileProvider remains gated by provider enablement |
+| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package now proves FileProvider enumerate + hydrate; production Finder enablement and write/conflict UX remain separate |
 | `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; Debian 12 is not currently a truthful target for the shipped package deps |
 | `.rpm` | pass | fresh install proved in Fedora container |
 | container image | pass | version and worker-mode startup proved |
@@ -90,11 +90,18 @@ What this still does **not** mean:
 macOS is no longer “missing” as a code path, but it is still not a release-grade
 desktop surface in the same sense Linux is.
 
+Now proven in the lab:
+
+- a `v0.12.11` testing-mode package on `petting-zoo-mini`
+- package install, signing/profile checks, shared-Keychain config, live S3/E2EE
+  access, daemon startup, FileProvider registration, CloudStorage enumeration,
+  host-app `requestDownload`, and exact-content hydration
+
 Still manual or weakly proven:
 
-- Finder/FileProvider end-to-end desktop flow
+- production Finder/FileProvider enablement on arbitrary clean machines
 - badges, progress, notifications, and conflict UX
-- clean-machine `.pkg` install followed by realistic desktop usage
+- mutation, conflict, evict/rehydrate, and realistic desktop usage
 
 Canonical docs:
 
@@ -187,8 +194,11 @@ work should be ordered like this:
    - prove dehydrate/unsync followed by rehydrate
 2. **Apple desktop acceptance**
    - stop retrying hosted production packages until FileProvider can be enabled
-   - obtain Apple's FileProvider testing-mode host profile or use a lab/self-hosted Mac
-   - extend the named Finder/FileProvider smoke from read/hydrate into mutate/conflict
+   - treat PZM testing-mode read/hydrate as green
+   - extend the named Finder/FileProvider smoke into evict/rehydrate,
+     mutate/conflict, and visible status
+   - keep production Developer ID clean-host Finder acceptance separate from
+     non-production testing-mode evidence
 3. **odrive-style lifecycle productionization**
    - surface `FileSyncStatus`, progress, and conflict state in CLI/TUI/Finder
    - prove `PathLocks`, dirty-child unsync, auto-unsync, and blacklist behavior
@@ -213,12 +223,14 @@ work should be ordered like this:
 
 ## Open Issue Map
 
-As of April 29, 2026, the narrow GitHub backlog is:
+As of May 6, 2026, the narrow GitHub backlog is:
 
 - M10 release-proof tranche
   - `#280`: distribution install and upgrade proof umbrella
   - `#308`: Debian 12 `.deb` support-floor decision
-  - `#309`: macOS `.pkg` clean-host fresh-install lane
+  - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
+    testing-mode enumerate/hydrate is green; production Finder lifecycle proof
+    remains open.
 - Adjacent non-M10 lanes
   - `#298`: residual Civo TCFS PVC retirement after on-prem recovery
   - `#327`: TCFS on-prem OpenTofu migration and cutover
@@ -257,13 +269,13 @@ The current parity summary and Desktop/honey demo contract live in
 
 ## Linear Mirror State
 
-As of May 1, 2026, Linear is a useful management mirror but is not the
+As of May 6, 2026, Linear is a useful management mirror but is not the
 freshest truth source for `tummycrypt`.
 
 - `TIN-133` has been retitled to `Prove lazy traversal and Finder/FileProvider
   hydration reality` and now points at GitHub `#309` plus the current repo docs.
-  The latest comments mirror the `v0.12.7` release/smoke evidence and the
-  remaining Apple testing-mode or lab-Mac dependency.
+  The latest comments mirror the `v0.12.11` PZM testing-mode success and the
+  remaining production Finder lifecycle gaps.
 - `TIN-131` and `TIN-132` remain in Backlog under `Tummycrypt M10: Usage
   Reality & Product Parity`; their descriptions were refreshed on April 29,
   2026 to separate current repo truth from the older GitHub issue framing they

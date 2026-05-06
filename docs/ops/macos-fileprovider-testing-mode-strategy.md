@@ -1,8 +1,10 @@
 # macOS FileProvider Testing-Mode Strategy
 
-As of May 1, 2026, the hosted FileProvider proof is blocked by Apple's
-profile-type boundary, not by TCFS package assembly, storage, signing profile
-rotation, or a missing App ID checkbox.
+As of May 6, 2026, the hosted production FileProvider proof is blocked by
+Apple's profile/user-enable boundary, but the registered-Mac testing-mode lane
+is green on `petting-zoo-mini`. The remaining distinction is product posture:
+testing-mode read/hydrate proof is not the same as production Developer ID
+Finder lifecycle acceptance.
 
 The production lane and testing-mode lane must stay separate:
 
@@ -234,7 +236,7 @@ Then dispatch the lab package lane with the generated p12:
 
 ```bash
 scripts/macos-fileprovider-testing-mode-dispatch.sh \
-  --tag v0.12.7 \
+  --tag v0.12.11 \
   --runner-label petting-zoo-mini \
   --signing-p12-path ~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-<sha>.p12 \
   --signing-p12-password-file ~/git/tummycrypt/build/asc-fileprovider-lab/p12-password.txt
@@ -248,8 +250,7 @@ profile files, or installs profiles.
 
 Keep the existing production release workflow on Developer ID signing.
 
-Add or refactor a separate testing-mode development workflow with these
-properties:
+The separate testing-mode development workflow now has these properties:
 
 1. Run the FileProvider smoke on a registered self-hosted/lab Mac, not on a
    GitHub-hosted macOS runner.
@@ -284,7 +285,7 @@ macOS. The profile device list is part of the trust model.
 
 ## Repository Implementation
 
-As of May 2, 2026, the repo has a first lab-lane implementation:
+As of May 6, 2026, the repo has a green lab-lane implementation:
 
 - `.github/workflows/macos-fileprovider-testing-mode-pkg.yml` defaults to the
   `petting-zoo-mini` runner label, resolves an `Apple Development` signing
@@ -302,6 +303,12 @@ As of May 2, 2026, the repo has a first lab-lane implementation:
   `scripts/asc-fileprovider-lab-provision.py`, and
   `scripts/macos-codesign-p12-probe.sh` supersede ad hoc portal profile
   regeneration for the lab lane
+- testing-mode package run `25445945705` built a `v0.12.11`
+  `dist-testing-mode-pkg` on `petting-zoo-mini`
+- post-install smoke run `25446601375` proved package install,
+  signing/profile checks, shared-Keychain config, live S3/E2EE access,
+  `tcfsd` startup, CloudStorage enumeration, host-app `requestDownload`,
+  55-byte hydration, and exact-content match
 
 ## Lab Runner Enrollment
 

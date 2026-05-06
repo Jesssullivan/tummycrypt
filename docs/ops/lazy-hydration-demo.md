@@ -1,11 +1,11 @@
 # Lazy Hydration Demo Acceptance
 
-As of May 1, 2026, the core lazy traversal and hydration code exists and the
+As of May 6, 2026, the core lazy traversal and hydration code exists and the
 repo has named harnesses for Linux terminal, mounted-view, Desktop-to-honey,
-and macOS Finder/FileProvider proof. The remaining gap is evidence coverage:
-Linux still needs an archived FUSE-capable host run, and GitHub-hosted macOS is
-blocked at Apple's FileProvider user-enable boundary unless the package carries
-Apple's testing-mode entitlement.
+and macOS Finder/FileProvider proof. Evidence coverage is now split more
+precisely: PZM proves the macOS testing-mode FileProvider enumerate/hydrate
+path, Linux still needs an archived FUSE-capable host run, and production
+Finder lifecycle proof remains separate from non-production testing-mode proof.
 
 This runbook is the acceptance target for the persistent demo goal:
 
@@ -142,19 +142,19 @@ and Finder/FileProvider as the native desktop lane.
 
 | User behavior | Linux mounted surface | macOS Finder/FileProvider | Current proof state |
 | --- | --- | --- | --- |
-| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | Core code and mounted helper are covered; Linux FUSE evidence and clean-host Finder evidence are still pending |
-| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | Local Finder pass exists on a user-enabled Mac; hosted production package reaches FileProvider but is disabled by macOS |
+| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | Core code and mounted helper are covered; PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence and production Finder evidence are still pending |
+| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.11`; Linux FUSE host evidence remains pending |
 | Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | Linux harness covers cache-clear rehydrate; Finder evict/unsync remains follow-on evidence |
 | Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder and prove daemon/FileProvider conflict/status behavior | Not yet release-gated on either desktop surface |
 | Observe health | CLI status, daemon logs, mounted-smoke transcript | Finder state, FileProvider logs, badges/progress when available | CLI/log evidence exists; Finder badges/progress are observational only |
 
-This means the FileProvider blocker does not freeze all parity work. The next
-non-Apple proof is to run `task lazy:linux-demo` on a FUSE-capable Linux host
-against a disposable remote prefix and archive its evidence directory. The next
-Apple proof is either a lab/self-hosted Mac where `TCFSProvider` can be enabled
-in System Settings, or a non-production testing-mode package signed with an
-Apple-granted host profile containing
-`com.apple.developer.fileprovider.testing-mode`.
+This means the old hosted FileProvider blocker no longer freezes the read-only
+Finder proof. The next non-Apple proof is to run `task lazy:linux-demo` on a
+FUSE-capable Linux host against a disposable remote prefix and archive its
+evidence directory. The next Apple proof is to extend the now-green PZM
+testing-mode lane beyond read/hydrate into evict/rehydrate, mutation, conflict,
+and visible status, while keeping production Developer ID clean-host evidence
+separate.
 
 Required proof:
 
@@ -238,6 +238,18 @@ show the higher-risk choice.
 
 The Finder lane is tracked by GitHub issue `#309` and the named harness in
 `scripts/macos-postinstall-smoke.sh`.
+
+PZM testing-mode evidence from May 6, 2026 is the current strongest
+FileProvider proof:
+
+- testing-mode package run `25445945705`
+- post-install smoke run `25446601375`
+- package install, signing/profile checks, live S3/E2EE fixture proof,
+  `tcfsd` startup, CloudStorage enumeration, host-app `requestDownload`,
+  55-byte hydration, exact-content match, and shared-Keychain config proof
+
+That is a lab/testing-mode proof, not a production Developer ID clean-host
+claim.
 
 Local source-tree evidence from April 30, 2026 is recorded in
 [macOS FileProvider Local Evidence](../release/macos-fileprovider-local-evidence-2026-04-30.md).

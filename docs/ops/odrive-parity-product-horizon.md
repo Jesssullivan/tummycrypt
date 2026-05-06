@@ -1,6 +1,6 @@
 # odrive Parity And Product Horizon
 
-As of May 1, 2026, `tummycrypt` should treat odrive parity as a product
+As of May 6, 2026, `tummycrypt` should treat odrive parity as a product
 behavior target, not an implementation target.
 
 The useful odrive lessons are visible user workflows:
@@ -70,14 +70,13 @@ and real-host backend sync. The weakest proof remains macOS Finder from package
 install through register, enumerate, hydrate, mutate, conflict, and visible
 status.
 
-The `v0.12.7` evidence tightened that boundary. The production `.pkg` installs
-on GitHub-hosted macOS, passes signing/profile checks, provisions storage
-config, starts `tcfsd`, reaches the public S3 backend, and proves the seeded
-E2EE fixture. A local user-enabled Mac also proves FileProvider enumeration and
-exact-content hydration. Hosted Finder proof is still blocked because macOS
-keeps the provider disabled for the runner user unless TCFS gets an
-Apple-granted FileProvider testing-mode host profile or runs on a lab Mac where
-the provider can be enabled.
+The `v0.12.11` evidence tightened that boundary. Production `.pkg` builds and
+smokes prove install, signing/profile checks, storage config, daemon startup,
+public S3 reachability, and seeded E2EE fixture access. The PZM non-production
+testing-mode lane now also proves FileProvider enumeration and exact-content
+hydration from a package install. Production Finder lifecycle evidence remains
+open: arbitrary clean-host enablement, evict/rehydrate, mutation, conflict, and
+visible status/progress are not yet release gates.
 
 ## Linux <> Finder Parity Evidence
 
@@ -92,8 +91,9 @@ Parity should be assessed at the user-behavior level:
 | Show lifecycle state | CLI/TUI/daemon status reports active/synced/conflict states | Finder badges/progress/notifications reflect the same status classes |
 | Keep scriptability | every desktop action has a CLI/headless equivalent | Finder is native UX, not the only control plane |
 
-The Linux proof lane can continue without waiting for Apple. The Finder lane is
-the one gated on FileProvider enablement in the hosted environment.
+The Linux proof lane can continue without waiting for Apple. The Finder
+read/hydrate lane is now green under PZM testing mode; production Finder
+lifecycle proof remains a separate bar.
 
 ## Product Pillars
 

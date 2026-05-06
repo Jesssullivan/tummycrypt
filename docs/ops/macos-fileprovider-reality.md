@@ -1,7 +1,9 @@
 # macOS Finder and FileProvider Reality
 
-As of April 15, 2026, macOS is a real packaging and integration lane for tcfs,
-but not yet a continuously proven release-grade desktop surface.
+As of May 6, 2026, macOS is a real packaging and integration lane for tcfs.
+The lab testing-mode FileProvider read/hydrate path is now proven end to end,
+but production Finder lifecycle behavior is still not a continuously proven
+release-grade desktop surface.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
@@ -57,6 +59,8 @@ sync-root stub representation, not the desired primary Finder UX.
   through a coordinated read.
 - The extension contains real enumeration, hydration, watch, and badge
   decoration code paths.
+- The non-production `petting-zoo-mini` testing-mode lane has passed a full
+  package-to-FileProvider read/hydrate smoke on `v0.12.11`.
 
 ## Important Constraints
 
@@ -75,8 +79,9 @@ sync-root stub representation, not the desired primary Finder UX.
 
 ## Not Yet Proven
 
-- A continuously exercised clean-host Finder/FileProvider acceptance lane from
-  install through register, enumerate, hydrate, mutate, and conflict handling
+- A continuously exercised production clean-host Finder/FileProvider acceptance
+  lane from Developer ID package install through user enablement, register,
+  enumerate, hydrate, mutate, and conflict handling
 - Finder badge visibility as a release gate
 - Conflict UX and notification behavior as a release gate
 - Release-day viability of every published macOS artifact without explicit
@@ -553,6 +558,34 @@ Testing-mode support is intentionally opt-in:
 Use that path only with an Apple provisioning profile that grants the
 testing-mode entitlement. A normal production `v0.12.7` package is expected to
 fail that preflight.
+
+May 6, 2026 testing-mode evidence updated the current blocker:
+
+- ASC provisioning on `petting-zoo-mini` produced a fresh lab-owned Apple
+  Development certificate, p12, and matching Mac App Development host/extension
+  profiles.
+- The host development profile grants
+  `com.apple.developer.fileprovider.testing-mode`; the extension profile is the
+  matching `io.tinyland.tcfs.fileprovider` development profile.
+- Testing-mode package run `25445945705` built and uploaded
+  `dist-testing-mode-pkg` from `v0.12.11`.
+- The first PZM smoke attempts reached FileProvider enumeration and showed the
+  expected remote item, but the harness stalled because the second host-app
+  launch used LaunchServices and the host process never received
+  `TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER`.
+- Commit `b52ebd7` changed the harness to launch the installed host app binary
+  directly for the download-request step, passing
+  `TCFS_FILEPROVIDER_REQUEST_DOWNLOAD_IDENTIFIER` in the process environment.
+- PZM smoke run `25446601375` then passed end to end: package install,
+  signing/profile checks, installed-binary smoke, live S3/E2EE fixture proof,
+  `tcfsd` startup, FileProvider registration, CloudStorage enumeration,
+  host-app `requestDownload`, 55-byte hydration, exact-content match, and
+  shared-Keychain config proof.
+
+So the testing-mode read/hydrate lane is green. The remaining macOS product
+work is production Developer ID clean-host enablement plus richer Finder
+lifecycle behavior: evict/rehydrate, mutation, conflict/status visibility, and
+recovery UX.
 
 May 1, 2026 Apple Developer follow-up changed the shape of this lane:
 

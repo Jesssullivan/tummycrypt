@@ -1,6 +1,6 @@
 # iOS Surface Status
 
-As of April 15, 2026, iOS is an experimental FileProvider proof-of-concept,
+As of May 6, 2026, iOS is an experimental FileProvider proof-of-concept,
 not an active release target.
 
 ## What Exists In The Repo Today
