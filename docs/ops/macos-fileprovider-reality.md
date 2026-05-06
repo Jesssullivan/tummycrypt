@@ -71,9 +71,10 @@ sync-root stub representation, not the desired primary Finder UX.
   `main()` in policy-probe mode. After package install, `spctl` rejects both
   bundles, `syspolicy_check` reports the app lacks a notarization ticket and
   has a fatal Gatekeeper rejection, the installed host policy probe times out
-  before Swift startup logs, AppleSystemPolicy later denies the installed host,
-  and AppleSystemPolicy also terminates the extension after `fileproviderd`
-  starts it.
+  before Swift startup logs while the process is still sampled at
+  `_dyld_start`, AppleSystemPolicy later denies the installed host, and
+  AppleSystemPolicy also terminates the extension after `fileproviderd` starts
+  it.
 
 ## Important Constraints
 
@@ -605,11 +606,13 @@ May 6, 2026 testing-mode evidence updated the current blocker:
   the installed app lacks a notarization ticket and has a fatal Gatekeeper
   rejection, and AppleSystemPolicy denied both `TCFSProvider` and
   `TCFSFileProvider`.
-- PZM testing-mode package run `25454592344` rebuilt from `9399d36` and added a
-  build-output policy probe. That artifact still shows `spctl` rejection, but
-  the host app prints `testingMode: requested alwaysEnabled for FileProvider
-  domain` and `policyProbe: OK`, then exits 0. This proves the Swift host
-  startup path itself is runnable in the runner context before install.
+- PZM testing-mode package run `25456290021` rebuilt from `5ba8851` and added
+  early build-output policy-probe markers. That artifact still shows `spctl`
+  rejection, but the host app prints `policyProbe: main entered`,
+  `policyProbe: domain created`, `testingMode: requested alwaysEnabled for
+  FileProvider domain`, and `policyProbe: OK`, then exits 0. This proves the
+  Swift host startup path itself is runnable in the runner context before
+  install.
 - PZM smoke run `25454681083` installed that package and passed the same
   install/signing/profile/E2EE/daemon gates, but the harness failed again.
   Diagnostics show an empty `harness/host-domain-launch.log`,
@@ -617,13 +620,12 @@ May 6, 2026 testing-mode evidence updated the current blocker:
   `/Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider`, and
   AppleSystemPolicy denial for
   `/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/MacOS/TCFSFileProvider`.
-- Commit `8594727` added an installed-host policy probe to the postinstall
-  workflow before live config and domain mutation.
-- PZM smoke run `25455202200` used the same package artifact and current
-  postinstall workflow. The installed-host policy probe wrote `exit=124` and
-  `timed out after 15s`, with no Swift stderr. The full harness then failed in
-  the same place, with an empty `harness/host-domain-launch.log` and
-  AppleSystemPolicy denial for both the installed host and extension.
+- PZM smoke run `25456341985` installed that fresh package. The installed-host
+  policy probe wrote `exit=124` and `timed out after 15s`, with no Swift stderr;
+  its `sample` report shows the live process still at `_dyld_start`. The full
+  harness then failed in the same place, with an empty
+  `harness/host-domain-launch.log` and AppleSystemPolicy denial for both the
+  installed host and extension.
 
 So the testing-mode read/hydrate lane is proven, but the current
 evict/rehydrate package is blocked by the Mac Development lab trust model. The

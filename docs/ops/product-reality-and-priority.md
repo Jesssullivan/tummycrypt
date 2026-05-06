@@ -103,16 +103,18 @@ Current lab blocker:
 - the current Mac App Development certificate/profile pair is valid: codesign
   verification passes for the host and extension, embedded profiles decode, and
   `taskgated-helper` allows both host and extension entitlements
-- package run `25454592344` proves the build-output host app reaches Swift
-  `main()` in policy-probe mode and exits 0 with `policyProbe: OK`, despite
-  Gatekeeper assessment rejection
+- package run `25456290021` proves the build-output host app reaches Swift
+  `main()` in policy-probe mode and exits 0 after logging `main entered`,
+  `domain created`, and `policyProbe: OK`, despite Gatekeeper assessment
+  rejection
 - `spctl` rejects both bundles, and `syspolicy_check` reports the installed app
   is not distribution-ready because it has no notarization ticket
 - `syspolicy_check notary-submission` also reports a fatal Gatekeeper rejection
   for `TCFSProvider.app/Contents/MacOS/TCFSProvider`
-- postinstall smoke run `25455202200` shows the installed host-app policy probe
-  times out after 15s with no instrumented stderr; the later harness host
-  launch also emits no instrumented stderr, then
+- postinstall smoke run `25456341985` shows the installed host-app policy probe
+  times out after 15s with no instrumented stderr and a sample stuck at
+  `_dyld_start`; the later harness host launch also emits no instrumented
+  stderr, then
   AppleSystemPolicy denies the host process
 - `fileproviderd` launches the extension process, then AppleSystemPolicy also
   terminates the extension before the evict/rehydrate lifecycle can complete

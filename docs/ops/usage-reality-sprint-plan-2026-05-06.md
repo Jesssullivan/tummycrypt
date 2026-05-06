@@ -15,7 +15,7 @@ M10 usage-reality issues are closed.
 | Linux mounted FS | Code and in-process VFS tests are strong; real-host FUSE evidence is not yet archived for the full user story | `tcfs-vfs` tests and mounted helper regressions | Run `task lazy:linux-demo` on a FUSE-capable host and archive evidence |
 | Physical `.tc` / `.tcf` stubs | Stub wire format, parse/write, and compatibility are tested | `tcfs-vfs` and daemon unsync tests | Product-level recursive safe-unsync acceptance, including dirty-child refusal |
 | macOS CLI + daemon | Package install, signing, E2EE, storage, and daemon startup are repeatedly proven | `v0.12.12` release and PZM smoke pre-harness stages | Keep install smoke green while FileProvider lab work continues |
-| macOS Finder/FileProvider, lab | `v0.12.11` proved testing-mode enumerate/hydrate; `v0.12.12` evict/rehydrate attempt is blocked by Gatekeeper/AppleSystemPolicy for the installed Mac Development app and extension. The build-output app can reach Swift `main()` in policy-probe mode, so the remaining split is install/provenance/service launch rather than code startup. | PZM run `25446601375` green for read/hydrate; package run `25454592344` has `policyProbe: OK` from the build output despite `spctl` rejection; smoke run `25455202200` shows the installed host policy probe times out after 15s with no Swift stderr, then the harness records installed host and extension AppleSystemPolicy denial | Decide the lab trust model: Xcode/local-development launch path, a dedicated Apple-approved distribution shape, or an explicit non-production Gatekeeper bypass on PZM |
+| macOS Finder/FileProvider, lab | `v0.12.11` proved testing-mode enumerate/hydrate; `v0.12.12` evict/rehydrate attempt is blocked by Gatekeeper/AppleSystemPolicy for the installed Mac Development app and extension. The build-output app can reach Swift `main()` in policy-probe mode, so the remaining split is install/provenance/service launch rather than code startup. | PZM run `25446601375` green for read/hydrate; package run `25456290021` has `main entered`, `domain created`, and `policyProbe: OK` from the build output despite `spctl` rejection; smoke run `25456341985` shows the installed host policy probe times out after 15s while sampled at `_dyld_start`, then the harness records installed host and extension AppleSystemPolicy denial | Decide the lab trust model: Xcode/local-development launch path, a dedicated Apple-approved distribution shape, or an explicit non-production Gatekeeper bypass on PZM |
 | macOS Finder/FileProvider, production | Not proven on arbitrary clean Developer ID hosts | Local `neo` source-tree proof and production package install/signing gates | Separate clean-host production Finder enablement from PZM testing-mode evidence |
 | iOS | Proof-of-concept only | Swift build/type-check scaffold | Decide whether to keep as scaffold or create a real Files.app device lane |
 | On-prem backend | Live endpoint client smoke works; source-owned migration is still open | `neo-honey` smoke using MagicDNS endpoints | Complete `#327`/`#298` migration and archive post-cutover storage/NATS proof |
@@ -49,12 +49,13 @@ Current blocker:
 
 1. `taskgated-helper` accepts the host and extension profiles for
    `io.tinyland.tcfs` and `io.tinyland.tcfs.fileprovider`.
-2. Package run `25454592344` proves the build-output host app reaches Swift
+2. Package run `25456290021` proves the build-output host app reaches Swift
    `main()` in `TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY=1` mode and exits 0
-   with `policyProbe: OK`, even though `spctl` rejects the bundle.
-3. Smoke run `25455202200` adds an installed-host policy probe before live
-   config and domain mutation. It times out after 15s with no Swift stderr, so
-   the installed host is not reaching the current policy-probe log points.
+   with `policyProbe: main entered`, `policyProbe: domain created`, and
+   `policyProbe: OK`, even though `spctl` rejects the bundle.
+3. Smoke run `25456341985` adds an installed-host policy probe before live
+   config and domain mutation. It times out after 15s with no Swift stderr, and
+   the captured `sample` shows the process still at `_dyld_start`.
 4. The same run's full harness still writes no `host-domain-launch.log` event;
    AppleSystemPolicy denies that installed host process before the instrumented
    Swift startup path emits.

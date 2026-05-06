@@ -323,19 +323,16 @@ Apple runtime policy boundary:
   daemon startup again, then failed the FileProvider lifecycle harness because
   `spctl` rejected both bundles and AppleSystemPolicy denied both
   `TCFSProvider` and `TCFSFileProvider`
-- testing-mode package run `25454592344` added the build-output policy probe:
-  `spctl` still rejected the app, but `TCFSProvider` printed `policyProbe: OK`
-  and exited 0 before install
-- post-install smoke run `25454681083` installed that package and again passed
-  install/signing/profile/E2EE/daemon startup, then failed with an empty
-  `harness/host-domain-launch.log`, AppleSystemPolicy denial for the installed
-  host binary, and AppleSystemPolicy denial for the extension from
-  `fileproviderd`
-- post-install smoke run `25455202200` used the same package artifact with a
-  newer postinstall workflow. The installed-host policy probe timed out after
-  15s with no Swift stderr before live config/domain mutation, and the full
-  harness again produced an empty `harness/host-domain-launch.log` plus
-  AppleSystemPolicy denial for the installed host and extension.
+- testing-mode package run `25456290021` added early build-output policy-probe
+  markers: `spctl` still rejected the app, but `TCFSProvider` printed
+  `policyProbe: main entered`, `policyProbe: domain created`, and
+  `policyProbe: OK`, then exited 0 before install
+- post-install smoke run `25456341985` installed that package and again passed
+  install/signing/profile/E2EE/daemon startup. The installed-host policy probe
+  timed out after 15s with no Swift stderr and sampled the live process at
+  `_dyld_start`; the full harness again produced an empty
+  `harness/host-domain-launch.log` plus AppleSystemPolicy denial for the
+  installed host and extension.
 
 ## Lab Runner Enrollment
 
@@ -491,9 +488,9 @@ Feature goals remain:
 2. Keep `spctl`, `syspolicy_check`, xattr, codesign, embedded-profile,
    `taskgated-helper`, `amfid`, and AppleSystemPolicy diagnostics attached to
    every FileProvider lab failure.
-3. Rebuild the `v0.12.12` PZM package with the earlier policy-probe markers in
-   `HostApp.main()` and rerun the PZM dispatch. The next artifact should show
-   whether the installed host reaches Swift entry, hangs while creating the
-   `NSFileProviderDomain`, or is blocked before Swift code runs.
+3. Decide the next PZM trust experiment now that the installed host is proven
+   blocked before Swift entry at `_dyld_start`: Xcode-style development launch,
+   explicit lab Gatekeeper bypass, or an Apple-approved distribution shape that
+   can still carry FileProvider testing mode.
 4. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
    gates.
