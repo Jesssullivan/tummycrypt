@@ -155,6 +155,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
             var updatedItems: [NSFileProviderItem] = []
             var deletedIds: [NSFileProviderItemIdentifier] = []
+            var updatedIds = Set<String>()
             var maxTimestamp: Int64 = sinceTimestamp
             var usedFullImport = false
 
@@ -176,17 +177,27 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     if eventType == "deleted" {
                         deletedIds.append(NSFileProviderItemIdentifier(itemIdentifier))
                     } else {
-                        updatedItems.append(
-                            TCFSFileProviderItem(
-                                identifier: NSFileProviderItemIdentifier(itemIdentifier),
-                                parentIdentifier: TCFSFileProviderExtension.parentIdentifier(forPath: itemIdentifier),
-                                filename: filename,
-                                isDirectory: event.is_directory,
-                                fileSize: event.file_size,
-                                downloaded: false,
-                                uploaded: true,
-                                versionTag: contentHash
+                        Self.appendAncestorDirectoryItems(
+                            forPath: itemIdentifier,
+                            to: &updatedItems,
+                            seen: &updatedIds
+                        )
+                        if updatedIds.insert(itemIdentifier).inserted {
+                            updatedItems.append(
+                                TCFSFileProviderItem(
+                                    identifier: NSFileProviderItemIdentifier(itemIdentifier),
+                                    parentIdentifier: TCFSFileProviderExtension.parentIdentifier(forPath: itemIdentifier),
+                                    filename: filename,
+                                    isDirectory: event.is_directory,
+                                    fileSize: event.file_size,
+                                    downloaded: false,
+                                    uploaded: true,
+                                    versionTag: contentHash
+                                )
                             )
+                        }
+                        enumLogger.info(
+                            "enumerateChanges: queued update \(itemIdentifier, privacy: .public)"
                         )
                     }
                 }
@@ -336,6 +347,38 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
         tcfs_file_items_free(outItems, outCount)
         return (result, providerItems)
+    }
+
+    private static func appendAncestorDirectoryItems(
+        forPath itemIdentifier: String,
+        to items: inout [NSFileProviderItem],
+        seen: inout Set<String>
+    ) {
+        let trimmed = itemIdentifier.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let components = trimmed.split(separator: "/").map(String.init)
+        guard components.count > 1 else {
+            return
+        }
+
+        var current = ""
+        for component in components.dropLast() {
+            current = current.isEmpty ? "\(component)/" : "\(current)\(component)/"
+            guard seen.insert(current).inserted else {
+                continue
+            }
+            items.append(
+                TCFSFileProviderItem(
+                    identifier: NSFileProviderItemIdentifier(current),
+                    parentIdentifier: TCFSFileProviderExtension.parentIdentifier(forPath: current),
+                    filename: component,
+                    isDirectory: true,
+                    fileSize: 0,
+                    downloaded: false,
+                    uploaded: true,
+                    versionTag: "1"
+                )
+            )
+        }
     }
 
     private static func normalizedItemIdentifier(_ raw: String, isDirectory: Bool) -> String {

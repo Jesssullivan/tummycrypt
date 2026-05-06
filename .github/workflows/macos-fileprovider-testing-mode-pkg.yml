@@ -6,7 +6,7 @@ on:
       tag:
         description: "Release tag whose macOS CLI tarball supplies tcfs/tcfsd"
         required: true
-        default: "v0.12.9"
+        default: "v0.12.10"
         type: string
       runner_label:
         description: "Registered self-hosted Mac runner label"
