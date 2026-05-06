@@ -120,8 +120,34 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             }
 
             guard result == TCFS_ERROR_TCFS_ERROR_NONE else {
-                // Fallback: if incremental fails, signal full re-enumerate
-                enumLogger.warning("enumerateChanges: incremental failed (\(result.rawValue)), requesting full re-enumerate")
+                if containerId == .workingSet {
+                    enumLogger.warning(
+                        "enumerateChanges: incremental failed (\(result.rawValue)), importing working set"
+                    )
+                    let enumeration = Self.enumerateProviderItems(
+                        provider: prov,
+                        path: "",
+                        parentIdentifier: .rootContainer,
+                        recursive: true
+                    )
+                    if enumeration.result == TCFS_ERROR_TCFS_ERROR_NONE {
+                        if !enumeration.items.isEmpty {
+                            observer.didUpdate(enumeration.items)
+                        }
+                        enumLogger.info(
+                            "enumerateChanges: working-set fallback returned \(enumeration.items.count) items"
+                        )
+                        observer.finishEnumeratingChanges(upTo: Self.makeAnchor(), moreComing: false)
+                        return
+                    }
+                    enumLogger.warning(
+                        "enumerateChanges: working-set fallback failed (\(enumeration.result.rawValue))"
+                    )
+                } else {
+                    enumLogger.warning(
+                        "enumerateChanges: incremental failed (\(result.rawValue)), requesting full re-enumerate"
+                    )
+                }
                 let newAnchor = Self.makeAnchor()
                 observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
                 return
@@ -130,6 +156,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             var updatedItems: [NSFileProviderItem] = []
             var deletedIds: [NSFileProviderItemIdentifier] = []
             var maxTimestamp: Int64 = sinceTimestamp
+            var usedFullImport = false
 
             if let events = outEvents, outCount > 0 {
                 let count = Int(outCount)
@@ -182,6 +209,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     return
                 }
                 updatedItems = enumeration.items
+                usedFullImport = true
                 enumLogger.info("enumerateChanges: working-set full import returned \(updatedItems.count) items")
             }
 
@@ -195,9 +223,14 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             }
             // Use max event timestamp as anchor to avoid skipping events
             // that arrive between anchor creation and next enumerateChanges
-            let newAnchor = outCount > 0
-                ? Self.makeAnchorFromTimestamp(maxTimestamp)
-                : anchor
+            let newAnchor: NSFileProviderSyncAnchor
+            if outCount > 0 {
+                newAnchor = Self.makeAnchorFromTimestamp(maxTimestamp)
+            } else if usedFullImport {
+                newAnchor = Self.makeAnchor()
+            } else {
+                newAnchor = anchor
+            }
             observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
         }
     }

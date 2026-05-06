@@ -70,6 +70,64 @@ fn sanitize_rel_path(path: &str) -> std::result::Result<String, String> {
     Ok(path.to_string())
 }
 
+fn logical_rel_path_from_state_key(
+    key: &str,
+    state: &tcfs_sync::state::SyncState,
+    sync_root: Option<&Path>,
+    storage_prefix: &str,
+) -> Option<String> {
+    if let Some(root) = sync_root {
+        let root = root.to_string_lossy();
+        let root = root.trim_end_matches('/');
+        if !root.is_empty() {
+            let root_prefix = format!("{root}/");
+            if let Some(rel) = key.strip_prefix(&root_prefix) {
+                let rel = rel.trim_start_matches('/');
+                if !rel.is_empty() {
+                    return Some(rel.to_string());
+                }
+            }
+        }
+    }
+
+    let index_prefix = format!("{}/index/", storage_prefix.trim_end_matches('/'));
+    state
+        .remote_path
+        .strip_prefix(&index_prefix)
+        .map(|rel| rel.trim_start_matches('/'))
+        .filter(|rel| !rel.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn logical_rel_path_from_fs_path(path: &Path, sync_root: Option<&Path>) -> String {
+    if let Some(root) = sync_root {
+        if let Ok(rel) = path.strip_prefix(root) {
+            let rel = rel.to_string_lossy();
+            let rel = rel.trim_start_matches('/');
+            return rel.to_string();
+        }
+    }
+
+    path.to_string_lossy().to_string()
+}
+
+fn normalize_watch_root(path: &str) -> String {
+    path.trim_matches('/').to_string()
+}
+
+fn rel_path_matches_watch_roots(rel_path: &str, roots: &[String]) -> bool {
+    roots.iter().any(|root| {
+        if root.is_empty() {
+            true
+        } else {
+            rel_path == root
+                || rel_path
+                    .strip_prefix(root)
+                    .is_some_and(|r| r.starts_with('/'))
+        }
+    })
+}
+
 impl TcfsDaemonImpl {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1125,47 +1183,19 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let cache = self.state_cache.lock().await;
         let all = cache.all_entries();
 
-        let sync_root_str = self
-            .config
-            .sync
-            .sync_root
-            .as_deref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "/".to_string());
-        // Ensure sync_root ends with '/' for reliable stripping
-        let sync_root_prefix = if sync_root_str.ends_with('/') {
-            sync_root_str.clone()
-        } else {
-            format!("{}/", sync_root_str)
-        };
-
         let mut dirs_seen = std::collections::HashSet::new();
         let mut files: Vec<FileEntry> = Vec::new();
 
         let storage_prefix = self.config.storage.resolved_prefix();
 
         for (key, state) in &all {
-            // Compute logical relative path from cache key (local abs path).
-            // Primary: strip sync_root from local path.
-            // Fallback: extract rel_path from remote_path (e.g., "data/manifests/hash"
-            //   → look up original rel_path from the index key pattern).
-            // Skip entries that can't be mapped (e.g., /private/tmp/ test artifacts
-            //   with no usable remote_path).
-            let rel_path = match key
-                .strip_prefix(&sync_root_prefix)
-                .or_else(|| key.strip_prefix(&sync_root_str))
-            {
-                Some(r) => r.trim_start_matches('/'),
-                None => {
-                    // Fallback: derive rel_path from remote_path for entries not
-                    // keyed under sync_root (e.g., FileProvider container temps).
-                    let index_prefix = format!("{}/index/", storage_prefix);
-                    if let Some(rel) = state.remote_path.strip_prefix(&index_prefix) {
-                        rel.trim_start_matches('/')
-                    } else {
-                        continue;
-                    }
-                }
+            let Some(rel_path) = logical_rel_path_from_state_key(
+                key,
+                state,
+                self.config.sync.sync_root.as_deref(),
+                &storage_prefix,
+            ) else {
+                continue;
             };
 
             if rel_path.is_empty() {
@@ -1183,7 +1213,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             };
 
             let remainder = if normalized_prefix.is_empty() {
-                rel_path.to_string()
+                rel_path.clone()
             } else {
                 // Must start with prefix (exact prefix match, not substring)
                 let pfx = if normalized_prefix.ends_with('/') {
@@ -1231,7 +1261,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     tcfs_sync::state::FileSyncStatus::Conflict => "conflict",
                 };
                 files.push(FileEntry {
-                    path: rel_path.to_string(),
+                    path: rel_path,
                     filename: remainder.clone(),
                     size: state.size,
                     last_synced: state.last_synced as i64,
@@ -1577,28 +1607,47 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let since = req.since_timestamp;
         info!(paths = ?req.paths, since, "watch requested");
+        let watch_roots: Vec<String> = req
+            .paths
+            .iter()
+            .map(|path| normalize_watch_root(path))
+            .collect();
 
         let (async_tx, async_rx) = tokio::sync::mpsc::channel(256);
 
         // ── Emit initial deltas from state cache (catch-up since anchor) ────
-        if since > 0 {
+        if since >= 0 {
             let cache = self.state_cache.lock().await;
             let all = cache.all_entries();
-            for (path, state) in &all {
+            let storage_prefix = self.config.storage.resolved_prefix();
+            let sync_root = self.config.sync.sync_root.as_deref();
+            for (key, state) in &all {
                 let last = state.last_synced as i64;
-                if last > since {
-                    let filename = std::path::Path::new(path.as_str())
+                if since == 0 || last > since {
+                    let Some(rel_path) =
+                        logical_rel_path_from_state_key(key, state, sync_root, &storage_prefix)
+                    else {
+                        continue;
+                    };
+                    if rel_path.is_empty() || !rel_path_matches_watch_roots(&rel_path, &watch_roots)
+                    {
+                        continue;
+                    }
+                    let filename = std::path::Path::new(rel_path.as_str())
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
+                    let is_directory = sync_root
+                        .map(|root| root.join(&rel_path).is_dir())
+                        .unwrap_or_else(|| std::path::Path::new(key.as_str()).is_dir());
                     let event = WatchEvent {
-                        path: path.clone(),
+                        path: rel_path,
                         event_type: "modified".into(),
                         timestamp: last,
                         filename,
                         size: state.size,
                         blake3: state.blake3.clone(),
-                        is_directory: std::path::Path::new(path.as_str()).is_dir(),
+                        is_directory,
                         device_id: state.device_id.clone(),
                     };
                     if async_tx.send(Ok(event)).await.is_err() {
@@ -1613,89 +1662,126 @@ impl TcfsDaemon for TcfsDaemonImpl {
         // ── Live local filesystem events via notify ─────────────────────────
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
         let state_cache_for_notify = self.state_cache.clone();
+        let sync_root = self.config.sync.sync_root.clone();
+        let mut watch_targets = Vec::new();
 
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let _ = sync_tx.send(res);
-        })
-        .map_err(|e| tonic::Status::internal(format!("create watcher: {e}")))?;
+        for root in &watch_roots {
+            let Some(path) = sync_root
+                .as_deref()
+                .map(|sync_root| {
+                    if root.is_empty() {
+                        sync_root.to_path_buf()
+                    } else {
+                        sync_root.join(root)
+                    }
+                })
+                .or_else(|| {
+                    if root.is_empty() {
+                        None
+                    } else {
+                        Some(std::path::PathBuf::from(root))
+                    }
+                })
+            else {
+                debug!("watch: local notify disabled for empty path without sync_root");
+                continue;
+            };
 
-        for path_str in &req.paths {
-            let path = std::path::Path::new(path_str);
-            if !path.exists() {
-                return Err(tonic::Status::not_found(format!(
-                    "watch path does not exist: {path_str}"
-                )));
+            if path.exists() {
+                watch_targets.push((root.clone(), path));
+            } else {
+                debug!(
+                    root,
+                    path = %path.display(),
+                    "watch: local notify target missing; using cache/NATS only"
+                );
             }
-            watcher
-                .watch(path, RecursiveMode::Recursive)
-                .map_err(|e| tonic::Status::internal(format!("watch {path_str}: {e}")))?;
         }
 
-        let notify_tx = async_tx.clone();
-        tokio::task::spawn_blocking(move || {
-            let _watcher = watcher;
-            while let Ok(result) = sync_rx.recv() {
-                let event = match result {
-                    Ok(event) => {
-                        let event_type = match event.kind {
-                            notify::EventKind::Create(_) => "created",
-                            notify::EventKind::Modify(_) => "modified",
-                            notify::EventKind::Remove(_) => "deleted",
-                            notify::EventKind::Access(_) => continue,
-                            notify::EventKind::Other => continue,
-                            notify::EventKind::Any => continue,
-                        };
-                        let path = event
-                            .paths
-                            .first()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        let filename = event
-                            .paths
-                            .first()
-                            .and_then(|p| p.file_name())
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        let timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
+        if !watch_targets.is_empty() {
+            let mut watcher =
+                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    let _ = sync_tx.send(res);
+                })
+                .map_err(|e| tonic::Status::internal(format!("create watcher: {e}")))?;
 
-                        // Enrich with state cache metadata (best-effort)
-                        let (size, blake3) = {
-                            let path_buf = std::path::PathBuf::from(&path);
-                            let cache = state_cache_for_notify.blocking_lock();
-                            cache
-                                .get(&path_buf)
-                                .map(|s| (s.size, s.blake3.clone()))
-                                .unwrap_or((0, String::new()))
-                        };
-
-                        let is_dir = event.paths.first().map(|p| p.is_dir()).unwrap_or(false);
-
-                        WatchEvent {
-                            path,
-                            event_type: event_type.to_string(),
-                            timestamp,
-                            filename,
-                            size,
-                            blake3,
-                            is_directory: is_dir,
-                            device_id: String::new(), // local event
-                        }
-                    }
-                    Err(e) => WatchEvent {
-                        path: String::new(),
-                        event_type: format!("error: {e}"),
-                        timestamp: 0,
-                        ..Default::default()
-                    },
-                };
-                if notify_tx.blocking_send(Ok(event)).is_err() {
-                    break; // Client disconnected
-                }
+            for (root, path) in &watch_targets {
+                watcher
+                    .watch(path, RecursiveMode::Recursive)
+                    .map_err(|e| tonic::Status::internal(format!("watch {root}: {e}")))?;
             }
-        });
+
+            let notify_tx = async_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let _watcher = watcher;
+                loop {
+                    if notify_tx.is_closed() {
+                        break;
+                    }
+                    let result = match sync_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                        Ok(result) => result,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
+                    let event = match result {
+                        Ok(event) => {
+                            let event_type = match event.kind {
+                                notify::EventKind::Create(_) => "created",
+                                notify::EventKind::Modify(_) => "modified",
+                                notify::EventKind::Remove(_) => "deleted",
+                                notify::EventKind::Access(_) => continue,
+                                notify::EventKind::Other => continue,
+                                notify::EventKind::Any => continue,
+                            };
+                            let path = event.paths.first().cloned().unwrap_or_default();
+                            let logical_path =
+                                logical_rel_path_from_fs_path(&path, sync_root.as_deref());
+                            let filename = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+
+                            // Enrich with state cache metadata (best-effort)
+                            let (size, blake3) = {
+                                let cache = state_cache_for_notify.blocking_lock();
+                                cache
+                                    .get(&path)
+                                    .map(|s| (s.size, s.blake3.clone()))
+                                    .unwrap_or((0, String::new()))
+                            };
+
+                            let is_dir = path.is_dir();
+
+                            WatchEvent {
+                                path: logical_path,
+                                event_type: event_type.to_string(),
+                                timestamp,
+                                filename,
+                                size,
+                                blake3,
+                                is_directory: is_dir,
+                                device_id: String::new(), // local event
+                            }
+                        }
+                        Err(e) => WatchEvent {
+                            path: String::new(),
+                            event_type: format!("error: {e}"),
+                            timestamp: 0,
+                            ..Default::default()
+                        },
+                    };
+                    if notify_tx.blocking_send(Ok(event)).is_err() {
+                        break; // Client disconnected
+                    }
+                }
+            });
+        } else {
+            debug!("watch: no local notify targets; using cache/NATS only");
+        }
 
         // ── Live remote events via NATS STATE_UPDATES ───────────────────────
         // Use an ephemeral consumer so Watch callers don't compete with
@@ -2427,6 +2513,21 @@ mod tests {
         Operator::new(Memory::default()).unwrap().finish()
     }
 
+    fn test_sync_state(remote_path: &str, last_synced: u64) -> tcfs_sync::state::SyncState {
+        tcfs_sync::state::SyncState {
+            blake3: "test-blake3".into(),
+            size: 123,
+            mtime: 0,
+            chunk_count: 1,
+            remote_path: remote_path.into(),
+            last_synced,
+            vclock: tcfs_sync::conflict::VectorClock::default(),
+            device_id: "remote-device".into(),
+            conflict: None,
+            status: tcfs_sync::state::FileSyncStatus::NotSynced,
+        }
+    }
+
     async fn connect_test_client(socket_path: &Path) -> TcfsDaemonClient<Channel> {
         let path = socket_path.to_path_buf();
         let mut last_err = None;
@@ -2727,6 +2828,71 @@ mod tests {
             "needs_sync Err was silently collapsed into \"synced\""
         );
         assert_eq!(resp.state, "unknown");
+    }
+
+    #[test]
+    fn logical_rel_path_prefers_sync_root_key_for_manifest_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("ci-smoke/0.12.9/hello.txt");
+        let state = test_sync_state("data/manifests/abc123", 1_700_000_000);
+
+        let rel = logical_rel_path_from_state_key(
+            &key.to_string_lossy(),
+            &state,
+            Some(root.path()),
+            "data",
+        )
+        .unwrap();
+
+        assert_eq!(rel, "ci-smoke/0.12.9/hello.txt");
+    }
+
+    #[test]
+    fn logical_rel_path_falls_back_to_remote_index_key() {
+        let root = tempfile::tempdir().unwrap();
+        let key = "/tmp/outside-tcfs-state-cache-key";
+        let state = test_sync_state("data/index/remote/only.txt", 1_700_000_000);
+
+        let rel = logical_rel_path_from_state_key(key, &state, Some(root.path()), "data").unwrap();
+
+        assert_eq!(rel, "remote/only.txt");
+    }
+
+    #[tokio::test]
+    async fn watch_empty_root_returns_logical_catch_up_events() {
+        use futures::StreamExt;
+
+        let daemon = test_daemon();
+        let tracked = std::path::PathBuf::from("/tmp/tcfs-state-key/ci-smoke/0.12.9/hello.txt");
+
+        {
+            let mut cache = daemon.state_cache.lock().await;
+            cache.set(
+                &tracked,
+                test_sync_state("data/index/ci-smoke/0.12.9/hello.txt", 1_700_000_000),
+            );
+            cache.flush().unwrap();
+        }
+
+        let mut stream = daemon
+            .watch(tonic::Request::new(WatchRequest {
+                paths: vec![String::new()],
+                since_timestamp: 1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("watch should emit catch-up event")
+            .expect("watch stream should stay open")
+            .expect("catch-up event should not be an error");
+
+        assert_eq!(event.path, "ci-smoke/0.12.9/hello.txt");
+        assert_eq!(event.filename, "hello.txt");
+        assert_eq!(event.event_type, "modified");
+        assert_eq!(event.size, 123);
     }
 
     #[tokio::test]
