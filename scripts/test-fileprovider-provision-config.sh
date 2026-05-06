@@ -58,6 +58,7 @@ jq -e \
 grep -Fq "Master key file: present" "${TMPDIR}/provision.out"
 grep -Fq "Also written to $APP_GROUP_JSON" "${TMPDIR}/provision.out"
 grep -Fq "TCFS_FILEPROVIDER_APP_GROUP_COPY_TIMEOUT" "$SCRIPT"
+grep -Fq "TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY" "$SCRIPT"
 
 jq -e \
   --arg master_key_file "$MASTER_KEY_FILE" \
@@ -65,5 +66,18 @@ jq -e \
     .master_key_file == $master_key_file and
     (has("master_key_base64") | not)
   ' "$APP_GROUP_JSON" >/dev/null
+
+rm -f "$APP_GROUP_JSON"
+HOME="$HOME_DIR" \
+AWS_ACCESS_KEY_ID="test-access" \
+AWS_SECRET_ACCESS_KEY="test-secret" \
+TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY=1 \
+bash "$SCRIPT" "$CONFIG_TOML" >"${TMPDIR}/provision-skip.out"
+
+grep -Fq "Skipping App Group config mirror" "${TMPDIR}/provision-skip.out"
+if [[ -e "$APP_GROUP_JSON" ]]; then
+  printf 'expected skip mode not to write %s\n' "$APP_GROUP_JSON" >&2
+  exit 1
+fi
 
 printf 'FileProvider provision config tests passed\n'

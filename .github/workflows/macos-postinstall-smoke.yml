@@ -194,10 +194,16 @@ jobs:
           MASTER_KEY_PATH="$RUNNER_TEMP/tcfs-master.key"
           EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
           APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
+          FILEPROVIDER_TESTING_MODE="${{ github.event.inputs.fileprovider_testing_mode }}"
+          if [[ "$FILEPROVIDER_TESTING_MODE" == "true" ]]; then
+            FILEPROVIDER_SOCKET="$HOME/Library/Application Support/io.tinyland.tcfs/tcfsd.sock"
+          else
+            FILEPROVIDER_SOCKET="${APP_GROUP_DIR}/tcfsd.sock"
+          fi
           REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
 
-          mkdir -p "$LOG_DIR" "$SYNC_ROOT" "$CONFIG_DIR" "$APP_GROUP_DIR"
+          mkdir -p "$LOG_DIR" "$SYNC_ROOT" "$CONFIG_DIR" "$(dirname "$FILEPROVIDER_SOCKET")"
 
           {
             echo "TAG=$TAG"
@@ -210,6 +216,7 @@ jobs:
             echo "MASTER_KEY_PATH=$MASTER_KEY_PATH"
             echo "EXPECTED_CONTENT_FILE=$EXPECTED_CONTENT_FILE"
             echo "APP_GROUP_DIR=$APP_GROUP_DIR"
+            echo "FILEPROVIDER_SOCKET=$FILEPROVIDER_SOCKET"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
             echo "FIXTURE_REL=$FIXTURE_REL"
           } >> "$GITHUB_ENV"
@@ -377,7 +384,7 @@ jobs:
           cat > "$CONFIG_PATH" <<EOF
           [daemon]
           socket = "/tmp/tcfsd-gha.sock"
-          fileprovider_socket = "${APP_GROUP_DIR}/tcfsd.sock"
+          fileprovider_socket = "${FILEPROVIDER_SOCKET}"
           metrics_addr = "127.0.0.1:19100"
           log_format = "text"
 
@@ -405,7 +412,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash swift/fileprovider/provision-config.sh "$CONFIG_PATH"
+          if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" == "true" ]]; then
+            TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY=1 \
+              bash swift/fileprovider/provision-config.sh "$CONFIG_PATH"
+          else
+            bash swift/fileprovider/provision-config.sh "$CONFIG_PATH"
+          fi
 
       - name: Seed remote fixture
         shell: bash
@@ -537,7 +549,7 @@ jobs:
             > "$LOG_DIR/tcfsd.log" 2>&1 &
           echo "$!" > "$LOG_DIR/tcfsd.pid"
 
-          for socket in /tmp/tcfsd-gha.sock "${APP_GROUP_DIR}/tcfsd.sock"; do
+          for socket in /tmp/tcfsd-gha.sock "${FILEPROVIDER_SOCKET}"; do
             ready=0
             for _ in $(seq 1 60); do
               if [[ -S "$socket" ]]; then

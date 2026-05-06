@@ -182,7 +182,9 @@ echo "    Credentials: present"
 # This remains path-only. Raw key material is handed to the extension through
 # Keychain in properly signed/provisioned builds, not through this file.
 APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
-if [ -d "$APP_GROUP_DIR" ]; then
+if [ "${TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY:-0}" = "1" ]; then
+    echo "==> Skipping App Group config mirror"
+elif [ -d "$APP_GROUP_DIR" ]; then
     APP_GROUP_CONFIG="$APP_GROUP_DIR/config.json"
     APP_GROUP_TMP="${APP_GROUP_CONFIG}.$$"
     if copy_app_group_config "$CONFIG_JSON" "$APP_GROUP_TMP" 2>/dev/null \

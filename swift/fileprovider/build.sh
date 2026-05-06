@@ -436,6 +436,17 @@ if [ "$FILEPROVIDER_TESTING_MODE_ENTITLEMENT" = "1" ]; then
         || /usr/libexec/PlistBuddy \
             -c 'Set :com.apple.developer.fileprovider.testing-mode true' \
             "$HOST_ENTITLEMENTS"
+
+    echo "==> Enabling testing-mode FileProvider socket sandbox exception"
+    /usr/libexec/PlistBuddy \
+        -c 'Add :com.apple.security.temporary-exception.files.home-relative-path.read-write array' \
+        "$EXT_ENTITLEMENTS" 2>/dev/null || true
+    /usr/libexec/PlistBuddy \
+        -c 'Add :com.apple.security.temporary-exception.files.home-relative-path.read-write:0 string /Library/Application Support/io.tinyland.tcfs/' \
+        "$EXT_ENTITLEMENTS" 2>/dev/null \
+        || /usr/libexec/PlistBuddy \
+            -c 'Set :com.apple.security.temporary-exception.files.home-relative-path.read-write:0 /Library/Application Support/io.tinyland.tcfs/' \
+            "$EXT_ENTITLEMENTS"
 fi
 
 # --- Code sign (inside-out: extensions first, then host app) ---

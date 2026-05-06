@@ -192,11 +192,18 @@ check_testing_mode_is_explicit_opt_in() {
 
   assert_contains "$build_script" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT"
   assert_contains "$build_script" "com.apple.developer.fileprovider.testing-mode"
+  assert_contains "$build_script" "com.apple.security.temporary-exception.files.home-relative-path.read-write"
+  assert_contains "$build_script" "/Library/Application Support/io.tinyland.tcfs/"
 
   if grep -Fq "com.apple.developer.fileprovider.testing-mode" \
     "$REPO_ROOT/swift/fileprovider/resources/HostApp.entitlements" \
     "$REPO_ROOT/swift/fileprovider/resources/Extension.entitlements"; then
     printf 'FileProvider testing-mode entitlement must stay out of default production entitlements\n' >&2
+    exit 1
+  fi
+  if grep -Fq "com.apple.security.temporary-exception.files.home-relative-path.read-write" \
+    "$REPO_ROOT/swift/fileprovider/resources/Extension.entitlements"; then
+    printf 'FileProvider temporary path exception must stay out of default production entitlements\n' >&2
     exit 1
   fi
 }
@@ -627,6 +634,8 @@ extract_step_from_workflow \
 bash -n "$DERIVE_RUN_PATHS_STEP"
 assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$RUNNER_TEMP/tcfs-config\""
 assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_PATH=\"\$CONFIG_DIR/config.toml\""
+assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\$HOME/Library/Application Support/io.tinyland.tcfs/tcfsd.sock\""
+assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\${APP_GROUP_DIR}/tcfsd.sock\""
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$HOME/.config/tcfs\""
 
 WRITE_LIVE_CONFIG_STEP="${TMPDIR}/write-live-config.sh"
@@ -637,11 +646,22 @@ extract_step_from_workflow \
   "$WRITE_LIVE_CONFIG_STEP"
 bash -n "$WRITE_LIVE_CONFIG_STEP"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "endpoint = \"\${TCFS_SMOKE_S3_ENDPOINT}\""
+assert_contains "$WRITE_LIVE_CONFIG_STEP" "fileprovider_socket = \"\${FILEPROVIDER_SOCKET}\""
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "bucket = \"\${TCFS_SMOKE_S3_BUCKET}\""
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "enforce_tls = true"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "[crypto]"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "enabled = true"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "master_key_file = \"\${MASTER_KEY_PATH}\""
+
+PROVISION_FILEPROVIDER_CONFIG_STEP="${TMPDIR}/provision-fileprovider-config.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Provision FileProvider config" \
+  "$PROVISION_FILEPROVIDER_CONFIG_STEP"
+bash -n "$PROVISION_FILEPROVIDER_CONFIG_STEP"
+assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY=1"
+assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "swift/fileprovider/provision-config.sh \"\$CONFIG_PATH\""
 
 SEED_REMOTE_FIXTURE_STEP="${TMPDIR}/seed-remote-fixture.sh"
 extract_step_from_workflow \
@@ -669,6 +689,15 @@ assert_contains "$VERIFY_E2EE_STEP" "No-crypto pull timed out"
 assert_contains "$VERIFY_E2EE_STEP" "run_bounded e2ee-pull.log 120"
 assert_contains "$VERIFY_E2EE_STEP" "E2EE pull failed or timed out"
 assert_contains "$VERIFY_E2EE_STEP" "cmp -s \"\$EXPECTED_CONTENT_FILE\" \"\$RUNNER_TEMP/e2ee-pull-check\""
+
+START_DAEMON_STEP="${TMPDIR}/start-tcfsd-with-live-config.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Start tcfsd with live config" \
+  "$START_DAEMON_STEP"
+bash -n "$START_DAEMON_STEP"
+assert_contains "$START_DAEMON_STEP" "for socket in /tmp/tcfsd-gha.sock \"\${FILEPROVIDER_SOCKET}\""
 
 POSTINSTALL_HARNESS_STEP="${TMPDIR}/run-macos-postinstall-harness.sh"
 extract_step_from_workflow \
