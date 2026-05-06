@@ -666,6 +666,30 @@ wait_for_expected_parent() {
   exit 1
 }
 
+wait_for_expected_parent_chain() {
+  local target_parent="$1"
+  local rel_parent
+  local current
+  local component
+
+  [[ "$target_parent" == "$CLOUD_ROOT" ]] && return
+  [[ "$target_parent" == "$CLOUD_ROOT/"* ]] || {
+    echo "expected parent is outside CloudStorage root: $target_parent" >&2
+    exit 1
+  }
+
+  rel_parent="${target_parent#"$CLOUD_ROOT"/}"
+  current="$CLOUD_ROOT"
+
+  IFS='/' read -r -a components <<<"$rel_parent"
+  for component in "${components[@]}"; do
+    [[ -n "$component" ]] || continue
+    current="$current/$component"
+    wait_for_expected_parent "$current"
+    nudge_expected_parent_enumeration "$current"
+  done
+}
+
 nudge_cloud_root_enumeration() {
   local root="$1"
   local fileproviderctl_help=""
@@ -925,8 +949,7 @@ enumerate_root "$CLOUD_ROOT"
 if [[ -n "$EXPECTED_FILE_REL" ]]; then
   EXPECTED_PATH="$CLOUD_ROOT/$EXPECTED_FILE_REL"
   EXPECTED_PARENT="$(dirname "$EXPECTED_PATH")"
-  wait_for_expected_parent "$EXPECTED_PARENT"
-  nudge_expected_parent_enumeration "$EXPECTED_PARENT"
+  wait_for_expected_parent_chain "$EXPECTED_PARENT"
   wait_for_expected_file "$EXPECTED_PATH"
   request_expected_file_download "$EXPECTED_FILE_REL"
   hydrate_expected_file "$EXPECTED_PATH"
