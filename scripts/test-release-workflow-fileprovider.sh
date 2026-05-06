@@ -282,7 +282,8 @@ check_testing_mode_package_workflow() {
   assert_contains "$resolve_assets_step" 'security import "$SIGNING_P12_PATH"'
   # shellcheck disable=SC2016 # Intentional literal assertion against workflow shell.
   assert_contains "$resolve_assets_step" 'security list-keychains -d user -s "$SIGNING_KEYCHAIN"'
-  assert_contains "$resolve_assets_step" "awk '/Apple Development|Mac Developer|Mac App Development/"
+  # shellcheck disable=SC2016 # Intentional literal assertion against workflow shell.
+  assert_contains "$resolve_assets_step" 'match($0, /"[^"]+"/)'
   assert_contains "$resolve_assets_step" "security unlock-keychain"
   assert_contains "$resolve_assets_step" "security set-key-partition-list"
   assert_contains "$resolve_assets_step" "codesign cannot use its private key noninteractively"

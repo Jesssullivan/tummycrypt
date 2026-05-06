@@ -135,7 +135,12 @@ printf '%s\n' "$IDENTITIES"
 
 if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(
-    awk '/Apple Development|Mac Developer|Mac App Development/ { sub(/^[[:space:]]*[0-9]+\) /, ""); print $1; exit }' <<<"$IDENTITIES"
+    awk '/Apple Development|Mac Developer|Mac App Development/ {
+      if (match($0, /"[^"]+"/)) {
+        print substr($0, RSTART + 1, RLENGTH - 2)
+        exit
+      }
+    }' <<<"$IDENTITIES"
   )"
 fi
 [[ -n "$IDENTITY" ]] || fail "no Apple/Mac development identity found in imported p12"

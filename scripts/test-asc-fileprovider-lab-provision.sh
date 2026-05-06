@@ -59,7 +59,8 @@ assert_contains "$P12_HELP_OUT" "--p12 <path>"
 assert_contains "$P12_HELP_OUT" "--p12-password-file <path>"
 assert_contains "$P12_HELP_OUT" "--identity <name-or-sha1>"
 assert_contains "$P12_PROBE" "security list-keychains -d user -s"
-assert_contains "$P12_PROBE" "awk '/Apple Development|Mac Developer|Mac App Development/"
+# shellcheck disable=SC2016 # The test intentionally checks the literal awk source.
+assert_contains "$P12_PROBE" 'match($0, /"[^"]+"/)'
 assert_contains "$ASC_SCRIPT" "security"
 assert_contains "$ASC_SCRIPT" "export"
 assert_contains "$ASC_SCRIPT" "pkcs12"

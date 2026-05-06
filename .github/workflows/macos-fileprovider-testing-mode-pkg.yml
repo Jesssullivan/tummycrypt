@@ -263,7 +263,7 @@ jobs:
           case "$SIGNING_IDENTITY_INPUT" in
             auto-development)
               SIGNING_IDENTITY="$(find_identities \
-                | awk '/Apple Development|Mac Developer|Mac App Development/ { sub(/^[[:space:]]*[0-9]+\) /, ""); print $1; exit }' || true)"
+                | awk '/Apple Development|Mac Developer|Mac App Development/ { if (match($0, /"[^"]+"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit } }' || true)"
               ;;
             auto)
               echo "::error::Developer ID auto-detection is not valid for the testing-mode lane; use auto-development or an Apple/Mac development identity"
