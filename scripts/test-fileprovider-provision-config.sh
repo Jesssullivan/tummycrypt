@@ -57,6 +57,7 @@ jq -e \
 
 grep -Fq "Master key file: present" "${TMPDIR}/provision.out"
 grep -Fq "Also written to $APP_GROUP_JSON" "${TMPDIR}/provision.out"
+grep -Fq "TCFS_FILEPROVIDER_APP_GROUP_COPY_TIMEOUT" "$SCRIPT"
 
 jq -e \
   --arg master_key_file "$MASTER_KEY_FILE" \

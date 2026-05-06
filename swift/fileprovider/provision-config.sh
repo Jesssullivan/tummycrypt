@@ -32,6 +32,36 @@ echo "==> Reading config from $CONFIG_TOML"
 extract_toml() {
     grep -E "^[[:space:]]*$1[[:space:]]*=" "$CONFIG_TOML" 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*"([^"]*)".*/\1/' || true
 }
+
+copy_app_group_config() {
+    local src="$1"
+    local dst="$2"
+    local timeout_secs="${TCFS_FILEPROVIDER_APP_GROUP_COPY_TIMEOUT:-5}"
+    local pid
+    local waited=0
+
+    case "$timeout_secs" in
+        ''|*[!0-9]*) timeout_secs=5 ;;
+    esac
+
+    cp "$src" "$dst" &
+    pid="$!"
+
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$timeout_secs" ]; then
+            kill "$pid" 2>/dev/null || true
+            perl -e 'select undef, undef, undef, 1.0'
+            kill -KILL "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 124
+        fi
+        perl -e 'select undef, undef, undef, 1.0'
+        waited=$((waited + 1))
+    done
+
+    wait "$pid"
+}
+
 S3_ENDPOINT="$(extract_toml endpoint)"
 S3_BUCKET="$(extract_toml bucket)"
 REMOTE_PREFIX="$(extract_toml remote_prefix)"
@@ -154,8 +184,13 @@ echo "    Credentials: present"
 APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
 if [ -d "$APP_GROUP_DIR" ]; then
     APP_GROUP_CONFIG="$APP_GROUP_DIR/config.json"
-    if cp "$CONFIG_JSON" "$APP_GROUP_CONFIG" 2>/dev/null \
+    APP_GROUP_TMP="${APP_GROUP_CONFIG}.$$"
+    if copy_app_group_config "$CONFIG_JSON" "$APP_GROUP_TMP" 2>/dev/null \
+        && mv -f "$APP_GROUP_TMP" "$APP_GROUP_CONFIG" 2>/dev/null \
         && chmod 600 "$APP_GROUP_CONFIG" 2>/dev/null; then
         echo "==> Also written to $APP_GROUP_CONFIG"
+    else
+        rm -f "$APP_GROUP_TMP" 2>/dev/null || true
+        echo "WARN: Could not mirror config to $APP_GROUP_CONFIG" >&2
     fi
 fi
