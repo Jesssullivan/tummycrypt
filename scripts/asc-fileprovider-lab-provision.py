@@ -403,6 +403,20 @@ def resolve_certificate_by_sha1(
     fail(f"ASC certificate not found for SHA-1 {wanted}")
 
 
+def revoke_certificate_by_sha1(
+    client: ASCClient, sha1: str, certificate_types: list[str]
+) -> str:
+    wanted = normalize_sha1(sha1)
+    if len(wanted) != 40:
+        fail("--revoke-certificate-sha1 must be a full 40-hex SHA-1 fingerprint")
+    for cert in list_certificate_candidates(client, certificate_types):
+        der = certificate_content_der(cert)
+        if sha1_from_der_certificate(der) == wanted:
+            client.request("DELETE", f"/certificates/{cert['id']}")
+            return str(cert["id"])
+    fail(f"ASC certificate not found for SHA-1 {wanted}")
+
+
 def create_certificate_from_csr(
     client: ASCClient, certificate_type: str, csr_content: str
 ) -> tuple[dict[str, Any], bytes]:
@@ -727,6 +741,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--create-certificate", action="store_true", help="create a fresh macOS development cert from a local CSR")
     parser.add_argument("--create-certificate-type", default="", help="ASC CertificateType to use with --create-certificate")
     parser.add_argument("--certificate-sha1", default="")
+    parser.add_argument("--revoke-certificate-sha1", default="", help="revoke this exact existing cert before creating a replacement")
     parser.add_argument("--device-udid", default="")
     parser.add_argument("--output-dir", default="build/asc-fileprovider-lab")
     parser.add_argument("--profiles-dir", default="~/Library/MobileDevice/Provisioning Profiles")
@@ -754,6 +769,13 @@ def main() -> int:
         print(f"config valid: {config_path}")
         print(f"profiles: {len(profiles)}")
         return 0
+
+    early_revoke_sha1 = normalize_sha1(args.revoke_certificate_sha1)
+    if early_revoke_sha1:
+        if not args.apply:
+            fail("--revoke-certificate-sha1 requires --apply")
+        if not args.create_certificate:
+            fail("--revoke-certificate-sha1 requires --create-certificate")
 
     asc_config = config.get("app_store_connect", {})
     key_id = env_first("ASC_KEY_ID", "APP_STORE_CONNECT_API_KEY_ID") or asc_config.get("key_id", "")
@@ -783,6 +805,11 @@ def main() -> int:
     cert_der: bytes
     cert: dict[str, Any]
     p12_path: Path | None = None
+
+    revoke_sha1 = normalize_sha1(args.revoke_certificate_sha1)
+    if revoke_sha1:
+        revoked_id = revoke_certificate_by_sha1(client, revoke_sha1, certificate_types)
+        log(f"revoked ASC certificate: {revoked_id} sha1={revoke_sha1}")
 
     if args.create_certificate:
         if not args.apply:

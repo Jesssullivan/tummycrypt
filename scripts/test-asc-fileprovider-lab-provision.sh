@@ -52,6 +52,7 @@ assert_contains "$HELP_OUT" "--apply"
 assert_contains "$HELP_OUT" "--create-certificate"
 assert_contains "$HELP_OUT" "--create-certificate-type"
 assert_contains "$HELP_OUT" "--certificate-sha1"
+assert_contains "$HELP_OUT" "--revoke-certificate-sha1"
 
 P12_HELP_OUT="${TMPDIR}/p12-help.out"
 bash "$P12_PROBE" --help >"$P12_HELP_OUT"
@@ -64,6 +65,7 @@ assert_contains "$P12_PROBE" 'match($0, /"[^"]+"/)'
 assert_contains "$ASC_SCRIPT" "security"
 assert_contains "$ASC_SCRIPT" "export"
 assert_contains "$ASC_SCRIPT" "pkcs12"
+assert_contains "$ASC_SCRIPT" 'DELETE", f"/certificates/{cert'
 assert_contains "$ASC_SCRIPT" "/usr/sbin/system_profiler"
 
 BAD_CONFIG="${TMPDIR}/bad.json"
@@ -75,6 +77,12 @@ JSON
 assert_fails_contains \
   "config.profiles must not be empty" \
   python3 "$ASC_SCRIPT" --config "$BAD_CONFIG" --validate-config
+
+assert_fails_contains \
+  "--revoke-certificate-sha1 requires --apply" \
+  python3 "$ASC_SCRIPT" \
+    --config "$CONFIG" \
+    --revoke-certificate-sha1 591EACF40DB1A8CD7B6A56E23D4DCB62A1E310C1
 
 python3 - "$CONFIG" <<'PY'
 import json

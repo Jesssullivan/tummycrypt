@@ -96,7 +96,9 @@ system_profiler SPHardwareDataType \
 ```
 
 Create or select an Apple Development certificate available to the build
-machine. Then create two Mac App Development profiles for the registered Mac.
+machine. For ASC automation this is certificate type `DEVELOPMENT`, even though
+the provisioning profiles themselves are `MAC_APP_DEVELOPMENT`. Then create two
+Mac App Development profiles for the registered Mac.
 Prefer the ASC-backed automation below over manual portal profile downloads:
 
 | Bundle | Profile type | Required profile contents |
@@ -168,10 +170,9 @@ scripts/asc-fileprovider-lab-provision.py \
 ```
 
 The more repeatable path is to let PZM generate a fresh private key and CSR,
-have ASC issue a Mac App Development certificate, and bind the generated Mac
-App Development profiles to that new certificate. This avoids reusing a
-damaged login-keychain identity and avoids the ASC quota conflict for an
-already-current generic Development certificate.
+have ASC issue an Apple Development certificate, and bind the generated Mac App
+Development profiles to that new certificate. This avoids reusing a damaged
+login-keychain identity.
 
 ```bash
 mkdir -p build/asc-fileprovider-lab
@@ -186,19 +187,37 @@ scripts/asc-fileprovider-lab-provision.py \
   --create-certificate
 ```
 
+If ASC refuses that with a current Development certificate conflict and the
+current certificate is known-bad for noninteractive PZM signing, rotate it
+explicitly by full SHA-1:
+
+```bash
+scripts/asc-fileprovider-lab-provision.py \
+  --apply \
+  --replace \
+  --install \
+  --create-certificate \
+  --create-certificate-type DEVELOPMENT \
+  --revoke-certificate-sha1 <current-apple-development-cert-sha1>
+```
+
+Certificate revocation is destructive Apple-side state. Use it only for the
+lab-owned Apple Development certificate after confirming it is not serving
+another active development lane.
+
 That writes:
 
 - a private key and CSR under `build/asc-fileprovider-lab/`
-- a downloaded Mac App Development certificate by default
+- a downloaded Apple Development certificate by default
 - `tcfs-fileprovider-lab-<sha>.p12` (`security export` on macOS, with an
   OpenSSL fallback elsewhere)
 - stable installed profile filenames:
   `tcfshostdevelopmenttestingmodepzm.provisionprofile` and
   `tcfsfileproviderdevelopmentpzm.provisionprofile`
 
-To intentionally create a generic Apple Development certificate instead, pass
-`--create-certificate-type DEVELOPMENT`. That path can fail with ASC 409 if the
-team already has a current Development certificate or pending request.
+That path can fail with ASC 409 if the team already has a current Development
+certificate or pending request. Use the explicit revocation form above only
+after confirming the current certificate is lab-owned and unusable.
 
 Before dispatching CI, prove the p12 is usable by `codesign` in the same
 security context that will run the build. SSH can list identities while still
