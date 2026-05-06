@@ -404,6 +404,13 @@ jobs:
           enabled = true
           master_key_file = "${MASTER_KEY_PATH}"
 
+          # This smoke proves Finder/FileProvider enumeration and hydration.
+          # CLI fixture checks above already prove live storage + E2EE. Keep the
+          # daemon auth boundary explicit here until FileProvider carries a
+          # session token.
+          [auth]
+          require_session = false
+
           [sync]
           state_db = "${RUNNER_TEMP}/tcfs-state.db"
           sync_root = "${SYNC_ROOT}"

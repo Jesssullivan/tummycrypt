@@ -660,6 +660,8 @@ assert_contains "$WRITE_LIVE_CONFIG_STEP" "enforce_tls = true"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "[crypto]"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "enabled = true"
 assert_contains "$WRITE_LIVE_CONFIG_STEP" "master_key_file = \"\${MASTER_KEY_PATH}\""
+assert_contains "$WRITE_LIVE_CONFIG_STEP" "[auth]"
+assert_contains "$WRITE_LIVE_CONFIG_STEP" "require_session = false"
 
 PROVISION_FILEPROVIDER_CONFIG_STEP="${TMPDIR}/provision-fileprovider-config.sh"
 extract_step_from_workflow \
