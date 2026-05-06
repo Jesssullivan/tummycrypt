@@ -103,11 +103,15 @@ Current lab blocker:
 - the current Mac App Development certificate/profile pair is valid: codesign
   verification passes for the host and extension, embedded profiles decode, and
   `taskgated-helper` allows both host and extension entitlements
+- package run `25454592344` proves the build-output host app reaches Swift
+  `main()` in policy-probe mode and exits 0 with `policyProbe: OK`, despite
+  Gatekeeper assessment rejection
 - `spctl` rejects both bundles, and `syspolicy_check` reports the installed app
   is not distribution-ready because it has no notarization ticket
 - `syspolicy_check notary-submission` also reports a fatal Gatekeeper rejection
   for `TCFSProvider.app/Contents/MacOS/TCFSProvider`
-- the direct host-app launch emits no instrumented stderr, then
+- postinstall smoke run `25454681083` shows the installed host-app launch emits
+  no instrumented stderr, then
   AppleSystemPolicy denies the host process
 - `fileproviderd` launches the extension process, then AppleSystemPolicy also
   terminates the extension before the evict/rehydrate lifecycle can complete
@@ -213,11 +217,13 @@ work should be ordered like this:
    - prove `cat` hydrates and returns exact content
    - prove dehydrate/unsync followed by rehydrate
 2. **Apple desktop acceptance**
-   - stop retrying hosted production packages until FileProvider can be enabled
-   - treat PZM testing-mode read/hydrate as green
-   - extend the named Finder/FileProvider smoke into evict/rehydrate,
-     mutate/conflict, and visible status
-   - keep production Developer ID clean-host Finder acceptance separate from
+  - stop retrying hosted production packages until FileProvider can be enabled
+  - treat PZM testing-mode read/hydrate as green
+  - use the installed-host policy probe in the PZM postinstall workflow to
+    classify install/provenance failures before deeper Finder assertions
+  - extend the named Finder/FileProvider smoke into evict/rehydrate,
+    mutate/conflict, and visible status
+  - keep production Developer ID clean-host Finder acceptance separate from
      non-production testing-mode evidence
 3. **odrive-style lifecycle productionization**
    - surface `FileSyncStatus`, progress, and conflict state in CLI/TUI/Finder
@@ -249,8 +255,9 @@ As of May 6, 2026, the narrow GitHub backlog is:
   - `#280`: distribution install and upgrade proof umbrella
   - `#308`: Debian 12 `.deb` support-floor decision
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
-    testing-mode enumerate/hydrate is green; production Finder lifecycle proof
-    remains open.
+    testing-mode enumerate/hydrate is green; `v0.12.12` lifecycle proof is
+    blocked at installed Mac Development policy, and production Finder
+    lifecycle proof remains open.
 - Adjacent non-M10 lanes
   - `#298`: residual Civo TCFS PVC retirement after on-prem recovery
   - `#327`: TCFS on-prem OpenTofu migration and cutover

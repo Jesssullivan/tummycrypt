@@ -595,6 +595,22 @@ assert_contains "$INSTALL_BINARY_SMOKE_STEP" "-u AWS_ACCESS_KEY_ID"
 assert_contains "$INSTALL_BINARY_SMOKE_STEP" "-u AWS_SECRET_ACCESS_KEY"
 assert_contains "$INSTALL_BINARY_SMOKE_STEP" "scripts/install-smoke.sh --expected-version \"\${VERSION}\""
 
+INSTALLED_POLICY_PROBE_STEP="${TMPDIR}/probe-installed-fileprovider-app-launch-policy.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Probe installed FileProvider app launch policy" \
+  "$INSTALLED_POLICY_PROBE_STEP"
+bash -n "$INSTALLED_POLICY_PROBE_STEP"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "/Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "installed-host-policy-probe.log"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "installed-host-policy-probe.exit"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY=1"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "exit=skipped"
+assert_contains "$INSTALLED_POLICY_PROBE_STEP" "exit 0"
+
 VALIDATE_STORAGE_STEP="${TMPDIR}/validate-release-inputs-and-storage-secrets.sh"
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \

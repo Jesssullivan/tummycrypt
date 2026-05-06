@@ -15,7 +15,7 @@ M10 usage-reality issues are closed.
 | Linux mounted FS | Code and in-process VFS tests are strong; real-host FUSE evidence is not yet archived for the full user story | `tcfs-vfs` tests and mounted helper regressions | Run `task lazy:linux-demo` on a FUSE-capable host and archive evidence |
 | Physical `.tc` / `.tcf` stubs | Stub wire format, parse/write, and compatibility are tested | `tcfs-vfs` and daemon unsync tests | Product-level recursive safe-unsync acceptance, including dirty-child refusal |
 | macOS CLI + daemon | Package install, signing, E2EE, storage, and daemon startup are repeatedly proven | `v0.12.12` release and PZM smoke pre-harness stages | Keep install smoke green while FileProvider lab work continues |
-| macOS Finder/FileProvider, lab | `v0.12.11` proved testing-mode enumerate/hydrate; `v0.12.12` evict/rehydrate attempt is blocked by Gatekeeper/AppleSystemPolicy for the Mac Development app, before the direct host launch reaches Swift `main()` and after `fileproviderd` starts the extension | PZM run `25446601375` green for read/hydrate; run `25453088909` shows valid host/extension signatures and profiles, `taskgated-helper` profile acceptance, `spctl` rejection, provenance xattrs, and AppleSystemPolicy denial for both host and extension processes | Decide the lab trust model: Xcode/local-development launch path, a dedicated Apple-approved distribution shape, or an explicit non-production Gatekeeper bypass on PZM |
+| macOS Finder/FileProvider, lab | `v0.12.11` proved testing-mode enumerate/hydrate; `v0.12.12` evict/rehydrate attempt is blocked by Gatekeeper/AppleSystemPolicy for the installed Mac Development app and extension. The build-output app can reach Swift `main()` in policy-probe mode, so the remaining split is install/provenance/service launch rather than code startup. | PZM run `25446601375` green for read/hydrate; package run `25454592344` has `policyProbe: OK` from the build output despite `spctl` rejection; smoke run `25454681083` again shows valid signatures/profiles plus installed host and extension AppleSystemPolicy denial | Decide the lab trust model: Xcode/local-development launch path, a dedicated Apple-approved distribution shape, or an explicit non-production Gatekeeper bypass on PZM |
 | macOS Finder/FileProvider, production | Not proven on arbitrary clean Developer ID hosts | Local `neo` source-tree proof and production package install/signing gates | Separate clean-host production Finder enablement from PZM testing-mode evidence |
 | iOS | Proof-of-concept only | Swift build/type-check scaffold | Decide whether to keep as scaffold or create a real Files.app device lane |
 | On-prem backend | Live endpoint client smoke works; source-owned migration is still open | `neo-honey` smoke using MagicDNS endpoints | Complete `#327`/`#298` migration and archive post-cutover storage/NATS proof |
@@ -49,21 +49,28 @@ Current blocker:
 
 1. `taskgated-helper` accepts the host and extension profiles for
    `io.tinyland.tcfs` and `io.tinyland.tcfs.fileprovider`.
-2. The direct host-app launch writes no host stderr event, so it is not reaching
-   the instrumented Swift startup path.
-3. `spctl --assess --type execute` rejects both the host app and extension.
-4. The installed app tree carries `com.apple.provenance` xattrs, but stripping
+2. Package run `25454592344` proves the build-output host app reaches Swift
+   `main()` in `TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY=1` mode and exits 0
+   with `policyProbe: OK`, even though `spctl` rejects the bundle.
+3. Smoke run `25454681083` proves the installed host app under
+   `/Applications/TCFSProvider.app` still writes no host stderr event in the
+   full harness; AppleSystemPolicy denies that installed host process before
+   the instrumented Swift startup path emits.
+4. `spctl --assess --type execute` rejects both the installed host app and
+   extension.
+5. The installed app tree carries `com.apple.provenance` xattrs, but stripping
    provenance/quarantine from a temporary copy does not make Gatekeeper accept
    the Mac Development signature.
-5. `syspolicy_check distribution` reports a missing notarization ticket.
-6. `syspolicy_check notary-submission` reports a fatal Gatekeeper rejection for
+6. `syspolicy_check distribution` reports a missing notarization ticket.
+7. `syspolicy_check notary-submission` reports a fatal Gatekeeper rejection for
    `TCFSProvider.app/Contents/MacOS/TCFSProvider`.
-7. `fileproviderd` starts the extension process.
-8. AppleSystemPolicy terminates both processes:
+8. `fileproviderd` starts the extension process.
+9. AppleSystemPolicy terminates both installed processes:
    `Security policy would not allow process ... TCFSProvider` and
    `Security policy would not allow process ... TCFSFileProvider`.
-9. The current evidence points to a Mac Development-vs-Gatekeeper trust-model
-   issue, not to the TCFS storage, E2EE, daemon, profile, or entitlement layers.
+10. The current evidence points to a Mac Development-vs-Gatekeeper trust-model
+    issue around installed package/service launch, not to the TCFS storage,
+    E2EE, daemon, profile, entitlement, or host source startup layers.
 
 ## Parallel Work Packets
 

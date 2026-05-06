@@ -4,8 +4,11 @@ As of May 6, 2026, the hosted production FileProvider proof is blocked by
 Apple's profile/user-enable boundary. The registered-Mac testing-mode lane has
 one green read/hydrate proof on `petting-zoo-mini`, but the current
 evict/rehydrate lifecycle package is blocked by Gatekeeper/AppleSystemPolicy
-rejecting the Mac Development-signed app at launch. Testing-mode proof is still
-not the same as production Developer ID Finder lifecycle acceptance.
+rejecting the installed Mac Development-signed app and extension at launch.
+The same package build output can reach Swift `main()` in policy-probe mode, so
+the remaining gap is the lab install/provenance/service trust model.
+Testing-mode proof is still not the same as production Developer ID Finder
+lifecycle acceptance.
 
 The production lane and testing-mode lane must stay separate:
 
@@ -87,8 +90,9 @@ Why:
 This does not make the packaged artifact a Gatekeeper-accepted distribution
 artifact. Current PZM evidence shows a Mac Development-signed app installed
 from the lab package is rejected by `spctl` and then killed by
-AppleSystemPolicy. Treat that as a lab trust-model problem, not as a storage or
-FileProvider implementation failure.
+AppleSystemPolicy, while the same build output reaches Swift `main()` in
+policy-probe mode before install. Treat that as a lab trust-model problem, not
+as a storage or FileProvider implementation failure.
 
 ## Required Apple Assets
 
@@ -319,6 +323,14 @@ Apple runtime policy boundary:
   daemon startup again, then failed the FileProvider lifecycle harness because
   `spctl` rejected both bundles and AppleSystemPolicy denied both
   `TCFSProvider` and `TCFSFileProvider`
+- testing-mode package run `25454592344` added the build-output policy probe:
+  `spctl` still rejected the app, but `TCFSProvider` printed `policyProbe: OK`
+  and exited 0 before install
+- post-install smoke run `25454681083` installed that package and again passed
+  install/signing/profile/E2EE/daemon startup, then failed with an empty
+  `harness/host-domain-launch.log`, AppleSystemPolicy denial for the installed
+  host binary, and AppleSystemPolicy denial for the extension from
+  `fileproviderd`
 
 ## Lab Runner Enrollment
 
@@ -474,7 +486,8 @@ Feature goals remain:
 2. Keep `spctl`, `syspolicy_check`, xattr, codesign, embedded-profile,
    `taskgated-helper`, `amfid`, and AppleSystemPolicy diagnostics attached to
    every FileProvider lab failure.
-3. Once the trust model is explicit, rerun the `v0.12.12` PZM dispatch with the
-   generated p12 and profiles.
+3. Rerun the `v0.12.12` PZM dispatch with the installed-host policy probe now
+   present in the postinstall workflow, so the artifact records whether the
+   installed host can reach Swift `main()` before the full FileProvider harness.
 4. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
    gates.

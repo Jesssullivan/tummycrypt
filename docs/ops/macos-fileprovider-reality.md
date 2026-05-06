@@ -67,11 +67,12 @@ sync-root stub representation, not the desired primary Finder UX.
   profile, E2EE, storage, and daemon startup gates. Its FileProvider lifecycle
   attempt currently fails at runtime policy: codesign verification and embedded
   profile evidence pass for both bundles, `taskgated-helper` accepts the host
-  and extension provisioning profiles, `spctl` rejects both bundles,
-  `syspolicy_check` reports the app lacks a notarization ticket and has a fatal
-  Gatekeeper rejection, the direct host launch is denied before the
-  instrumented Swift startup path emits stderr, and AppleSystemPolicy also
-  terminates the extension after `fileproviderd` starts it.
+  and extension provisioning profiles, and the build-output app reaches Swift
+  `main()` in policy-probe mode. After package install, `spctl` rejects both
+  bundles, `syspolicy_check` reports the app lacks a notarization ticket and
+  has a fatal Gatekeeper rejection, AppleSystemPolicy denies the installed host
+  before Swift startup logs, and AppleSystemPolicy also terminates the
+  extension after `fileproviderd` starts it.
 
 ## Important Constraints
 
@@ -603,6 +604,18 @@ May 6, 2026 testing-mode evidence updated the current blocker:
   the installed app lacks a notarization ticket and has a fatal Gatekeeper
   rejection, and AppleSystemPolicy denied both `TCFSProvider` and
   `TCFSFileProvider`.
+- PZM testing-mode package run `25454592344` rebuilt from `9399d36` and added a
+  build-output policy probe. That artifact still shows `spctl` rejection, but
+  the host app prints `testingMode: requested alwaysEnabled for FileProvider
+  domain` and `policyProbe: OK`, then exits 0. This proves the Swift host
+  startup path itself is runnable in the runner context before install.
+- PZM smoke run `25454681083` installed that package and passed the same
+  install/signing/profile/E2EE/daemon gates, but the harness failed again.
+  Diagnostics show an empty `harness/host-domain-launch.log`,
+  AppleSystemPolicy denial for
+  `/Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider`, and
+  AppleSystemPolicy denial for
+  `/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/MacOS/TCFSFileProvider`.
 
 So the testing-mode read/hydrate lane is proven, but the current
 evict/rehydrate package is blocked by the Mac Development lab trust model. The

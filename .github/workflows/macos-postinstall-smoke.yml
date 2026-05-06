@@ -381,6 +381,65 @@ jobs:
             -u AWS_SECRET_ACCESS_KEY \
             bash scripts/install-smoke.sh --expected-version "${VERSION}"
 
+      - name: Probe installed FileProvider app launch policy
+        if: ${{ github.event.inputs.fileprovider_testing_mode == 'true' }}
+        shell: bash
+        run: |
+          set +e
+          HOST_BIN="/Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider"
+          LOG_PATH="$LOG_DIR/installed-host-policy-probe.log"
+          EXIT_PATH="$LOG_DIR/installed-host-policy-probe.exit"
+
+          run_bounded() {
+            local timeout_secs="$1"
+            shift
+
+            local pid
+            local waited=0
+            local status=0
+
+            "$@" > "$LOG_PATH" 2>&1 &
+            pid="$!"
+
+            while kill -0 "$pid" 2>/dev/null; do
+              if (( waited >= timeout_secs )); then
+                kill "$pid" 2>/dev/null || true
+                perl -e 'select undef, undef, undef, 1.0'
+                kill -KILL "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                echo "timed out after ${timeout_secs}s" >> "$LOG_PATH"
+                return 124
+              fi
+              perl -e 'select undef, undef, undef, 1.0'
+              waited=$((waited + 1))
+            done
+
+            wait "$pid" || status=$?
+            return "$status"
+          }
+
+          if [[ ! -x "$HOST_BIN" ]]; then
+            echo "missing executable host binary: $HOST_BIN" > "$LOG_PATH"
+            echo "exit=127" > "$EXIT_PATH"
+            exit 0
+          fi
+
+          if ! strings "$HOST_BIN" | grep -Fq "TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY"; then
+            echo "installed host does not contain policy-probe support; skipping" > "$LOG_PATH"
+            echo "exit=skipped" > "$EXIT_PATH"
+            exit 0
+          fi
+
+          run_bounded 15 env \
+            TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
+            TCFS_FILEPROVIDER_HOST_POLICY_PROBE_ONLY=1 \
+            TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1 \
+            "$HOST_BIN"
+          status=$?
+          echo "exit=$status" > "$EXIT_PATH"
+          cat "$LOG_PATH" || true
+          exit 0
+
       - name: Write live config
         shell: bash
         run: |
