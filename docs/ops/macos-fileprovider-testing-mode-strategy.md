@@ -168,11 +168,16 @@ scripts/asc-fileprovider-lab-provision.py \
 ```
 
 The more repeatable path is to let PZM generate a fresh private key and CSR,
-have ASC issue the Apple Development certificate, and bind the generated Mac
-App Development profiles to that new certificate:
+have ASC issue a Mac App Development certificate, and bind the generated Mac
+App Development profiles to that new certificate. This avoids reusing a
+damaged login-keychain identity and avoids the ASC quota conflict for an
+already-current generic Development certificate.
 
 ```bash
-export TCFS_FILEPROVIDER_LAB_P12_PASSWORD="$(openssl rand -hex 16)"
+mkdir -p build/asc-fileprovider-lab
+openssl rand -hex 16 > build/asc-fileprovider-lab/p12-password.txt
+chmod 600 build/asc-fileprovider-lab/p12-password.txt
+export TCFS_FILEPROVIDER_LAB_P12_PASSWORD="$(cat build/asc-fileprovider-lab/p12-password.txt)"
 
 scripts/asc-fileprovider-lab-provision.py \
   --apply \
@@ -184,12 +189,16 @@ scripts/asc-fileprovider-lab-provision.py \
 That writes:
 
 - a private key and CSR under `build/asc-fileprovider-lab/`
-- a downloaded Apple Development certificate
+- a downloaded Mac App Development certificate by default
 - `tcfs-fileprovider-lab-<sha>.p12` (`security export` on macOS, with an
   OpenSSL fallback elsewhere)
 - stable installed profile filenames:
   `tcfshostdevelopmenttestingmodepzm.provisionprofile` and
   `tcfsfileproviderdevelopmentpzm.provisionprofile`
+
+To intentionally create a generic Apple Development certificate instead, pass
+`--create-certificate-type DEVELOPMENT`. That path can fail with ASC 409 if the
+team already has a current Development certificate or pending request.
 
 Before dispatching CI, prove the p12 is usable by `codesign` in the same
 security context that will run the build. SSH can list identities while still
@@ -198,7 +207,8 @@ not necessarily about the GitHub runner LaunchAgent.
 
 ```bash
 scripts/macos-codesign-p12-probe.sh \
-  --p12 build/asc-fileprovider-lab/tcfs-fileprovider-lab-<sha>.p12
+  --p12 build/asc-fileprovider-lab/tcfs-fileprovider-lab-<sha>.p12 \
+  --p12-password-file build/asc-fileprovider-lab/p12-password.txt
 ```
 
 Then dispatch the lab package lane with the generated p12:
@@ -207,7 +217,8 @@ Then dispatch the lab package lane with the generated p12:
 scripts/macos-fileprovider-testing-mode-dispatch.sh \
   --tag v0.12.7 \
   --runner-label petting-zoo-mini \
-  --signing-p12-path ~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-<sha>.p12
+  --signing-p12-path ~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-<sha>.p12 \
+  --signing-p12-password-file ~/git/tummycrypt/build/asc-fileprovider-lab/p12-password.txt
 ```
 
 The default mode is non-mutating. `--apply` is required before the ASC script
@@ -420,14 +431,17 @@ Feature goals remain:
 2. Keep `config/macos-fileprovider-lab.asc.json` pointed at PZM's registered
    Provisioning UDID.
 3. On `petting-zoo-mini`, run the ASC provisioner with
-   `--apply --replace --install --create-certificate` so the private key,
-   certificate, p12, and profiles are generated from one controlled lane.
-4. Run `scripts/macos-codesign-p12-probe.sh --p12 <generated.p12>` from the
-   runner/GUI security context where possible.
+   `--apply --replace --install --create-certificate` so the private key, Mac
+   App Development certificate, p12, and profiles are generated from one
+   controlled lane.
+4. Run `scripts/macos-codesign-p12-probe.sh --p12 <generated.p12>
+   --p12-password-file <password-file>` from the runner/GUI security context
+   where possible.
 5. Run the streamed profile inventory gate with
    `--require-host-entitlement com.apple.developer.fileprovider.testing-mode
    --strict`.
 6. Dispatch the self-hosted FileProvider testing-mode smoke against `v0.12.7`
-   with `--signing-p12-path <generated.p12>`.
+   with `--signing-p12-path <generated.p12>` and
+   `--signing-p12-password-file <password-file>`.
 7. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
    gates.

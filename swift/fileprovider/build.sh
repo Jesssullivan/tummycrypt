@@ -14,7 +14,7 @@
 # Signing identity:
 #   - omitted or "-":   ad-hoc signing (development)
 #   - "auto":           auto-detect Developer ID Application from Keychain
-#   - "auto-development": auto-detect Apple Development from Keychain
+#   - "auto-development": auto-detect Apple/Mac development from Keychain
 #   - other string:     use as explicit codesign identity
 
 set -euo pipefail
@@ -120,12 +120,12 @@ team_id_from_profile() {
 # Auto-detect a signing identity from Keychain.
 if [ "$SIGNING_IDENTITY" = "auto" ] || [ "$SIGNING_IDENTITY" = "auto-development" ]; then
   if [ "$SIGNING_IDENTITY" = "auto-development" ]; then
-    IDENTITY_PATTERN="Apple Development"
+    IDENTITY_PATTERN="Apple Development|Mac Developer|Mac App Development"
   else
     IDENTITY_PATTERN="Developer ID Application"
   fi
 
-  SIGNING_IDENTITY=$(find_codesign_identities | grep "$IDENTITY_PATTERN" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
+  SIGNING_IDENTITY=$(find_codesign_identities | grep -E "$IDENTITY_PATTERN" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
   if [ -z "$SIGNING_IDENTITY" ]; then
     echo "WARNING: No $IDENTITY_PATTERN identity found in Keychain, falling back to ad-hoc" >&2
     SIGNING_IDENTITY="-"

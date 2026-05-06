@@ -11,7 +11,8 @@ Usage: scripts/macos-codesign-p12-probe.sh --p12 <path> [options]
 Options:
   --p12 <path>                  p12 identity to import
   --p12-password <value>        p12 password (default: $TCFS_FILEPROVIDER_LAB_P12_PASSWORD or empty)
-  --identity <name-or-sha1>     identity to sign with (default: first Apple Development identity)
+  --p12-password-file <path>    read p12 password from a local file
+  --identity <name-or-sha1>     identity to sign with (default: first Apple/Mac development identity)
   --keychain-password <value>   temporary keychain password (default: generated)
   --keep-keychain               print and keep the temporary keychain for debugging
   -h, --help                    show help
@@ -25,6 +26,7 @@ fail() {
 
 P12_PATH=""
 P12_PASSWORD="${TCFS_FILEPROVIDER_LAB_P12_PASSWORD:-}"
+P12_PASSWORD_FILE=""
 IDENTITY=""
 KEYCHAIN_PASSWORD=""
 KEEP_KEYCHAIN=0
@@ -39,6 +41,11 @@ while [[ $# -gt 0 ]]; do
     --p12-password)
       [[ $# -ge 2 ]] || fail "--p12-password requires a value"
       P12_PASSWORD="$2"
+      shift 2
+      ;;
+    --p12-password-file)
+      [[ $# -ge 2 ]] || fail "--p12-password-file requires a value"
+      P12_PASSWORD_FILE="$2"
       shift 2
       ;;
     --identity)
@@ -68,6 +75,10 @@ done
 [[ "$(uname -s)" == "Darwin" ]] || fail "macos-codesign-p12-probe.sh only runs on macOS"
 [[ -n "$P12_PATH" ]] || fail "--p12 is required"
 [[ -f "$P12_PATH" ]] || fail "p12 not found: $P12_PATH"
+if [[ -n "$P12_PASSWORD_FILE" ]]; then
+  [[ -f "$P12_PASSWORD_FILE" ]] || fail "p12 password file not found: $P12_PASSWORD_FILE"
+  P12_PASSWORD="$(<"$P12_PASSWORD_FILE")"
+fi
 
 if [[ -z "$KEYCHAIN_PASSWORD" ]]; then
   KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
@@ -124,10 +135,10 @@ printf '%s\n' "$IDENTITIES"
 
 if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(
-    awk '/Apple Development/ { sub(/^[[:space:]]*[0-9]+\) /, ""); print $1; exit }' <<<"$IDENTITIES"
+    awk '/Apple Development|Mac Developer|Mac App Development/ { sub(/^[[:space:]]*[0-9]+\) /, ""); print $1; exit }' <<<"$IDENTITIES"
   )"
 fi
-[[ -n "$IDENTITY" ]] || fail "no Apple Development identity found in imported p12"
+[[ -n "$IDENTITY" ]] || fail "no Apple/Mac development identity found in imported p12"
 if ! grep -F "$IDENTITY" <<<"$IDENTITIES" >/dev/null; then
   fail "requested identity is not present in imported p12: $IDENTITY"
 fi

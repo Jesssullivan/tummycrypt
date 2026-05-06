@@ -85,6 +85,8 @@ assert_contains "$DRY_RUN_KEYCHAIN_OUT" "-f signing_keychain=\"~/Library/Keychai
 DRY_RUN_P12_OUT="${TMPDIR}/dry-run-p12.out"
 # shellcheck disable=SC2088 # The test intentionally passes a literal tilde.
 LITERAL_P12='~/Certificates.p12'
+# shellcheck disable=SC2088 # The test intentionally passes a literal tilde.
+LITERAL_P12_PASSWORD_FILE='~/tcfs-fileprovider-lab.p12-password'
 bash "$SCRIPT" \
   --dry-run \
   --tag v9.9.9 \
@@ -93,6 +95,18 @@ bash "$SCRIPT" \
   --signing-p12-path "$LITERAL_P12" \
   >"$DRY_RUN_P12_OUT"
 assert_contains "$DRY_RUN_P12_OUT" "-f signing_p12_path=\"~/Certificates.p12\""
+
+DRY_RUN_P12_PASSWORD_FILE_OUT="${TMPDIR}/dry-run-p12-password-file.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --signing-p12-path "$LITERAL_P12" \
+  --signing-p12-password-file "$LITERAL_P12_PASSWORD_FILE" \
+  >"$DRY_RUN_P12_PASSWORD_FILE_OUT"
+assert_contains "$DRY_RUN_P12_PASSWORD_FILE_OUT" "-f signing_p12_path=\"~/Certificates.p12\""
+assert_contains "$DRY_RUN_P12_PASSWORD_FILE_OUT" "-f signing_p12_password_file=\"~/tcfs-fileprovider-lab.p12-password\""
 
 DRY_RUN_NO_WATCH_OUT="${TMPDIR}/dry-run-no-watch.out"
 bash "$SCRIPT" \
@@ -171,6 +185,11 @@ assert_fails_contains \
   bash "$SCRIPT" --dry-run --tag v9.9.9 \
     --signing-keychain "$LITERAL_KEYCHAIN" \
     --signing-p12-path "$LITERAL_P12"
+
+assert_fails_contains \
+  "--signing-p12-password-file requires --signing-p12-path" \
+  bash "$SCRIPT" --dry-run --tag v9.9.9 \
+    --signing-p12-password-file "$LITERAL_P12_PASSWORD_FILE"
 
 FAKE_BIN="${TMPDIR}/fake-bin"
 mkdir -p "$FAKE_BIN"
@@ -283,6 +302,23 @@ bash "$SCRIPT" \
   >"${TMPDIR}/p12.out" \
   2>"${TMPDIR}/p12.err"
 assert_contains "$FAKE_LOG" "-f signing_p12_path=\\~/Certificates.p12"
+
+FAKE_LOG="${TMPDIR}/gh-p12-password-file.log"
+PATH="$FAKE_BIN:$PATH" \
+TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+TCFS_FAKE_STATE="$TMPDIR" \
+TCFS_GH_RUN_ID_POLL_SECONDS=0 \
+bash "$SCRIPT" \
+  --tag v1.2.3 \
+  --repo owner/repo \
+  --ref main \
+  --signing-p12-path "$LITERAL_P12" \
+  --signing-p12-password-file "$LITERAL_P12_PASSWORD_FILE" \
+  --no-watch \
+  >"${TMPDIR}/p12-password-file.out" \
+  2>"${TMPDIR}/p12-password-file.err"
+assert_contains "$FAKE_LOG" "-f signing_p12_path=\\~/Certificates.p12"
+assert_contains "$FAKE_LOG" "-f signing_p12_password_file=\\~/tcfs-fileprovider-lab.p12-password"
 
 FAKE_LOG="${TMPDIR}/gh-no-runner.log"
 assert_fails_contains \

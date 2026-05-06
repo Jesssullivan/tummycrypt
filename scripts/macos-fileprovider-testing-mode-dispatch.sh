@@ -17,6 +17,7 @@ RUN_ID_POLL_ATTEMPTS="${TCFS_GH_RUN_ID_POLL_ATTEMPTS:-10}"
 RUN_ID_POLL_SECONDS="${TCFS_GH_RUN_ID_POLL_SECONDS:-2}"
 SIGNING_KEYCHAIN="${TCFS_FILEPROVIDER_LAB_SIGNING_KEYCHAIN:-}"
 SIGNING_P12_PATH="${TCFS_FILEPROVIDER_LAB_SIGNING_P12_PATH:-}"
+SIGNING_P12_PASSWORD_FILE="${TCFS_FILEPROVIDER_LAB_P12_PASSWORD_FILE:-}"
 DRY_RUN=0
 WATCH=1
 SKIP_SECRET_CHECK=0
@@ -33,8 +34,10 @@ Options:
   --ref <ref>             Workflow ref to dispatch (default: main)
   --artifact-name <name>  Package artifact name (default: dist-testing-mode-pkg)
   --runner-label <label>  Registered self-hosted Mac runner label (default: petting-zoo-mini)
-  --signing-keychain <p>  Optional runner-local keychain path for Apple Development signing
+  --signing-keychain <p>  Optional runner-local keychain path for development signing
   --signing-p12-path <p>  Optional runner-local .p12 to import into an ephemeral keychain
+  --signing-p12-password-file <p>
+                          Optional runner-local file containing the .p12 import password
   --package-run-id <id>   Skip package workflow dispatch and smoke an existing package run
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion
@@ -99,6 +102,11 @@ while [[ $# -gt 0 ]]; do
       SIGNING_P12_PATH="$2"
       shift 2
       ;;
+    --signing-p12-password-file)
+      require_value "$1" "${2:-}"
+      SIGNING_P12_PASSWORD_FILE="$2"
+      shift 2
+      ;;
     --package-run-id)
       require_value "$1" "${2:-}"
       PACKAGE_RUN_ID="$2"
@@ -142,6 +150,9 @@ fi
 if [[ -n "$SIGNING_KEYCHAIN" && -n "$SIGNING_P12_PATH" ]]; then
   die "--signing-keychain and --signing-p12-path are mutually exclusive"
 fi
+if [[ -n "$SIGNING_P12_PASSWORD_FILE" && -z "$SIGNING_P12_PATH" ]]; then
+  die "--signing-p12-password-file requires --signing-p12-path"
+fi
 
 if [[ "$SKIP_SECRET_CHECK" == "1" ]]; then
   log "Ignoring --skip-secret-check; testing-mode profiles are resolved locally on $RUNNER_LABEL"
@@ -166,7 +177,7 @@ EOF
 gh workflow run "$PACKAGE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f tag="$TAG" \\
   -f runner_label="$RUNNER_LABEL" \\
-  -f signing_p12_path="$SIGNING_P12_PATH"
+  -f signing_p12_path="$SIGNING_P12_PATH"$(if [[ -n "$SIGNING_P12_PASSWORD_FILE" ]]; then printf ' \\\n  -f signing_p12_password_file="%s"' "$SIGNING_P12_PASSWORD_FILE"; fi)
 EOF
     elif [[ -n "$SIGNING_KEYCHAIN" ]]; then
       cat <<EOF
@@ -414,6 +425,9 @@ if [[ -z "$PACKAGE_RUN_ID" ]]; then
   fi
   if [[ -n "$SIGNING_P12_PATH" ]]; then
     package_inputs+=(-f signing_p12_path="$SIGNING_P12_PATH")
+  fi
+  if [[ -n "$SIGNING_P12_PASSWORD_FILE" ]]; then
+    package_inputs+=(-f signing_p12_password_file="$SIGNING_P12_PASSWORD_FILE")
   fi
   PACKAGE_RUN_ID="$(dispatch_and_capture_run_id \
     "$PACKAGE_WORKFLOW" \

@@ -16,7 +16,7 @@
       "MAC_APP_DEVELOPMENT"
     ],
     "certificate_sha1": "",
-    "create_certificate_type": "DEVELOPMENT",
+    "create_certificate_type": "MAC_APP_DEVELOPMENT",
     "p12_password_env": "TCFS_FILEPROVIDER_LAB_P12_PASSWORD"
   },
   "profiles": [

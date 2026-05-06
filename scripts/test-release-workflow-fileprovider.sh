@@ -219,7 +219,8 @@ check_testing_mode_package_workflow() {
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "GIT_CONFIG_NOSYSTEM"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "signing_keychain:"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_CODESIGN_KEYCHAIN"
-  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "Apple Development"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "Apple/Mac development"
+  assert_contains "$TESTING_MODE_PKG_WORKFLOW" "signing_p12_password_file"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "--require-host-entitlement com.apple.developer.fileprovider.testing-mode"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "com.apple.developer.fileprovider.testing-mode"
   assert_contains "$TESTING_MODE_PKG_WORKFLOW" "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
@@ -268,18 +269,20 @@ check_testing_mode_package_workflow() {
   extract_step_from_workflow \
     "$TESTING_MODE_PKG_WORKFLOW" \
     "build-testing-mode-pkg" \
-    "Resolve local Apple Development signing assets" \
+    "Resolve local development signing assets" \
     "$resolve_assets_step"
   bash -n "$resolve_assets_step"
-  assert_contains "$resolve_assets_step" "Apple Development"
+  assert_contains "$resolve_assets_step" "Apple/Mac development"
+  assert_contains "$resolve_assets_step" "Mac Developer"
   assert_contains "$resolve_assets_step" "find_identities"
   assert_contains "$resolve_assets_step" "signing_keychain does not exist"
   assert_contains "$resolve_assets_step" "signing_p12_path does not exist"
+  assert_contains "$resolve_assets_step" "signing_p12_password_file does not exist"
   # shellcheck disable=SC2016 # Intentional literal assertion against workflow shell.
   assert_contains "$resolve_assets_step" 'security import "$SIGNING_P12_PATH"'
   # shellcheck disable=SC2016 # Intentional literal assertion against workflow shell.
   assert_contains "$resolve_assets_step" 'security list-keychains -d user -s "$SIGNING_KEYCHAIN"'
-  assert_contains "$resolve_assets_step" "awk '/Apple Development/"
+  assert_contains "$resolve_assets_step" "awk '/Apple Development|Mac Developer|Mac App Development/"
   assert_contains "$resolve_assets_step" "security unlock-keychain"
   assert_contains "$resolve_assets_step" "security set-key-partition-list"
   assert_contains "$resolve_assets_step" "codesign cannot use its private key noninteractively"

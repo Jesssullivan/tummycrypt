@@ -14,22 +14,27 @@ on:
         default: "petting-zoo-mini"
         type: string
       signing_identity:
-        description: "Apple Development codesigning identity, or auto-development"
+        description: "Apple/Mac development codesigning identity, or auto-development"
         required: false
         default: "auto-development"
         type: string
       signing_keychain:
-        description: "Optional local keychain to search for Apple Development identity"
+        description: "Optional local keychain to search for development identity"
         required: false
         default: "~/Library/Keychains/login.keychain-db"
         type: string
       signing_p12_path:
-        description: "Optional runner-local Apple Development .p12 to import into an ephemeral keychain"
+        description: "Optional runner-local development .p12 to import into an ephemeral keychain"
         required: false
         default: ""
         type: string
       signing_p12_password:
         description: "Optional password for signing_p12_path"
+        required: false
+        default: ""
+        type: string
+      signing_p12_password_file:
+        description: "Optional runner-local file containing the password for signing_p12_path"
         required: false
         default: ""
         type: string
@@ -117,7 +122,7 @@ jobs:
         shell: bash
         run: cargo build -p tcfs-file-provider --release --no-default-features --features grpc
 
-      - name: Resolve local Apple Development signing assets
+      - name: Resolve local development signing assets
         shell: bash
         run: |
           set -euo pipefail
@@ -125,6 +130,7 @@ jobs:
           SIGNING_KEYCHAIN_INPUT="${{ github.event.inputs.signing_keychain }}"
           SIGNING_P12_PATH_INPUT="${{ github.event.inputs.signing_p12_path }}"
           SIGNING_P12_PASSWORD="${{ github.event.inputs.signing_p12_password }}"
+          SIGNING_P12_PASSWORD_FILE_INPUT="${{ github.event.inputs.signing_p12_password_file }}"
           SIGNING_KEYCHAIN_PASSWORD="${{ github.event.inputs.signing_keychain_password }}"
           PROFILES_DIR_INPUT="${{ github.event.inputs.profiles_dir }}"
           ORIGINAL_KEYCHAINS=()
@@ -154,6 +160,21 @@ jobs:
             if [[ ! -f "$SIGNING_P12_PATH" ]]; then
               echo "::error::signing_p12_path does not exist: $SIGNING_P12_PATH"
               exit 1
+            fi
+            if [[ -n "$SIGNING_P12_PASSWORD" && -n "$SIGNING_P12_PASSWORD_FILE_INPUT" ]]; then
+              echo "::error::signing_p12_password and signing_p12_password_file are mutually exclusive"
+              exit 1
+            fi
+            if [[ -n "$SIGNING_P12_PASSWORD_FILE_INPUT" ]]; then
+              case "$SIGNING_P12_PASSWORD_FILE_INPUT" in
+                "~/"*) SIGNING_P12_PASSWORD_FILE="${HOME}/${SIGNING_P12_PASSWORD_FILE_INPUT#"~/"}" ;;
+                *) SIGNING_P12_PASSWORD_FILE="$SIGNING_P12_PASSWORD_FILE_INPUT" ;;
+              esac
+              if [[ ! -f "$SIGNING_P12_PASSWORD_FILE" ]]; then
+                echo "::error::signing_p12_password_file does not exist: $SIGNING_P12_PASSWORD_FILE"
+                exit 1
+              fi
+              SIGNING_P12_PASSWORD="$(<"$SIGNING_P12_PASSWORD_FILE")"
             fi
 
             SIGNING_KEYCHAIN="${RUNNER_TEMP:-/tmp}/tcfs-fileprovider-lab-signing.keychain-db"
@@ -242,10 +263,10 @@ jobs:
           case "$SIGNING_IDENTITY_INPUT" in
             auto-development)
               SIGNING_IDENTITY="$(find_identities \
-                | awk '/Apple Development/ { sub(/^[[:space:]]*[0-9]+\) /, ""); print $1; exit }' || true)"
+                | awk '/Apple Development|Mac Developer|Mac App Development/ { sub(/^[[:space:]]*[0-9]+\) /, ""); print $1; exit }' || true)"
               ;;
             auto)
-              echo "::error::Developer ID auto-detection is not valid for the testing-mode lane; use auto-development or an Apple Development identity"
+              echo "::error::Developer ID auto-detection is not valid for the testing-mode lane; use auto-development or an Apple/Mac development identity"
               exit 1
               ;;
             *)
@@ -254,7 +275,7 @@ jobs:
           esac
 
           if [[ -z "$SIGNING_IDENTITY" ]]; then
-            echo "::error::No Apple Development signing identity found on this runner"
+            echo "::error::No Apple/Mac development signing identity found on this runner"
             find_identities || true
             exit 1
           fi
@@ -272,7 +293,7 @@ jobs:
           cp /bin/echo "$PROBE_BIN"
           if [[ -n "$SIGNING_KEYCHAIN" ]]; then
             if ! codesign -f -s "$SIGNING_IDENTITY" --keychain "$SIGNING_KEYCHAIN" --timestamp=none "$PROBE_BIN" 2>"$PROBE_ERR"; then
-              echo "::error::Apple Development signing identity is visible, but codesign cannot use its private key noninteractively"
+              echo "::error::Development signing identity is visible, but codesign cannot use its private key noninteractively"
               cat "$PROBE_ERR"
               echo "Unlock the runner keychain and allow apple-tool:, apple:, and codesign: key partition access for this identity."
               rm -rf "$PROBE_DIR"
@@ -280,7 +301,7 @@ jobs:
             fi
           else
             if ! codesign -f -s "$SIGNING_IDENTITY" --timestamp=none "$PROBE_BIN" 2>"$PROBE_ERR"; then
-              echo "::error::Apple Development signing identity is visible, but codesign cannot use its private key noninteractively"
+              echo "::error::Development signing identity is visible, but codesign cannot use its private key noninteractively"
               cat "$PROBE_ERR"
               echo "Unlock the runner keychain and allow apple-tool:, apple:, and codesign: key partition access for this identity."
               rm -rf "$PROBE_DIR"

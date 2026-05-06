@@ -166,8 +166,11 @@ def private_key_from_env_or_config(asc_config: dict[str, Any]) -> str:
 
 
 def local_provisioning_udid() -> str:
+    system_profiler = shutil.which("system_profiler") or "/usr/sbin/system_profiler"
+    if not Path(system_profiler).exists():
+        fail("failed to find system_profiler for local Provisioning UDID lookup")
     result = subprocess.run(
-        ["system_profiler", "SPHardwareDataType"],
+        [system_profiler, "SPHardwareDataType"],
         check=False,
         capture_output=True,
         text=True,
@@ -721,7 +724,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--apply", action="store_true", help="mutate ASC and write profiles")
     parser.add_argument("--replace", action="store_true", help="delete stale active profiles with the desired name")
-    parser.add_argument("--create-certificate", action="store_true", help="create a fresh Apple Development cert from a local CSR")
+    parser.add_argument("--create-certificate", action="store_true", help="create a fresh macOS development cert from a local CSR")
+    parser.add_argument("--create-certificate-type", default="", help="ASC CertificateType to use with --create-certificate")
     parser.add_argument("--certificate-sha1", default="")
     parser.add_argument("--device-udid", default="")
     parser.add_argument("--output-dir", default="build/asc-fileprovider-lab")
@@ -785,18 +789,27 @@ def main() -> int:
             fail("--create-certificate requires --apply")
         common_name = f"TCFS FileProvider Lab {runner.get('name', 'mac')}"
         key_path, csr_content = generate_key_and_csr(output_dir, common_name)
+        create_certificate_type = (
+            args.create_certificate_type
+            or signing.get("create_certificate_type", "MAC_APP_DEVELOPMENT")
+        )
         cert, cert_der = create_certificate_from_csr(
             client,
-            signing.get("create_certificate_type", "DEVELOPMENT"),
+            create_certificate_type,
             csr_content,
         )
         cert_sha1 = sha1_from_der_certificate(cert_der)
         password_env = signing.get("p12_password_env", "TCFS_FILEPROVIDER_LAB_P12_PASSWORD")
         p12_password = os.environ.get(password_env, "")
+        if not p12_password:
+            log(f"warning: {password_env} is empty; generated p12 will use an empty import password")
         _, p12_path = write_certificate_and_p12(
             output_dir, cert_der, key_path, cert_sha1, p12_password
         )
-        log(f"created ASC certificate: {cert.get('id')} sha1={cert_sha1}")
+        log(
+            f"created ASC certificate: {cert.get('id')} "
+            f"type={create_certificate_type} sha1={cert_sha1}"
+        )
         log(f"wrote p12: {p12_path}")
     else:
         cert_sha1 = normalize_sha1(
