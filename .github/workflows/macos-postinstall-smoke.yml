@@ -671,9 +671,29 @@ jobs:
               > "$LOG_DIR/${label}-codesign-verify.txt" 2>&1 || true
             codesign -dvvv --entitlements :- "$bundle" \
               > "$LOG_DIR/${label}-codesign-detail.txt" 2>&1 || true
-            if command -v spctl >/dev/null 2>&1; then
-              spctl --assess --type execute --verbose=4 "$bundle" \
+            {
+              ls -ldeO@ "$bundle" || true
+              find "$bundle" -maxdepth 3 \( -type d -o -type f \) -print 2>/dev/null \
+                | while IFS= read -r path; do
+                    ls -ldeO@ "$path" || true
+                  done
+            } > "$LOG_DIR/${label}-ls-flags.txt" 2>&1 || true
+            if command -v xattr >/dev/null 2>&1; then
+              xattr -lr "$bundle" > "$LOG_DIR/${label}-xattrs.txt" 2>&1 || true
+            else
+              echo "xattr not found" > "$LOG_DIR/${label}-xattrs.txt"
+            fi
+
+            local spctl_bin
+            spctl_bin="$(command -v spctl || true)"
+            if [[ -z "$spctl_bin" && -x /usr/sbin/spctl ]]; then
+              spctl_bin=/usr/sbin/spctl
+            fi
+            if [[ -n "$spctl_bin" ]]; then
+              "$spctl_bin" --assess --type execute --verbose=4 "$bundle" \
                 > "$LOG_DIR/${label}-spctl-execute.txt" 2>&1 || true
+            else
+              echo "spctl not found" > "$LOG_DIR/${label}-spctl-execute.txt"
             fi
 
             if [[ -f "$profile" ]]; then

@@ -100,12 +100,15 @@ Now proven in the lab:
 Current lab blocker:
 
 - `v0.12.12` package/signing/storage/daemon stages pass on PZM
-- the current Mac App Development certificate/profile pair is valid enough for
-  `taskgated-helper` to allow the FileProvider extension entitlements
-- `fileproviderd` launches the extension process, then AppleSystemPolicy
-  terminates it before the evict/rehydrate lifecycle can complete
-- the next lab package must capture direct host stderr, `spctl`, codesign,
-  embedded profile, `taskgated`, `amfid`, and AppleSystemPolicy diagnostics
+- the current Mac App Development certificate/profile pair is valid: codesign
+  verification passes for the host and extension, embedded profiles decode, and
+  `taskgated-helper` allows both host and extension entitlements
+- the direct host-app launch emits no instrumented stderr, then
+  AppleSystemPolicy denies the host process
+- `fileproviderd` launches the extension process, then AppleSystemPolicy also
+  terminates the extension before the evict/rehydrate lifecycle can complete
+- the next lab package must capture `spctl`, xattrs, and filesystem provenance
+  flags so the remaining policy source is explicit
 
 Still manual or weakly proven:
 

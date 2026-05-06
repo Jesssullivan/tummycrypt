@@ -3,7 +3,7 @@
 As of May 6, 2026, macOS is a real packaging and integration lane for tcfs.
 The lab testing-mode FileProvider read/hydrate path is proven end to end on
 `v0.12.11`, but the current `v0.12.12` lifecycle attempt is blocked by a
-runtime policy termination of the FileProvider extension after launch.
+runtime policy termination of the host and FileProvider extension processes.
 Production Finder lifecycle behavior is still not a continuously proven
 release-grade desktop surface.
 
@@ -65,9 +65,11 @@ sync-root stub representation, not the desired primary Finder UX.
   package-to-FileProvider read/hydrate smoke on `v0.12.11`.
 - The `v0.12.12` PZM testing-mode package passes package install, signing,
   profile, E2EE, storage, and daemon startup gates. Its FileProvider lifecycle
-  attempt currently fails after `fileproviderd` starts the extension process:
-  `taskgated-helper` accepts the extension provisioning profile, then
-  AppleSystemPolicy terminates the extension before evict/rehydrate can run.
+  attempt currently fails at runtime policy: codesign verification and embedded
+  profile evidence pass for both bundles, `taskgated-helper` accepts the host
+  and extension provisioning profiles, the direct host launch is denied before
+  the instrumented Swift startup path emits stderr, and AppleSystemPolicy also
+  terminates the extension after `fileproviderd` starts it.
 
 ## Important Constraints
 
