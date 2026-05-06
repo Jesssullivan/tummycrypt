@@ -262,34 +262,41 @@ jobs:
           PACKAGE_ARTIFACT_NAME="${{ github.event.inputs.package_artifact_name }}"
 
           if [[ -n "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
-            GH_BIN="${TCFS_GH:-}"
-            if [[ -z "$GH_BIN" ]]; then
-              for candidate in \
-                gh \
-                "$HOME/.nix-profile/bin/gh" \
-                /opt/homebrew/bin/gh \
-                /usr/local/bin/gh
-              do
-                if command -v "$candidate" >/dev/null 2>&1; then
-                  GH_BIN="$(command -v "$candidate")"
-                  break
-                elif [[ -x "$candidate" ]]; then
-                  GH_BIN="$candidate"
-                  break
-                fi
-              done
-            fi
-            if [[ -z "$GH_BIN" ]]; then
-              echo "::error::gh is required to download package artifacts by run ID"
-              exit 1
-            fi
-
             artifact_dir="$RUNNER_TEMP/package-artifact"
+            artifact_json="$RUNNER_TEMP/package-artifacts.json"
+            artifact_zip="$RUNNER_TEMP/package-artifact.zip"
             mkdir -p "$artifact_dir"
-            "$GH_BIN" run download "$PACKAGE_ARTIFACT_RUN_ID" \
-              --repo "${{ github.repository }}" \
-              --name "$PACKAGE_ARTIFACT_NAME" \
-              --dir "$artifact_dir"
+            curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${PACKAGE_ARTIFACT_RUN_ID}/artifacts?per_page=100" \
+              -o "$artifact_json"
+            artifact_url="$(
+          python3 - "$artifact_json" "$PACKAGE_ARTIFACT_NAME" <<'PY'
+          import json
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          wanted = sys.argv[2]
+          for artifact in payload.get("artifacts", []):
+              if artifact.get("name") == wanted and not artifact.get("expired", False):
+                  print(artifact["archive_download_url"])
+                  raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+            )" || {
+              echo "::error::non-expired artifact $PACKAGE_ARTIFACT_NAME not found on run $PACKAGE_ARTIFACT_RUN_ID"
+              cat "$artifact_json"
+              exit 1
+            }
+            curl -fL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -o "$artifact_zip" \
+              "$artifact_url"
+            python3 -m zipfile -e "$artifact_zip" "$artifact_dir"
             artifact_pkg="$(find "$artifact_dir" -type f -name '*.pkg' -print -quit)"
             if [[ -z "$artifact_pkg" ]]; then
               echo "::error::artifact $PACKAGE_ARTIFACT_NAME from run $PACKAGE_ARTIFACT_RUN_ID did not contain a .pkg"

@@ -144,7 +144,7 @@ check_postinstall_workflow_environment_and_secrets() {
   ' "$POSTINSTALL_WORKFLOW"
 }
 
-check_postinstall_workflow_artifact_download_gh_lookup() {
+check_postinstall_workflow_artifact_download_uses_api_zip() {
   local download_step="${TMPDIR}/postinstall-download-package.sh"
 
   extract_step_from_workflow \
@@ -153,13 +153,10 @@ check_postinstall_workflow_artifact_download_gh_lookup() {
     "Download package" \
     "$download_step"
   bash -n "$download_step"
-  assert_contains "$download_step" "TCFS_GH"
-  # shellcheck disable=SC2016 # Intentional literal assertion against workflow shell.
-  assert_contains "$download_step" '$HOME/.nix-profile/bin/gh'
-  assert_contains "$download_step" "/opt/homebrew/bin/gh"
-  assert_contains "$download_step" "gh is required to download package artifacts by run ID"
-  # shellcheck disable=SC2016 # Intentional literal assertion against workflow shell.
-  assert_contains "$download_step" 'run download "$PACKAGE_ARTIFACT_RUN_ID"'
+  assert_contains "$download_step" "archive_download_url"
+  assert_contains "$download_step" "python3 -m zipfile -e"
+  assert_contains "$download_step" "Authorization: Bearer \$GH_TOKEN"
+  assert_not_contains "$download_step" "gh run download"
 }
 
 check_release_action_token_override() {
@@ -383,7 +380,7 @@ mkdir -p "$FAKE_BIN"
 check_workflow_step_shape
 check_postinstall_workflow_checkout_uses_current_harness
 check_postinstall_workflow_environment_and_secrets
-check_postinstall_workflow_artifact_download_gh_lookup
+check_postinstall_workflow_artifact_download_uses_api_zip
 check_release_action_token_override
 check_macos_fileprovider_principal_class
 check_testing_mode_is_explicit_opt_in
@@ -610,8 +607,10 @@ bash -n "$DOWNLOAD_PACKAGE_STEP"
 assert_contains "$DOWNLOAD_PACKAGE_STEP" "PACKAGE_PATH=\"\$RUNNER_TEMP/tcfs-\${VERSION}-macos-aarch64.pkg\""
 assert_contains "$DOWNLOAD_PACKAGE_STEP" "package_artifact_run_id"
 assert_contains "$DOWNLOAD_PACKAGE_STEP" "package_artifact_name"
-assert_contains "$DOWNLOAD_PACKAGE_STEP" "run download \"\$PACKAGE_ARTIFACT_RUN_ID\""
-assert_contains "$DOWNLOAD_PACKAGE_STEP" "--name \"\$PACKAGE_ARTIFACT_NAME\""
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "archive_download_url"
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "python3 -m zipfile -e"
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "non-expired artifact \$PACKAGE_ARTIFACT_NAME not found"
+assert_contains "$DOWNLOAD_PACKAGE_STEP" "actions/runs/\${PACKAGE_ARTIFACT_RUN_ID}/artifacts?per_page=100"
 assert_contains "$DOWNLOAD_PACKAGE_STEP" "package_url"
 assert_contains "$DOWNLOAD_PACKAGE_STEP" "curl -fL -o \"\$PACKAGE_PATH\" \"\$PACKAGE_URL\""
 assert_contains "$DOWNLOAD_PACKAGE_STEP" "releases/download/\${TAG}/tcfs-\${VERSION}-macos-aarch64.pkg"
