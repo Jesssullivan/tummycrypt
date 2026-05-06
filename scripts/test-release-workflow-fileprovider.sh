@@ -637,9 +637,9 @@ extract_step_from_workflow \
 bash -n "$DERIVE_RUN_PATHS_STEP"
 assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$RUNNER_TEMP/tcfs-config\""
 assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_PATH=\"\$CONFIG_DIR/config.toml\""
-assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"/tmp/tcfsd-fileprovider-gha.sock\""
+assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\${APP_GROUP_DIR}/tcfsd-gha.sock\""
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\$HOME/Library/Application Support/io.tinyland.tcfs/tcfsd.sock\""
-assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\${APP_GROUP_DIR}/tcfsd.sock\""
+assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"/tmp/tcfsd-fileprovider-gha.sock\""
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$HOME/.config/tcfs\""
 
 WRITE_LIVE_CONFIG_STEP="${TMPDIR}/write-live-config.sh"
