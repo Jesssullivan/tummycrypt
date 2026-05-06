@@ -134,6 +134,7 @@ check_postinstall_workflow_environment_and_secrets() {
       "TCFS_S3_SECRET" => secret.call("TCFS_SMOKE_S3_SECRET_ACCESS_KEY"),
       "AWS_ACCESS_KEY_ID" => secret.call("TCFS_SMOKE_S3_ACCESS_KEY_ID"),
       "AWS_SECRET_ACCESS_KEY" => secret.call("TCFS_SMOKE_S3_SECRET_ACCESS_KEY"),
+      "TCFS_RUNNER_SUDO_PASSWORD" => secret.call("TCFS_RUNNER_SUDO_PASSWORD"),
     }
 
     expected.each do |name, value|
@@ -531,6 +532,18 @@ assert_contains "$VERIFY_RELEASE_PKG_STEP" "--require-signature"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "require_current_postinstall"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--allow-postinstall-mismatch"
 assert_contains "$VERIFY_RELEASE_PKG_STEP" "--expected-postinstall scripts/macos-pkg-postinstall.sh"
+
+INSTALL_PACKAGE_STEP="${TMPDIR}/install-package.sh"
+extract_step_from_workflow \
+  "$POSTINSTALL_WORKFLOW" \
+  "pkg-postinstall" \
+  "Install package" \
+  "$INSTALL_PACKAGE_STEP"
+bash -n "$INSTALL_PACKAGE_STEP"
+assert_contains "$INSTALL_PACKAGE_STEP" "sudo -n true"
+assert_contains "$INSTALL_PACKAGE_STEP" "TCFS_RUNNER_SUDO_PASSWORD"
+assert_contains "$INSTALL_PACKAGE_STEP" ".config/sops-nix/secrets/become/password"
+assert_contains "$INSTALL_PACKAGE_STEP" "sudo -S -p '' installer -pkg \"\$PACKAGE_PATH\" -target /"
 
 SIGNING_PREFLIGHT_STEP="${TMPDIR}/verify-installed-fileprovider-production-signing.sh"
 extract_step_from_workflow \
