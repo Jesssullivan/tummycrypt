@@ -9,6 +9,13 @@ OpenEBS/ZFS storage classes.
 It is intentionally not an apply script. Do not use this as approval to mutate
 the live cluster without an explicit downtime window.
 
+Scheduling decision, 2026-05-08: the on-prem storage cutover is explicitly
+deferred from the current usage-reality sprint. The live backend can remain the
+separate operational authority while Linux lazy proof, PZM FileProvider
+lifecycle depth, distribution support truth, and production Finder planning
+continue. Resume this runbook only after a maintenance window is named in
+`#327`, with rollback owner and post-cut smoke owner recorded before mutation.
+
 ## Current Authority
 
 Live readback shows `nats` and `seaweedfs` are kubectl-applied singleton

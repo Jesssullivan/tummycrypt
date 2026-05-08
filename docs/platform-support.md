@@ -17,6 +17,10 @@ coverage and the clearest end-to-end validation story.
 - **D-Bus**: Status change signals for desktop integration
 - **Encryption**: XChaCha20-Poly1305 per-chunk, Argon2id KDF
 - **Build targets**: x86_64 (.tar.gz, .deb, .rpm), aarch64 (.tar.gz, .deb)
+  with `.deb` install support claimed for Ubuntu 24.04+ and Debian 13
+  `trixie`+. Debian 12 `bookworm` is not a truthful target for the current
+  shipped `.deb` assets because the packages require newer glibc/OpenSSL ABI
+  floors than bookworm provides.
 
 ## macOS (Experimental Desktop Surface)
 

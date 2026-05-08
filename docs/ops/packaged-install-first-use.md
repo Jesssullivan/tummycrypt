@@ -19,7 +19,7 @@ For `v0.12.x`, packaged-install to first-real-use proof is:
 - **required every tag** on the primary mutable user-facing install surfaces:
   - Homebrew
   - macOS `.pkg`
-  - Debian/Ubuntu `.deb`
+  - Ubuntu 24.04+ / Debian 13+ `.deb`
 - **sampled or scenario-driven** on the narrower surfaces:
   - Fedora/RHEL `.rpm` (daemon-only today)
   - container image
@@ -57,7 +57,7 @@ Passing `scripts/install-smoke.sh` alone is not sufficient to claim this bar.
 |---------|---------------------|-------------------|-----------------------|
 | Homebrew | every tag | `tcfs status` with `storage [ok]`, then a minimal push/pull or sync-status path | one of: unsync/rehydrate, conflict, symlink, large file |
 | macOS `.pkg` | every tag | package install, then the named Finder/FileProvider lane from [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md) through enumerate + hydrate | clean-host install and one desktop follow-on such as mutate/conflict or unsync/rehydrate |
-| Debian/Ubuntu `.deb` | every tag | `tcfs status` with `storage [ok]`, then minimal push/pull or sync-status | one of: upgrade carry-forward, unsync/rehydrate, conflict, large file |
+| Ubuntu 24.04+ / Debian 13+ `.deb` | every tag | `tcfs status` with `storage [ok]`, then minimal push/pull or sync-status | one of: upgrade carry-forward, unsync/rehydrate, conflict, large file |
 | Fedora/RHEL `.rpm` | sampled | daemon/worker startup against intentional config | worker restart or backend reconnect as needed |
 | Container image | sampled | worker startup against real or disposable backend dependencies | restart/reconnect or rollout-oriented check |
 | Nix | sampled or scenario-driven | same bar as CLI surfaces once cache/install is truthful | use the same edge-case menu as `.deb` once the install path is stable |
@@ -84,7 +84,7 @@ Record results using a table like this:
 |---------|--------------------|------------------------------|-------------------|-----------|-------|
 | Homebrew | pass/fail | pass/fail | pass/fail | pass/fail | |
 | macOS `.pkg` | pass/fail | pass/fail | pass/fail | pass/fail | |
-| Debian/Ubuntu `.deb` | pass/fail | pass/fail | pass/fail | pass/fail | |
+| Ubuntu 24.04+ / Debian 13+ `.deb` | pass/fail | pass/fail | pass/fail | pass/fail | Debian 12 excluded unless a bookworm package exists |
 | Fedora/RHEL `.rpm` | pass/fail | n/a or pass/fail | pass/fail | sampled | |
 | Container image | pass/fail | equivalent only | pass/fail | sampled | |
 | Nix | pass/fail | pass/fail | pass/fail | sampled | |

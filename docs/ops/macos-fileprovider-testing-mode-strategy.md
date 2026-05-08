@@ -447,8 +447,10 @@ Once the Mac App Development profiles exist on `petting-zoo-mini`, run:
 scripts/macos-fileprovider-testing-mode-dispatch.sh \
   --tag v0.12.12 \
   --runner-label petting-zoo-mini \
-  --signing-p12-path ~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-4EC8EA7A.p12 \
-  --profiles-dir ~/git/tummycrypt/build/asc-fileprovider-lab
+  --signing-p12-path ~/.tcfs-fileprovider-lab/tcfs-fileprovider-lab-E9B03E55.p12 \
+  --signing-p12-password-file ~/.tcfs-fileprovider-lab/p12-password.txt \
+  --profiles-dir ~/.tcfs-fileprovider-lab \
+  --lab-gatekeeper-override
 ```
 
 Use `--dry-run` first if you want to inspect the exact `gh workflow run`

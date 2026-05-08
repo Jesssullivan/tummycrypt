@@ -21,7 +21,7 @@ Use this document as the short answer to:
 | Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, cache clear, and rehydrate on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, and rehydrate under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
-| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
+| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; mutation harness support is implemented but blocked on the PZM runner signing security domain; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
 
@@ -35,7 +35,7 @@ This is the narrowest and most important truth for public release claims.
 | --- | --- | --- |
 | Homebrew | pass | fresh install and upgrade proved on `v0.12.2` |
 | macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, and rehydrate on run `25562087555`; production Finder remains separate |
-| `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; Debian 12 is not currently a truthful target for the shipped package deps |
+| `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; current support floor is Ubuntu 24.04+ / Debian 13+; Debian 12 is excluded unless a separate bookworm-targeted package is produced |
 | `.rpm` | pass | fresh install proved in Fedora container |
 | container image | pass | version and worker-mode startup proved |
 | Nix install | needs per-tag proof | `v0.12.2` evidence was blocked; future proof follows the distribution smoke matrix |
@@ -133,7 +133,11 @@ Still manual or weakly proven:
 
 - production Finder/FileProvider enablement on arbitrary clean machines
 - badges, progress, notifications, and conflict UX
-- mutation, conflict, and realistic desktop usage beyond evict/rehydrate
+- mutation, conflict, and realistic desktop usage beyond evict/rehydrate. The
+  current mutation harness changes are present in `main`, but package run
+  `25564780049` stopped before app build because PZM's non-GUI runner security
+  domain resolves the system keychain as default and `codesign` cannot resolve
+  the user/temp development identities there.
 
 Canonical docs:
 
@@ -253,7 +257,8 @@ work should be ordered like this:
      claiming macOS Finder Desktop and honey home directories are the same
 5. **Release support truth**
    - finish Nix proof
-   - decide Debian 12 support posture honestly
+   - Debian 12 posture is decided for the current packages: do not claim it as
+     a supported `.deb` target until a bookworm-specific build exists
 6. **Accessibility**
    - define an explicit AX bar before claiming mature desktop UX
 7. **Diagnostics and recovery UX**
@@ -266,7 +271,9 @@ As of May 6, 2026, the narrow GitHub backlog is:
 
 - M10 release-proof tranche
   - `#280`: distribution install and upgrade proof umbrella
-  - `#308`: Debian 12 `.deb` support-floor decision
+  - `#308`: Debian 12 `.deb` support-floor decision. Current decision: exclude
+    Debian 12 from the shipped `.deb` support floor until a bookworm-specific
+    package exists.
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
     testing-mode enumerate/hydrate/evict/rehydrate is green under the installed
     lab `SystemPolicyRule` profile; production Finder lifecycle proof remains

@@ -638,6 +638,16 @@ production Developer ID clean-host enablement plus richer Finder lifecycle
 behavior: mutation, conflict/status visibility, badges/progress, and recovery
 UX.
 
+May 8, 2026 update: mutation harness support is now present in `main`, but the
+first PZM package run carrying it, `25564780049`, stopped before app build in
+`Resolve local development signing assets`. The installed lab profiles in
+`~/.tcfs-fileprovider-lab` are compatible and bound to certificate
+`E9B03E55D391E4368F1C4E8C8A7AE0FC1372D5E6`; the failure is the runner security
+domain. In SSH/service context, `security find-identity <explicit keychain>`
+can see user/temp identities, but unqualified identity lookup resolves the
+system keychain and `codesign` reports `no identity found`. Do not treat this
+as a TCFS storage, E2EE, profile, or FileProvider runtime regression.
+
 May 1, 2026 Apple Developer follow-up changed the shape of this lane:
 
 - enabling FileProvider Testing Mode on the host App ID invalidated and required
@@ -679,8 +689,10 @@ Use the generated PZM p12/profiles when dispatching the current lane:
 scripts/macos-fileprovider-testing-mode-dispatch.sh \
   --tag v0.12.12 \
   --runner-label petting-zoo-mini \
-  --signing-p12-path ~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-4EC8EA7A.p12 \
-  --profiles-dir ~/git/tummycrypt/build/asc-fileprovider-lab
+  --signing-p12-path ~/.tcfs-fileprovider-lab/tcfs-fileprovider-lab-E9B03E55.p12 \
+  --signing-p12-password-file ~/.tcfs-fileprovider-lab/p12-password.txt \
+  --profiles-dir ~/.tcfs-fileprovider-lab \
+  --lab-gatekeeper-override
 ```
 
 It dispatches the non-release testing package workflow, waits for it by default,
@@ -720,8 +732,9 @@ The equivalent manual form is:
 gh workflow run macos-fileprovider-testing-mode-pkg.yml \
   -f tag=v0.12.12 \
   -f runner_label=petting-zoo-mini \
-  -f signing_p12_path=~/git/tummycrypt/build/asc-fileprovider-lab/tcfs-fileprovider-lab-4EC8EA7A.p12 \
-  -f profiles_dir=~/git/tummycrypt/build/asc-fileprovider-lab
+  -f signing_p12_path=~/.tcfs-fileprovider-lab/tcfs-fileprovider-lab-E9B03E55.p12 \
+  -f signing_p12_password_file=~/.tcfs-fileprovider-lab/p12-password.txt \
+  -f profiles_dir=~/.tcfs-fileprovider-lab
 
 TESTING_PKG_RUN_ID="$(gh run list \
   --workflow macos-fileprovider-testing-mode-pkg.yml \

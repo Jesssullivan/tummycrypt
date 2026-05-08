@@ -11,14 +11,14 @@ surfaces below have passed their required smoke checks.
 - **Fresh install proof is required on every shipped release surface for every `v0.12.x+` tag**:
   - Homebrew
   - macOS `.pkg`
-  - Debian/Ubuntu `.deb`
+  - Ubuntu 24.04+ / Debian 13+ `.deb`
   - Fedora/RHEL `.rpm`
   - container image
   - Nix package path
 - **Upgrade proof is required on the primary mutable installer surfaces**:
   - Homebrew
   - macOS `.pkg`
-  - Debian/Ubuntu `.deb`
+  - Ubuntu 24.04+ / Debian 13+ `.deb`
 - **RPM, container, and Nix upgrade proof is sampled rather than mandatory on every tag**:
   - RPM is daemon-only today, so its proof surface is narrower than Homebrew, `.pkg`, or `.deb`
   - container upgrades are normally orchestrator rollouts rather than a host-local installer flow
@@ -76,7 +76,7 @@ installed-binary smoke to the first truthful user action, use
 |---------|------------------------------|------------------------|----------------|-------|
 | Homebrew | Yes | Yes | `scripts/install-smoke.sh` | Current manual `homebrew-tap` checkout flow |
 | macOS `.pkg` | Yes | Yes | `scripts/install-smoke.sh` | Apple Silicon package path; desktop UX still experimental |
-| Debian/Ubuntu `.deb` | Yes | Yes | `scripts/install-smoke.sh` | Install both `tcfsd` and `tcfs` packages |
+| Ubuntu 24.04+ / Debian 13+ `.deb` | Yes | Yes | `scripts/install-smoke.sh` | Install both `tcfsd` and `tcfs` packages |
 | Fedora/RHEL `.rpm` | Yes | Sampled | `scripts/install-smoke.sh --skip-cli` | RPM ships `tcfsd` only today |
 | Container image | Yes | Sampled | worker-image startup check | Pull + entrypoint/startup proof, not CLI status |
 | Nix | Yes | Sampled | `scripts/install-smoke.sh` | Fresh install from the tagged flake is the primary proof |
@@ -139,7 +139,17 @@ sudo installer -pkg "tcfs-${VERSION}-macos-aarch64.pkg" -target /
 bash scripts/install-smoke.sh --expected-version "${VERSION}"
 ```
 
-### Debian/Ubuntu `.deb`
+### Ubuntu 24.04+ / Debian 13+ `.deb`
+
+The current `.deb` support floor is Ubuntu 24.04+ and Debian 13 `trixie`+.
+Do not count Debian 12 `bookworm` as a passing `.deb` surface unless the release
+adds a separate bookworm-targeted package variant. The observed `v0.12.2`
+failure matches Debian's package floor: bookworm ships `libc6 2.36`, while
+trixie ships `libc6 2.41` and `libssl3t64`. References:
+
+- <https://packages.debian.org/bookworm/libc6>
+- <https://packages.debian.org/trixie/libc6>
+- <https://packages.debian.org/trixie/libssl3t64>
 
 Fresh install:
 
@@ -220,7 +230,7 @@ using a table like this:
 |---------|---------------|---------|-----------------------|-------|
 | Homebrew | pass/fail | pass/fail | yes/no | |
 | macOS `.pkg` | pass/fail | pass/fail | yes/no | |
-| Debian/Ubuntu `.deb` | pass/fail | pass/fail | yes/no | |
+| Ubuntu 24.04+ / Debian 13+ `.deb` | pass/fail | pass/fail | yes/no | Debian 12 excluded unless a bookworm package exists |
 | Fedora/RHEL `.rpm` | pass/fail | sampled/n-a | yes/no | |
 | Container image | pass/fail | sampled/n-a | yes/no | |
 | Nix | pass/fail | sampled/n-a | yes/no | |

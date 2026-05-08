@@ -65,6 +65,12 @@ non-canonical candidate workloads, candidate tailnet Services, and render-only
 cutover/rollback commands. Do not switch canonical tailnet hostnames or move
 data outside an approved downtime window.
 
+As of 2026-05-08, no downtime window is open. Keep the on-prem cutover deferred
+from the current usage-reality sprint unless `#327` is explicitly scheduled
+with preflight, rollback, and post-cut smoke owners. The lazy hydration and PZM
+FileProvider proof lanes should continue against disposable/live smoke
+endpoints rather than depending on this migration.
+
 Reasons:
 
 - The backend worker objects are Helm-shaped, but NATS and SeaweedFS are not.

@@ -204,3 +204,8 @@ list:
 - 2026-04-29 — Refreshed branch counts and divergence after origin PRs #337
   through #340 landed; tinyland now trails canonical `origin/main` again while
   keeping the same 21-commit downstream lead.
+- 2026-05-08 — Branch hygiene was inspected during the usage-reality push but
+  intentionally deferred. `origin/main` is current, several local branches track
+  deleted remotes, and product proof is still actively moving through the PZM
+  FileProvider mutation lane. Do not prune or delete branches as part of this
+  sprint until that proof lane is no longer blocked.
