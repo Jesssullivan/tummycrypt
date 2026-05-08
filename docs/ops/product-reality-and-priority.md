@@ -20,7 +20,7 @@ Use this document as the short answer to:
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
-| Lazy traversal / hydration | core code and harnesses exist; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, and rehydrate under testing mode with the installed lab `SystemPolicyRule` profile; archived Linux FUSE and production Finder lifecycle evidence are still pending | `tcfs-vfs`/FUSE implementation, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, cache clear, and rehydrate on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, and rehydrate under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
 | macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
@@ -145,10 +145,12 @@ Canonical docs:
 
 The filesystem implementation can list remote index entries and hydrate content
 on open, and the repo now has named Linux, mounted-view, Desktop-to-honey, and
-Finder/FileProvider harnesses. The repo still needs archived host evidence that
-proves the exact user story: `cd`, `ls`, `cat`, dehydrate/unsync, and rehydrate
-against real remote state. The canonical acceptance target is now
-[Lazy Hydration Demo Acceptance](lazy-hydration-demo.md).
+Finder/FileProvider harnesses. The archived Linux FUSE run
+`docs/release/evidence/lazy-linux-20260508T151858Z/` proves the read lifecycle
+against real remote state: traverse/list before hydration, exact `cat`
+hydration, cache clear, and rehydrate. Mutation, conflict/status, and
+product-level recursive safe-unsync acceptance remain open. The canonical
+acceptance target is now [Lazy Hydration Demo Acceptance](lazy-hydration-demo.md).
 
 The representation contract for that demo is:
 
@@ -221,10 +223,10 @@ If the goal is better product reality rather than more code surface, the next
 work should be ordered like this:
 
 1. **Linux lazy traversal and hydration evidence**
-   - seed a real backend fixture
-   - prove `cd`/`ls` before hydration
-   - prove `cat` hydrates and returns exact content
-   - prove dehydrate/unsync followed by rehydrate
+   - read lifecycle is green in
+     `docs/release/evidence/lazy-linux-20260508T151858Z/`
+   - next proof: mutation, conflict/status, and recursive safe-unsync product
+     acceptance
 2. **Apple desktop acceptance**
   - stop retrying hosted production packages until FileProvider can be enabled
   - treat PZM testing-mode read/hydrate/evict/rehydrate as green under the

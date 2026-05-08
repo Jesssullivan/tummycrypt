@@ -1,11 +1,12 @@
 # Lazy Hydration Demo Acceptance
 
-As of May 6, 2026, the core lazy traversal and hydration code exists and the
+As of May 8, 2026, the core lazy traversal and hydration code exists and the
 repo has named harnesses for Linux terminal, mounted-view, Desktop-to-honey,
 and macOS Finder/FileProvider proof. Evidence coverage is now split more
 precisely: PZM proves the macOS testing-mode FileProvider enumerate/hydrate
-path, Linux still needs an archived FUSE-capable host run, and production
-Finder lifecycle proof remains separate from non-production testing-mode proof.
+path through evict/rehydrate, Linux has archived FUSE-capable host evidence
+for the same read lifecycle, and production Finder lifecycle proof remains
+separate from non-production testing-mode proof.
 
 This runbook is the acceptance target for the persistent demo goal:
 
@@ -84,6 +85,18 @@ writes a transcript, redacted run metadata, final result status, `tcfs.toml`,
 and mount log copy. The metadata intentionally records endpoint, bucket,
 prefix, backend, and command shape, but not S3 credentials.
 
+Archived host evidence:
+
+- [lazy-linux-20260508T151858Z](../release/evidence/lazy-linux-20260508T151858Z/)
+  ran on `honey` through `nix develop --command task lazy:linux-demo` against
+  `seaweedfs://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z`.
+- The run passed with `status=0`, mounted through FUSE3, listed the nested
+  remote tree before content hydration, hydrated exact 77-byte content with
+  `cat`, cleared the cache to 0 entries, then rehydrated the same file.
+- A first ambient-host attempt failed before product proof because honey's
+  non-dev-shell Rust was too old for current async dependencies. The archived
+  passing run is the repo-pinned toolchain run.
+
 For an already-mounted surface, the repo carries a small mounted-view smoke
 helper:
 
@@ -142,19 +155,18 @@ and Finder/FileProvider as the native desktop lane.
 
 | User behavior | Linux mounted surface | macOS Finder/FileProvider | Current proof state |
 | --- | --- | --- | --- |
-| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | Core code and mounted helper are covered; PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence and production Finder evidence are still pending |
-| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.12`; Linux FUSE host evidence remains pending |
-| Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | PZM testing-mode smoke proves FileProvider evict + rehydrate on `v0.12.12`; Linux FUSE cache-clear host evidence remains pending |
+| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence `lazy-linux-20260508T151858Z` is green; production Finder evidence is still pending |
+| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.12`; archived Linux FUSE evidence proves exact `cat` hydration |
+| Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | PZM testing-mode smoke proves FileProvider evict + rehydrate on `v0.12.12`; archived Linux FUSE evidence proves cache clear + rehydrate |
 | Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder and prove daemon/FileProvider conflict/status behavior | Not yet release-gated on either desktop surface |
 | Observe health | CLI status, daemon logs, mounted-smoke transcript | Finder state, FileProvider logs, badges/progress when available | CLI/log evidence exists; Finder badges/progress are observational only |
 
 This means the old hosted FileProvider blocker no longer freezes the read-only
-Finder proof. The next non-Apple proof is to run `task lazy:linux-demo` on a
-FUSE-capable Linux host against a disposable remote prefix and archive its
-evidence directory. The next Apple proof is to extend the now-green PZM
-testing-mode lane beyond read/hydrate into evict/rehydrate, mutation, conflict,
-and visible status, while keeping production Developer ID clean-host evidence
-separate.
+Finder proof, and the Linux read lifecycle no longer lacks host evidence. The
+next non-Apple proof is mutation/safe-unsync over mounted or sync-root
+surfaces. The next Apple proof is to extend the now-green PZM testing-mode lane
+beyond read/hydrate/evict/rehydrate into mutation, conflict, and visible
+status, while keeping production Developer ID clean-host evidence separate.
 
 Required proof:
 
@@ -366,7 +378,7 @@ Do not keep cutting production release tags solely to retry this state.
       it, and records `ls`/`cat`/dehydrate/rehydrate evidence.
 - [x] Add evidence-directory support to the Linux terminal harness so a
       FUSE-capable host run can self-archive transcript and metadata.
-- [ ] Run the Linux terminal harness on a FUSE-capable host and archive the
+- [x] Run the Linux terminal harness on a FUSE-capable host and archive the
       command output as release/demo evidence.
 - [x] Keep FileProvider proof scoped to clean-host Finder acceptance rather than
       treating package installation alone as desktop proof.

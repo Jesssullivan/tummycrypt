@@ -1,0 +1,66 @@
+evidence dir: /tmp/tcfs-lazy-proof-20260508T151720Z/docs/release/evidence/lazy-linux-20260508T151858Z
+remote: seaweedfs://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z
+temp root: /tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL
+tcfs command: cargo run --quiet -p tcfs-cli --
+
+[1/6] seed fixture into remote prefix
+[2m2026-05-08T15:21:53.862889Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-08T15:21:53.862994Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-08T15:21:53.863043Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pushing /tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/source → tcfs:lazy-linux-20260508T151858Z (endpoint: http://100.64.48.53:8333, device: d1176e5d...)
+[2m2026-05-08T15:21:53.874408Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/index/docs/README.md: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/index/docs/README.md, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "338", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054C7DF57DB5D72AABC", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/index/docs/README.md, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/lazy-linux-20260508T151858Z/index/docs/README.md", request_id: "18ADA054C7DF57DB5D72AABC" }
+[2m2026-05-08T15:21:53.877180Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "446", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054C81778AC1245C8A1", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-08T15:21:53.879743Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "440", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054C83EE02919234511", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-08T15:21:53.888261Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/index/docs/README.md: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/index/docs/README.md, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "338", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054C8BDEC029A430D68", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/index/docs/README.md, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/lazy-linux-20260508T151858Z/index/docs/README.md", request_id: "18ADA054C8BDEC029A430D68" }
+[2m2026-05-08T15:21:53.899765Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "446", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054C971108C17EF24BA", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-08T15:21:53.911742Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/source/docs/README.md [3mhash[0m[2m=[0mfc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m25 [3muploaded_bytes[0m[2m=[0m25 [3mstreaming[0m[2m=[0mfalse
+[2m2026-05-08T15:21:53.914942Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/index/docs/deep/remote.txt: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/index/docs/deep/remote.txt, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "350", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054CA538E5A27486FEA", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/index/docs/deep/remote.txt, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/lazy-linux-20260508T151858Z/index/docs/deep/remote.txt", request_id: "18ADA054CA538E5A27486FEA" }
+[2m2026-05-08T15:21:53.917652Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "446", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054CA80E60070F763D2", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-08T15:21:53.920106Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "440", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054CAA84F2BED3CCEEC", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-08T15:21:53.930953Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/index/docs/deep/remote.txt: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/index/docs/deep/remote.txt, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "350", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054CB49E5AA73C595AD", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/index/docs/deep/remote.txt, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/lazy-linux-20260508T151858Z/index/docs/deep/remote.txt", request_id: "18ADA054CB49E5AA73C595AD" }
+[2m2026-05-08T15:21:53.944982Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=lazy-linux-20260508T151858Z/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "446", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18ADA054CC1D79830F1B2F05", "date": "Fri, 08 May 2026 15:21:53 GMT"} }, service: s3, path: lazy-linux-20260508T151858Z/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-08T15:21:53.956745Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/source/docs/deep/remote.txt [3mhash[0m[2m=[0mbd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m77 [3muploaded_bytes[0m[2m=[0m77 [3mstreaming[0m[2m=[0mfalse
+
+Push complete:
+  uploaded: 2 files (102 B)
+  skipped:  0 files (unchanged)
+  total:    2 files
+
+[2/6] start direct fuse mount
+mounted at: /tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount
+
+[3/6] prove traversal does not hydrate content
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/README.md
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/deep
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/deep/remote.txt
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/empty-dir
+
+[4/6] cat remote-backed file and verify hydration
+mounted root: /tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount
+listing parent before cat: /tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/deep
+total 1
+drwxr-xr-x 2 jess jess  0 May  8 11:21 .
+drwxr-xr-x 2 jess jess  0 May  8 11:21 ..
+-rw-r--r-- 1 jess jess 77 May  8 11:21 remote.txt
+find evidence (max depth 6):
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/README.md
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/deep
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/deep/remote.txt
+/tmp/nix-shell.KMItQb/tcfs-lazy-linux-demo.949vjL/mount/docs/empty-dir
+cat hydrate target: docs/deep/remote.txt
+cat byte count: 77
+lazy hydration mounted smoke passed
+cache after first cat: entries=1 bytes=77
+
+[5/6] clear mount cache as mounted-surface dehydration
+cache after clear: entries=0
+
+[6/6] cat again and verify rehydration
+cache after re-cat: entries=1 bytes=77
+
+lazy hydration Linux demo passed
+evidence written to: /tmp/tcfs-lazy-proof-20260508T151720Z/docs/release/evidence/lazy-linux-20260508T151858Z

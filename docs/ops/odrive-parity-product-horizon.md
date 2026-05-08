@@ -92,9 +92,11 @@ Parity should be assessed at the user-behavior level:
 | Show lifecycle state | CLI/TUI/daemon status reports active/synced/conflict states | Finder badges/progress/notifications reflect the same status classes |
 | Keep scriptability | every desktop action has a CLI/headless equivalent | Finder is native UX, not the only control plane |
 
-The Linux proof lane can continue without waiting for Apple. The Finder
-read/hydrate/evict/rehydrate lane is now green under PZM testing mode;
-production Finder lifecycle proof remains a separate bar.
+The Linux read lifecycle proof no longer needs to wait for Apple: archived
+evidence `docs/release/evidence/lazy-linux-20260508T151858Z/` proves mounted
+FUSE browse-before-download, exact `cat` hydration, cache clear, and
+rehydrate. The Finder read/hydrate/evict/rehydrate lane is now green under PZM
+testing mode; production Finder lifecycle proof remains a separate bar.
 
 ## Product Pillars
 
@@ -282,7 +284,8 @@ CloudStorage root rather than making `~/Desktop` the first FileProvider test.
 
 Highest-value work from here:
 
-1. Run and archive Linux lazy demo evidence on a FUSE-capable host.
+1. Extend Linux lazy proof beyond read lifecycle into mutation, conflict/status,
+   and recursive safe-unsync acceptance.
 2. Run and archive clean-host macOS Finder/FileProvider evidence.
 3. Run and archive the dedicated arbitrary-folder sync demo using
    `~/Desktop/TCFS Demo` and honey.

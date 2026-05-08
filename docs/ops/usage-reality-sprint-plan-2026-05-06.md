@@ -12,7 +12,7 @@ M10 usage-reality issues are closed.
 | Surface | Truth today | Strongest evidence | Next proof gate |
 | --- | --- | --- | --- |
 | Linux CLI + daemon | Strongest supported path | CI, release smoke, `neo-honey` live acceptance | Archive a current Linux first-use transcript against the live/disposable backend |
-| Linux mounted FS | Code and in-process VFS tests are strong; real-host FUSE evidence is not yet archived for the full user story | `tcfs-vfs` tests and mounted helper regressions | Run `task lazy:linux-demo` on a FUSE-capable host and archive evidence |
+| Linux mounted FS | Green for the read lifecycle on a real FUSE host: browse remote tree, hydrate exact content, clear cache, and rehydrate. Mutate/conflict/status are still open. | `tcfs-vfs` tests, mounted helper regressions, and archived evidence `docs/release/evidence/lazy-linux-20260508T151858Z/` | Extend mounted/sync-root proof into mutation, dirty-child safe-unsync, conflict, and status reporting |
 | Physical `.tc` / `.tcf` stubs | Stub wire format, parse/write, and compatibility are tested | `tcfs-vfs` and daemon unsync tests | Product-level recursive safe-unsync acceptance, including dirty-child refusal |
 | macOS CLI + daemon | Package install, signing, E2EE, storage, and daemon startup are repeatedly proven | `v0.12.12` release and PZM smoke pre-harness stages | Keep install smoke green while FileProvider lab work continues |
 | macOS Finder/FileProvider, lab | Green for the non-production PZM testing-mode lane through enumerate, exact-content hydrate, evict, and rehydrate. This depends on the installed PZM `SystemPolicyRule` profile plus Mac App Development signing, so it is not production Finder proof. | PZM run `25446601375` green for read/hydrate; package run `25456290021` proves build-output host startup; smoke run `25456341985` captured the pre-profile `_dyld_start` AppleSystemPolicy block; smoke run `25458526158` proves macOS 15 rejects `spctl --add`; smoke run `25562087555` passes profile verification, installed host policy probe, shared-Keychain config, E2EE, FileProvider registration, enumeration, requestDownload, evict, re-requestDownload, and exact 55-byte hydration | Expand lifecycle depth: mutation/conflict/status/badges/recovery, while separately proving production Developer ID Finder enablement |
@@ -92,7 +92,7 @@ Each packet should produce an archived evidence directory or a linked CI run.
 | Packet | Scope | Acceptance bar | Can run in parallel with |
 | --- | --- | --- | --- |
 | A. PZM runtime-policy diagnosis | macOS lab package only | Done for the non-production profile-backed lane: run `25562087555` is green and archived | B, C, D |
-| B. Linux FUSE proof | Linux real host | `find`/`ls` before hydration, exact `cat`, cache clear or unsync, exact rehydrate, evidence archived | A, C, D |
+| B. Linux FUSE proof | Linux real host | Done for read lifecycle: `docs/release/evidence/lazy-linux-20260508T151858Z/` proves `find`/`ls` before hydration, exact `cat`, cache clear, and exact rehydrate | C, D, E |
 | C. Safe-unsync product proof | CLI/daemon/VFS | Recursive unsync refuses dirty children without force, succeeds after clean state, and rehydrates exact content | A, B, D |
 | D. Distribution refresh | release surfaces | Homebrew fresh install/upgrade refreshed, Debian 12 posture decided, Nix proof recorded or explicitly scoped | A, B, C |
 | E. Finder lifecycle depth | macOS lab after A | Evict/rehydrate is green in run `25562087555`; next add mutation, conflict/status, badges/progress, and recovery evidence through FileProvider | B, C, D |
@@ -103,9 +103,10 @@ Each packet should produce an archived evidence directory or a linked CI run.
 
 The minimum credible M10 proof bar is:
 
-1. One green Linux mounted-surface evidence bundle.
-2. One green PZM FileProvider read/hydrate-or-better run from a current tag, or
-   a documented Apple runtime-policy blocker with complete signing evidence.
+1. One green Linux mounted-surface evidence bundle. Done:
+   `docs/release/evidence/lazy-linux-20260508T151858Z/`.
+2. One green PZM FileProvider read/hydrate-or-better run from a current tag.
+   Done: run `25562087555`.
 3. One updated product-status document that does not conflate testing-mode lab
    proof with production Finder proof.
 4. Linear/GitHub trackers updated with run IDs, artifact paths, and the next
