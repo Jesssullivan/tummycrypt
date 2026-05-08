@@ -76,9 +76,13 @@ startup, public S3 reachability, and seeded E2EE fixture access. The PZM
 non-production testing-mode lane now also proves FileProvider enumeration,
 exact-content hydration, evict, rehydrate, and CloudStorage mutation
 upload/readback from a package install when the lab `SystemPolicyRule` profile
-is installed. Production Finder lifecycle evidence remains open: arbitrary
-clean-host enablement, conflict, and visible status/progress are not yet release
-gates.
+is installed. PZM smoke run `25569596910` also proves the deterministic
+conflict/status lane at the current lab depth: CLI `sync state: conflict` and
+exact FileProvider content preservation. The same run did not observe a
+FileProvider enumerator conflict-status log, so visible Finder status/progress
+remains observational. Production Finder lifecycle evidence remains open:
+arbitrary clean-host enablement, conflict, and visible status/progress are not
+yet release gates.
 
 ## Linux <> Finder Parity Evidence
 
@@ -93,12 +97,12 @@ Parity should be assessed at the user-behavior level:
 | Show lifecycle state | CLI/TUI/daemon status reports active/synced/conflict states | Finder badges/progress/notifications reflect the same status classes |
 | Keep scriptability | every desktop action has a CLI/headless equivalent | Finder is native UX, not the only control plane |
 
-The Linux read lifecycle proof no longer needs to wait for Apple: archived
-evidence `docs/release/evidence/lazy-linux-20260508T151858Z/` proves mounted
-FUSE browse-before-download, exact `cat` hydration, cache clear, and
-rehydrate. The Finder read/hydrate/evict/rehydrate/mutation lane is now green
-under PZM testing mode; production Finder lifecycle proof remains a separate
-bar.
+The Linux lifecycle proof no longer needs to wait for Apple: archived evidence
+`docs/release/evidence/lazy-linux-20260508T170825Z/` proves mounted FUSE
+browse-before-download, exact `cat` hydration, mounted write/readback, cache
+clear/rehydrate, and recursive safe-unsync dirty refusal/success. The Finder
+read/hydrate/evict/rehydrate/mutation lane is now green under PZM testing mode;
+production Finder lifecycle proof remains a separate bar.
 
 ## Product Pillars
 
@@ -129,8 +133,9 @@ about proving and surfacing them:
 
 - expose status consistently through CLI, TUI, daemon RPC, and desktop UI
 - prove per-path locking under concurrent operations
-- prove dirty-child unsync safety recursively
-- make conflict status and resolution visible in Finder and CLI
+- prove dirty-child unsync safety recursively on a real host evidence run
+- make conflict status and resolution visible in Finder; CLI conflict state and
+  exact FileProvider content preservation are green in PZM run `25569596910`
 
 ### 3. Folder Policy
 
@@ -286,8 +291,9 @@ CloudStorage root rather than making `~/Desktop` the first FileProvider test.
 
 Highest-value work from here:
 
-1. Extend Linux lazy proof beyond read lifecycle into mutation, conflict/status,
-   and recursive safe-unsync acceptance.
+1. Extend lifecycle status visibility beyond the archived Linux mutation and
+   recursive safe-unsync proof into richer CLI/TUI/Finder conflict/progress
+   surfaces.
 2. Run and archive clean-host macOS Finder/FileProvider evidence.
 3. Run and archive the dedicated arbitrary-folder sync demo using
    `~/Desktop/TCFS Demo` and honey.

@@ -34,6 +34,15 @@ Options:
   --mutation-content <text>   Exact content to write for --exercise-mutation
   --mutation-content-file <path>
                               File containing exact mutation content
+  --exercise-conflict-status  Verify a pre-seeded conflict/status fixture
+                              through CLI state, FileProvider enumeration,
+                              requestDownload, and exact-content hydration
+  --conflict-file <relpath>   Relative conflict fixture path under CloudStorage
+  --conflict-content <text>   Exact content expected for --conflict-file
+  --conflict-content-file <path>
+                              File containing exact conflict fixture content
+  --state <path>              State cache JSON path for conflict/status checks
+  --sync-root <path>          Sync root containing the conflict fixture
   --remote-prefix <prefix>    Remote prefix used to verify mutation by pull
   --app-path <path>           Installed TCFSProvider.app path
                               (default: auto-detect /Applications or ~/Applications)
@@ -77,6 +86,12 @@ EXERCISE_MUTATION="${TCFS_EXERCISE_MUTATION:-0}"
 MUTATION_FILE_REL="${TCFS_FILEPROVIDER_MUTATION_FILE_REL:-}"
 MUTATION_CONTENT="${TCFS_FILEPROVIDER_MUTATION_CONTENT:-}"
 MUTATION_CONTENT_FILE="${TCFS_FILEPROVIDER_MUTATION_CONTENT_FILE:-}"
+EXERCISE_CONFLICT_STATUS="${TCFS_EXERCISE_CONFLICT_STATUS:-0}"
+CONFLICT_FILE_REL="${TCFS_FILEPROVIDER_CONFLICT_FILE_REL:-}"
+CONFLICT_CONTENT="${TCFS_FILEPROVIDER_CONFLICT_CONTENT:-}"
+CONFLICT_CONTENT_FILE="${TCFS_FILEPROVIDER_CONFLICT_CONTENT_FILE:-}"
+CONFLICT_STATE_PATH="${TCFS_STATE_PATH:-}"
+SYNC_ROOT_OVERRIDE="${TCFS_SYNC_ROOT:-}"
 REMOTE_PREFIX="${TCFS_REMOTE_PREFIX:-}"
 APP_PATH="${TCFS_APP_PATH:-}"
 CLOUD_ROOT="${TCFS_CLOUD_ROOT:-}"
@@ -134,6 +149,30 @@ while [[ $# -gt 0 ]]; do
       ;;
     --mutation-content-file)
       MUTATION_CONTENT_FILE="$2"
+      shift 2
+      ;;
+    --exercise-conflict-status)
+      EXERCISE_CONFLICT_STATUS=1
+      shift
+      ;;
+    --conflict-file)
+      CONFLICT_FILE_REL="$2"
+      shift 2
+      ;;
+    --conflict-content)
+      CONFLICT_CONTENT="$2"
+      shift 2
+      ;;
+    --conflict-content-file)
+      CONFLICT_CONTENT_FILE="$2"
+      shift 2
+      ;;
+    --state)
+      CONFLICT_STATE_PATH="$2"
+      shift 2
+      ;;
+    --sync-root)
+      SYNC_ROOT_OVERRIDE="$2"
       shift 2
       ;;
     --remote-prefix)
@@ -221,6 +260,11 @@ if [[ -n "$MUTATION_CONTENT" && -n "$MUTATION_CONTENT_FILE" ]]; then
   exit 2
 fi
 
+if [[ -n "$CONFLICT_CONTENT" && -n "$CONFLICT_CONTENT_FILE" ]]; then
+  echo "--conflict-content and --conflict-content-file are mutually exclusive" >&2
+  exit 2
+fi
+
 if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" && -z "$EXPECTED_FILE_REL" ]]; then
   echo "--require-keychain-config requires --expected-file so the extension config path is exercised" >&2
   exit 2
@@ -238,6 +282,21 @@ fi
 
 if [[ "$EXERCISE_MUTATION" == "1" && -z "$REMOTE_PREFIX" ]]; then
   echo "--exercise-mutation requires --remote-prefix" >&2
+  exit 2
+fi
+
+if [[ "$EXERCISE_CONFLICT_STATUS" == "1" && -z "$CONFLICT_FILE_REL" ]]; then
+  echo "--exercise-conflict-status requires --conflict-file" >&2
+  exit 2
+fi
+
+if [[ "$EXERCISE_CONFLICT_STATUS" == "1" && -z "$CONFLICT_CONTENT" && -z "$CONFLICT_CONTENT_FILE" ]]; then
+  echo "--exercise-conflict-status requires --conflict-content or --conflict-content-file" >&2
+  exit 2
+fi
+
+if [[ "$EXERCISE_CONFLICT_STATUS" == "1" && "$SKIP_STATUS" -eq 1 ]]; then
+  echo "--exercise-conflict-status requires tcfs CLI status checks; remove --skip-status" >&2
   exit 2
 fi
 
@@ -368,6 +427,10 @@ fi
 
 if [[ -n "$MUTATION_CONTENT_FILE" ]]; then
   require_file "$MUTATION_CONTENT_FILE"
+fi
+
+if [[ -n "$CONFLICT_CONTENT_FILE" ]]; then
+  require_file "$CONFLICT_CONTENT_FILE"
 fi
 
 require_dir() {
@@ -1275,6 +1338,66 @@ prepare_mutation_content_file() {
   fi
 }
 
+prepare_conflict_content_file() {
+  local target="$1"
+
+  if [[ -n "$CONFLICT_CONTENT_FILE" ]]; then
+    cp "$CONFLICT_CONTENT_FILE" "$target"
+  else
+    printf '%s' "$CONFLICT_CONTENT" >"$target"
+  fi
+}
+
+resolve_config_path_value() {
+  local section="$1"
+  local key="$2"
+
+  python3 - "$CONFIG_PATH" "$section" "$key" <<'PY'
+import pathlib
+import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+config_path = pathlib.Path(sys.argv[1])
+section = sys.argv[2]
+key = sys.argv[3]
+with config_path.open("rb") as fh:
+    config = tomllib.load(fh)
+value = config.get(section, {}).get(key)
+if not value:
+    raise SystemExit(1)
+print(value)
+PY
+}
+
+resolve_conflict_state_path() {
+  if [[ -n "$CONFLICT_STATE_PATH" ]]; then
+    printf '%s\n' "$CONFLICT_STATE_PATH"
+    return
+  fi
+
+  python3 - "$CONFIG_PATH" <<'PY'
+import pathlib
+import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+config_path = pathlib.Path(sys.argv[1])
+with config_path.open("rb") as fh:
+    config = tomllib.load(fh)
+state_db = config.get("sync", {}).get("state_db")
+if not state_db:
+    raise SystemExit(1)
+print(pathlib.Path(state_db).with_suffix(".json"))
+PY
+}
+
 pull_mutation_from_remote() {
   local rel="$1"
   local expected_file="$2"
@@ -1347,6 +1470,104 @@ exercise_fileprovider_mutation() {
   run_status "post-mutation"
 }
 
+collect_conflict_enumerator_log() {
+  run_log_show --style compact --last 2m \
+    --predicate 'subsystem == "io.tinyland.tcfs.fileprovider" && category == "enumerator" && eventMessage CONTAINS "hydration_state=conflict"' \
+    || true
+}
+
+exercise_fileprovider_conflict_status() {
+  local rel="$CONFLICT_FILE_REL"
+  local expected_file="$LOG_DIR/conflict-expected-content"
+  local hydrated_copy="$LOG_DIR/conflict-hydrated-file"
+  local read_error="$LOG_DIR/conflict-read-error.log"
+  local status_log="$LOG_DIR/conflict-sync-status.log"
+  local enum_log="$LOG_DIR/conflict-enumerator.log"
+  local state_path
+  local sync_root
+  local sync_path
+  local cloud_path
+  local cloud_parent
+  local attempt=0
+  local read_status=0
+  local enum_output
+
+  validate_relative_file_path "$rel"
+  prepare_conflict_content_file "$expected_file"
+
+  state_path="$(resolve_conflict_state_path)" || {
+    echo "could not resolve conflict state path from --state or config [sync].state_db" >&2
+    exit 1
+  }
+  sync_root="${SYNC_ROOT_OVERRIDE:-$(resolve_config_path_value sync sync_root)}" || {
+    echo "could not resolve conflict sync root from --sync-root or config [sync].sync_root" >&2
+    exit 1
+  }
+  sync_path="$sync_root/$rel"
+  cloud_path="$CLOUD_ROOT/$rel"
+  cloud_parent="$(dirname "$cloud_path")"
+
+  require_file "$state_path"
+  require_file "$sync_path"
+
+  if ! cmp -s "$expected_file" "$sync_path"; then
+    echo "conflict fixture sync-root content mismatch: $sync_path" >&2
+    exit 1
+  fi
+
+  "$TCFS_PATH" --config "$CONFIG_PATH" sync-status "$sync_path" --state "$state_path" >"$status_log" 2>&1 || {
+    echo "tcfs sync-status failed for conflict fixture" >&2
+    cat "$status_log" >&2 || true
+    exit 1
+  }
+  cat "$status_log"
+  grep -q "sync state: conflict" "$status_log" || {
+    echo "tcfs sync-status did not report conflict for $sync_path" >&2
+    exit 1
+  }
+  echo "CLI conflict status verified: $rel"
+
+  wait_for_expected_parent_chain "$cloud_parent"
+  wait_for_expected_file "$cloud_path"
+  request_expected_file_download "$rel"
+
+  while (( attempt < TIMEOUT_SECS )); do
+    if read_fileprovider_file "$cloud_path" "$hydrated_copy" 2>"$read_error"; then
+      break
+    else
+      read_status="$?"
+    fi
+    rm -f "$hydrated_copy"
+    if [[ "$read_status" == "124" ]]; then
+      attempt="$TIMEOUT_SECS"
+      break
+    fi
+    short_pause
+    attempt=$((attempt + 1))
+  done
+
+  if (( attempt >= TIMEOUT_SECS )); then
+    cat "$read_error" >&2 || true
+    echo "failed to read conflict fixture through FileProvider: $cloud_path" >&2
+    exit 1
+  fi
+
+  if ! cmp -s "$expected_file" "$hydrated_copy"; then
+    echo "conflict fixture FileProvider content mismatch: $cloud_path" >&2
+    exit 1
+  fi
+  echo "FileProvider conflict fixture content matched"
+
+  enum_output="$(collect_conflict_enumerator_log)"
+  printf '%s\n' "$enum_output" >"$enum_log"
+  if grep -F "item=$rel hydration_state=conflict" "$enum_log" >/dev/null; then
+    echo "FileProvider enumerator conflict status observed"
+  else
+    echo "warning: FileProvider enumerator did not log conflict hydration state for $rel; treating Finder status as captured evidence only" >&2
+    cat "$enum_log" >&2 || true
+  fi
+}
+
 APP_PATH="$(detect_app_path)"
 if [[ -n "$LOG_DIR_OVERRIDE" ]]; then
   LOG_DIR="$LOG_DIR_OVERRIDE"
@@ -1410,6 +1631,10 @@ fi
 
 if [[ "$EXERCISE_MUTATION" == "1" ]]; then
   exercise_fileprovider_mutation
+fi
+
+if [[ "$EXERCISE_CONFLICT_STATUS" == "1" ]]; then
+  exercise_fileprovider_conflict_status
 fi
 
 run_status "post-hydrate"

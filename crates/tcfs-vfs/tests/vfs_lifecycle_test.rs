@@ -204,6 +204,49 @@ async fn readdir_is_lazy_and_open_hydrates_cache() {
 }
 
 #[tokio::test]
+async fn hydrated_remote_file_edit_flushes_exact_content() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "mounted-edit-contract";
+    let original = b"original remote-backed content";
+    let edited = b"edited through mounted view with longer exact content";
+
+    let writer = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("writer-cache"));
+    writer
+        .mkdir("/", OsStr::new("docs"), 0o755)
+        .await
+        .expect("mkdir docs");
+    let (fh, _) = writer
+        .create("/docs", OsStr::new("remote.txt"), 0o644)
+        .await
+        .expect("create remote file");
+    writer.write(fh, 0, original).await.expect("write original");
+    writer.release(fh).await.expect("flush original");
+
+    let editor = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("editor-cache"));
+    let (edit_fh, hydrated) = editor
+        .open("/docs/remote.txt")
+        .await
+        .expect("hydrate remote file for edit");
+    assert_eq!(&hydrated, original);
+    editor
+        .write(edit_fh, 0, edited)
+        .await
+        .expect("write edited content");
+    editor.release(edit_fh).await.expect("flush edited content");
+
+    let verifier = memory_vfs_with_op(op, prefix, tmp.path().join("verifier-cache"));
+    let (verify_fh, verified) = verifier
+        .open("/docs/remote.txt")
+        .await
+        .expect("hydrate edited remote file");
+    assert_eq!(&verified, edited);
+    verifier.release(verify_fh).await.expect("release verifier");
+}
+
+#[tokio::test]
 async fn sync_push_json_index_hydrates_through_vfs() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let source_root = tmp.path().join("source");

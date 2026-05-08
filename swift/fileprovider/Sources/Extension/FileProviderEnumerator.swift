@@ -315,6 +315,12 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             let hydration = item.hydration_state.map { String(cString: $0) } ?? ""
             let itemIdentifier = normalizedItemIdentifier(itemId, isDirectory: item.is_directory)
 
+            if !hydration.isEmpty {
+                enumLogger.info(
+                    "enumerateProviderItems: item=\(itemIdentifier, privacy: .public) hydration_state=\(hydration, privacy: .public)"
+                )
+            }
+
             providerItems.append(
                 TCFSFileProviderItem(
                     identifier: NSFileProviderItemIdentifier(itemIdentifier),

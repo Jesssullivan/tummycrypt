@@ -41,13 +41,17 @@ FAKE_BIN="${TMPDIR}/fake-bin"
 HOME_DIR="${TMPDIR}/home"
 APP_PATH="${TMPDIR}/TCFSProvider.app"
 CLOUD_ROOT="${HOME_DIR}/Library/CloudStorage/TCFS"
+SYNC_ROOT="${TMPDIR}/sync-root"
+STATE_PATH="${TMPDIR}/tcfs-state.json"
 LOG_DIR="${TMPDIR}/logs"
 CONFIG_PATH="${HOME_DIR}/.config/tcfs/config.toml"
 FILEPROVIDER_CONFIG="${HOME_DIR}/.config/tcfs/fileprovider/config.json"
 EXPECTED_REL="Projects/tcfs-odrive-parity/honey-readme.txt"
 MUTATION_REL="Projects/tcfs-odrive-parity/fileprovider-mutation.txt"
+CONFLICT_REL="Projects/tcfs-odrive-parity/conflict-status.txt"
 EXPECTED_CONTENT_FILE="${TMPDIR}/expected-content.txt"
 MUTATION_CONTENT_FILE="${TMPDIR}/mutation-content.txt"
+CONFLICT_CONTENT_FILE="${TMPDIR}/conflict-content.txt"
 OPEN_LOG="${TMPDIR}/open.log"
 PLUGINKIT_LOG="${TMPDIR}/pluginkit.log"
 LAUNCHCTL_LOG="${TMPDIR}/launchctl.log"
@@ -62,13 +66,27 @@ mkdir -p \
   "$(dirname "$CONFIG_PATH")" \
   "$(dirname "$FILEPROVIDER_CONFIG")" \
   "$(dirname "$CLOUD_ROOT/$EXPECTED_REL")" \
+  "$(dirname "$CLOUD_ROOT/$CONFLICT_REL")" \
+  "$(dirname "$SYNC_ROOT/$CONFLICT_REL")" \
   "$LOG_DIR"
 
-printf '[storage]\nendpoint = "http://example.invalid:8333"\nbucket = "tcfs"\n' >"$CONFIG_PATH"
+cat >"$CONFIG_PATH" <<EOF
+[storage]
+endpoint = "http://example.invalid:8333"
+bucket = "tcfs"
+
+[sync]
+state_db = "${TMPDIR}/tcfs-state.db"
+sync_root = "${SYNC_ROOT}"
+EOF
 printf '{"socket_path":"/tmp/tcfs-fileprovider.sock"}\n' >"$FILEPROVIDER_CONFIG"
 printf 'TCFS Finder hydration fixture\n' >"$EXPECTED_CONTENT_FILE"
 printf 'TCFS Finder mutation fixture\n' >"$MUTATION_CONTENT_FILE"
+printf 'TCFS Finder conflict fixture\n' >"$CONFLICT_CONTENT_FILE"
 cp "$EXPECTED_CONTENT_FILE" "$CLOUD_ROOT/$EXPECTED_REL"
+cp "$CONFLICT_CONTENT_FILE" "$CLOUD_ROOT/$CONFLICT_REL"
+cp "$CONFLICT_CONTENT_FILE" "$SYNC_ROOT/$CONFLICT_REL"
+printf '{"entries":{}}\n' >"$STATE_PATH"
 
 cat >"$FAKE_BIN/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -101,6 +119,19 @@ case "${1:-}" in
         src="${TCFS_FAKE_REMOTE_ROOT:?}/$rel"
         /bin/cat "$src" >"$dest"
         printf 'Pulling %s -> %s using %s\n' "$rel" "$dest" "$config"
+        ;;
+      sync-status)
+        path="$2"
+        printf 'State cache: %s\n' "${4:-unknown-state}"
+        printf 'Tracked files: 1\n\n'
+        printf 'File: %s\n' "$path"
+        printf '  hash:       deadbeef\n'
+        printf '  size:       29 B\n'
+        printf '  chunks:     1\n'
+        printf '  remote:     data/index/Projects/tcfs-odrive-parity/conflict-status.txt\n'
+        printf '  last sync:  0 seconds ago\n'
+        printf '  sync state: conflict\n'
+        printf '  sync check: up to date\n'
         ;;
       *)
         printf 'unexpected tcfs --config invocation:'
@@ -221,6 +252,10 @@ if [[ "$args" == *"io.tinyland.tcfs.fileprovider"* && "$args" == *"loadConfig:"*
     fi
   else
     printf '2026-04-30 TCFSFileProvider extension loadConfig: loaded from shared Keychain\n'
+  fi
+elif [[ "$args" == *"io.tinyland.tcfs.fileprovider"* && "$args" == *"hydration_state=conflict"* ]]; then
+  if [[ "${TCFS_FAKE_SKIP_ENUM_CONFLICT_LOG:-0}" != "1" ]]; then
+    printf '2026-04-30 TCFSFileProvider enumerator enumerateProviderItems: item=Projects/tcfs-odrive-parity/conflict-status.txt hydration_state=conflict\n'
   fi
 elif [[ "$args" == *"com.apple.FileProvider"* || "$args" == *"fileproviderd"* || "$args" == *"Sync is not enabled"* ]]; then
   if [[ -v TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG && -n "$TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG" ]]; then
@@ -367,6 +402,7 @@ TCFS_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
 TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
 TCFS_FAKE_TESTING_MODE_ENTITLEMENT=1 \
 TCFS_FAKE_COMPACT_ENTITLEMENTS=1 \
+TCFS_FAKE_SKIP_ENUM_CONFLICT_LOG=1 \
 TCFS_FAKE_REMOTE_ROOT="$CLOUD_ROOT" \
 TCFS_FAKE_SWIFT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
 TCFS_FAKE_SWIFT_MARKER="$READ_RETRY_MARKER" \
@@ -385,9 +421,14 @@ bash "$SCRIPT" \
   --exercise-mutation \
   --mutation-file "$MUTATION_REL" \
   --mutation-content-file "$MUTATION_CONTENT_FILE" \
+  --exercise-conflict-status \
+  --conflict-file "$CONFLICT_REL" \
+  --conflict-content-file "$CONFLICT_CONTENT_FILE" \
+  --state "$STATE_PATH" \
+  --sync-root "$SYNC_ROOT" \
   --remote-prefix "gha/fake-prefix" \
   --timeout 2 \
-  >"$OUT"
+  >"$OUT" 2>&1
 
 assert_contains "$OUT" "tcfsd version: tcfsd 0.12.2"
 assert_contains "$OUT" "tcfs version: tcfs 0.12.2"
@@ -415,6 +456,9 @@ assert_contains "$OUT" "writing FileProvider mutation fixture: $MUTATION_REL"
 assert_contains "$OUT" "FileProvider mutation local content matched"
 assert_contains "$OUT" "remote mutation pull matched expected content"
 assert_contains "$OUT" "tcfs status (post-mutation):"
+assert_contains "$OUT" "CLI conflict status verified: $CONFLICT_REL"
+assert_contains "$OUT" "FileProvider conflict fixture content matched"
+assert_contains "$OUT" "warning: FileProvider enumerator did not log conflict hydration state for $CONFLICT_REL"
 assert_contains "$OUT" "hydrated file content matched expected content file"
 assert_contains "$OUT" "FileProvider extension config source: shared Keychain"
 assert_contains "$OUT" "macOS post-install FileProvider smoke passed"
@@ -433,9 +477,11 @@ assert_contains "$HOST_BINARY_LOG" "host-binary requestDownload=$EXPECTED_REL"
 assert_contains "$HOST_BINARY_LOG" "host-binary evict=$EXPECTED_REL"
 assert_contains "$HOST_BINARY_LOG" "nonce=tcfs-smoke-"
 assert_contains "$LOG_DIR/host-domain-launch.log" "add: OK - domain available"
-assert_contains "$LOG_DIR/host-request-launch.log" "requestDownload: $EXPECTED_REL: OK"
+assert_contains "$LOG_DIR/host-request-launch.log" "requestDownload: $CONFLICT_REL: OK"
 assert_contains "$LOG_DIR/host-evict-launch.log" "evict: $EXPECTED_REL: OK"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
+assert_contains "$LOG_DIR/conflict-sync-status.log" "sync state: conflict"
+test -f "$LOG_DIR/conflict-enumerator.log"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl evaluate"
 assert_contains "$LOG_DIR/fileproviderctl-check-root.log" "fileproviderctl check -P -a"
@@ -444,6 +490,7 @@ assert_contains "$LOG_DIR/fileproviderctl-check-expected-parent.log" "fileprovid
 cmp -s "$EXPECTED_CONTENT_FILE" "$LOG_DIR/hydrated-expected-file"
 cmp -s "$MUTATION_CONTENT_FILE" "$CLOUD_ROOT/$MUTATION_REL"
 cmp -s "$MUTATION_CONTENT_FILE" "$LOG_DIR/mutation-remote-pull"
+cmp -s "$CONFLICT_CONTENT_FILE" "$LOG_DIR/conflict-hydrated-file"
 [[ -e "$READ_RETRY_MARKER" ]] || {
   printf 'expected coordinated read to fail once before hydration retry succeeded\n' >&2
   exit 1
@@ -473,6 +520,19 @@ assert_fails_contains \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
     bash "$SCRIPT" \
       --exercise-mutation
+
+assert_fails_contains \
+  "--exercise-conflict-status requires --conflict-file" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --exercise-conflict-status
+
+assert_fails_contains \
+  "--exercise-conflict-status requires --conflict-content or --conflict-content-file" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --exercise-conflict-status \
+      --conflict-file "$CONFLICT_REL"
 
 assert_fails_contains \
   "host app missing com.apple.developer.fileprovider.testing-mode entitlement" \

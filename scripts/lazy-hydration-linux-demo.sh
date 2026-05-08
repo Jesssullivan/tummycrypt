@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# End-to-end Linux terminal demo for mounted TCFS lazy traversal and hydration.
+# End-to-end Linux terminal demo for mounted TCFS lazy traversal, hydration,
+# mounted mutation, cache dehydration/rehydration, and recursive safe-unsync.
 #
 set -euo pipefail
 
@@ -9,8 +10,9 @@ usage() {
 Usage: scripts/lazy-hydration-linux-demo.sh [options]
 
 Seed a dedicated remote prefix, mount it through tcfs on Linux, prove clean
-ls/find names before hydration, cat a remote-backed file, verify cache hydration,
-clear the mount cache, and cat again to prove rehydration.
+ls/find names before hydration, cat a remote-backed file, write/edit through
+the mounted view, verify exact remote pullback, clear the mount cache, cat
+again to prove rehydration, and prove recursive safe-unsync refusal/success.
 
 Options:
   --remote <seaweedfs://host:port/bucket/prefix>
@@ -24,7 +26,7 @@ Options:
   --create-bucket
       Best-effort bucket creation with aws cli, s5cmd, or mc before seeding.
   --evidence-dir <path>
-      Write transcript, redacted metadata, result, and mount log evidence.
+      Write transcript, redacted metadata, result, remote prefix, and mount log evidence.
   --keep
       Keep the temp source/config/mount/cache directory after the run.
   -h, --help
@@ -151,6 +153,11 @@ mount_log="$tmp_root/mount.log"
 mc_config_dir="$tmp_root/mc"
 expected_file="docs/deep/remote.txt"
 expected_content=$'TCFS lazy hydration fixture\nThis file should hydrate only when cat opens it.\n'
+write_file="docs/deep/mounted-write.txt"
+write_initial_content=$'TCFS mounted write fixture\nfirst version from mounted view\n'
+write_final_content=$'TCFS mounted write fixture\nedited version from mounted view\n'
+dirty_file="docs/README.md"
+dirty_original_content=$'visible before hydration\n'
 mount_pid=""
 
 tcfs_cmd=()
@@ -172,6 +179,7 @@ setup_evidence() {
   {
     printf 'started_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'remote=%s\n' "$remote"
+    printf 'remote_prefix=%s\n' "$prefix"
     printf 'endpoint=%s\n' "$endpoint"
     printf 'bucket=%s\n' "$bucket"
     printf 'prefix=%s\n' "$prefix"
@@ -185,6 +193,8 @@ setup_evidence() {
     done
     printf '\n'
   } >"$evidence_dir/run-metadata.env"
+  cp "$evidence_dir/run-metadata.env" "$evidence_dir/redacted-metadata.env"
+  printf '%s\n' "$prefix" >"$evidence_dir/remote-prefix.txt"
 
   exec > >(tee "$transcript_path") 2>&1
   printf 'evidence dir: %s\n' "$evidence_dir"
@@ -267,10 +277,18 @@ cleanup() {
     mkdir -p "$evidence_dir"
     {
       printf 'completed_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      printf 'status=%s\n' "$status"
-    } >"$evidence_dir/result.env"
+    printf 'status=%s\n' "$status"
+  } >"$evidence_dir/result.env"
     [[ -f "$mount_log" ]] && cp "$mount_log" "$evidence_dir/mount.log"
     [[ -f "$config_path" ]] && cp "$config_path" "$evidence_dir/tcfs.toml"
+    for artifact in \
+      mounted-write-remote-pull.log \
+      unsync-dirty.out \
+      unsync-success.out \
+      unsync-status.out
+    do
+      [[ -f "$tmp_root/$artifact" ]] && cp "$tmp_root/$artifact" "$evidence_dir/$artifact"
+    done
   fi
 
   if [[ "$keep" == "1" ]]; then
@@ -326,9 +344,39 @@ clear_cache_entries() {
   fi
 }
 
+pull_write_from_remote() {
+  local pulled_copy="$tmp_root/mounted-write-remote-pull"
+  local expected_copy="$tmp_root/mounted-write-expected"
+  local pull_log="$tmp_root/mounted-write-remote-pull.log"
+  local attempt
+  local status=0
+
+  printf '%s' "$write_final_content" >"$expected_copy"
+
+  for attempt in {1..80}; do
+    status=0
+    rm -f "$pulled_copy"
+    if "${tcfs_cmd[@]}" --config "$config_path" pull "$write_file" "$pulled_copy" --prefix "$prefix" >"$pull_log" 2>&1; then
+      if cmp -s "$expected_copy" "$pulled_copy"; then
+        cat "$pull_log"
+        printf 'remote mounted-write pull matched exact edited content\n'
+        return 0
+      fi
+      printf 'remote mounted-write pull content mismatch on attempt %s\n' "$attempt" >>"$pull_log"
+    else
+      status=$?
+      printf 'remote mounted-write pull failed on attempt %s with status %s\n' "$attempt" "$status" >>"$pull_log"
+    fi
+    short_pause
+  done
+
+  cat "$pull_log" >&2 || true
+  return 1
+}
+
 mkdir -p "$source_root/docs/deep" "$source_root/docs/empty-dir" "$mount_root" "$cache_root"
 printf '%s' "$expected_content" >"$source_root/$expected_file"
-printf 'visible before hydration\n' >"$source_root/docs/README.md"
+printf '%s' "$dirty_original_content" >"$source_root/$dirty_file"
 
 cat >"$config_path" <<EOF
 [daemon]
@@ -363,13 +411,13 @@ printf 'tcfs command: %s\n' "${tcfs_cmd[*]}"
 
 create_bucket_if_requested
 
-printf '\n[1/6] seed fixture into remote prefix\n'
+printf '\n[1/9] seed fixture into remote prefix\n'
 "${tcfs_cmd[@]}" --config "$config_path" push "$source_root" --prefix "$prefix" --state "$state_json"
 
 before_count="$(cache_entry_count)"
 [[ "$before_count" == "0" ]] || fail "cache should be empty before mount traversal, got $before_count entries"
 
-printf '\n[2/6] start direct %s mount\n' "$backend"
+printf '\n[2/9] start direct %s mount\n' "$backend"
 mount_args=(--config "$config_path" mount "$remote" "$mount_root")
 if [[ "$backend" == "nfs" ]]; then
   mount_args+=(--nfs)
@@ -379,12 +427,12 @@ mount_pid=$!
 wait_for_mount
 printf 'mounted at: %s\n' "$mount_root"
 
-printf '\n[3/6] prove traversal does not hydrate content\n'
+printf '\n[3/9] prove traversal does not hydrate content\n'
 find "$mount_root" -maxdepth 4 -print | sort
 after_ls_count="$(cache_entry_count)"
 [[ "$after_ls_count" == "0" ]] || fail "ls/find hydrated cache unexpectedly; entries=$after_ls_count"
 
-printf '\n[4/6] cat remote-backed file and verify hydration\n'
+printf '\n[4/9] cat remote-backed file and verify hydration\n'
 "$REPO_ROOT/scripts/lazy-hydration-mounted-smoke.sh" \
   --mount-root "$mount_root" \
   --expected-file "$expected_file" \
@@ -398,13 +446,20 @@ after_cat_bytes="$(cache_entry_bytes)"
 [[ "$after_cat_count" -gt 0 ]] || fail "cat succeeded but cache remained empty"
 printf 'cache after first cat: entries=%s bytes=%s\n' "$after_cat_count" "$after_cat_bytes"
 
-printf '\n[5/6] clear mount cache as mounted-surface dehydration\n'
+printf '\n[5/9] write and edit through mounted view, then verify exact remote pull\n'
+write_path="$mount_root/$write_file"
+printf '%s' "$write_initial_content" >"$write_path"
+printf '%s' "$write_final_content" >"$write_path"
+cmp -s <(printf '%s' "$write_final_content") "$write_path" || fail "mounted write local content mismatch"
+pull_write_from_remote || fail "mounted write did not become remotely pullable with exact edited content"
+
+printf '\n[6/9] clear mount cache as mounted-surface dehydration\n'
 clear_cache_entries
 after_clear_count="$(cache_entry_count)"
 [[ "$after_clear_count" == "0" ]] || fail "cache clear left $after_clear_count entries"
 printf 'cache after clear: entries=%s\n' "$after_clear_count"
 
-printf '\n[6/6] cat again and verify rehydration\n'
+printf '\n[7/9] cat again and verify rehydration\n'
 rehydrated_output="$tmp_root/rehydrated-output.txt"
 cat "$mount_root/$expected_file" >"$rehydrated_output"
 cmp -s "$source_root/$expected_file" "$rehydrated_output" || fail "rehydrated cat output mismatch"
@@ -413,7 +468,30 @@ after_recat_bytes="$(cache_entry_bytes)"
 [[ "$after_recat_count" -gt 0 ]] || fail "re-cat succeeded but cache remained empty"
 printf 'cache after re-cat: entries=%s bytes=%s\n' "$after_recat_count" "$after_recat_bytes"
 
-printf '\nlazy hydration Linux demo passed\n'
+printf '\n[8/9] prove recursive safe-unsync refuses dirty descendants\n'
+dirty_path="$source_root/$dirty_file"
+printf 'dirty local edit that must be refused\n' >"$dirty_path"
+if "${tcfs_cmd[@]}" --config "$config_path" unsync "$source_root/docs" >"$tmp_root/unsync-dirty.out" 2>&1; then
+  cat "$tmp_root/unsync-dirty.out" >&2 || true
+  fail "recursive unsync unexpectedly succeeded with dirty descendant"
+fi
+cat "$tmp_root/unsync-dirty.out"
+grep -qi "dirty" "$tmp_root/unsync-dirty.out" || fail "recursive unsync refusal did not mention dirty descendants"
+[[ -f "$dirty_path" ]] || fail "dirty descendant was removed despite refusal"
+[[ ! -e "$source_root/docs/README.md.tc" ]] || fail "dirty refusal still created README stub"
+
+printf '\n[9/9] restore clean content and prove recursive safe-unsync succeeds\n'
+printf '%s' "$dirty_original_content" >"$dirty_path"
+"${tcfs_cmd[@]}" --config "$config_path" unsync "$source_root/docs" >"$tmp_root/unsync-success.out" 2>&1
+cat "$tmp_root/unsync-success.out"
+[[ -f "$source_root/docs/README.md.tc" ]] || fail "recursive unsync did not create README stub"
+[[ -f "$source_root/docs/deep/remote.txt.tc" ]] || fail "recursive unsync did not create remote fixture stub"
+[[ ! -f "$dirty_path" ]] || fail "recursive unsync did not remove restored hydrated README"
+"${tcfs_cmd[@]}" --config "$config_path" sync-status "$dirty_path" >"$tmp_root/unsync-status.out" 2>&1
+cat "$tmp_root/unsync-status.out"
+grep -q "sync state: not_synced" "$tmp_root/unsync-status.out" || fail "recursive unsync did not persist NotSynced status"
+
+printf '\nlazy hydration Linux lifecycle demo passed\n'
 if [[ -n "$evidence_dir" ]]; then
   printf 'evidence written to: %s\n' "$evidence_dir"
 fi

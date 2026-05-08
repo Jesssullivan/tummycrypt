@@ -20,6 +20,7 @@ SIGNING_P12_PATH="${TCFS_FILEPROVIDER_LAB_SIGNING_P12_PATH:-}"
 SIGNING_P12_PASSWORD_FILE="${TCFS_FILEPROVIDER_LAB_P12_PASSWORD_FILE:-}"
 PROFILES_DIR="${TCFS_FILEPROVIDER_LAB_PROFILES_DIR:-}"
 LAB_GATEKEEPER_OVERRIDE="${TCFS_FILEPROVIDER_LAB_GATEKEEPER_OVERRIDE:-0}"
+EXERCISE_CONFLICT_STATUS="${TCFS_FILEPROVIDER_LAB_EXERCISE_CONFLICT_STATUS:-0}"
 DRY_RUN=0
 WATCH=1
 SKIP_SECRET_CHECK=0
@@ -43,6 +44,8 @@ Options:
   --profiles-dir <p>      Optional runner-local provisioning profile directory
   --lab-gatekeeper-override
                           PZM-only non-production SystemPolicyRule profile gate for installed testing-mode app
+  --exercise-conflict-status
+                          Seed and verify deterministic FileProvider conflict/status fixture in the lab smoke
   --package-run-id <id>   Skip package workflow dispatch and smoke an existing package run
   --dry-run               Print the commands without calling gh
   --no-watch              Do not wait for workflow completion
@@ -119,6 +122,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --lab-gatekeeper-override)
       LAB_GATEKEEPER_OVERRIDE=1
+      shift
+      ;;
+    --exercise-conflict-status)
+      EXERCISE_CONFLICT_STATUS=1
       shift
       ;;
     --package-run-id)
@@ -235,7 +242,7 @@ gh workflow run "$SMOKE_WORKFLOW" --repo "$REPO" --ref "$REF" \\
   -f package_artifact_run_id="$package_run_id" \\
   -f package_artifact_name="$ARTIFACT_NAME" \\
   -f fileprovider_testing_mode=true \\
-  -f runner_label="$RUNNER_LABEL"$(if [[ "$LAB_GATEKEEPER_OVERRIDE" == "1" ]]; then printf ' \\\n  -f lab_gatekeeper_override=true'; fi)
+  -f runner_label="$RUNNER_LABEL"$(if [[ "$EXERCISE_CONFLICT_STATUS" == "1" ]]; then printf ' \\\n  -f exercise_conflict_status=true'; fi)$(if [[ "$LAB_GATEKEEPER_OVERRIDE" == "1" ]]; then printf ' \\\n  -f lab_gatekeeper_override=true'; fi)
 EOF
 
   if [[ "$WATCH" != "1" ]]; then
@@ -478,6 +485,9 @@ smoke_inputs=(
   -f fileprovider_testing_mode=true \
   -f runner_label="$RUNNER_LABEL"
 )
+if [[ "$EXERCISE_CONFLICT_STATUS" == "1" ]]; then
+  smoke_inputs+=(-f exercise_conflict_status=true)
+fi
 if [[ "$LAB_GATEKEEPER_OVERRIDE" == "1" ]]; then
   smoke_inputs+=(-f lab_gatekeeper_override=true)
 fi

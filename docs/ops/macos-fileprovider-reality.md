@@ -648,7 +648,12 @@ verification, policy probe, `.pkg` assembly, and package upload. Smoke run
 `25565943781` then passed install/signing/profile/E2EE/daemon gates plus the
 extended FileProvider harness: enumerate, requestDownload, evict, rehydrate,
 CloudStorage mutation write, exact 68-byte remote pull, and post-mutation
-`tcfs status` with storage `[ok]`.
+`tcfs status` with storage `[ok]`. Package run `25569345240` and smoke run
+`25569596910` extended the same testing-mode lane with
+`exercise_conflict_status=true`: CLI status reported `sync state: conflict`,
+FileProvider readback preserved exact content, and the run captured that the
+enumerator did not emit a conflict hydration-state log, so badge/progress
+assertions remain observational.
 
 May 1, 2026 Apple Developer follow-up changed the shape of this lane:
 
