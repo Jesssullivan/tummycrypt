@@ -25,11 +25,10 @@ release-grade desktop or iOS product.
   policy launch, shared-Keychain config, live S3/E2EE access, daemon startup,
   FileProvider registration, CloudStorage enumeration, `requestDownload`,
   `evict`, re-`requestDownload`, and exact-content hydration.
-- Mutation harness support is now in `main`, but package run `25564780049`
-  stopped before app build at PZM signing-asset resolution. The remaining lab
-  blocker is the runner security domain/keychain lookup for development
-  identities, not FileProvider storage, E2EE, profile inventory, or the
-  mutation harness itself.
+- PZM package run `25565895586` and smoke run `25565943781` extended the same
+  testing-mode lane into mutation proof: write through CloudStorage, exact
+  remote pull of the 68-byte mutated file, and post-mutation `tcfs status`
+  showing storage `[ok]`.
 
 ## macOS: Not Yet Proven As A Release-Grade Desktop Surface
 

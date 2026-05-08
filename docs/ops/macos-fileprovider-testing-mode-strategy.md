@@ -3,9 +3,9 @@
 As of May 8, 2026, the hosted production FileProvider proof is blocked by
 Apple's profile/user-enable boundary. The registered-Mac testing-mode lane is
 green on `petting-zoo-mini` through enumerate, exact-content hydrate, evict,
-and rehydrate when the lab `SystemPolicyRule` profile is installed. That
-testing-mode proof is still not the same as production Developer ID Finder
-lifecycle acceptance.
+rehydrate, and mutation upload/readback when the lab `SystemPolicyRule` profile
+is installed. That testing-mode proof is still not the same as production
+Developer ID Finder lifecycle acceptance.
 
 The production lane and testing-mode lane must stay separate:
 
@@ -447,9 +447,9 @@ Once the Mac App Development profiles exist on `petting-zoo-mini`, run:
 scripts/macos-fileprovider-testing-mode-dispatch.sh \
   --tag v0.12.12 \
   --runner-label petting-zoo-mini \
-  --signing-p12-path ~/.tcfs-fileprovider-lab/tcfs-fileprovider-lab-E9B03E55.p12 \
-  --signing-p12-password-file ~/.tcfs-fileprovider-lab/p12-password.txt \
-  --profiles-dir ~/.tcfs-fileprovider-lab \
+  --signing-p12-path /Users/jsullivan2/.tcfs-fileprovider-lab/tcfs-fileprovider-lab-E9B03E55.p12 \
+  --signing-p12-password-file /Users/jsullivan2/.tcfs-fileprovider-lab/p12-password.txt \
+  --profiles-dir /Users/jsullivan2/.tcfs-fileprovider-lab \
   --lab-gatekeeper-override
 ```
 

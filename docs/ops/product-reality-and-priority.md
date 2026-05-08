@@ -20,8 +20,8 @@ Use this document as the short answer to:
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
-| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, cache clear, and rehydrate on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, and rehydrate under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
-| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; mutation harness support is implemented but blocked on the PZM runner signing security domain; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
+| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, cache clear, and rehydrate on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
 
@@ -34,7 +34,7 @@ This is the narrowest and most important truth for public release claims.
 | Surface | Status | Current reality |
 | --- | --- | --- |
 | Homebrew | pass | fresh install and upgrade proved on `v0.12.2` |
-| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, and rehydrate on run `25562087555`; production Finder remains separate |
+| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, rehydrate, and mutation on runs `25562087555` / `25565943781`; production Finder remains separate |
 | `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; current support floor is Ubuntu 24.04+ / Debian 13+; Debian 12 is excluded unless a separate bookworm-targeted package is produced |
 | `.rpm` | pass | fresh install proved in Fedora container |
 | container image | pass | version and worker-mode startup proved |
@@ -59,7 +59,7 @@ Current CI proves:
 
 Current CI does **not** prove:
 
-- Finder/FileProvider install-to-enumerate-to-hydrate-to-mutate UX
+- production Finder/FileProvider install-to-enable-to-conflict/status UX
 - real iOS Files.app behavior on simulator or device
 - accessibility behavior
 - user-facing badges, progress, notifications, or recovery ergonomics
@@ -79,7 +79,7 @@ Real operator flows and real-host sync flows are being exercised.
 What this still does **not** mean:
 
 - full desktop UX is release-proven
-- Finder/FileProvider mutation UX is continuously tested
+- production Finder/FileProvider mutation/conflict UX is continuously tested
 - iOS is a truthful active release target
 - every host/platform combination is equally mature
 
@@ -133,11 +133,10 @@ Still manual or weakly proven:
 
 - production Finder/FileProvider enablement on arbitrary clean machines
 - badges, progress, notifications, and conflict UX
-- mutation, conflict, and realistic desktop usage beyond evict/rehydrate. The
-  current mutation harness changes are present in `main`, but package run
-  `25564780049` stopped before app build because PZM's non-GUI runner security
-  domain resolves the system keychain as default and `codesign` cannot resolve
-  the user/temp development identities there.
+- production mutation, conflict, and realistic desktop usage beyond the PZM
+  testing-mode lab. PZM smoke run `25565943781` proves CloudStorage mutation
+  upload and exact 68-byte remote pull under testing mode, not production
+  Developer ID Finder behavior.
 
 Canonical docs:
 
@@ -153,8 +152,10 @@ Finder/FileProvider harnesses. The archived Linux FUSE run
 `docs/release/evidence/lazy-linux-20260508T151858Z/` proves the read lifecycle
 against real remote state: traverse/list before hydration, exact `cat`
 hydration, cache clear, and rehydrate. Mutation, conflict/status, and
-product-level recursive safe-unsync acceptance remain open. The canonical
-acceptance target is now [Lazy Hydration Demo Acceptance](lazy-hydration-demo.md).
+product-level recursive safe-unsync acceptance remain open on the Linux mounted
+surface; the PZM testing-mode FileProvider lane now proves mutation
+upload/readback under run `25565943781`. The canonical acceptance target is now
+[Lazy Hydration Demo Acceptance](lazy-hydration-demo.md).
 
 The representation contract for that demo is:
 
@@ -235,11 +236,11 @@ work should be ordered like this:
   - stop retrying hosted production packages until FileProvider can be enabled
   - treat PZM testing-mode read/hydrate/evict/rehydrate as green under the
     installed lab `SystemPolicyRule` profile
+  - treat PZM testing-mode mutation as green under smoke run `25565943781`
   - keep the installed-host policy probe and profile verification in the PZM
     postinstall workflow so install/provenance failures stay classified before
     deeper Finder assertions
-  - extend the named Finder/FileProvider smoke into mutate/conflict and visible
-    status
+  - extend the named Finder/FileProvider smoke into conflict and visible status
   - keep production Developer ID clean-host Finder acceptance separate from
      non-production testing-mode evidence
 3. **odrive-style lifecycle productionization**

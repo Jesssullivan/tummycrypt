@@ -66,18 +66,19 @@ implemented through older placeholder-file conventions:
 
 The important qualifier is proof. Most of those pieces are not yet proven as a
 polished desktop product. The strongest current proof is still Linux CLI/daemon
-and real-host backend sync. The weakest proof remains macOS Finder from package
-install through register, enumerate, hydrate, mutate, conflict, and visible
+and real-host backend sync. The weakest proof remains production macOS Finder
+from package install through clean-host enablement, conflict, and visible
 status.
 
 The `v0.12.12` PZM evidence tightened that boundary. Production `.pkg` builds
 and smokes prove install, signing/profile checks, storage config, daemon
 startup, public S3 reachability, and seeded E2EE fixture access. The PZM
 non-production testing-mode lane now also proves FileProvider enumeration,
-exact-content hydration, evict, and rehydrate from a package install when the
-lab `SystemPolicyRule` profile is installed. Production Finder lifecycle
-evidence remains open: arbitrary clean-host enablement, mutation, conflict, and
-visible status/progress are not yet release gates.
+exact-content hydration, evict, rehydrate, and CloudStorage mutation
+upload/readback from a package install when the lab `SystemPolicyRule` profile
+is installed. Production Finder lifecycle evidence remains open: arbitrary
+clean-host enablement, conflict, and visible status/progress are not yet release
+gates.
 
 ## Linux <> Finder Parity Evidence
 
@@ -95,8 +96,9 @@ Parity should be assessed at the user-behavior level:
 The Linux read lifecycle proof no longer needs to wait for Apple: archived
 evidence `docs/release/evidence/lazy-linux-20260508T151858Z/` proves mounted
 FUSE browse-before-download, exact `cat` hydration, cache clear, and
-rehydrate. The Finder read/hydrate/evict/rehydrate lane is now green under PZM
-testing mode; production Finder lifecycle proof remains a separate bar.
+rehydrate. The Finder read/hydrate/evict/rehydrate/mutation lane is now green
+under PZM testing mode; production Finder lifecycle proof remains a separate
+bar.
 
 ## Product Pillars
 

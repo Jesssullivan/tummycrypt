@@ -158,15 +158,15 @@ and Finder/FileProvider as the native desktop lane.
 | Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence `lazy-linux-20260508T151858Z` is green; production Finder evidence is still pending |
 | Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.12`; archived Linux FUSE evidence proves exact `cat` hydration |
 | Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | PZM testing-mode smoke proves FileProvider evict + rehydrate on `v0.12.12`; archived Linux FUSE evidence proves cache clear + rehydrate |
-| Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder and prove daemon/FileProvider conflict/status behavior | Not yet release-gated on either desktop surface |
+| Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder/FileProvider and prove daemon/FileProvider upload plus conflict/status behavior | PZM testing-mode smoke run `25565943781` proves CloudStorage mutation upload and exact remote pull; Linux mounted mutation/conflict and production Finder conflict/status remain open |
 | Observe health | CLI status, daemon logs, mounted-smoke transcript | Finder state, FileProvider logs, badges/progress when available | CLI/log evidence exists; Finder badges/progress are observational only |
 
 This means the old hosted FileProvider blocker no longer freezes the read-only
 Finder proof, and the Linux read lifecycle no longer lacks host evidence. The
 next non-Apple proof is mutation/safe-unsync over mounted or sync-root
 surfaces. The next Apple proof is to extend the now-green PZM testing-mode lane
-beyond read/hydrate/evict/rehydrate into mutation, conflict, and visible
-status, while keeping production Developer ID clean-host evidence separate.
+beyond mutation into conflict and visible status, while keeping production
+Developer ID clean-host evidence separate.
 
 Required proof:
 
