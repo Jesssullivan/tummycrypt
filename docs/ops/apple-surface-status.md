@@ -29,6 +29,10 @@ release-grade desktop or iOS product.
   testing-mode lane into mutation proof: write through CloudStorage, exact
   remote pull of the 68-byte mutated file, and post-mutation `tcfs status`
   showing storage `[ok]`.
+- PZM package run `25569345240` and smoke run `25569596910` extended the lane
+  into deterministic conflict/status proof: CLI status reported
+  `sync state: conflict` and FileProvider readback preserved exact content.
+  Finder badges/progress remain observational.
 
 ## macOS: Not Yet Proven As A Release-Grade Desktop Surface
 

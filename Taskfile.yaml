@@ -107,9 +107,10 @@ tasks:
   lazy:check:
     desc: Run host-runnable lazy hydration proof checks
     cmds:
-      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
-      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
       - python3 -m py_compile scripts/asc-fileprovider-lab-provision.py
+      - task: lazy:test-linux-lifecycle-demo
       - task: lazy:test-mounted-smoke
       - task: lazy:test-desktop-honey
       - task: lazy:test-macos-profile-inventory
@@ -128,6 +129,16 @@ tasks:
     desc: "Linux lazy proof: set TCFS_LAZY_DEMO_REMOTE=... and optional TCFS_LAZY_DEMO_CREATE_BUCKET=1"
     cmds:
       - bash scripts/lazy-hydration-linux-demo.sh
+
+  lazy:linux-lifecycle-demo:
+    desc: "Linux lifecycle parity proof: read, write, rehydrate, safe-unsync"
+    cmds:
+      - bash scripts/lazy-hydration-linux-lifecycle-demo.sh
+
+  lazy:test-linux-lifecycle-demo:
+    desc: Regression-test the Linux lifecycle proof helper shape
+    cmds:
+      - bash scripts/test-lazy-hydration-linux-lifecycle-demo.sh
 
   lazy:desktop-honey-plan:
     desc: "Prepare safe Desktop-originated honey demo artifacts; add TCFS_DESKTOP_DEMO_PUSH=1 to push"

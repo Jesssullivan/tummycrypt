@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      exercise_conflict_status:
+        description: "In testing mode, seed and verify a deterministic FileProvider conflict/status fixture"
+        required: false
+        default: false
+        type: boolean
       lab_gatekeeper_override:
         description: "PZM-only non-production lab: require a SystemPolicyRule profile for the installed testing-mode app"
         required: false
@@ -89,6 +94,7 @@ jobs:
           PACKAGE_URL="${{ github.event.inputs.package_url }}"
           PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
           FILEPROVIDER_TESTING_MODE="${{ github.event.inputs.fileprovider_testing_mode }}"
+          EXERCISE_CONFLICT_STATUS="${{ github.event.inputs.exercise_conflict_status }}"
           LAB_GATEKEEPER_OVERRIDE="${{ github.event.inputs.lab_gatekeeper_override }}"
           RUNNER_LABEL="${{ github.event.inputs.runner_label }}"
           [[ "$TAG" == v* ]] || {
@@ -108,6 +114,11 @@ jobs:
 
           if [[ "$FILEPROVIDER_TESTING_MODE" == "true" && "$RUNNER_LABEL" == macos-* ]]; then
             echo "::error::fileprovider_testing_mode=true requires a registered self-hosted Mac runner label, not $RUNNER_LABEL"
+            exit 1
+          fi
+
+          if [[ "$EXERCISE_CONFLICT_STATUS" == "true" && "$FILEPROVIDER_TESTING_MODE" != "true" ]]; then
+            echo "::error::exercise_conflict_status=true requires fileprovider_testing_mode=true"
             exit 1
           fi
 
@@ -213,14 +224,17 @@ jobs:
           CONFIG_PATH="$CONFIG_DIR/config.toml"
           NO_CRYPTO_CONFIG_PATH="$RUNNER_TEMP/tcfs-no-crypto.toml"
           MASTER_KEY_PATH="$RUNNER_TEMP/tcfs-master.key"
+          STATE_PATH="$RUNNER_TEMP/tcfs-state.json"
           EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
           MUTATION_CONTENT_FILE="$RUNNER_TEMP/mutation-fixture-content"
+          CONFLICT_CONTENT_FILE="$RUNNER_TEMP/conflict-fixture-content"
           APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
           FILEPROVIDER_LISTEN_ADDR="127.0.0.1:19101"
           FILEPROVIDER_ENDPOINT="http://${FILEPROVIDER_LISTEN_ADDR}"
           REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
           MUTATION_REL="ci-smoke/${VERSION}/mutation-${GITHUB_RUN_ATTEMPT}.txt"
+          CONFLICT_REL="ci-smoke/${VERSION}/conflict-status-${GITHUB_RUN_ATTEMPT}.txt"
 
           mkdir -p "$LOG_DIR" "$SYNC_ROOT" "$CONFIG_DIR"
 
@@ -233,14 +247,17 @@ jobs:
             echo "CONFIG_PATH=$CONFIG_PATH"
             echo "NO_CRYPTO_CONFIG_PATH=$NO_CRYPTO_CONFIG_PATH"
             echo "MASTER_KEY_PATH=$MASTER_KEY_PATH"
+            echo "STATE_PATH=$STATE_PATH"
             echo "EXPECTED_CONTENT_FILE=$EXPECTED_CONTENT_FILE"
             echo "MUTATION_CONTENT_FILE=$MUTATION_CONTENT_FILE"
+            echo "CONFLICT_CONTENT_FILE=$CONFLICT_CONTENT_FILE"
             echo "APP_GROUP_DIR=$APP_GROUP_DIR"
             echo "FILEPROVIDER_LISTEN_ADDR=$FILEPROVIDER_LISTEN_ADDR"
             echo "FILEPROVIDER_ENDPOINT=$FILEPROVIDER_ENDPOINT"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
             echo "FIXTURE_REL=$FIXTURE_REL"
             echo "MUTATION_REL=$MUTATION_REL"
+            echo "CONFLICT_REL=$CONFLICT_REL"
           } >> "$GITHUB_ENV"
 
       - name: Install E2EE master key
@@ -575,6 +592,48 @@ jobs:
             exit 1
           fi
 
+          if [[ "${{ github.event.inputs.exercise_conflict_status }}" == "true" ]]; then
+            CONFLICT_PATH="${SYNC_ROOT}/${CONFLICT_REL}"
+            mkdir -p "$(dirname "$CONFLICT_PATH")"
+            printf 'tcfs macOS FileProvider conflict fixture %s run %s attempt %s\n' \
+              "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$CONFLICT_CONTENT_FILE"
+            cp "$CONFLICT_CONTENT_FILE" "$CONFLICT_PATH"
+            if ! run_bounded tcfs-conflict-push.log 120 tcfs --config "$CONFIG_PATH" push "$CONFLICT_PATH"; then
+              echo "::error::tcfs conflict fixture push failed or timed out"
+              cat "$LOG_DIR/tcfs-conflict-push.log" || true
+              exit 1
+            fi
+            python3 - "$STATE_PATH" "$CONFLICT_PATH" "$CONFLICT_REL" <<'PY'
+          import json
+          import os
+          import sys
+          import time
+
+          state_path, conflict_path, rel_path = sys.argv[1:4]
+          key = os.path.realpath(conflict_path)
+          with open(state_path, encoding="utf-8") as fh:
+              state = json.load(fh)
+          entries = state.get("entries", state)
+          entry = entries.get(key)
+          if entry is None:
+              raise SystemExit(f"state entry not found for {key}")
+          entry["status"] = "conflict"
+          entry["conflict"] = {
+              "rel_path": rel_path,
+              "local_vclock": {"clocks": {"gha-macos-postinstall": 1}},
+              "remote_vclock": {"clocks": {"fixture-remote": 1}},
+              "local_blake3": entry.get("blake3", ""),
+              "remote_blake3": entry.get("blake3", ""),
+              "local_device": "gha-macos-postinstall",
+              "remote_device": "fixture-remote",
+              "detected_at": int(time.time()),
+          }
+          with open(state_path, "w", encoding="utf-8") as fh:
+              json.dump(state, fh, indent=2, sort_keys=True)
+              fh.write("\n")
+          PY
+          fi
+
       - name: Verify remote fixture requires E2EE key
         shell: bash
         run: |
@@ -727,6 +786,15 @@ jobs:
               --mutation-content-file "$MUTATION_CONTENT_FILE" \
               --remote-prefix "$REMOTE_PREFIX"
             )
+            if [[ "${{ github.event.inputs.exercise_conflict_status }}" == "true" ]]; then
+              args+=(
+                --exercise-conflict-status \
+                --conflict-file "$CONFLICT_REL" \
+                --conflict-content-file "$CONFLICT_CONTENT_FILE" \
+                --state "$STATE_PATH" \
+                --sync-root "$SYNC_ROOT"
+              )
+            fi
           fi
 
           bash scripts/macos-postinstall-smoke.sh "${args[@]}"

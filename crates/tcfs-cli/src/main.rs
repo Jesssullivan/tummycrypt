@@ -2096,10 +2096,50 @@ fn cmd_unmount(mountpoint: &std::path::Path) -> Result<()> {
 
 // ── `tcfs unsync` ─────────────────────────────────────────────────────────────
 
-/// Convert a hydrated file back to a `.tc` stub, reclaiming disk space.
+#[derive(Debug, Clone)]
+struct UnsyncTarget {
+    path: PathBuf,
+    tracked: tcfs_sync::state::SyncState,
+}
+
+#[derive(Debug, Clone)]
+struct UnsyncConversion {
+    path: PathBuf,
+    stub_full: PathBuf,
+    tracked: tcfs_sync::state::SyncState,
+    local_size: u64,
+}
+
+#[derive(Debug, Clone)]
+struct UnsyncSkip {
+    path: PathBuf,
+    reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct DirtyUnsyncPath {
+    path: PathBuf,
+    reason: String,
+}
+
+#[derive(Debug, Default)]
+struct UnsyncPlan {
+    conversions: Vec<UnsyncConversion>,
+    skipped: Vec<UnsyncSkip>,
+    dirty: Vec<DirtyUnsyncPath>,
+}
+
+impl UnsyncPlan {
+    fn has_work(&self) -> bool {
+        !self.conversions.is_empty() || !self.skipped.is_empty()
+    }
+}
+
+/// Convert hydrated file(s) back to `.tc` stubs, reclaiming disk space.
 ///
-/// Reads the file, computes its BLAKE3 hash, looks up the matching index entry,
-/// and replaces the file content with a stub. The actual remote data is NOT deleted.
+/// File input preserves the original one-file behavior. Directory input walks
+/// tracked descendants, refuses dirty files unless `--force` is set, flips
+/// state to `NotSynced`, then writes stubs and removes hydrated files.
 async fn cmd_unsync(
     config: &tcfs_core::config::TcfsConfig,
     path: &std::path::Path,
@@ -2114,56 +2154,257 @@ async fn cmd_unsync(
     }
 
     let state_path = resolve_state_path(config, None);
-    let state = tcfs_sync::state::StateCache::open(&state_path)
+
+    if path.is_dir() {
+        cmd_unsync_directory(config, path, force, &state_path).await
+    } else {
+        cmd_unsync_file(config, path, force, &state_path).await
+    }
+}
+
+async fn cmd_unsync_file(
+    config: &tcfs_core::config::TcfsConfig,
+    path: &std::path::Path,
+    force: bool,
+    state_path: &std::path::Path,
+) -> Result<()> {
+    let state = tcfs_sync::state::StateCache::open(state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
     let tracked = state
         .get(path)
         .cloned()
         .with_context(|| format!("{} is not tracked (never pushed)", path.display()))?;
+    drop(state);
 
-    // Read file content and compute hash
-    let data = tokio::fs::read(path)
-        .await
-        .with_context(|| format!("reading: {}", path.display()))?;
-
-    let hash = tcfs_chunks::hash_bytes(&data);
-    let hash_hex = tcfs_chunks::hash_to_hex(&hash);
-    let size = data.len() as u64;
-
-    if !force && tracked.blake3 != hash_hex {
+    let target = UnsyncTarget {
+        path: path.to_path_buf(),
+        tracked,
+    };
+    let plan = build_unsync_plan(state_path, vec![target], force)?;
+    if let Some(dirty) = plan.dirty.first() {
         anyhow::bail!(
-            "{} has local changes (hash mismatch). Use --force to unsync anyway.",
-            path.display()
+            "{} has local changes ({}). Use --force to unsync anyway.",
+            dirty.path.display(),
+            dirty.reason
         );
     }
 
-    let sync_root = config.sync.sync_root.as_deref();
-    let rel_path = tcfs_sync::engine::normalize_rel_path(path, sync_root);
-    let stub = tcfs_vfs::StubMeta::for_upload(
-        &tracked.blake3,
-        tracked.size,
-        tracked.chunk_count,
-        config.storage.resolved_prefix(),
-        &rel_path,
+    flush_unsync_state_first(
+        state_path,
+        plan.conversions.iter().map(|c| c.path.as_path()),
+    )?;
+
+    let conversion = plan
+        .conversions
+        .first()
+        .context("tracked file had no unsync conversion")?;
+    apply_unsync_conversion(config, conversion).await?;
+
+    println!(
+        "Unsynced: {} → {}",
+        conversion.path.display(),
+        conversion.stub_full.display()
+    );
+    println!(
+        "  hash: {}",
+        &conversion.tracked.blake3[..16.min(conversion.tracked.blake3.len())]
+    );
+    println!("  size: {} freed", fmt_bytes(conversion.local_size));
+
+    Ok(())
+}
+
+async fn cmd_unsync_directory(
+    config: &tcfs_core::config::TcfsConfig,
+    path: &std::path::Path,
+    force: bool,
+    state_path: &std::path::Path,
+) -> Result<()> {
+    let state = tcfs_sync::state::StateCache::open(state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+    let mut targets: Vec<UnsyncTarget> = state
+        .children_with_prefix(path)
+        .into_iter()
+        .map(|(key, tracked)| UnsyncTarget {
+            path: PathBuf::from(key),
+            tracked: tracked.clone(),
+        })
+        .collect();
+    targets.sort_by(|a, b| a.path.cmp(&b.path));
+    drop(state);
+
+    if targets.is_empty() {
+        anyhow::bail!(
+            "{} has no tracked descendants in {}",
+            path.display(),
+            state_path.display()
+        );
+    }
+
+    let plan = build_unsync_plan(state_path, targets, force)?;
+    if !plan.dirty.is_empty() {
+        print_dirty_unsync_paths(path, &plan.dirty);
+        anyhow::bail!(
+            "{} dirty descendant(s) with local changes. Use --force to unsync anyway.",
+            plan.dirty.len()
+        );
+    }
+
+    if !plan.has_work() {
+        println!(
+            "{} has no hydrated tracked descendants to unsync.",
+            path.display()
+        );
+        return Ok(());
+    }
+
+    flush_unsync_state_first(
+        state_path,
+        plan.conversions
+            .iter()
+            .map(|c| c.path.as_path())
+            .chain(plan.skipped.iter().map(|s| s.path.as_path())),
+    )?;
+
+    for conversion in &plan.conversions {
+        apply_unsync_conversion(config, conversion).await?;
+    }
+
+    println!("Unsynced directory: {}", path.display());
+    if !plan.conversions.is_empty() {
+        println!("  converted:");
+        for conversion in &plan.conversions {
+            println!(
+                "    {} → {}",
+                conversion.path.display(),
+                conversion.stub_full.display()
+            );
+        }
+    }
+    if !plan.skipped.is_empty() {
+        println!("  skipped:");
+        for skipped in &plan.skipped {
+            println!("    {} ({})", skipped.path.display(), skipped.reason);
+        }
+    }
+    println!(
+        "  summary: {} converted, {} skipped, 0 dirty",
+        plan.conversions.len(),
+        plan.skipped.len()
     );
 
-    // Build stub at path.tc
-    let stub_path = tcfs_vfs::real_to_stub_name(path.file_name().context("path has no filename")?);
-    let stub_full = path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join(stub_path);
+    Ok(())
+}
 
+fn build_unsync_plan(
+    state_path: &std::path::Path,
+    targets: Vec<UnsyncTarget>,
+    force: bool,
+) -> Result<UnsyncPlan> {
+    let state = tcfs_sync::state::StateCache::open(state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+    let mut plan = UnsyncPlan::default();
+
+    for target in targets {
+        if target.path.is_dir() {
+            plan.skipped.push(UnsyncSkip {
+                path: target.path,
+                reason: "tracked directory marker".to_string(),
+            });
+            continue;
+        }
+
+        if target.path.exists() {
+            match state.needs_sync(&target.path) {
+                Ok(Some(reason)) if !force => {
+                    plan.dirty.push(DirtyUnsyncPath {
+                        path: target.path,
+                        reason,
+                    });
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) if !force => {
+                    plan.dirty.push(DirtyUnsyncPath {
+                        path: target.path,
+                        reason: e.to_string(),
+                    });
+                    continue;
+                }
+                Err(_) => {}
+            }
+
+            let metadata = std::fs::metadata(&target.path)
+                .with_context(|| format!("stat: {}", target.path.display()))?;
+            if !metadata.is_file() {
+                plan.skipped.push(UnsyncSkip {
+                    path: target.path,
+                    reason: "not a regular file".to_string(),
+                });
+                continue;
+            }
+
+            let stub_name = tcfs_vfs::real_to_stub_name(
+                target
+                    .path
+                    .file_name()
+                    .context("tracked path has no filename")?,
+            );
+            let stub_full = target
+                .path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(stub_name);
+
+            plan.conversions.push(UnsyncConversion {
+                path: target.path,
+                stub_full,
+                tracked: target.tracked,
+                local_size: metadata.len(),
+            });
+            continue;
+        }
+
+        let stub_candidate = target
+            .path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(tcfs_vfs::real_to_stub_name(
+                target
+                    .path
+                    .file_name()
+                    .context("tracked path has no filename")?,
+            ));
+        let reason = if stub_candidate.exists() {
+            "already stubbed".to_string()
+        } else {
+            "hydrated file missing".to_string()
+        };
+        plan.skipped.push(UnsyncSkip {
+            path: target.path,
+            reason,
+        });
+    }
+
+    Ok(plan)
+}
+
+fn flush_unsync_state_first<'a>(
+    state_path: &std::path::Path,
+    paths: impl IntoIterator<Item = &'a std::path::Path>,
+) -> Result<()> {
     // Flip persisted state to NotSynced BEFORE destructive fs ops.
     //
-    // If the stub write or original removal fails below, the on-disk state
+    // If a stub write or original removal fails below, the on-disk state
     // already reflects reality (NotSynced, possibly with a missing stub)
     // and a re-hydration pass can recover. The previous ordering could
     // leave a stub on disk, the original gone, and status still Synced —
     // which would make the CLI lie to the daemon.
-    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+    let mut state = tcfs_sync::state::StateCache::open(state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
-    state.set_status(path, tcfs_sync::state::FileSyncStatus::NotSynced);
+    for path in paths {
+        state.set_status(path, tcfs_sync::state::FileSyncStatus::NotSynced);
+    }
     state.flush().with_context(|| {
         format!(
             "flushing state cache before unsync: {}",
@@ -2171,24 +2412,45 @@ async fn cmd_unsync(
         )
     })?;
     drop(state);
+    Ok(())
+}
+
+async fn apply_unsync_conversion(
+    config: &tcfs_core::config::TcfsConfig,
+    conversion: &UnsyncConversion,
+) -> Result<()> {
+    let sync_root = config.sync.sync_root.as_deref();
+    let rel_path = tcfs_sync::engine::normalize_rel_path(&conversion.path, sync_root);
+    let stub = tcfs_vfs::StubMeta::for_upload(
+        &conversion.tracked.blake3,
+        conversion.tracked.size,
+        conversion.tracked.chunk_count,
+        config.storage.resolved_prefix(),
+        &rel_path,
+    );
 
     // Now safe: any fs failure below leaves a recoverable
     // NotSynced-with-possibly-missing-stub state.
-    tokio::fs::write(&stub_full, stub.to_bytes())
+    tokio::fs::write(&conversion.stub_full, stub.to_bytes())
         .await
-        .with_context(|| format!("writing stub: {}", stub_full.display()))?;
-    tokio::fs::remove_file(path)
+        .with_context(|| format!("writing stub: {}", conversion.stub_full.display()))?;
+    tokio::fs::remove_file(&conversion.path)
         .await
-        .with_context(|| format!("removing hydrated file: {}", path.display()))?;
-
-    println!("Unsynced: {} → {}", path.display(), stub_full.display());
-    println!(
-        "  hash: {}",
-        &tracked.blake3[..16.min(tracked.blake3.len())]
-    );
-    println!("  size: {} freed", fmt_bytes(size));
+        .with_context(|| format!("removing hydrated file: {}", conversion.path.display()))?;
 
     Ok(())
+}
+
+fn print_dirty_unsync_paths(root: &std::path::Path, dirty: &[DirtyUnsyncPath]) {
+    eprintln!(
+        "Refusing to unsync directory with dirty descendants: {}",
+        root.display()
+    );
+    eprintln!("  dirty:");
+    for entry in dirty {
+        eprintln!("    {} ({})", entry.path.display(), entry.reason);
+    }
+    eprintln!("  summary: 0 converted, 0 skipped, {} dirty", dirty.len());
 }
 
 // ── `tcfs init` ──────────────────────────────────────────────────────────────
@@ -4117,6 +4379,141 @@ mod tests {
         assert!(
             !sync_root.join("never-pushed.txt.tc").exists(),
             "force unsync must not create a fake stub for an untracked file"
+        );
+    }
+
+    fn seed_tracked_file(
+        state: &mut tcfs_sync::state::StateCache,
+        file: &Path,
+        remote_path: &str,
+    ) -> tcfs_sync::state::SyncState {
+        let data = std::fs::read(file).unwrap();
+        let hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data));
+        let entry =
+            tcfs_sync::state::make_sync_state(file, hash, 1, remote_path.to_string()).unwrap();
+        state.set(file, entry.clone());
+        entry
+    }
+
+    #[tokio::test]
+    async fn cli_unsync_directory_converts_clean_tracked_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(sync_root.join("docs/deep")).unwrap();
+        let alpha = sync_root.join("docs/alpha.txt");
+        let beta = sync_root.join("docs/deep/beta.txt");
+        let outside = sync_root.join("outside.txt");
+        std::fs::write(&alpha, b"alpha").unwrap();
+        std::fs::write(&beta, b"beta").unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+
+        let config = test_config(&sync_root);
+        let state_path = resolve_state_path(&config, None);
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        seed_tracked_file(&mut state, &alpha, "data/index/docs/alpha.txt");
+        seed_tracked_file(&mut state, &beta, "data/index/docs/deep/beta.txt");
+        seed_tracked_file(&mut state, &outside, "data/index/outside.txt");
+        state.flush().unwrap();
+
+        cmd_unsync(&config, &sync_root.join("docs"), false)
+            .await
+            .unwrap();
+
+        assert!(!alpha.exists(), "alpha should be dehydrated");
+        assert!(!beta.exists(), "beta should be dehydrated");
+        assert!(sync_root.join("docs/alpha.txt.tc").exists());
+        assert!(sync_root.join("docs/deep/beta.txt.tc").exists());
+        assert!(outside.exists(), "outside path is not a descendant");
+
+        let state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        assert_eq!(
+            state.get(&alpha).map(|entry| entry.status),
+            Some(tcfs_sync::state::FileSyncStatus::NotSynced)
+        );
+        assert_eq!(
+            state.get(&beta).map(|entry| entry.status),
+            Some(tcfs_sync::state::FileSyncStatus::NotSynced)
+        );
+        assert_eq!(
+            state.get(&outside).map(|entry| entry.status),
+            Some(tcfs_sync::state::FileSyncStatus::Synced)
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_unsync_directory_refuses_dirty_descendants_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(sync_root.join("docs")).unwrap();
+        let clean = sync_root.join("docs/clean.txt");
+        let dirty = sync_root.join("docs/dirty.txt");
+        std::fs::write(&clean, b"clean").unwrap();
+        std::fs::write(&dirty, b"before").unwrap();
+
+        let config = test_config(&sync_root);
+        let state_path = resolve_state_path(&config, None);
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        seed_tracked_file(&mut state, &clean, "data/index/docs/clean.txt");
+        seed_tracked_file(&mut state, &dirty, "data/index/docs/dirty.txt");
+        state.flush().unwrap();
+
+        std::fs::write(&dirty, b"after local edit").unwrap();
+
+        let err = cmd_unsync(&config, &sync_root.join("docs"), false)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("dirty descendant"),
+            "unexpected error: {err}"
+        );
+        assert!(clean.exists(), "clean file should not be converted");
+        assert!(dirty.exists(), "dirty file should not be converted");
+        assert!(!sync_root.join("docs/clean.txt.tc").exists());
+        assert!(!sync_root.join("docs/dirty.txt.tc").exists());
+
+        let state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        assert_eq!(
+            state.get(&clean).map(|entry| entry.status),
+            Some(tcfs_sync::state::FileSyncStatus::Synced)
+        );
+        assert_eq!(
+            state.get(&dirty).map(|entry| entry.status),
+            Some(tcfs_sync::state::FileSyncStatus::Synced)
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_unsync_directory_force_converts_dirty_with_tracked_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(sync_root.join("docs")).unwrap();
+        let dirty = sync_root.join("docs/dirty.txt");
+        std::fs::write(&dirty, b"before").unwrap();
+
+        let config = test_config(&sync_root);
+        let state_path = resolve_state_path(&config, None);
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        let tracked = seed_tracked_file(&mut state, &dirty, "data/index/docs/dirty.txt");
+        state.flush().unwrap();
+
+        std::fs::write(&dirty, b"after local edit").unwrap();
+
+        cmd_unsync(&config, &sync_root.join("docs"), true)
+            .await
+            .unwrap();
+
+        let stub_path = sync_root.join("docs/dirty.txt.tc");
+        assert!(!dirty.exists(), "dirty file should be removed after force");
+        assert!(stub_path.exists(), "dirty file should be replaced by stub");
+        let stub =
+            tcfs_vfs::StubMeta::parse(&std::fs::read_to_string(&stub_path).unwrap()).unwrap();
+        assert_eq!(stub.blake3_hex(), Some(tracked.blake3.as_str()));
+        assert_eq!(stub.size, tracked.size);
+
+        let state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        assert_eq!(
+            state.get(&dirty).map(|entry| entry.status),
+            Some(tcfs_sync::state::FileSyncStatus::NotSynced)
         );
     }
 

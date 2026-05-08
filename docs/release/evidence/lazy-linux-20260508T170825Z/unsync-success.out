@@ -1,0 +1,5 @@
+Unsynced directory: /tmp/nix-shell.LpfJD1/tcfs-lazy-linux-demo.GZnPLW/source/docs
+  converted:
+    /tmp/nix-shell.LpfJD1/tcfs-lazy-linux-demo.GZnPLW/source/docs/README.md → /tmp/nix-shell.LpfJD1/tcfs-lazy-linux-demo.GZnPLW/source/docs/README.md.tc
+    /tmp/nix-shell.LpfJD1/tcfs-lazy-linux-demo.GZnPLW/source/docs/deep/remote.txt → /tmp/nix-shell.LpfJD1/tcfs-lazy-linux-demo.GZnPLW/source/docs/deep/remote.txt.tc
+  summary: 2 converted, 0 skipped, 0 dirty

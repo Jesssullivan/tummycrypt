@@ -68,6 +68,7 @@ assert_contains "$DRY_RUN_OUT" "grep -Fx \"dist-testing-mode-pkg\""
 assert_contains "$DRY_RUN_OUT" "-f package_artifact_run_id=\"<testing-mode-package-run-id>\""
 assert_contains "$DRY_RUN_OUT" "-f fileprovider_testing_mode=true"
 assert_contains "$DRY_RUN_OUT" "gh run watch \"<postinstall-smoke-run-id>\""
+assert_not_contains "$DRY_RUN_OUT" "exercise_conflict_status=true"
 assert_not_contains "$DRY_RUN_OUT" "lab_gatekeeper_override=true"
 assert_not_contains "$DRY_RUN_OUT" "gh secret list"
 
@@ -180,6 +181,17 @@ bash "$SCRIPT" \
   --lab-gatekeeper-override \
   >"$DRY_RUN_GATEKEEPER_OUT"
 assert_contains "$DRY_RUN_GATEKEEPER_OUT" "-f lab_gatekeeper_override=true"
+
+DRY_RUN_CONFLICT_OUT="${TMPDIR}/dry-run-conflict.out"
+bash "$SCRIPT" \
+  --dry-run \
+  --tag v9.9.9 \
+  --repo owner/repo \
+  --ref main \
+  --package-run-id 123456 \
+  --exercise-conflict-status \
+  >"$DRY_RUN_CONFLICT_OUT"
+assert_contains "$DRY_RUN_CONFLICT_OUT" "-f exercise_conflict_status=true"
 
 DRY_RUN_EXISTING_NO_WATCH_OUT="${TMPDIR}/dry-run-existing-no-watch.out"
 bash "$SCRIPT" \
@@ -435,6 +447,22 @@ assert_contains "$FAKE_LOG" "gh api repos/owner/repo/actions/runs/123456/artifac
 assert_contains "$FAKE_LOG" "gh workflow run macos-postinstall-smoke.yml --repo owner/repo --ref main -f tag=v1.2.3 -f package_artifact_run_id=123456"
 assert_contains "$FAKE_LOG" "-f runner_label=petting-zoo-mini"
 assert_contains "${TMPDIR}/existing.err" "Post-install smoke dispatched. Watch with: gh run watch 654321 --repo owner/repo --exit-status"
+
+FAKE_LOG="${TMPDIR}/gh-existing-conflict.log"
+PATH="$FAKE_BIN:$PATH" \
+TCFS_FAKE_GH_LOG="$FAKE_LOG" \
+TCFS_FAKE_STATE="$TMPDIR" \
+TCFS_GH_RUN_ID_POLL_SECONDS=0 \
+bash "$SCRIPT" \
+  --tag v1.2.3 \
+  --repo owner/repo \
+  --ref main \
+  --package-run-id 123456 \
+  --exercise-conflict-status \
+  --no-watch \
+  >"${TMPDIR}/existing-conflict.out" \
+  2>"${TMPDIR}/existing-conflict.err"
+assert_contains "$FAKE_LOG" "-f exercise_conflict_status=true"
 
 FAKE_LOG="${TMPDIR}/gh-existing-gatekeeper.log"
 PATH="$FAKE_BIN:$PATH" \

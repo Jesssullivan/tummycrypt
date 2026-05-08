@@ -4,9 +4,10 @@ As of May 8, 2026, the core lazy traversal and hydration code exists and the
 repo has named harnesses for Linux terminal, mounted-view, Desktop-to-honey,
 and macOS Finder/FileProvider proof. Evidence coverage is now split more
 precisely: PZM proves the macOS testing-mode FileProvider enumerate/hydrate
-path through evict/rehydrate, Linux has archived FUSE-capable host evidence
-for the same read lifecycle, and production Finder lifecycle proof remains
-separate from non-production testing-mode proof.
+path through evict/rehydrate/mutation, Linux has archived FUSE-capable host
+evidence for read, mounted write, cache clear/rehydrate, and recursive
+safe-unsync, and production Finder lifecycle proof remains separate from
+non-production testing-mode proof.
 
 This runbook is the acceptance target for the persistent demo goal:
 
@@ -53,10 +54,10 @@ colliding with real user state.
 Use a real S3/SeaweedFS-compatible backend or an explicit disposable backend,
 not only an in-memory mock.
 
-For the full Linux terminal lane, use the Linux-only harness:
+For the full Linux terminal lifecycle lane, use the Linux-only harness:
 
 ```bash
-scripts/lazy-hydration-linux-demo.sh \
+scripts/lazy-hydration-linux-lifecycle-demo.sh \
   --remote seaweedfs://localhost:8333/tcfs/lazy-demo-manual \
   --create-bucket \
   --evidence-dir docs/release/evidence/lazy-linux-$(date -u +%Y%m%dT%H%M%SZ)
@@ -68,25 +69,41 @@ The same harness is exposed through the task surface:
 TCFS_LAZY_DEMO_REMOTE=seaweedfs://localhost:8333/tcfs/lazy-demo-manual \
 TCFS_LAZY_DEMO_CREATE_BUCKET=1 \
 TCFS_LAZY_DEMO_EVIDENCE_DIR=docs/release/evidence/lazy-linux-manual \
-task lazy:linux-demo
+task lazy:linux-lifecycle-demo
 ```
 
 The harness seeds a fixture into a dedicated remote prefix, forces a direct
 mount with a temp config, runs `find` before hydration, cats a known
-remote-backed file, verifies cache hydration, clears the mount cache as the
-mounted-surface dehydration step, and cats again to prove rehydration. It
+remote-backed file, verifies cache hydration, writes and edits through the
+mounted view, verifies exact remote pullback, clears the mount cache as the
+mounted-surface dehydration step, cats again to prove rehydration, and proves
+recursive safe-unsync refusal/success against the physical sync root. It
 requires Linux, `/dev/fuse`, `fusermount3` for the default FUSE backend, S3
 credentials, and a pre-existing bucket unless `--create-bucket` can create it
-with `aws`, `s5cmd`, or `mc`. The task surface also accepts
+with `aws`, `s5cmd`, or `mc`. The legacy `task lazy:linux-demo` entrypoint
+uses the same harness. The task surface also accepts
 `TCFS_LAZY_DEMO_CREATE_BUCKET=1` and `TCFS_LAZY_DEMO_BACKEND=nfs`.
 
 When `--evidence-dir` or `TCFS_LAZY_DEMO_EVIDENCE_DIR` is set, the harness
-writes a transcript, redacted run metadata, final result status, `tcfs.toml`,
-and mount log copy. The metadata intentionally records endpoint, bucket,
-prefix, backend, and command shape, but not S3 credentials.
+writes a transcript, redacted run metadata, final result status, remote prefix
+file, `tcfs.toml`, mount log copy, mounted-write pull log, and unsync status
+logs. The metadata intentionally records endpoint, bucket, prefix, backend,
+and command shape, but not S3 credentials.
 
 Archived host evidence:
 
+- [lazy-linux-20260508T170825Z](../release/evidence/lazy-linux-20260508T170825Z/)
+  ran on `honey` through
+  `nix develop --accept-flake-config --command task lazy:linux-lifecycle-demo`
+  against
+  `seaweedfs://100.64.48.53:8333/tcfs/lazy-linux-20260508T170825Z`.
+- The run passed with `status=0`, mounted through FUSE3, listed the nested
+  remote tree before content hydration, hydrated exact 77-byte content with
+  `cat`, wrote and edited through the mounted view, pulled the edited file
+  back from remote with exact 60-byte content, cleared the cache to 0 entries,
+  rehydrated the original fixture, refused recursive `unsync` for a dirty
+  descendant, then converted clean tracked descendants to `.tc` stubs with
+  `sync state: not_synced`.
 - [lazy-linux-20260508T151858Z](../release/evidence/lazy-linux-20260508T151858Z/)
   ran on `honey` through `nix develop --command task lazy:linux-demo` against
   `seaweedfs://100.64.48.53:8333/tcfs/lazy-linux-20260508T151858Z`.
@@ -155,18 +172,18 @@ and Finder/FileProvider as the native desktop lane.
 
 | User behavior | Linux mounted surface | macOS Finder/FileProvider | Current proof state |
 | --- | --- | --- | --- |
-| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence `lazy-linux-20260508T151858Z` is green; production Finder evidence is still pending |
+| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence `lazy-linux-20260508T170825Z` is green; production Finder evidence is still pending |
 | Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.12`; archived Linux FUSE evidence proves exact `cat` hydration |
 | Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | PZM testing-mode smoke proves FileProvider evict + rehydrate on `v0.12.12`; archived Linux FUSE evidence proves cache clear + rehydrate |
-| Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder/FileProvider and prove daemon/FileProvider upload plus conflict/status behavior | PZM testing-mode smoke run `25565943781` proves CloudStorage mutation upload and exact remote pull; Linux mounted mutation/conflict and production Finder conflict/status remain open |
-| Observe health | CLI status, daemon logs, mounted-smoke transcript | Finder state, FileProvider logs, badges/progress when available | CLI/log evidence exists; Finder badges/progress are observational only |
+| Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder/FileProvider and prove daemon/FileProvider upload plus conflict/status behavior | Archived Linux FUSE evidence `lazy-linux-20260508T170825Z` proves mounted write/readback and recursive safe-unsync refusal/success. PZM testing-mode smoke run `25565943781` proves CloudStorage mutation upload and exact remote pull; PZM smoke run `25569596910` proves CLI conflict state and exact FileProvider content preservation; production Finder conflict/status remains open |
+| Observe health | CLI status, daemon logs, mounted-smoke transcript | Finder state, FileProvider logs, badges/progress when available | CLI/log evidence exists; PZM run `25569596910` captured that the FileProvider enumerator did not emit a conflict hydration-state log, so Finder badges/progress remain observational only |
 
 This means the old hosted FileProvider blocker no longer freezes the read-only
-Finder proof, and the Linux read lifecycle no longer lacks host evidence. The
-next non-Apple proof is mutation/safe-unsync over mounted or sync-root
-surfaces. The next Apple proof is to extend the now-green PZM testing-mode lane
-beyond mutation into conflict and visible status, while keeping production
-Developer ID clean-host evidence separate.
+Finder proof, and the Linux lifecycle no longer lacks host evidence for read,
+mounted mutation, cache rehydration, or recursive safe-unsync. The PZM
+testing-mode lane now proves conflict/status content preservation, while
+production Developer ID clean-host evidence and reliable Finder badge/progress
+assertions remain separate.
 
 Required proof:
 
@@ -175,9 +192,10 @@ Required proof:
 3. Run `ls`/`find` and show the fixture names before file content is hydrated.
 4. Run `cat` on a fixture file and verify exact content.
 5. Verify that hydration used the cache path expected by `tcfs-vfs`.
-6. Run `tcfs unsync` or the daemon/VFS dehydration path appropriate to the
+6. Write/edit through the mounted view and verify exact remote pullback.
+7. Run `tcfs unsync` or the daemon/VFS dehydration path appropriate to the
    surface being tested.
-7. Re-open or re-`cat` the item and verify it hydrates again.
+8. Re-open or re-`cat` the item and verify it hydrates again.
 
 ## Desktop-Originated Cross-Host Acceptance
 

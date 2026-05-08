@@ -1,6 +1,6 @@
 # Product Reality And Priority
 
-As of May 6, 2026, `tummycrypt` is in a much better state operationally than
+As of May 8, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
 The latest release is `v0.12.12`, and most release-facing surfaces now have
@@ -20,8 +20,8 @@ Use this document as the short answer to:
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
-| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, cache clear, and rehydrate on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
-| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
+| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
 
@@ -33,18 +33,20 @@ This is the narrowest and most important truth for public release claims.
 
 | Surface | Status | Current reality |
 | --- | --- | --- |
-| Homebrew | pass | fresh install and upgrade proved on `v0.12.2` |
-| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, rehydrate, and mutation on runs `25562087555` / `25565943781`; production Finder remains separate |
+| Homebrew | pass | fresh install and upgrade proved on `v0.12.12`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
+| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, rehydrate, mutation, and conflict/status content preservation on runs `25562087555`, `25565943781`, and `25569596910`; production Finder remains separate |
 | `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; current support floor is Ubuntu 24.04+ / Debian 13+; Debian 12 is excluded unless a separate bookworm-targeted package is produced |
 | `.rpm` | pass | fresh install proved in Fedora container |
 | container image | pass | version and worker-mode startup proved |
-| Nix install | needs per-tag proof | `v0.12.2` evidence was blocked; future proof follows the distribution smoke matrix |
+| Nix install | pass | `v0.12.12` fresh install proved from the tagged flake into a temporary profile on `neo`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
 
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
 Install-to-first-use bridge:
 [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md).
 Historical per-release evidence freeze for `v0.12.2`:
 [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md).
+Current Homebrew/Nix distribution evidence for `v0.12.12`:
+[distribution-v01212-20260508T205913Z](../release/evidence/distribution-v01212-20260508T205913Z/).
 
 ### 2. Continuous CI / Build Proof
 
@@ -135,8 +137,9 @@ Still manual or weakly proven:
 - badges, progress, notifications, and conflict UX
 - production mutation, conflict, and realistic desktop usage beyond the PZM
   testing-mode lab. PZM smoke run `25565943781` proves CloudStorage mutation
-  upload and exact 68-byte remote pull under testing mode, not production
-  Developer ID Finder behavior.
+  upload and exact 68-byte remote pull; PZM smoke run `25569596910` proves
+  CLI `sync state: conflict` and exact FileProvider content preservation under
+  testing mode, not production Developer ID Finder behavior.
 
 Canonical docs:
 
@@ -149,12 +152,14 @@ Canonical docs:
 The filesystem implementation can list remote index entries and hydrate content
 on open, and the repo now has named Linux, mounted-view, Desktop-to-honey, and
 Finder/FileProvider harnesses. The archived Linux FUSE run
-`docs/release/evidence/lazy-linux-20260508T151858Z/` proves the read lifecycle
-against real remote state: traverse/list before hydration, exact `cat`
-hydration, cache clear, and rehydrate. Mutation, conflict/status, and
-product-level recursive safe-unsync acceptance remain open on the Linux mounted
-surface; the PZM testing-mode FileProvider lane now proves mutation
-upload/readback under run `25565943781`. The canonical acceptance target is now
+`docs/release/evidence/lazy-linux-20260508T170825Z/` proves the expanded
+lifecycle against real remote state: traverse/list before hydration, exact
+`cat` hydration, mounted write/readback, cache clear/rehydrate, dirty-child
+recursive `unsync` refusal, clean recursive conversion to `.tc` stubs, and
+persisted `NotSynced` state. The PZM
+testing-mode FileProvider lane now proves mutation upload/readback under run
+`25565943781` and deterministic conflict/status content preservation under run
+`25569596910`. The canonical acceptance target is now
 [Lazy Hydration Demo Acceptance](lazy-hydration-demo.md).
 
 The representation contract for that demo is:
@@ -200,8 +205,8 @@ Developer and operator experience is in decent shape for maintainers:
 
 The rough edges are environment-sensitive proving lanes:
 
-- Nix proof is per-tag and should follow the distribution smoke matrix rather
-  than relying on stale cache-externality tracker state
+- Nix proof is per-tag and environment-sensitive; keep using the distribution
+  smoke matrix and capture the profile/build context for each release
 - privileged on-host cluster work is still outside repo automation
 - Apple desktop proof is still too manual
 
@@ -228,19 +233,22 @@ If the goal is better product reality rather than more code surface, the next
 work should be ordered like this:
 
 1. **Linux lazy traversal and hydration evidence**
-   - read lifecycle is green in
-     `docs/release/evidence/lazy-linux-20260508T151858Z/`
-   - next proof: mutation, conflict/status, and recursive safe-unsync product
-     acceptance
+   - expanded lifecycle is green in
+     `docs/release/evidence/lazy-linux-20260508T170825Z/`
+   - remaining Linux work is product polish around conflict/status surfacing,
+     not the lifecycle proof packet itself
 2. **Apple desktop acceptance**
   - stop retrying hosted production packages until FileProvider can be enabled
   - treat PZM testing-mode read/hydrate/evict/rehydrate as green under the
     installed lab `SystemPolicyRule` profile
   - treat PZM testing-mode mutation as green under smoke run `25565943781`
+  - treat PZM testing-mode conflict/status content preservation as green under
+    smoke run `25569596910`
   - keep the installed-host policy probe and profile verification in the PZM
     postinstall workflow so install/provenance failures stay classified before
     deeper Finder assertions
-  - extend the named Finder/FileProvider smoke into conflict and visible status
+  - keep Finder badges/progress as observational evidence until there is a
+    reliable assertion for those UI signals
   - keep production Developer ID clean-host Finder acceptance separate from
      non-production testing-mode evidence
 3. **odrive-style lifecycle productionization**
@@ -257,7 +265,7 @@ work should be ordered like this:
    - prove `find`/`ls` pre-hydration and `cat` hydration over SSH without
      claiming macOS Finder Desktop and honey home directories are the same
 5. **Release support truth**
-   - finish Nix proof
+   - keep Homebrew and Nix proof current in the distribution matrix
    - Debian 12 posture is decided for the current packages: do not claim it as
      a supported `.deb` target until a bookworm-specific build exists
 6. **Accessibility**
@@ -268,13 +276,10 @@ work should be ordered like this:
 
 ## Open Issue Map
 
-As of May 6, 2026, the narrow GitHub backlog is:
+As of May 8, 2026, the narrow GitHub backlog is:
 
 - M10 release-proof tranche
   - `#280`: distribution install and upgrade proof umbrella
-  - `#308`: Debian 12 `.deb` support-floor decision. Current decision: exclude
-    Debian 12 from the shipped `.deb` support floor until a bookworm-specific
-    package exists.
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
     testing-mode enumerate/hydrate/evict/rehydrate is green under the installed
     lab `SystemPolicyRule` profile; production Finder lifecycle proof remains
@@ -287,12 +292,12 @@ As of May 6, 2026, the narrow GitHub backlog is:
 
 Milestone `#9 M10: Usage Reality & Product Parity` remains open because the
 release-proof tranche still has active issues beyond the umbrella. The earlier
-M10 GitHub issues (`#276`-`#279`, `#281`, `#307`, `#317`, `#318`) are already
-closed.
+M10 GitHub issues (`#276`-`#279`, `#281`, `#307`, `#308`, `#317`, `#318`) are
+already closed.
 
-There are currently no open pull requests on `Jesssullivan/tummycrypt`. The
-on-prem render/apply work from `#337` was merged on April 29, 2026 and now feeds
-`#327` rather than representing an open review surface.
+Open review surfaces should be checked in GitHub. The on-prem render/apply work
+from `#337` was merged on April 29, 2026 and now feeds `#327` rather than
+representing an open review surface.
 
 The default lazy traversal demo backend is now a disposable, run-scoped
 S3-compatible prefix. The on-prem authority remains separate until its

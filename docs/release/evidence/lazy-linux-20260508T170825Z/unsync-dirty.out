@@ -1,0 +1,5 @@
+Refusing to unsync directory with dirty descendants: /tmp/nix-shell.LpfJD1/tcfs-lazy-linux-demo.GZnPLW/source/docs
+  dirty:
+    /tmp/nix-shell.LpfJD1/tcfs-lazy-linux-demo.GZnPLW/source/docs/README.md (size changed: 25 → 38)
+  summary: 0 converted, 0 skipped, 1 dirty
+Error: 1 dirty descendant(s) with local changes. Use --force to unsync anyway.
