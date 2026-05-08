@@ -214,11 +214,13 @@ jobs:
           NO_CRYPTO_CONFIG_PATH="$RUNNER_TEMP/tcfs-no-crypto.toml"
           MASTER_KEY_PATH="$RUNNER_TEMP/tcfs-master.key"
           EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
+          MUTATION_CONTENT_FILE="$RUNNER_TEMP/mutation-fixture-content"
           APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
           FILEPROVIDER_LISTEN_ADDR="127.0.0.1:19101"
           FILEPROVIDER_ENDPOINT="http://${FILEPROVIDER_LISTEN_ADDR}"
           REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
+          MUTATION_REL="ci-smoke/${VERSION}/mutation-${GITHUB_RUN_ATTEMPT}.txt"
 
           mkdir -p "$LOG_DIR" "$SYNC_ROOT" "$CONFIG_DIR"
 
@@ -232,11 +234,13 @@ jobs:
             echo "NO_CRYPTO_CONFIG_PATH=$NO_CRYPTO_CONFIG_PATH"
             echo "MASTER_KEY_PATH=$MASTER_KEY_PATH"
             echo "EXPECTED_CONTENT_FILE=$EXPECTED_CONTENT_FILE"
+            echo "MUTATION_CONTENT_FILE=$MUTATION_CONTENT_FILE"
             echo "APP_GROUP_DIR=$APP_GROUP_DIR"
             echo "FILEPROVIDER_LISTEN_ADDR=$FILEPROVIDER_LISTEN_ADDR"
             echo "FILEPROVIDER_ENDPOINT=$FILEPROVIDER_ENDPOINT"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
             echo "FIXTURE_REL=$FIXTURE_REL"
+            echo "MUTATION_REL=$MUTATION_REL"
           } >> "$GITHUB_ENV"
 
       - name: Install E2EE master key
@@ -713,8 +717,16 @@ jobs:
           fi
 
           if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" == "true" ]]; then
+            printf 'tcfs macOS FileProvider mutation %s run %s attempt %s\n' \
+              "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$MUTATION_CONTENT_FILE"
             args+=(--fileprovider-testing-mode)
             args+=(--exercise-evict-rehydrate)
+            args+=(
+              --exercise-mutation \
+              --mutation-file "$MUTATION_REL" \
+              --mutation-content-file "$MUTATION_CONTENT_FILE" \
+              --remote-prefix "$REMOTE_PREFIX"
+            )
           fi
 
           bash scripts/macos-postinstall-smoke.sh "${args[@]}"

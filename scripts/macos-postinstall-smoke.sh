@@ -27,6 +27,14 @@ Options:
                               File containing exact expected content
   --exercise-evict-rehydrate  After initial exact hydration, request provider
                               eviction and verify a second exact rehydrate
+  --exercise-mutation         Write a new file through the CloudStorage root
+                              and verify the upload by pulling it from remote
+  --mutation-file <relpath>   Relative mutation file path under CloudStorage
+                              (default: generated root-level file name)
+  --mutation-content <text>   Exact content to write for --exercise-mutation
+  --mutation-content-file <path>
+                              File containing exact mutation content
+  --remote-prefix <prefix>    Remote prefix used to verify mutation by pull
   --app-path <path>           Installed TCFSProvider.app path
                               (default: auto-detect /Applications or ~/Applications)
   --cloud-root <path>         CloudStorage root path
@@ -65,6 +73,11 @@ EXPECTED_FILE_REL=""
 EXPECTED_CONTENT=""
 EXPECTED_CONTENT_FILE=""
 EXERCISE_EVICT_REHYDRATE="${TCFS_EXERCISE_EVICT_REHYDRATE:-0}"
+EXERCISE_MUTATION="${TCFS_EXERCISE_MUTATION:-0}"
+MUTATION_FILE_REL="${TCFS_FILEPROVIDER_MUTATION_FILE_REL:-}"
+MUTATION_CONTENT="${TCFS_FILEPROVIDER_MUTATION_CONTENT:-}"
+MUTATION_CONTENT_FILE="${TCFS_FILEPROVIDER_MUTATION_CONTENT_FILE:-}"
+REMOTE_PREFIX="${TCFS_REMOTE_PREFIX:-}"
 APP_PATH="${TCFS_APP_PATH:-}"
 CLOUD_ROOT="${TCFS_CLOUD_ROOT:-}"
 PLUGIN_ID="${TCFS_PLUGIN_ID:-io.tinyland.tcfs.fileprovider}"
@@ -106,6 +119,26 @@ while [[ $# -gt 0 ]]; do
     --exercise-evict-rehydrate)
       EXERCISE_EVICT_REHYDRATE=1
       shift
+      ;;
+    --exercise-mutation)
+      EXERCISE_MUTATION=1
+      shift
+      ;;
+    --mutation-file)
+      MUTATION_FILE_REL="$2"
+      shift 2
+      ;;
+    --mutation-content)
+      MUTATION_CONTENT="$2"
+      shift 2
+      ;;
+    --mutation-content-file)
+      MUTATION_CONTENT_FILE="$2"
+      shift 2
+      ;;
+    --remote-prefix)
+      REMOTE_PREFIX="$2"
+      shift 2
       ;;
     --app-path)
       APP_PATH="$2"
@@ -183,6 +216,11 @@ if [[ -n "$EXPECTED_CONTENT" && -n "$EXPECTED_CONTENT_FILE" ]]; then
   exit 2
 fi
 
+if [[ -n "$MUTATION_CONTENT" && -n "$MUTATION_CONTENT_FILE" ]]; then
+  echo "--mutation-content and --mutation-content-file are mutually exclusive" >&2
+  exit 2
+fi
+
 if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" && -z "$EXPECTED_FILE_REL" ]]; then
   echo "--require-keychain-config requires --expected-file so the extension config path is exercised" >&2
   exit 2
@@ -195,6 +233,11 @@ fi
 
 if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" && -z "$EXPECTED_CONTENT" && -z "$EXPECTED_CONTENT_FILE" ]]; then
   echo "--exercise-evict-rehydrate requires --expected-content or --expected-content-file" >&2
+  exit 2
+fi
+
+if [[ "$EXERCISE_MUTATION" == "1" && -z "$REMOTE_PREFIX" ]]; then
+  echo "--exercise-mutation requires --remote-prefix" >&2
   exit 2
 fi
 
@@ -321,6 +364,10 @@ require_file() {
 
 if [[ -n "$EXPECTED_CONTENT_FILE" ]]; then
   require_file "$EXPECTED_CONTENT_FILE"
+fi
+
+if [[ -n "$MUTATION_CONTENT_FILE" ]]; then
+  require_file "$MUTATION_CONTENT_FILE"
 fi
 
 require_dir() {
@@ -732,6 +779,24 @@ check_host_evict_log() {
   fi
 
   return 1
+}
+
+validate_relative_file_path() {
+  local path="$1"
+
+  if [[ -z "$path" || "$path" == /* || "$path" == */ ]]; then
+    echo "expected relative file path, got: $path" >&2
+    exit 2
+  fi
+
+  local component
+  IFS='/' read -r -a components <<<"$path"
+  for component in "${components[@]}"; do
+    if [[ -z "$component" || "$component" == "." || "$component" == ".." ]]; then
+      echo "expected normalized relative file path, got: $path" >&2
+      exit 2
+    fi
+  done
 }
 
 extension_log_path() {
@@ -1198,6 +1263,90 @@ hydrate_expected_file() {
   fi
 }
 
+prepare_mutation_content_file() {
+  local target="$1"
+
+  if [[ -n "$MUTATION_CONTENT_FILE" ]]; then
+    cp "$MUTATION_CONTENT_FILE" "$target"
+  elif [[ -n "$MUTATION_CONTENT" ]]; then
+    printf '%s' "$MUTATION_CONTENT" >"$target"
+  else
+    printf 'tcfs FileProvider mutation smoke %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$target"
+  fi
+}
+
+pull_mutation_from_remote() {
+  local rel="$1"
+  local expected_file="$2"
+  local pulled_copy="$LOG_DIR/mutation-remote-pull"
+  local attempt=0
+  local status=0
+
+  rm -f "$pulled_copy"
+  while (( attempt < TIMEOUT_SECS )); do
+    status=0
+    if run_bounded_to_log \
+      "mutation-remote-pull" \
+      "$READ_TIMEOUT_SECS" \
+      "$TCFS_PATH" --config "$CONFIG_PATH" pull "$rel" "$pulled_copy" --prefix "$REMOTE_PREFIX"; then
+      if cmp -s "$expected_file" "$pulled_copy"; then
+        echo "remote mutation pull matched expected content"
+        return
+      fi
+      echo "remote mutation content mismatch for $rel" >&2
+      exit 1
+    else
+      status="$?"
+    fi
+
+    if [[ "$status" == "124" ]]; then
+      echo "remote mutation pull timed out for $rel" >&2
+      cat "$LOG_DIR/mutation-remote-pull.log" >&2 || true
+      exit 1
+    fi
+    short_pause
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for mutation to appear in remote index: $rel" >&2
+  cat "$LOG_DIR/mutation-remote-pull.log" >&2 || true
+  exit 1
+}
+
+exercise_fileprovider_mutation() {
+  local rel="$MUTATION_FILE_REL"
+  local expected_file="$LOG_DIR/mutation-expected-content"
+  local path
+  local parent
+
+  if [[ -z "$rel" ]]; then
+    rel="tcfs-fileprovider-mutation-${USER:-user}-$$-${RANDOM:-0}.txt"
+  fi
+  validate_relative_file_path "$rel"
+
+  path="$CLOUD_ROOT/$rel"
+  parent="$(dirname "$path")"
+  wait_for_expected_parent_chain "$parent"
+  prepare_mutation_content_file "$expected_file"
+
+  echo "writing FileProvider mutation fixture: $rel"
+  run_bounded_to_log "mutation-write" "$TIMEOUT_SECS" cp "$expected_file" "$path" || {
+    echo "FileProvider mutation write failed: $path" >&2
+    cat "$LOG_DIR/mutation-write.log" >&2 || true
+    exit 1
+  }
+
+  wait_for_expected_file "$path"
+  if ! cmp -s "$expected_file" "$path"; then
+    echo "FileProvider mutation local content mismatch: $path" >&2
+    exit 1
+  fi
+  echo "FileProvider mutation local content matched"
+
+  pull_mutation_from_remote "$rel" "$expected_file"
+  run_status "post-mutation"
+}
+
 APP_PATH="$(detect_app_path)"
 if [[ -n "$LOG_DIR_OVERRIDE" ]]; then
   LOG_DIR="$LOG_DIR_OVERRIDE"
@@ -1257,6 +1406,10 @@ if [[ -n "$EXPECTED_FILE_REL" ]]; then
   fi
 else
   echo "warning: --expected-file not provided; hydration was not exercised" >&2
+fi
+
+if [[ "$EXERCISE_MUTATION" == "1" ]]; then
+  exercise_fileprovider_mutation
 fi
 
 run_status "post-hydrate"

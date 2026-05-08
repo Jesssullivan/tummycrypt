@@ -240,6 +240,13 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return NSFileProviderItemIdentifier(parentPath)
     }
 
+    private static func logicalParentPath(_ identifier: NSFileProviderItemIdentifier) -> String {
+        if identifier == .rootContainer {
+            return ""
+        }
+        return identifier.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
     // MARK: - Write operations
 
     func createItem(
@@ -258,8 +265,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let parentPath = itemTemplate.parentItemIdentifier == .rootContainer
-                ? "" : itemTemplate.parentItemIdentifier.rawValue
+            let parentPath = Self.logicalParentPath(itemTemplate.parentItemIdentifier)
             let filename = itemTemplate.filename
 
             if itemTemplate.contentType == .folder {
@@ -271,7 +277,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 }
 
                 if result == TCFS_ERROR_TCFS_ERROR_NONE {
-                    let dirPath = parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"
+                    let dirPath = parentPath.isEmpty ? "\(filename)/" : "\(parentPath)/\(filename)/"
                     let item = TCFSFileProviderItem(
                         identifier: NSFileProviderItemIdentifier(dirPath),
                         parentIdentifier: itemTemplate.parentItemIdentifier,
@@ -374,8 +380,7 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             } else if changedFields.contains(.filename) {
                 // Rename: delete old index entry, re-upload to new path
                 let oldPath = item.itemIdentifier.rawValue
-                let parentPath = item.parentItemIdentifier == .rootContainer
-                    ? "" : item.parentItemIdentifier.rawValue
+                let parentPath = Self.logicalParentPath(item.parentItemIdentifier)
                 let newRemotePath = parentPath.isEmpty ? item.filename : "\(parentPath)/\(item.filename)"
 
                 // Delete old entry

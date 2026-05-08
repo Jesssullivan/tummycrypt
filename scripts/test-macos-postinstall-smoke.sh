@@ -45,7 +45,9 @@ LOG_DIR="${TMPDIR}/logs"
 CONFIG_PATH="${HOME_DIR}/.config/tcfs/config.toml"
 FILEPROVIDER_CONFIG="${HOME_DIR}/.config/tcfs/fileprovider/config.json"
 EXPECTED_REL="Projects/tcfs-odrive-parity/honey-readme.txt"
+MUTATION_REL="Projects/tcfs-odrive-parity/fileprovider-mutation.txt"
 EXPECTED_CONTENT_FILE="${TMPDIR}/expected-content.txt"
+MUTATION_CONTENT_FILE="${TMPDIR}/mutation-content.txt"
 OPEN_LOG="${TMPDIR}/open.log"
 PLUGINKIT_LOG="${TMPDIR}/pluginkit.log"
 LAUNCHCTL_LOG="${TMPDIR}/launchctl.log"
@@ -65,6 +67,7 @@ mkdir -p \
 printf '[storage]\nendpoint = "http://example.invalid:8333"\nbucket = "tcfs"\n' >"$CONFIG_PATH"
 printf '{"socket_path":"/tmp/tcfs-fileprovider.sock"}\n' >"$FILEPROVIDER_CONFIG"
 printf 'TCFS Finder hydration fixture\n' >"$EXPECTED_CONTENT_FILE"
+printf 'TCFS Finder mutation fixture\n' >"$MUTATION_CONTENT_FILE"
 cp "$EXPECTED_CONTENT_FILE" "$CLOUD_ROOT/$EXPECTED_REL"
 
 cat >"$FAKE_BIN/uname" <<'EOF'
@@ -78,7 +81,34 @@ case "${1:-}" in
     printf 'tcfs 0.12.2\n'
     ;;
   --config)
-    printf 'tcfsd v0.12.2\nstorage: [ok]\n'
+    config="$2"
+    shift 2
+    case "${1:-status}" in
+      status)
+        printf 'tcfsd v0.12.2\nstorage: [ok]\n'
+        ;;
+      pull)
+        rel="$2"
+        dest="$3"
+        [[ "${4:-}" == "--prefix" ]] || {
+          printf 'expected --prefix for fake pull\n' >&2
+          exit 1
+        }
+        [[ -n "${5:-}" ]] || {
+          printf 'missing fake pull prefix\n' >&2
+          exit 1
+        }
+        src="${TCFS_FAKE_REMOTE_ROOT:?}/$rel"
+        /bin/cat "$src" >"$dest"
+        printf 'Pulling %s -> %s using %s\n' "$rel" "$dest" "$config"
+        ;;
+      *)
+        printf 'unexpected tcfs --config invocation:'
+        printf ' %q' "$@"
+        printf '\n'
+        exit 1
+        ;;
+    esac
     ;;
   *)
     printf 'unexpected tcfs invocation:'
@@ -337,6 +367,7 @@ TCFS_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
 TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
 TCFS_FAKE_TESTING_MODE_ENTITLEMENT=1 \
 TCFS_FAKE_COMPACT_ENTITLEMENTS=1 \
+TCFS_FAKE_REMOTE_ROOT="$CLOUD_ROOT" \
 TCFS_FAKE_SWIFT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
 TCFS_FAKE_SWIFT_MARKER="$READ_RETRY_MARKER" \
 bash "$SCRIPT" \
@@ -351,6 +382,10 @@ bash "$SCRIPT" \
   --fileprovider-testing-mode \
   --require-keychain-config \
   --exercise-evict-rehydrate \
+  --exercise-mutation \
+  --mutation-file "$MUTATION_REL" \
+  --mutation-content-file "$MUTATION_CONTENT_FILE" \
+  --remote-prefix "gha/fake-prefix" \
   --timeout 2 \
   >"$OUT"
 
@@ -376,6 +411,10 @@ assert_contains "$OUT" "requesting FileProvider eviction for expected file: $EXP
 assert_contains "$OUT" "launching host app binary for eviction request: $APP_PATH/Contents/MacOS/TCFSProvider"
 assert_contains "$OUT" "host app requested FileProvider eviction for expected file"
 assert_contains "$OUT" "FileProvider evict/rehydrate cycle passed"
+assert_contains "$OUT" "writing FileProvider mutation fixture: $MUTATION_REL"
+assert_contains "$OUT" "FileProvider mutation local content matched"
+assert_contains "$OUT" "remote mutation pull matched expected content"
+assert_contains "$OUT" "tcfs status (post-mutation):"
 assert_contains "$OUT" "hydrated file content matched expected content file"
 assert_contains "$OUT" "FileProvider extension config source: shared Keychain"
 assert_contains "$OUT" "macOS post-install FileProvider smoke passed"
@@ -403,6 +442,8 @@ assert_contains "$LOG_DIR/fileproviderctl-check-root.log" "fileproviderctl check
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-expected-parent.log" "fileproviderctl evaluate"
 assert_contains "$LOG_DIR/fileproviderctl-check-expected-parent.log" "fileproviderctl check -P -a"
 cmp -s "$EXPECTED_CONTENT_FILE" "$LOG_DIR/hydrated-expected-file"
+cmp -s "$MUTATION_CONTENT_FILE" "$CLOUD_ROOT/$MUTATION_REL"
+cmp -s "$MUTATION_CONTENT_FILE" "$LOG_DIR/mutation-remote-pull"
 [[ -e "$READ_RETRY_MARKER" ]] || {
   printf 'expected coordinated read to fail once before hydration retry succeeded\n' >&2
   exit 1
@@ -426,6 +467,12 @@ assert_fails_contains \
     bash "$SCRIPT" \
       --expected-file "$EXPECTED_REL" \
       --exercise-evict-rehydrate
+
+assert_fails_contains \
+  "--exercise-mutation requires --remote-prefix" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --exercise-mutation
 
 assert_fails_contains \
   "host app missing com.apple.developer.fileprovider.testing-mode entitlement" \
