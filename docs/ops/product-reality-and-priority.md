@@ -18,7 +18,7 @@ Use this document as the short answer to:
 
 | Surface | Current truth | Source of proof |
 | --- | --- | --- |
-| Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
+| Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
 | macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
@@ -33,12 +33,12 @@ This is the narrowest and most important truth for public release claims.
 
 | Surface | Status | Current reality |
 | --- | --- | --- |
-| Homebrew | pass | fresh install and upgrade proved on `v0.12.12`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
+| Homebrew | current-tag pass | fresh install and upgrade proved on `v0.12.12`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
 | macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, rehydrate, mutation, and conflict/status content preservation on runs `25562087555`, `25565943781`, and `25569596910`; production Finder remains separate |
-| `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; current support floor is Ubuntu 24.04+ / Debian 13+; Debian 12 is excluded unless a separate bookworm-targeted package is produced |
-| `.rpm` | pass | fresh install proved in Fedora container |
-| container image | pass | version and worker-mode startup proved |
-| Nix install | pass | `v0.12.12` fresh install proved from the tagged flake into a temporary profile on `neo`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
+| `.deb` | floor decided; current-tag refresh pending | support floor is Ubuntu 24.04+ / Debian 13+; Debian 12 is excluded unless a separate bookworm-targeted package is produced; `v0.12.12` repo-archived evidence currently does not include `.deb` fresh/upgrade |
+| `.rpm` | historical/sample proof; current-tag refresh pending | RPM is daemon-only today; `v0.12.12` repo-archived evidence currently does not include Fedora/RHEL/Rocky smoke |
+| container image | historical/sample proof; current-tag refresh pending | worker-mode startup is modeled in CI/release, but `v0.12.12` repo-archived evidence currently does not include a pulled-image startup smoke |
+| Nix install | current-tag pass | `v0.12.12` fresh install proved from the tagged flake into a temporary Darwin profile on `neo`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
 
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
 Install-to-first-use bridge:
@@ -47,6 +47,8 @@ Historical per-release evidence freeze for `v0.12.2`:
 [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md).
 Current Homebrew/Nix distribution evidence for `v0.12.12`:
 [distribution-v01212-20260508T205913Z](../release/evidence/distribution-v01212-20260508T205913Z/).
+Current evidence index with GitHub Actions run links:
+[Release Evidence Index](../release/evidence/README.md).
 
 ### 2. Continuous CI / Build Proof
 
@@ -238,18 +240,18 @@ work should be ordered like this:
    - remaining Linux work is product polish around conflict/status surfacing,
      not the lifecycle proof packet itself
 2. **Apple desktop acceptance**
-  - stop retrying hosted production packages until FileProvider can be enabled
-  - treat PZM testing-mode read/hydrate/evict/rehydrate as green under the
-    installed lab `SystemPolicyRule` profile
-  - treat PZM testing-mode mutation as green under smoke run `25565943781`
-  - treat PZM testing-mode conflict/status content preservation as green under
-    smoke run `25569596910`
-  - keep the installed-host policy probe and profile verification in the PZM
-    postinstall workflow so install/provenance failures stay classified before
-    deeper Finder assertions
-  - keep Finder badges/progress as observational evidence until there is a
-    reliable assertion for those UI signals
-  - keep production Developer ID clean-host Finder acceptance separate from
+   - stop retrying hosted production packages until FileProvider can be enabled
+   - treat PZM testing-mode read/hydrate/evict/rehydrate as green under the
+     installed lab `SystemPolicyRule` profile
+   - treat PZM testing-mode mutation as green under smoke run `25565943781`
+   - treat PZM testing-mode conflict/status content preservation as green under
+     smoke run `25569596910`
+   - keep the installed-host policy probe and profile verification in the PZM
+     postinstall workflow so install/provenance failures stay classified before
+     deeper Finder assertions
+   - keep Finder badges/progress as observational evidence until there is a
+     reliable assertion for those UI signals
+   - keep production Developer ID clean-host Finder acceptance separate from
      non-production testing-mode evidence
 3. **odrive-style lifecycle productionization**
    - surface `FileSyncStatus`, progress, and conflict state in CLI/TUI/Finder
@@ -268,9 +270,12 @@ work should be ordered like this:
    - keep Homebrew and Nix proof current in the distribution matrix
    - Debian 12 posture is decided for the current packages: do not claim it as
      a supported `.deb` target until a bookworm-specific build exists
-6. **Accessibility**
+6. **Credential hygiene**
+   - rotate and migrate legacy plaintext Ansible inventory credentials into the
+     SOPS-managed path before claiming repo-wide secret handling is complete
+7. **Accessibility**
    - define an explicit AX bar before claiming mature desktop UX
-7. **Diagnostics and recovery UX**
+8. **Diagnostics and recovery UX**
    - on-demand diagnostic dump
    - clearer support/recovery flows for operator and end-user failures
 
@@ -279,11 +284,13 @@ work should be ordered like this:
 As of May 8, 2026, the narrow GitHub backlog is:
 
 - M10 release-proof tranche
-  - `#280`: distribution install and upgrade proof umbrella
+  - `#280`: distribution install and upgrade proof umbrella. Homebrew/Nix
+    current-tag proof is archived for `v0.12.12`; Linux package/container and
+    production macOS `.pkg` current-tag proof remain named follow-ups.
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
-    testing-mode enumerate/hydrate/evict/rehydrate is green under the installed
-    lab `SystemPolicyRule` profile; production Finder lifecycle proof remains
-    open.
+    testing-mode enumerate/hydrate/evict/rehydrate/mutation/conflict-status is
+    green under the installed lab `SystemPolicyRule` profile; production Finder
+    lifecycle proof remains open.
 - Adjacent non-M10 lanes
   - `#298`: residual Civo TCFS PVC retirement after on-prem recovery
   - `#327`: TCFS on-prem OpenTofu migration and cutover

@@ -1,10 +1,10 @@
-# tcfs-backend: sync-worker Deployment + metadata-service + RBAC
+# tcfs-backend: sync-worker Deployment + RBAC
 #
 # Sync workers are stateless NATS consumers (tcfsd --mode=worker --features k8s-worker).
 # KEDA scales them based on NATS JetStream lag (see keda module).
 #
-# Metadata-service is a 2-replica Deployment using Kubernetes Lease API
-# for leader election — coordinates distributed sync-worker locking per repo.
+# This module grants Kubernetes Lease permissions for worker coordination, but
+# it does not create a separate metadata-service Deployment today.
 
 terraform {
   required_providers {

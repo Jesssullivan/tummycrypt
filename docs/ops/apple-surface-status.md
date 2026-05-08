@@ -2,7 +2,8 @@
 
 As of May 8, 2026, Apple support is a buildable and partially proven lane. The
 macOS FileProvider testing-mode lab now has green enumerate, hydrate, evict,
-and rehydrate proof on PZM, but Apple surfaces are still not a full
+rehydrate, mutation upload/readback, and deterministic conflict/status content
+preservation proof on PZM, but Apple surfaces are still not a full
 release-grade desktop or iOS product.
 
 ## macOS: Proven Today
@@ -33,6 +34,8 @@ release-grade desktop or iOS product.
   into deterministic conflict/status proof: CLI status reported
   `sync state: conflict` and FileProvider readback preserved exact content.
   Finder badges/progress remain observational.
+- GitHub Actions links for the current PZM runs are indexed in
+  [Release Evidence Index](../release/evidence/README.md).
 
 ## macOS: Not Yet Proven As A Release-Grade Desktop Surface
 
@@ -58,7 +61,7 @@ release-grade desktop or iOS product.
 
 Use:
 
-- `macOS: CLI/daemon plus lab-proven experimental FileProvider read/hydrate`
+- `macOS: CLI/daemon plus lab-proven experimental FileProvider lifecycle`
 - `iOS: proof-of-concept FileProvider direction`
 
 Avoid:
@@ -75,8 +78,9 @@ Avoid:
   [Distribution Smoke Matrix](distribution-smoke-matrix.md).
 - Use [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md) for
   the current desktop acceptance path and proof gaps.
-- Extend the named macOS Finder/FileProvider smoke path beyond read/hydrate
-  before upgrading the public desktop posture.
+- Keep extending the named macOS Finder/FileProvider smoke path, but do not
+  upgrade the public desktop posture until production Developer ID clean-host
+  acceptance is green.
 - Add simulator or device-backed iOS acceptance before claiming an active iOS
   product surface.
 

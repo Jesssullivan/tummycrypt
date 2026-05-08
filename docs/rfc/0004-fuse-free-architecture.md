@@ -309,9 +309,11 @@ stay in userspace with zero kernel dependencies.
 ## Migration Impact
 
 ### Users
-- **macOS**: No visible change — FileProvider already works. NFS mount replaces FUSE
-  mount for terminal users who want a mount point.
-- **iOS**: No change — FileProvider is already the only backend.
+- **macOS**: The FileProvider direction exists, but the production Finder
+  surface remains experimental. NFS mount replaces FUSE mount for terminal
+  users who want a mount point.
+- **iOS**: FileProvider remains the only intended backend, but the current
+  product posture is proof-of-concept pending device acceptance.
 - **Linux**: `tcfs mount` switches from FUSE to NFS. Same UX, no kernel module needed.
 
 ### Packagers

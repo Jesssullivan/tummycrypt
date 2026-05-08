@@ -1,8 +1,8 @@
 # tcfs — TummyCrypt Filesystem
 
-**FOSS self-hosted odrive replacement**
+**FOSS self-hosted odrive-style encrypted sync target**
 
-tcfs is a self-hosted encrypted file sync system backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with end-to-end [age](https://age-encryption.org) encryption, content-defined chunking, clean-name on-demand hydration in mounted views, physical `.tc`/`.tcf` stubs for offline/dehydrated paths, and multi-machine fleet sync with vector clocks. Linux is the best-supported runtime today; Apple desktop and mobile surfaces exist but are still experimental.
+tcfs is a self-hosted encrypted file sync system backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with client-side XChaCha20-Poly1305 content encryption, SOPS/age-managed credentials, content-defined chunking, clean-name on-demand hydration in mounted views, physical `.tc`/`.tcf` stubs for offline/dehydrated paths, and multi-machine fleet sync with vector clocks. Linux is the best-supported runtime today; Apple desktop and mobile surfaces exist but are still experimental.
 
 ## Installation
 
@@ -58,7 +58,7 @@ nix develop github:Jesssullivan/tummycrypt
 
 ## How It Works
 
-1. **Push**: Files are split into content-defined chunks (FastCDC), compressed (zstd), encrypted (age), and uploaded to SeaweedFS via S3. Vector clock is ticked and SyncManifest v2 (JSON) is written.
+1. **Push**: Files are split into content-defined chunks (FastCDC), compressed (zstd), encrypted client-side with XChaCha20-Poly1305, and uploaded to SeaweedFS via S3. Vector clock is ticked and SyncManifest v2 (JSON) is written.
 2. **Pull**: Manifests describe the chunk layout. Chunks are fetched, verified (BLAKE3), decrypted, decompressed, and reassembled. Vector clock is merged with remote.
 3. **Mount**: The local filesystem surface presents remote files as local names and hydrates on open. On Linux this is exercised primarily through FUSE. Apple desktop surfaces are still evolving and should be treated as experimental.
 4. **Unsync**: Convert hydrated files back to physical `.tc` stubs or platform placeholders, reclaiming disk space while keeping the remote copy.
@@ -155,13 +155,13 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux x86_64 | Full | FUSE mount, CLI, daemon, TUI, MCP |
-| Linux aarch64 | Full | FUSE mount, CLI, daemon, TUI, MCP |
+| Linux x86_64 | Proven primary lane | FUSE mount lifecycle, CLI, daemon, TUI, MCP |
+| Linux aarch64 | Available | Release tarball and `.deb`; FUSE is not built in the current cross-compiled release artifact |
 | macOS (Apple Silicon) | Experimental | CLI and daemon build, release `.pkg`, and FileProvider packaging exist, but user-facing acceptance coverage is still limited |
 | macOS (Intel) | Experimental | CLI binaries ship, but the desktop integration story is not yet as proven as Linux |
-| Windows x86_64 | CLI only | Cloud Files API skeleton; no FUSE or daemon |
-| iOS | Proof-of-concept | Read-only FileProvider direction; CI type-checks Swift, but there is no continuously proven TestFlight/App Store lane |
-| NixOS | Full | Flake + NixOS module + Home Manager module |
+| Windows x86_64 | Planned / skeleton | Cloud Files API skeleton; no release-grade CLI, daemon, or Explorer flow |
+| iOS | Proof-of-concept | FileProvider direction with unproven write hooks; CI type-checks Swift, but there is no continuously proven device/TestFlight/App Store lane |
+| NixOS | Available / evidence pending | Flake + NixOS module + Home Manager module; current `v0.12.12` evidence is Darwin Nix profile install |
 
 ## License
 

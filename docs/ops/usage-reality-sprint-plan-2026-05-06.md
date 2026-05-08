@@ -1,6 +1,7 @@
 # TCFS Usage Reality Sprint Plan
 
-Date: May 6, 2026
+Started: May 6, 2026
+Last updated: May 8, 2026
 
 This is the short-lived execution plan for turning the current TCFS surface
 matrix into archived, repeatable proof. It is intentionally separate from

@@ -2,7 +2,7 @@
 
 > Under active development. Not yet stable. Expect breaking changes.
 
-Self-hosted encrypted file sync with on-demand hydration. Mounted views present remote files as normal names and hydrate on open; offline/dehydrated copies can be represented by small `.tc`/`.tcf` stubs. FOSS odrive/Dropbox replacement.
+Self-hosted encrypted file sync with on-demand hydration. Mounted views present remote files as normal names and hydrate on open; offline/dehydrated copies can be represented by small `.tc`/`.tcf` stubs. FOSS odrive/Dropbox-style alternative under active development.
 
 ## Canonical Home
 
@@ -76,7 +76,7 @@ tcfs status                    # Daemon status, device identity, NATS connection
 tcfs push <path>               # Upload with encryption + vector clock tick
 tcfs pull <manifest> <local>   # Download with conflict detection + decryption
 tcfs mount <remote> <target>   # FUSE mount with clean-name on-demand hydration
-tcfs unsync <path>             # Convert hydrated file back to a physical .tc stub
+tcfs unsync <path>             # Convert clean tracked files/directories back to .tc stubs
 tcfs device enroll             # Register device with age keypair
 tcfs device list               # Show enrolled fleet devices
 ```
@@ -109,7 +109,7 @@ crates/
 ├── tcfs-cloudfilter/    # Windows Cloud Files API (planned)
 ├── tcfs-file-provider/  # macOS/iOS FileProvider FFI (cbindgen + UniFFI)
 ├── tcfs-sops/           # SOPS+age fleet secret propagation
-├── tcfs-dbus/           # D-Bus integration (Linux)
+├── tcfs-dbus/           # Linux D-Bus interface (stub default; gRPC backend feature-gated)
 ├── tcfsd/               # Daemon binary (gRPC + metrics + systemd)
 ├── tcfs-cli/            # CLI binary
 ├── tcfs-tui/            # Terminal UI (ratatui)
@@ -127,14 +127,14 @@ For the bar after install succeeds, see
 
 | Feature | Linux | macOS | Windows | iOS |
 |---------|-------|-------|---------|-----|
-| CLI (push/pull/reconcile) | Full | Full | Planned | - |
-| Daemon (gRPC + metrics) | Full | Available, lightly validated | Planned | - |
-| Filesystem mount | Full (FUSE3, NFS fallback) | Experimental | Cloud Files API (skeleton) | - |
-| FileProvider | - | Experimental | - | Proof-of-concept, read-only |
+| CLI (push/pull/reconcile) | Proven | Proven | Planned | - |
+| Daemon (gRPC + metrics) | Proven | Available, lightly validated | Planned | - |
+| Filesystem mount | Proven on x86_64 FUSE; NFS fallback exists | Experimental | Cloud Files API skeleton | - |
+| FileProvider | - | Lab-proven experimental | - | Proof-of-concept; write hooks unproven |
 | Finder/Explorer badges | - | Experimental | - | - |
-| D-Bus integration | Full | - | - | - |
-| Fleet sync (NATS) | Full | Core path available, not continuously acceptance-tested | Planned | - |
-| E2E encryption | Full | Full | Planned | Core crypto path available |
+| D-Bus integration | Interface exists; release UX not proven | - | - | - |
+| Fleet sync (NATS) | Proven core/live lanes | Core path available, not continuously acceptance-tested | Planned | - |
+| E2E encryption | Proven core path | Proven core path | Planned | Core crypto path available |
 
 See [docs/platform-support.md](docs/platform-support.md) for details.
 For the dated Apple posture, see
@@ -144,7 +144,7 @@ For the dated Apple posture, see
 
 ```bash
 task build          # Build all crates
-task test           # Run all tests (424 tests)
+task test           # Run workspace tests
 task lint           # Clippy + rustfmt
 task deny           # License + advisory check
 task check          # All of the above
