@@ -70,12 +70,13 @@ and real-host backend sync. The weakest proof remains macOS Finder from package
 install through register, enumerate, hydrate, mutate, conflict, and visible
 status.
 
-The `v0.12.11` evidence tightened that boundary. Production `.pkg` builds and
-smokes prove install, signing/profile checks, storage config, daemon startup,
-public S3 reachability, and seeded E2EE fixture access. The PZM non-production
-testing-mode lane now also proves FileProvider enumeration and exact-content
-hydration from a package install. Production Finder lifecycle evidence remains
-open: arbitrary clean-host enablement, evict/rehydrate, mutation, conflict, and
+The `v0.12.12` PZM evidence tightened that boundary. Production `.pkg` builds
+and smokes prove install, signing/profile checks, storage config, daemon
+startup, public S3 reachability, and seeded E2EE fixture access. The PZM
+non-production testing-mode lane now also proves FileProvider enumeration,
+exact-content hydration, evict, and rehydrate from a package install when the
+lab `SystemPolicyRule` profile is installed. Production Finder lifecycle
+evidence remains open: arbitrary clean-host enablement, mutation, conflict, and
 visible status/progress are not yet release gates.
 
 ## Linux <> Finder Parity Evidence
@@ -92,8 +93,8 @@ Parity should be assessed at the user-behavior level:
 | Keep scriptability | every desktop action has a CLI/headless equivalent | Finder is native UX, not the only control plane |
 
 The Linux proof lane can continue without waiting for Apple. The Finder
-read/hydrate lane is now green under PZM testing mode; production Finder
-lifecycle proof remains a separate bar.
+read/hydrate/evict/rehydrate lane is now green under PZM testing mode;
+production Finder lifecycle proof remains a separate bar.
 
 ## Product Pillars
 

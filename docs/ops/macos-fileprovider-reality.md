@@ -1,11 +1,10 @@
 # macOS Finder and FileProvider Reality
 
-As of May 6, 2026, macOS is a real packaging and integration lane for tcfs.
-The lab testing-mode FileProvider read/hydrate path is proven end to end on
-`v0.12.11`, but the current `v0.12.12` lifecycle attempt is blocked by a
-runtime policy termination of the host and FileProvider extension processes.
-Production Finder lifecycle behavior is still not a continuously proven
-release-grade desktop surface.
+As of May 8, 2026, macOS is a real packaging and integration lane for tcfs.
+The non-production PZM testing-mode FileProvider lane is proven end to end on
+`v0.12.12` through enumerate, exact-content hydrate, evict, and rehydrate when
+the lab `SystemPolicyRule` profile is installed. Production Finder lifecycle
+behavior is still not a continuously proven release-grade desktop surface.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
@@ -63,18 +62,13 @@ sync-root stub representation, not the desired primary Finder UX.
   decoration code paths.
 - The non-production `petting-zoo-mini` testing-mode lane has passed a full
   package-to-FileProvider read/hydrate smoke on `v0.12.11`.
-- The `v0.12.12` PZM testing-mode package passes package install, signing,
-  profile, E2EE, storage, and daemon startup gates. Its FileProvider lifecycle
-  attempt currently fails at runtime policy: codesign verification and embedded
-  profile evidence pass for both bundles, `taskgated-helper` accepts the host
-  and extension provisioning profiles, and the build-output app reaches Swift
-  `main()` in policy-probe mode. After package install, `spctl` rejects both
-  bundles, `syspolicy_check` reports the app lacks a notarization ticket and
-  has a fatal Gatekeeper rejection, the installed host policy probe times out
-  before Swift startup logs while the process is still sampled at
-  `_dyld_start`, AppleSystemPolicy later denies the installed host, and
-  AppleSystemPolicy also terminates the extension after `fileproviderd` starts
-  it.
+- The `v0.12.12` PZM testing-mode lane passes package install, signing,
+  profile, E2EE, storage, daemon startup, installed host policy probe,
+  FileProvider registration, enumeration, requestDownload, evict, re-request,
+  and exact-content hydration when the computer-level
+  `TCFS FileProvider Lab Gatekeeper Rules` `SystemPolicyRule` profile is
+  installed. This is a non-production Mac App Development/testing-mode proof,
+  not a production Developer ID clean-host claim.
 
 ## Important Constraints
 
@@ -96,9 +90,8 @@ sync-root stub representation, not the desired primary Finder UX.
 - A continuously exercised production clean-host Finder/FileProvider acceptance
   lane from Developer ID package install through user enablement, register,
   enumerate, hydrate, mutate, and conflict handling
-- A current-tag PZM lifecycle smoke beyond read/hydrate; the immediate blocker
-  is extension runtime policy, not missing S3/E2EE config or missing PZM
-  provisioning profiles
+- A production clean-host Finder/FileProvider lifecycle smoke beyond
+  install/signing/storage gates
 - Finder badge visibility as a release gate
 - Conflict UX and notification behavior as a release gate
 - Release-day viability of every published macOS artifact without explicit
@@ -626,23 +619,24 @@ May 6, 2026 testing-mode evidence updated the current blocker:
   harness then failed in the same place, with an empty
   `harness/host-domain-launch.log` and AppleSystemPolicy denial for both the
   installed host and extension.
+- PZM smoke run `25458526158` proved the old `spctl --add --label` workaround
+  is not available on macOS 15: `spctl` exits 4 with "This operation is no
+  longer supported" and the man page routes this class of rule to
+  configuration profiles.
+- PZM smoke run `25562087555` installed the same `v0.12.12` testing-mode
+  package, verified the computer-level `TCFS FileProvider Lab Gatekeeper Rules`
+  `SystemPolicyRule` profile, passed the installed host policy probe
+  (`policyProbe: OK`), loaded extension config from shared Keychain, registered
+  the FileProvider domain, enumerated CloudStorage, requested download,
+  evicted, requested download again, and hydrated the exact 55-byte fixture.
+  `fileproviderctl check` reconciled 35 files for both the root and expected
+  parent.
 
-So the testing-mode read/hydrate lane is proven, but the current
-evict/rehydrate package is blocked by the Mac Development lab trust model. The
-remaining macOS product work is production Developer ID clean-host enablement
-plus richer Finder lifecycle behavior: evict/rehydrate, mutation,
-conflict/status visibility, and recovery UX.
-
-The next PZM experiment is now encoded as a workflow input instead of a manual
-operator step: dispatch `macos-postinstall-smoke.yml` with
-`fileprovider_testing_mode=true` and `lab_gatekeeper_override=true`. That path
-is restricted to the PZM lab runner, runs
-`scripts/macos-fileprovider-lab-gatekeeper-override.sh`, generates the desired
-`SystemPolicyRule` `.mobileconfig`, and verifies that profile is installed
-before the harness. A pass would prove only the non-production Mac Development
-lab trust path, not production Developer ID Finder enablement. If the profile
-is missing, the run fails early and uploads the generated `.mobileconfig` for
-manual System Settings or MDM installation on PZM.
+So the testing-mode read/hydrate plus evict/rehydrate lane is now proven on the
+non-production PZM Mac Development lab. The remaining macOS product work is
+production Developer ID clean-host enablement plus richer Finder lifecycle
+behavior: mutation, conflict/status visibility, badges/progress, and recovery
+UX.
 
 May 1, 2026 Apple Developer follow-up changed the shape of this lane:
 

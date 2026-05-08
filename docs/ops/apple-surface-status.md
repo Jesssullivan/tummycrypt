@@ -1,8 +1,9 @@
 # Apple Surface Status
 
-As of May 6, 2026, Apple support is a buildable and partially proven lane. The
-macOS FileProvider read/hydrate path now has a green lab proof, but Apple
-surfaces are still not a full release-grade desktop or iOS product.
+As of May 8, 2026, Apple support is a buildable and partially proven lane. The
+macOS FileProvider testing-mode lab now has green enumerate, hydrate, evict,
+and rehydrate proof on PZM, but Apple surfaces are still not a full
+release-grade desktop or iOS product.
 
 ## macOS: Proven Today
 
@@ -19,6 +20,11 @@ surfaces are still not a full release-grade desktop or iOS product.
   signing/profile checks, shared-Keychain config, live S3/E2EE access, daemon
   startup, FileProvider registration, CloudStorage enumeration,
   `requestDownload`, and exact-content hydration.
+- PZM smoke run `25562087555` on `v0.12.12` with the installed
+  `TCFS FileProvider Lab Gatekeeper Rules` profile proved installed host
+  policy launch, shared-Keychain config, live S3/E2EE access, daemon startup,
+  FileProvider registration, CloudStorage enumeration, `requestDownload`,
+  `evict`, re-`requestDownload`, and exact-content hydration.
 
 ## macOS: Not Yet Proven As A Release-Grade Desktop Surface
 

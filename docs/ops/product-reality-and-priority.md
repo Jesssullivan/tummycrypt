@@ -20,8 +20,8 @@ Use this document as the short answer to:
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path | CI, release smoke, live host acceptance |
 | Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
-| Lazy traversal / hydration | core code and harnesses exist; PZM proves macOS FileProvider enumerate + hydrate under testing mode on `v0.12.11`; the `v0.12.12` evict/rehydrate attempt is blocked by extension runtime policy; archived Linux FUSE and production Finder lifecycle evidence are still pending | `tcfs-vfs`/FUSE implementation, PZM testing-mode smoke, and the lazy hydration demo runbook |
-| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and `v0.12.11` proves lab FileProvider enumeration/exact-content hydration under Apple's testing-mode entitlement; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
+| Lazy traversal / hydration | core code and harnesses exist; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, and rehydrate under testing mode with the installed lab `SystemPolicyRule` profile; archived Linux FUSE and production Finder lifecycle evidence are still pending | `tcfs-vfs`/FUSE implementation, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/mutate/conflict UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
 
@@ -34,7 +34,7 @@ This is the narrowest and most important truth for public release claims.
 | Surface | Status | Current reality |
 | --- | --- | --- |
 | Homebrew | pass | fresh install and upgrade proved on `v0.12.2` |
-| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proved FileProvider enumerate + hydrate on `v0.12.11`; `v0.12.12` adds an evict/rehydrate gate but is currently blocked by AppleSystemPolicy terminating the extension after launch |
+| macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, and rehydrate on run `25562087555`; production Finder remains separate |
 | `.deb` | partial pass | Ubuntu 24.04 fresh install and upgrade proved; Debian 12 is not currently a truthful target for the shipped package deps |
 | `.rpm` | pass | fresh install proved in Fedora container |
 | container image | pass | version and worker-mode startup proved |
@@ -90,14 +90,19 @@ What this still does **not** mean:
 macOS is no longer “missing” as a code path, but it is still not a release-grade
 desktop surface in the same sense Linux is.
 
-Now proven in the lab:
+Now proven in the non-production PZM lab:
 
 - a `v0.12.11` testing-mode package on `petting-zoo-mini`
 - package install, signing/profile checks, shared-Keychain config, live S3/E2EE
   access, daemon startup, FileProvider registration, CloudStorage enumeration,
   host-app `requestDownload`, and exact-content hydration
+- a `v0.12.12` testing-mode package with the installed
+  `TCFS FileProvider Lab Gatekeeper Rules` profile
+- smoke run `25562087555`: installed host policy probe, shared-Keychain config,
+  E2EE, daemon startup, FileProvider registration, CloudStorage enumeration,
+  `requestDownload`, `evict`, re-`requestDownload`, and exact 55-byte hydration
 
-Current lab blocker:
+Resolved lab runtime-policy blocker:
 
 - `v0.12.12` package/signing/storage/daemon stages pass on PZM
 - the current Mac App Development certificate/profile pair is valid: codesign
@@ -118,17 +123,17 @@ Current lab blocker:
   AppleSystemPolicy denies the host process
 - `fileproviderd` launches the extension process, then AppleSystemPolicy also
   terminates the extension before the evict/rehydrate lifecycle can complete
-- the next engineering choice is now an explicit workflow experiment:
-  `lab_gatekeeper_override=true` on the PZM testing-mode smoke generates and
-  requires a `SystemPolicyRule` configuration profile for the installed host
-  app and extension. This can only prove the non-production lab path;
+- smoke run `25458526158` showed macOS 15 rejects `spctl --add` rule mutation
+  with exit 4, so the repo moved to a managed `SystemPolicyRule` profile
+- smoke run `25562087555` verifies that profile and passes the FileProvider
+  evict/rehydrate harness. This proves only the non-production lab path;
   production Finder still needs separate Developer ID clean-host evidence.
 
 Still manual or weakly proven:
 
 - production Finder/FileProvider enablement on arbitrary clean machines
 - badges, progress, notifications, and conflict UX
-- mutation, conflict, evict/rehydrate, and realistic desktop usage
+- mutation, conflict, and realistic desktop usage beyond evict/rehydrate
 
 Canonical docs:
 
@@ -222,12 +227,13 @@ work should be ordered like this:
    - prove dehydrate/unsync followed by rehydrate
 2. **Apple desktop acceptance**
   - stop retrying hosted production packages until FileProvider can be enabled
-  - treat PZM testing-mode read/hydrate as green
-  - use the installed-host policy probe plus process/sample capture in the PZM
-    postinstall workflow to classify install/provenance failures before deeper
-    Finder assertions
-  - extend the named Finder/FileProvider smoke into evict/rehydrate,
-    mutate/conflict, and visible status
+  - treat PZM testing-mode read/hydrate/evict/rehydrate as green under the
+    installed lab `SystemPolicyRule` profile
+  - keep the installed-host policy probe and profile verification in the PZM
+    postinstall workflow so install/provenance failures stay classified before
+    deeper Finder assertions
+  - extend the named Finder/FileProvider smoke into mutate/conflict and visible
+    status
   - keep production Developer ID clean-host Finder acceptance separate from
      non-production testing-mode evidence
 3. **odrive-style lifecycle productionization**
@@ -260,9 +266,9 @@ As of May 6, 2026, the narrow GitHub backlog is:
   - `#280`: distribution install and upgrade proof umbrella
   - `#308`: Debian 12 `.deb` support-floor decision
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
-    testing-mode enumerate/hydrate is green; `v0.12.12` lifecycle proof is
-    blocked at installed Mac Development policy, and production Finder
-    lifecycle proof remains open.
+    testing-mode enumerate/hydrate/evict/rehydrate is green under the installed
+    lab `SystemPolicyRule` profile; production Finder lifecycle proof remains
+    open.
 - Adjacent non-M10 lanes
   - `#298`: residual Civo TCFS PVC retirement after on-prem recovery
   - `#327`: TCFS on-prem OpenTofu migration and cutover
@@ -306,8 +312,8 @@ freshest truth source for `tummycrypt`.
 
 - `TIN-133` has been retitled to `Prove lazy traversal and Finder/FileProvider
   hydration reality` and now points at GitHub `#309` plus the current repo docs.
-  The latest comments mirror the `v0.12.11` PZM testing-mode success and the
-  remaining production Finder lifecycle gaps.
+  The latest comments mirror the `v0.12.12` PZM testing-mode lifecycle success
+  and the remaining production Finder lifecycle gaps.
 - `TIN-131` and `TIN-132` remain in Backlog under `Tummycrypt M10: Usage
   Reality & Product Parity`; their descriptions were refreshed on April 29,
   2026 to separate current repo truth from the older GitHub issue framing they

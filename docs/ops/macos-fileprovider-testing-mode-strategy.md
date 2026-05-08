@@ -1,13 +1,10 @@
 # macOS FileProvider Testing-Mode Strategy
 
-As of May 6, 2026, the hosted production FileProvider proof is blocked by
-Apple's profile/user-enable boundary. The registered-Mac testing-mode lane has
-one green read/hydrate proof on `petting-zoo-mini`, but the current
-evict/rehydrate lifecycle package is blocked by Gatekeeper/AppleSystemPolicy
-rejecting the installed Mac Development-signed app and extension at launch.
-The same package build output can reach Swift `main()` in policy-probe mode, so
-the remaining gap is the lab install/provenance/service trust model.
-Testing-mode proof is still not the same as production Developer ID Finder
+As of May 8, 2026, the hosted production FileProvider proof is blocked by
+Apple's profile/user-enable boundary. The registered-Mac testing-mode lane is
+green on `petting-zoo-mini` through enumerate, exact-content hydrate, evict,
+and rehydrate when the lab `SystemPolicyRule` profile is installed. That
+testing-mode proof is still not the same as production Developer ID Finder
 lifecycle acceptance.
 
 The production lane and testing-mode lane must stay separate:
@@ -88,11 +85,9 @@ Why:
 - it can carry the testing-mode entitlement that Developer ID profiles omit
 
 This does not make the packaged artifact a Gatekeeper-accepted distribution
-artifact. Current PZM evidence shows a Mac Development-signed app installed
-from the lab package is rejected by `spctl` and then killed by
-AppleSystemPolicy, while the same build output reaches Swift `main()` in
-policy-probe mode before install. Treat that as a lab trust-model problem, not
-as a storage or FileProvider implementation failure.
+artifact. Current PZM evidence shows the Mac Development-signed package needs a
+managed `SystemPolicyRule` profile to pass macOS runtime policy after install.
+Treat that as the explicit lab trust model, not as production acceptance.
 
 The current controlled experiment for that trust-model problem is
 `lab_gatekeeper_override=true` on `macos-postinstall-smoke.yml`. The input is
@@ -101,9 +96,9 @@ restricted to the `petting-zoo-mini` testing-mode lane. On macOS 15,
 generates a `SystemPolicyRule` configuration profile from the installed host
 and extension designated requirements, verifies that profile is installed, and
 fails early with the generated `.mobileconfig` attached when it is missing.
-Use it only to decide whether the non-production Mac Development lab can
-continue into FileProvider lifecycle coverage; it is not evidence that the
-production Developer ID package is accepted by Gatekeeper.
+Use it only to keep the non-production Mac Development lab eligible for
+FileProvider lifecycle coverage; it is not evidence that the production
+Developer ID package is accepted by Gatekeeper.
 
 ## Required Apple Assets
 
@@ -323,8 +318,8 @@ profile device list is part of the trust model.
 
 ## Repository Implementation
 
-As of May 6, 2026, the repo has a working lab-lane implementation up to the
-Apple runtime policy boundary:
+As of May 8, 2026, the repo has a working non-production profile-backed PZM
+lab lane:
 
 - `.github/workflows/macos-fileprovider-testing-mode-pkg.yml` defaults to the
   `petting-zoo-mini` runner label, resolves an `Apple Development` signing
@@ -365,6 +360,14 @@ Apple runtime policy boundary:
   `_dyld_start`; the full harness again produced an empty
   `harness/host-domain-launch.log` plus AppleSystemPolicy denial for the
   installed host and extension.
+- post-install smoke run `25458526158` proved macOS 15 no longer supports
+  `spctl --add`/`--remove` rule mutation; the supported path is a managed
+  configuration profile carrying `com.apple.systempolicy.rule` payloads.
+- post-install smoke run `25562087555` verified the installed computer-level
+  `TCFS FileProvider Lab Gatekeeper Rules` profile and passed the full
+  testing-mode harness: installed host policy probe, shared-Keychain config,
+  E2EE, daemon startup, FileProvider registration, CloudStorage enumeration,
+  requestDownload, evict, re-requestDownload, and exact fixture hydration.
 
 ## Lab Runner Enrollment
 
@@ -506,26 +509,20 @@ Feature goals remain:
 1. production `v0.12.x` packages stay Developer ID signed and notarized
 2. user-enabled lab Mac proves production Finder behavior without testing mode
 3. development testing-mode lane proves repeatable CI FileProvider behavior
-   only after its Mac Development trust model is explicit
+   through the explicit PZM `SystemPolicyRule` lab trust profile
 4. Linux FUSE lane proves the scriptable reference behavior independently
 5. parity evidence expands from read/hydrate into lifecycle, mutation,
    conflict, status, badges, and recovery
 
 ## Immediate Work Items
 
-1. Install the generated PZM `SystemPolicyRule` profile from the
-   `lab_gatekeeper_override` run artifact, then rerun the same smoke against
-   `dist-testing-mode-pkg` from run `25456290021`. If it allows the installed
-   host and extension to launch, continue lifecycle proof under that clearly
-   marked non-production lane. If it does not, pivot to Xcode-style local
-   development launch or an Apple-approved distribution shape that can still
-   carry testing mode.
+1. Keep the `TCFS FileProvider Lab Gatekeeper Rules` profile installed on PZM
+   for the testing-mode lane, and rerun `lab_gatekeeper_override=true` whenever
+   the Mac Development signing requirement changes.
 2. Keep `spctl`, `syspolicy_check`, xattr, codesign, embedded-profile,
    `taskgated-helper`, `amfid`, and AppleSystemPolicy diagnostics attached to
    every FileProvider lab failure.
-3. Decide the next PZM trust experiment now that the installed host is proven
-   blocked before Swift entry at `_dyld_start`: Xcode-style development launch,
-   explicit lab Gatekeeper bypass, or an Apple-approved distribution shape that
-   can still carry FileProvider testing mode.
+3. Expand the PZM lab proof beyond evict/rehydrate into mutation,
+   conflict/status, badges/progress, and recovery evidence.
 4. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
    gates.

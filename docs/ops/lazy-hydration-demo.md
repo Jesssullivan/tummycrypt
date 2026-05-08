@@ -143,8 +143,8 @@ and Finder/FileProvider as the native desktop lane.
 | User behavior | Linux mounted surface | macOS Finder/FileProvider | Current proof state |
 | --- | --- | --- | --- |
 | Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | Core code and mounted helper are covered; PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence and production Finder evidence are still pending |
-| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.11`; Linux FUSE host evidence remains pending |
-| Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | Linux harness covers cache-clear rehydrate; Finder evict/unsync remains follow-on evidence |
+| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.12`; Linux FUSE host evidence remains pending |
+| Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | PZM testing-mode smoke proves FileProvider evict + rehydrate on `v0.12.12`; Linux FUSE cache-clear host evidence remains pending |
 | Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder and prove daemon/FileProvider conflict/status behavior | Not yet release-gated on either desktop surface |
 | Observe health | CLI status, daemon logs, mounted-smoke transcript | Finder state, FileProvider logs, badges/progress when available | CLI/log evidence exists; Finder badges/progress are observational only |
 
@@ -239,7 +239,7 @@ show the higher-risk choice.
 The Finder lane is tracked by GitHub issue `#309` and the named harness in
 `scripts/macos-postinstall-smoke.sh`.
 
-PZM testing-mode evidence from May 6, 2026 is the current strongest
+PZM testing-mode evidence from May 8, 2026 is the current strongest
 FileProvider proof:
 
 - testing-mode package run `25445945705`
@@ -247,18 +247,20 @@ FileProvider proof:
 - package install, signing/profile checks, live S3/E2EE fixture proof,
   `tcfsd` startup, CloudStorage enumeration, host-app `requestDownload`,
   55-byte hydration, exact-content match, and shared-Keychain config proof
+- post-install smoke run `25562087555` on `v0.12.12` with the installed
+  `TCFS FileProvider Lab Gatekeeper Rules` profile proved the current
+  lifecycle gate: installed host policy probe, FileProvider registration,
+  CloudStorage enumeration, `requestDownload`, `evict`, re-`requestDownload`,
+  and exact-content hydration
 
 That is a lab/testing-mode proof, not a production Developer ID clean-host
 claim.
 
-The current `v0.12.12` PZM lifecycle extension attempted to add
-evict/rehydrate to that same lane. Package install, Mac App Development
-signing/profile checks, live S3/E2EE fixture proof, and daemon startup pass.
-The failure is narrower: `taskgated-helper` accepts the FileProvider extension
-profile, `fileproviderd` starts the extension process, and AppleSystemPolicy
-then terminates the extension before the lifecycle gate can complete. Treat the
-next retry as a runtime-policy diagnosis run, not another profile/certificate
-bootstrap loop.
+The current `v0.12.12` PZM lifecycle extension adds evict/rehydrate to that
+same lane. Earlier attempts showed the package, signing, profiles, S3/E2EE, and
+daemon were sound but the installed Mac Development app needed a managed
+runtime-policy rule. The green run `25562087555` proves the profile-backed lab
+path; it does not prove production Finder enablement.
 
 Local source-tree evidence from April 30, 2026 is recorded in
 [macOS FileProvider Local Evidence](../release/macos-fileprovider-local-evidence-2026-04-30.md).
@@ -389,8 +391,8 @@ Do not keep cutting production release tags solely to retry this state.
       so the Keychain access group works without embedded diagnostic config.
 - [x] Provision a PZM Mac App Development testing-mode host profile and matching
       FileProvider extension profile.
-- [ ] Resolve the PZM runtime-policy termination of the FileProvider extension
-      after launch, then rerun the current-tag lifecycle smoke.
+- [x] Resolve the PZM runtime-policy termination with the profile-backed
+      testing-mode lab and rerun the current-tag lifecycle smoke.
 - [x] Decide whether the non-`TIN-133` M10 Linear mirrors should remain open or
       be closed/superseded.
 - [x] Decide whether the demo backend is disposable public S3 or the on-prem

@@ -15,7 +15,7 @@ M10 usage-reality issues are closed.
 | Linux mounted FS | Code and in-process VFS tests are strong; real-host FUSE evidence is not yet archived for the full user story | `tcfs-vfs` tests and mounted helper regressions | Run `task lazy:linux-demo` on a FUSE-capable host and archive evidence |
 | Physical `.tc` / `.tcf` stubs | Stub wire format, parse/write, and compatibility are tested | `tcfs-vfs` and daemon unsync tests | Product-level recursive safe-unsync acceptance, including dirty-child refusal |
 | macOS CLI + daemon | Package install, signing, E2EE, storage, and daemon startup are repeatedly proven | `v0.12.12` release and PZM smoke pre-harness stages | Keep install smoke green while FileProvider lab work continues |
-| macOS Finder/FileProvider, lab | `v0.12.11` proved testing-mode enumerate/hydrate; `v0.12.12` evict/rehydrate attempt is blocked by Gatekeeper/AppleSystemPolicy for the installed Mac Development app and extension. The build-output app can reach Swift `main()` in policy-probe mode, so the remaining split is install/provenance/service launch rather than code startup. | PZM run `25446601375` green for read/hydrate; package run `25456290021` has `main entered`, `domain created`, and `policyProbe: OK` from the build output despite `spctl` rejection; smoke run `25456341985` shows the installed host policy probe times out after 15s while sampled at `_dyld_start`, then the harness records installed host and extension AppleSystemPolicy denial; smoke run `25458526158` proves macOS 15 rejects `spctl --add` with exit 4 | Install the generated PZM `SystemPolicyRule` profile, then rerun the guarded `lab_gatekeeper_override` smoke to determine whether a managed assessment rule unblocks installed Mac Development FileProvider lifecycle proof |
+| macOS Finder/FileProvider, lab | Green for the non-production PZM testing-mode lane through enumerate, exact-content hydrate, evict, and rehydrate. This depends on the installed PZM `SystemPolicyRule` profile plus Mac App Development signing, so it is not production Finder proof. | PZM run `25446601375` green for read/hydrate; package run `25456290021` proves build-output host startup; smoke run `25456341985` captured the pre-profile `_dyld_start` AppleSystemPolicy block; smoke run `25458526158` proves macOS 15 rejects `spctl --add`; smoke run `25562087555` passes profile verification, installed host policy probe, shared-Keychain config, E2EE, FileProvider registration, enumeration, requestDownload, evict, re-requestDownload, and exact 55-byte hydration | Expand lifecycle depth: mutation/conflict/status/badges/recovery, while separately proving production Developer ID Finder enablement |
 | macOS Finder/FileProvider, production | Not proven on arbitrary clean Developer ID hosts | Local `neo` source-tree proof and production package install/signing gates | Separate clean-host production Finder enablement from PZM testing-mode evidence |
 | iOS | Proof-of-concept only | Swift build/type-check scaffold | Decide whether to keep as scaffold or create a real Files.app device lane |
 | On-prem backend | Live endpoint client smoke works; source-owned migration is still open | `neo-honey` smoke using MagicDNS endpoints | Complete `#327`/`#298` migration and archive post-cutover storage/NATS proof |
@@ -45,7 +45,7 @@ documentation for the
 and
 [certificates](https://developer.apple.com/documentation/appstoreconnectapi/certificates).
 
-Current blocker:
+Current PZM lab proof:
 
 1. `taskgated-helper` accepts the host and extension profiles for
    `io.tinyland.tcfs` and `io.tinyland.tcfs.fileprovider`.
@@ -71,20 +71,19 @@ Current blocker:
 10. AppleSystemPolicy terminates both installed processes:
    `Security policy would not allow process ... TCFSProvider` and
    `Security policy would not allow process ... TCFSFileProvider`.
-11. The current evidence points to a Mac Development-vs-Gatekeeper trust-model
-    issue around installed package/service launch, not to the TCFS storage,
-    E2EE, daemon, profile, entitlement, or host source startup layers.
+11. Smoke run `25458526158` proved macOS 15 exits 4 for `spctl --add`; the
+    supported managed path is a configuration profile carrying
+    `com.apple.systempolicy.rule` payloads.
+12. Smoke run `25562087555` verified the installed computer-level
+    `TCFS FileProvider Lab Gatekeeper Rules` profile, then passed installed
+    host policy probe, live config provisioning, S3/E2EE fixture checks,
+    `tcfsd` startup, FileProvider registration, CloudStorage enumeration,
+    `requestDownload`, `evict`, re-`requestDownload`, and exact 55-byte
+    hydration.
 
-The next lab experiment is explicit in CI rather than manual: the
-`macos-postinstall-smoke.yml` input `lab_gatekeeper_override=true` is allowed
-only with `fileprovider_testing_mode=true` on `petting-zoo-mini`. On macOS 15,
-`spctl --add`/`--remove` rule mutation exits 4 and the `spctl` man page points
-administrators to configuration profiles, so
-`scripts/macos-fileprovider-lab-gatekeeper-override.sh` now generates the
-desired `SystemPolicyRule` `.mobileconfig`, verifies whether that profile is
-installed, and fails early with the generated profile attached when it is
-missing. This is not production acceptance; it is a bounded test of whether the
-PZM Mac Development lab trust model can advance to lifecycle coverage.
+This is not production acceptance. It is a bounded non-production PZM proof
+that the Mac App Development testing-mode lab can cross Apple's runtime policy
+boundary once the managed `SystemPolicyRule` profile is installed.
 
 ## Parallel Work Packets
 
@@ -92,11 +91,11 @@ Each packet should produce an archived evidence directory or a linked CI run.
 
 | Packet | Scope | Acceptance bar | Can run in parallel with |
 | --- | --- | --- | --- |
-| A. PZM runtime-policy diagnosis | macOS lab package only | Install the generated PZM `SystemPolicyRule` profile, then run PZM smoke with the guarded lab Gatekeeper profile check and host stderr diagnostics, `spctl`, `syspolicy_check`, xattrs, codesign, embedded profile, `taskgated`, `amfid`, and AppleSystemPolicy logs attached | B, C, D |
+| A. PZM runtime-policy diagnosis | macOS lab package only | Done for the non-production profile-backed lane: run `25562087555` is green and archived | B, C, D |
 | B. Linux FUSE proof | Linux real host | `find`/`ls` before hydration, exact `cat`, cache clear or unsync, exact rehydrate, evidence archived | A, C, D |
 | C. Safe-unsync product proof | CLI/daemon/VFS | Recursive unsync refuses dirty children without force, succeeds after clean state, and rehydrates exact content | A, B, D |
 | D. Distribution refresh | release surfaces | Homebrew fresh install/upgrade refreshed, Debian 12 posture decided, Nix proof recorded or explicitly scoped | A, B, C |
-| E. Finder lifecycle depth | macOS lab after A | Evict/rehydrate, mutation, conflict/status evidence through FileProvider | B, C, D; depends on A |
+| E. Finder lifecycle depth | macOS lab after A | Evict/rehydrate is green in run `25562087555`; next add mutation, conflict/status, badges/progress, and recovery evidence through FileProvider | B, C, D |
 | F. On-prem authority | infra/backend | `#327` candidate service/cutover proof and post-cut tailnet endpoint smoke | A, B, C, D |
 | G. iOS posture | product/docs | Explicit keep-as-scaffold or create a real device/Files.app lane | all |
 
