@@ -29,9 +29,11 @@ repo proves Homebrew fresh/upgrade, Darwin Nix profile install, Ubuntu 24.04
 `.deb` fresh/upgrade on arm64 and amd64, Debian 13 `.deb` fresh install on
 arm64 and amd64, and Fedora 42 x86_64 daemon-only RPM fresh/upgrade. Container
 evidence proves explicit amd64 pull/version/startup logs but records a missing
-native `linux/arm64/v8` image manifest. Production macOS `.pkg` current-tag
-proof remains a separate follow-up check even though older release and CI
-evidence exists for parts of that surface.
+native `linux/arm64/v8` image manifest. The release workflow is configured to
+publish both architectures on the next cut, but that still needs tagged
+registry proof before upgrading the current evidence row. Production macOS
+`.pkg` current-tag proof remains a separate follow-up check even though older
+release and CI evidence exists for parts of that surface.
 
 ## Out-Of-Scope Published Helpers
 
@@ -87,7 +89,7 @@ installed-binary smoke to the first truthful user action, use
 | macOS `.pkg` | Yes | Yes | `scripts/install-smoke.sh` | Apple Silicon package path; desktop UX still experimental |
 | Ubuntu 24.04+ / Debian 13+ `.deb` | Yes | Yes | `scripts/install-smoke.sh` | Install both `tcfsd` and `tcfs` packages |
 | Fedora/RHEL `.rpm` | Yes | Sampled | `scripts/install-smoke.sh --skip-cli` | Fedora 42 x86_64 is currently proven; RHEL/Rocky remain target surfaces pending smoke |
-| Container image | Yes | Sampled | worker-image startup check | amd64 pull + entrypoint/startup proof, not CLI status or cluster rollout |
+| Container image | Yes | Sampled | worker-image startup check | prove amd64 and arm64 pulls + entrypoint/startup, not CLI status or cluster rollout |
 | Nix | Yes | Sampled | `scripts/install-smoke.sh` | Current `v0.12.12` proof is Darwin profile install; Linux/NixOS host proof is separate |
 
 ## Surface Procedures
@@ -195,24 +197,32 @@ bash scripts/install-smoke.sh --expected-version "${VERSION}" --skip-cli
 
 ### Container Image
 
-Fresh install proof for the worker image is:
+Fresh install proof for the worker image is both architecture presence and a
+minimal startup check:
 
 ```bash
-podman pull --arch amd64 "ghcr.io/jesssullivan/tcfsd:${TAG}"
-podman run --rm --arch amd64 "ghcr.io/jesssullivan/tcfsd:${TAG}" --version
-timeout 10s podman run --rm --entrypoint /tcfsd \
-  --arch amd64 \
-  "ghcr.io/jesssullivan/tcfsd:${TAG}" \
-  --mode=worker \
-  --config /tmp/missing.toml \
-  --log-format text
+for ARCH in amd64 arm64; do
+  podman pull --arch "${ARCH}" "ghcr.io/jesssullivan/tcfsd:${TAG}"
+  podman run --rm --arch "${ARCH}" \
+    "ghcr.io/jesssullivan/tcfsd:${TAG}" --version
+  podman run --rm --entrypoint /tcfsd \
+    --arch "${ARCH}" \
+    -e AWS_ACCESS_KEY_ID=dummy \
+    -e AWS_SECRET_ACCESS_KEY=dummy \
+    "ghcr.io/jesssullivan/tcfsd:${TAG}" \
+    --mode=worker \
+    --config /tmp/missing.toml \
+    --log-format text
+done
 ```
 
 Success criteria:
 
 - the image pulls successfully on the architecture under test
 - `tcfsd --version` reports the expected release version
-- the worker binary starts cleanly enough to emit startup logs before `timeout` stops it
+- the worker binary starts cleanly enough to emit version/config, worker-mode,
+  and metrics initialization logs before the no-config smoke exits on the
+  expected missing local NATS endpoint
 
 Full cluster rollout proof remains an infra-level check and should be paired with
 the live fleet runbooks when container packaging or worker behavior changes.
