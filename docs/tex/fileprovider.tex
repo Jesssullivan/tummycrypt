@@ -26,6 +26,14 @@ integration.
 FileProvider replaces FUSE as the primary file integration point on Apple
 platforms. FUSE remains the correct approach for Linux via \code{tcfs-fuse}.
 
+Current implementation note, May 2026: this document is a design reference.
+The active macOS build path is the Swift package script
+\filepath{swift/fileprovider/build.sh}, release packaging produces a
+\code{.pkg} via \filepath{scripts/macos-build-pkg.sh}, and notarization is
+attempted but non-blocking in release CI. The PZM evidence is non-production
+Mac App Development/testing-mode proof, not production Developer ID clean-host
+Finder acceptance.
+
 \subsection{Design Goals}
 
 \begin{enumerate}
@@ -53,10 +61,10 @@ platforms. FUSE remains the correct approach for Linux via \code{tcfs-fuse}.
 \toprule
 \textbf{Platform} & \textbf{Framework} & \textbf{Crate} & \textbf{Mechanism} & \textbf{Status} \\
 \midrule
-Linux   & FUSE3                & tcfs-fuse         & Kernel FUSE module           & Working (v0.3.0) \\
+Linux   & FUSE3                & tcfs-fuse         & Kernel FUSE module           & Host-proven lifecycle \\
 Windows & Cloud Files API      & tcfs-cloudfilter  & CFAPI minifilter             & Skeleton \\
-macOS   & FileProvider         & tcfs-fileprovider & APFS dataless files          & This design \\
-iOS     & FileProvider         & tcfs-fileprovider & APFS dataless files          & RFC 0003 \\
+macOS   & FileProvider         & tcfs-fileprovider & APFS dataless files          & PZM testing-mode lab proof \\
+iOS     & FileProvider         & tcfs-fileprovider & APFS dataless files          & Proof-of-concept \\
 \bottomrule
 \end{tabularx}
 \caption{Per-platform file integration strategy}
@@ -381,24 +389,17 @@ cargo build --lib -p tcfs-fileprovider \
 cbindgen --crate tcfs-fileprovider --lang c \
     -o TcfsFileProvider.h
 
-# 3. Build Xcode project (extension + host app)
-xcodebuild -project TummyCrypt.xcodeproj \
-    -scheme TummyCrypt \
-    -configuration Release \
-    -archivePath build/TummyCrypt.xcarchive \
-    archive
+# 3. Build and sign Swift host app + FileProvider extension
+swift/fileprovider/build.sh
 
-# 4. Sign and notarize
-codesign --sign "Developer ID Application: Tinyland Inc" \
-    --options runtime \
-    --entitlements entitlements.plist \
-    build/TummyCrypt.app
+# 4. Assemble the macOS installer package
+scripts/macos-build-pkg.sh \
+    --cli-tar tcfs-<version>-macos-aarch64.tar.gz \
+    --fileprovider-zip TCFSProvider.zip \
+    --out tcfs-<version>-macos-aarch64.pkg
 
-xcrun notarytool submit build/TummyCrypt.zip \
-    --apple-id "$APPLE_ID" \
-    --team-id "$TEAM_ID" \
-    --password "$APP_SPECIFIC_PASSWORD" \
-    --wait
+# 5. Notarize when credentials are available
+swift/fileprovider/notarize.sh TCFSProvider.zip
 \end{lstlisting}
 
 \subsection{CI Integration}
@@ -408,10 +409,10 @@ The build runs on macOS GitHub Actions runners:
 \begin{enumerate}
   \item Rust cross-compilation: \code{cargo build} with Apple targets
   \item \code{cbindgen} header generation
-  \item \code{xcodebuild} for the extension bundle
-  \item Code signing with stored certificates (GitHub Secrets)
-  \item Notarization via \code{notarytool}
-  \item Archive as \code{.dmg} release asset
+  \item Swift package build for the host app and extension bundle
+  \item Code signing with explicit certificate/profile gates
+  \item Optional notarization via \code{notarytool}
+  \item Archive as FileProvider zip and macOS \code{.pkg} release assets
 \end{enumerate}
 
 % ─────────────────────────────────────────────────────────────────────────────

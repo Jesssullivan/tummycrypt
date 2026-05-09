@@ -45,6 +45,15 @@ ruby -ryaml -e '
   raise "container signing step not found" unless sign
   run = sign.fetch("run")
   raise "container signing must use the immutable build digest" unless run.include?("@${IMAGE_DIGEST}")
+
+  release_steps = workflow.fetch("jobs").fetch("create-release").fetch("steps")
+  release = release_steps.find { |step| step["name"] == "Create release" }
+  raise "create-release step not found" unless release
+  body = release.fetch("with").fetch("body")
+  raise "release body must ask operators to verify amd64 image pulls explicitly" unless body.include?("podman pull --arch amd64")
+  raise "release body must ask operators to verify arm64 image pulls explicitly" unless body.include?("podman pull --arch arm64")
+  raise "release body must state the current Debian floor" unless body.include?("Ubuntu 24.04+ / Debian 13+")
+  raise "release body must keep macOS Finder/FileProvider experimental" unless body.include?("Finder/FileProvider remains experimental")
 ' "$WORKFLOW"
 
 printf 'release workflow container tests passed\n'

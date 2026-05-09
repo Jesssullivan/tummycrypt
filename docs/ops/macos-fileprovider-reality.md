@@ -640,10 +640,10 @@ May 6, 2026 testing-mode evidence updated the current blocker:
   `fileproviderctl check` reconciled 35 files for both the root and expected
   parent.
 
-So the testing-mode read/hydrate plus evict/rehydrate lane is now proven on the
+So the testing-mode read/hydrate plus evict/rehydrate lane is proven on the
 non-production PZM Mac Development lab. The remaining macOS product work is
-production Developer ID clean-host enablement plus richer Finder lifecycle
-behavior: mutation, conflict/status visibility, badges/progress, and recovery
+production Developer ID clean-host enablement plus production mutation,
+conflict/status visibility, reliable badges/progress assertions, and recovery
 UX.
 
 May 8, 2026 update: mutation harness support is now green in the PZM lab. The

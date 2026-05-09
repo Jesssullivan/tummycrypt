@@ -2,7 +2,10 @@
 
 > Under active development. Not yet stable. Expect breaking changes.
 
-Self-hosted encrypted file sync with on-demand hydration. Mounted views present remote files as normal names and hydrate on open; offline/dehydrated copies can be represented by small `.tc`/`.tcf` stubs. FOSS odrive/Dropbox-style alternative under active development.
+Self-hosted encrypted file sync with on-demand hydration. The Linux FUSE mounted
+view is host-proven for clean-name traversal and hydrate-on-open; offline or
+dehydrated sync-root copies can be represented by small `.tc`/`.tcf` stubs. FOSS
+odrive/Dropbox-style alternative under active development.
 
 ## Canonical Home
 
@@ -15,8 +18,8 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 
 ## Features
 
-- **On-demand hydration**: Mounted files list as normal names and hydrate transparently on open
-- **E2E encryption**: XChaCha20-Poly1305 per-chunk, Argon2id KDF, BIP-39 recovery keys
+- **On-demand hydration**: Linux FUSE mounted files list as normal names and hydrate transparently on open
+- **E2E encryption core path**: XChaCha20-Poly1305 per-chunk, Argon2id KDF, BIP-39 recovery keys; per-surface proof varies
 - **Fleet sync**: Multi-machine sync via NATS JetStream with vector clock conflict detection
 - **Content-addressed storage**: FastCDC chunking, BLAKE3 hashing, zstd compression
 - **Git-safe**: Syncs `.git/` directories as atomic bundles with lock detection
@@ -42,17 +45,13 @@ task check
 ## Installation
 
 ```bash
-# Linux/macOS tarball convenience installer
-# Fast CLI install, but not part of the canonical release-proof surface.
-curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
-
 # macOS (Homebrew, current manual tap flow)
 brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt.git
 git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin homebrew-tap
 git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
 brew install Jesssullivan/tummycrypt/tcfs
 
-# Debian/Ubuntu
+# Ubuntu 24.04+ / Debian 13+
 sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 
 # RPM (Fedora/RHEL/Rocky, daemon-only today)
@@ -61,8 +60,15 @@ sudo rpm -i tcfsd-*.rpm
 # Container (K8s worker mode; amd64 image is the current proven lane)
 podman pull --arch amd64 ghcr.io/jesssullivan/tcfsd:latest
 
-# Nix
-nix build github:Jesssullivan/tummycrypt
+# Nix tagged profile install
+TAG=v0.12.12
+nix profile install \
+  "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfsd" \
+  "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfs-cli"
+
+# Linux/macOS tarball convenience installer
+# Fast CLI install, but not part of the canonical release-proof surface.
+curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
 ```
 
 For the supported post-release proof contract across Homebrew, `.pkg`, `.deb`,
@@ -75,7 +81,7 @@ For the supported post-release proof contract across Homebrew, `.pkg`, `.deb`,
 tcfs status                    # Daemon status, device identity, NATS connection
 tcfs push <path>               # Upload with encryption + vector clock tick
 tcfs pull <manifest> <local>   # Download with conflict detection + decryption
-tcfs mount <remote> <target>   # FUSE mount with clean-name on-demand hydration
+tcfs mount <remote> <target>   # Linux FUSE mount with clean-name on-demand hydration
 tcfs unsync <path>             # Convert clean tracked files/directories back to .tc stubs
 tcfs device enroll             # Register device with age keypair
 tcfs device list               # Show enrolled fleet devices
@@ -86,7 +92,7 @@ tcfs device list               # Show enrolled fleet devices
 | Binary | Purpose |
 |--------|---------|
 | `tcfs` | CLI: push, pull, mount, unsync, device management |
-| `tcfsd` | Daemon: gRPC, FUSE mounts, NATS fleet sync, Prometheus metrics |
+| `tcfsd` | Daemon: gRPC, Linux FUSE mounts, NATS fleet sync, Prometheus metrics |
 | `tcfs-tui` | Terminal UI: dashboard with sync status, conflicts, mounts |
 | `tcfs-mcp` | MCP server: AI agent integration (8 tools, stdio transport) |
 
@@ -110,7 +116,7 @@ crates/
 ├── tcfs-file-provider/  # macOS/iOS FileProvider FFI (cbindgen + UniFFI)
 ├── tcfs-sops/           # SOPS+age fleet secret propagation
 ├── tcfs-dbus/           # Linux D-Bus interface (stub default; gRPC backend feature-gated)
-├── tcfsd/               # Daemon binary (gRPC + metrics + systemd)
+├── tcfsd/               # Daemon binary (gRPC + metrics)
 ├── tcfs-cli/            # CLI binary
 ├── tcfs-tui/            # Terminal UI (ratatui)
 └── tcfs-mcp/            # MCP server (rmcp, stdio transport)
@@ -130,7 +136,7 @@ For the bar after install succeeds, see
 | CLI (push/pull/reconcile) | Proven | Proven | Planned | - |
 | Daemon (gRPC + metrics) | Proven | Available, lightly validated | Planned | - |
 | Filesystem mount | x86_64 FUSE lifecycle is host-proven; packaged mount/systemd first-use is still separate; NFS fallback evidence pending | Experimental | Cloud Files API skeleton | - |
-| FileProvider | - | Lab-proven experimental | - | Proof-of-concept; write hooks unproven |
+| FileProvider | - | Non-production PZM testing-mode lab-proven experimental | - | Proof-of-concept; write hooks unproven |
 | Finder/Explorer badges | - | Experimental | - | - |
 | D-Bus integration | Interface exists; release UX not proven | - | - | - |
 | Fleet sync (NATS) | Proven core/live lanes | Core path available, not continuously acceptance-tested | Planned | - |

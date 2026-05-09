@@ -102,8 +102,8 @@ Current source-owned resources:
   (`tcfs-nats-openebs-target`)
 - target retained PVC for SeaweedFS on `openebs-bumble-s3-retain`
   (`tcfs-seaweedfs-openebs-target`)
-- explicit copy/export/import mechanism that handles honey-to-bumble node
-  locality
+- rendered copy/export/import command path that handles honey-to-bumble node
+  locality once an operator executes the downtime lane
 - replacement or adopted StatefulSet definitions that bind to the target PVCs
 - candidate Tailscale Services using `honey-sting-tailnet`
 - rollback notes that preserve the old retained PVs and old canonical Services

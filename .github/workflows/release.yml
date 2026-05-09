@@ -998,7 +998,7 @@ jobs:
 
             ### Quick Install
 
-            **macOS (.pkg installer — recommended):**
+            **macOS (.pkg installer path; Finder/FileProvider remains experimental):**
             ```bash
             curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfs-${{ needs.plan.outputs.version }}-macos-aarch64.pkg
             sudo installer -pkg tcfs-${{ needs.plan.outputs.version }}-macos-aarch64.pkg -target /
@@ -1017,12 +1017,13 @@ jobs:
             brew install ${{ github.repository }}/tcfs
             ```
 
-            **Container image:**
+            **Container image (verify the published architecture explicitly):**
             ```bash
-            podman pull ${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.tag }}
+            podman pull --arch amd64 ${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.tag }}
+            podman pull --arch arm64 ${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.tag }}
             ```
 
-            **Debian/Ubuntu:**
+            **Ubuntu 24.04+ / Debian 13+:**
             ```bash
             curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfsd-${{ needs.plan.outputs.version }}-amd64.deb
             curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.tag }}/tcfs-${{ needs.plan.outputs.version }}-amd64.deb
@@ -1062,7 +1063,7 @@ jobs:
             | Binary | Purpose |
             |--------|---------|
             | `tcfs` | CLI: push, pull, sync-status, mount, unsync |
-            | `tcfsd` | Daemon: gRPC socket, FUSE, Prometheus metrics |
+            | `tcfsd` | Daemon: gRPC socket, Linux FUSE, Prometheus metrics |
             | `tcfs-tui` | Terminal UI for interactive management |
             | `tcfs-mcp` | MCP server for AI agent integration |
 

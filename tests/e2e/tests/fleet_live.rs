@@ -1,6 +1,6 @@
-//! Fleet E2E: Live NATS + SeaweedFS on CIVO K3s
+//! Fleet E2E: live/on-prem tailnet NATS + SeaweedFS
 //!
-//! These tests connect to REAL infrastructure via Tailscale:
+//! These tests connect to real infrastructure via Tailscale:
 //! - SeaweedFS S3: seaweedfs-tcfs (MagicDNS, port 8333)
 //! - NATS JetStream: nats-tcfs (MagicDNS, port 4222)
 //!

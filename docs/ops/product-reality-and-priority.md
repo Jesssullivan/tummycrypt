@@ -54,7 +54,7 @@ Current evidence index with GitHub Actions run links:
 
 Current CI proves:
 
-- Rust workspace compile, format, clippy, and test coverage
+- Rust workspace compile, format, clippy, and test suite
 - sync feature tests in `tcfs-sync`
 - wireup tests in `tcfs-e2e`
 - Nix flake evaluation/build surfaces
@@ -285,14 +285,16 @@ work should be ordered like this:
 
 ## Open Issue Map
 
-As of May 9, 2026, the narrow GitHub backlog is:
+As of May 9, 2026, the narrow GitHub backlog snapshot is below. Verify live
+GitHub state before acting on exact issue or milestone status.
 
 - M10 release-proof tranche
   - `#280`: distribution install and upgrade proof umbrella. Homebrew/Nix
     current-tag proof is archived for `v0.12.12`; Linux `.deb`/`.rpm` package
-    proof is archived; container amd64 pull/version/startup proof is archived
-    with a native arm64 manifest gap; production macOS `.pkg` current-tag proof
-    remains a named follow-up.
+    proof is archived; container amd64 pull/version/startup proof is archived,
+    and release workflow readiness for native arm64 is merged, but current-tag
+    native arm64 registry proof remains open; production macOS `.pkg`
+    current-tag proof remains a named follow-up.
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
     testing-mode enumerate/hydrate/evict/rehydrate/mutation/conflict-status is
     green under the installed lab `SystemPolicyRule` profile; production Finder
