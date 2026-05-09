@@ -1,0 +1,109 @@
+Resolved "ubuntu" as an alias (/etc/containers/registries.conf.d/000-shortnames.conf)
+Trying to pull docker.io/library/ubuntu:24.04...
+Getting image source signatures
+Copying blob sha256:818154cda96df8bbb276b4f4339124da55756620a1037af15570bc95312850fa
+Copying config sha256:3c220491de2e7cd3946456f3e8b2a2d2e0f52383235f5cab93ead70cca9ee9ed
+Writing manifest to image destination
+Linux bdb6c36a84bb 6.18.10-200.fc43.aarch64 #1 SMP PREEMPT_DYNAMIC Wed Feb 11 17:23:35 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.4 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+Get:1 http://ports.ubuntu.com/ubuntu-ports noble InRelease [256 kB]
+Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease [126 kB]
+Get:3 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease [126 kB]
+Get:4 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease [126 kB]
+Get:5 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages [1776 kB]
+Get:6 http://ports.ubuntu.com/ubuntu-ports noble/multiverse arm64 Packages [274 kB]
+Get:7 http://ports.ubuntu.com/ubuntu-ports noble/restricted arm64 Packages [113 kB]
+Get:8 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages [19.0 MB]
+Get:9 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages [2545 kB]
+Get:10 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages [2124 kB]
+Get:11 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages [5387 kB]
+Get:12 http://ports.ubuntu.com/ubuntu-ports noble-updates/multiverse arm64 Packages [65.5 kB]
+Get:13 http://ports.ubuntu.com/ubuntu-ports noble-backports/main arm64 Packages [48.9 kB]
+Get:14 http://ports.ubuntu.com/ubuntu-ports noble-backports/universe arm64 Packages [35.9 kB]
+Get:15 http://ports.ubuntu.com/ubuntu-ports noble-backports/multiverse arm64 Packages [671 B]
+Get:16 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages [1521 kB]
+Get:17 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages [2196 kB]
+Get:18 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages [5154 kB]
+Get:19 http://ports.ubuntu.com/ubuntu-ports noble-security/multiverse arm64 Packages [47.4 kB]
+Fetched 40.9 MB in 18s (2247 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  openssl
+The following NEW packages will be installed:
+  ca-certificates openssl
+0 upgraded, 2 newly installed, 0 to remove and 3 not upgraded.
+Need to get 1144 kB of archives.
+After this operation, 2338 kB of additional disk space will be used.
+Get:1 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 openssl arm64 3.0.13-0ubuntu3.9 [984 kB]
+Get:2 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 ca-certificates all 20240203 [159 kB]
+debconf: delaying package configuration, since apt-utils is not installed
+Fetched 1144 kB in 0s (2581 kB/s)
+Selecting previously unselected package openssl.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4376 files and directories currently installed.)
+Preparing to unpack .../openssl_3.0.13-0ubuntu3.9_arm64.deb ...
+Unpacking openssl (3.0.13-0ubuntu3.9) ...
+Selecting previously unselected package ca-certificates.
+Preparing to unpack .../ca-certificates_20240203_all.deb ...
+Unpacking ca-certificates (20240203) ...
+Setting up openssl (3.0.13-0ubuntu3.9) ...
+Setting up ca-certificates (20240203) ...
+Updating certificates in /etc/ssl/certs...
+146 added, 0 removed; done.
+Processing triggers for ca-certificates (20240203) ...
+Updating certificates in /etc/ssl/certs...
+0 added, 0 removed; done.
+Running hooks in /etc/ca-certificates/update.d...
+done.
+87a951f7c539ab0283afdc6108f87336cc358093e1fc0a6fdd293e6900728d32  /assets/tcfsd-0.12.12-arm64.deb
+3a821f4b077319c81d9c00b429c3ccdc455c9eb9ea9d6f846de0a68ed54c30bf  /assets/tcfs-0.12.12-arm64.deb
+87a951f7c539ab0283afdc6108f87336cc358093e1fc0a6fdd293e6900728d32  tcfsd-0.12.12-arm64.deb
+3a821f4b077319c81d9c00b429c3ccdc455c9eb9ea9d6f846de0a68ed54c30bf  tcfs-0.12.12-arm64.deb
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following NEW packages will be installed:
+  tcfs-cli tcfsd
+0 upgraded, 2 newly installed, 0 to remove and 3 not upgraded.
+Need to get 0 B/10.4 MB of archives.
+After this operation, 35.1 MB of additional disk space will be used.
+Get:1 /assets/tcfs-0.12.12-arm64.deb tcfs-cli arm64 0.12.12-1 [4111 kB]
+Get:2 /assets/tcfsd-0.12.12-arm64.deb tcfsd arm64 0.12.12-1 [6273 kB]
+debconf: delaying package configuration, since apt-utils is not installed
+Selecting previously unselected package tcfs-cli.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4857 files and directories currently installed.)
+Preparing to unpack /assets/tcfs-0.12.12-arm64.deb ...
+Unpacking tcfs-cli (0.12.12-1) ...
+Selecting previously unselected package tcfsd.
+Preparing to unpack .../assets/tcfsd-0.12.12-arm64.deb ...
+Unpacking tcfsd (0.12.12-1) ...
+Setting up tcfsd (0.12.12-1) ...
+Setting up tcfs-cli (0.12.12-1) ...
+tcfsd version: tcfsd 0.12.12
+tcfs version: tcfs 0.12.12
+starting daemon smoke with temp home: /tmp/tcfs-install-smoke.eW0Gnu/home
+daemon socket ready: /tmp/tcfs-install-smoke.eW0Gnu/home/.local/state/tcfsd/tcfsd.sock
+tcfsd v0.12.12
+  uptime:        1s
+  socket:        /tmp/tcfs-install-smoke.eW0Gnu/home/.local/state/tcfsd/tcfsd.sock
+  device:        bdb6c36a84bb (f0959f7c)
+  conflict mode: auto
+  storage:       http://localhost:8333 [UNREACHABLE]
+  nats:          not connected
+  active mounts: 0
+  credentials:   loaded (source: env)
+install smoke passed

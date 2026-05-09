@@ -1,0 +1,50 @@
+Linux 70a174b174cd 6.18.10-200.fc43.aarch64 #1 SMP PREEMPT_DYNAMIC Wed Feb 11 17:23:35 UTC 2026 x86_64 GNU/Linux
+NAME="Fedora Linux"
+VERSION="42 (Container Image)"
+RELEASE_TYPE=stable
+ID=fedora
+VERSION_ID=42
+VERSION_CODENAME=""
+PLATFORM_ID="platform:f42"
+PRETTY_NAME="Fedora Linux 42 (Container Image)"
+ANSI_COLOR="0;38;2;60;110;180"
+LOGO=fedora-logo-icon
+CPE_NAME="cpe:/o:fedoraproject:fedora:42"
+DEFAULT_HOSTNAME="fedora"
+HOME_URL="https://fedoraproject.org/"
+DOCUMENTATION_URL="https://docs.fedoraproject.org/en-US/fedora/f42/"
+SUPPORT_URL="https://ask.fedoraproject.org/"
+BUG_REPORT_URL="https://bugzilla.redhat.com/"
+REDHAT_BUGZILLA_PRODUCT="Fedora"
+REDHAT_BUGZILLA_PRODUCT_VERSION=42
+REDHAT_SUPPORT_PRODUCT="Fedora"
+REDHAT_SUPPORT_PRODUCT_VERSION=42
+SUPPORT_END=2026-05-13
+VARIANT="Container Image"
+VARIANT_ID=container
+be0873fe110bc4317836be43ea57713656daf17f23d0210240e9e131026ab5c7  /assets/tcfsd-0.12.12-x86_64.rpm
+be0873fe110bc4317836be43ea57713656daf17f23d0210240e9e131026ab5c7  tcfsd-0.12.12-x86_64.rpm
+Updating and loading repositories:
+ Fedora 42 - x86_64 - Updates           100% |   1.5 MiB/s |  12.4 MiB |  00m08s
+ Fedora 42 openh264 (From Cisco) - x86_ 100% | 743.0   B/s |   5.8 KiB |  00m08s
+ Fedora 42 - x86_64                     100% |   3.2 MiB/s |  35.4 MiB |  00m11s
+Repositories loaded.
+Package Arch   Version   Repository        Size
+Installing:
+ tcfsd  x86_64 0.12.12-1 @commandline  17.7 MiB
+
+Transaction Summary:
+ Installing:         1 package
+
+Total size of inbound packages is 5 MiB. Need to download 0 B.
+After this operation, 18 MiB extra will be used (install 18 MiB, remove 0 B).
+Running transaction
+[1/3] Verify package files              100% |  10.0   B/s |   1.0   B |  00m00s
+[2/3] Prepare transaction               100% |  19.0   B/s |   1.0   B |  00m00s
+[3/3] Installing tcfsd-0:0.12.12-1.x86_ 100% | 158.0   B/s | 100.0   B |  00m01s
+Warning: skipped OpenPGP checks for 1 package from repository: @commandline
+Complete!
+tcfsd version: tcfsd 0.12.12
+starting daemon smoke with temp home: /tmp/tcfs-install-smoke.6qH0pT/home
+daemon socket ready: /tmp/tcfs-install-smoke.6qH0pT/home/.local/state/tcfsd/tcfsd.sock
+CLI smoke skipped

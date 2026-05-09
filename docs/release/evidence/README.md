@@ -10,6 +10,7 @@ the repository.
 | --- | --- | --- |
 | `distribution-v01212-20260508T205913Z/` | Homebrew fresh/upgrade and Darwin Nix tagged-profile install | repo-archived README and metadata |
 | `container-v01212-20260509T0145Z/` | Container image current-tag smoke | native arm64 pull fails because the image index lacks `linux/arm64/v8`; explicit amd64 pull/version pass and worker startup reaches process/metrics initialization before failing on missing local NATS |
+| `linux-packages-v01212-20260509T0231Z/` | Linux package current-tag smoke | Ubuntu 24.04 `.deb` fresh/upgrade passes on arm64 and amd64; Debian 13 `.deb` fresh install passes on arm64 and amd64; Fedora 42 x86_64 daemon-only RPM fresh/upgrade passes |
 | `lazy-linux-20260508T170825Z/` | Linux FUSE lifecycle on `honey`: browse before hydration, exact `cat`, mounted write/readback, cache clear/rehydrate, dirty recursive `unsync` refusal, clean recursive `.tc` conversion, persisted `NotSynced` state | repo-archived transcript, config, mount log, remote prefix, remote pullback, unsync outputs, redacted metadata |
 | PZM testing-mode FileProvider package run | Mac App Development/testing-mode package build for deterministic conflict/status proof | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569345240> |
 | PZM testing-mode FileProvider smoke run | Enumerate/hydrate/evict/rehydrate, mutation proof already present from prior run, deterministic CLI conflict/status and exact FileProvider content preservation | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569596910> |
@@ -23,10 +24,12 @@ the repository.
   evidence with the lab `SystemPolicyRule` profile. They do not prove a
   production Developer ID clean-host Finder lane.
 - `distribution-v01212-20260508T205913Z/` covers Homebrew and Nix only. It does
-  not cover current-tag `.deb`, `.rpm`, container, or production macOS `.pkg`
+  not cover current-tag Linux packages, container, or production macOS `.pkg`
   smoke.
 - `container-v01212-20260509T0145Z/` covers the `v0.12.12` container image
   only. It proves amd64 image presence/version/startup logs and records a
   missing native arm64 manifest.
+- `linux-packages-v01212-20260509T0231Z/` covers Linux package install/upgrade
+  smoke, not mounted FUSE lifecycle or production systemd service management.
 - Linux `lazy-linux-20260508T170825Z/` proves the mounted lifecycle and
   recursive safe-unsync behavior, not Linux package fresh/upgrade install.
