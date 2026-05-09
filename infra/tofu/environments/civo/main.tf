@@ -55,6 +55,10 @@ module "nats" {
 }
 
 # ── Tailscale NATS exposure (tailnet only, no public IP) ──────────────────────
+#
+# Legacy/standby note: this environment still carries the historical canonical
+# Civo `nats-tcfs` / `nats.tcfs` names. Applying it can mutate the standby DNS
+# path; do not use it as the active honey/on-prem authority path.
 
 module "tailscale_nats" {
   source             = "../../modules/tailscale-nats"

@@ -148,7 +148,7 @@ Useful flags:
 ```bash
 bash scripts/tcfs-backend-deploy.sh --dry-run
 TCFS_NAMESPACE=tcfs bash scripts/tcfs-backend-deploy.sh \
-  --set image.tag=v0.12.2
+  --set image.tag=v0.12.12
 ```
 
 ### RBAC-Only Recovery For Missing Helm Release State

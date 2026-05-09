@@ -143,7 +143,7 @@ resource "kubernetes_deployment" "sync_worker" {
             }
           }
           env {
-            name = "AWS_SECRET${"_ACCESS_KEY"}"  # env var name split to avoid credential-scan false positive
+            name = "AWS_SECRET${"_ACCESS_KEY"}" # env var name split to avoid credential-scan false positive
             value_from {
               secret_key_ref {
                 name = var.s3_secret_name

@@ -45,9 +45,10 @@ Divergence points:
 - All **contributor PRs** targeting the canonical product land on `origin`.
   A PR that only exists on `tinyland` is staging-only until a corresponding
   `origin` PR is opened.
-- **Branch protection** and **required reviews** are configured on `origin`
-  as the gate of record. `tinyland` and `yoga` may have weaker or different
-  protections; those do not substitute for `origin`'s.
+- `origin` is the merge gate of record. As of 2026-05-09, GitHub branch
+  protection does not enforce required status checks, so operators must verify
+  Actions are green before merging until required checks are configured.
+  `tinyland` and `yoga` protections do not substitute for `origin`'s.
 
 ### `tinyland` — active downstream dev surface
 

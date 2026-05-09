@@ -1,7 +1,9 @@
 //! tcfs-cloudfilter: Windows Cloud Files API (CFAPI) provider
 //!
-//! Provides native Windows Explorer integration for tcfs:
-//! - Sync root registration (Files show in Explorer with cloud status icons)
+//! Scaffolds native Windows Explorer integration for tcfs. The CFAPI calls are
+//! still skeleton/no-op paths until Windows CI and functional smoke coverage
+//! exist. Intended capabilities:
+//! - Sync root registration (files show in Explorer with cloud status icons)
 //! - Placeholder creation for remote-only files
 //! - On-demand hydration callbacks (fetch from SeaweedFS when file is opened)
 //! - Dehydration (convert back to placeholder, reclaim disk space)

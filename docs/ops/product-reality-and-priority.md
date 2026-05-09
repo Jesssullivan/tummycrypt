@@ -23,7 +23,7 @@ Use this document as the short answer to:
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
 | macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
-| Windows | partial / CLI-oriented | code exists, but not a release-grade user flow |
+| Windows | planned / skeleton | code exists, but there is no release-grade CLI, daemon, or Explorer flow |
 
 ## What Is Actually Proven
 

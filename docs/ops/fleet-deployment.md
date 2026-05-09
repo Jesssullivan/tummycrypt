@@ -44,15 +44,15 @@ cd infra/tofu/environments/civo && tofu apply
 ```
 
 This creates a `LoadBalancer` service with `loadBalancerClass: tailscale` and
-hostname annotation `nats-tcfs`. The Tailscale operator picks it up and exposes
-NATS as a tailnet device.
+the legacy Civo hostname annotation `nats-tcfs`. The Tailscale operator picks it
+up and exposes NATS as a tailnet device.
 
-Lab machines connect via the IaC-managed FQDN:
+Legacy Civo standby machines may connect via the IaC-managed FQDN:
 ```
 nats://nats.tcfs.tummycrypt.dev:4222
 ```
 
-MagicDNS fallback (works without Porkbun):
+Current honey/on-prem lab acceptance should prefer the MagicDNS/tailnet name:
 ```
 nats://nats-tcfs:4222
 ```
@@ -85,8 +85,8 @@ just dns-status
 # Test NATS connectivity via Tailscale
 just nats-status
 
-# Or manually
-nats server info --server nats://nats.tcfs.tummycrypt.dev:4222
+# Or manually against the active tailnet path
+nats server info --server nats://nats-tcfs:4222
 
 # Check JetStream streams
 just nats-streams
@@ -188,7 +188,7 @@ creation_rules:
 s3_access: "<access-credential>"
 s3_secret: "<secret-credential>"
 s3_endpoint: "http://dees-appu-bearts:8333"
-nats_url: "nats://nats.tcfs.tummycrypt.dev:4222"
+nats_url: "nats://nats-tcfs:4222"
 ```
 
 ```bash
@@ -219,7 +219,7 @@ For non-NixOS machines:
 TCFS_S3_ACCESS=<your-access-credential>
 TCFS_S3_SECRET=<your-secret-credential>
 TCFS_S3_ENDPOINT=http://dees-appu-bearts:8333
-TCFS_NATS_URL=nats://nats.tcfs.tummycrypt.dev:4222
+TCFS_NATS_URL=nats://nats-tcfs:4222
 ```
 
 ### Credential Rotation
@@ -245,7 +245,7 @@ sops --encrypt --in-place secrets/hosts/yoga.yaml
 
 ## 3. Automatic Daemon Startup
 
-### Home Manager (All Platforms — Recommended)
+### Home Manager (Linux/macOS — Recommended)
 
 The Home Manager module handles both Linux (systemd) and macOS (launchd) automatically:
 
@@ -257,7 +257,7 @@ programs.tcfs = {
   identity = "~/.config/sops/age/keys.txt";
   deviceName = "yoga";
   conflictMode = "interactive";
-  natsUrl = "nats://nats.tcfs.tummycrypt.dev:4222";
+  natsUrl = "nats://nats-tcfs:4222";
   syncRoot = "~/tcfs";
   mounts = [
     { remote = "seaweedfs://dees-appu-bearts:8333/tcfs"; local = "~/tcfs"; }
@@ -279,7 +279,7 @@ services.tcfsd = {
   enable = true;
   deviceName = "yoga";
   conflictMode = "interactive";
-  natsUrl = "nats://nats.tcfs.tummycrypt.dev:4222";
+  natsUrl = "nats://nats-tcfs:4222";
   syncRoot = "/srv/tcfs";
 };
 ```

@@ -178,7 +178,10 @@ sudo dpkg -i "tcfsd-${VERSION}-amd64.deb" "tcfs-${VERSION}-amd64.deb"
 bash scripts/install-smoke.sh --expected-version "${VERSION}"
 ```
 
-### Fedora/RHEL/Rocky `.rpm`
+### Fedora `.rpm`
+
+The current `v0.12.12` proof covers Fedora 42 x86_64 daemon-only. RHEL/Rocky
+remain target surfaces pending smoke.
 
 Fresh install:
 
@@ -199,6 +202,28 @@ bash scripts/install-smoke.sh --expected-version "${VERSION}" --skip-cli
 
 Fresh install proof for the worker image is both architecture presence and a
 minimal startup check:
+
+For the current `v0.12.12` evidence packet, run and archive the amd64 lane:
+
+```bash
+podman pull --arch amd64 "ghcr.io/jesssullivan/tcfsd:${TAG}"
+podman run --rm --arch amd64 \
+  "ghcr.io/jesssullivan/tcfsd:${TAG}" --version
+podman run --rm --entrypoint /tcfsd \
+  --arch amd64 \
+  -e AWS_ACCESS_KEY_ID=dummy \
+  -e AWS_SECRET_ACCESS_KEY=dummy \
+  "ghcr.io/jesssullivan/tcfsd:${TAG}" \
+  --mode=worker \
+  --config /tmp/missing.toml \
+  --log-format text
+```
+
+Native `linux/arm64/v8` should be attempted and recorded, but it remains an open
+current-tag gap for `v0.12.12` until a new multi-arch image is published.
+
+For the next release tag that is expected to publish both manifests, require the
+full architecture loop:
 
 ```bash
 for ARCH in amd64 arm64; do

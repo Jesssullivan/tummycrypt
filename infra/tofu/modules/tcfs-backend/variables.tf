@@ -5,7 +5,7 @@ variable "namespace" {
 }
 
 variable "image" {
-  description = "tcfsd container image (repository:tag). Defaults to the canonical Jesssullivan GHCR image; downstream org deployments can override it."
+  description = "tcfsd container image (repository:tag). Defaults to the canonical Jesssullivan GHCR image with mutable latest for convenience; set an explicit tag or digest for proof or production evidence."
   type        = string
   default     = "ghcr.io/jesssullivan/tcfsd:latest"
 }
