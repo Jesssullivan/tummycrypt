@@ -8,8 +8,9 @@
 #   ./scripts/tcfs-deploy.sh --dry-run          # template only, no install
 #   ./scripts/tcfs-deploy.sh --set global.imageTag=v0.12.12
 #
-# This is the blank-cluster umbrella path. For reconciling an already-existing
-# direct `tcfs-backend` Helm release, use `scripts/tcfs-backend-deploy.sh`.
+# This is the blank TCFS control-plane umbrella path with external SeaweedFS.
+# For reconciling an already-existing direct `tcfs-backend` Helm release, use
+# `scripts/tcfs-backend-deploy.sh`.
 # Set an explicit release tag for proof or production runs; mutable defaults are
 # convenience values only.
 #

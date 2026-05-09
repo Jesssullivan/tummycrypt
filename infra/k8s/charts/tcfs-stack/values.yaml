@@ -27,7 +27,9 @@ global:
       cpu: "1"
       memory: 512Mi
 
-# -- Existing SeaweedFS S3 credentials (populate via --set or sealed-secrets)
+# -- Existing SeaweedFS S3 credentials (populate via --set or sealed-secrets).
+# -- The generated Secret includes both AWS-style keys and the key names that
+# -- tcfs-backend consumes directly.
 seaweedfs:
   # -- S3 access key ID
   accessKeyId: ""
@@ -42,7 +44,13 @@ createNamespace: true
 # -------------------------------------------------------
 # tcfs-backend (local sub-chart, always installed)
 # -------------------------------------------------------
-tcfs-backend: {}
+tcfs-backend:
+  credentialsSecret: tcfs-seaweedfs-secret
+  metrics:
+    serviceMonitor:
+      # kube-prometheus-stack is disabled by default, so do not render a
+      # ServiceMonitor unless an operator enables the monitoring CRDs.
+      enabled: false
 
 # -------------------------------------------------------
 # NATS (optional dependency)

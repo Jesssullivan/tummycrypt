@@ -622,43 +622,10 @@ jobs:
           # tcfs installer for Windows (PowerShell)
           $ErrorActionPreference = "Stop"
 
-          $repo = "__REPO__"
           $tag = "__TAG__"
-          $version = $tag.TrimStart("v")
-          $platform = "windows-x86_64"
-          $tarball = "tcfs-${version}-${platform}.zip"
-          $url = "https://github.com/${repo}/releases/download/${tag}/${tarball}"
-
-          $installDir = if ($env:TCFS_INSTALL_DIR) { $env:TCFS_INSTALL_DIR } else { "$env:LOCALAPPDATA\tcfs\bin" }
-
-          Write-Host "Downloading tcfs ${tag} for Windows..."
-          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-
-          $tmpFile = [System.IO.Path]::GetTempFileName() + ".zip"
-          Invoke-WebRequest -Uri $url -OutFile $tmpFile
-
-          $tmpDir = [System.IO.Path]::GetTempFileName() + "_extract"
-          Expand-Archive -Path $tmpFile -DestinationPath $tmpDir -Force
-
-          Copy-Item "${tmpDir}\tcfs-${version}-${platform}\tcfs.exe" "${installDir}\tcfs.exe" -Force
-          Copy-Item "${tmpDir}\tcfs-${version}-${platform}\tcfsd.exe" "${installDir}\tcfsd.exe" -Force
-          Copy-Item "${tmpDir}\tcfs-${version}-${platform}\tcfs-tui.exe" "${installDir}\tcfs-tui.exe" -Force
-
-          Remove-Item -Recurse -Force $tmpFile, $tmpDir
-
-          # Add to PATH if not already there
-          $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-          if ($userPath -notlike "*${installDir}*") {
-            [Environment]::SetEnvironmentVariable("PATH", "${installDir};${userPath}", "User")
-            Write-Host "Added ${installDir} to PATH"
-          }
-
-          Write-Host ""
-          Write-Host "tcfs ${tag} installed successfully!"
-          Write-Host "  Restart your shell, then run: tcfs status"
+          Write-Error "tcfs ${tag} does not publish Windows artifacts. Windows support is planned, but this release has no tcfs-*-windows-x86_64.zip asset."
           PSINSTALLER
 
-          sed -i "s|__REPO__|${{ github.repository }}|g" install.ps1
           sed -i "s|__TAG__|${{ needs.plan.outputs.tag }}|g" install.ps1
 
       - name: Upload installers

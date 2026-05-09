@@ -257,8 +257,9 @@ git rev-list --left-right --count origin/main...tinyland/main
 ```
 
 Expected result after Tranche A only: the `tinyland` remote branch count drops
-from 65 to 21, while `tinyland/main` remains 21 ahead / 140 behind
-`origin/main`.
+from 65 to 21. At proposal creation, `tinyland/main` remained 21 ahead / 140
+behind `origin/main`; after PR #351 merged, the current comparison is 21 ahead
+/ 141 behind `origin/main`.
 
 Expected result after Tranche A and B: the `tinyland` remote branch count drops
 from 65 to 4, leaving only:
@@ -274,7 +275,7 @@ tinyland/refactor/retire-fuse-crates
 
 - #312 can close once this proposal is merged and an operator either approves
   or explicitly defers the Tranche A deletion.
-- #313 can close on the documentation-only retirement decision already recorded
+- #313 closed after PR #351 recorded the documentation-only retirement decision
   in [Remote Governance](remote-governance.md). No `yoga` archive, SSH host
   deletion, key revocation, or local remote removal is part of this branch
   hygiene lane.

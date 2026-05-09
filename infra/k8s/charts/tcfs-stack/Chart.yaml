@@ -1,6 +1,6 @@
 apiVersion: v2
 name: tcfs-stack
-description: Umbrella Helm chart for tcfs backend workers, NATS, KEDA, and monitoring
+description: Umbrella Helm chart for tcfs backend workers, NATS, KEDA, and monitoring with external SeaweedFS
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

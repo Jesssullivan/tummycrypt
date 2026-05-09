@@ -300,7 +300,16 @@ systemctl --user start tcfsd
 
 ### macOS (launchd, non-Nix)
 
-For manual installs without Home Manager:
+For packaged installs, the current postinstall path writes
+`/Library/LaunchAgents/io.tinyland.tcfsd.plist` and starts `tcfsd` with:
+
+```bash
+--config "$HOME/.config/tcfs/config.toml"
+```
+
+The older `dist/com.tummycrypt.tcfsd.plist` file is a historical/manual helper,
+not the active package evidence path. If you use it for a manual install, treat
+the result as local operator setup, not release proof.
 
 ```bash
 # Copy plist

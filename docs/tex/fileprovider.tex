@@ -355,8 +355,11 @@ variables or arbitrary config files. Credentials are stored via:
 
 \begin{description}
   \item[Keychain] S3 access and secret credentials stored in a shared Keychain
-    access group (\code{group.com.tummycrypt.tcfs}). The host app writes
-    credentials during setup; the extension reads them at runtime.
+    access group. The current app group is
+    \code{group.io.tinyland.tcfs}; the concrete Keychain group is the Apple
+    Team ID / App Identifier Prefix plus that group, for example
+    \code{QP994XQKNH.group.io.tinyland.tcfs}. The host app writes credentials
+    during setup; the extension reads them at runtime.
   \item[App Group UserDefaults] Configuration values (S3 endpoint, bucket,
     prefix, NATS URL) stored in shared UserDefaults.
   \item[App Group Container] Large config files or state caches stored in
@@ -478,11 +481,14 @@ tcfs-sync       & 100\% & 100\% & 100\% & 80\%  \\
   \item \textbf{Apple Developer enrollment}: Is Tinyland Inc enrolled in the
     Apple Developer Program (\$99/year)? If not, who initiates enrollment?
   \item \textbf{App Group identifier}: Proposed
-    \code{group.com.tummycrypt.tcfs} for shared Keychain and container access.
+    \code{group.io.tinyland.tcfs} for shared Keychain and container access.
   \item \textbf{Distribution}: \code{.dmg} with drag-to-install? Homebrew cask?
     Both?
   \item \textbf{Minimum macOS}: \code{NSFileProviderReplicatedExtension}
-    matured in macOS 13+. Recommend targeting macOS 13 (Ventura) as minimum.
+    matured in macOS 13+, but the current packaged FileProvider lane targets
+    macOS 15.0 in the build script and bundle plists. Treat macOS 13 as
+    historical design direction unless \code{MIN\_MACOS} and the plists are
+    lowered deliberately.
   \item \textbf{iOS timeline}: Shared crate enables iOS but requires Xcode
     project, TestFlight, and App Store submission. Defer to Phase 3+.
 \end{enumerate}

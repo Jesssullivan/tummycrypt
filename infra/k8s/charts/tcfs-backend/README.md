@@ -36,6 +36,16 @@ With the default release name `tcfs-backend`, this chart creates:
 
 ## Usage
 
+This direct chart can render KEDA `ScaledObject` and Prometheus
+`ServiceMonitor` resources. Before using the defaults, confirm those CRDs are
+installed. For a plain backend-worker reconcile without those CRDs, disable the
+optional resources explicitly:
+
+```bash
+--set autoscaling.enabled=false \
+--set metrics.serviceMonitor.enabled=false
+```
+
 ```bash
 bash scripts/tcfs-backend-deploy.sh
 ```
@@ -47,6 +57,8 @@ helm upgrade --install tcfs-backend ./infra/k8s/charts/tcfs-backend \
   --namespace tcfs \
   --create-namespace \
   --set image.tag=v0.12.12 \
+  --set autoscaling.enabled=false \
+  --set metrics.serviceMonitor.enabled=false \
   --set config.natsUrl=nats://nats.tcfs.svc.cluster.local:4222
 ```
 

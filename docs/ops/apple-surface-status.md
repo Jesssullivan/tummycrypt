@@ -1,6 +1,6 @@
 # Apple Surface Status
 
-As of May 8, 2026, Apple support is a buildable and partially proven lane. The
+As of May 9, 2026, Apple support is a buildable and partially proven lane. The
 macOS FileProvider testing-mode lab now has green enumerate, hydrate, evict,
 rehydrate, mutation upload/readback, and deterministic conflict/status content
 preservation proof on PZM, but Apple surfaces are still not a full

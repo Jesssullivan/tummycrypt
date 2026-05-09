@@ -3,7 +3,8 @@
 > Under active development. Not yet stable. Expect breaking changes.
 
 Self-hosted encrypted file sync with on-demand hydration. The Linux FUSE mounted
-view is host-proven for clean-name traversal and hydrate-on-open; offline or
+view is host-proven for clean-name traversal, hydrate-on-open, mounted
+write/readback, cache clear/rehydrate, and recursive safe-unsync; offline or
 dehydrated sync-root copies can be represented by small `.tc`/`.tcf` stubs. FOSS
 odrive/Dropbox-style alternative under active development.
 

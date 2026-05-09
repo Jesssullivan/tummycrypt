@@ -14,15 +14,15 @@ As of 2026-05-09:
 | Remote | URL | Branches | `main` ahead of `origin/main` | `main` behind `origin/main` | Role |
 |--------|-----|----------|-------------------------------|------------------------------|------|
 | `origin` | `https://github.com/Jesssullivan/tummycrypt.git` | 26 | 0 | 0 | canonical source + release authority |
-| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 65 | 21 | 140 | active downstream dev surface |
-| `yoga` | `yoga:git/tummycrypt` (bare SSH) | 9 cached remote-tracking branches | 137 | 471 | retired legacy mirror; live fetch timed out on 2026-05-09 |
+| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 65 | 21 | 141 | active downstream dev surface |
+| `yoga` | `yoga:git/tummycrypt` (bare SSH) | 9 cached remote-tracking branches | 137 | 472 | retired legacy mirror; live fetch timed out on 2026-05-09 |
 
 Divergence points:
 
 - `origin/main` ↔ `tinyland/main`: merge-base is now `796b42e`
   (`origin/main`, 2026-04-17). `tinyland/main` merged `origin/main` via
   tinyland PR #60 on 2026-04-17, but canonical `origin/main` has since moved
-  140 commits ahead. The remaining 21 tinyland-only commits are the 19 pre-sync
+  141 commits ahead. The remaining 21 tinyland-only commits are the 19 pre-sync
   historical commits recorded in
   [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
   plus the sync merge pair (`6f7841f`, `987a6b4`).
@@ -74,7 +74,7 @@ merged there first and upstreamed to `origin` afterward.
 ### `yoga` — retired legacy mirror
 
 `yoga` is a bare SSH remote on a laptop host. It carries a `v0.9.x`-era
-snapshot that predates the current `v0.12.x` line by 471 commits in the current
+snapshot that predates the current `v0.12.x` line by 472 commits in the current
 cached remote comparison.
 
 - `yoga` is **not pushed to** from this point forward.
@@ -242,3 +242,8 @@ list:
   deletion tranche, 17 feature/test branches for short human review before
   deletion, and keeps `main`, `homebrew-tap`, `feat/fuse-free-vfs-nfs`, and
   `refactor/retire-fuse-crates`.
+- 2026-05-09 — Refreshed divergence after PR #351 merged as `26e9fab3e08d`.
+  `tinyland/main` remains 21 commits ahead and is now 141 commits behind
+  `origin/main`; cached `yoga/main` remains 137 commits ahead and is now 472
+  commits behind `origin/main`. The `origin` branch count remains 26 after
+  pruning the deleted PR branch.
