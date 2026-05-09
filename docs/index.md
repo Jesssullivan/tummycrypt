@@ -2,7 +2,7 @@
 
 **FOSS self-hosted odrive-style encrypted sync target**
 
-tcfs is a self-hosted encrypted file sync system backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with client-side XChaCha20-Poly1305 content encryption, SOPS/age-managed credentials, content-defined chunking, clean-name on-demand hydration in mounted views, physical `.tc`/`.tcf` stubs for offline/dehydrated paths, and multi-machine fleet sync with vector clocks. Linux is the best-supported runtime today; Apple desktop and mobile surfaces exist but are still experimental.
+tcfs is a self-hosted encrypted file sync system backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with core file-content XChaCha20-Poly1305 encryption, SOPS/age-managed credentials, content-defined chunking, Linux FUSE clean-name on-demand hydration, physical `.tc`/`.tcf` stubs for offline/dehydrated paths, and multi-machine fleet sync with vector clocks. Linux is the best-supported runtime today; Apple desktop and mobile surfaces exist but are still experimental.
 
 ## Installation
 
@@ -15,27 +15,33 @@ default here.
 Download the latest release from [GitHub Releases](https://github.com/Jesssullivan/tummycrypt/releases):
 
 ```bash
-# Linux/macOS tarball convenience installer
-# Fast CLI install, but not part of the canonical release-proof surface.
-curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
-
 # macOS (Homebrew, current manual tap flow)
 brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt.git
 git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin homebrew-tap
 git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
 brew install Jesssullivan/tummycrypt/tcfs
 
-# Debian/Ubuntu
+# Ubuntu 24.04+ / Debian 13+
 sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 
 # RPM (Fedora/RHEL/Rocky, daemon-only today)
 sudo rpm -i tcfsd-*.rpm
+
+# Nix tagged profile install
+TAG=v0.12.12
+nix profile install \
+  "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfsd" \
+  "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfs-cli"
+
+# Linux/macOS tarball convenience installer
+# Fast CLI install, but not part of the canonical release-proof surface.
+curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
 ```
 
 ### Container (K8s worker mode)
 
 ```bash
-podman pull ghcr.io/jesssullivan/tcfsd:latest
+podman pull --arch amd64 ghcr.io/jesssullivan/tcfsd:latest
 ```
 
 ### From Source
@@ -71,7 +77,7 @@ flowchart TD
     cli["tcfs (CLI)"] -->|gRPC| daemon["tcfsd (daemon)"]
     tui["tcfs-tui"] -->|gRPC| daemon
     mcp["tcfs-mcp"] -->|gRPC| daemon
-    daemon --> fuse["FUSE mount"]
+    daemon --> fuse["Linux FUSE mount"]
     daemon --> secrets["tcfs-secrets\n(age/SOPS/KeePassXC)"]
     daemon --> chunks["tcfs-chunks\n(FastCDC + zstd + BLAKE3)"]
     daemon --> storage["tcfs-storage\n(OpenDAL → S3/SeaweedFS)"]
@@ -88,7 +94,7 @@ flowchart TD
 | Binary | Purpose |
 |--------|---------|
 | `tcfs` | CLI: push, pull, sync-status, mount, unmount, unsync, device management |
-| `tcfsd` | Daemon: 11 gRPC RPCs, FUSE mounts, NATS state sync, Prometheus metrics, systemd notify |
+| `tcfsd` | Daemon: gRPC service, Linux FUSE mounts, NATS state sync, Prometheus metrics, systemd notify |
 | `tcfs-tui` | Terminal UI: 5-tab dashboard (Dashboard, Config, Mounts, Secrets, Conflicts) |
 | `tcfs-mcp` | MCP server: 8 tools for AI agent integration (stdio transport) |
 
@@ -99,11 +105,11 @@ flowchart TD
 | `tcfs status` | Show daemon status, device identity, NATS connection |
 | `tcfs config show` | Display active configuration |
 | `tcfs push <path>` | Upload files with chunking, encryption, vector clock tick |
-| `tcfs pull <remote> <local>` | Download files with conflict detection |
+| `tcfs pull <manifest> [local]` | Download files from a manifest path with conflict detection |
 | `tcfs sync-status <path>` | Check sync state of a file |
-| `tcfs mount <source> <target>` | FUSE mount with clean-name on-demand hydration |
+| `tcfs mount <source> <target>` | Linux FUSE mount with clean-name on-demand hydration |
 | `tcfs unmount <path>` | Unmount FUSE directory |
-| `tcfs unsync <path>` | Convert hydrated file back to a physical `.tc` stub |
+| `tcfs unsync <path>` | Convert clean tracked files/directories back to physical `.tc` stubs |
 | `tcfs device enroll` | Generate keypair and register in S3 |
 | `tcfs device list` | Show all enrolled devices |
 | `tcfs device revoke <name>` | Mark a device as revoked |
@@ -124,7 +130,7 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 ### Guides (Markdown)
 
 - [Contributing](CONTRIBUTING.md) — development setup, PR workflow
-- [Benchmarks](BENCHMARKS.md) — performance characteristics
+- [Benchmarks](BENCHMARKS.md) — partial benchmark snapshot
 - [Changelog](../CHANGELOG.md) — release history
 
 ### Ops Runbooks
@@ -150,12 +156,13 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 - [RFC 0001: Fleet Sync Integration](rfc/0001-fleet-sync-integration.md) — multi-machine sync design and rollout plan
 - [RFC 0002: Darwin FUSE Strategy](rfc/0002-darwin-fuse-strategy.md) — FileProvider as primary macOS/iOS path
 - [RFC 0003: iOS File Provider](rfc/0003-ios-file-provider.md) — UniFFI bridge and experimental iOS scaffold architecture
+- [RFC 0004: FUSE-Free Architecture](rfc/0004-fuse-free-architecture.md) — draft target architecture for FUSE-free/client-integrated paths
 
 ## Platform Support
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux x86_64 | Proven primary lane | FUSE mount lifecycle, CLI, daemon, TUI, MCP |
+| Linux x86_64 | Proven primary lane | Host-proven FUSE lifecycle plus CLI/daemon surfaces; packaged first-use/systemd remains a separate gate |
 | Linux aarch64 | Available | Release tarball and `.deb`; FUSE is not built in the current cross-compiled release artifact |
 | macOS (Apple Silicon) | Experimental | CLI and daemon build, release `.pkg`, and FileProvider packaging exist, but user-facing acceptance coverage is still limited |
 | macOS (Intel) | Experimental | CLI binaries ship, but the desktop integration story is not yet as proven as Linux |

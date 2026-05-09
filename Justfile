@@ -10,20 +10,21 @@ default:
 
 # ── Infrastructure ──────────────────────────────────────────────────────────
 
-# Initialize OpenTofu for an environment
-tofu-init env="civo":
+# Initialize OpenTofu for an environment (defaults to current on-prem)
+tofu-init env="onprem":
     cd infra/tofu/environments/{{env}} && tofu init
 
 # Plan OpenTofu changes
-tofu-plan env="civo":
+tofu-plan env="onprem":
     cd infra/tofu/environments/{{env}} && tofu plan
 
-# Apply OpenTofu changes
-tofu-apply env="civo":
+# Apply OpenTofu changes (requires explicit env)
+tofu-apply env="":
+    @test -n "{{env}}" || (echo "pass env=onprem, env=local, or env=civo explicitly" >&2; exit 2)
     cd infra/tofu/environments/{{env}} && tofu apply
 
 # Validate OpenTofu configuration
-tofu-validate env="civo":
+tofu-validate env="onprem":
     cd infra/tofu/environments/{{env}} && tofu validate
 
 # ── Kubernetes ──────────────────────────────────────────────────────────────
@@ -80,17 +81,19 @@ dns-status:
     @echo "DNS record:"
     @dig +short nats.tcfs.tummycrypt.dev
 
-# Full deploy: infra + DNS (may need two runs for Tailscale IP)
 # Fresh cluster (no CRDs installed yet):
 #   just deploy-fresh   # Installs operators without CRD consumers
 #   just deploy         # Second run creates ServiceMonitors + ScaledObject
 # Import existing DNS record first if needed:
 #   cd infra/tofu/environments/civo && tofu import 'module.nats_dns[0].porkbun_dns_record.this' 'tummycrypt.dev:RECORD_ID'
-deploy env="civo":
+# Full deploy: infra + DNS (legacy civo-era helper; requires explicit env)
+deploy env="":
+    @test -n "{{env}}" || (echo "pass env=onprem, env=local, or env=civo explicitly" >&2; exit 2)
     cd infra/tofu/environments/{{env}} && tofu apply
 
 # First-apply on fresh cluster: skip CRD consumers (ServiceMonitor, ScaledObject)
-deploy-fresh env="civo":
+deploy-fresh env="":
+    @test -n "{{env}}" || (echo "pass env=onprem, env=local, or env=civo explicitly" >&2; exit 2)
     cd infra/tofu/environments/{{env}} && tofu apply -var='enable_crds=false'
 
 # ── NATS ────────────────────────────────────────────────────────────────────

@@ -297,7 +297,9 @@ Highest-value work from here:
 2. Run and archive clean-host macOS Finder/FileProvider evidence.
 3. Run and archive the dedicated arbitrary-folder sync demo using
    `~/Desktop/TCFS Demo` and honey.
-4. Add CLI commands or docs for folder policy set/list/remove.
+4. Document the current folder policy CLI (`set`, `get`, `list`, `pin`,
+   `unpin`) and add a remove/delete command if that becomes part of the product
+   contract.
 5. Surface auto-unsync results in CLI/TUI and desktop notifications.
 6. Prove dirty-child unsync safety for directories in acceptance tests.
 7. Prove status/progress/badges in Finder instead of treating them as comments

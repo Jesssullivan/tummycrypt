@@ -282,15 +282,22 @@ FileProvider proof:
   lifecycle gate: installed host policy probe, FileProvider registration,
   CloudStorage enumeration, `requestDownload`, `evict`, re-`requestDownload`,
   and exact-content hydration
+- post-install smoke run `25565943781` proved CloudStorage mutation upload and
+  exact 68-byte remote pullback
+- post-install smoke run `25569596910` passed
+  `exercise_conflict_status=true`, proving CLI `sync state: conflict` and exact
+  FileProvider content preservation while keeping Finder badges/progress as
+  observational
 
 That is a lab/testing-mode proof, not a production Developer ID clean-host
 claim.
 
-The current `v0.12.12` PZM lifecycle extension adds evict/rehydrate to that
-same lane. Earlier attempts showed the package, signing, profiles, S3/E2EE, and
-daemon were sound but the installed Mac Development app needed a managed
-runtime-policy rule. The green run `25562087555` proves the profile-backed lab
-path; it does not prove production Finder enablement.
+The current `v0.12.12` PZM lifecycle extension adds evict/rehydrate, mutation,
+and deterministic conflict/status content preservation to that same lane.
+Earlier attempts showed the package, signing, profiles, S3/E2EE, and daemon
+were sound but the installed Mac Development app needed a managed runtime-policy
+rule. The green PZM runs prove the profile-backed lab path; they do not prove
+production Finder enablement.
 
 Local source-tree evidence from April 30, 2026 is recorded in
 [macOS FileProvider Local Evidence](../release/macos-fileprovider-local-evidence-2026-04-30.md).
