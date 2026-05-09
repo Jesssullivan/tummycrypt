@@ -74,22 +74,22 @@ jobs:
           fi
 
       - name: Build tcfsd
-        run: nix build --accept-flake-config .#tcfsd
+        run: nix build --accept-flake-config --fallback .#tcfsd
 
       - name: Build tcfs-cli
-        run: nix build --accept-flake-config .#tcfs-cli
+        run: nix build --accept-flake-config --fallback .#tcfs-cli
 
       - name: Build tcfs-tui
-        run: nix build --accept-flake-config .#tcfs-tui
+        run: nix build --accept-flake-config --fallback .#tcfs-tui
 
       - name: Build tcfs-mcp
-        run: nix build --accept-flake-config .#tcfs-mcp
+        run: nix build --accept-flake-config --fallback .#tcfs-mcp
 
       - name: Push to Attic
         if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
         run: |
           for pkg in tcfsd tcfs-cli tcfs-tui tcfs-mcp; do
-            nix build --accept-flake-config ".#${pkg}" -o "result-${pkg}"
+            nix build --accept-flake-config --fallback ".#${pkg}" -o "result-${pkg}"
             attic push "${{ env.ATTIC_CACHE }}" "result-${pkg}" || echo "::warning::Failed to push ${pkg} to Attic"
           done
 
@@ -120,18 +120,18 @@ jobs:
           fi
 
       - name: Build tcfs-cli (no FUSE on macOS)
-        run: nix build --accept-flake-config .#tcfs-cli
+        run: nix build --accept-flake-config --fallback .#tcfs-cli
 
       - name: Build tcfs-tui
-        run: nix build --accept-flake-config .#tcfs-tui
+        run: nix build --accept-flake-config --fallback .#tcfs-tui
 
       - name: Build tcfs-mcp
-        run: nix build --accept-flake-config .#tcfs-mcp
+        run: nix build --accept-flake-config --fallback .#tcfs-mcp
 
       - name: Push to Attic
         if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
         run: |
           for pkg in tcfs-cli tcfs-tui tcfs-mcp; do
-            nix build --accept-flake-config ".#${pkg}" -o "result-${pkg}"
+            nix build --accept-flake-config --fallback ".#${pkg}" -o "result-${pkg}"
             attic push "${{ env.ATTIC_CACHE }}" "result-${pkg}" || echo "::warning::Failed to push ${pkg} to Attic"
           done
