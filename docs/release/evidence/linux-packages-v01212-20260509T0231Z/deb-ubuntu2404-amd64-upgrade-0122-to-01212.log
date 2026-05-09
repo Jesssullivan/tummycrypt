@@ -1,0 +1,135 @@
+Linux fe821d03ac62 6.18.10-200.fc43.aarch64 #1 SMP PREEMPT_DYNAMIC Wed Feb 11 17:23:35 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.4 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+Get:1 http://archive.ubuntu.com/ubuntu noble InRelease [256 kB]
+Get:2 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+Get:3 http://archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Get:4 http://archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+Get:5 http://archive.ubuntu.com/ubuntu noble/main amd64 Packages [1808 kB]
+Get:6 http://archive.ubuntu.com/ubuntu noble/restricted amd64 Packages [117 kB]
+Get:7 http://archive.ubuntu.com/ubuntu noble/multiverse amd64 Packages [331 kB]
+Get:8 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages [19.3 MB]
+Get:9 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Packages [54.1 kB]
+Get:10 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages [2145 kB]
+Get:11 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Packages [3824 kB]
+Get:12 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages [2412 kB]
+Get:13 http://archive.ubuntu.com/ubuntu noble-backports/multiverse amd64 Packages [671 B]
+Get:14 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Packages [49.0 kB]
+Get:15 http://archive.ubuntu.com/ubuntu noble-backports/universe amd64 Packages [35.5 kB]
+Get:16 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Packages [34.2 kB]
+Get:17 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages [3610 kB]
+Get:18 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages [2038 kB]
+Get:19 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Packages [1502 kB]
+Fetched 37.9 MB in 11s (3598 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  openssl
+The following NEW packages will be installed:
+  ca-certificates openssl
+0 upgraded, 2 newly installed, 0 to remove and 3 not upgraded.
+Need to get 1162 kB of archives.
+After this operation, 2326 kB of additional disk space will be used.
+Get:1 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 openssl amd64 3.0.13-0ubuntu3.9 [1002 kB]
+Get:2 http://archive.ubuntu.com/ubuntu noble/main amd64 ca-certificates all 20240203 [159 kB]
+debconf: delaying package configuration, since apt-utils is not installed
+Fetched 1162 kB in 0s (4175 kB/s)
+Selecting previously unselected package openssl.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4381 files and directories currently installed.)
+Preparing to unpack .../openssl_3.0.13-0ubuntu3.9_amd64.deb ...
+Unpacking openssl (3.0.13-0ubuntu3.9) ...
+Selecting previously unselected package ca-certificates.
+Preparing to unpack .../ca-certificates_20240203_all.deb ...
+Unpacking ca-certificates (20240203) ...
+Setting up openssl (3.0.13-0ubuntu3.9) ...
+Setting up ca-certificates (20240203) ...
+Updating certificates in /etc/ssl/certs...
+146 added, 0 removed; done.
+Processing triggers for ca-certificates (20240203) ...
+Updating certificates in /etc/ssl/certs...
+0 added, 0 removed; done.
+Running hooks in /etc/ca-certificates/update.d...
+done.
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following NEW packages will be installed:
+  tcfs-cli tcfsd
+0 upgraded, 2 newly installed, 0 to remove and 3 not upgraded.
+Need to get 0 B/9595 kB of archives.
+After this operation, 33.3 MB of additional disk space will be used.
+Get:1 /assets/tcfs-0.12.2-amd64.deb tcfs-cli amd64 0.12.2-1 [4564 kB]
+Get:2 /assets/tcfsd-0.12.2-amd64.deb tcfsd amd64 0.12.2-1 [5031 kB]
+debconf: delaying package configuration, since apt-utils is not installed
+Selecting previously unselected package tcfs-cli.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4862 files and directories currently installed.)
+Preparing to unpack /assets/tcfs-0.12.2-amd64.deb ...
+Unpacking tcfs-cli (0.12.2-1) ...
+Selecting previously unselected package tcfsd.
+Preparing to unpack /assets/tcfsd-0.12.2-amd64.deb ...
+Unpacking tcfsd (0.12.2-1) ...
+Setting up tcfsd (0.12.2-1) ...
+Setting up tcfs-cli (0.12.2-1) ...
+tcfsd version: tcfsd 0.12.2
+tcfs version: tcfs 0.12.2
+starting daemon smoke with temp home: /tmp/tcfs-install-smoke.nXLqRD/home
+daemon socket ready: /tmp/tcfs-install-smoke.nXLqRD/home/.local/state/tcfsd/tcfsd.sock
+tcfsd v0.12.2
+  uptime:        1s
+  socket:        /tmp/tcfs-install-smoke.nXLqRD/home/.local/state/tcfsd/tcfsd.sock
+  device:        fe821d03ac62 (4eccbbb3)
+  conflict mode: auto
+  storage:       http://localhost:8333 [UNREACHABLE]
+  nats:          not connected
+  active mounts: 0
+  credentials:   loaded (source: env)
+install smoke passed
+9c2c6356e65a6fa60a026b01d68603ee4faef3952907e57c3746d93587d49347  /assets/tcfsd-0.12.12-amd64.deb
+4c1a27dc82ccbf0d85d3f903ae83993eb8677cccafe61e123aace5a8190508f4  /assets/tcfs-0.12.12-amd64.deb
+9c2c6356e65a6fa60a026b01d68603ee4faef3952907e57c3746d93587d49347  tcfsd-0.12.12-amd64.deb
+4c1a27dc82ccbf0d85d3f903ae83993eb8677cccafe61e123aace5a8190508f4  tcfs-0.12.12-amd64.deb
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages will be upgraded:
+  tcfs-cli tcfsd
+2 upgraded, 0 newly installed, 0 to remove and 3 not upgraded.
+Need to get 0 B/9754 kB of archives.
+After this operation, 887 kB of additional disk space will be used.
+Get:1 /assets/tcfs-0.12.12-amd64.deb tcfs-cli amd64 0.12.12-1 [4562 kB]
+Get:2 /assets/tcfsd-0.12.12-amd64.deb tcfsd amd64 0.12.12-1 [5192 kB]
+debconf: delaying package configuration, since apt-utils is not installed
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4868 files and directories currently installed.)
+Preparing to unpack /assets/tcfs-0.12.12-amd64.deb ...
+Unpacking tcfs-cli (0.12.12-1) over (0.12.2-1) ...
+Preparing to unpack .../assets/tcfsd-0.12.12-amd64.deb ...
+Unpacking tcfsd (0.12.12-1) over (0.12.2-1) ...
+Setting up tcfsd (0.12.12-1) ...
+Setting up tcfs-cli (0.12.12-1) ...
+tcfsd version: tcfsd 0.12.12
+tcfs version: tcfs 0.12.12
+starting daemon smoke with temp home: /tmp/tcfs-install-smoke.OjvwFS/home
+daemon socket ready: /tmp/tcfs-install-smoke.OjvwFS/home/.local/state/tcfsd/tcfsd.sock
+tcfsd v0.12.12
+  uptime:        1s
+  socket:        /tmp/tcfs-install-smoke.OjvwFS/home/.local/state/tcfsd/tcfsd.sock
+  device:        fe821d03ac62 (30f52d06)
+  conflict mode: auto
+  storage:       http://localhost:8333 [UNREACHABLE]
+  nats:          not connected
+  active mounts: 0
+  credentials:   loaded (source: env)
+install smoke passed

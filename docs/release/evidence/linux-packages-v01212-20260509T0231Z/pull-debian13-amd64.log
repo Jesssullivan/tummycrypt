@@ -1,0 +1,6 @@
+Trying to pull docker.io/library/debian:13...
+Getting image source signatures
+Copying blob sha256:307f8152a55ef1e9eeb1acbbee7bc81232615329eaeb00d8dd93b46be297f34c
+Copying config sha256:a881cfe5479eae09d0fa834981a9da4022cd8af2b60fd337e59528b3bfbf9763
+Writing manifest to image destination
+a881cfe5479eae09d0fa834981a9da4022cd8af2b60fd337e59528b3bfbf9763

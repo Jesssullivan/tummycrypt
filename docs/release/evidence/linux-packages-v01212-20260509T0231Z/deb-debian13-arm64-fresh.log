@@ -1,0 +1,86 @@
+Linux 638c089091f2 6.18.10-200.fc43.aarch64 #1 SMP PREEMPT_DYNAMIC Wed Feb 11 17:23:35 UTC 2026 aarch64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.4
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+Get:1 http://deb.debian.org/debian trixie InRelease [140 kB]
+Get:2 http://deb.debian.org/debian trixie-updates InRelease [47.3 kB]
+Get:3 http://deb.debian.org/debian-security trixie-security InRelease [43.4 kB]
+Get:4 http://deb.debian.org/debian trixie/main arm64 Packages [9607 kB]
+Get:5 http://deb.debian.org/debian trixie-updates/main arm64 Packages [5404 B]
+Get:6 http://deb.debian.org/debian-security trixie-security/main arm64 Packages [156 kB]
+Fetched 9999 kB in 1s (8187 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  openssl
+The following NEW packages will be installed:
+  ca-certificates openssl
+0 upgraded, 2 newly installed, 0 to remove and 0 not upgraded.
+Need to get 1625 kB of archives.
+After this operation, 3007 kB of additional disk space will be used.
+Get:1 http://deb.debian.org/debian-security trixie-security/main arm64 openssl arm64 3.5.5-1~deb13u2 [1464 kB]
+Get:2 http://deb.debian.org/debian trixie/main arm64 ca-certificates all 20250419 [162 kB]
+Preconfiguring packages ...
+Fetched 1625 kB in 0s (13.9 MB/s)
+Selecting previously unselected package openssl.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 4934 files and directories currently installed.)
+Preparing to unpack .../openssl_3.5.5-1~deb13u2_arm64.deb ...
+Unpacking openssl (3.5.5-1~deb13u2) ...
+Selecting previously unselected package ca-certificates.
+Preparing to unpack .../ca-certificates_20250419_all.deb ...
+Unpacking ca-certificates (20250419) ...
+Setting up openssl (3.5.5-1~deb13u2) ...
+Setting up ca-certificates (20250419) ...
+Updating certificates in /etc/ssl/certs...
+150 added, 0 removed; done.
+Processing triggers for ca-certificates (20250419) ...
+Updating certificates in /etc/ssl/certs...
+0 added, 0 removed; done.
+Running hooks in /etc/ca-certificates/update.d...
+done.
+87a951f7c539ab0283afdc6108f87336cc358093e1fc0a6fdd293e6900728d32  /assets/tcfsd-0.12.12-arm64.deb
+3a821f4b077319c81d9c00b429c3ccdc455c9eb9ea9d6f846de0a68ed54c30bf  /assets/tcfs-0.12.12-arm64.deb
+87a951f7c539ab0283afdc6108f87336cc358093e1fc0a6fdd293e6900728d32  tcfsd-0.12.12-arm64.deb
+3a821f4b077319c81d9c00b429c3ccdc455c9eb9ea9d6f846de0a68ed54c30bf  tcfs-0.12.12-arm64.deb
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following NEW packages will be installed:
+  tcfs-cli tcfsd
+0 upgraded, 2 newly installed, 0 to remove and 0 not upgraded.
+Need to get 0 B/10.4 MB of archives.
+After this operation, 35.1 MB of additional disk space will be used.
+Get:1 /assets/tcfs-0.12.12-arm64.deb tcfs-cli arm64 0.12.12-1 [4111 kB]
+Get:2 /assets/tcfsd-0.12.12-arm64.deb tcfsd arm64 0.12.12-1 [6273 kB]
+Selecting previously unselected package tcfs-cli.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5498 files and directories currently installed.)
+Preparing to unpack /assets/tcfs-0.12.12-arm64.deb ...
+Unpacking tcfs-cli (0.12.12-1) ...
+Selecting previously unselected package tcfsd.
+Preparing to unpack .../assets/tcfsd-0.12.12-arm64.deb ...
+Unpacking tcfsd (0.12.12-1) ...
+Setting up tcfsd (0.12.12-1) ...
+Setting up tcfs-cli (0.12.12-1) ...
+tcfsd version: tcfsd 0.12.12
+tcfs version: tcfs 0.12.12
+starting daemon smoke with temp home: /tmp/tcfs-install-smoke.vULiGo/home
+daemon socket ready: /tmp/tcfs-install-smoke.vULiGo/home/.local/state/tcfsd/tcfsd.sock
+tcfsd v0.12.12
+  uptime:        1s
+  socket:        /tmp/tcfs-install-smoke.vULiGo/home/.local/state/tcfsd/tcfsd.sock
+  device:        638c089091f2 (4c96194d)
+  conflict mode: auto
+  storage:       http://localhost:8333 [UNREACHABLE]
+  nats:          not connected
+  active mounts: 0
+  credentials:   loaded (source: env)
+install smoke passed
