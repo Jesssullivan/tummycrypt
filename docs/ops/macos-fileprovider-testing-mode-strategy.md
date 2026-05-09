@@ -508,7 +508,8 @@ for an Apple consent boundary that GitHub-hosted macOS cannot cross.
 
 Feature goals remain:
 
-1. production `v0.12.x` packages stay Developer ID signed and notarized
+1. production `v0.12.x` packages attempt Developer ID signing/notarization and
+   are accepted only after explicit post-cut smoke proves the shipped artifacts
 2. user-enabled lab Mac proves production Finder behavior without testing mode
 3. development testing-mode lane proves repeatable CI FileProvider behavior
    through the explicit PZM `SystemPolicyRule` lab trust profile

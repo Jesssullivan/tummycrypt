@@ -8,8 +8,9 @@ release-grade desktop or iOS product.
 
 ## macOS: Proven Today
 
-- CI proves the Rust staticlib and Swift build surfaces needed for FileProvider
-  packaging.
+- CI proves the Rust staticlib/header needed for FileProvider packaging, plus
+  the iOS Swift type-check lane. The regular CI workflow does not yet build the
+  macOS FileProvider Swift bundle.
 - Release automation can build Apple Silicon artifacts, package
   `TCFSProvider.app`, and publish `.pkg` plus tarball assets.
 - The repo contains real macOS daemon, launchd, NFS loopback, and FileProvider

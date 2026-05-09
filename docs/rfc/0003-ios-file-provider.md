@@ -233,7 +233,7 @@ enum ProviderError {
 - Background refresh via `NSFileProviderManager.signalEnumerator`
 - Push notifications for real-time updates (APNs or polling)
 
-### Phase 7e: UI + Polish (PR #65, IN PROGRESS)
+### Phase 7e: UI + Polish (PR #65 merged; broader iOS proof remains incomplete)
 
 - [x] Progress reporting during hydration (UniFFI callback interface → NSProgress)
 - [x] Conflict detection via vclock divergence (`check_conflict_async`)

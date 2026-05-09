@@ -17,7 +17,7 @@
 #   - .rpm package (x86_64 daemon package only today)
 #   - Shell installer script (curl | sh)
 #   - Homebrew formula
-#   - Container image (GHCR, multi-arch)
+#   - Container image (GHCR, linux/amd64 today)
 #   - SHA256SUMS.txt
 
 name: Release

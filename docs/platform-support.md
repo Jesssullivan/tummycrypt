@@ -10,17 +10,18 @@ Best-supported runtime. This is the platform with the strongest continuous CI
 coverage and the clearest end-to-end validation story.
 
 - **CLI**: All commands (push, pull, reconcile, policy, resolve, mount, unsync)
-- **Daemon**: systemd user service with auto-restart, metrics (Prometheus), health checks
-- **Filesystem**: FUSE3 mount with clean-name on-demand hydration on the primary x86_64 release artifact; physical `.tc` stubs are used by unsync/offline paths
-- **NFS loopback**: Alternative to FUSE (no kernel modules required)
+- **Daemon**: package artifacts install daemon binaries and service files; isolated daemon smoke is proven, while systemd-managed service behavior is a separate release gate
+- **Filesystem**: FUSE3 mount with clean-name on-demand hydration is host-proven on Linux x86_64 from repo-pinned tooling; packaged install-to-mount proof is still separate
+- **NFS loopback**: Alternative to FUSE (no kernel modules required), with current release evidence pending
 - **Fleet sync**: NATS JetStream with vector clock conflict detection
 - **D-Bus**: Interface crate exists, but the default backend is a stub and release UX/status integration is not yet proven
 - **Encryption**: XChaCha20-Poly1305 per-chunk, Argon2id KDF
-- **Build targets**: x86_64 (.tar.gz, .deb, .rpm), aarch64 (.tar.gz, .deb)
-  with `.deb` install support claimed for Ubuntu 24.04+ and Debian 13
-  `trixie`+. Debian 12 `bookworm` is not a truthful target for the current
-  shipped `.deb` assets because the packages require newer glibc/OpenSSL ABI
-  floors than bookworm provides.
+- **Build targets**: x86_64 (.tar.gz, .deb, .rpm) with the primary FUSE lane;
+  aarch64 (.tar.gz, .deb) is install-smoke proven but cross-compiled without
+  FUSE in the current release matrix. `.deb` install support is claimed for
+  Ubuntu 24.04+ and Debian 13 `trixie`+. Debian 12 `bookworm` is not a truthful
+  target for the current shipped `.deb` assets because the packages require
+  newer glibc/OpenSSL ABI floors than bookworm provides.
 
 ## macOS (Experimental Desktop Surface)
 
@@ -37,7 +38,10 @@ as a production-proven platform.
 - **Encryption**: Core crypto path is shared and available
 - **Build targets**: aarch64 (.tar.gz, .pkg; notarization attempted but non-blocking), x86_64 (.tar.gz)
 - **Homebrew**: manual tap flow required today because the formula is published on the `homebrew-tap` branch, not the default branch
-- **Current proof**: CI covers Rust builds plus Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts; PZM testing-mode lab proof is green beyond read/hydrate; production clean-host Finder proof is still pending
+- **Current proof**: CI covers the Rust FileProvider staticlib/header and iOS
+  Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts;
+  PZM testing-mode lab proof is green beyond read/hydrate; production
+  clean-host Finder proof is still pending
 - **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)
   and [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md)
 
@@ -108,3 +112,5 @@ Stateless worker for horizontal scaling.
 - **Mode**: `--mode=worker` (NATS consumer, no FUSE)
 - **Features**: k8s-worker feature flag, KEDA auto-scaling support
 - **Metrics**: Prometheus on port 9100
+- **Current proof**: `v0.12.12` proves explicit amd64 pull/version/startup
+  only; native arm64 manifests and full Kubernetes rollout proof remain open

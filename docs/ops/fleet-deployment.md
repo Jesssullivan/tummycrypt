@@ -6,6 +6,11 @@ Companion to [RFC 0001: Fleet Sync Integration](../rfc/0001-fleet-sync-integrati
 For the named live acceptance lane built on this fleet, see
 [Neo-Honey Live Acceptance](neo-honey-acceptance.md).
 
+Current authority note: this guide still contains the Civo-era deployment path.
+Treat those commands as legacy/standby unless an operator explicitly targets the
+Civo environment. The active on-prem authority path is honey/on-prem and is
+tracked in [On-Prem Authority Recovery](onprem-authority-recovery.md).
+
 ## Prerequisites
 
 - tcfs v0.3.0+ installed on all machines
@@ -17,8 +22,10 @@ For the named live acceptance lane built on this fleet, see
 
 ## 1. NATS Access Path
 
-NATS JetStream runs in the Civo K8s cluster (`nats.tcfs.svc.cluster.local:4222`).
-Lab machines access it via the Tailscale operator — no public IP, tailnet only.
+The historical Civo path ran NATS JetStream in the Civo K8s cluster
+(`nats.tcfs.svc.cluster.local:4222`). Current live/on-prem authority is moving
+through the honey OpenTofu migration lane; lab machines still access NATS via a
+tailnet-only path rather than a public IP.
 
 ### Tailscale Exposure + DNS
 
@@ -330,7 +337,8 @@ tcfs sync-status
 
 ## 4. IaC Operations
 
-All Civo infrastructure is managed via OpenTofu. Use the Justfile for common operations:
+For the legacy Civo environment, infrastructure is managed via OpenTofu. Use the
+Justfile for common operations:
 
 ```bash
 # List all recipes
@@ -351,7 +359,8 @@ just nats-streams
 just k8s-logs app=tcfsd
 ```
 
-The Justfile is at the project root. All recipes use the `civo` environment by default.
+The Justfile is at the project root. Older recipes use the `civo` environment
+by default; verify the intended environment before applying changes.
 
 ---
 

@@ -86,16 +86,16 @@ installed-binary smoke to the first truthful user action, use
 | Homebrew | Yes | Yes | `scripts/install-smoke.sh` | Current manual `homebrew-tap` checkout flow |
 | macOS `.pkg` | Yes | Yes | `scripts/install-smoke.sh` | Apple Silicon package path; desktop UX still experimental |
 | Ubuntu 24.04+ / Debian 13+ `.deb` | Yes | Yes | `scripts/install-smoke.sh` | Install both `tcfsd` and `tcfs` packages |
-| Fedora/RHEL `.rpm` | Yes | Sampled | `scripts/install-smoke.sh --skip-cli` | RPM ships `tcfsd` only today |
-| Container image | Yes | Sampled | worker-image startup check | Pull + entrypoint/startup proof, not CLI status |
-| Nix | Yes | Sampled | `scripts/install-smoke.sh` | Fresh install from the tagged flake is the primary proof |
+| Fedora/RHEL `.rpm` | Yes | Sampled | `scripts/install-smoke.sh --skip-cli` | Fedora 42 x86_64 is currently proven; RHEL/Rocky remain target surfaces pending smoke |
+| Container image | Yes | Sampled | worker-image startup check | amd64 pull + entrypoint/startup proof, not CLI status or cluster rollout |
+| Nix | Yes | Sampled | `scripts/install-smoke.sh` | Current `v0.12.12` proof is Darwin profile install; Linux/NixOS host proof is separate |
 
 ## Surface Procedures
 
 Set the release variables first:
 
 ```bash
-export TAG=v0.12.1
+export TAG=v0.12.12
 export VERSION="${TAG#v}"
 ```
 
@@ -198,9 +198,10 @@ bash scripts/install-smoke.sh --expected-version "${VERSION}" --skip-cli
 Fresh install proof for the worker image is:
 
 ```bash
-podman pull "ghcr.io/jesssullivan/tcfsd:${TAG}"
-podman run --rm "ghcr.io/jesssullivan/tcfsd:${TAG}" --version
+podman pull --arch amd64 "ghcr.io/jesssullivan/tcfsd:${TAG}"
+podman run --rm --arch amd64 "ghcr.io/jesssullivan/tcfsd:${TAG}" --version
 timeout 10s podman run --rm --entrypoint /tcfsd \
+  --arch amd64 \
   "ghcr.io/jesssullivan/tcfsd:${TAG}" \
   --mode=worker \
   --config /tmp/missing.toml \
@@ -209,12 +210,14 @@ timeout 10s podman run --rm --entrypoint /tcfsd \
 
 Success criteria:
 
-- the image pulls successfully
+- the image pulls successfully on the architecture under test
 - `tcfsd --version` reports the expected release version
 - the worker binary starts cleanly enough to emit startup logs before `timeout` stops it
 
 Full cluster rollout proof remains an infra-level check and should be paired with
 the live fleet runbooks when container packaging or worker behavior changes.
+The current `v0.12.12` evidence proves amd64 only; native `linux/arm64/v8`
+pulls are not yet published.
 
 ### Nix
 
@@ -226,6 +229,10 @@ nix profile install \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfs-cli"
 bash scripts/install-smoke.sh --expected-version "${VERSION}"
 ```
+
+Record the host platform in evidence. The current `v0.12.12` packet proves a
+Darwin temporary profile install; Linux Nix profile and NixOS module host proof
+remain separate acceptance lanes.
 
 Upgrade is sampled unless the flake packaging path or install story changes
 materially between releases.
