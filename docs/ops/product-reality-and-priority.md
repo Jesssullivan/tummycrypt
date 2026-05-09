@@ -19,8 +19,8 @@ Use this document as the short answer to:
 | Surface | Current truth | Source of proof |
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
-| Fleet sync / backend path | materially exercised on real hosts; a current live transcript is archived in the fleet pilot packet | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-20260509T1919Z/` |
-| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| Fleet sync / backend path | materially exercised on real hosts; current live transcripts are archived in the fleet pilot packets | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` |
+| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; the extended fleet packet carries that lifecycle proof as a honey companion next to isolated `Documents`/`git` traversal and live backend smoke; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux and fleet evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
 | macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | planned / skeleton | code exists, but there is no release-grade CLI, daemon, or Explorer flow |
@@ -157,7 +157,12 @@ Canonical docs:
 
 The filesystem implementation can list remote index entries and hydrate content
 on open, and the repo now has named Linux, mounted-view, Desktop-to-honey, and
-Finder/FileProvider harnesses. The archived Linux FUSE run
+Finder/FileProvider harnesses. The extended fleet packet
+`docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` proves isolated
+`Documents`/`git` seed and honey traversal/hydration, then runs the honey Linux
+lifecycle companion for mounted write/readback, cache clear/rehydrate, and
+recursive safe-unsync, alongside a live `neo-honey` backend smoke. The archived
+Linux FUSE run
 `docs/release/evidence/lazy-linux-20260508T170825Z/` proves the expanded
 lifecycle against real remote state: traverse/list before hydration, exact
 `cat` hydration, mounted write/readback, cache clear/rehydrate, dirty-child

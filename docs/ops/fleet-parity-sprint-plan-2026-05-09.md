@@ -25,6 +25,11 @@ Planning-pass validation:
 - `docs/release/evidence/fleet-pilot-20260509T1919Z/` was archived after a live
   run: seed to disposable SeaweedFS prefix, honey mounted traversal/hydration,
   and live `neo-honey` SeaweedFS/NATS smoke.
+- `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` was archived
+  after a live run: seed to disposable SeaweedFS prefix, honey mounted
+  traversal/hydration, honey Linux lifecycle companion for mounted
+  write/readback, cache clear/rehydrate, recursive safe-unsync refusal/success,
+  and live `neo-honey` SeaweedFS/NATS smoke.
 
 ## Readiness Answer
 
@@ -35,18 +40,15 @@ ready to manage real `~/Documents` or `~/git` across arbitrary machines.
 | Host/surface | Ready today | Not ready yet |
 | --- | --- | --- |
 | `honey` Linux mounted surface | Strongest lane. The archived lifecycle proof shows clean-name traversal before hydration, exact `cat` hydration, mounted write/readback, cache clear, exact rehydrate, dirty recursive `tcfs unsync` refusal, clean recursive `.tc` conversion, and persisted `sync state: not_synced`. | Treating packaged Linux install, systemd first-use, and every distro/service-manager path as continuously proven. |
-| `neo` Darwin workstation | Useful release-adjacent control host and CLI participant for live backend sync. Local FileProvider smoke has historical source-tree evidence. The `fleet-pilot-20260509T1919Z` packet also includes a green live `neo-honey` smoke from this host. | Not a clean production Finder host. Ambient binary/path state can be stale, and local source-tree FileProvider proof does not satisfy `#309`. |
+| `neo` Darwin workstation | Useful release-adjacent control host and CLI participant for live backend sync. Local FileProvider smoke has historical source-tree evidence. The `fleet-pilot-extended-20260509T2152Z` packet includes a green live `neo-honey` smoke from this host. | Not a clean production Finder host. Ambient binary/path state can be stale, and local source-tree FileProvider proof does not satisfy `#309`. |
 | `petting-zoo-mini` FileProvider lab | Strong non-production Apple lane. Testing-mode package/smoke proof covers enumerate, hydrate, evict, rehydrate, mutation, CLI conflict state, and exact content preservation. | Not production Developer ID clean-host Finder acceptance. Badges/progress remain observational until reliable assertions exist. |
 | Live on-prem backend | Usable enough for live smoke via named endpoints, and source-owned migration commands are renderable. | Not source-owned/storage-mobile yet. Do not couple the parity sprint to live OpenTofu mutation unless `#327` has a named downtime window and rollback owner. |
 
-The next credible step is an isolated fleet-pilot evidence bundle using a
-disposable remote prefix and pilot directories such as `~/TCFS Pilot/Documents`
-or `~/TCFS Pilot/git`. Do not make real `~/Documents` or `~/git` the default
-sync roots until the acceptance gates below are archived. The fleet-pilot
-helper now has an explicit `--run-linux-lifecycle` /
-`TCFS_FLEET_PILOT_RUN_LINUX_LIFECYCLE=1` companion path that runs the Linux
-lifecycle harness on `honey` under a nested disposable prefix and copies the
-evidence back into the same packet.
+The isolated fleet-pilot evidence bundle now exists at
+`docs/release/evidence/fleet-pilot-extended-20260509T2152Z/`. It uses a
+disposable remote prefix and pilot directories, not real `~/Documents` or
+`~/git`. Do not make real home subtrees the default sync roots until the staged
+rollout gates below are archived.
 
 ## Product Semantics
 

@@ -1,0 +1,17 @@
+# Optional Linux lifecycle companion. This proves mounted write/readback,
+# cache clear/rehydrate, and recursive safe-unsync under a nested disposable
+# prefix without changing the fleet traversal fixture.
+ssh honey 'mkdir -p /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle'
+ssh honey 'mkdir -p /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/scripts'
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-linux-demo.sh honey:/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle/lazy-hydration-linux-demo.sh
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-linux-lifecycle-demo.sh honey:/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle/lazy-hydration-linux-lifecycle-demo.sh
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-mounted-smoke.sh honey:/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/scripts/lazy-hydration-mounted-smoke.sh
+scp docs/release/evidence/fleet-pilot-extended-20260509T2152Z/honey-linux-lifecycle-run.sh honey:/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle/honey-linux-lifecycle-run.sh
+ssh honey 'chmod +x /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle/lazy-hydration-linux-demo.sh /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle/lazy-hydration-linux-lifecycle-demo.sh /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/scripts/lazy-hydration-mounted-smoke.sh /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle/honey-linux-lifecycle-run.sh'
+ssh honey 'bash /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle/honey-linux-lifecycle-run.sh'
+mkdir -p docs/release/evidence/fleet-pilot-extended-20260509T2152Z/linux-lifecycle
+scp -r honey:/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/linux-lifecycle/evidence/. docs/release/evidence/fleet-pilot-extended-20260509T2152Z/linux-lifecycle/
+
+# If honey does not already have AWS credentials, rerun this local helper with
+# --run-linux-lifecycle --forward-aws-env. The generated command file never
+# stores those credentials.

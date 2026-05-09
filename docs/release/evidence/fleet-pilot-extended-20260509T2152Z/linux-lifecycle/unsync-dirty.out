@@ -1,0 +1,5 @@
+Refusing to unsync directory with dirty descendants: /tmp/tcfs-lazy-linux-demo.RCAckb/source/docs
+  dirty:
+    /tmp/tcfs-lazy-linux-demo.RCAckb/source/docs/README.md (size changed: 25 → 38)
+  summary: 0 converted, 0 skipped, 1 dirty
+Error: 1 dirty descendant(s) with local changes. Use --force to unsync anyway.

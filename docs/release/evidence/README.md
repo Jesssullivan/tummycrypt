@@ -13,6 +13,7 @@ the repository.
 | `linux-packages-v01212-20260509T0231Z/` | Linux package current-tag smoke | Ubuntu 24.04 `.deb` fresh/upgrade passes on arm64 and amd64; Debian 13 `.deb` fresh install passes on arm64 and amd64; Fedora 42 x86_64 daemon-only RPM fresh/upgrade passes |
 | `lazy-linux-20260508T170825Z/` | Linux FUSE lifecycle on `honey`: browse before hydration, exact `cat`, mounted write/readback, cache clear/rehydrate, dirty recursive `unsync` refusal, clean recursive `.tc` conversion, persisted `NotSynced` state | repo-archived transcript, config, mount log, remote prefix, remote pullback, unsync outputs, redacted metadata |
 | `fleet-pilot-20260509T1919Z/` | Isolated `Documents`/`git` fleet-pilot packet: neo seed to disposable prefix, honey mounted traversal/hydration, live `neo-honey` backend smoke | repo-archived fixture tree, transcripts, honey commands, mount log, remote prefix, and live SeaweedFS/NATS smoke log |
+| `fleet-pilot-extended-20260509T2152Z/` | Extended isolated fleet-pilot packet: neo seed to disposable prefix, honey mounted traversal/hydration, honey Linux lifecycle companion, and live `neo-honey` backend smoke | repo-archived fixture tree, transcripts, honey commands, mount log, remote prefix, mounted write/readback pullback, cache rehydrate log, recursive safe-unsync outputs, and live SeaweedFS/NATS smoke log |
 | PZM testing-mode FileProvider package run | Mac App Development/testing-mode package build for deterministic conflict/status proof | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569345240> |
 | PZM testing-mode FileProvider smoke run | Enumerate/hydrate/evict/rehydrate, mutation proof already present from prior run, deterministic CLI conflict/status and exact FileProvider content preservation | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569596910> |
 | PZM testing-mode mutation package run | Mac App Development/testing-mode package build for mutation proof | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25565895586> |
@@ -37,3 +38,8 @@ the repository.
 - `fleet-pilot-20260509T1919Z/` proves an isolated cross-host pilot tree and
   live backend smoke. It does not prove production Finder, mounted writeback,
   recursive safe-unsync, or managing real `~/Documents` / `~/git`.
+- `fleet-pilot-extended-20260509T2152Z/` adds honey-side mounted
+  write/readback, cache clear/rehydrate, and recursive safe-unsync evidence
+  through a nested Linux lifecycle companion. It still does not prove
+  production Finder, production Developer ID FileProvider acceptance, live
+  OpenTofu/on-prem cutover, or managing real `~/Documents` / `~/git`.

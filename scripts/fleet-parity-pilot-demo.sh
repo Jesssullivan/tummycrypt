@@ -291,6 +291,7 @@ honey_linux_lifecycle_commands="$evidence_dir/honey-linux-lifecycle-commands.txt
 honey_linux_lifecycle_log="$evidence_dir/honey-linux-lifecycle.log"
 linux_lifecycle_status="$evidence_dir/linux-lifecycle-status.env"
 honey_linux_lifecycle_dir="$honey_remote_dir/linux-lifecycle"
+honey_linux_lifecycle_scripts_dir="$honey_remote_dir/scripts"
 honey_linux_lifecycle_evidence_dir="$honey_linux_lifecycle_dir/evidence"
 
 mkdir -p "$evidence_dir"
@@ -443,9 +444,12 @@ cat >"$honey_linux_lifecycle_commands" <<EOF
 # cache clear/rehydrate, and recursive safe-unsync under a nested disposable
 # prefix without changing the fleet traversal fixture.
 ssh $(shell_quote "$honey_host") 'mkdir -p $(shell_quote "$honey_linux_lifecycle_dir")'
+ssh $(shell_quote "$honey_host") 'mkdir -p $(shell_quote "$honey_linux_lifecycle_scripts_dir")'
 scp $(shell_quote "$REPO_ROOT/scripts/lazy-hydration-linux-demo.sh") $(shell_quote "$honey_host"):$(shell_quote "$honey_linux_lifecycle_dir/lazy-hydration-linux-demo.sh")
 scp $(shell_quote "$REPO_ROOT/scripts/lazy-hydration-linux-lifecycle-demo.sh") $(shell_quote "$honey_host"):$(shell_quote "$honey_linux_lifecycle_dir/lazy-hydration-linux-lifecycle-demo.sh")
+scp $(shell_quote "$REPO_ROOT/scripts/lazy-hydration-mounted-smoke.sh") $(shell_quote "$honey_host"):$(shell_quote "$honey_linux_lifecycle_scripts_dir/lazy-hydration-mounted-smoke.sh")
 scp $(shell_quote "$honey_linux_lifecycle_script") $(shell_quote "$honey_host"):$(shell_quote "$honey_linux_lifecycle_dir/honey-linux-lifecycle-run.sh")
+ssh $(shell_quote "$honey_host") 'chmod +x $(shell_quote "$honey_linux_lifecycle_dir/lazy-hydration-linux-demo.sh") $(shell_quote "$honey_linux_lifecycle_dir/lazy-hydration-linux-lifecycle-demo.sh") $(shell_quote "$honey_linux_lifecycle_scripts_dir/lazy-hydration-mounted-smoke.sh") $(shell_quote "$honey_linux_lifecycle_dir/honey-linux-lifecycle-run.sh")'
 ssh $(shell_quote "$honey_host") 'bash $(shell_quote "$honey_linux_lifecycle_dir/honey-linux-lifecycle-run.sh")'
 mkdir -p $(shell_quote "$linux_lifecycle_evidence")
 scp -r $(shell_quote "$honey_host"):$(shell_quote "$honey_linux_lifecycle_evidence_dir/.") $(shell_quote "$linux_lifecycle_evidence/")
@@ -481,9 +485,14 @@ if [[ "$run_linux_lifecycle" == "1" ]]; then
 
   # shellcheck disable=SC2029
   ssh "$honey_host" "mkdir -p $(shell_quote "$honey_linux_lifecycle_dir")"
+  # shellcheck disable=SC2029
+  ssh "$honey_host" "mkdir -p $(shell_quote "$honey_linux_lifecycle_scripts_dir")"
   scp "$REPO_ROOT/scripts/lazy-hydration-linux-demo.sh" "$honey_host:$honey_linux_lifecycle_dir/lazy-hydration-linux-demo.sh"
   scp "$REPO_ROOT/scripts/lazy-hydration-linux-lifecycle-demo.sh" "$honey_host:$honey_linux_lifecycle_dir/lazy-hydration-linux-lifecycle-demo.sh"
+  scp "$REPO_ROOT/scripts/lazy-hydration-mounted-smoke.sh" "$honey_host:$honey_linux_lifecycle_scripts_dir/lazy-hydration-mounted-smoke.sh"
   scp "$honey_linux_lifecycle_script" "$honey_host:$honey_linux_lifecycle_dir/honey-linux-lifecycle-run.sh"
+  # shellcheck disable=SC2029
+  ssh "$honey_host" "chmod +x $(shell_quote "$honey_linux_lifecycle_dir/lazy-hydration-linux-demo.sh") $(shell_quote "$honey_linux_lifecycle_dir/lazy-hydration-linux-lifecycle-demo.sh") $(shell_quote "$honey_linux_lifecycle_scripts_dir/lazy-hydration-mounted-smoke.sh") $(shell_quote "$honey_linux_lifecycle_dir/honey-linux-lifecycle-run.sh")"
 
   remote_lifecycle_env_file=""
   cleanup_remote_lifecycle_env() {

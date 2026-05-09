@@ -270,6 +270,13 @@ The lifecycle companion proves mounted write/readback, cache clear/rehydrate,
 and recursive safe-unsync on `honey`; it still uses an isolated fixture and is
 not evidence that real `~/Documents` or `~/git` have been taken over.
 
+Archived extended fleet evidence:
+
+- [fleet-pilot-extended-20260509T2152Z](../release/evidence/fleet-pilot-extended-20260509T2152Z/)
+  proves isolated `Documents`/`git` seed, honey mounted traversal/hydration,
+  honey Linux lifecycle companion write/readback plus safe-unsync, and live
+  `neo-honey` backend smoke.
+
 Do not describe this as `honey:~/Desktop` unless honey is deliberately
 configured with TCFS at that exact path. The Finder/FileProvider proof remains
 the `~/Library/CloudStorage/TCFS*` root, not the physical Desktop directory.

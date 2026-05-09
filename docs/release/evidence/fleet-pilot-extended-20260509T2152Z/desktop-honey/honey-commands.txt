@@ -1,0 +1,17 @@
+# Prepare remote work directory:
+ssh honey 'mkdir -p /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run'
+
+# Copy the smoke helper and honey run script:
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-mounted-smoke.sh honey:/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/lazy-hydration-mounted-smoke.sh
+scp docs/release/evidence/fleet-pilot-extended-20260509T2152Z/desktop-honey/honey-run.sh honey:/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/honey-run.sh
+
+# On honey, ensure tcfs can reach the same remote and has S3 credentials.
+# To start the mount from the script, set TCFS_HONEY_START_MOUNT=1:
+ssh honey 'TCFS_HONEY_START_MOUNT=1 TCFS_HONEY_SMOKE_SCRIPT=/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/lazy-hydration-mounted-smoke.sh TCFS_HONEY_EXPECTED_CONTENT_FILE=/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/expected-content.txt TCFS_HONEY_MOUNT_LOG=/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/mount.log bash /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/honey-run.sh'
+
+# If the mount is already active on honey, omit TCFS_HONEY_START_MOUNT:
+ssh honey 'TCFS_HONEY_SMOKE_SCRIPT=/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/lazy-hydration-mounted-smoke.sh TCFS_HONEY_EXPECTED_CONTENT_FILE=/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/expected-content.txt TCFS_HONEY_MOUNT_LOG=/tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/mount.log bash /tmp/tcfs-fleet-pilot-extended-20260509T2152Z-honey/run/honey-run.sh'
+
+# If honey does not already have AWS credentials, rerun this local helper with
+# --run-honey --forward-aws-env. The generated command file never stores those
+# credentials.

@@ -1,0 +1,24 @@
+[daemon]
+socket = "/tmp/tcfs-lazy-linux-demo.RCAckb/no-daemon.sock"
+
+[storage]
+endpoint = "http://100.64.48.53:8333"
+region = "us-east-1"
+bucket = "tcfs"
+remote_prefix = "fleet-pilot-extended-20260509T2152Z/linux-lifecycle"
+enforce_tls = false
+
+[sync]
+state_db = "/tmp/tcfs-lazy-linux-demo.RCAckb/state.db"
+sync_root = "/tmp/tcfs-lazy-linux-demo.RCAckb/source"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_empty_dirs = true
+
+[fuse]
+cache_dir = "/tmp/tcfs-lazy-linux-demo.RCAckb/cache"
+cache_max_mb = 64
+negative_cache_ttl_secs = 1
+
+[crypto]
+enabled = false

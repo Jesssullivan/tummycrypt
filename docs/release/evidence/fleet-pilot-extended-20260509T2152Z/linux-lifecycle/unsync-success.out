@@ -1,0 +1,5 @@
+Unsynced directory: /tmp/tcfs-lazy-linux-demo.RCAckb/source/docs
+  converted:
+    /tmp/tcfs-lazy-linux-demo.RCAckb/source/docs/README.md → /tmp/tcfs-lazy-linux-demo.RCAckb/source/docs/README.md.tc
+    /tmp/tcfs-lazy-linux-demo.RCAckb/source/docs/deep/remote.txt → /tmp/tcfs-lazy-linux-demo.RCAckb/source/docs/deep/remote.txt.tc
+  summary: 2 converted, 0 skipped, 0 dirty
