@@ -163,6 +163,7 @@ jobs:
 
           python3 - "$TCFS_SMOKE_S3_ENDPOINT" <<'PY'
           import ipaddress
+          import socket
           import sys
           from urllib.parse import urlparse
 
@@ -209,6 +210,26 @@ jobs:
               print(
                   f"::error::TCFS_SMOKE_S3_ENDPOINT host {host!r} is {' and '.join(blocked)}; GitHub-hosted macOS runners need a publicly reachable storage endpoint."
               )
+              raise SystemExit(1)
+
+          port = parsed.port or 443
+          try:
+              socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+          except OSError as exc:
+              print(
+                  "::error::TCFS_SMOKE_S3_ENDPOINT hostname does not resolve from this GitHub-hosted macOS runner; refresh the public smoke endpoint or use a private runner."
+              )
+              print(f"DNS error: {exc}")
+              raise SystemExit(1)
+
+          try:
+              with socket.create_connection((host, port), timeout=5):
+                  pass
+          except OSError as exc:
+              print(
+                  "::error::TCFS_SMOKE_S3_ENDPOINT did not accept a TCP connection from this GitHub-hosted macOS runner; refresh the public smoke endpoint or use a private runner."
+              )
+              print(f"connection error: {exc}")
               raise SystemExit(1)
           PY
 

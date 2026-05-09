@@ -14,6 +14,7 @@ the repository.
 | `lazy-linux-20260508T170825Z/` | Linux FUSE lifecycle on `honey`: browse before hydration, exact `cat`, mounted write/readback, cache clear/rehydrate, dirty recursive `unsync` refusal, clean recursive `.tc` conversion, persisted `NotSynced` state | repo-archived transcript, config, mount log, remote prefix, remote pullback, unsync outputs, redacted metadata |
 | `fleet-pilot-20260509T1919Z/` | Isolated `Documents`/`git` fleet-pilot packet: neo seed to disposable prefix, honey mounted traversal/hydration, live `neo-honey` backend smoke | repo-archived fixture tree, transcripts, honey commands, mount log, remote prefix, and live SeaweedFS/NATS smoke log |
 | `fleet-pilot-extended-20260509T2152Z/` | Extended isolated fleet-pilot packet: neo seed to disposable prefix, honey mounted traversal/hydration, honey Linux lifecycle companion, and live `neo-honey` backend smoke | repo-archived fixture tree, transcripts, honey commands, mount log, remote prefix, mounted write/readback pullback, cache rehydrate log, recursive safe-unsync outputs, and live SeaweedFS/NATS smoke log |
+| Production Developer ID `.pkg` hosted smoke attempt | Published `v0.12.12` package on GitHub-hosted `macos-15`: package download, structure check, install, installed FileProvider signing, installed CLI smoke, live config, and FileProvider config provisioning passed; remote fixture seed failed because the public Cloudflare quick-tunnel hostname did not resolve from the hosted runner | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25613963424> |
 | PZM testing-mode FileProvider package run | Mac App Development/testing-mode package build for deterministic conflict/status proof | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569345240> |
 | PZM testing-mode FileProvider smoke run | Enumerate/hydrate/evict/rehydrate, mutation proof already present from prior run, deterministic CLI conflict/status and exact FileProvider content preservation | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569596910> |
 | PZM testing-mode mutation package run | Mac App Development/testing-mode package build for mutation proof | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25565895586> |
@@ -25,6 +26,10 @@ the repository.
 - PZM FileProvider runs are non-production Mac App Development/testing-mode
   evidence with the lab `SystemPolicyRule` profile. They do not prove a
   production Developer ID clean-host Finder lane.
+- The production Developer ID `.pkg` hosted smoke attempt is useful package,
+  signing, and installed-binary evidence, but it failed before daemon startup
+  and FileProvider lifecycle because the run-scoped storage fixture could not
+  be seeded through the expired/unresolvable public tunnel endpoint.
 - `distribution-v01212-20260508T205913Z/` covers Homebrew and Nix only. It does
   not cover current-tag Linux packages, container, or production macOS `.pkg`
   smoke.

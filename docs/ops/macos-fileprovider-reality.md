@@ -490,7 +490,9 @@ Notes:
 - the remaining unknown is backend reachability from GitHub-hosted macOS
   runners; Tailscale-only, RFC1918, localhost, and other clearly non-public
   endpoints are not sufficient for this executor, and the workflow now rejects
-  those classes during preflight
+  those classes during preflight. It also resolves and opens TCP to the
+  configured HTTPS endpoint during preflight so expired public tunnel hostnames
+  fail before package download/install.
 - the lazy traversal demo defaults to disposable, run-scoped S3-compatible
   prefixes; the on-prem TCFS authority is not a prerequisite for this proof
   unless an operator intentionally selects it and records the private-runner
@@ -505,6 +507,25 @@ Notes:
 - treat this as a clean-host approximation, not as already-proven release
   truth, until at least one tagged run has passed and produced usable logs on
   GitHub
+
+May 9, 2026 hosted production-artifact retry narrowed the current hosted
+executor blocker again:
+
+- Run `25613963424` targeted GitHub-hosted `macos-15` with the published
+  `v0.12.12` Developer ID `.pkg`.
+- The run passed checkout, release input and secret validation, E2EE key
+  material install, package download, package structure verification, package
+  install, installed FileProvider signing verification, installed-binary smoke,
+  live config write, and FileProvider config provisioning.
+- It failed at `Seed remote fixture`, before daemon startup and before the
+  FileProvider harness. The uploaded `tcfs-push.log` shows the configured
+  Cloudflare quick-tunnel S3 endpoint failed DNS resolution from the hosted
+  runner and the push timed out after retries.
+- This is not a production Finder pass and not a new FileProvider failure. It
+  is a public storage endpoint freshness/reachability blocker for the
+  GitHub-hosted executor. Refresh `TCFS_SMOKE_S3_ENDPOINT` to a currently
+  reachable public endpoint, or move the production `.pkg` smoke to a
+  private/self-hosted Mac that can reach the backend.
 
 May 1, 2026 hosted evidence narrowed the current blocker:
 
