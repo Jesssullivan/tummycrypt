@@ -9,26 +9,28 @@ document makes the consequences of that declaration operational.
 
 ## Current Remote Topology
 
-As of 2026-04-29:
+As of 2026-05-09:
 
 | Remote | URL | Branches | `main` ahead of `origin/main` | `main` behind `origin/main` | Role |
 |--------|-----|----------|-------------------------------|------------------------------|------|
 | `origin` | `https://github.com/Jesssullivan/tummycrypt.git` | 26 | 0 | 0 | canonical source + release authority |
-| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 65 | 21 | 31 | active downstream dev surface |
-| `yoga` | `yoga:git/tummycrypt` (bare SSH) | 10 | 137 | 362 | retired legacy mirror |
+| `tinyland` | `git@github.com:tinyland-inc/tummycrypt.git` | 65 | 21 | 132 | active downstream dev surface |
+| `yoga` | `yoga:git/tummycrypt` (bare SSH) | 9 cached remote-tracking branches | 137 | 463 | retired legacy mirror; live fetch timed out on 2026-05-09 |
 
 Divergence points:
 
 - `origin/main` ↔ `tinyland/main`: merge-base is now `796b42e`
   (`origin/main`, 2026-04-17). `tinyland/main` merged `origin/main` via
   tinyland PR #60 on 2026-04-17, but canonical `origin/main` has since moved
-  31 commits ahead. The remaining 21 tinyland-only commits are the 19 pre-sync
+  132 commits ahead. The remaining 21 tinyland-only commits are the 19 pre-sync
   historical commits recorded in
   [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
   plus the sync merge pair (`6f7841f`, `987a6b4`).
 - `origin/main` ↔ `yoga/main`: there is no current merge base in this checkout;
   yoga represents a `v0.9.x`-era tcfs snapshot and is not a current development
-  branch.
+  branch. A May 9, 2026 `git fetch yoga --prune` attempt timed out over SSH,
+  so current governance decisions should treat the cached `yoga/*` refs as
+  historical evidence, not as a live collaboration surface.
 
 ## Declared Roles
 
@@ -71,12 +73,12 @@ merged there first and upstreamed to `origin` afterward.
 ### `yoga` — retired legacy mirror
 
 `yoga` is a bare SSH remote on a laptop host. It carries a `v0.9.x`-era
-snapshot that predates the current `v0.12.x` line by 362 commits in the current
-remote comparison.
+snapshot that predates the current `v0.12.x` line by 463 commits in the current
+cached remote comparison.
 
 - `yoga` is **not pushed to** from this point forward.
-- `yoga/main` and its 10 branches remain as **read-only historical
-  reference** only.
+- Cached `yoga/*` remote-tracking refs, including `yoga/main`, remain as
+  **read-only historical reference** only.
 - When the host is decommissioned the remote can be dropped with
   `git remote remove yoga` without information loss, provided anything
   worth preserving has been audited first.
@@ -170,7 +172,9 @@ list:
   `41` `fix/*`, `14` `feat/*`, `4` `test/*`, `3` `chore/*`, `1`
   `refactor/*`, `1` `homebrew-tap`, and `1` `main`. The tracker issue now
   focuses on auditing the larger `fix/*` and `chore/*` backlog for
-  "superseded vs. still-needed" status.
+  "superseded vs. still-needed" status. As of May 9, 2026, no remote branches
+  were deleted during the TCFS parity proof push; the next action should be an
+  explicit operator-approved prune tranche, not opportunistic cleanup.
 
 - **Retire `yoga` formally**: the remote is already de facto retired.
   A tracker issue decides whether to archive the bare SSH repo,
@@ -209,3 +213,7 @@ list:
   deleted remotes, and product proof is still actively moving through the next
   FileProvider/conflict and distribution packets. Do not prune or delete
   branches as part of this sprint until the next proof packet is chosen.
+- 2026-05-09 — Refreshed remote counts after parity proof PRs #341 and #342
+  merged. `origin/main` is current and all #342 checks passed. `tinyland` still
+  has the 65-branch tranche; `yoga` live fetch timed out and remains retired.
+  Branch deletion remains a separate explicit-approval action.
