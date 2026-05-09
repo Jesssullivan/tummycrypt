@@ -136,6 +136,7 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 ### Ops Runbooks
 - [Product Reality and Priority](ops/product-reality-and-priority.md) — current proof surface, honest product posture, and prioritized backlog
 - [TCFS Feature and Objective Matrix](ops/feature-objective-matrix-2026-05-09.md) — cross-linked feature readiness, GitHub/Linear tracker map, and next-workstream todo list
+- [TCFS Next Workstream Queue](ops/next-workstream-queue-2026-05-09.md) — execution order for production Finder, distribution, fleet, on-prem, Civo, and tinyland gates
 - [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md) — canonical post-release install proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container, and Nix
 - [Packaged Install To First-Real-Use Acceptance](ops/packaged-install-first-use.md) — the bar after artifact smoke passes and before broader host acceptance
 - [Lab Host Acceptance Matrix](ops/lab-host-acceptance-matrix.md) — real-host acceptance lanes across `honey`, `neo`, and `petting-zoo-mini`
