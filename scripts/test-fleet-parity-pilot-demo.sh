@@ -52,15 +52,22 @@ HOME="$HOME_OK" bash "$SCRIPT" \
 
 assert_contains "$OUT" "fleet pilot root:"
 assert_contains "$OUT" "honey fleet commands:"
+assert_contains "$OUT" "honey linux lifecycle commands:"
 assert_contains "$EVIDENCE/run-metadata.env" "honey_host=honey-test"
 assert_contains "$EVIDENCE/run-metadata.env" "push=0"
+assert_contains "$EVIDENCE/run-metadata.env" "run_linux_lifecycle=0"
+assert_contains "$EVIDENCE/run-metadata.env" "linux_lifecycle_remote=seaweedfs://example.invalid/tcfs/fleet-pilot-test/linux-lifecycle"
 assert_contains "$EVIDENCE/README.md" "TCFS Fleet Parity Pilot Evidence"
+assert_contains "$EVIDENCE/README.md" "honey-linux-lifecycle-commands.txt"
 assert_contains "$EVIDENCE/fleet-pilot-tree.txt" "Documents/fleet-readiness.md"
 assert_contains "$EVIDENCE/fleet-pilot-tree.txt" "git/tcfs-pilot-repo/README.md"
 assert_contains "$EVIDENCE/fleet-documents-expected.txt" "TCFS Fleet Pilot"
 assert_contains "$EVIDENCE/honey-fleet-run.sh" "Documents/fleet-readiness.md"
 assert_contains "$EVIDENCE/honey-fleet-run.sh" "--expect-entry git/tcfs-pilot-repo"
 assert_contains "$EVIDENCE/honey-fleet-commands.txt" "ssh honey-test"
+assert_contains "$EVIDENCE/honey-linux-lifecycle-commands.txt" "lazy-hydration-linux-lifecycle-demo.sh"
+assert_contains "$EVIDENCE/honey-linux-lifecycle-run.sh" "TCFS_BIN_RESOLVED"
+assert_contains "$EVIDENCE/linux-lifecycle-status.env" "ran=0"
 assert_contains "$EVIDENCE/desktop-honey/honey-commands.txt" "ssh honey-test"
 test -f "$HOME_OK/TCFS Pilot/run/Documents/fleet-readiness.md"
 test -f "$HOME_OK/TCFS Pilot/run/git/tcfs-pilot-repo/.git/HEAD"
@@ -81,6 +88,7 @@ printf '\n' >>"$TCFS_FAKE_SSH_LOG"
 case "$*" in
   *honey-run.sh*) printf 'fake honey smoke passed\n' ;;
   *honey-fleet-run.sh*) printf 'fake fleet honey smoke passed\n' ;;
+  *honey-linux-lifecycle-run.sh*) printf 'fake linux lifecycle passed\n' ;;
 esac
 EOF
 cat >"$FAKE_BIN/scp" <<'EOF'
@@ -102,15 +110,22 @@ bash "$SCRIPT" \
   --honey-host honey-run-test \
   --honey-remote-dir /tmp/tcfs-fleet-pilot-run-test \
   --run-honey \
+  --run-linux-lifecycle \
   --honey-existing-mount \
   >"${TMPDIR}/run.out"
 
 assert_contains "$RUN_EVIDENCE/desktop-honey/honey-run.log" "fake honey smoke passed"
 assert_contains "$RUN_EVIDENCE/honey-fleet-run.log" "fake fleet honey smoke passed"
+assert_contains "$RUN_EVIDENCE/honey-linux-lifecycle.log" "fake linux lifecycle passed"
+assert_contains "$RUN_EVIDENCE/linux-lifecycle-status.env" "ran=1"
+assert_contains "$RUN_EVIDENCE/linux-lifecycle-status.env" "status=0"
 assert_contains "$SSH_LOG" "honey-run-test"
 assert_contains "$SSH_LOG" "honey-fleet-run.sh"
+assert_contains "$SSH_LOG" "honey-linux-lifecycle-run.sh"
 assert_contains "$SCP_LOG" "fleet-documents-expected.txt"
 assert_contains "$SCP_LOG" "honey-fleet-run.sh"
+assert_contains "$SCP_LOG" "lazy-hydration-linux-demo.sh"
+assert_contains "$SCP_LOG" "linux-lifecycle/evidence/."
 
 HOME_BAD="${TMPDIR}/home-bad"
 mkdir -p "$HOME_BAD"

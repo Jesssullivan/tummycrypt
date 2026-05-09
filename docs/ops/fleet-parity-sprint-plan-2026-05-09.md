@@ -42,7 +42,11 @@ ready to manage real `~/Documents` or `~/git` across arbitrary machines.
 The next credible step is an isolated fleet-pilot evidence bundle using a
 disposable remote prefix and pilot directories such as `~/TCFS Pilot/Documents`
 or `~/TCFS Pilot/git`. Do not make real `~/Documents` or `~/git` the default
-sync roots until the acceptance gates below are archived.
+sync roots until the acceptance gates below are archived. The fleet-pilot
+helper now has an explicit `--run-linux-lifecycle` /
+`TCFS_FLEET_PILOT_RUN_LINUX_LIFECYCLE=1` companion path that runs the Linux
+lifecycle harness on `honey` under a nested disposable prefix and copies the
+evidence back into the same packet.
 
 ## Product Semantics
 
@@ -87,7 +91,7 @@ Minimum acceptable packet:
 
 | Packet | Tracker | Work | Acceptance |
 | --- | --- | --- | --- |
-| A. Fleet pilot packet | `TIN-133`, `#309` adjacent | Create a cross-host evidence lane from isolated `neo` or `honey` pilot roots, not real home directories. Reuse `task lazy:fleet-pilot-plan`, `task lazy:linux-lifecycle-demo`, `just neo-honey-smoke`, and lab host acceptance docs. | One archived bundle shows traversal, hydrate, edit, unsync, rehydrate, and exact content across at least `neo` and `honey`; PZM can be included as Apple lab proof but does not replace production Finder. |
+| A. Fleet pilot packet | `TIN-133`, `#309` adjacent | Create a cross-host evidence lane from isolated `neo` or `honey` pilot roots, not real home directories. Reuse `task lazy:fleet-pilot-plan`, the helper's `--run-linux-lifecycle` companion, `task lazy:linux-lifecycle-demo`, `just neo-honey-smoke`, and lab host acceptance docs. | One archived bundle shows traversal, hydrate, edit, unsync, rehydrate, and exact content across at least `neo` and `honey`; PZM can be included as Apple lab proof but does not replace production Finder. |
 | B. Safe-unsync hardening | `TIN-133`, code | Keep recursive `tcfs unsync <directory>` behavior product-grade: clean descendants convert, dirty descendants refuse, `--force` preserves tracked remote metadata, state flips to `NotSynced` before destructive file/stub operations. | `cargo test -p tcfs-cli cli_unsync`, `tcfs-vfs` lifecycle tests, daemon RPC unsync tests, and host transcript stay green. |
 | C. Production Finder lane | `TIN-133`, `#309` | Select a true production Developer ID clean-host executor and run the published `.pkg` path through app install, host launch, domain add, CloudStorage enumeration, hydrate, mutate/conflict if reliable, and log capture. | `#309` gets one tagged production clean-host run. PZM testing-mode remains regression evidence only. |
 | D. Distribution proof closure | `TIN-131`, `#280` | Keep `v0.12.12` proof boundaries explicit and finish next-tag native `linux/arm64/v8` GHCR proof. Tie macOS `.pkg` closure to Packet C. | `#280` can narrow to only future policy decisions after production macOS and native arm64 container proof land. |
@@ -130,6 +134,7 @@ Host evidence:
 
 ```bash
 task lazy:fleet-pilot-plan
+TCFS_FLEET_PILOT_RUN_LINUX_LIFECYCLE=1 task lazy:fleet-pilot-plan
 task lazy:linux-lifecycle-demo
 just neo-honey-smoke
 ```

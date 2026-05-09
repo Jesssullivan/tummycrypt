@@ -153,7 +153,7 @@ tasks:
       - bash scripts/test-lazy-hydration-desktop-honey-demo.sh
 
   lazy:fleet-pilot-plan:
-    desc: "Prepare isolated fleet parity pilot artifacts; add TCFS_FLEET_PILOT_PUSH=1 and TCFS_FLEET_PILOT_RUN_HONEY=1 to execute"
+    desc: "Prepare isolated fleet parity pilot artifacts; add PUSH/RUN_HONEY/RUN_LINUX_LIFECYCLE env flags to execute"
     cmds:
       - bash scripts/fleet-parity-pilot-demo.sh
 

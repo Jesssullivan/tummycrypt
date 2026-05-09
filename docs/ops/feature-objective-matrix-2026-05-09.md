@@ -22,10 +22,10 @@ GitHub issues, and Linear mirrors. It should answer two questions quickly:
 
 | Feature / surface | Objective | Readiness | Strongest proof | Next action |
 | --- | --- | --- | --- | --- |
-| Fleet-pilot packet | Bundle isolated `Documents`/`git` fixture generation, honey commands, and optional live smoke transcripts. | Green for isolated seed, honey traversal/hydration, and live `neo-honey` smoke. | `docs/release/evidence/fleet-pilot-20260509T1919Z/`, `task lazy:fleet-pilot-plan`, `scripts/fleet-parity-pilot-demo.sh`, `scripts/test-fleet-parity-pilot-demo.sh`. | Extend the packet with mounted write/readback and recursive safe-unsync if this becomes the broader home-directory acceptance gate. |
+| Fleet-pilot packet | Bundle isolated `Documents`/`git` fixture generation, honey commands, optional live smoke transcripts, and an optional Linux lifecycle companion. | Green for isolated seed, honey traversal/hydration, and live `neo-honey` smoke; helper now emits/runs a nested honey Linux lifecycle companion when explicitly requested. | `docs/release/evidence/fleet-pilot-20260509T1919Z/`, `task lazy:fleet-pilot-plan`, `scripts/fleet-parity-pilot-demo.sh`, `scripts/test-fleet-parity-pilot-demo.sh`. | Archive a new extended packet with `TCFS_FLEET_PILOT_RUN_LINUX_LIFECYCLE=1` before treating the fleet packet itself as the broader home-directory lifecycle gate. |
 | Linux clean-name mounted traversal | Browse remote trees without hydrating all file bodies. | Green on `honey` for the archived lifecycle lane. | `docs/release/evidence/lazy-linux-20260508T170825Z/`, `tcfs-vfs` lifecycle tests. | Keep harness green while cross-host pilot evidence is built. |
 | On-demand hydration | Hydrate exact selected content on open/read. | Green on Linux; green in PZM testing-mode FileProvider lab; production Finder still open. | Linux lifecycle evidence; PZM run IDs in FileProvider docs; `cargo test -p tcfs-vfs --test vfs_lifecycle_test`. | Prove production Developer ID clean-host hydrate through `#309`. |
-| Mounted write/readback | Edit through the mounted view and prove exact remote content. | Green on Linux lifecycle evidence. | `mounted-write-remote-pull.log` in the Linux evidence bundle. | Add cross-host edit/pullback to the fleet-pilot packet. |
+| Mounted write/readback | Edit through the mounted view and prove exact remote content. | Green on Linux lifecycle evidence. | `mounted-write-remote-pull.log` in the Linux evidence bundle. | Use the fleet-pilot Linux lifecycle companion for the next archived packet; add same-fixture cross-host edit/pullback only if that becomes the acceptance bar. |
 | Recursive safe-unsync | Convert clean tracked descendants back to dehydrated representation while refusing dirty descendants unless forced. | Green in CLI tests and Linux host evidence. | `cargo test -p tcfs-cli cli_unsync`, `unsync-dirty.out`, `unsync-success.out`, `unsync-status.out`. | Keep status/state-ordering tests in the sprint gate. |
 | Physical `.tc` / `.tcf` stubs | Represent dehydrated sync-root files outside mounted/FileProvider views. | Real and tested for CLI/offline roots. | CLI unsync tests and lazy lifecycle evidence. | Avoid presenting physical stubs as the Finder UX. |
 | macOS FileProvider lab | Prove enumerate, hydrate, evict, rehydrate, mutation, and conflict/status content preservation. | Green in non-production PZM testing mode. | `macos-fileprovider-reality.md` and testing-mode run IDs. | Treat as regression proof, not production acceptance. |
@@ -45,11 +45,13 @@ GitHub issues, and Linear mirrors. It should answer two questions quickly:
    a disposable remote prefix, and at least `neo` plus `honey`. Prove browse,
    hydrate, edit, unsync/dehydrate, rehydrate, and exact content preservation.
    Start with `task lazy:fleet-pilot-plan`; use `TCFS_FLEET_PILOT_PUSH=1`,
-   `TCFS_FLEET_PILOT_RUN_HONEY=1`, and `TCFS_HONEY_START_MOUNT=1` when the
-   disposable remote and honey credentials are ready.
+   `TCFS_FLEET_PILOT_RUN_HONEY=1`, `TCFS_FLEET_PILOT_RUN_LINUX_LIFECYCLE=1`,
+   and `TCFS_HONEY_START_MOUNT=1` when the disposable remote and honey
+   credentials are ready.
    Initial packet `docs/release/evidence/fleet-pilot-20260509T1919Z/` is green
    for seed, honey traversal/hydration, and live `neo-honey`; writeback and
-   safe-unsync remain covered by the Linux lifecycle packet, not this pilot.
+   safe-unsync remain covered by the older Linux lifecycle packet until a new
+   extended fleet packet is archived.
 
 2. Keep safe-unsync as a hard gate.
    Run `cargo test -p tcfs-cli cli_unsync`,

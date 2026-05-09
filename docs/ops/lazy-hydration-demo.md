@@ -252,6 +252,24 @@ inherits those environment variables.
 If honey's installed `tcfs` is older than the current workspace, build a current
 Linux binary on honey and pass it with `TCFS_HONEY_TCFS_BIN=/path/to/tcfs`.
 
+For the broader fleet-pilot packet, use the dedicated helper rather than
+repurposing the Desktop helper. It creates isolated `Documents` and `git`
+fixtures and can attach the honey-side Linux lifecycle proof under a nested
+remote prefix:
+
+```bash
+TCFS_FLEET_PILOT_REMOTE=seaweedfs://host:8333/tcfs/fleet-pilot-manual \
+TCFS_FLEET_PILOT_PUSH=1 \
+TCFS_FLEET_PILOT_RUN_HONEY=1 \
+TCFS_FLEET_PILOT_RUN_LINUX_LIFECYCLE=1 \
+TCFS_HONEY_START_MOUNT=1 \
+task lazy:fleet-pilot-plan
+```
+
+The lifecycle companion proves mounted write/readback, cache clear/rehydrate,
+and recursive safe-unsync on `honey`; it still uses an isolated fixture and is
+not evidence that real `~/Documents` or `~/git` have been taken over.
+
 Do not describe this as `honey:~/Desktop` unless honey is deliberately
 configured with TCFS at that exact path. The Finder/FileProvider proof remains
 the `~/Library/CloudStorage/TCFS*` root, not the physical Desktop directory.
