@@ -1,3 +1,6 @@
+{{- $global := default dict .Values.global -}}
+{{- $s3Endpoint := default .Values.config.s3Endpoint $global.seaweedfsEndpoint -}}
+{{- $natsUrl := default .Values.config.natsUrl $global.natsUrl -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,12 +17,12 @@ data:
     metrics_addr = "0.0.0.0:{{ .Values.metrics.port }}"
 
     [storage]
-    endpoint = {{ .Values.config.s3Endpoint | quote }}
+    endpoint = {{ $s3Endpoint | quote }}
     region   = {{ .Values.config.s3Region | quote }}
     bucket   = {{ .Values.config.s3Bucket | quote }}
 
     [sync]
-    nats_url    = {{ .Values.config.natsUrl | quote }}
+    nats_url    = {{ $natsUrl | quote }}
     state_db    = "/var/lib/tcfsd/state.db"
     workers     = {{ .Values.config.workerConcurrency }}
     max_retries = 3

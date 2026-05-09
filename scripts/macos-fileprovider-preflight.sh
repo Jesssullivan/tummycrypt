@@ -33,9 +33,11 @@ Options:
                               Only inspect TCFSProvider.app signing,
                               entitlements, and embedded profiles
   --require-production-signing
-                              Fail unless host app and extension have
-                              keychain-access-groups entitlements and embedded
-                              provisioning profiles
+                              Fail unless host app and extension pass strict
+                              profile-backed signing checks: keychain-access-
+                              groups entitlements, embedded provisioning
+                              profiles, and matching profile certificates.
+                              This does not by itself require Developer ID.
   --tcfs <path-or-name>       CLI binary to use (default: tcfs)
   --tcfsd <path-or-name>      Daemon binary to use (default: tcfsd)
   -h, --help                  Show this help

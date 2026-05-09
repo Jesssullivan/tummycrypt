@@ -6,7 +6,7 @@
 #   ./scripts/tcfs-backend-deploy.sh
 #   ./scripts/tcfs-backend-deploy.sh --dry-run
 #   ./scripts/tcfs-backend-deploy.sh --rbac-only
-#   TCFS_RELEASE_NAME=tcfs-backend ./scripts/tcfs-backend-deploy.sh --set image.tag=v0.12.2
+#   TCFS_RELEASE_NAME=tcfs-backend ./scripts/tcfs-backend-deploy.sh --set image.tag=v0.12.12
 #
 set -euo pipefail
 
@@ -16,6 +16,7 @@ CHART_DIR="${REPO_ROOT}/infra/k8s/charts/tcfs-backend"
 
 RELEASE_NAME="${TCFS_RELEASE_NAME:-tcfs-backend}"
 NAMESPACE="${TCFS_NAMESPACE:-tcfs}"
+KUBE_CONTEXT="${TCFS_CONTEXT:-${TCFS_KUBE_CONTEXT:-}}"
 DRY_RUN=false
 RBAC_ONLY=false
 EXTRA_ARGS=()
@@ -57,13 +58,24 @@ info "Checking prerequisites..."
 check_command helm
 check_command kubectl
 
-if ! kubectl cluster-info >/dev/null 2>&1; then
+if [[ -n "${KUBE_CONTEXT}" ]]; then
+    info "Using Kubernetes context: ${KUBE_CONTEXT}"
+    KUBECTL=(kubectl --context "${KUBE_CONTEXT}")
+    HELM_CONTEXT_ARGS=(--kube-context "${KUBE_CONTEXT}")
+else
+    warn "TCFS_CONTEXT not set; using the current kube context"
+    KUBECTL=(kubectl)
+    HELM_CONTEXT_ARGS=()
+fi
+
+if ! "${KUBECTL[@]}" cluster-info >/dev/null 2>&1; then
     error "Cannot connect to Kubernetes cluster. Check your kubeconfig."
     exit 1
 fi
 
 HELM_CMD=(
     helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}"
+    "${HELM_CONTEXT_ARGS[@]}"
     --namespace "${NAMESPACE}"
     --create-namespace
     -f "${CHART_DIR}/values.yaml"
@@ -101,12 +113,12 @@ if [[ "${RBAC_ONLY}" == "true" ]]; then
         "${TEMPLATE_CMD[@]}"
     else
         info "Applying RBAC-only recovery manifest"
-        "${TEMPLATE_CMD[@]}" | kubectl apply --namespace "${NAMESPACE}" -f -
+        "${TEMPLATE_CMD[@]}" | "${KUBECTL[@]}" apply --namespace "${NAMESPACE}" -f -
         echo
         info "Validating RBAC-only recovery objects..."
-        kubectl get serviceaccount "${RELEASE_NAME}-tcfs-backend" --namespace "${NAMESPACE}"
-        kubectl get role "${RELEASE_NAME}-tcfs-backend-leases" --namespace "${NAMESPACE}"
-        kubectl get rolebinding "${RELEASE_NAME}-tcfs-backend-leases" --namespace "${NAMESPACE}"
+        "${KUBECTL[@]}" get serviceaccount "${RELEASE_NAME}-tcfs-backend" --namespace "${NAMESPACE}"
+        "${KUBECTL[@]}" get role "${RELEASE_NAME}-tcfs-backend-leases" --namespace "${NAMESPACE}"
+        "${KUBECTL[@]}" get rolebinding "${RELEASE_NAME}-tcfs-backend-leases" --namespace "${NAMESPACE}"
     fi
     exit 0
 fi
@@ -118,12 +130,12 @@ if [[ "${DRY_RUN}" == "false" ]]; then
     SERVICE_ACCOUNT_NAME="${RELEASE_NAME}-tcfs-backend"
     echo
     info "Validating Helm-managed scaffolding..."
-    kubectl get serviceaccount "${SERVICE_ACCOUNT_NAME}" --namespace "${NAMESPACE}" \
+    "${KUBECTL[@]}" get serviceaccount "${SERVICE_ACCOUNT_NAME}" --namespace "${NAMESPACE}" \
         >/dev/null 2>&1 || warn "service account ${SERVICE_ACCOUNT_NAME} not visible yet"
-    kubectl rollout status deployment/"${DEPLOYMENT_NAME}" \
+    "${KUBECTL[@]}" rollout status deployment/"${DEPLOYMENT_NAME}" \
         --namespace "${NAMESPACE}" \
         --timeout=120s 2>/dev/null || warn "${DEPLOYMENT_NAME} rollout not ready yet"
     echo
     info "Helm release state:"
-    helm list --namespace "${NAMESPACE}" || true
+    helm list "${HELM_CONTEXT_ARGS[@]}" --namespace "${NAMESPACE}" || true
 fi

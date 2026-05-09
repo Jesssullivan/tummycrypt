@@ -21,6 +21,10 @@ Do not assume it is interchangeable with `infra/tofu/modules/tcfs-backend`.
 The OpenTofu module uses different object names (`tcfsd`, `tcfs-sync-worker`)
 and should be treated as a separate deployment path.
 
+The chart defaults to the mutable `latest` container tag for operator
+convenience. Use an explicit release tag, such as `v0.12.12`, for production
+reconcile or evidence runs.
+
 ## Expected Objects
 
 With the default release name `tcfs-backend`, this chart creates:
@@ -42,7 +46,7 @@ Or directly:
 helm upgrade --install tcfs-backend ./infra/k8s/charts/tcfs-backend \
   --namespace tcfs \
   --create-namespace \
-  --set image.tag=latest \
+  --set image.tag=v0.12.12 \
   --set config.natsUrl=nats://nats.tcfs.svc.cluster.local:4222
 ```
 

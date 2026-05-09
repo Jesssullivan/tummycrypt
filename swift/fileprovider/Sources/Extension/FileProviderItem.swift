@@ -89,9 +89,9 @@ class TCFSFileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDeco
 
     var capabilities: NSFileProviderItemCapabilities {
         if isDirectory {
-            return [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems, .allowsDeleting, .allowsRenaming]
+            return [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems, .allowsDeleting]
         }
-        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting, .allowsEvicting]
+        return [.allowsReading, .allowsWriting, .allowsDeleting, .allowsEvicting]
     }
 
     /// Content policy controls eviction (dehydration) for placeholder support.

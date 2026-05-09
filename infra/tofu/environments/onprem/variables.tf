@@ -101,7 +101,7 @@ variable "seaweedfs_candidate_app_label" {
 }
 
 variable "seaweedfs_image" {
-  description = "SeaweedFS image for the on-prem candidate workload. Mirrors current live readback until a pinned production tag is selected."
+  description = "SeaweedFS image for the on-prem candidate workload. Mirrors current live readback until a pinned production tag is selected; pin before accepting cutover evidence."
   type        = string
   default     = "chrislusf/seaweedfs:latest"
 }

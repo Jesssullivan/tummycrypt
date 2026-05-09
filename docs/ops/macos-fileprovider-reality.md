@@ -46,6 +46,10 @@ sync-root stub representation, not the desired primary Finder UX.
 - CI proves the Rust staticlib/header required by the macOS FileProvider bridge
   and separately type-checks the iOS Swift lane. The regular CI workflow does
   not yet build the macOS FileProvider Swift bundle.
+- Runner split: CI and release build jobs currently use GitHub-hosted
+  `macos-14`; the production post-install smoke defaults to GitHub-hosted
+  `macos-15`; the PZM testing-mode package/smoke lanes run on the registered
+  self-hosted `petting-zoo-mini` Mac.
 - Release automation builds `TCFSProvider.app`, packages it into the Apple
   Silicon `.pkg`, and asks LaunchServices to register the containing app in the
   active console user's context. The
@@ -253,7 +257,7 @@ base64 -i ~/Downloads/tcfs-fileprovider-developer-id.provisionprofile \
 
 When `APPLE_CERTIFICATE_BASE64` is configured, the release workflow now treats
 those two profile secrets as required, inventories the decoded profiles as a
-compatible host/extension pair, and runs the same strict production signing
+compatible host/extension pair, and runs the same strict profile-backed signing
 preflight during `swift/fileprovider/build.sh`.
 `task lazy:check` includes `scripts/test-release-workflow-fileprovider.sh`,
 which extracts the release workflow's profile-import step, verifies the package
@@ -288,8 +292,8 @@ task lazy:macos-finder-preflight
 It intentionally does not launch the app or change FileProvider domain state.
 Use it before `task lazy:macos-finder-smoke` to identify stale app bundles,
 missing configs, duplicate extension registrations, and CloudStorage ambiguity.
-By default it warns on missing production signing material so diagnostic local
-apps remain inspectable. For release evidence and the no-embedded-config lane,
+By default it warns on missing profile-backed signing material so diagnostic
+local apps remain inspectable. For release evidence and the no-embedded-config lane,
 make those checks fatal:
 
 ```bash

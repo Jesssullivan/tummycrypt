@@ -13,6 +13,14 @@ WORKFLOW="${REPO_ROOT}/.github/workflows/release.yml"
 # shellcheck disable=SC2016 # Intentional literal assertions against GitHub expressions.
 ruby -ryaml -e '
   workflow = YAML.load_file(ARGV[0])
+  dispatch = workflow.fetch(true).fetch("workflow_dispatch").fetch("inputs")
+  tag = dispatch.fetch("tag")
+  raise "release tag input example must track current proof tag" unless tag.fetch("description").include?("v0.12.12")
+  raise "release workflow must not default manual dispatch to latest" if tag["default"] == "latest"
+
+  plan_run = workflow.fetch("jobs").fetch("plan").fetch("steps").find { |step| step["name"] == "Determine version" }.fetch("run")
+  raise "release plan must validate semantic v-tag input" unless plan_run.include?("Release tag must look like vX.Y.Z")
+
   steps = workflow.fetch("jobs").fetch("build-image").fetch("steps")
 
   qemu_index = steps.index { |step| step["uses"] == "docker/setup-qemu-action@v3" }

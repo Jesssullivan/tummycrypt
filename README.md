@@ -54,7 +54,7 @@ brew install Jesssullivan/tummycrypt/tcfs
 # Ubuntu 24.04+ / Debian 13+
 sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 
-# RPM (Fedora/RHEL/Rocky, daemon-only today)
+# RPM (Fedora 42 x86_64 proven; RHEL/Rocky pending, daemon-only today)
 sudo rpm -i tcfsd-*.rpm
 
 # Container (K8s worker mode; amd64 image is the current proven lane)
@@ -133,7 +133,7 @@ For the bar after install succeeds, see
 
 | Feature | Linux | macOS | Windows | iOS |
 |---------|-------|-------|---------|-----|
-| CLI (push/pull/reconcile) | Proven | Proven | Planned | - |
+| CLI (push/pull/reconcile) | Proven | Install-smoke proven; storage commands available but not continuous macOS acceptance | Planned | - |
 | Daemon (gRPC + metrics) | Proven | Available, lightly validated | Planned | - |
 | Filesystem mount | x86_64 FUSE lifecycle is host-proven; packaged mount/systemd first-use is still separate; NFS fallback evidence pending | Experimental | Cloud Files API skeleton | - |
 | FileProvider | - | Non-production PZM testing-mode lab-proven experimental | - | Proof-of-concept; write hooks unproven |

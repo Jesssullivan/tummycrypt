@@ -24,7 +24,7 @@ brew install Jesssullivan/tummycrypt/tcfs
 # Ubuntu 24.04+ / Debian 13+
 sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 
-# RPM (Fedora/RHEL/Rocky, daemon-only today)
+# RPM (Fedora 42 x86_64 proven; RHEL/Rocky pending, daemon-only today)
 sudo rpm -i tcfsd-*.rpm
 
 # Nix tagged profile install

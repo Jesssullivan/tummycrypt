@@ -10,7 +10,9 @@ global:
   # -- NATS server URL
   natsUrl: "nats://nats:4222"
 
-  # -- Default container image tag
+  # -- Default container image tag passed through to tcfs-backend. Mutable
+  # -- convenience default only; set an explicit tag such as v0.12.12 for release
+  # -- proof or production runs.
   imageTag: "latest"
 
   # -- Default replica count for tcfs workloads

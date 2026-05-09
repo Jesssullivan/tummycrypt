@@ -12,7 +12,7 @@ variable "namespace" {
 }
 
 variable "image_tag" {
-  description = "tcfsd container image tag"
+  description = "tcfsd container image tag. The default is legacy/standby convenience only; set an explicit release tag for proof or production evidence."
   type        = string
   default     = "latest"
 }

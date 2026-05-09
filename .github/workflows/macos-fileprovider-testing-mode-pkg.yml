@@ -88,6 +88,9 @@ jobs:
             echo "TAG=$TAG"
             echo "VERSION=${TAG#v}"
             echo "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
+            # This flag means strict profile-backed signing checks in the
+            # preflight helper. The testing-mode lane intentionally uses
+            # Apple/Mac Development identities, not Developer ID identities.
             echo "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
             echo "TCFS_CODESIGN_TIMESTAMP=0"
           } >> "$GITHUB_ENV"
@@ -323,6 +326,7 @@ jobs:
             echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
             echo "TCFS_HOST_PROVISIONING_PROFILE=$TCFS_HOST_PROVISIONING_PROFILE"
             echo "TCFS_EXTENSION_PROVISIONING_PROFILE=$TCFS_EXTENSION_PROVISIONING_PROFILE"
+            # Strict profile-backed signing checks, not Developer ID signing.
             echo "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
             echo "TCFS_FILEPROVIDER_TESTING_MODE_ENTITLEMENT=1"
             echo "TCFS_CODESIGN_TIMESTAMP=0"

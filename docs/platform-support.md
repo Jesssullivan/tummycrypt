@@ -1,8 +1,8 @@
 # Platform Support
 
 tcfs targets Linux, macOS, Windows, and iOS with varying feature completeness.
-The repo is under active development, so "supported" here means "currently
-shipped and evidenced," not "long-term stable."
+This page records platform maturity; only surfaces explicitly marked proven or
+available with evidence should be treated as shipped/supportable.
 
 ## Linux (Primary)
 
@@ -90,7 +90,8 @@ surface.
 
 - **FileProvider**: NSFileProviderExtension with enumeration + hydration; experimental write hooks exist but are not accepted as supported behavior
 - **UniFFI**: Swift bindings via uniffi-bindgen
-- **Encryption**: Full E2E decryption support
+- **Encryption**: Core crypto/decryption bindings are available; real-device
+  credential and Files.app behavior are not yet proven
 - **Build**: Swift sources type-check in CI; Xcode/TestFlight remains a manual lane
 - **Status**: Proof-of-concept, not in App Store
 - **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)

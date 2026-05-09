@@ -3,6 +3,8 @@
 
 image:
   repository: ghcr.io/jesssullivan/tcfsd
+  # Mutable convenience default only; set an explicit tag such as v0.12.12 for
+  # release proof or production runs.
   tag: latest
   pullPolicy: Always
 

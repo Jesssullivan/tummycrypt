@@ -174,6 +174,33 @@ check_release_action_token_override() {
   ' "$WORKFLOW"
 }
 
+check_release_gates_and_apple_signing_requirements() {
+  ruby -ryaml -e '
+    workflow = YAML.load_file(ARGV[0])
+    jobs = workflow.fetch("jobs")
+
+    ["build-pkg", "create-release", "update-homebrew"].each do |job_name|
+      condition = jobs.fetch(job_name).fetch("if")
+      raise "#{job_name} must require upstream success" unless condition.include?("success()")
+      raise "#{job_name} must not use !cancelled() as a success gate" if condition.include?("!cancelled()")
+    end
+
+    produced = File.read(ARGV[0]).lines.take(24).join
+    raise "release header must list FileProvider zip" unless produced.include?("macOS FileProvider app archive")
+    raise "release header must list macOS pkg" unless produced.include?("macOS installer package")
+
+    fileprovider_import = jobs.fetch("build-fileprovider").fetch("steps").find { |step| step["name"] == "Import signing certificate" }.fetch("run")
+    raise "release FileProvider build must require APPLE_CERTIFICATE_BASE64" unless fileprovider_import.include?("APPLE_CERTIFICATE_BASE64 is required")
+    raise "release FileProvider build must fail without Developer ID Application" unless fileprovider_import.include?("No Developer ID Application identity found")
+    raise "release FileProvider build must not fall back to ad-hoc signing" if fileprovider_import.include?("using ad-hoc")
+
+    installer_import = jobs.fetch("build-pkg").fetch("steps").find { |step| step["name"] == "Import installer certificate" }.fetch("run")
+    raise "release pkg build must require APPLE_INSTALLER_CERTIFICATE_BASE64" unless installer_import.include?("APPLE_INSTALLER_CERTIFICATE_BASE64 is required")
+    raise "release pkg build must fail without Developer ID Installer" unless installer_import.include?("No Developer ID Installer identity found")
+    raise "release pkg build must not build unsigned packages" if installer_import.include?("building unsigned")
+  ' "$WORKFLOW"
+}
+
 check_macos_fileprovider_principal_class() {
   local plist="$REPO_ROOT/swift/fileprovider/resources/Extension-Info.plist"
   local source="$REPO_ROOT/swift/fileprovider/Sources/Extension/FileProviderExtension.swift"
@@ -401,6 +428,7 @@ check_postinstall_workflow_checkout_uses_current_harness
 check_postinstall_workflow_environment_and_secrets
 check_postinstall_workflow_artifact_download_uses_api_zip
 check_release_action_token_override
+check_release_gates_and_apple_signing_requirements
 check_macos_fileprovider_principal_class
 check_testing_mode_is_explicit_opt_in
 check_testing_mode_package_workflow
