@@ -135,12 +135,14 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 
 ### Ops Runbooks
 - [Product Reality and Priority](ops/product-reality-and-priority.md) — current proof surface, honest product posture, and prioritized backlog
+- [TCFS Feature and Objective Matrix](ops/feature-objective-matrix-2026-05-09.md) — cross-linked feature readiness, GitHub/Linear tracker map, and next-workstream todo list
 - [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md) — canonical post-release install proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container, and Nix
 - [Packaged Install To First-Real-Use Acceptance](ops/packaged-install-first-use.md) — the bar after artifact smoke passes and before broader host acceptance
 - [Lab Host Acceptance Matrix](ops/lab-host-acceptance-matrix.md) — real-host acceptance lanes across `honey`, `neo`, and `petting-zoo-mini`
 - [Neo-Honey Live Acceptance](ops/neo-honey-acceptance.md) — named live fleet sync acceptance lane
 - [On-Prem Authority Recovery](ops/onprem-authority-recovery.md) — backend-worker Helm recovery plus the on-prem OpenTofu migration boundary
 - [Fleet Deployment Guide](ops/fleet-deployment.md) — legacy Civo-era fleet deployment notes plus operational checks
+- [TCFS Fleet Parity Sprint Plan](ops/fleet-parity-sprint-plan-2026-05-09.md) — next proof sprint for isolated cross-host traversal, hydration, unsync, and rehydrate readiness
 - [Lazy Hydration Demo Acceptance](ops/lazy-hydration-demo.md) — terminal and Finder proof target for lazy `ls`/`cat`/dehydrate flows
 - [Lazy Desktop-to-Honey Evidence](release/lazy-desktop-honey-evidence-2026-04-30.md) — live proof of Desktop-originated remote traversal and `cat` hydration on honey
 - [macOS FileProvider Local Evidence](release/macos-fileprovider-local-evidence-2026-04-30.md) — local CloudStorage enumeration and exact-content hydration proof

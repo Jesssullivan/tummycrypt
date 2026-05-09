@@ -1,0 +1,3 @@
+Mounting http://100.64.48.53:8333:tcfs (prefix: fleet-pilot-20260509T1919Z) → /tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount [FUSE]
+Press Ctrl-C or run `tcfs unmount /tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount` to stop.
+[2m2026-05-09T19:15:47.497889Z[0m [32m INFO[0m [2mtcfs_fuse::driver[0m[2m:[0m mounting tcfs via FUSE3 (unprivileged) [3mmountpoint[0m[2m=[0m/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount

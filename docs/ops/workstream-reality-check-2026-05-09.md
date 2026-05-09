@@ -1,6 +1,7 @@
 # TCFS Workstream Reality Check - 2026-05-09
 
-This checkpoint records the repo, tracker, and proof state after PR #352 merged.
+This checkpoint records the repo, tracker, and proof state after PR #352 merged,
+with the PR #353 follow-up commit included in the local planning base.
 It is meant to keep planning language grounded while the remaining M10 work
 continues.
 
@@ -9,8 +10,8 @@ continues.
 | Surface | Current state |
 | --- | --- |
 | Canonical repo | `Jesssullivan/tummycrypt` |
-| Checkpoint commit | PR #352 merge commit `57a60b892854` |
-| Open PRs | none immediately after PR #352 merged |
+| Checkpoint commit | PR #353 follow-up commit `17569d445c20` |
+| Open PRs | none at the 2026-05-09 fleet-parity planning pass |
 | Current release | `v0.12.12` |
 | Primary milestone | GitHub milestone `#9 M10: Usage Reality & Product Parity` |
 
@@ -54,6 +55,7 @@ truth.
 | --- | --- | --- |
 | Linux CLI/daemon | Strongest supported path. CI, package smoke, live backend acceptance, and release evidence exist. | Universal Linux desktop UX or every distro/service-manager combination. |
 | Linux mounted FUSE | Expanded lifecycle proof is archived in `docs/release/evidence/lazy-linux-20260508T170825Z/`: browse before hydration, exact `cat`, mounted write/readback, cache clear/rehydrate, recursive safe-unsync refusal/success. | Packaged mount/systemd first-use as continuously proven on every supported distro. |
+| Fleet pilot | Isolated cross-host pilot proof is archived in `docs/release/evidence/fleet-pilot-20260509T1919Z/`: local seed to disposable prefix, honey mounted traversal/hydration of `Documents` and `git`, and live `neo-honey` SeaweedFS/NATS smoke. | Real `~/Documents` / `~/git` takeover, production Finder, or writeback/safe-unsync from this specific packet. |
 | K8s/on-prem backend | Live backend works; source-owned OpenTofu migration/cutover is planned and renderable. | That NATS/SeaweedFS are already source-owned or storage-mobile. |
 | CI/test coverage | PR #352 passed the full pre-merge matrix: Rust build/lint/test, Docs, Nix CI, Nix Build, cargo-deny, Secret Scan, FileProvider staticlib, iOS typecheck. | Production Finder, iOS device, Kubernetes rollout, accessibility, or visible badge/progress UX. |
 | Fuzzing | Four cargo-fuzz targets exist under `fuzz/`. | Continuous fuzz execution in CI or `task check`; fuzz is present but not currently a release gate. |
@@ -82,7 +84,9 @@ truth.
 ## Related Docs
 
 - [Product Reality And Priority](product-reality-and-priority.md)
+- [TCFS Feature and Objective Matrix](feature-objective-matrix-2026-05-09.md)
 - [TCFS Usage Reality Sprint Plan](usage-reality-sprint-plan-2026-05-06.md)
+- [TCFS Fleet Parity Sprint Plan](fleet-parity-sprint-plan-2026-05-09.md)
 - [Distribution Smoke Matrix](distribution-smoke-matrix.md)
 - [Lazy Hydration Demo Acceptance](lazy-hydration-demo.md)
 - [Apple Surface Status](apple-surface-status.md)

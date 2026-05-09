@@ -12,6 +12,7 @@ the repository.
 | `container-v01212-20260509T0145Z/` | Container image current-tag smoke | native arm64 pull fails because the image index lacks `linux/arm64/v8`; explicit amd64 pull/version pass and worker startup reaches process/metrics initialization before failing on missing local NATS |
 | `linux-packages-v01212-20260509T0231Z/` | Linux package current-tag smoke | Ubuntu 24.04 `.deb` fresh/upgrade passes on arm64 and amd64; Debian 13 `.deb` fresh install passes on arm64 and amd64; Fedora 42 x86_64 daemon-only RPM fresh/upgrade passes |
 | `lazy-linux-20260508T170825Z/` | Linux FUSE lifecycle on `honey`: browse before hydration, exact `cat`, mounted write/readback, cache clear/rehydrate, dirty recursive `unsync` refusal, clean recursive `.tc` conversion, persisted `NotSynced` state | repo-archived transcript, config, mount log, remote prefix, remote pullback, unsync outputs, redacted metadata |
+| `fleet-pilot-20260509T1919Z/` | Isolated `Documents`/`git` fleet-pilot packet: neo seed to disposable prefix, honey mounted traversal/hydration, live `neo-honey` backend smoke | repo-archived fixture tree, transcripts, honey commands, mount log, remote prefix, and live SeaweedFS/NATS smoke log |
 | PZM testing-mode FileProvider package run | Mac App Development/testing-mode package build for deterministic conflict/status proof | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569345240> |
 | PZM testing-mode FileProvider smoke run | Enumerate/hydrate/evict/rehydrate, mutation proof already present from prior run, deterministic CLI conflict/status and exact FileProvider content preservation | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569596910> |
 | PZM testing-mode mutation package run | Mac App Development/testing-mode package build for mutation proof | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25565895586> |
@@ -33,3 +34,6 @@ the repository.
   smoke, not mounted FUSE lifecycle or production systemd service management.
 - Linux `lazy-linux-20260508T170825Z/` proves the mounted lifecycle and
   recursive safe-unsync behavior, not Linux package fresh/upgrade install.
+- `fleet-pilot-20260509T1919Z/` proves an isolated cross-host pilot tree and
+  live backend smoke. It does not prove production Finder, mounted writeback,
+  recursive safe-unsync, or managing real `~/Documents` / `~/git`.

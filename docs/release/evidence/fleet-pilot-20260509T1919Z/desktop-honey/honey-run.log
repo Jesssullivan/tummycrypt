@@ -1,0 +1,30 @@
+mounted root: /tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount
+listing parent before cat: /tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Projects/tcfs-odrive-parity
+total 1
+drwxr-xr-x. 2 jess jess   0 May  9 15:15 .
+drwxr-xr-x. 2 jess jess   0 May  9 15:15 ..
+drwxr-xr-x. 2 jess jess   0 May  9 15:15 Notes
+-rw-r--r--. 1 jess jess 115 May  9 15:15 honey-readme.txt
+find evidence (max depth 6):
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Documents
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Documents/fleet-readiness.md
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Notes
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Notes/unsync-checklist.txt
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Photos
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Photos/2026
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Photos/2026/april
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Photos/2026/april/manifest.txt
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Projects
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Projects/tcfs-odrive-parity
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Projects/tcfs-odrive-parity/Notes
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Projects/tcfs-odrive-parity/Notes/product-goal.md
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/Projects/tcfs-odrive-parity/honey-readme.txt
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/git
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/git/tcfs-pilot-repo
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/git/tcfs-pilot-repo/README.md
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/git/tcfs-pilot-repo/src
+/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/mount/git/tcfs-pilot-repo/src/main.rs
+cat hydrate target: Projects/tcfs-odrive-parity/honey-readme.txt
+cat byte count: 115
+lazy hydration mounted smoke passed

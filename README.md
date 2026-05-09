@@ -17,6 +17,15 @@ releases, or contributor workflow.
 
 Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance.md).
 
+## Reality And Wayfinding
+
+- Current proof posture: [docs/ops/product-reality-and-priority.md](docs/ops/product-reality-and-priority.md)
+- Feature/objective matrix: [docs/ops/feature-objective-matrix-2026-05-09.md](docs/ops/feature-objective-matrix-2026-05-09.md)
+- Next fleet parity sprint: [docs/ops/fleet-parity-sprint-plan-2026-05-09.md](docs/ops/fleet-parity-sprint-plan-2026-05-09.md)
+- Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
+- Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
+- Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
+
 ## Features
 
 - **On-demand hydration**: Linux FUSE mounted files list as normal names and hydrate transparently on open

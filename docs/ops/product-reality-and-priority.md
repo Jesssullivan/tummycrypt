@@ -19,7 +19,7 @@ Use this document as the short answer to:
 | Surface | Current truth | Source of proof |
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
-| Fleet sync / backend path | materially exercised on real hosts, but current live transcripts should be archived per run before treating them as release evidence | `neo-honey` live acceptance plus lab host matrix |
+| Fleet sync / backend path | materially exercised on real hosts; a current live transcript is archived in the fleet pilot packet | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-20260509T1919Z/` |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
 | macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
@@ -377,6 +377,7 @@ Linear hygiene decision on April 29, 2026:
 - [Distribution Smoke Matrix](distribution-smoke-matrix.md)
 - [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md)
 - [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md)
+- [TCFS Feature and Objective Matrix - 2026-05-09](feature-objective-matrix-2026-05-09.md)
 - [Remote Governance](remote-governance.md)
 - [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md)
 - [Neo-Honey Live Acceptance](neo-honey-acceptance.md)
@@ -386,4 +387,5 @@ Linear hygiene decision on April 29, 2026:
 - [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md)
 - [iOS Surface Status](ios-surface-status.md)
 - [TCFS Workstream Reality Check - 2026-05-09](workstream-reality-check-2026-05-09.md)
+- [TCFS Fleet Parity Sprint Plan - 2026-05-09](fleet-parity-sprint-plan-2026-05-09.md)
 - [Feature Parity Gap Analysis](../../odrive-re/docs/feature-parity-gap-analysis.md)

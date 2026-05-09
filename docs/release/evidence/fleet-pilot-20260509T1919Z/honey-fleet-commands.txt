@@ -1,0 +1,4 @@
+# Run this after the desktop-honey commands have mounted or verified honey.
+scp docs/release/evidence/fleet-pilot-20260509T1919Z/fleet-documents-expected.txt honey:/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/run/fleet-documents-expected.txt
+scp docs/release/evidence/fleet-pilot-20260509T1919Z/honey-fleet-run.sh honey:/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/run/honey-fleet-run.sh
+ssh honey 'TCFS_HONEY_SMOKE_SCRIPT=/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/run/lazy-hydration-mounted-smoke.sh TCFS_HONEY_FLEET_EXPECTED_CONTENT_FILE=/tmp/tcfs-fleet-pilot-20260509T1919Z-honey/run/fleet-documents-expected.txt bash /tmp/tcfs-fleet-pilot-20260509T1919Z-honey/run/honey-fleet-run.sh'
