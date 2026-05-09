@@ -58,7 +58,7 @@ sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 sudo rpm -i tcfsd-*.rpm
 
 # Container (K8s worker mode; amd64 image is the current proven lane)
-podman pull --arch amd64 ghcr.io/jesssullivan/tcfsd:latest
+podman pull --arch amd64 ghcr.io/jesssullivan/tcfsd:v0.12.12
 
 # Nix tagged profile install
 TAG=v0.12.12

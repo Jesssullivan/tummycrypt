@@ -41,7 +41,7 @@ curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/i
 ### Container (K8s worker mode)
 
 ```bash
-podman pull --arch amd64 ghcr.io/jesssullivan/tcfsd:latest
+podman pull --arch amd64 ghcr.io/jesssullivan/tcfsd:v0.12.12
 ```
 
 ### From Source
