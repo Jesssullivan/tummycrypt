@@ -40,13 +40,15 @@ release and CI evidence exists for parts of that surface.
 The release workflow also publishes helper installers:
 
 - `install.sh` for Linux/macOS tarball convenience installs
-- `install.ps1` for Windows convenience installs
+- `install.ps1` for Windows, currently an explicit unsupported-release stub
+  while Windows artifacts are disabled
 
 These are **not** canonical release-proof surfaces today.
 
 - `install.sh` remains convenience tooling until a dedicated smoke lane is added
-- `install.ps1` is convenience-only because Windows is not yet a truthful
-  release-grade user surface
+- `install.ps1` must not claim install success until the release workflow
+  publishes a matching Windows zip; today it fails with an unsupported-release
+  message because Windows is not yet a truthful release-grade user surface
 
 ## Shared Installed-Binary Smoke
 

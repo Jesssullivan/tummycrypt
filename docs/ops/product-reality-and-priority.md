@@ -302,8 +302,15 @@ GitHub state before acting on exact issue or milestone status.
 - Adjacent non-M10 lanes
   - `#298`: residual Civo TCFS PVC retirement after on-prem recovery
   - `#327`: TCFS on-prem OpenTofu migration and cutover
-  - `#312`: tinyland branch-tranche triage
-  - `#313`: yoga retirement decision
+  - `#312`: tinyland branch-tranche triage. PR #351 recorded a concrete
+    non-destructive prune proposal; the remaining decision is operator
+    approve/defer for Tranche A.
+
+Closed during the May 9 branch-hygiene pass:
+
+- `#313`: yoga retirement decision. The recorded decision is
+  documentation-only retirement; no archive, host deletion, key revocation,
+  local remote removal, or branch deletion was performed.
 
 Milestone `#9 M10: Usage Reality & Product Parity` remains open because the
 release-proof tranche still has active issues beyond the umbrella. The earlier
@@ -337,13 +344,14 @@ The current parity summary and Desktop/honey demo contract live in
 
 ## Linear Mirror State
 
-As of May 6, 2026, Linear is a useful management mirror but is not the
+As of May 9, 2026, Linear is a useful management mirror but is not the
 freshest truth source for `tummycrypt`.
 
-- `TIN-133` has been retitled to `Prove lazy traversal and Finder/FileProvider
-  hydration reality` and now points at GitHub `#309` plus the current repo docs.
-  The latest comments mirror the `v0.12.12` PZM testing-mode lifecycle success
-  and the remaining production Finder lifecycle gaps.
+- `TIN-133` is `In Progress`, is titled `Prove lazy traversal and
+  Finder/FileProvider hydration reality`, and points at GitHub `#309` plus the
+  current repo docs. The latest comments mirror the `v0.12.12` PZM
+  testing-mode lifecycle success and the remaining production Finder lifecycle
+  gaps.
 - `TIN-131` and `TIN-132` remain in Backlog under `Tummycrypt M10: Usage
   Reality & Product Parity`; their descriptions were refreshed on April 29,
   2026 to separate current repo truth from the older GitHub issue framing they
@@ -377,4 +385,5 @@ Linear hygiene decision on April 29, 2026:
 - [Apple Surface Status](apple-surface-status.md)
 - [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md)
 - [iOS Surface Status](ios-surface-status.md)
+- [TCFS Workstream Reality Check - 2026-05-09](workstream-reality-check-2026-05-09.md)
 - [Feature Parity Gap Analysis](../../odrive-re/docs/feature-parity-gap-analysis.md)

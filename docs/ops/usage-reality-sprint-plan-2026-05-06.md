@@ -118,7 +118,7 @@ Each packet should produce an archived evidence directory or a linked CI run.
 | E. Finder lifecycle depth | macOS lab after A | Evict/rehydrate is green in run `25562087555`; mutation upload/readback is green in run `25565943781`; CLI conflict state and exact FileProvider content preservation are green in run `25569596910`; badges/progress remain observational | B, C, D |
 | F. On-prem authority | infra/backend | Deferred for this sprint unless a maintenance window is explicitly scheduled; when resumed, `#327` needs candidate service/cutover proof and post-cut tailnet endpoint smoke | A, B, C, D |
 | G. iOS posture | product/docs | Explicit keep-as-scaffold or create a real device/Files.app lane | all |
-| H. Remote/branch hygiene | repo governance | Parity proof PRs #341 and #342 are merged and green. Current May 9 pass refreshed remote counts and confirmed `yoga` fetch timeout, but did not delete local or remote branches. Next action is an explicit operator-approved tinyland/yoga prune or archive decision. | A, D, E |
+| H. Remote/branch hygiene | repo governance | PR #351 recorded the current non-destructive truth: `tinyland` has a prune proposal with 44 fix/chore Tranche A candidates, 17 feature/test review candidates, and two architecture-sensitive hold branches; `yoga` is documentation-only retired under #313. No tinyland branch deletion, yoga archive, host deletion, key revocation, or local remote removal was performed. | A, D, E |
 
 ## SLA Bar For This Week
 
@@ -134,7 +134,8 @@ The minimum credible M10 proof bar is:
 3. One updated product-status document that does not conflate testing-mode lab
    proof with production Finder proof.
 4. Linear/GitHub trackers updated with run IDs, artifact paths, and the next
-   owner packet.
+   owner packet. The May 9 tracker reality is summarized in
+   [TCFS Workstream Reality Check - 2026-05-09](workstream-reality-check-2026-05-09.md).
 
 Anything below that is still useful engineering work, but not enough to claim
 the desktop/lazy-hydration story is release-proven.
