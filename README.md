@@ -146,7 +146,7 @@ For the bar after install succeeds, see
 | CLI (push/pull/reconcile) | Proven | Install-smoke proven; storage commands available but not continuous macOS acceptance | Planned | - |
 | Daemon (gRPC + metrics) | Proven | Available, lightly validated | Planned | - |
 | Filesystem mount | x86_64 FUSE lifecycle is host-proven; packaged mount/systemd first-use is still separate; NFS fallback evidence pending | Experimental | Cloud Files API skeleton | - |
-| FileProvider | - | Non-production PZM testing-mode lab-proven experimental | - | Proof-of-concept; write hooks unproven |
+| FileProvider | - | Non-production PZM testing-mode lab-proven experimental; production `.pkg` install/signing partial proof exists but Finder remains open | - | Proof-of-concept; write hooks unproven |
 | Finder/Explorer badges | - | Experimental | - | - |
 | D-Bus integration | Interface exists; release UX not proven | - | - | - |
 | Fleet sync (NATS) | Proven core/live lanes | Core path available, not continuously acceptance-tested | Planned | - |

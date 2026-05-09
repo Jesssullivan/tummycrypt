@@ -4,11 +4,11 @@ This sprint follows the usage-reality proof packet. Its job is to move from
 separate lane proofs to one grounded "work from any machine" acceptance packet
 for TCFS, without overstating Finder, on-prem, or release-artifact readiness.
 
-Current local base at planning time:
+Current repo base after the follow-up grounding pass:
 
 - repo: `Jesssullivan/tummycrypt`
 - branch: `main`
-- commit: `17569d445c203071370fbffb9cb56f5ce9c55628`
+- commit: `4fbcfb8a0ac1d672fdaa04021cc0210883f4120d`
 - open PRs: none
 - open GitHub issues: `#280`, `#298`, `#309`, `#312`, `#327`
 - closed prerequisite: `#308`
@@ -30,6 +30,12 @@ Planning-pass validation:
   traversal/hydration, honey Linux lifecycle companion for mounted
   write/readback, cache clear/rehydrate, recursive safe-unsync refusal/success,
   and live `neo-honey` SeaweedFS/NATS smoke.
+- Production hosted macOS `.pkg` attempt `25613963424` passed published
+  package install/signing/installed-CLI/config gates, then failed before daemon
+  and Finder because the public Cloudflare quick-tunnel endpoint no longer
+  resolved from GitHub-hosted macOS.
+- Remote checks for `4fbcfb8` were green: CI `25614098609`, Docs
+  `25614098594`, and Nix CI `25614098629`.
 
 ## Readiness Answer
 

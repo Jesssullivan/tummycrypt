@@ -21,7 +21,7 @@ Use this document as the short answer to:
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
 | Fleet sync / backend path | materially exercised on real hosts; current live transcripts are archived in the fleet pilot packets | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; the extended fleet packet carries that lifecycle proof as a honey companion next to isolated `Documents`/`git` traversal and live backend smoke; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux and fleet evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
-| macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
+| macOS | experimental but real; current packages prove package/signing/install paths, earlier hosted lanes proved storage/daemon gates, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; the latest hosted production `.pkg` attempt failed before daemon/Finder on an expired public storage endpoint, so production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | planned / skeleton | code exists, but there is no release-grade CLI, daemon, or Explorer flow |
 
@@ -34,7 +34,7 @@ This is the narrowest and most important truth for public release claims.
 | Surface | Status | Current reality |
 | --- | --- | --- |
 | Homebrew | current-tag pass | fresh install and upgrade proved on `v0.12.12`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
-| macOS `.pkg` | partial pass | package install/signing/provisioning, daemon startup, and E2EE fixture gates have been proven in release/PZM lanes, but current production Developer ID clean-host Finder acceptance remains open; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, rehydrate, mutation, and conflict/status content preservation on runs `25562087555`, `25565943781`, and `25569596910` |
+| macOS `.pkg` | partial pass | package install/signing/provisioning, daemon startup, and E2EE fixture gates have been proven across release/PZM lanes; hosted production `.pkg` attempt `25613963424` adds current `v0.12.12` package install/signing/installed-CLI proof but failed before daemon/Finder because the public quick-tunnel storage endpoint no longer resolved; production Developer ID clean-host Finder acceptance remains open; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, rehydrate, mutation, and conflict/status content preservation on runs `25562087555`, `25565943781`, and `25569596910` |
 | `.deb` | current-tag pass | support floor is Ubuntu 24.04+ / Debian 13+; Debian 12 is excluded unless a separate bookworm-targeted package is produced; `v0.12.12` repo-archived evidence proves Ubuntu 24.04 fresh/upgrade on arm64 and amd64 plus Debian 13 fresh install on arm64 and amd64 |
 | `.rpm` | current-tag pass | RPM is daemon-only today; `v0.12.12` repo-archived evidence proves Fedora 42 x86_64 fresh install and sampled `0.12.2 -> 0.12.12` upgrade with CLI smoke skipped |
 | container image | current-tag partial pass | `v0.12.12` evidence proves explicit amd64 pull, version, and worker process/metrics initialization before the no-config smoke exits on missing local NATS; the same evidence records that the tag lacks a native `linux/arm64/v8` manifest. The release workflow is configured for amd64 + arm64 publication on the next cut, but current-tag arm64 proof remains open until a new registry packet is archived |
@@ -303,8 +303,10 @@ GitHub state before acting on exact issue or milestone status.
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. The
     extended fleet packet is archived and linked from `#309`/`TIN-133`; PZM
     testing-mode enumerate/hydrate/evict/rehydrate/mutation/conflict-status is
-    green under the installed lab `SystemPolicyRule` profile; production Finder
-    lifecycle proof remains open.
+    green under the installed lab `SystemPolicyRule` profile; hosted production
+    `.pkg` attempt `25613963424` passed install/signing/installed-CLI/config
+    provisioning and failed before daemon/Finder on an expired public storage
+    endpoint; production Finder lifecycle proof remains open.
 - Adjacent non-M10 lanes
   - `#298`: residual Civo TCFS PVC retirement after on-prem recovery
   - `#327`: TCFS on-prem OpenTofu migration and cutover
