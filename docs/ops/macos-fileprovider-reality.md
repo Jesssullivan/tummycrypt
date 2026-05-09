@@ -21,7 +21,7 @@ The macOS FileProvider path currently consists of these pieces:
 1. A packaged host app: `TCFSProvider.app`
 2. A packaged non-UI FileProvider extension:
    `io.tinyland.tcfs.fileprovider`
-3. A host-app registration step that removes and re-adds the
+3. A host-app registration step that adds or updates the
    `io.tinyland.tcfs` FileProvider domain on launch
 4. A daemon and FileProvider socket path that the extension uses for
    enumeration, hydration, and watch signaling
@@ -43,8 +43,9 @@ sync-root stub representation, not the desired primary Finder UX.
 
 ## Proven Today
 
-- CI proves the Rust staticlib, Swift sources, and macOS FileProvider build
-  surfaces compile.
+- CI proves the Rust staticlib/header required by the macOS FileProvider bridge
+  and separately type-checks the iOS Swift lane. The regular CI workflow does
+  not yet build the macOS FileProvider Swift bundle.
 - Release automation builds `TCFSProvider.app`, packages it into the Apple
   Silicon `.pkg`, and asks LaunchServices to register the containing app in the
   active console user's context. The

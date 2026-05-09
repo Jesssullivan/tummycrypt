@@ -18,8 +18,8 @@ Use this document as the short answer to:
 
 | Surface | Current truth | Source of proof |
 | --- | --- | --- |
-| Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
-| Fleet sync / backend path | materially proven on real hosts | `neo-honey` live acceptance plus lab host matrix |
+| Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
+| Fleet sync / backend path | materially exercised on real hosts, but current live transcripts should be archived per run before treating them as release evidence | `neo-honey` live acceptance plus lab host matrix |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
 | macOS | experimental but real; current packages prove package/signing/storage/daemon startup, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
@@ -58,13 +58,16 @@ Current CI proves:
 - sync feature tests in `tcfs-sync`
 - wireup tests in `tcfs-e2e`
 - Nix flake evaluation/build surfaces
-- macOS FileProvider staticlib and Swift header/build integration
+- macOS FileProvider staticlib/header integration
 - iOS simulator-oriented Swift type-check/build surface
 
 Current CI does **not** prove:
 
 - production Finder/FileProvider install-to-enable-to-conflict/status UX
 - real iOS Files.app behavior on simulator or device
+- macOS FileProvider Swift bundle build in the regular CI workflow
+- Helm/Kubernetes rollout, OpenTofu apply, live NATS/SeaweedFS health, or
+  worker deployment semantics
 - accessibility behavior
 - user-facing badges, progress, notifications, or recovery ergonomics
 
@@ -72,7 +75,8 @@ Primary workflow: `.github/workflows/ci.yml`.
 
 ### 3. Live Usage Proof
 
-`tummycrypt` does now have real non-CI usage lanes:
+`tummycrypt` does now have real non-CI usage lanes. Treat them as live/manual
+acceptance unless the specific run has a dated repo-archived transcript:
 
 - [Neo-Honey Live Acceptance](neo-honey-acceptance.md): canonical live backend and two-device sync smoke
 - [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md): real host acceptance using `honey`, `neo`, and `petting-zoo-mini`

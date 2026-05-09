@@ -133,8 +133,8 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 - [Packaged Install To First-Real-Use Acceptance](ops/packaged-install-first-use.md) — the bar after artifact smoke passes and before broader host acceptance
 - [Lab Host Acceptance Matrix](ops/lab-host-acceptance-matrix.md) — real-host acceptance lanes across `honey`, `neo`, and `petting-zoo-mini`
 - [Neo-Honey Live Acceptance](ops/neo-honey-acceptance.md) — named live fleet sync acceptance lane
-- [On-Prem Authority Recovery](ops/onprem-authority-recovery.md) — source-of-truth and recovery path for the Helm-managed `tcfs` backend namespace
-- [Fleet Deployment Guide](ops/fleet-deployment.md) — multi-machine fleet deployment and operational checks
+- [On-Prem Authority Recovery](ops/onprem-authority-recovery.md) — backend-worker Helm recovery plus the on-prem OpenTofu migration boundary
+- [Fleet Deployment Guide](ops/fleet-deployment.md) — legacy Civo-era fleet deployment notes plus operational checks
 - [Lazy Hydration Demo Acceptance](ops/lazy-hydration-demo.md) — terminal and Finder proof target for lazy `ls`/`cat`/dehydrate flows
 - [Lazy Desktop-to-Honey Evidence](release/lazy-desktop-honey-evidence-2026-04-30.md) — live proof of Desktop-originated remote traversal and `cat` hydration on honey
 - [macOS FileProvider Local Evidence](release/macos-fileprovider-local-evidence-2026-04-30.md) — local CloudStorage enumeration and exact-content hydration proof
@@ -161,7 +161,8 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 | macOS (Intel) | Experimental | CLI binaries ship, but the desktop integration story is not yet as proven as Linux |
 | Windows x86_64 | Planned / skeleton | Cloud Files API skeleton; no release-grade CLI, daemon, or Explorer flow |
 | iOS | Proof-of-concept | FileProvider direction with unproven write hooks; CI type-checks Swift, but there is no continuously proven device/TestFlight/App Store lane |
-| NixOS | Available / evidence pending | Flake + NixOS module + Home Manager module; current `v0.12.12` evidence is Darwin Nix profile install |
+| Nix package/profile | Available / Darwin evidence current | Flake package/profile install is proven on Darwin for `v0.12.12`; Linux Nix install proof and NixOS module host proof are separate |
+| NixOS module | Available / host evidence pending | NixOS and Home Manager modules exist, but current evidence is not a NixOS host acceptance run |
 
 ## License
 

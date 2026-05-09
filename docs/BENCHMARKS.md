@@ -2,6 +2,9 @@
 
 Performance characteristics of tcfs operations, measured with [divan](https://github.com/nvzqz/divan).
 
+Status: partial benchmark snapshot. Sections marked `TBD` are backlog items,
+not release evidence or current performance claims.
+
 ## Chunking Throughput
 
 FastCDC content-defined chunking with BLAKE3 hashing (single-threaded, in-memory):

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Current release-proof posture is tracked in `docs/release/evidence/` and
+`docs/ops/product-reality-and-priority.md`; older entries below may describe
+historical release intent rather than the current supported/proven surface.
+
+## [0.12.3 - 0.12.12] - 2026-04-17 to 2026-05-08
+
+### Added
+
+- **Release evidence packets**: current proof after `0.12.2` is tracked in
+  `docs/release/evidence/`, including Linux lifecycle, PZM testing-mode
+  FileProvider lifecycle/conflict, Homebrew/Nix, container, and Linux package
+  distribution packets.
+
+### Changed
+
+- Public docs now separate packaged artifact smoke, host-proven lifecycle,
+  non-production Apple testing-mode evidence, production Finder acceptance, and
+  Kubernetes rollout proof.
+
 ## [0.12.2] - 2026-04-16
 
 ### Added
@@ -45,7 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Finder status surfaces**: macOS FileProvider gained Finder Sync badge support, download progress reporting, and policy-aware excluded or pinned status badges.
 - **Conflict UX improvements**: conflict notifications, conflict-copy remote writes, and CLI policy controls for handling sync conflicts.
-- **Apple packaging updates**: release artifacts include notarized Apple Silicon `.pkg` installers and bundled `TCFSProvider.app` payloads.
+- **Apple packaging updates**: release artifacts include Apple Silicon `.pkg`
+  installers and bundled `TCFSProvider.app` payloads; current notarization
+  posture is tracked in the Apple surface docs and later release-proof evidence.
 
 ### Changed
 
@@ -342,7 +363,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - K8s worker mode with KEDA auto-scaling
 - Prometheus metrics endpoint with systemd `sd_notify(READY=1)`
 - Cross-platform release pipeline: Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64
-- Container image: `ghcr.io/tinyland-inc/tcfsd` (multi-arch distroless)
+- Container image publishing path for `tcfsd`; current registry and
+  architecture proof are tracked in the release evidence docs.
 - Nix flake with NixOS module and Home Manager module
 - Homebrew formula, `.deb`/`.rpm` packages, install scripts
 - 77 tests, cargo-deny license/advisory checks, security audit CI

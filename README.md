@@ -58,8 +58,8 @@ sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 # RPM (Fedora/RHEL/Rocky, daemon-only today)
 sudo rpm -i tcfsd-*.rpm
 
-# Container (K8s worker mode)
-podman pull ghcr.io/jesssullivan/tcfsd:latest
+# Container (K8s worker mode; amd64 image is the current proven lane)
+podman pull --arch amd64 ghcr.io/jesssullivan/tcfsd:latest
 
 # Nix
 nix build github:Jesssullivan/tummycrypt
@@ -129,7 +129,7 @@ For the bar after install succeeds, see
 |---------|-------|-------|---------|-----|
 | CLI (push/pull/reconcile) | Proven | Proven | Planned | - |
 | Daemon (gRPC + metrics) | Proven | Available, lightly validated | Planned | - |
-| Filesystem mount | Proven on x86_64 FUSE; NFS fallback exists | Experimental | Cloud Files API skeleton | - |
+| Filesystem mount | x86_64 FUSE lifecycle is host-proven; packaged mount/systemd first-use is still separate; NFS fallback evidence pending | Experimental | Cloud Files API skeleton | - |
 | FileProvider | - | Lab-proven experimental | - | Proof-of-concept; write hooks unproven |
 | Finder/Explorer badges | - | Experimental | - | - |
 | D-Bus integration | Interface exists; release UX not proven | - | - | - |

@@ -66,7 +66,13 @@ Current pain points:
 
 ## Infrastructure Prerequisites
 
-### Already Running (Civo K8s)
+Historical note: this section records the original Civo-era fleet plan. Current
+backend/on-prem authority is tracked in
+[Fleet Deployment Guide](../ops/fleet-deployment.md),
+[On-Prem Authority Recovery](../ops/onprem-authority-recovery.md), and
+[Product Reality And Priority](../ops/product-reality-and-priority.md).
+
+### Historical Civo K8s State
 
 | Service | Endpoint | Namespace |
 |---------|----------|-----------|
@@ -139,9 +145,15 @@ tinyland.host.tummycrypt = {
 
 ## Rollout Plan
 
+Historical note: this section records the original `v0.3.0` rollout plan.
+Current live fleet proof should be taken from
+[Neo-Honey Live Acceptance](../ops/neo-honey-acceptance.md) and the current
+[Product Reality And Priority](../ops/product-reality-and-priority.md), not
+from the unchecked historical task list below.
+
 ### Phase 1: Merge + Package (Day 0)
 
-1. Merge PR #18 to `main` in tummycrypt
+1. PR #18 merged to `main` in tummycrypt
 2. Tag `v0.3.0` release
 3. Nix flake update in crush-dots: `nix flake update tummycrypt`
 4. Verify `nix build .#tcfs-cli` succeeds on all platforms
@@ -192,6 +204,8 @@ tinyland.host.tummycrypt = {
 4. Take one machine offline, modify files on others, bring back online, verify catch-up
 
 ## Verification Checklist
+
+Historical checklist for the original RFC rollout:
 
 - [ ] PR #18 CI all green (Build + Lint + Test, Nix Build, Security Audit, cargo-deny)
 - [ ] All 133 tests pass locally on each platform (linux-x86_64, darwin-aarch64)
