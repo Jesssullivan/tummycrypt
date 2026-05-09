@@ -29,6 +29,9 @@ tailnet-only path rather than a public IP.
 
 ### Tailscale Exposure + DNS
 
+Legacy/standby Civo helper path only. Do not use this as the active honey/on-prem
+authority cutover path; that remains the downtime-gated OpenTofu migration lane.
+
 The `tailscale-nats` OpenTofu module creates a Tailscale-only LoadBalancer service,
 and the `porkbun-dns` module creates an A record pointing at the Tailscale CGNAT IP.
 
@@ -337,16 +340,16 @@ tcfs sync-status
 
 ## 4. IaC Operations
 
-For the legacy Civo environment, infrastructure is managed via OpenTofu. Use the
-Justfile for common operations:
+For the legacy/standby Civo environment, infrastructure is managed via OpenTofu.
+Use the Justfile for common readback and explicitly targeted operations:
 
 ```bash
 # List all recipes
 just --list
 
-# Plan and apply infrastructure changes
-just tofu-plan
-just tofu-apply
+# Plan and apply Civo infrastructure changes
+just tofu-plan env=civo
+just tofu-apply env=civo
 
 # Check cluster status
 just k8s-status
@@ -359,8 +362,8 @@ just nats-streams
 just k8s-logs app=tcfsd
 ```
 
-The Justfile is at the project root. Older recipes use the `civo` environment
-by default; verify the intended environment before applying changes.
+The Justfile is at the project root. Mutating recipes require an explicit
+environment argument; verify the intended environment before applying changes.
 
 ---
 

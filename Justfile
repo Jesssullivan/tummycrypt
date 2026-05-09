@@ -73,7 +73,7 @@ k8s-describe app="tcfsd" ns="tcfs":
 
 # ── DNS ────────────────────────────────────────────────────────────────────
 
-# Show current DNS records for tummycrypt.dev
+# Show current legacy/standby Civo DNS records for tummycrypt.dev
 dns-status:
     @echo "NATS Tailscale IP:"
     @kubectl get svc nats-tailscale -n tcfs -o jsonpath='{.status.loadBalancer.ingress[?(@.ip)].ip}'
@@ -98,11 +98,11 @@ deploy-fresh env="":
 
 # ── NATS ────────────────────────────────────────────────────────────────────
 
-# Check NATS server info via Tailscale
+# Check legacy/standby Civo NATS server info via Tailscale
 nats-status server="nats://nats.tcfs.tummycrypt.dev:4222":
     nats server info --server {{server}}
 
-# List JetStream streams
+# List legacy/standby Civo JetStream streams
 nats-streams server="nats://nats.tcfs.tummycrypt.dev:4222":
     nats stream ls --server {{server}}
 

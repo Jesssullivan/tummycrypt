@@ -108,7 +108,8 @@ surface.
 
 Stateless worker for horizontal scaling.
 
-- **Image**: `ghcr.io/jesssullivan/tcfsd:latest` (distroless/cc-debian12)
+- **Current proof image**: `ghcr.io/jesssullivan/tcfsd:v0.12.12`
+  (distroless/cc-debian12; `latest` is convenience-only)
 - **Mode**: `--mode=worker` (NATS consumer, no FUSE)
 - **Features**: k8s-worker feature flag, KEDA auto-scaling support
 - **Metrics**: Prometheus on port 9100
