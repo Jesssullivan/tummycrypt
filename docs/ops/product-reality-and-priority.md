@@ -300,7 +300,8 @@ GitHub state before acting on exact issue or milestone status.
     and release workflow readiness for native arm64 is merged, but current-tag
     native arm64 registry proof remains open; production macOS `.pkg`
     current-tag proof remains a named follow-up.
-  - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
+  - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. The
+    extended fleet packet is archived and linked from `#309`/`TIN-133`; PZM
     testing-mode enumerate/hydrate/evict/rehydrate/mutation/conflict-status is
     green under the installed lab `SystemPolicyRule` profile; production Finder
     lifecycle proof remains open.

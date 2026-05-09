@@ -177,7 +177,7 @@ Kubernetes/on-prem evidence, only if Packet E is scheduled:
 | Tracker | Next update should say |
 | --- | --- |
 | `#280` / `TIN-131` | Current release proof is Homebrew/Nix/Linux packages/amd64 container; remaining blockers are production macOS `.pkg` clean-host Finder and native arm64 container proof on a future tag. No release artifact cut unless explicitly scheduled. |
-| `#309` / `TIN-133` | Linux and PZM lab evidence are strong, but production Developer ID clean-host Finder remains open. Link the fleet-pilot packet when archived. |
+| `#309` / `TIN-133` | Extended fleet packet `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` is archived and linked from both trackers. Linux and PZM lab evidence are strong, but production Developer ID clean-host Finder remains open. |
 | `#312` | Record approve/defer for Tranche A branch pruning. Do not delete tinyland branches without explicit approval. |
 | `#327` / `TIN-720` | Record whether a downtime window exists. If not, state that parity proof uses disposable prefixes and no live OpenTofu cutover occurred. |
 | `#298` | Keep blocked on `#327` unless an operator makes a separate Civo retirement decision. |
