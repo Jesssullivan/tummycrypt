@@ -1,7 +1,7 @@
 # TCFS Usage Reality Sprint Plan
 
 Started: May 6, 2026
-Last updated: May 8, 2026
+Last updated: May 9, 2026
 
 This is the short-lived execution plan for turning the current TCFS surface
 matrix into archived, repeatable proof. It is intentionally separate from
@@ -20,7 +20,7 @@ M10 usage-reality issues are closed.
 | macOS Finder/FileProvider, production | Not proven on arbitrary clean Developer ID hosts | Local `neo` source-tree proof and production package install/signing gates | Separate clean-host production Finder enablement from PZM testing-mode evidence |
 | iOS | Proof-of-concept only | Swift build/type-check scaffold | Decide whether to keep as scaffold or create a real Files.app device lane |
 | On-prem backend | Live endpoint client smoke works; source-owned migration is still open and explicitly deferred from this usage-reality sprint unless a maintenance window is scheduled | `neo-honey` smoke using MagicDNS endpoints | Keep out of the lazy/Finder proof path; schedule `#327` downtime separately, then archive post-cutover storage/NATS proof |
-| Distribution parity | Release assets are publishing; Homebrew and Nix current-tag proof is refreshed, while current `.deb` proof remains scoped to Ubuntu 24.04+ / Debian 13+ | `v0.12.12` distribution evidence `docs/release/evidence/distribution-v01212-20260508T205913Z/`, current tagged releases, and the `v0.12.2` distribution matrix | Refresh `.deb` proof on Ubuntu 24.04+ / Debian 13+ when the next full distribution matrix is run |
+| Distribution parity | Release assets are publishing; Homebrew and Nix current-tag proof is refreshed; container amd64 pull/version/startup proof is archived with a native arm64 manifest gap; current `.deb` proof remains scoped to Ubuntu 24.04+ / Debian 13+ | `v0.12.12` distribution evidence `docs/release/evidence/distribution-v01212-20260508T205913Z/`, container evidence `docs/release/evidence/container-v01212-20260509T0145Z/`, current tagged releases, and the `v0.12.2` distribution matrix | Refresh `.deb` proof on Ubuntu 24.04+ / Debian 13+ and publish a native arm64 container image when the next full distribution matrix is run |
 
 ## Apple Lab Ground Truth
 
@@ -114,7 +114,7 @@ Each packet should produce an archived evidence directory or a linked CI run.
 | A. PZM signing/runtime-policy maintenance | macOS lab package only | Done for current lab depth: run `25562087555` proves read/evict/rehydrate, run `25565943781` proves mutation upload/readback, and run `25569596910` proves conflict/status content preservation under testing mode. | B, C, D |
 | B. Linux FUSE proof | Linux real host | Done for expanded lifecycle: `docs/release/evidence/lazy-linux-20260508T170825Z/` proves `find`/`ls` before hydration, exact `cat`, mounted write/readback, cache clear, exact rehydrate, and recursive safe-unsync refusal/success | C, D, E |
 | C. Safe-unsync product proof | CLI/daemon/VFS | CLI recursive unsync refuses dirty children without force and succeeds after clean state in regression tests and host lifecycle evidence | A, B, D |
-| D. Distribution refresh | release surfaces | Homebrew fresh install/upgrade and Nix fresh install are refreshed for `v0.12.12` in `docs/release/evidence/distribution-v01212-20260508T205913Z/`; `.deb` proof is scoped to Ubuntu 24.04+ / Debian 13+ and remains the next full-matrix refresh item | A, B, C |
+| D. Distribution refresh | release surfaces | Homebrew fresh install/upgrade and Nix fresh install are refreshed for `v0.12.12` in `docs/release/evidence/distribution-v01212-20260508T205913Z/`; container amd64 pull/version/startup proof is archived in `docs/release/evidence/container-v01212-20260509T0145Z/` with a native arm64 manifest gap; `.deb` proof is scoped to Ubuntu 24.04+ / Debian 13+ and remains the next full-matrix refresh item | A, B, C |
 | E. Finder lifecycle depth | macOS lab after A | Evict/rehydrate is green in run `25562087555`; mutation upload/readback is green in run `25565943781`; CLI conflict state and exact FileProvider content preservation are green in run `25569596910`; badges/progress remain observational | B, C, D |
 | F. On-prem authority | infra/backend | Deferred for this sprint unless a maintenance window is explicitly scheduled; when resumed, `#327` needs candidate service/cutover proof and post-cut tailnet endpoint smoke | A, B, C, D |
 | G. iOS posture | product/docs | Explicit keep-as-scaffold or create a real device/Files.app lane | all |
