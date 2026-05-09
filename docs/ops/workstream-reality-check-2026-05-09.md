@@ -1,6 +1,6 @@
 # TCFS Workstream Reality Check - 2026-05-09
 
-This checkpoint records the repo, tracker, and proof state after PR #351 merged.
+This checkpoint records the repo, tracker, and proof state after PR #352 merged.
 It is meant to keep planning language grounded while the remaining M10 work
 continues.
 
@@ -9,8 +9,8 @@ continues.
 | Surface | Current state |
 | --- | --- |
 | Canonical repo | `Jesssullivan/tummycrypt` |
-| Current `main` | `26e9fab3e08d` |
-| Open PRs | none at audit time |
+| Checkpoint commit | PR #352 merge commit `57a60b892854` |
+| Open PRs | none immediately after PR #352 merged |
 | Current release | `v0.12.12` |
 | Primary milestone | GitHub milestone `#9 M10: Usage Reality & Product Parity` |
 
@@ -55,7 +55,7 @@ truth.
 | Linux CLI/daemon | Strongest supported path. CI, package smoke, live backend acceptance, and release evidence exist. | Universal Linux desktop UX or every distro/service-manager combination. |
 | Linux mounted FUSE | Expanded lifecycle proof is archived in `docs/release/evidence/lazy-linux-20260508T170825Z/`: browse before hydration, exact `cat`, mounted write/readback, cache clear/rehydrate, recursive safe-unsync refusal/success. | Packaged mount/systemd first-use as continuously proven on every supported distro. |
 | K8s/on-prem backend | Live backend works; source-owned OpenTofu migration/cutover is planned and renderable. | That NATS/SeaweedFS are already source-owned or storage-mobile. |
-| CI/test coverage | PR #351 passed the full matrix: Rust build/lint/test, Docs, Nix CI, Nix Build, cargo-deny, Secret Scan, FileProvider staticlib, iOS typecheck. | Production Finder, iOS device, Kubernetes rollout, accessibility, or visible badge/progress UX. |
+| CI/test coverage | PR #352 passed the full pre-merge matrix: Rust build/lint/test, Docs, Nix CI, Nix Build, cargo-deny, Secret Scan, FileProvider staticlib, iOS typecheck. | Production Finder, iOS device, Kubernetes rollout, accessibility, or visible badge/progress UX. |
 | Fuzzing | Four cargo-fuzz targets exist under `fuzz/`. | Continuous fuzz execution in CI or `task check`; fuzz is present but not currently a release gate. |
 | macOS package/FileProvider | PZM testing-mode lane is green through enumerate, hydrate, evict, rehydrate, mutation upload/readback, CLI conflict state, and exact FileProvider content preservation. | Production Developer ID clean-host Finder lifecycle or visible Finder conflict/status UX. |
 | iOS | Host app, extension, generated bindings, and simulator type-check surface exist. | Active release target, TestFlight/App Store readiness, real-device Files.app behavior, or write support. |

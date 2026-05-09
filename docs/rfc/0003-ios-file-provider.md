@@ -272,8 +272,9 @@ Credentials must be stored in the iOS Keychain and accessed via
 ```swift
 let query: [String: Any] = [
     kSecClass: kSecClassGenericPassword,
-    kSecAttrService: "com.tummycrypt.tcfsd",
-    kSecAttrAccount: "s3_access_key",
+    kSecAttrService: "io.tinyland.tcfs.config",
+    kSecAttrAccount: "configJSON",
+    kSecAttrAccessGroup: "group.io.tinyland.tcfs",
     kSecReturnData: true,
 ]
 ```
