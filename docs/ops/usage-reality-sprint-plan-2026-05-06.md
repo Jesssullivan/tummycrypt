@@ -118,7 +118,7 @@ Each packet should produce an archived evidence directory or a linked CI run.
 | E. Finder lifecycle depth | macOS lab after A | Evict/rehydrate is green in run `25562087555`; mutation upload/readback is green in run `25565943781`; CLI conflict state and exact FileProvider content preservation are green in run `25569596910`; badges/progress remain observational | B, C, D |
 | F. On-prem authority | infra/backend | Deferred for this sprint unless a maintenance window is explicitly scheduled; when resumed, `#327` needs candidate service/cutover proof and post-cut tailnet endpoint smoke | A, B, C, D |
 | G. iOS posture | product/docs | Explicit keep-as-scaffold or create a real device/Files.app lane | all |
-| H. Remote/branch hygiene | repo governance | Deferred until product proof is no longer actively moving. Current pass only inspected branches; do not delete local or remote branches until the next proof packet is chosen. | A, D, E |
+| H. Remote/branch hygiene | repo governance | Parity proof PRs #341 and #342 are merged and green. Current May 9 pass refreshed remote counts and confirmed `yoga` fetch timeout, but did not delete local or remote branches. Next action is an explicit operator-approved tinyland/yoga prune or archive decision. | A, D, E |
 
 ## SLA Bar For This Week
 
