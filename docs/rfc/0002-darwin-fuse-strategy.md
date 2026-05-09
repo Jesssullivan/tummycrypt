@@ -32,6 +32,14 @@ Investigation of alternatives (FUSE-T, NFS loopback, FSKit) revealed fundamental
 limitations. FileProvider emerged as the Apple-sanctioned solution designed
 specifically for cloud storage with on-demand hydration.
 
+Current implementation note as of 2026-05-09: the product docs outrank this
+RFC for exact identifiers and signing posture. The active macOS lane uses
+`io.tinyland.tcfs`, `io.tinyland.tcfs.fileprovider`,
+`group.io.tinyland.tcfs`, and a Team-ID-prefixed Keychain access group such as
+`QP994XQKNH.group.io.tinyland.tcfs`. The packaged LaunchAgent is
+`/Library/LaunchAgents/io.tinyland.tcfsd.plist`; older `com.tummycrypt` and
+`dist/*.plist` examples below are historical design notes.
+
 ## Platform Integration Matrix
 
 | Platform | Integration Point | Framework | Crate | Status |
@@ -272,12 +280,11 @@ else:
 
 macOS daemon startup via launchd (for both FileProvider and FUSE modes):
 
-```
-dist/com.tummycrypt.tcfsd.plist
-  - RunAtLoad: true
-  - KeepAlive: true
-  - Logs: /tmp/tcfsd.stdout.log, /tmp/tcfsd.stderr.log
-```
+The active packaged postinstall writes
+`/Library/LaunchAgents/io.tinyland.tcfsd.plist` and starts `tcfsd` with the
+user config at `$HOME/.config/tcfs/config.toml`. The older
+`dist/com.tummycrypt.tcfsd.plist` file is a historical/manual helper, not the
+release proof path.
 
 See `docs/ops/fleet-deployment.md` for installation instructions.
 
@@ -411,8 +418,10 @@ frameworks through a Swift shim, Rust + cbindgen is the pragmatic choice.
 1. **Apple Developer enrollment**: Is Tinyland Inc already enrolled in the Apple
    Developer Program ($99/year)? If not, who initiates enrollment?
 
-2. **App Group identifier**: What App Group and Keychain access group should we
-   register? Proposed: `group.com.tummycrypt.tcfs`
+2. **App Group identifier**: resolved in the current implementation as
+   `group.io.tinyland.tcfs`; the concrete Keychain access group is prefixed by
+   the Apple Team ID / App Identifier Prefix, for example
+   `QP994XQKNH.group.io.tinyland.tcfs`.
 
 3. **Distribution format**: .dmg with drag-to-install? Homebrew cask? Both?
 

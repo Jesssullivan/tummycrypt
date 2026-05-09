@@ -242,8 +242,11 @@ All open questions have been resolved. See [Fleet Deployment Guide](../ops/fleet
    KDBX > config file. Rotation procedure documented. See [Fleet Deployment Guide, Section 2](../ops/fleet-deployment.md#2-credential-distribution).
 
 3. **Automatic daemon startup**: Resolved — **systemd** on Linux (NixOS module or manual unit),
-   **launchd** on macOS (plist at `dist/com.tummycrypt.tcfsd.plist`). Both configured for
-   auto-start on boot with restart-on-failure. See [Fleet Deployment Guide, Section 3](../ops/fleet-deployment.md#3-automatic-daemon-startup).
+   **launchd** on macOS. Current packaged installs write
+   `/Library/LaunchAgents/io.tinyland.tcfsd.plist`; the older
+   `dist/com.tummycrypt.tcfsd.plist` helper is historical/manual-only. Both
+   are configured for auto-start on boot with restart-on-failure. See
+   [Fleet Deployment Guide, Section 3](../ops/fleet-deployment.md#3-automatic-daemon-startup).
 
 ---
 
