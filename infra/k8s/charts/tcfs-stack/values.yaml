@@ -3,7 +3,8 @@ global:
   # -- Kubernetes namespace for tcfs resources
   namespace: tcfs
 
-  # -- SeaweedFS S3-compatible endpoint
+  # -- Existing SeaweedFS S3-compatible endpoint. This umbrella chart does not
+  # -- deploy SeaweedFS.
   seaweedfsEndpoint: "http://seaweedfs.tcfs.svc.cluster.local:8333"
 
   # -- NATS server URL
@@ -24,7 +25,7 @@ global:
       cpu: "1"
       memory: 512Mi
 
-# -- SeaweedFS S3 credentials (populate via --set or sealed-secrets)
+# -- Existing SeaweedFS S3 credentials (populate via --set or sealed-secrets)
 seaweedfs:
   # -- S3 access key ID
   accessKeyId: ""

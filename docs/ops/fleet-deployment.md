@@ -369,6 +369,8 @@ NATS and the tcfsd gRPC socket also run unencrypted. For production hardening:
 - Set `storage.enforce_tls = true` in tcfs config for HTTPS S3
 - Set `sync.nats_tls = true` for TLS NATS connections
 - Wire `security.toml` into SeaweedFS Ansible roles / Helm values for mTLS
+- Wire JetStream `sync_always: true` into the Helm/OpenTofu NATS path before
+  claiming production-grade NATS durability
 
 ---
 
@@ -382,6 +384,10 @@ is used. **All production NATS servers MUST set `sync_always: true`** in
 the jetstream configuration block.
 
 See `config/nats-server.conf` for a reference configuration.
+
+Current repo reality: the reference config carries this setting, but the
+OpenTofu/Helm NATS module path has not yet been audited as carrying it through.
+Treat that as a production-hardening tracker item, not a completed guarantee.
 
 ### Architectural Note
 

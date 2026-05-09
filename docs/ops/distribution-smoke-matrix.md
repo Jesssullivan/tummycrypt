@@ -24,6 +24,12 @@ surfaces below have passed their required smoke checks.
   - container upgrades are normally orchestrator rollouts rather than a host-local installer flow
   - Nix installs are immutable and ref-pinned, so the per-tag fresh install gate is the most meaningful baseline
 
+Current evidence note for `v0.12.12`: the archived current-tag packet in this
+repo proves Homebrew fresh/upgrade and Darwin Nix profile install only. Linux
+`.deb`, `.rpm`, container, and production macOS `.pkg` current-tag proof remain
+separate follow-up checks even though older release and CI evidence exists for
+parts of those surfaces.
+
 ## Out-Of-Scope Published Helpers
 
 The release workflow also publishes helper installers:

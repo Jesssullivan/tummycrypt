@@ -1,11 +1,15 @@
 # tcfs-backend Helm Chart
 
-Helm chart for deploying the tcfs sync workers and metadata service to Kubernetes.
+Helm chart for deploying tcfs sync workers to Kubernetes.
 
 ## Components
 
 - **sync-worker**: Stateless NATS JetStream consumer pods (HPA-scaled via KEDA)
-- **metadata-service**: Leader-elected coordination service (Kubernetes Lease API)
+- **coordination RBAC**: Kubernetes Lease permissions for worker coordination
+
+There is no separate metadata-service Deployment in this chart today. Treat any
+older metadata-service references as planned or historical until an actual
+Deployment exists.
 
 ## Current Status
 

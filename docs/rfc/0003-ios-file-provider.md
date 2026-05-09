@@ -56,7 +56,7 @@ As of April 15, 2026:
 │  │  - FileProviderExtension.swift             │  │
 │  │  - FileProviderItem.swift                  │  │
 │  │  - FileProviderEnumerator.swift            │  │
-│  │  - ContentKeychain.swift (~2000 LOC)       │  │
+│  │  - Keychain helpers in host/extension code │  │
 │  └────────────────┬───────────────────────────┘  │
 │                   │ UniFFI (C ABI)               │
 │  ┌────────────────┴───────────────────────────┐  │
@@ -307,7 +307,7 @@ tcfs-core (proto types, config)
             │
             └── tcfs-file-provider (UniFFI bridge) ← NEW
                     │
-                    └── Swift FileProviderExtension (Xcode project) ← FUTURE
+                    └── Swift FileProviderExtension (Xcode project) ← scaffold exists; acceptance pending
 ```
 
 ## References

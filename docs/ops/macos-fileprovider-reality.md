@@ -2,13 +2,17 @@
 
 As of May 8, 2026, macOS is a real packaging and integration lane for tcfs.
 The non-production PZM testing-mode FileProvider lane is proven end to end on
-`v0.12.12` through enumerate, exact-content hydrate, evict, and rehydrate when
-the lab `SystemPolicyRule` profile is installed. Production Finder lifecycle
-behavior is still not a continuously proven release-grade desktop surface.
+`v0.12.12` through enumerate, exact-content hydrate, evict, rehydrate,
+mutation upload/readback, and deterministic CLI conflict/status content
+preservation when the lab `SystemPolicyRule` profile is installed. Production
+Developer ID clean-host Finder lifecycle behavior is still not a continuously
+proven release-grade desktop surface.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
 smoke path for the Finder/FileProvider surface.
+For the current PZM GitHub Actions run links, see the
+[Release Evidence Index](../release/evidence/README.md).
 
 ## Supported Workflow In The Repo Today
 
@@ -65,10 +69,12 @@ sync-root stub representation, not the desired primary Finder UX.
 - The `v0.12.12` PZM testing-mode lane passes package install, signing,
   profile, E2EE, storage, daemon startup, installed host policy probe,
   FileProvider registration, enumeration, requestDownload, evict, re-request,
-  and exact-content hydration when the computer-level
-  `TCFS FileProvider Lab Gatekeeper Rules` `SystemPolicyRule` profile is
-  installed. This is a non-production Mac App Development/testing-mode proof,
-  not a production Developer ID clean-host claim.
+  exact-content hydration, CloudStorage mutation upload/readback, and
+  deterministic CLI conflict/status content preservation when the
+  computer-level `TCFS FileProvider Lab Gatekeeper Rules` `SystemPolicyRule`
+  profile is installed. This is a non-production Mac App
+  Development/testing-mode proof, not a production Developer ID clean-host
+  claim.
 
 ## Important Constraints
 
@@ -93,7 +99,8 @@ sync-root stub representation, not the desired primary Finder UX.
 - A production clean-host Finder/FileProvider lifecycle smoke beyond
   install/signing/storage gates
 - Finder badge visibility as a release gate
-- Conflict UX and notification behavior as a release gate
+- Conflict UX, notification behavior, and Finder badge/progress visibility as
+  release gates
 - Release-day viability of every published macOS artifact without explicit
   post-cut smoke
 - A stable claim that write flows are supported for end users on macOS

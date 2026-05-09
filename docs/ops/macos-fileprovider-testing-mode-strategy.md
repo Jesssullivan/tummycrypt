@@ -524,7 +524,7 @@ Feature goals remain:
 2. Keep `spctl`, `syspolicy_check`, xattr, codesign, embedded-profile,
    `taskgated-helper`, `amfid`, and AppleSystemPolicy diagnostics attached to
    every FileProvider lab failure.
-3. Expand the PZM lab proof beyond evict/rehydrate into mutation,
-   conflict/status, badges/progress, and recovery evidence.
-4. Expand the successful read/hydrate proof into Linux/Finder parity follow-on
-   gates.
+3. Keep the PZM mutation and conflict/status gates green, and expand the lab
+   evidence next into badges/progress and recovery behavior.
+4. Keep production Developer ID clean-host Finder acceptance separate from the
+   non-production Mac App Development/testing-mode lane.

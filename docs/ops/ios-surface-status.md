@@ -1,6 +1,6 @@
 # iOS Surface Status
 
-As of May 6, 2026, iOS is an experimental FileProvider proof-of-concept,
+As of May 8, 2026, iOS is an experimental FileProvider proof-of-concept,
 not an active release target.
 
 ## What Exists In The Repo Today
@@ -43,6 +43,12 @@ It does not prove:
 - There is no repeatable TestFlight or App Store delivery lane.
 - Release and support decisions would otherwise be based on scaffolded code
   rather than proof.
+- The current entitlement files declare the App Group, but shared Keychain
+  behavior still needs real-device proof before claiming credentials work
+  across the host app and extension.
+- The FileProvider item capabilities can expose write affordances in Files.app;
+  those affordances are unsupported until create/modify/delete flows have
+  device-backed acceptance.
 
 ## Maintenance Expectation
 
@@ -61,6 +67,7 @@ It does not prove:
 ## Exit Criteria For A Stronger Public Posture
 
 - simulator or device-backed acceptance coverage
+- real-device Keychain/App Group entitlement proof
 - an explicit decision on whether write support is in or out of near-term scope
 - a repeatable TestFlight or equivalent Apple distribution lane
 - docs that can point to those validation surfaces directly

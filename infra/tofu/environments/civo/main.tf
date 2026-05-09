@@ -1,8 +1,8 @@
 # Civo Kubernetes environment: tinyland-civo-dev
 #
-# Deploy the full tcfs stack to Civo K8s.
-# SeaweedFS and NATS run in-cluster in the tcfs namespace;
-# sync workers + observability also run in K8s.
+# Deploy the Civo tcfs worker stack.
+# NATS, sync workers, and observability are modeled here. SeaweedFS is expected
+# as an existing S3 endpoint/secret; this environment does not create it.
 #
 # To deploy:
 #   task infra:apply ENV=civo
@@ -98,7 +98,8 @@ module "tcfs_backend" {
   image      = "ghcr.io/jesssullivan/tcfsd:${var.image_tag}"
   nats_url   = module.nats.nats_url
 
-  # Point workers at the in-cluster SeaweedFS
+  # Point workers at the expected SeaweedFS S3 endpoint. This environment
+  # expects the service and credentials to exist already.
   s3_endpoint    = "http://seaweedfs.tcfs.svc.cluster.local:8333"
   s3_bucket      = "tcfs"
   s3_region      = "us-east-1"

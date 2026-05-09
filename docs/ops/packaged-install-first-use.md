@@ -56,7 +56,7 @@ Passing `scripts/install-smoke.sh` alone is not sufficient to claim this bar.
 | Surface | Per-tag requirement | First real action | Edge case / follow-on |
 |---------|---------------------|-------------------|-----------------------|
 | Homebrew | every tag | `tcfs status` with `storage [ok]`, then a minimal push/pull or sync-status path | one of: unsync/rehydrate, conflict, symlink, large file |
-| macOS `.pkg` | every tag | package install, then the named Finder/FileProvider lane from [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md) through enumerate + hydrate | clean-host install and one desktop follow-on such as mutate/conflict or unsync/rehydrate |
+| macOS `.pkg` | every tag | package install, then the named Finder/FileProvider lane from [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md) through enumerate + hydrate | clean-host install and one desktop follow-on such as mutate/conflict or unsync/rehydrate; PZM testing-mode evidence is useful but does not replace production Developer ID clean-host proof |
 | Ubuntu 24.04+ / Debian 13+ `.deb` | every tag | `tcfs status` with `storage [ok]`, then minimal push/pull or sync-status | one of: upgrade carry-forward, unsync/rehydrate, conflict, large file |
 | Fedora/RHEL `.rpm` | sampled | daemon/worker startup against intentional config | worker restart or backend reconnect as needed |
 | Container image | sampled | worker startup against real or disposable backend dependencies | restart/reconnect or rollout-oriented check |
@@ -93,21 +93,26 @@ Record results using a table like this:
 
 - `install.sh` is published convenience tooling, not part of the canonical
   release-proof surface. See [Distribution Smoke Matrix](distribution-smoke-matrix.md).
-- The macOS clean-host lane remains tracked in `#309`; the harness now exists,
-  and the repo now carries a manual GitHub-hosted approximation in
-  [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml),
-  but the remaining blocker is at least one successful tagged run. It uses
-  GitHub's `macos-15` arm64 runner because the packaged FileProvider app cannot
-  launch on `macos-14`. That hosted
-  lane uses the workflow ref's acceptance harness, downloads the requested
-  release tag's published `.pkg`, uses the `tcfs-macos-smoke` GitHub
-  environment secrets, rejects non-public endpoint classes during preflight,
-  decodes a 32-byte E2EE master key for the run, proves the seeded fixture
-  cannot be pulled without that key, and runs the signed package structure
-  smoke before installer runs. Current-postinstall equality is opt-in so older
-  published tags can still reach install/Finder proof. NATS is not required for
-  the enumerate + hydrate lane, and keychain/app-group failures should be
-  treated separately from storage reachability failures.
+- The macOS production clean-host lane remains tracked in `#309`. The repo has
+  two different harness families:
+  - [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml)
+    exercises published packages and production-style install/signing/storage
+    gates, but production Finder enablement is still not continuously green.
+  - [`.github/workflows/macos-fileprovider-testing-mode-pkg.yml`](../../.github/workflows/macos-fileprovider-testing-mode-pkg.yml)
+    plus the PZM smoke path exercises a non-production Mac App
+    Development/testing-mode package with the lab `SystemPolicyRule` profile.
+    That lane now proves enumerate, hydrate, evict, rehydrate, mutation
+    upload/readback, and CLI conflict/status content preservation on `v0.12.12`,
+    but it is not a production Developer ID clean-host claim.
+- The hosted/package lane uses the workflow ref's acceptance harness, downloads
+  the requested release tag's published `.pkg`, uses the `tcfs-macos-smoke`
+  GitHub environment secrets, rejects non-public endpoint classes during
+  preflight, decodes a 32-byte E2EE master key for the run, proves the seeded
+  fixture cannot be pulled without that key, and runs the signed package
+  structure smoke before installer runs. Current-postinstall equality is opt-in
+  so older published tags can still reach install/Finder proof. NATS is not
+  required for the enumerate + hydrate lane, and keychain/app-group failures
+  should be treated separately from storage reachability failures.
 - The FileProvider testing-mode lane is separate from that production hosted
   approximation. It targets the registered `petting-zoo-mini` self-hosted Mac
   through the same post-install workflow's `runner_label` input and installs a
