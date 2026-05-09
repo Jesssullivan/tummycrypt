@@ -25,10 +25,11 @@ surfaces below have passed their required smoke checks.
   - Nix installs are immutable and ref-pinned, so the per-tag fresh install gate is the most meaningful baseline
 
 Current evidence note for `v0.12.12`: the archived current-tag packet in this
-repo proves Homebrew fresh/upgrade and Darwin Nix profile install only. Linux
-`.deb`, `.rpm`, container, and production macOS `.pkg` current-tag proof remain
-separate follow-up checks even though older release and CI evidence exists for
-parts of those surfaces.
+repo proves Homebrew fresh/upgrade and Darwin Nix profile install. Container
+evidence proves explicit amd64 pull/version/startup logs but records a missing
+native `linux/arm64/v8` image manifest. Linux `.deb`, `.rpm`, and production
+macOS `.pkg` current-tag proof remain separate follow-up checks even though
+older release and CI evidence exists for parts of those surfaces.
 
 ## Out-Of-Scope Published Helpers
 

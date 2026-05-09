@@ -1,0 +1,7 @@
+[2m2026-05-09T01:47:48.679700Z[0m [32m INFO[0m [2mtcfsd[0m[2m:[0m tcfsd starting [3mversion[0m[2m=[0m"0.12.12" [3mmode[0m[2m=[0mWorker [3mconfig[0m[2m=[0m/tmp/missing.toml
+[2m2026-05-09T01:47:48.682996Z[0m [33m WARN[0m [2mtcfsd[0m[2m:[0m config file not found: /tmp/missing.toml  (using defaults)
+[2m2026-05-09T01:47:48.685728Z[0m [32m INFO[0m [2mtcfsd::worker::inner[0m[2m:[0m tcfsd starting in worker mode (NATS consumer)
+[2m2026-05-09T01:47:48.688693Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://localhost:8333
+[2m2026-05-09T01:47:48.704212Z[0m [32m INFO[0m [2mtcfsd::worker::inner[0m[2m:[0m metrics: listening on http://127.0.0.1:9100/metrics
+[2m2026-05-09T01:47:48.720802Z[0m [33m WARN[0m [2mtcfs_sync::nats::inner[0m[2m:[0m NATS: upgrading to TLS (nats_tls=true) [3moriginal[0m[2m=[0m"nats://localhost:4222" [3mupgraded[0m[2m=[0mtls://localhost:4222
+Error: connecting to NATS at tls://localhost:4222: IO error: Connection refused (os error 111)

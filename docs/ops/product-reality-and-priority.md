@@ -1,6 +1,6 @@
 # Product Reality And Priority
 
-As of May 8, 2026, `tummycrypt` is in a much better state operationally than
+As of May 9, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
 The latest release is `v0.12.12`, and most release-facing surfaces now have
@@ -37,7 +37,7 @@ This is the narrowest and most important truth for public release claims.
 | macOS `.pkg` | partial pass | production packages install/sign/provision/start and prove E2EE; the PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, rehydrate, mutation, and conflict/status content preservation on runs `25562087555`, `25565943781`, and `25569596910`; production Finder remains separate |
 | `.deb` | floor decided; current-tag refresh pending | support floor is Ubuntu 24.04+ / Debian 13+; Debian 12 is excluded unless a separate bookworm-targeted package is produced; `v0.12.12` repo-archived evidence currently does not include `.deb` fresh/upgrade |
 | `.rpm` | historical/sample proof; current-tag refresh pending | RPM is daemon-only today; `v0.12.12` repo-archived evidence currently does not include Fedora/RHEL/Rocky smoke |
-| container image | historical/sample proof; current-tag refresh pending | worker-mode startup is modeled in CI/release, but `v0.12.12` repo-archived evidence currently does not include a pulled-image startup smoke |
+| container image | current-tag partial pass | `v0.12.12` evidence proves explicit amd64 pull, version, and worker process/metrics initialization before the no-config smoke exits on missing local NATS; the same evidence records that the tag lacks a native `linux/arm64/v8` manifest |
 | Nix install | current-tag pass | `v0.12.12` fresh install proved from the tagged flake into a temporary Darwin profile on `neo`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
 
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
@@ -281,12 +281,14 @@ work should be ordered like this:
 
 ## Open Issue Map
 
-As of May 8, 2026, the narrow GitHub backlog is:
+As of May 9, 2026, the narrow GitHub backlog is:
 
 - M10 release-proof tranche
   - `#280`: distribution install and upgrade proof umbrella. Homebrew/Nix
-    current-tag proof is archived for `v0.12.12`; Linux package/container and
-    production macOS `.pkg` current-tag proof remain named follow-ups.
+    current-tag proof is archived for `v0.12.12`; container amd64
+    pull/version/startup proof is archived with a native arm64 manifest gap;
+    Linux package and production macOS `.pkg` current-tag proof remain named
+    follow-ups.
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
     testing-mode enumerate/hydrate/evict/rehydrate/mutation/conflict-status is
     green under the installed lab `SystemPolicyRule` profile; production Finder
