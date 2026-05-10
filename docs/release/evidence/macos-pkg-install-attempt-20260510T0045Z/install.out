@@ -1,0 +1,1 @@
+$ sudo -n installer -pkg /tmp/tcfs-published-pkg-v0.12.12/tcfs-0.12.12-macos-aarch64.pkg -target /

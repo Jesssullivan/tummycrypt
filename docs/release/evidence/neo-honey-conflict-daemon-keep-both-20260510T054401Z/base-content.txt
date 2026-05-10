@@ -1,0 +1,4 @@
+# Conflict shared TCFS note
+
+version: base
+body: both peers start from this content before diverging.

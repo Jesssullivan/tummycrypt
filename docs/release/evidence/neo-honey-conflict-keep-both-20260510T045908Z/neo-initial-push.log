@@ -1,0 +1,10 @@
+2026-05-10T04:59:11.830556Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T04:59:11.835349Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T04:59:11.836854Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pushing /Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T045910Z-48352/neo/Projects/shared/conflict-notes.md → tcfs:neo-honey-conflict-keep-both-20260510T045908Z (endpoint: http://100.64.48.53:8333, device: 00000000...)
+2026-05-10T04:59:11.921415Z DEBUG tcfs_sync::engine: uploading path=/Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T045910Z-48352/neo/Projects/shared/conflict-notes.md reason=new file
+2026-05-10T04:59:12.115840Z  INFO tcfs_sync::engine: uploaded path=/Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T045910Z-48352/neo/Projects/shared/conflict-notes.md hash=ef92e12cf3e6e54180cdfbd779d026209a4c9f215c01f21584ff1f47a9f5c6e8 chunks=1 bytes=102 uploaded_bytes=102 streaming=false
+  hash:    ef92e12cf3e6e541
+  chunks:  1
+  bytes:   102 B
+  remote:  neo-honey-conflict-keep-both-20260510T045908Z/manifests/ef92e12cf3e6e54180cdfbd779d026209a4c9f215c01f21584ff1f47a9f5c6e8

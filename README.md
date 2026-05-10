@@ -22,6 +22,8 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 - Current proof posture: [docs/ops/product-reality-and-priority.md](docs/ops/product-reality-and-priority.md)
 - Feature/objective matrix: [docs/ops/feature-objective-matrix-2026-05-09.md](docs/ops/feature-objective-matrix-2026-05-09.md)
 - Next fleet parity sprint: [docs/ops/fleet-parity-sprint-plan-2026-05-09.md](docs/ops/fleet-parity-sprint-plan-2026-05-09.md)
+- Lazy traversal QA matrix: [docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md](docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md)
+- Real project-tree canary lane: `task lazy:home-canary-linux-xr-shadow`
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
@@ -105,6 +107,9 @@ tcfs device list               # Show enrolled fleet devices
 | `tcfsd` | Daemon: gRPC, Linux FUSE mounts, NATS fleet sync, Prometheus metrics |
 | `tcfs-tui` | Terminal UI: dashboard with sync status, conflicts, mounts |
 | `tcfs-mcp` | MCP server: AI agent integration (8 tools, stdio transport) |
+
+macOS desktop naming: `TCFSProvider.app` is only the host app, and
+`TCFSFileProvider.appex` is the Finder/Files integration extension.
 
 ## Architecture
 

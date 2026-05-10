@@ -1,0 +1,10 @@
+2026-05-10T01:56:48.329572Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T01:56:48.329856Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T01:56:48.329960Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pulling Projects/shared/notes.md → /Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared/notes.md
+2026-05-10T01:56:48.358109Z  INFO tcfs_sync::engine: downloaded remote=neo-honey-unsynced-rehydrate-20260510T015644Z/manifests/e7f2f498316cc4523cc5a5e72609fead9e79418bd136cb09a1acbee831003807 local=/Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared/notes.md bytes=100
+  removed stub: /Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared/notes.md.tc
+
+Downloaded:
+  local:  /Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared/notes.md
+  bytes:  100 B

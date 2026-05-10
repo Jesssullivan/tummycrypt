@@ -1,0 +1,22 @@
+{
+  "last_nats_seq": 0,
+  "device_id": "",
+  "entries": {
+    "/Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared/notes.md": {
+      "blake3": "e7f2f498316cc4523cc5a5e72609fead9e79418bd136cb09a1acbee831003807",
+      "size": 100,
+      "mtime": 1778378208,
+      "chunk_count": 1,
+      "remote_path": "neo-honey-unsynced-rehydrate-20260510T015644Z/manifests/e7f2f498316cc4523cc5a5e72609fead9e79418bd136cb09a1acbee831003807",
+      "last_synced": 1778378208,
+      "vclock": {
+        "clocks": {
+          "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 1,
+          "cli": 2
+        }
+      },
+      "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a",
+      "status": "synced"
+    }
+  }
+}

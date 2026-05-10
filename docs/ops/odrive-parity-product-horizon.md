@@ -70,19 +70,21 @@ and real-host backend sync. The weakest proof remains production macOS Finder
 from package install through clean-host enablement, conflict, and visible
 status.
 
-The `v0.12.12` PZM evidence tightened that boundary. Production `.pkg` builds
-and smokes prove install, signing/profile checks, storage config, daemon
-startup, public S3 reachability, and seeded E2EE fixture access. The PZM
-non-production testing-mode lane now also proves FileProvider enumeration,
-exact-content hydration, evict, rehydrate, and CloudStorage mutation
-upload/readback from a package install when the lab `SystemPolicyRule` profile
-is installed. PZM smoke run `25569596910` also proves the deterministic
-conflict/status lane at the current lab depth: CLI `sync state: conflict` and
-exact FileProvider content preservation. The same run did not observe a
-FileProvider enumerator conflict-status log, so visible Finder status/progress
-remains observational. Production Finder lifecycle evidence remains open:
-arbitrary clean-host enablement, conflict, and visible status/progress are not
-yet release gates.
+The `v0.12.12` PZM evidence tightened that boundary. The latest production
+Developer ID `.pkg` hosted smoke proved package download, structure, install,
+installed FileProvider signing, installed CLI smoke, live config, and
+FileProvider config provisioning, then failed before daemon/Finder lifecycle
+because the public tunnel hostname for the storage fixture did not resolve from
+the hosted runner. It does not prove production Finder. The PZM non-production
+testing-mode lane proves FileProvider enumeration, exact-content hydration,
+evict, rehydrate, and CloudStorage mutation upload/readback from a package
+install when the lab `SystemPolicyRule` profile is installed. PZM smoke run
+`25569596910` also proves the deterministic conflict/status lane at the current
+lab depth: CLI `sync state: conflict` and exact FileProvider content
+preservation. The same run did not observe a FileProvider enumerator
+conflict-status log, so visible Finder status/progress remains observational.
+Production Finder lifecycle evidence remains open: arbitrary clean-host
+enablement, conflict, and visible status/progress are not yet release gates.
 
 ## Linux <> Finder Parity Evidence
 
@@ -135,7 +137,12 @@ about proving and surfacing them:
 - prove per-path locking under concurrent operations
 - prove dirty-child unsync safety recursively on a real host evidence run
 - make conflict status and resolution visible in Finder; CLI conflict state and
-  exact FileProvider content preservation are green in PZM run `25569596910`
+  exact FileProvider content preservation are green in PZM run `25569596910`,
+  and the neo/honey lane now proves manual keep-both recovery in
+  `neo-honey-conflict-keep-both-20260510T045908Z/` plus independent sibling
+  progress in `neo-honey-conflict-sibling-20260510T051328Z/`; daemon-backed
+  keep-both currently has only a timeout/partial-side-effect blocker packet in
+  `neo-honey-conflict-daemon-keep-both-20260510T054611Z/`
 
 ### 3. Folder Policy
 
@@ -147,7 +154,9 @@ Policy modes:
 - `on_demand`: enumerate remotely, hydrate on open, optionally auto-download
   files under a threshold
 - `never`: ignore this subtree for sync and reconcile
-- `pinned`: exempt from auto-unsync
+- `pinned`: planned keep-local policy primitive; current CLI support toggles
+  auto-unsync exemption, but accepted "keep synced" semantics still need
+  status, eviction, watcher/reconcile, and cross-device QA proof
 
 Current TCFS has policy primitives; productionization needs CLI/desktop controls,
 status reporting, and acceptance tests against watcher, reconcile, auto-unsync,
@@ -291,15 +300,16 @@ CloudStorage root rather than making `~/Desktop` the first FileProvider test.
 
 Highest-value work from here:
 
-1. Extend lifecycle status visibility beyond the archived Linux mutation and
-   recursive safe-unsync proof into richer CLI/TUI/Finder conflict/progress
-   surfaces.
+1. Extend lifecycle status visibility beyond the archived Linux mutation,
+   recursive safe-unsync, conflict detection, manual keep-both recovery, and
+   independent sibling progress proof into richer CLI/TUI/Finder
+   conflict/progress surfaces.
 2. Run and archive clean-host macOS Finder/FileProvider evidence.
 3. Run and archive the dedicated arbitrary-folder sync demo using
    `~/Desktop/TCFS Demo` and honey.
 4. Document the current folder policy CLI (`set`, `get`, `list`, `pin`,
-   `unpin`) and add a remove/delete command if that becomes part of the product
-   contract.
+   `unpin`) as primitives, then decide the user-facing keep-synced contract
+   before treating pinning as a proven product mode.
 5. Surface auto-unsync results in CLI/TUI and desktop notifications.
 6. Prove dirty-child unsync safety for directories in acceptance tests.
 7. Prove status/progress/badges in Finder instead of treating them as comments

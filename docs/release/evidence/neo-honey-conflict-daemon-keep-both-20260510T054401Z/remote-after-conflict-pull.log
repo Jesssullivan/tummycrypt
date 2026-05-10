@@ -1,0 +1,9 @@
+2026-05-10T05:44:20.999555Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T05:44:20.999836Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T05:44:20.999924Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pulling Projects/shared/conflict-notes.md → docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/remote-after-conflict.content
+2026-05-10T05:44:21.023669Z  INFO tcfs_sync::engine: downloaded remote=neo-honey-conflict-daemon-keep-both-20260510T054401Z/manifests/615b119402da42275efeca36838fa95ddc7dc66970078c090b751241173c5b4e local=docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/remote-after-conflict.content bytes=124
+
+Downloaded:
+  local:  docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/remote-after-conflict.content
+  bytes:  124 B

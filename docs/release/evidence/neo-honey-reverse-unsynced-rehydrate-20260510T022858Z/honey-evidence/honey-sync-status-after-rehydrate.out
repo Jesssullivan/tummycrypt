@@ -1,0 +1,11 @@
+State cache: /tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run/honey-state/state.json
+Tracked files: 1
+
+File: /tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/root/Projects/shared/reverse-notes.md
+  hash:       e6ffb6925a2ae0f9
+  size:       107 B
+  chunks:     1
+  remote:     neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/manifests/e6ffb6925a2ae0f9d560257a86d8553037eddff4fb71d8c9b2212c3341db5e37
+  last sync:  0 seconds ago
+  sync state: synced
+  sync check: up to date

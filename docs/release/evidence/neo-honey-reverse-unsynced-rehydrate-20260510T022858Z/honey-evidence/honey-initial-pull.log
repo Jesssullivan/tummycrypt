@@ -1,0 +1,9 @@
+[2m2026-05-10T02:28:59.775551Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-10T02:28:59.775706Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-10T02:28:59.775773Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pulling Projects/shared/reverse-notes.md → /tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/root/Projects/shared/reverse-notes.md
+[2m2026-05-10T02:28:59.804832Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m downloaded [3mremote[0m[2m=[0mneo-honey-reverse-unsynced-rehydrate-20260510T022858Z/manifests/67a1b261f42adc6078a18bf0df08b55a132b729590751d4efd5a7e1ca407b12e [3mlocal[0m[2m=[0m/tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/root/Projects/shared/reverse-notes.md [3mbytes[0m[2m=[0m112
+
+Downloaded:
+  local:  /tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/root/Projects/shared/reverse-notes.md
+  bytes:  112 B

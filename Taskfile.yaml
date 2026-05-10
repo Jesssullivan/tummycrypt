@@ -107,13 +107,20 @@ tasks:
   lazy:check:
     desc: Run lazy hydration harness/static regression checks
     cmds:
-      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
-      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
       - python3 -m py_compile scripts/asc-fileprovider-lab-provision.py
       - task: lazy:test-linux-lifecycle-demo
       - task: lazy:test-mounted-smoke
       - task: lazy:test-desktop-honey
       - task: lazy:test-fleet-pilot
+      - task: lazy:test-neo-honey-unsynced-rehydrate
+      - task: lazy:test-neo-honey-reverse-unsynced-rehydrate
+      - task: lazy:test-neo-mounted-reverse-read
+      - task: lazy:test-neo-honey-delete-rename-unsynced
+      - task: lazy:test-neo-honey-conflict
+      - task: lazy:test-home-canary-linux-xr-shadow
+      - task: lazy:test-macos-fileprovider-neo-cleanup
       - task: lazy:test-macos-profile-inventory
       - task: lazy:test-macos-preflight
       - task: lazy:test-macos-postinstall
@@ -125,6 +132,9 @@ tasks:
       - task: lazy:test-fileprovider-provision
       - task: lazy:test-release-workflow-fileprovider
       - task: lazy:test-release-workflow-container
+      - cargo test -p tcfs-cli cli_unsync
+      - cargo test -p tcfs-cli cli_pull_after_unsync_hydrates_latest_remote_and_removes_stub
+      - cargo test -p tcfs-cli cli_pull_adjacent_stub_cleanup_ignores_non_tcfs_files
       - cargo test -p tcfs-vfs
 
   lazy:linux-demo:
@@ -161,6 +171,462 @@ tasks:
     desc: Regression-test the isolated fleet parity pilot helper
     cmds:
       - bash scripts/test-fleet-parity-pilot-demo.sh
+
+  lazy:neo-honey-unsynced-rehydrate-plan:
+    desc: "Same-fixture proof: neo unsyncs, honey mutates mounted view, neo rehydrates"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${REMOTE:-}" ]]; then
+            args+=(--remote "$REMOTE")
+          fi
+          if [[ -n "${NEO_ROOT:-}" ]]; then
+            args+=(--neo-root "$NEO_ROOT")
+          fi
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${STATE_DIR:-}" ]]; then
+            args+=(--state-dir "$STATE_DIR")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs-bin "$TCFS_BIN")
+          fi
+          if [[ -n "${HONEY_HOST:-}" ]]; then
+            args+=(--honey-host "$HONEY_HOST")
+          fi
+          if [[ -n "${HONEY_MOUNT_ROOT:-}" ]]; then
+            args+=(--honey-mount-root "$HONEY_MOUNT_ROOT")
+          fi
+          if [[ -n "${HONEY_REMOTE_DIR:-}" ]]; then
+            args+=(--honey-remote-dir "$HONEY_REMOTE_DIR")
+          fi
+          if [[ -n "${HONEY_TCFS_BIN:-}" ]]; then
+            args+=(--honey-tcfs-bin "$HONEY_TCFS_BIN")
+          fi
+          if [[ "${PUSH:-0}" == "1" ]]; then
+            args+=(--push)
+          fi
+          if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
+            args+=(--create-bucket)
+          fi
+          if [[ "${RUN_HONEY:-0}" == "1" ]]; then
+            args+=(--run-honey)
+          fi
+          if [[ "${HONEY_START_MOUNT:-0}" == "1" ]]; then
+            args+=(--honey-start-mount)
+          fi
+          if [[ "${HONEY_EXISTING_MOUNT:-0}" == "1" ]]; then
+            args+=(--honey-existing-mount)
+          fi
+          if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
+            args+=(--forward-aws-env)
+          fi
+          if [[ "${ALLOW_REAL_ROOTS:-0}" == "1" ]]; then
+            args+=(--allow-real-roots)
+          fi
+
+          scripts/neo-honey-unsynced-rehydrate-demo.sh "${args[@]}"
+          EOF
+
+  lazy:test-neo-honey-unsynced-rehydrate:
+    desc: Regression-test the neo/honey unsynced rehydrate helper
+    cmds:
+      - bash scripts/test-neo-honey-unsynced-rehydrate-demo.sh
+
+  lazy:neo-honey-reverse-unsynced-rehydrate-plan:
+    desc: "Reverse same-fixture proof: honey unsyncs, neo mutates, honey rehydrates"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${REMOTE:-}" ]]; then
+            args+=(--remote "$REMOTE")
+          fi
+          if [[ -n "${NEO_ROOT:-}" ]]; then
+            args+=(--neo-root "$NEO_ROOT")
+          fi
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${STATE_DIR:-}" ]]; then
+            args+=(--state-dir "$STATE_DIR")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs-bin "$TCFS_BIN")
+          fi
+          if [[ -n "${HONEY_HOST:-}" ]]; then
+            args+=(--honey-host "$HONEY_HOST")
+          fi
+          if [[ -n "${HONEY_ROOT:-}" ]]; then
+            args+=(--honey-root "$HONEY_ROOT")
+          fi
+          if [[ -n "${HONEY_MOUNT_ROOT:-}" ]]; then
+            args+=(--honey-mount-root "$HONEY_MOUNT_ROOT")
+          fi
+          if [[ -n "${HONEY_REMOTE_DIR:-}" ]]; then
+            args+=(--honey-remote-dir "$HONEY_REMOTE_DIR")
+          fi
+          if [[ -n "${HONEY_TCFS_BIN:-}" ]]; then
+            args+=(--honey-tcfs-bin "$HONEY_TCFS_BIN")
+          fi
+          if [[ "${PUSH:-0}" == "1" ]]; then
+            args+=(--push)
+          fi
+          if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
+            args+=(--create-bucket)
+          fi
+          if [[ "${RUN_HONEY:-0}" == "1" ]]; then
+            args+=(--run-honey)
+          fi
+          if [[ "${HONEY_MOUNTED_READ:-0}" == "1" ]]; then
+            args+=(--honey-mounted-read)
+          fi
+          if [[ "${HONEY_START_MOUNT:-0}" == "1" ]]; then
+            args+=(--honey-start-mount)
+          fi
+          if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
+            args+=(--forward-aws-env)
+          fi
+          if [[ "${ALLOW_REAL_ROOTS:-0}" == "1" ]]; then
+            args+=(--allow-real-roots)
+          fi
+
+          scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh "${args[@]}"
+          EOF
+
+  lazy:honey-mounted-reverse-read-plan:
+    desc: "Linux-equivalent M4 proof: honey mounted clean-name read after neo updates while honey is unsynced"
+    cmds:
+      - HONEY_MOUNTED_READ=1 task lazy:neo-honey-reverse-unsynced-rehydrate-plan
+
+  lazy:test-neo-honey-reverse-unsynced-rehydrate:
+    desc: Regression-test the reverse neo/honey unsynced rehydrate helper
+    cmds:
+      - bash scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh
+
+  lazy:neo-mounted-reverse-read-plan:
+    desc: "M4 proof: neo mounted clean-name read after honey updates while neo is unsynced"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${REMOTE:-}" ]]; then
+            args+=(--remote "$REMOTE")
+          fi
+          if [[ -n "${NEO_ROOT:-}" ]]; then
+            args+=(--neo-root "$NEO_ROOT")
+          fi
+          if [[ -n "${NEO_MOUNT_ROOT:-}" ]]; then
+            args+=(--neo-mount-root "$NEO_MOUNT_ROOT")
+          fi
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${STATE_DIR:-}" ]]; then
+            args+=(--state-dir "$STATE_DIR")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs-bin "$TCFS_BIN")
+          fi
+          if [[ -n "${HONEY_HOST:-}" ]]; then
+            args+=(--honey-host "$HONEY_HOST")
+          fi
+          if [[ -n "${HONEY_ROOT:-}" ]]; then
+            args+=(--honey-root "$HONEY_ROOT")
+          fi
+          if [[ -n "${HONEY_REMOTE_DIR:-}" ]]; then
+            args+=(--honey-remote-dir "$HONEY_REMOTE_DIR")
+          fi
+          if [[ -n "${HONEY_TCFS_BIN:-}" ]]; then
+            args+=(--honey-tcfs-bin "$HONEY_TCFS_BIN")
+          fi
+          if [[ "${PUSH:-0}" == "1" ]]; then
+            args+=(--push)
+          fi
+          if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
+            args+=(--create-bucket)
+          fi
+          if [[ "${RUN_HONEY:-0}" == "1" ]]; then
+            args+=(--run-honey)
+          fi
+          if [[ "${NEO_START_MOUNT:-0}" == "1" ]]; then
+            args+=(--neo-start-mount)
+          fi
+          if [[ "${NEO_EXISTING_MOUNT:-0}" == "1" ]]; then
+            args+=(--neo-existing-mount)
+          fi
+          if [[ "${NEO_NFS:-0}" == "1" ]]; then
+            args+=(--neo-nfs)
+          fi
+          if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
+            args+=(--forward-aws-env)
+          fi
+          if [[ "${ALLOW_REAL_ROOTS:-0}" == "1" ]]; then
+            args+=(--allow-real-roots)
+          fi
+
+          scripts/neo-mounted-reverse-read-demo.sh "${args[@]}"
+          EOF
+
+  lazy:test-neo-mounted-reverse-read:
+    desc: Regression-test the neo mounted reverse-read helper
+    cmds:
+      - bash scripts/test-neo-mounted-reverse-read-demo.sh
+
+  lazy:neo-honey-delete-rename-unsynced-plan:
+    desc: "Current-behavior proof: peer delete/rename while other machine is unsynced"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${REMOTE:-}" ]]; then
+            args+=(--remote "$REMOTE")
+          fi
+          if [[ -n "${NEO_ROOT:-}" ]]; then
+            args+=(--neo-root "$NEO_ROOT")
+          fi
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${STATE_DIR:-}" ]]; then
+            args+=(--state-dir "$STATE_DIR")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs-bin "$TCFS_BIN")
+          fi
+          if [[ -n "${HONEY_HOST:-}" ]]; then
+            args+=(--honey-host "$HONEY_HOST")
+          fi
+          if [[ -n "${HONEY_ROOT:-}" ]]; then
+            args+=(--honey-root "$HONEY_ROOT")
+          fi
+          if [[ -n "${HONEY_REMOTE_DIR:-}" ]]; then
+            args+=(--honey-remote-dir "$HONEY_REMOTE_DIR")
+          fi
+          if [[ -n "${HONEY_TCFS_BIN:-}" ]]; then
+            args+=(--honey-tcfs-bin "$HONEY_TCFS_BIN")
+          fi
+          if [[ "${PUSH:-0}" == "1" ]]; then
+            args+=(--push)
+          fi
+          if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
+            args+=(--create-bucket)
+          fi
+          if [[ "${RUN_HONEY:-0}" == "1" ]]; then
+            args+=(--run-honey)
+          fi
+          if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
+            args+=(--forward-aws-env)
+          fi
+          if [[ "${ALLOW_REAL_ROOTS:-0}" == "1" ]]; then
+            args+=(--allow-real-roots)
+          fi
+
+          scripts/neo-honey-delete-rename-unsynced-demo.sh "${args[@]}"
+          EOF
+
+  lazy:test-neo-honey-delete-rename-unsynced:
+    desc: Regression-test the neo/honey delete/rename while peer-unsynced helper
+    cmds:
+      - bash scripts/test-neo-honey-delete-rename-unsynced-demo.sh
+
+  lazy:neo-honey-conflict-plan:
+    desc: "Current-behavior proof: divergent same-file edits produce conflict"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${REMOTE:-}" ]]; then
+            args+=(--remote "$REMOTE")
+          fi
+          if [[ -n "${NEO_ROOT:-}" ]]; then
+            args+=(--neo-root "$NEO_ROOT")
+          fi
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${STATE_DIR:-}" ]]; then
+            args+=(--state-dir "$STATE_DIR")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs-bin "$TCFS_BIN")
+          fi
+          if [[ -n "${HONEY_HOST:-}" ]]; then
+            args+=(--honey-host "$HONEY_HOST")
+          fi
+          if [[ -n "${HONEY_ROOT:-}" ]]; then
+            args+=(--honey-root "$HONEY_ROOT")
+          fi
+          if [[ -n "${HONEY_REMOTE_DIR:-}" ]]; then
+            args+=(--honey-remote-dir "$HONEY_REMOTE_DIR")
+          fi
+          if [[ -n "${HONEY_TCFS_BIN:-}" ]]; then
+            args+=(--honey-tcfs-bin "$HONEY_TCFS_BIN")
+          fi
+          if [[ -n "${HONEY_TCFSD_BIN:-}" ]]; then
+            args+=(--honey-tcfsd-bin "$HONEY_TCFSD_BIN")
+          fi
+          if [[ "${PUSH:-0}" == "1" ]]; then
+            args+=(--push)
+          fi
+          if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
+            args+=(--create-bucket)
+          fi
+          if [[ "${RUN_HONEY:-0}" == "1" ]]; then
+            args+=(--run-honey)
+          fi
+          if [[ "${HONEY_RECOVER_KEEP_BOTH:-0}" == "1" ]]; then
+            args+=(--honey-recover-keep-both)
+          fi
+          if [[ "${HONEY_INDEPENDENT_SIBLING:-0}" == "1" ]]; then
+            args+=(--honey-independent-sibling)
+          fi
+          if [[ "${HONEY_RESOLVE_KEEP_BOTH:-0}" == "1" ]]; then
+            args+=(--honey-resolve-keep-both)
+          fi
+          if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
+            args+=(--forward-aws-env)
+          fi
+          if [[ "${ALLOW_REAL_ROOTS:-0}" == "1" ]]; then
+            args+=(--allow-real-roots)
+          fi
+
+          scripts/neo-honey-conflict-demo.sh "${args[@]}"
+          EOF
+
+  lazy:neo-honey-conflict-keep-both-plan:
+    desc: "Current-behavior proof: divergent edits plus manual keep-both recovery"
+    cmds:
+      - HONEY_RECOVER_KEEP_BOTH=1 task lazy:neo-honey-conflict-plan
+
+  lazy:neo-honey-conflict-sibling-plan:
+    desc: "Current-behavior proof: conflict on one descendant does not block sibling sync"
+    cmds:
+      - HONEY_INDEPENDENT_SIBLING=1 task lazy:neo-honey-conflict-plan
+
+  lazy:neo-honey-conflict-daemon-keep-both-plan:
+    desc: "Current-behavior proof/blocker: daemon-backed tcfs resolve keep-both"
+    cmds:
+      - HONEY_RESOLVE_KEEP_BOTH=1 task lazy:neo-honey-conflict-plan
+
+  lazy:test-neo-honey-conflict:
+    desc: Regression-test the neo/honey conflict helper
+    cmds:
+      - bash scripts/test-neo-honey-conflict-demo.sh
+
+  lazy:home-canary-linux-xr-shadow:
+    desc: "Real project-tree canary: isolated /Users/jess/git/linux-xr shadow packet"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${SOURCE:-}" ]]; then
+            args+=(--source "$SOURCE")
+          fi
+          if [[ -n "${SHADOW_ROOT:-}" ]]; then
+            args+=(--shadow-root "$SHADOW_ROOT")
+          fi
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${REMOTE:-}" ]]; then
+            args+=(--remote "$REMOTE")
+          fi
+          if [[ -n "${STATE_DIR:-}" ]]; then
+            args+=(--state-dir "$STATE_DIR")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs-bin "$TCFS_BIN")
+          fi
+          if [[ -n "${HONEY_HOST:-}" ]]; then
+            args+=(--honey-host "$HONEY_HOST")
+          fi
+          if [[ -n "${HONEY_MOUNT_ROOT:-}" ]]; then
+            args+=(--honey-mount-root "$HONEY_MOUNT_ROOT")
+          fi
+          if [[ -n "${HONEY_REMOTE_DIR:-}" ]]; then
+            args+=(--honey-remote-dir "$HONEY_REMOTE_DIR")
+          fi
+          if [[ -n "${HONEY_TCFS_BIN:-}" ]]; then
+            args+=(--honey-tcfs-bin "$HONEY_TCFS_BIN")
+          fi
+          if [[ "${PUSH:-0}" == "1" ]]; then
+            args+=(--push)
+          fi
+          if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
+            args+=(--create-bucket)
+          fi
+          if [[ "${RUN_HONEY:-0}" == "1" ]]; then
+            args+=(--run-honey)
+          fi
+          if [[ "${HONEY_START_MOUNT:-0}" == "1" ]]; then
+            args+=(--honey-start-mount)
+          fi
+          if [[ "${HONEY_EXISTING_MOUNT:-0}" == "1" ]]; then
+            args+=(--honey-existing-mount)
+          fi
+          if [[ "${RUN_LINUX_LIFECYCLE:-0}" == "1" ]]; then
+            args+=(--run-linux-lifecycle)
+          fi
+          if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
+            args+=(--forward-aws-env)
+          fi
+
+          scripts/home-canary-linux-xr-shadow.sh "${args[@]}"
+          EOF
+
+  lazy:test-home-canary-linux-xr-shadow:
+    desc: Regression-test the linux-xr shadow canary helper
+    cmds:
+      - bash scripts/test-home-canary-linux-xr-shadow.sh
+
+  lazy:macos-fileprovider-neo-cleanup-packet:
+    desc: "Archive neo FileProvider divergence and optionally install the published pkg"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${PKG_PATH:-}" ]]; then
+            args+=(--pkg "$PKG_PATH")
+          fi
+          if [[ -n "${APP_PATH:-}" ]]; then
+            args+=(--app-path "$APP_PATH")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs "$TCFS_BIN")
+          fi
+          if [[ -n "${TCFSD_BIN:-}" ]]; then
+            args+=(--tcfsd "$TCFSD_BIN")
+          fi
+          if [[ "${INSTALL_PKG:-0}" == "1" ]]; then
+            args+=(--install-pkg)
+          fi
+          if [[ "${QUARANTINE_STALE:-0}" == "1" ]]; then
+            args+=(--quarantine-stale)
+          fi
+          if [[ "${STRICT_PREFLIGHT:-0}" == "1" ]]; then
+            args+=(--strict-preflight)
+          fi
+
+          scripts/macos-fileprovider-neo-cleanup-packet.sh "${args[@]}"
+          EOF
+
+  lazy:test-macos-fileprovider-neo-cleanup:
+    desc: Regression-test the neo FileProvider cleanup packet helper
+    cmds:
+      - bash scripts/test-macos-fileprovider-neo-cleanup-packet.sh
 
   lazy:test-macos-postinstall:
     desc: Regression-test the macOS FileProvider post-install smoke helper with fake platform tools

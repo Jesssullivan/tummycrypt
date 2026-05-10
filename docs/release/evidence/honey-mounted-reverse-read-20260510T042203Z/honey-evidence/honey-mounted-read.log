@@ -1,0 +1,14 @@
+mounted root: /tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/mount
+listing parent before cat: /tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/mount/Projects/shared
+total 1
+drwxr-xr-x. 2 jess jess   0 May 10 00:22 .
+drwxr-xr-x. 2 jess jess   0 May 10 00:22 ..
+-rw-r--r--. 1 jess jess 107 May 10 00:22 reverse-notes.md
+find evidence (max depth 8):
+/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/mount
+/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/mount/Projects
+/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/mount/Projects/shared
+/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/mount/Projects/shared/reverse-notes.md
+cat hydrate target: Projects/shared/reverse-notes.md
+cat byte count: 107
+lazy hydration mounted smoke passed

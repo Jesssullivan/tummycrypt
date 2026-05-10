@@ -1,0 +1,4 @@
+# Independent sibling TCFS note
+
+version: honey-sibling
+body: honey should be able to publish this sibling even while another descendant is conflicted.

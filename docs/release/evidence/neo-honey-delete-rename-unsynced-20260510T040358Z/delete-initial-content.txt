@@ -1,0 +1,4 @@
+# TCFS M8 delete target
+
+version: neo-initial
+body: honey will be unsynced before neo deletes this file.

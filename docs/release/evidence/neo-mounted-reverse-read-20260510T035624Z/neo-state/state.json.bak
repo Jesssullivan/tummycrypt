@@ -1,0 +1,21 @@
+{
+  "last_nats_seq": 0,
+  "device_id": "",
+  "entries": {
+    "/Users/jess/TCFS Pilot/runs/mounted-reverse-read-20260510T035625Z-44117/neo/Projects/shared/mounted-reverse-notes.md": {
+      "blake3": "a8f7bcd6b818807095af324f0d276d511b55ed18744b547f52ee5022c7329941",
+      "size": 118,
+      "mtime": 1778385390,
+      "chunk_count": 1,
+      "remote_path": "neo-mounted-reverse-read-20260510T035624Z/manifests/a8f7bcd6b818807095af324f0d276d511b55ed18744b547f52ee5022c7329941",
+      "last_synced": 1778385390,
+      "vclock": {
+        "clocks": {
+          "d1176e5d-8baa-413e-8d50-68c1dbd36506": 1
+        }
+      },
+      "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a",
+      "status": "synced"
+    }
+  }
+}

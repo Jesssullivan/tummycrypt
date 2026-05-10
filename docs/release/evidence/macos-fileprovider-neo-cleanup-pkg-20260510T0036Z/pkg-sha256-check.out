@@ -1,0 +1,2 @@
+$ cd /tmp/tcfs-published-pkg-v0.12.12 && shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+tcfs-0.12.12-macos-aarch64.pkg: OK

@@ -1,0 +1,103 @@
+evidence dir: /tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/linux-lifecycle/linux-lifecycle/evidence
+remote: seaweedfs://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle
+temp root: /tmp/tcfs-lazy-linux-demo.lGJB7z
+tcfs command: /tmp/tcfs-fleet-pilot-build-20260509T1907Z/target/debug/tcfs
+
+[1/9] seed fixture into remote prefix
+[2m2026-05-10T15:15:25.392111Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-10T15:15:25.392202Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-10T15:15:25.392248Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pushing /tmp/tcfs-lazy-linux-demo.lGJB7z/source → tcfs:home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle (endpoint: http://100.64.48.53:8333, device: d1176e5d...)
+[2m2026-05-10T15:15:25.399274Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "436", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D2377902C14ABFC2CE1", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/README.md", request_id: "18AE3D2377902C14ABFC2CE1" }
+[2m2026-05-10T15:15:25.402254Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "544", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D2377CC7037AA6CC59D", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-10T15:15:25.405019Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "538", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D2377F7ED9DEFD6D2CD", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-10T15:15:25.415271Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "436", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D237890AC4B46513D08", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/README.md", request_id: "18AE3D237890AC4B46513D08" }
+[2m2026-05-10T15:15:25.427800Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "544", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D2379537BE787C7A7D3", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-10T15:15:25.440430Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs/README.md [3mhash[0m[2m=[0mfc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m25 [3muploaded_bytes[0m[2m=[0m25 [3mstreaming[0m[2m=[0mfalse
+[2m2026-05-10T15:15:25.443433Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "448", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D237A3F0B07C0E8C1C9", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt", request_id: "18AE3D237A3F0B07C0E8C1C9" }
+[2m2026-05-10T15:15:25.445885Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "544", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D237A68D3B74C0A04E9", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-10T15:15:25.448426Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "538", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D237A8EFDFC6C5AF9FE", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-10T15:15:25.455247Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "448", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D237AF2E73C4731E089", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt", request_id: "18AE3D237AF2E73C4731E089" }
+[2m2026-05-10T15:15:25.468190Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "544", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AE3D237BB9202E3DADBE4C", "date": "Sun, 10 May 2026 15:15:25 GMT"} }, service: s3, path: home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-10T15:15:25.480604Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs/deep/remote.txt [3mhash[0m[2m=[0mbd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m77 [3muploaded_bytes[0m[2m=[0m77 [3mstreaming[0m[2m=[0mfalse
+
+Push complete:
+  uploaded: 2 files (102 B)
+  skipped:  0 files (unchanged)
+  total:    2 files
+
+[2/9] start direct fuse mount
+mounted at: /tmp/tcfs-lazy-linux-demo.lGJB7z/mount
+
+[3/9] prove traversal does not hydrate content
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/README.md
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/deep
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/deep/remote.txt
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/empty-dir
+
+[4/9] cat remote-backed file and verify hydration
+mounted root: /tmp/tcfs-lazy-linux-demo.lGJB7z/mount
+listing parent before cat: /tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/deep
+total 1
+drwxr-xr-x. 2 jess jess  0 May 10 11:15 .
+drwxr-xr-x. 2 jess jess  0 May 10 11:15 ..
+-rw-r--r--. 1 jess jess 77 May 10 11:15 remote.txt
+find evidence (max depth 6):
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/README.md
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/deep
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/deep/remote.txt
+/tmp/tcfs-lazy-linux-demo.lGJB7z/mount/docs/empty-dir
+cat hydrate target: docs/deep/remote.txt
+cat byte count: 77
+lazy hydration mounted smoke passed
+cache after first cat: entries=1 bytes=77
+
+[5/9] write and edit through mounted view, then verify exact remote pull
+[2m2026-05-10T15:15:25.878764Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-10T15:15:25.878893Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-10T15:15:25.878943Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pulling docs/deep/mounted-write.txt → /tmp/tcfs-lazy-linux-demo.lGJB7z/mounted-write-remote-pull
+[2m2026-05-10T15:15:25.893814Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m downloaded [3mremote[0m[2m=[0mhome-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/566dc4e5cc6d1993149202667f448a51529639ec2751e6db8427095d49cf7af6 [3mlocal[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.lGJB7z/mounted-write-remote-pull [3mbytes[0m[2m=[0m60
+
+Downloaded:
+  local:  /tmp/tcfs-lazy-linux-demo.lGJB7z/mounted-write-remote-pull
+  bytes:  60 B
+remote mounted-write pull matched exact edited content
+
+[6/9] clear mount cache as mounted-surface dehydration
+cache after clear: entries=0
+
+[7/9] cat again and verify rehydration
+cache after re-cat: entries=1 bytes=77
+
+[8/9] prove recursive safe-unsync refuses dirty descendants
+Refusing to unsync directory with dirty descendants: /tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs
+  dirty:
+    /tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs/README.md (size changed: 25 → 38)
+  summary: 0 converted, 0 skipped, 1 dirty
+Error: 1 dirty descendant(s) with local changes. Use --force to unsync anyway.
+
+[9/9] restore clean content and prove recursive safe-unsync succeeds
+Unsynced directory: /tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs
+  converted:
+    /tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs/README.md → /tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs/README.md.tc
+    /tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs/deep/remote.txt → /tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs/deep/remote.txt.tc
+  summary: 2 converted, 0 skipped, 0 dirty
+State cache: /tmp/tcfs-lazy-linux-demo.lGJB7z/state.json
+Tracked files: 3
+
+File: /tmp/tcfs-lazy-linux-demo.lGJB7z/source/docs/README.md
+  hash:       fc6ae05dfa7398a4
+  size:       25 B
+  chunks:     1
+  remote:     home-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0
+  last sync:  0 seconds ago
+  sync state: not_synced
+  sync check: up to date
+
+lazy hydration Linux lifecycle demo passed
+evidence written to: /tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/linux-lifecycle/linux-lifecycle/evidence

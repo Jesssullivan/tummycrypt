@@ -1,0 +1,14 @@
+# Prepare remote work directory:
+ssh honey 'mkdir -p /tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run'
+
+# Copy expected content and the honey M8 runner:
+scp docs/release/evidence/neo-honey-delete-rename-unsynced-20260510T040358Z/delete-initial-content.txt honey:/tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/delete-initial-content.txt
+scp docs/release/evidence/neo-honey-delete-rename-unsynced-20260510T040358Z/rename-content.txt honey:/tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/rename-content.txt
+scp docs/release/evidence/neo-honey-delete-rename-unsynced-20260510T040358Z/honey-delete-rename-run.sh honey:/tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/honey-delete-rename-run.sh
+
+# Pull and unsync on honey:
+ssh honey 'TCFS_HONEY_DELETE_CONTENT_FILE=/tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/delete-initial-content.txt TCFS_HONEY_RENAME_CONTENT_FILE=/tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/rename-content.txt bash /tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/honey-delete-rename-run.sh prepare-unsync'
+
+# After neo deletes/renames, verify current peer-unsynced behavior:
+ssh honey 'bash /tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/honey-delete-rename-run.sh verify-delete'
+ssh honey 'TCFS_HONEY_RENAME_CONTENT_FILE=/tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/rename-content.txt bash /tmp/tcfs-delete-rename-unsynced-20260510T040359Z-56130-honey/run/honey-delete-rename-run.sh verify-rename'

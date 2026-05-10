@@ -1,0 +1,9 @@
+[2m2026-05-10T15:15:25.878764Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-10T15:15:25.878893Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-10T15:15:25.878943Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pulling docs/deep/mounted-write.txt → /tmp/tcfs-lazy-linux-demo.lGJB7z/mounted-write-remote-pull
+[2m2026-05-10T15:15:25.893814Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m downloaded [3mremote[0m[2m=[0mhome-canary-linux-xr-shadow-20260510T023938Z/linux-lifecycle/linux-lifecycle/manifests/566dc4e5cc6d1993149202667f448a51529639ec2751e6db8427095d49cf7af6 [3mlocal[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.lGJB7z/mounted-write-remote-pull [3mbytes[0m[2m=[0m60
+
+Downloaded:
+  local:  /tmp/tcfs-lazy-linux-demo.lGJB7z/mounted-write-remote-pull
+  bytes:  60 B

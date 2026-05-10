@@ -1,0 +1,17 @@
+# Prepare remote work directory:
+ssh honey 'mkdir -p /tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run'
+
+# Copy expected content and the honey reverse runner:
+scp docs/release/evidence/honey-mounted-reverse-read-20260510T042203Z/neo-initial-content.txt honey:/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/neo-initial-content.txt
+scp docs/release/evidence/honey-mounted-reverse-read-20260510T042203Z/neo-mutated-content.txt honey:/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/neo-mutated-content.txt
+scp docs/release/evidence/honey-mounted-reverse-read-20260510T042203Z/honey-reverse-run.sh honey:/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/honey-reverse-run.sh
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-mounted-smoke.sh honey:/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/lazy-hydration-mounted-smoke.sh
+
+# Pull and unsync on honey:
+ssh honey 'TCFS_HONEY_INITIAL_CONTENT_FILE=/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/neo-initial-content.txt bash /tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/honey-reverse-run.sh prepare-unsync'
+
+# After neo mutates and pushes, rehydrate honey:
+ssh honey 'TCFS_HONEY_MUTATED_CONTENT_FILE=/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/neo-mutated-content.txt bash /tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/honey-reverse-run.sh rehydrate'
+
+# Or, for the Linux-mounted reverse-read row:
+ssh honey 'TCFS_HONEY_MUTATED_CONTENT_FILE=/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/neo-mutated-content.txt TCFS_HONEY_SMOKE_SCRIPT=/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/lazy-hydration-mounted-smoke.sh TCFS_HONEY_MOUNT_ROOT=/tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/mount TCFS_HONEY_START_MOUNT=1 bash /tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/honey-reverse-run.sh mounted-read'

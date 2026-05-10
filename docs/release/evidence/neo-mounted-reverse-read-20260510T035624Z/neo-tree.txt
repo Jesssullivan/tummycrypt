@@ -1,0 +1,3 @@
+/Users/jess/TCFS Pilot/runs/mounted-reverse-read-20260510T035625Z-44117/neo
+/Users/jess/TCFS Pilot/runs/mounted-reverse-read-20260510T035625Z-44117/neo/Projects
+/Users/jess/TCFS Pilot/runs/mounted-reverse-read-20260510T035625Z-44117/neo/Projects/shared

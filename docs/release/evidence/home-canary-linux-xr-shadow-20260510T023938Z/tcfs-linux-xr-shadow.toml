@@ -1,0 +1,27 @@
+[daemon]
+socket = "/Users/jess/git/tummycrypt/docs/release/evidence/home-canary-linux-xr-shadow-20260510T023938Z/state/no-daemon.sock"
+
+[storage]
+endpoint = "http://100.64.48.53:8333"
+region = "us-east-1"
+bucket = "tcfs"
+remote_prefix = "home-canary-linux-xr-shadow-20260510T023938Z"
+enforce_tls = false
+
+[sync]
+state_db = "/Users/jess/git/tummycrypt/docs/release/evidence/home-canary-linux-xr-shadow-20260510T023938Z/state/state.db"
+sync_root = "/Users/jess/TCFS Pilot/real-canaries/linux-xr-shadow-20260510T002604Z"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_git_dirs = true
+git_sync_mode = "raw"
+sync_hidden_dirs = true
+sync_empty_dirs = true
+
+[fuse]
+cache_dir = "/Users/jess/git/tummycrypt/docs/release/evidence/home-canary-linux-xr-shadow-20260510T023938Z/state/cache"
+cache_max_mb = 512
+negative_cache_ttl_secs = 1
+
+[crypto]
+enabled = false

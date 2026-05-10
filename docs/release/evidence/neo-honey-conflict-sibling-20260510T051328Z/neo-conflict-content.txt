@@ -1,0 +1,4 @@
+# Conflict shared TCFS note
+
+version: neo-conflict
+body: neo pushed this divergent version before honey attempted its push.

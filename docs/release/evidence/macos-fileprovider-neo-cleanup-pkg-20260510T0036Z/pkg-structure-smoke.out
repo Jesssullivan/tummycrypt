@@ -1,0 +1,22 @@
+$ PKG_PATH=/tmp/tcfs-published-pkg-v0.12.12/tcfs-0.12.12-macos-aarch64.pkg REQUIRE_SIGNATURE=1 task lazy:macos-pkg-structure-smoke
+task: [lazy:macos-pkg-structure-smoke] bash -euo pipefail <<'EOF'
+: "${PKG_PATH:?set PKG_PATH=/path/to/tcfs.pkg}"
+
+args=(--pkg "$PKG_PATH")
+if [[ -n "${EXPECTED_POSTINSTALL:-}" ]]; then
+  args+=(--expected-postinstall "$EXPECTED_POSTINSTALL")
+fi
+if [[ "${REQUIRE_SIGNATURE:-0}" == "1" ]]; then
+  args+=(--require-signature)
+fi
+
+scripts/macos-pkg-structure-smoke.sh "${args[@]}"
+EOF
+
+package: /tmp/tcfs-published-pkg-v0.12.12/tcfs-0.12.12-macos-aarch64.pkg
+payload: usr/local/bin/tcfs present
+payload: usr/local/bin/tcfsd present
+payload: TCFSProvider.app present
+payload: TCFSFileProvider.appex present
+postinstall: matches /Users/jess/git/tummycrypt/scripts/macos-pkg-postinstall.sh
+macOS package structure smoke passed

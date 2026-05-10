@@ -1,0 +1,11 @@
+2026-05-10T04:22:06.181346Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T04:22:06.181514Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T04:22:06.181571Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pushing /Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T042204Z-92360/neo → tcfs:honey-mounted-reverse-read-20260510T042203Z (endpoint: http://100.64.48.53:8333, device: 03d8a0bd...)
+2026-05-10T04:22:06.187967Z DEBUG tcfs_sync::engine: uploading path=/Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T042204Z-92360/neo/Projects/shared/reverse-notes.md reason=size changed: 112 → 107
+2026-05-10T04:22:06.431281Z  INFO tcfs_sync::engine: uploaded path=/Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T042204Z-92360/neo/Projects/shared/reverse-notes.md hash=e6ffb6925a2ae0f9d560257a86d8553037eddff4fb71d8c9b2212c3341db5e37 chunks=1 bytes=107 uploaded_bytes=107 streaming=false
+
+Push complete:
+  uploaded: 1 files (107 B)
+  skipped:  0 files (unchanged)
+  total:    1 files

@@ -1,0 +1,7 @@
+Pushing /tmp/tcfs-mounted-reverse-read-20260510T035625Z-44117-honey/root → tcfs:neo-mounted-reverse-read-20260510T035624Z (endpoint: http://100.64.48.53:8333, device: d1176e5d...)
+
+Push complete:
+  uploaded: 1 files (119 B)
+  skipped:  0 files (unchanged)
+  total:    1 files
+honey mounted reverse mutated push ok: Projects/shared/mounted-reverse-notes.md

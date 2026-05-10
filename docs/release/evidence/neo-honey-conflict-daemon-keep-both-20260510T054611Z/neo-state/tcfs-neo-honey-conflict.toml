@@ -1,0 +1,31 @@
+[daemon]
+socket = "docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054611Z/neo-state/tcfsd.sock"
+metrics_addr = "127.0.0.1:0"
+
+[storage]
+endpoint = "http://100.64.48.53:8333"
+region = "us-east-1"
+bucket = "tcfs"
+remote_prefix = "neo-honey-conflict-daemon-keep-both-20260510T054611Z"
+enforce_tls = false
+
+[sync]
+state_db = "docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054611Z/neo-state/state.db"
+sync_root = "/Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T054622Z-94850/neo"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_empty_dirs = true
+device_identity = "docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054611Z/neo-state/device-registry.json"
+device_name = "neo-conflict"
+reconcile_interval_secs = 0
+
+[fuse]
+cache_dir = "docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054611Z/neo-state/cache"
+cache_max_mb = 64
+negative_cache_ttl_secs = 1
+
+[crypto]
+enabled = false
+
+[auth]
+require_session = false

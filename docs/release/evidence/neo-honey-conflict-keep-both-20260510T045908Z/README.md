@@ -1,0 +1,46 @@
+# TCFS neo/honey Conflict Evidence
+
+Created: 2026-05-10T04:59:17Z
+
+This packet targets the same-fixture cross-host conflict row:
+
+1. neo pushes `Projects/shared/conflict-notes.md` to a disposable prefix.
+2. honey pulls that file into a physical sync root and edits it locally.
+3. neo edits and pushes a different version of the same relative path.
+4. honey attempts to push its divergent local version.
+5. TCFS must detect conflict, skip the honey upload, mark honey local state as
+   `conflict`, preserve honey's local bytes, and leave the remote index at
+   neo's last pushed bytes.
+
+When `--honey-recover-keep-both` is enabled, the packet then runs a manual
+keep-both recovery pattern:
+
+6. honey copies its conflicted local bytes to `Projects/shared/conflict-notes.conflict-honey.md`.
+7. honey pulls the original path back to neo's remote bytes.
+8. honey pushes `Projects/shared/conflict-notes.conflict-honey.md`.
+9. neo pulls both paths back and compares exact content.
+
+Remote:
+
+```text
+seaweedfs://100.64.48.53:8333/tcfs/neo-honey-conflict-keep-both-20260510T045908Z
+```
+
+Important files:
+
+- `neo-initial-push.log`: initial neo publish transcript, when pushed
+- `honey-prepare.log`: honey pull/local edit transcript, when run
+- `neo-conflict-push.log`: neo divergent push transcript, when run
+- `honey-conflict-push.log`: honey conflict push transcript, when run
+- `honey-keep-both-recovery.log`: optional manual keep-both recovery transcript
+- `honey-evidence/`: detailed remote transcripts, copied back when available
+- `remote-after-conflict.content`: remote pullback after honey conflict push
+- `remote-original-after-recovery.content`: optional original-path pullback
+- `remote-conflict-copy.content`: optional keep-both copy pullback
+- `result.env`: pass/plan-only status
+
+Claimability note: this proves current CLI conflict behavior for one
+same-fixture cross-host row. Optional keep-both mode proves a manual recovery
+pattern, not daemon-backed `tcfs resolve` UX. It does not prove Finder conflict
+UX, automatic resolution, keep-synced/pin policy, or production FileProvider
+status badges.

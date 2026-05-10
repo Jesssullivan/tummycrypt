@@ -1,0 +1,21 @@
+{
+  "last_nats_seq": 0,
+  "device_id": "",
+  "entries": {
+    "/Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T054416Z-92811/neo/Projects/shared/conflict-notes.md": {
+      "blake3": "615b119402da42275efeca36838fa95ddc7dc66970078c090b751241173c5b4e",
+      "size": 124,
+      "mtime": 1778391860,
+      "chunk_count": 1,
+      "remote_path": "neo-honey-conflict-daemon-keep-both-20260510T054401Z/manifests/615b119402da42275efeca36838fa95ddc7dc66970078c090b751241173c5b4e",
+      "last_synced": 1778391860,
+      "vclock": {
+        "clocks": {
+          "00000000-0000-4000-8000-0000000000a1": 2
+        }
+      },
+      "device_id": "00000000-0000-4000-8000-0000000000a1",
+      "status": "synced"
+    }
+  }
+}

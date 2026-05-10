@@ -139,6 +139,206 @@ This helper intentionally does not seed storage, start `tcfsd`, or perform the
 mount. It verifies the user-facing part of the demo: clean `ls`/`find` names and
 `cat` hydration of a known remote-backed file.
 
+## Same-Fixture neo/honey Rehydrate
+
+The first high-value cross-machine permutation is narrower than a full home
+rollout: one fixture is pushed by `neo`, removed locally with `tcfs unsync`,
+mutated by `honey` through a mounted clean-name view, then pulled back by `neo`.
+The required result is exact honey bytes on neo and no stale adjacent `.tc`
+stub after the pull.
+
+Use the bounded helper:
+
+```bash
+PUSH=1 \
+RUN_HONEY=1 \
+HONEY_START_MOUNT=1 \
+REMOTE=seaweedfs://HOST:8333/tcfs/unsynced-rehydrate-manual \
+task lazy:neo-honey-unsynced-rehydrate-plan
+```
+
+The helper creates an isolated root under `~/TCFS Pilot/runs/`, writes a
+disposable config/state directory, emits manual honey commands, and archives
+evidence under the selected evidence directory. It refuses direct `HOME`,
+`~/Documents`, and `~/git` roots unless `ALLOW_REAL_ROOTS=1` is explicitly set.
+
+This lane proves a specific QA row: "remove from this machine" on neo, edit
+elsewhere on honey, then rehydrate exact latest content on neo. It complements
+the broader fleet pilot and does not claim production Finder behavior.
+
+Archived host evidence:
+
+- [neo-honey-unsynced-rehydrate-20260510T015644Z](../release/evidence/neo-honey-unsynced-rehydrate-20260510T015644Z/)
+  ran against
+  `seaweedfs://100.64.48.53:8333/tcfs/neo-honey-unsynced-rehydrate-20260510T015644Z`.
+- The run passed with `status=0`: neo unsynced the fixture to a `.tc` stub,
+  honey listed/cat-hydrated/mutated the clean mounted path, neo pulled exact
+  honey bytes, `sync-status` returned `sync state: synced`, and
+  `stub_after_pull=absent`.
+
+The reverse row uses a honey physical sync root instead of the honey mounted
+mutation used by M3:
+
+```bash
+PUSH=1 \
+RUN_HONEY=1 \
+REMOTE=seaweedfs://HOST:8333/tcfs/reverse-unsynced-rehydrate-manual \
+task lazy:neo-honey-reverse-unsynced-rehydrate-plan
+```
+
+That helper seeds from neo, pulls and unsyncs on honey, mutates and pushes on
+neo, then runs a honey pull and checks exact neo bytes plus absent stale `.tc`.
+
+Archived reverse evidence:
+
+- [neo-honey-reverse-unsynced-rehydrate-20260510T022858Z](../release/evidence/neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/)
+  ran against
+  `seaweedfs://100.64.48.53:8333/tcfs/neo-honey-reverse-unsynced-rehydrate-20260510T022858Z`.
+- The run passed with `status=0`: honey pulled the initial fixture, unsynced it
+  to a `.tc` stub, neo pushed the mutation, honey pulled exact 107-byte neo
+  content, `sync-status` returned `sync state: synced`, and
+  `stub_after_pull=absent`.
+- [neo-honey-reverse-unsynced-rehydrate-20260510T022657Z](../release/evidence/neo-honey-reverse-unsynced-rehydrate-20260510T022657Z/)
+  is retained as blocker evidence: it pulled the new content and reported
+  synced, but an older honey `tcfs` binary left the adjacent `.tc` stub behind.
+
+## Mounted Reverse Read
+
+M4 is different from M6: the final proof is not `tcfs pull` into a physical
+sync root. Honey publishes bytes, neo pulls once only so it can create a
+physical `.tc` stub with `tcfs unsync`, honey publishes newer bytes, and neo
+then reads the latest content through a mounted clean-name view. The mounted
+view must pass `ls`/`find` traversal, avoid raw `.tc` / `.tcf` suffix leaks, and
+return exact honey bytes from `cat`.
+
+Use the bounded helper:
+
+```bash
+PUSH=1 \
+RUN_HONEY=1 \
+NEO_START_MOUNT=1 \
+NEO_NFS=1 \
+REMOTE=seaweedfs://HOST:8333/tcfs/mounted-reverse-read-manual \
+task lazy:neo-mounted-reverse-read-plan
+```
+
+When neo/macOS cannot mount, use the Linux-equivalent row. It inverts the
+actors: honey keeps only the physical `.tc` stub, neo publishes newer bytes,
+and honey reads exact neo content through a mounted Linux clean-name view:
+
+```bash
+PUSH=1 \
+RUN_HONEY=1 \
+HONEY_START_MOUNT=1 \
+REMOTE=seaweedfs://HOST:8333/tcfs/honey-mounted-reverse-read-manual \
+task lazy:honey-mounted-reverse-read-plan
+```
+
+The helper archives honey initial/mutated push transcripts, neo physical
+pull/unsync/status, the mounted `lazy-hydration-mounted-smoke.sh` transcript,
+and the physical root state after mounted read. A passing live run should have
+`proof=mounted-reverse-read-current-behavior` and
+`neo_physical_after_mounted_read=stub_present`; the mounted read should hydrate
+through the mount cache, not by converting the physical sync root back to a
+hydrated file.
+
+On neo/macOS, use `NEO_NFS=1` unless macFUSE is explicitly installed. Linux
+hosts with FUSE3 can omit it.
+
+Current live M4 evidence:
+
+- [honey-mounted-reverse-read-20260510T042203Z](../release/evidence/honey-mounted-reverse-read-20260510T042203Z/)
+  ran against
+  `seaweedfs://100.64.48.53:8333/tcfs/honey-mounted-reverse-read-20260510T042203Z`.
+- The Linux-equivalent row passed with
+  `proof=linux-mounted-reverse-read-current-behavior`: honey pulled and
+  unsynced a physical copy, neo pushed the mutation, honey mounted
+  `ls`/`find`/`cat` returned exact neo content, and
+  `honey_physical_after_mounted_read=stub_present`.
+- [neo-mounted-reverse-read-20260510T035826Z](../release/evidence/neo-mounted-reverse-read-20260510T035826Z/)
+  ran against
+  `seaweedfs://100.64.48.53:8333/tcfs/neo-mounted-reverse-read-20260510T035826Z`.
+- The pre-mount stages passed: honey initial push, neo physical pull, neo
+  `tcfs unsync`, `sync state: not_synced`, and honey mutated push are archived.
+- The row remains blocked before mounted `cat`: neo/macOS has no macFUSE
+  installed, and the `NEO_NFS=1` fallback failed at `mount_nfs` with
+  `Operation not permitted`.
+- The Linux row does not close the neo/macOS or production Finder claim.
+
+## Delete/Rename While Peer Unsynced
+
+The M8 row intentionally stays narrower than a clean user-facing delete/rename
+claim. It stages two files, has honey pull and `tcfs unsync` both into physical
+`.tc` stubs, then has neo delete one path and rename the other by publishing the
+new path and removing the old remote index entry. Honey verifies current
+behavior: old paths fail to rehydrate, the renamed new path hydrates exact
+bytes, and stale old stubs are recorded as an open product gap.
+
+Use the bounded helper:
+
+```bash
+PUSH=1 \
+RUN_HONEY=1 \
+REMOTE=seaweedfs://HOST:8333/tcfs/delete-rename-unsynced-manual \
+task lazy:neo-honey-delete-rename-unsynced-plan
+```
+
+The helper writes `result.env` with
+`proof=delete-rename-peer-unsynced-current-behavior` when the live run passes.
+That is not the same as claiming that TCFS has accepted tombstone semantics or
+automatic stale-placeholder cleanup for every peer. A stronger QA row needs the
+product decision first: remove stale physical `.tc` stubs, retain them with
+explicit deleted/renamed status, or introduce durable tombstones and make that
+visible through CLI, mounted views, and FileProvider.
+
+Archived M8 evidence:
+
+- [neo-honey-delete-rename-unsynced-20260510T040456Z](../release/evidence/neo-honey-delete-rename-unsynced-20260510T040456Z/)
+  ran against
+  `seaweedfs://100.64.48.53:8333/tcfs/neo-honey-delete-rename-unsynced-20260510T040456Z`.
+- The run passed with `status=0`: honey pulled and unsynced both fixtures, neo
+  deleted one path and renamed another, honey old-path pulls failed as expected,
+  the renamed new path hydrated exact bytes, and `rename_new_pull=synced`.
+- The run also records the current UX gap: `delete_stub_after_failed_pull` and
+  `rename_old_stub_after_new_pull` are both `present`. A same-hash rename must
+  use the current safe order, delete old remote path before publishing the new
+  path, until manifest/reference semantics are hardened.
+
+## Real Project-Tree Canary
+
+After the isolated fleet packet, the next project-tree gate is an isolated
+shadow of `/Users/jess/git/linux-xr`, not live home-directory management:
+
+```bash
+PUSH=1 \
+RUN_HONEY=1 \
+RUN_LINUX_LIFECYCLE=1 \
+REMOTE=seaweedfs://HOST:8333/tcfs/home-canary-linux-xr-shadow-manual \
+task lazy:home-canary-linux-xr-shadow
+```
+
+The helper inventories the live repo read-only, copies it to
+`~/TCFS Pilot/real-canaries/linux-xr-shadow-<UTC>`, writes a disposable config
+with raw `.git`, hidden dirs, and empty dirs enabled, and archives evidence
+under `docs/release/evidence/home-canary-linux-xr-shadow-<UTC>/`. It records
+symlinks and unsupported special files as truth gates; while TCFS push uses
+`follow_symlinks=false`, evidence must not claim full project parity when the
+source contains symlinks.
+
+Archived scoped canary evidence:
+
+- [home-canary-linux-xr-shadow-20260510T023938Z](../release/evidence/home-canary-linux-xr-shadow-20260510T023938Z/)
+  completed a 92,969-file / 7.7 GB shadow push to
+  `seaweedfs://100.64.48.53:8333/tcfs/home-canary-linux-xr-shadow-20260510T023938Z`.
+- Honey mounted the prefix, listed clean names including `.git`, ran bounded
+  traversal at `max-depth=3`, and `cat` hydrated `.clang-format` with exact
+  24,291-byte content.
+- The Linux lifecycle companion passed mounted write/readback, cache
+  clear/rehydrate, dirty safe-unsync refusal, clean recursive unsync, and exact
+  rehydrate under the same disposable prefix.
+- Full project parity remains unclaimed because the source inventory records 85
+  symlinks and push still uses `follow_symlinks=false`.
+
 Run the helper from `nix develop` or through direnv so the repo-pinned Rust,
 `go-task`, shell lint tools, `jq`, and S3 helper commands are active. The dev
 shell intentionally prepends the pinned toolchain and proof-helper commands
@@ -148,9 +348,9 @@ tools.
 The helper's own behavior is covered by:
 
 ```bash
-scripts/test-lazy-hydration-mounted-smoke.sh
+scripts/test-home-canary-linux-xr-shadow.sh
 # or:
-task lazy:test-mounted-smoke
+task lazy:test-home-canary-linux-xr-shadow
 ```
 
 The host-runnable lazy proof gate is:
@@ -159,10 +359,11 @@ The host-runnable lazy proof gate is:
 task lazy:check
 ```
 
-That task runs shell syntax checks, shellcheck, the mounted-smoke helper
-regression suite, and the `tcfs-vfs` tests that lock the clean-name and
-lazy-cache contract. It does not replace the Linux FUSE demo or clean-host
-Finder acceptance runs; those still need the appropriate host surface.
+That task runs shell syntax checks, shellcheck, helper regression suites, the
+focused CLI unsync/resync regressions, and the `tcfs-vfs` tests that lock the
+clean-name and lazy-cache contract. It does not replace the Linux FUSE demo,
+same-fixture cross-host run, or clean-host Finder acceptance runs; those still
+need the appropriate host surface.
 
 ## Linux <> Finder Parity Contract
 
@@ -184,6 +385,19 @@ mounted mutation, cache rehydration, or recursive safe-unsync. The PZM
 testing-mode lane now proves conflict/status content preservation, while
 production Developer ID clean-host evidence and reliable Finder badge/progress
 assertions remain separate.
+
+The neo/honey CLI packets now add cross-host conflict detection and manual
+keep-both recovery evidence to the same parity story: detection/preservation is
+archived in `neo-honey-conflict-20260510T043741Z/`, and the scriptable
+keep-both pattern is archived in
+`neo-honey-conflict-keep-both-20260510T045908Z/`. Independent sibling progress
+while another descendant remains conflicted is archived in
+`neo-honey-conflict-sibling-20260510T051328Z/`. The daemon-backed keep-both
+attempt is archived as
+`neo-honey-conflict-daemon-keep-both-20260510T054611Z/`: the request reaches
+isolated `tcfsd 0.12.12`, but the CLI times out after partial side effects.
+That still is not production Finder conflict UI or daemon-backed `tcfs resolve`
+acceptance.
 
 Required proof:
 
@@ -397,13 +611,15 @@ GitHub-hosted macOS runners need a public reachable S3-compatible endpoint for
 this lane. Tailscale-only, RFC1918, localhost, and CGNAT endpoints are not
 sufficient for the hosted executor.
 
-As of the `v0.12.7` hosted smoke, that endpoint/config/package portion is no
-longer the observed blocker. The published production `.pkg` installed,
-passed signing, reached storage, started the daemon, and proved the seeded E2EE
-fixture. The remaining hosted failure was
+The `v0.12.7` hosted smoke historically proved that a published production
+`.pkg` could install, pass signing, reach storage, start the daemon, and prove a
+seeded E2EE fixture before hitting
 `NSFileProviderErrorDomainDisabled` (`-2011`) / `Sync is not enabled for
-"TCFSProvider"` because macOS kept the provider disabled for that runner user.
-Do not keep cutting production release tags solely to retry this state.
+"TCFSProvider"`. The later `v0.12.12` hosted production attempt is the current
+package-lane truth for this sprint: it passed install/signing/installed
+CLI/config gates, then failed earlier because the public tunnel hostname for
+the storage fixture no longer resolved from GitHub-hosted macOS. Do not keep
+cutting production release tags solely to retry either state.
 
 ## Hygiene TODO
 

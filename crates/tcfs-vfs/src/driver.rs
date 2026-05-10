@@ -752,6 +752,47 @@ impl VirtualFilesystem for TcfsVfs {
         Ok(data.len() as u32)
     }
 
+    async fn truncate(&self, path: Option<&str>, fh: Option<u64>, size: u64) -> Result<VfsAttr> {
+        if size as usize > MAX_WRITE_SIZE {
+            anyhow::bail!(
+                "EFBIG: truncate would exceed maximum file size ({} bytes, limit {} bytes)",
+                size,
+                MAX_WRITE_SIZE
+            );
+        }
+
+        if let Some(fh) = fh {
+            let mut handles = self.handles.write().await;
+            let handle = handles
+                .get_mut(&fh)
+                .context(format!("truncate: bad file handle: {}", fh))?;
+            handle.data.resize(size as usize, 0);
+            handle.modified = true;
+            return Ok(self.file_attr(size));
+        }
+
+        let path = path.context("truncate requires path or file handle")?;
+
+        {
+            let mut handles = self.handles.write().await;
+            let mut matched = false;
+            for handle in handles.values_mut().filter(|handle| handle.path == path) {
+                handle.data.resize(size as usize, 0);
+                handle.modified = true;
+                matched = true;
+            }
+            if matched {
+                return Ok(self.file_attr(size));
+            }
+        }
+
+        let (fh, _) = self.open(path).await?;
+        self.truncate(None, Some(fh), size).await?;
+        self.release(fh).await?;
+
+        Ok(self.file_attr(size))
+    }
+
     async fn create(&self, parent: &str, name: &OsStr, _mode: u32) -> Result<(u64, VfsAttr)> {
         let name_str = name.to_str().context("non-UTF-8 filename")?;
         let vpath = if parent == "/" {

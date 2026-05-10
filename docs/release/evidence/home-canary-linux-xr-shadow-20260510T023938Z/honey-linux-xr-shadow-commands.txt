@@ -1,0 +1,8 @@
+# Run after the shadow prefix is mounted on honey at:
+# /tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/mount
+ssh honey 'mkdir -p /tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run'
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-mounted-smoke.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/lazy-hydration-mounted-smoke.sh
+scp docs/release/evidence/home-canary-linux-xr-shadow-20260510T023938Z/selected-hydration-file.content honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/selected-hydration-file.content
+scp docs/release/evidence/home-canary-linux-xr-shadow-20260510T023938Z/honey-linux-xr-shadow-run.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/honey-linux-xr-shadow-run.sh
+ssh honey 'chmod +x /tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/lazy-hydration-mounted-smoke.sh /tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/honey-linux-xr-shadow-run.sh'
+ssh honey 'TCFS_HONEY_START_MOUNT=1 TCFS_HONEY_SMOKE_SCRIPT=/tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/lazy-hydration-mounted-smoke.sh TCFS_HONEY_EXPECTED_CONTENT_FILE=/tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/selected-hydration-file.content TCFS_HONEY_MOUNT_LOG=/tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/mount.log TCFS_HONEY_SMOKE_MAX_DEPTH=3 TCFS_HONEY_SMOKE_TIMEOUT_SECS=300 bash /tmp/tcfs-home-canary-linux-xr-shadow-20260510T023938Z-honey/run/honey-linux-xr-shadow-run.sh'

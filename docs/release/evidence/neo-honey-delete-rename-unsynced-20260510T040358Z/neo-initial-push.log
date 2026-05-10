@@ -1,0 +1,13 @@
+2026-05-10T04:04:02.008368Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T04:04:02.009794Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T04:04:02.010628Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pushing /Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040359Z-56130/neo → tcfs:neo-honey-delete-rename-unsynced-20260510T040358Z (endpoint: http://100.64.48.53:8333, device: 03d8a0bd...)
+2026-05-10T04:04:02.050499Z DEBUG tcfs_sync::engine: uploading path=/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040359Z-56130/neo/Projects/shared/delete-me.md reason=new file
+2026-05-10T04:04:02.113956Z  INFO tcfs_sync::engine: uploaded path=/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040359Z-56130/neo/Projects/shared/delete-me.md hash=6890f2b804de7015c6f9dd72f8146b99fba9fa5bdc35a563cfb92d655c5624c7 chunks=1 bytes=105 uploaded_bytes=105 streaming=false
+2026-05-10T04:04:02.114680Z DEBUG tcfs_sync::engine: uploading path=/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040359Z-56130/neo/Projects/shared/rename-old.md reason=new file
+2026-05-10T04:04:02.161665Z  INFO tcfs_sync::engine: uploaded path=/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040359Z-56130/neo/Projects/shared/rename-old.md hash=4c6855523dd3ef8d752c80112582c5c4310b5f44b2082cbcf1f64649ebeec9af chunks=1 bytes=105 uploaded_bytes=105 streaming=false
+
+Push complete:
+  uploaded: 2 files (210 B)
+  skipped:  0 files (unchanged)
+  total:    2 files

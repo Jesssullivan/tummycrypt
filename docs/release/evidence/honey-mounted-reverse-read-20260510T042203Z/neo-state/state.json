@@ -1,0 +1,21 @@
+{
+  "last_nats_seq": 0,
+  "device_id": "",
+  "entries": {
+    "/Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T042204Z-92360/neo/Projects/shared/reverse-notes.md": {
+      "blake3": "e6ffb6925a2ae0f9d560257a86d8553037eddff4fb71d8c9b2212c3341db5e37",
+      "size": 107,
+      "mtime": 1778386926,
+      "chunk_count": 1,
+      "remote_path": "honey-mounted-reverse-read-20260510T042203Z/manifests/e6ffb6925a2ae0f9d560257a86d8553037eddff4fb71d8c9b2212c3341db5e37",
+      "last_synced": 1778386926,
+      "vclock": {
+        "clocks": {
+          "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 2
+        }
+      },
+      "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a",
+      "status": "synced"
+    }
+  }
+}

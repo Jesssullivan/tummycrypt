@@ -1,0 +1,4 @@
+honey peer-rename verify ok: Projects/shared/rename-old.md -> Projects/shared/rename-new.md
+rename_old_pull=failed_as_expected
+rename_new_pull=synced
+rename_old_stub_after_new_pull=present
