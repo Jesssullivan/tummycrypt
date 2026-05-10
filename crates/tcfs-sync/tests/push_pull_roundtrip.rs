@@ -20,6 +20,149 @@ fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf
     path
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn roundtrip_symlink_preserves_link_target() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/symlink";
+
+    write_test_file(tmp.path(), "target.txt", b"target bytes");
+    std::os::unix::fs::symlink("target.txt", tmp.path().join("link.txt")).unwrap();
+
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+    let config = tcfs_sync::engine::CollectConfig {
+        preserve_symlinks: true,
+        ..Default::default()
+    };
+
+    let (uploaded, _skipped, _bytes) = tcfs_sync::engine::push_tree_with_device(
+        &op,
+        tmp.path(),
+        prefix,
+        &mut state,
+        None,
+        "neo",
+        Some(&config),
+        None,
+    )
+    .await
+    .expect("push tree with symlink");
+
+    assert_eq!(uploaded, 2);
+
+    let link_manifest =
+        tcfs_sync::engine::resolve_manifest_path(&op, "link.txt", prefix, Some(tmp.path()))
+            .await
+            .expect("resolve symlink manifest");
+    let index_bytes = op.read("test/symlink/index/link.txt").await.unwrap();
+    let index = tcfs_sync::index_entry::parse_index_entry(&index_bytes.to_vec()).unwrap();
+    assert!(index.is_symlink());
+    assert_eq!(index.symlink_target.as_deref(), Some("target.txt"));
+
+    let out = tmp.path().join("out/link.txt");
+    std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+    std::fs::write(&out, b"stale regular file").unwrap();
+    tcfs_sync::engine::download_file(&op, &link_manifest, &out, prefix, None)
+        .await
+        .expect("download symlink");
+
+    let restored = std::fs::read_link(out).unwrap();
+    assert_eq!(restored, std::path::PathBuf::from("target.txt"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn roundtrip_directory_symlink_preserves_link_target() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/dir-symlink";
+
+    std::fs::create_dir_all(tmp.path().join("target-dir")).unwrap();
+    write_test_file(
+        &tmp.path().join("target-dir"),
+        "inside.txt",
+        b"directory target bytes",
+    );
+    std::os::unix::fs::symlink("target-dir", tmp.path().join("dir-link")).unwrap();
+
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+    let config = tcfs_sync::engine::CollectConfig {
+        preserve_symlinks: true,
+        ..Default::default()
+    };
+
+    let (uploaded, _skipped, _bytes) = tcfs_sync::engine::push_tree_with_device(
+        &op,
+        tmp.path(),
+        prefix,
+        &mut state,
+        None,
+        "neo",
+        Some(&config),
+        None,
+    )
+    .await
+    .expect("push tree with directory symlink");
+
+    assert_eq!(uploaded, 2);
+
+    let link_manifest =
+        tcfs_sync::engine::resolve_manifest_path(&op, "dir-link", prefix, Some(tmp.path()))
+            .await
+            .expect("resolve directory symlink manifest");
+    let out = tmp.path().join("out/dir-link");
+    tcfs_sync::engine::download_file(&op, &link_manifest, &out, prefix, None)
+        .await
+        .expect("download directory symlink");
+
+    let restored = std::fs::read_link(out).unwrap();
+    assert_eq!(restored, std::path::PathBuf::from("target-dir"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn roundtrip_broken_symlink_preserves_link_target() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/broken-symlink";
+
+    std::os::unix::fs::symlink("missing-target", tmp.path().join("broken-link")).unwrap();
+
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+    let config = tcfs_sync::engine::CollectConfig {
+        preserve_symlinks: true,
+        ..Default::default()
+    };
+
+    let (uploaded, _skipped, _bytes) = tcfs_sync::engine::push_tree_with_device(
+        &op,
+        tmp.path(),
+        prefix,
+        &mut state,
+        None,
+        "neo",
+        Some(&config),
+        None,
+    )
+    .await
+    .expect("push tree with broken symlink");
+
+    assert_eq!(uploaded, 1);
+
+    let link_manifest =
+        tcfs_sync::engine::resolve_manifest_path(&op, "broken-link", prefix, Some(tmp.path()))
+            .await
+            .expect("resolve broken symlink manifest");
+    let out = tmp.path().join("out/broken-link");
+    tcfs_sync::engine::download_file(&op, &link_manifest, &out, prefix, None)
+        .await
+        .expect("download broken symlink");
+
+    let restored = std::fs::read_link(out).unwrap();
+    assert_eq!(restored, std::path::PathBuf::from("missing-target"));
+}
+
 #[tokio::test]
 async fn roundtrip_small_file() {
     let tmp = TempDir::new().unwrap();

@@ -404,6 +404,7 @@ nats_tls = false
 sync_git_dirs = true
 git_sync_mode = "raw"
 sync_hidden_dirs = true
+sync_symlinks = true
 sync_empty_dirs = true
 
 [fuse]
@@ -420,9 +421,10 @@ unsupported_count="$(awk -F= '$1 == "unsupported_special_files" { print $2 }' "$
 parity_status="full-project-parity-not-claimed"
 {
   printf 'status=%s\n' "$parity_status"
-  printf 'reason=TCFS push currently uses follow_symlinks=false; symlinks are inventoried but not preserved as symlinks by this proof lane.\n'
+  printf 'reason=Symlink preservation is configured for this lane, but full project parity still requires a fresh host packet proving the 85 source symlinks rehydrate as symlinks with matching targets.\n'
   printf 'source_symlink_count=%s\n' "$symlink_count"
   printf 'source_unsupported_special_file_count=%s\n' "$unsupported_count"
+  printf 'sync_symlinks=true\n'
 } >"$evidence_dir/parity-gates.env"
 
 push_rc=0
@@ -500,9 +502,9 @@ dotfiles, or broad \`~/git\` takeover.
 - Config: \`$config_path\`
 - State JSON: \`$state_json\`
 
-Truth gate: full project parity is not claimed while symlink preservation is
-unsupported by the push path. See \`parity-gates.env\`,
-\`source-inventory/symlinks.txt\`, and
+Truth gate: full project parity is not claimed until a fresh host packet proves
+source symlinks rehydrate as symlinks with matching targets. See
+\`parity-gates.env\`, \`source-inventory/symlinks.txt\`, and
 \`source-inventory/unsupported-special-files.txt\`.
 
 Contents:
@@ -512,7 +514,8 @@ Contents:
 - \`shadow-inventory/\`: same inventory after the isolated copy
 - \`tcfs-linux-xr-shadow.toml\` under \`state/\`: disposable config with
   \`sync_git_dirs = true\`, \`sync_hidden_dirs = true\`,
-  \`git_sync_mode = "raw"\`, and \`sync_empty_dirs = true\`
+  \`git_sync_mode = "raw"\`, \`sync_symlinks = true\`, and
+  \`sync_empty_dirs = true\`
 - \`push.log\`: shadow push transcript when \`--push\` ran
 - \`honey-linux-xr-shadow-commands.txt\`: honey mounted traversal/hydration
   commands for the selected file and \`.git\` traversal

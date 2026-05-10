@@ -199,6 +199,8 @@ pub struct IndexEntry {
     pub manifest_hash: String,
     pub size: u64,
     pub chunks: usize,
+    pub kind: tcfs_sync::index_entry::RemoteEntryKind,
+    pub symlink_target: Option<String>,
 }
 
 impl IndexEntry {
@@ -211,6 +213,8 @@ impl IndexEntry {
             manifest_hash: entry.manifest_hash,
             size: entry.size,
             chunks: entry.chunks,
+            kind: entry.kind,
+            symlink_target: entry.symlink_target,
         })
     }
 

@@ -79,6 +79,7 @@ fn to_fuse_attr(attr: &VfsAttr) -> FileAttr {
         kind: match attr.kind {
             VfsFileType::RegularFile => FileType::RegularFile,
             VfsFileType::Directory => FileType::Directory,
+            VfsFileType::Symlink => FileType::Symlink,
         },
         perm: attr.perm,
         nlink: attr.nlink,
@@ -97,6 +98,7 @@ fn to_fuse_file_type(kind: VfsFileType) -> FileType {
     match kind {
         VfsFileType::RegularFile => FileType::RegularFile,
         VfsFileType::Directory => FileType::Directory,
+        VfsFileType::Symlink => FileType::Symlink,
     }
 }
 
@@ -331,6 +333,25 @@ impl PathFilesystem for TcfsFs {
         }
 
         Ok(ReplyOpen { fh, flags: 0 })
+    }
+
+    async fn readlink(&self, _req: Request, path: &OsStr) -> fuse3::Result<ReplyData> {
+        let path_str = path.to_str().ok_or(Errno::from(libc::ENOENT))?;
+
+        let target = tokio::time::timeout(VFS_TIMEOUT, self.vfs.readlink(path_str))
+            .await
+            .map_err(|_| {
+                warn!(path = %path_str, "FUSE READLINK timed out");
+                Errno::from(libc::EIO)
+            })?
+            .map_err(|e| {
+                warn!(path = %path_str, error = %e, "FUSE READLINK failed");
+                vfs_error_to_errno(&e)
+            })?;
+
+        Ok(ReplyData {
+            data: Bytes::from(target.into_bytes()),
+        })
     }
 
     async fn setattr(

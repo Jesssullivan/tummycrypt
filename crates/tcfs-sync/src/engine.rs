@@ -18,12 +18,12 @@ use tracing::{debug, info, warn};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-use crate::conflict::{compare_clocks, SyncOutcome};
+use crate::conflict::{compare_clocks, SyncOutcome, VectorClock};
 use crate::index_entry::{
     manifest_key, read_index_entry_record_from_store, resolve_visible_index_entry,
     write_committed_index_entry, write_preparing_index_entry, PendingIndexEntry, RemoteIndexEntry,
 };
-use crate::manifest::SyncManifest;
+use crate::manifest::{SymlinkManifest, SyncManifest};
 use crate::state::{make_sync_state_full, FileSyncStatus, StateCache};
 
 /// Maximum number of retry attempts for chunk upload/download operations.
@@ -369,12 +369,7 @@ where
         op,
         &index_key,
         current,
-        PendingIndexEntry::new(
-            entry.manifest_hash.clone(),
-            entry.size,
-            entry.chunks,
-            staged_manifest_key.clone(),
-        ),
+        PendingIndexEntry::from_remote_entry(&entry, staged_manifest_key.clone()),
     )
     .await?;
     after_stage(PublishStage::PreparingIndex)?;
@@ -425,6 +420,8 @@ pub struct CollectConfig {
     pub exclude_patterns: Vec<String>,
     /// Whether to follow symlinks (default: false — skip with warning)
     pub follow_symlinks: bool,
+    /// Whether to preserve symlinks as symlinks instead of skipping/following.
+    pub preserve_symlinks: bool,
     /// Whether to sync empty directories via `.tcfs_dir` markers
     pub sync_empty_dirs: bool,
 }
@@ -437,6 +434,7 @@ impl Default for CollectConfig {
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
             follow_symlinks: false,
+            preserve_symlinks: false,
             sync_empty_dirs: true,
         }
     }
@@ -447,6 +445,8 @@ impl Default for CollectConfig {
 pub struct CollectResult {
     /// Regular files to upload.
     pub files: Vec<PathBuf>,
+    /// Symlinks to preserve as symlinks.
+    pub symlinks: Vec<PathBuf>,
     /// Empty directories (no files after exclusions) to create markers for.
     pub empty_dirs: Vec<PathBuf>,
 }
@@ -1063,6 +1063,78 @@ pub async fn upload_file_with_device(
     })
 }
 
+/// Upload a symbolic link as a first-class symlink entry.
+pub async fn upload_symlink_with_device(
+    op: &Operator,
+    local_path: &Path,
+    remote_prefix: &str,
+    _state: &mut StateCache,
+    device_id: &str,
+    rel_path: &str,
+) -> Result<UploadResult> {
+    let target = read_symlink_target_text(local_path)?;
+    let symlink_hash = symlink_manifest_hash(&target);
+    let remote_manifest = format!("{remote_prefix}/manifests/{symlink_hash}");
+
+    let mut vclock = VectorClock::new();
+    if !device_id.is_empty() {
+        vclock.tick(device_id);
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let manifest = SymlinkManifest::new(
+        target.clone(),
+        vclock,
+        device_id.to_string(),
+        now,
+        Some(rel_path.to_string()),
+    );
+    publish_manifest_for_rel_path(
+        op,
+        remote_prefix,
+        rel_path,
+        manifest.to_bytes()?,
+        RemoteIndexEntry::new_symlink(symlink_hash.clone(), target.clone()),
+    )
+    .await?;
+
+    info!(
+        path = %local_path.display(),
+        target = %target,
+        hash = %symlink_hash,
+        "uploaded symlink"
+    );
+
+    Ok(UploadResult {
+        path: local_path.to_path_buf(),
+        remote_path: remote_manifest,
+        hash: symlink_hash,
+        chunks: 0,
+        bytes: target.len() as u64,
+        skipped: false,
+        outcome: None,
+    })
+}
+
+fn read_symlink_target_text(path: &Path) -> Result<String> {
+    let target = std::fs::read_link(path)
+        .with_context(|| format!("reading symlink target: {}", path.display()))?;
+    target
+        .to_str()
+        .map(|s| s.to_string())
+        .with_context(|| format!("symlink target is not valid UTF-8: {}", path.display()))
+}
+
+fn symlink_manifest_hash(target: &str) -> String {
+    let mut data = b"tcfs-symlink-v1\0".to_vec();
+    data.extend_from_slice(target.as_bytes());
+    tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
+}
+
 /// Download a file from SeaweedFS using its manifest path.
 ///
 /// Reads the manifest to get chunk hashes, fetches each chunk, reassembles
@@ -1105,6 +1177,21 @@ pub async fn download_file_with_device(
     let manifest_bytes = read_with_retry(op, remote_manifest)
         .await
         .with_context(|| format!("reading manifest: {remote_manifest}"))?;
+
+    if let Ok(manifest) = SymlinkManifest::from_bytes(&manifest_bytes) {
+        create_local_symlink(local_path, &manifest.symlink_target).await?;
+        info!(
+            remote = %remote_manifest,
+            local = %local_path.display(),
+            target = %manifest.symlink_target,
+            "downloaded symlink"
+        );
+        return Ok(DownloadResult {
+            remote_path: remote_manifest.to_string(),
+            local_path: local_path.to_path_buf(),
+            bytes: manifest.symlink_target.len() as u64,
+        });
+    }
 
     let manifest = SyncManifest::from_bytes(&manifest_bytes)
         .with_context(|| format!("parsing manifest: {remote_manifest}"))?;
@@ -1307,6 +1394,34 @@ pub async fn download_file_with_device(
     })
 }
 
+async fn create_local_symlink(local_path: &Path, target: &str) -> Result<()> {
+    if let Some(parent) = local_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating dir: {}", parent.display()))?;
+    }
+
+    let tmp = local_path.with_extension("tcfs_symlink_tmp");
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, &tmp)
+            .with_context(|| format!("creating symlink: {} -> {target}", tmp.display()))?;
+    }
+
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, &tmp)
+            .with_context(|| format!("creating symlink: {} -> {target}", tmp.display()))?;
+    }
+
+    tokio::fs::rename(&tmp, local_path)
+        .await
+        .with_context(|| format!("renaming symlink to: {}", local_path.display()))?;
+    Ok(())
+}
+
 /// Walk a local directory and upload all changed files.
 ///
 /// Returns stats: (files_uploaded, files_skipped, bytes_uploaded)
@@ -1348,7 +1463,7 @@ pub async fn push_tree_with_device(
 
     let cfg = collect_cfg.cloned().unwrap_or_default();
     let result = collect_files(local_root, &cfg)?;
-    let total = result.files.len();
+    let total = result.files.len() + result.symlinks.len();
 
     for (i, path) in result.files.iter().enumerate() {
         let rel = path.strip_prefix(local_root).unwrap_or(path);
@@ -1383,6 +1498,40 @@ pub async fn push_tree_with_device(
             }
             Err(e) => {
                 warn!(path = %path.display(), "upload failed: {e}");
+            }
+        }
+    }
+
+    for (i, path) in result.symlinks.iter().enumerate() {
+        let rel = path.strip_prefix(local_root).unwrap_or(path);
+        let rel_str = normalize_rel_path_text(&rel.to_string_lossy());
+        let ordinal = result.files.len() + i + 1;
+
+        let msg = format!("[{ordinal}/{total}] {} -> symlink", rel.display());
+        if let Some(cb) = progress {
+            cb((ordinal - 1) as u64, total as u64, &msg);
+        }
+
+        match upload_symlink_with_device(
+            op,
+            path,
+            &remote_path_prefix(remote_prefix),
+            state,
+            device_id,
+            &rel_str,
+        )
+        .await
+        {
+            Ok(result) => {
+                if result.skipped {
+                    skipped += 1;
+                } else {
+                    uploaded += 1;
+                    bytes += result.bytes;
+                }
+            }
+            Err(e) => {
+                warn!(path = %path.display(), "symlink upload failed: {e}");
             }
         }
     }
@@ -1422,6 +1571,7 @@ pub async fn push_tree_with_device(
 /// marker objects in the remote index.
 pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<CollectResult> {
     let mut files = Vec::new();
+    let mut symlinks = Vec::new();
     let mut empty_dirs = Vec::new();
     let exclude_matchers: Vec<glob::Pattern> = config
         .exclude_patterns
@@ -1436,25 +1586,33 @@ pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<CollectResul
     collect_files_inner(
         root,
         &mut files,
+        &mut symlinks,
         &mut empty_dirs,
         config,
         &exclude_matchers,
         &mut visited,
     )?;
     files.sort(); // deterministic order
+    symlinks.sort();
     empty_dirs.sort();
-    Ok(CollectResult { files, empty_dirs })
+    Ok(CollectResult {
+        files,
+        symlinks,
+        empty_dirs,
+    })
 }
 
 fn collect_files_inner(
     dir: &Path,
     out: &mut Vec<PathBuf>,
+    symlinks: &mut Vec<PathBuf>,
     empty_dirs: &mut Vec<PathBuf>,
     config: &CollectConfig,
     excludes: &[glob::Pattern],
     visited: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
     let before = out.len();
+    let before_symlinks = symlinks.len();
 
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("reading dir: {}", dir.display()))?
@@ -1473,6 +1631,11 @@ fn collect_files_inner(
 
             // Handle symlinks explicitly
             if ft.is_symlink() {
+                if config.preserve_symlinks {
+                    symlinks.push(path);
+                    continue;
+                }
+
                 if !config.follow_symlinks {
                     let target = std::fs::read_link(&path).unwrap_or_default();
                     warn!(
@@ -1498,7 +1661,7 @@ fn collect_files_inner(
                         match std::fs::metadata(&real) {
                             Ok(meta) if meta.is_dir() => {
                                 collect_files_inner(
-                                    &path, out, empty_dirs, config, excludes, visited,
+                                    &path, out, symlinks, empty_dirs, config, excludes, visited,
                                 )?;
                             }
                             Ok(meta) if meta.is_file() => {
@@ -1560,7 +1723,9 @@ fn collect_files_inner(
                             continue;
                         }
                         // In raw mode, recurse into .git
-                        collect_files_inner(&path, out, empty_dirs, config, excludes, visited)?;
+                        collect_files_inner(
+                            &path, out, symlinks, empty_dirs, config, excludes, visited,
+                        )?;
                     }
                     continue;
                 }
@@ -1570,7 +1735,7 @@ fn collect_files_inner(
                     continue;
                 }
 
-                collect_files_inner(&path, out, empty_dirs, config, excludes, visited)?;
+                collect_files_inner(&path, out, symlinks, empty_dirs, config, excludes, visited)?;
             } else if ft.is_file() {
                 out.push(path);
             }
@@ -1579,7 +1744,7 @@ fn collect_files_inner(
 
     // If no files were collected from this directory (directly or via
     // subdirectories) and we're tracking empty dirs, record it as empty.
-    if config.sync_empty_dirs && out.len() == before {
+    if config.sync_empty_dirs && out.len() == before && symlinks.len() == before_symlinks {
         empty_dirs.push(dir.to_path_buf());
     }
 

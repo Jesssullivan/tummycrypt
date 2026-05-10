@@ -246,6 +246,8 @@ pub struct SyncConfig {
     pub sync_hidden_dirs: bool,
     /// Glob patterns to exclude from sync
     pub exclude_patterns: Vec<String>,
+    /// Whether to preserve POSIX symbolic links as links during tree sync.
+    pub sync_symlinks: bool,
     /// Whether to sync empty directories via `.tcfs_dir` markers.
     /// Default: true.
     pub sync_empty_dirs: bool,
@@ -418,6 +420,7 @@ impl Default for SyncConfig {
             git_sync_mode: "bundle".into(),
             sync_hidden_dirs: false,
             exclude_patterns: Vec::new(),
+            sync_symlinks: false,
             sync_empty_dirs: true,
             sync_root: None,
             auto_unsync_max_age_secs: 0,

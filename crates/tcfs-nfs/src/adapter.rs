@@ -44,6 +44,7 @@ impl<V: VirtualFilesystem> NfsAdapter<V> {
         let ftype = match attr.kind {
             VfsFileType::RegularFile => ftype3::NF3REG,
             VfsFileType::Directory => ftype3::NF3DIR,
+            VfsFileType::Symlink => ftype3::NF3LNK,
         };
 
         fattr3 {
@@ -304,7 +305,15 @@ impl<V: VirtualFilesystem + 'static> NFSFileSystem for NfsAdapter<V> {
         Err(nfsstat3::NFS3ERR_ROFS)
     }
 
-    async fn readlink(&self, _id: fileid3) -> Result<nfspath3, nfsstat3> {
-        Err(nfsstat3::NFS3ERR_INVAL) // no symlinks
+    async fn readlink(&self, id: fileid3) -> Result<nfspath3, nfsstat3> {
+        let path = self.inodes.get_path(id).ok_or(nfsstat3::NFS3ERR_STALE)?;
+        let target = tokio::time::timeout(VFS_TIMEOUT, self.vfs.readlink(&path))
+            .await
+            .map_err(|_| {
+                warn!(path = %path, "NFS READLINK timed out");
+                nfsstat3::NFS3ERR_IO
+            })?
+            .map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
+        Ok(nfsstring(target.into_bytes()))
     }
 }

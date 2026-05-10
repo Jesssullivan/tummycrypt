@@ -6,11 +6,12 @@
 
 use std::time::SystemTime;
 
-/// File type (regular file or directory).
+/// File type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VfsFileType {
     RegularFile,
     Directory,
+    Symlink,
 }
 
 /// File/directory attributes — the VFS equivalent of `stat`.
@@ -66,6 +67,22 @@ impl VfsAttr {
             kind: VfsFileType::Directory,
             perm: 0o755,
             nlink: 2,
+            uid,
+            gid,
+        }
+    }
+
+    /// Create attributes for a symbolic link.
+    pub fn symlink(size: u64, uid: u32, gid: u32, mtime: SystemTime) -> Self {
+        VfsAttr {
+            size,
+            blocks: 0,
+            atime: mtime,
+            mtime,
+            ctime: mtime,
+            kind: VfsFileType::Symlink,
+            perm: 0o777,
+            nlink: 1,
             uid,
             gid,
         }

@@ -24,6 +24,13 @@ fn config_follow() -> CollectConfig {
     }
 }
 
+fn config_preserve() -> CollectConfig {
+    CollectConfig {
+        preserve_symlinks: true,
+        ..Default::default()
+    }
+}
+
 fn write_file(dir: &Path, name: &str, content: &[u8]) {
     let path = dir.join(name);
     if let Some(parent) = path.parent() {
@@ -57,6 +64,39 @@ fn symlink_to_file_skipped_when_follow_false() {
         "should contain real.txt, got: {:?}",
         result.files
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_to_file_collected_when_preserve_true() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    write_file(root, "real.txt", b"real content");
+    std::os::unix::fs::symlink("real.txt", root.join("link.txt")).unwrap();
+
+    let result = collect_files(root, &config_preserve()).unwrap();
+
+    assert_eq!(result.files.len(), 1);
+    assert!(result.files[0].ends_with("real.txt"));
+    assert_eq!(result.symlinks.len(), 1);
+    assert!(result.symlinks[0].ends_with("link.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn broken_symlink_collected_when_preserve_true() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    write_file(root, "real.txt", b"real content");
+    std::os::unix::fs::symlink("missing.txt", root.join("broken.txt")).unwrap();
+
+    let result = collect_files(root, &config_preserve()).unwrap();
+
+    assert_eq!(result.files.len(), 1);
+    assert_eq!(result.symlinks.len(), 1);
+    assert!(result.symlinks[0].ends_with("broken.txt"));
 }
 
 #[test]

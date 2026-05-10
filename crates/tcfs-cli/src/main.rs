@@ -773,6 +773,7 @@ fn collect_config_from_sync(
         sync_hidden_dirs: config.sync.sync_hidden_dirs,
         exclude_patterns: config.sync.exclude_patterns.clone(),
         follow_symlinks: false,
+        preserve_symlinks: config.sync.sync_symlinks,
         sync_empty_dirs: config.sync.sync_empty_dirs,
     }
 }
@@ -4181,6 +4182,25 @@ mod tests {
             .decode(wrapped_b64)
             .unwrap();
         tcfs_crypto::unwrap_key(master_key, &wrapped).is_ok()
+    }
+
+    #[test]
+    fn collect_config_from_sync_enables_symlink_preservation() {
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        config.sync.sync_git_dirs = true;
+        config.sync.git_sync_mode = "raw".into();
+        config.sync.sync_hidden_dirs = true;
+        config.sync.sync_symlinks = true;
+        config.sync.sync_empty_dirs = true;
+
+        let collect = collect_config_from_sync(&config);
+
+        assert!(collect.sync_git_dirs);
+        assert_eq!(collect.git_sync_mode, "raw");
+        assert!(collect.sync_hidden_dirs);
+        assert!(!collect.follow_symlinks);
+        assert!(collect.preserve_symlinks);
+        assert!(collect.sync_empty_dirs);
     }
 
     #[tokio::test]

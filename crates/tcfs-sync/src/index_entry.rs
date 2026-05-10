@@ -2,6 +2,21 @@ use anyhow::{bail, Context, Result};
 use opendal::{ErrorKind, Operator};
 use serde::{Deserialize, Serialize};
 
+/// Kind of object published at a path in the remote index.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteEntryKind {
+    #[default]
+    RegularFile,
+    Symlink,
+}
+
+impl RemoteEntryKind {
+    fn is_regular_file(kind: &Self) -> bool {
+        *kind == RemoteEntryKind::RegularFile
+    }
+}
+
 /// A parsed remote index entry that points to a committed manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteIndexEntry {
@@ -10,6 +25,10 @@ pub struct RemoteIndexEntry {
     pub size: u64,
     #[serde(default)]
     pub chunks: usize,
+    #[serde(default, skip_serializing_if = "RemoteEntryKind::is_regular_file")]
+    pub kind: RemoteEntryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
 }
 
 impl RemoteIndexEntry {
@@ -18,7 +37,24 @@ impl RemoteIndexEntry {
             manifest_hash: manifest_hash.into(),
             size,
             chunks,
+            kind: RemoteEntryKind::RegularFile,
+            symlink_target: None,
         }
+    }
+
+    pub fn new_symlink(manifest_hash: impl Into<String>, target: impl Into<String>) -> Self {
+        let target = target.into();
+        Self {
+            manifest_hash: manifest_hash.into(),
+            size: target.len() as u64,
+            chunks: 0,
+            kind: RemoteEntryKind::Symlink,
+            symlink_target: Some(target),
+        }
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.kind == RemoteEntryKind::Symlink
     }
 
     pub fn to_legacy_bytes(&self) -> Vec<u8> {
@@ -46,6 +82,10 @@ pub struct PendingIndexEntry {
     pub size: u64,
     #[serde(default)]
     pub chunks: usize,
+    #[serde(default, skip_serializing_if = "RemoteEntryKind::is_regular_file")]
+    pub kind: RemoteEntryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
     pub staged_manifest_key: String,
 }
 
@@ -60,12 +100,34 @@ impl PendingIndexEntry {
             manifest_hash: manifest_hash.into(),
             size,
             chunks,
+            kind: RemoteEntryKind::RegularFile,
+            symlink_target: None,
+            staged_manifest_key: staged_manifest_key.into(),
+        }
+    }
+
+    pub fn from_remote_entry(
+        entry: &RemoteIndexEntry,
+        staged_manifest_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            manifest_hash: entry.manifest_hash.clone(),
+            size: entry.size,
+            chunks: entry.chunks,
+            kind: entry.kind,
+            symlink_target: entry.symlink_target.clone(),
             staged_manifest_key: staged_manifest_key.into(),
         }
     }
 
     pub fn as_remote_entry(&self) -> RemoteIndexEntry {
-        RemoteIndexEntry::new(self.manifest_hash.clone(), self.size, self.chunks)
+        RemoteIndexEntry {
+            manifest_hash: self.manifest_hash.clone(),
+            size: self.size,
+            chunks: self.chunks,
+            kind: self.kind,
+            symlink_target: self.symlink_target.clone(),
+        }
     }
 }
 
@@ -104,12 +166,31 @@ impl VersionedIndexEntry {
 
     pub fn to_json_bytes(&self) -> Result<Vec<u8>> {
         serde_json::to_vec_pretty(&VersionedIndexEntryWire {
-            version: 2,
+            version: self.wire_version(),
             state: self.state,
             current: self.current.clone(),
             pending: self.pending.clone(),
         })
         .context("serializing versioned index entry")
+    }
+
+    fn wire_version(&self) -> u8 {
+        let current_regular = self
+            .current
+            .as_ref()
+            .map(|entry| entry.kind == RemoteEntryKind::RegularFile)
+            .unwrap_or(true);
+        let pending_regular = self
+            .pending
+            .as_ref()
+            .map(|entry| entry.kind == RemoteEntryKind::RegularFile)
+            .unwrap_or(true);
+
+        if current_regular && pending_regular {
+            2
+        } else {
+            3
+        }
     }
 }
 
@@ -192,8 +273,35 @@ fn parse_versioned_index_entry(text: &str) -> Result<ParsedIndexEntry> {
     let wire: VersionedIndexEntryWire =
         serde_json::from_str(text).context("parsing versioned index entry JSON")?;
 
-    if wire.version != 2 {
+    if wire.version != 2 && wire.version != 3 {
         bail!("unsupported index entry version: {}", wire.version);
+    }
+
+    if wire.version < 3 {
+        let current_is_regular = wire
+            .current
+            .as_ref()
+            .map(|entry| entry.kind == RemoteEntryKind::RegularFile)
+            .unwrap_or(true);
+        let pending_is_regular = wire
+            .pending
+            .as_ref()
+            .map(|entry| entry.kind == RemoteEntryKind::RegularFile)
+            .unwrap_or(true);
+        if !current_is_regular || !pending_is_regular {
+            bail!("non-regular index entry requires index version 3");
+        }
+    }
+
+    for entry in wire.current.iter() {
+        if entry.kind == RemoteEntryKind::Symlink && entry.symlink_target.is_none() {
+            bail!("symlink index entry missing symlink_target");
+        }
+    }
+    for entry in wire.pending.iter() {
+        if entry.kind == RemoteEntryKind::Symlink && entry.symlink_target.is_none() {
+            bail!("symlink index entry missing symlink_target");
+        }
     }
 
     match wire.state {
@@ -349,6 +457,8 @@ fn parse_legacy_index_entry(text: &str) -> Result<RemoteIndexEntry> {
         manifest_hash: manifest_hash.context("index entry missing manifest_hash")?,
         size,
         chunks,
+        kind: RemoteEntryKind::RegularFile,
+        symlink_target: None,
     })
 }
 
@@ -450,6 +560,56 @@ mod tests {
     }
 
     #[test]
+    fn symlink_index_entry_uses_v3_and_roundtrips() {
+        let entry = super::VersionedIndexEntry::committed(super::RemoteIndexEntry::new_symlink(
+            "linkhash",
+            "../target.txt",
+        ));
+
+        let bytes = entry.to_json_bytes().unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains(r#""version": 3"#));
+        assert!(text.contains(r#""kind": "symlink""#));
+
+        match parse_index_entry_record(&bytes).unwrap() {
+            ParsedIndexEntry::Legacy(_) => panic!("expected v3 entry"),
+            ParsedIndexEntry::V2(reparsed) => assert_eq!(reparsed, entry),
+        }
+
+        let visible = parse_index_entry(&bytes).unwrap();
+        assert!(visible.is_symlink());
+        assert_eq!(visible.symlink_target.as_deref(), Some("../target.txt"));
+    }
+
+    #[test]
+    fn symlink_index_entry_requires_v3_and_target() {
+        let v2_symlink = br#"{
+            "version": 2,
+            "state": "committed",
+            "current": {
+                "manifest_hash": "linkhash",
+                "size": 13,
+                "chunks": 0,
+                "kind": "symlink",
+                "symlink_target": "../target.txt"
+            }
+        }"#;
+        assert!(parse_index_entry_record(v2_symlink).is_err());
+
+        let missing_target = br#"{
+            "version": 3,
+            "state": "committed",
+            "current": {
+                "manifest_hash": "linkhash",
+                "size": 13,
+                "chunks": 0,
+                "kind": "symlink"
+            }
+        }"#;
+        assert!(parse_index_entry_record(missing_target).is_err());
+    }
+
+    #[test]
     fn preparing_entry_without_current_is_not_visible() {
         let data = br#"{
             "version": 2,
@@ -495,7 +655,7 @@ mod tests {
     #[test]
     fn unsupported_version_errors() {
         let data = br#"{
-            "version": 3,
+            "version": 4,
             "state": "committed",
             "current": {
                 "manifest_hash": "abc123",
