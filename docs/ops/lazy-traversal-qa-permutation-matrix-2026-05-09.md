@@ -74,7 +74,7 @@ multi-machine neo/honey flows.
 | --- | --- | --- | --- |
 | P1 | Shadow real repo without mutating source | Source inventory, full isolated shadow, config/state under shadow | Green scoped packet: `home-canary-linux-xr-shadow-20260510T023938Z` inventories the source read-only and uses an isolated shadow; live source was not mutated |
 | P2 | Include `.git` and hidden dirs | `sync_git_dirs = true`, `sync_hidden_dirs = true`, `git_sync_mode = "raw"` | Green scoped packet: raw `.git`/hidden-dir config is archived, honey mounted traversal lists `.git`, and bounded `find -maxdepth 3`/selected `cat` passed |
-| P3 | Symlink truth gate | Inventory symlinks and preserve them as symlinks with matching targets, or keep full parity blocked | Code-level preservation is covered by local regressions and `sync_symlinks = true`; archived `linux-xr` evidence still records 85 skipped symlinks, so full project parity waits for a fresh host packet |
+| P3 | Symlink truth gate | Inventory symlinks and preserve them as symlinks with matching targets, or keep full parity blocked | Code-level preservation is covered by local regressions and `sync_symlinks = true`; the canary helper now archives `symlink-targets.tsv` and wires mounted `readlink` verification, but archived `linux-xr` evidence still skipped 85 symlinks, so full project parity waits for a fresh host packet |
 | P4 | Unsupported special files | Inventory sockets/FIFOs/devices/permissions and record behavior | Green inventory: source and shadow record `unsupported_special_files=0` |
 | P5 | Large tree scale | Push/honey traversal/hydration completes without source mutation | Green scoped packet: push completed 92,969 files / 7.7 GB, honey mounted traversal/hydration passed, and Linux lifecycle companion passed; full parity still blocked by symlinks |
 
@@ -90,7 +90,7 @@ Every live QA packet should archive:
 - command transcript for `ls`/`find`, `cat`, `tcfs pull`, `tcfs unsync`, and `tcfs sync-status`
 - stale placeholder/stub checks after rehydrate
 - platform signing/profile/build details for FileProvider runs
-- blocker notes when a row is not claimed, especially symlinks and production Finder signing
+- blocker notes when a row is not claimed, especially symlinks, tombstones, keep-synced/pin semantics, and production Finder signing
 
 ## Claimability Bars
 
@@ -111,7 +111,9 @@ behavior into user-facing claims:
 1. Keep full `linux-xr` parity blocked until a fresh symlink-preserving host
    packet lands. The scoped shadow canary is green for push, bounded honey
    traversal/hydration, and Linux lifecycle, but the archived packet still
-   skipped 85 symlinks.
+   skipped 85 symlinks. The next run must archive source/shadow
+   `symlink-targets.tsv`, mounted `readlink` verification, and matching target
+   counts before the row can move.
 2. Decide tombstone/stale-stub semantics before making any clean delete/rename
    UX claim; M8 current behavior is live-proven, but stale old stubs remain.
 3. Keep the neo/macOS M4 mounted reverse-read row open until a permitted mount

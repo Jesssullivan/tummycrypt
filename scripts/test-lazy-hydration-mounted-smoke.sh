@@ -43,6 +43,8 @@ mkdir -p "${MOUNT_ROOT}/projects/alpha/notes" "${MOUNT_ROOT}/empty"
 
 printf 'remote hydrated contents' >"${MOUNT_ROOT}/projects/alpha/notes/plan.txt"
 printf 'remote hydrated contents' >"${EXPECTED_CONTENT}"
+ln -s notes/plan.txt "${MOUNT_ROOT}/projects/alpha/plan-link"
+printf 'projects/alpha/plan-link\tnotes/plan.txt\n' >"${TMPDIR}/symlink-targets.tsv"
 
 OUT="${TMPDIR}/positive.out"
 bash "${SCRIPT}" \
@@ -51,10 +53,12 @@ bash "${SCRIPT}" \
     --expect-entry "projects/alpha" \
     --expect-entry "empty" \
     --expected-content-file "${EXPECTED_CONTENT}" \
+    --expected-symlink-targets-file "${TMPDIR}/symlink-targets.tsv" \
     --max-depth 5 \
     >"${OUT}"
 assert_contains "${OUT}" "lazy hydration mounted smoke passed"
 assert_contains "${OUT}" "cat byte count: 24"
+assert_contains "${OUT}" "symlink target checks passed: 1"
 
 CONTAINS_OUT="${TMPDIR}/contains.out"
 bash "${SCRIPT}" \
@@ -97,6 +101,14 @@ assert_fails_contains \
         --mount-root "${MOUNT_ROOT}" \
         --expected-file "projects/alpha/notes/plan.txt" \
         --expect-entry "missing/entry"
+
+printf 'projects/alpha/plan-link\twrong-target\n' >"${TMPDIR}/bad-symlink-targets.tsv"
+assert_fails_contains \
+    "mounted symlink target mismatch" \
+    bash "${SCRIPT}" \
+        --mount-root "${MOUNT_ROOT}" \
+        --expected-file "projects/alpha/notes/plan.txt" \
+        --expected-symlink-targets-file "${TMPDIR}/bad-symlink-targets.tsv"
 
 assert_fails_contains \
     "--expected-file must not contain .. path segments" \

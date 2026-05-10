@@ -19,6 +19,8 @@ Options:
   --expected-content <text>       Exact expected cat output
   --expected-content-file <path>  File containing exact expected cat output
   --expected-contains <text>      Substring expected in cat output
+  --expected-symlink-targets-file <path>
+                                  TSV file of mounted symlink relpath<TAB>target
   --max-depth <n>                 find depth for clean-name scan (default: 4)
   -h, --help                      Show this help
 EOF
@@ -48,6 +50,7 @@ EXPECTED_FILE_REL=""
 EXPECTED_CONTENT=""
 EXPECTED_CONTENT_FILE=""
 EXPECTED_CONTAINS=""
+EXPECTED_SYMLINK_TARGETS_FILE=""
 MAX_DEPTH=4
 EXPECT_ENTRIES=()
 
@@ -81,6 +84,11 @@ while [[ $# -gt 0 ]]; do
     --expected-contains)
       [[ $# -ge 2 ]] || fail "--expected-contains requires a value"
       EXPECTED_CONTAINS="$2"
+      shift 2
+      ;;
+    --expected-symlink-targets-file)
+      [[ $# -ge 2 ]] || fail "--expected-symlink-targets-file requires a value"
+      EXPECTED_SYMLINK_TARGETS_FILE="$2"
       shift 2
       ;;
     --max-depth)
@@ -131,6 +139,11 @@ fi
 
 if [[ -n "$EXPECTED_CONTENT_FILE" && ! -f "$EXPECTED_CONTENT_FILE" ]]; then
   echo "expected content file not found: $EXPECTED_CONTENT_FILE" >&2
+  exit 1
+fi
+
+if [[ -n "$EXPECTED_SYMLINK_TARGETS_FILE" && ! -f "$EXPECTED_SYMLINK_TARGETS_FILE" ]]; then
+  echo "expected symlink targets file not found: $EXPECTED_SYMLINK_TARGETS_FILE" >&2
   exit 1
 fi
 
@@ -191,6 +204,28 @@ for entry in "${EXPECT_ENTRIES[@]}"; do
     exit 1
   fi
 done
+
+if [[ -n "$EXPECTED_SYMLINK_TARGETS_FILE" ]]; then
+  symlink_count=0
+  while IFS=$'\t' read -r rel target; do
+    [[ -n "$rel" ]] || continue
+    validate_relpath "--expected-symlink-targets-file relpath" "$rel"
+    symlink_path="$MOUNT_ROOT/$rel"
+    if [[ ! -L "$symlink_path" ]]; then
+      echo "expected symlink is not a symlink in mounted view: $rel" >&2
+      exit 1
+    fi
+    actual_target="$(readlink "$symlink_path")"
+    if [[ "$actual_target" != "$target" ]]; then
+      echo "mounted symlink target mismatch for $rel" >&2
+      echo "expected: $target" >&2
+      echo "actual:   $actual_target" >&2
+      exit 1
+    fi
+    symlink_count=$((symlink_count + 1))
+  done <"$EXPECTED_SYMLINK_TARGETS_FILE"
+  echo "symlink target checks passed: $symlink_count"
+fi
 
 [[ -f "$expected_path" ]] || {
   echo "expected file is not visible before cat: $expected_path" >&2
