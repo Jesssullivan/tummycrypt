@@ -102,6 +102,21 @@ write_count() {
   printf '%s=%s\n' "$label" "$count"
 }
 
+write_symlink_targets() {
+  local root="$1"
+  local out="$2"
+
+  {
+    while IFS= read -r -d '' link; do
+      local rel
+      local target
+      rel="${link#"$root"/}"
+      target="$(readlink "$link")" || target="__TCFS_READLINK_FAILED__"
+      printf '%s\t%s\n' "$rel" "$target"
+    done < <(find "$root" -type l -print0)
+  } | sort >"$out"
+}
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_id="home-canary-linux-xr-shadow-${timestamp}"
@@ -312,6 +327,7 @@ inventory_tree() {
   printf '%s\n' "$root" >"$out/root.txt"
   find "$root" -mindepth 1 -maxdepth 12 -print | sort >"$out/tree-maxdepth-12.txt"
   find "$root" -type l -print | sort >"$out/symlinks.txt"
+  write_symlink_targets "$root" "$out/symlink-targets.tsv"
   find "$root" \( -type p -o -type s -o -type b -o -type c \) -print | sort >"$out/unsupported-special-files.txt"
   find "$root" -type d -name '.*' -print | sort >"$out/hidden-dirs.txt"
   {
@@ -368,6 +384,16 @@ fi
 inventory_tree "$shadow_canon" "$shadow_inventory_dir"
 inventory_git "$shadow_canon" "$shadow_inventory_dir"
 
+shadow_symlink_target_match=0
+if cmp -s "$inventory_dir/symlink-targets.tsv" "$shadow_inventory_dir/symlink-targets.tsv"; then
+  shadow_symlink_target_match=1
+  printf 'source and shadow symlink target manifests match\n' >"$evidence_dir/symlink-shadow-compare.log"
+else
+  diff -u "$inventory_dir/symlink-targets.tsv" "$shadow_inventory_dir/symlink-targets.tsv" \
+    >"$evidence_dir/symlink-shadow-compare.diff" || true
+  printf 'source and shadow symlink target manifests differ\n' >"$evidence_dir/symlink-shadow-compare.log"
+fi
+
 selected_file="$(find "$shadow_canon" -type f ! -path '*/.git/*' | sort | head -n 1 || true)"
 if [[ -n "$selected_file" ]]; then
   selected_rel="${selected_file#"$shadow_canon"/}"
@@ -417,22 +443,19 @@ enabled = false
 EOF
 
 symlink_count="$(awk -F= '$1 == "symlinks" { print $2 }' "$inventory_dir/counts.env")"
+shadow_symlink_count="$(awk -F= '$1 == "symlinks" { print $2 }' "$shadow_inventory_dir/counts.env")"
 unsupported_count="$(awk -F= '$1 == "unsupported_special_files" { print $2 }' "$inventory_dir/counts.env")"
 parity_status="full-project-parity-not-claimed"
-{
-  printf 'status=%s\n' "$parity_status"
-  printf 'reason=Symlink preservation is configured for this lane, but full project parity still requires a fresh host packet proving the 85 source symlinks rehydrate as symlinks with matching targets.\n'
-  printf 'source_symlink_count=%s\n' "$symlink_count"
-  printf 'source_unsupported_special_file_count=%s\n' "$unsupported_count"
-  printf 'sync_symlinks=true\n'
-} >"$evidence_dir/parity-gates.env"
+parity_reason="Symlink preservation is configured for this lane, but full project parity still requires a fresh host packet proving source symlinks rehydrate as symlinks with matching targets."
 
 push_rc=0
 honey_rc=0
 linux_lifecycle_rc=0
+push_available=0
 push_status_label=0
 honey_status_label=0
 linux_lifecycle_status_label=0
+mounted_symlink_status_label=not-run
 if [[ "$push_remote" == "1" ]]; then
   push_status_label=pending
 fi
@@ -441,10 +464,53 @@ if [[ "$resume_after_push" == "1" ]]; then
 fi
 if [[ "$run_honey" == "1" ]]; then
   honey_status_label=pending
+  mounted_symlink_status_label=pending
 fi
 if [[ "$run_linux_lifecycle" == "1" ]]; then
   linux_lifecycle_status_label=pending
 fi
+
+compute_parity_status() {
+  parity_status="full-project-parity-not-claimed"
+  parity_reason="full project parity requires push, mounted traversal/hydration, mounted symlink target verification, Linux lifecycle, and zero unsupported special files"
+
+  if [[ "$unsupported_count" != "0" ]]; then
+    parity_reason="source inventory includes unsupported special files"
+  elif [[ "$shadow_symlink_count" != "$symlink_count" ]]; then
+    parity_reason="source/shadow symlink counts differ"
+  elif [[ "$shadow_symlink_target_match" != "1" ]]; then
+    parity_reason="source/shadow symlink target manifests differ"
+  elif [[ "$push_available" != "1" ]]; then
+    parity_reason="shadow push evidence is not present"
+  elif [[ "$push_rc" -ne 0 ]]; then
+    parity_reason="shadow push failed"
+  elif [[ "$run_honey" != "1" ]]; then
+    parity_reason="mounted honey traversal and symlink target verification were not run"
+  elif [[ "$honey_rc" -ne 0 ]]; then
+    parity_reason="mounted honey traversal or symlink target verification failed"
+  elif [[ "$run_linux_lifecycle" != "1" ]]; then
+    parity_reason="Linux lifecycle companion was not run"
+  elif [[ "$linux_lifecycle_rc" -ne 0 ]]; then
+    parity_reason="Linux lifecycle companion failed"
+  else
+    parity_status="scoped-project-tree-parity-evidence-complete"
+    parity_reason="shadow push, mounted traversal/hydration, mounted symlink target verification, and Linux lifecycle companion passed for the isolated project-tree canary"
+  fi
+}
+
+write_parity_gates() {
+  compute_parity_status
+  {
+    printf 'status=%s\n' "$parity_status"
+    printf 'reason=%s\n' "$parity_reason"
+    printf 'source_symlink_count=%s\n' "$symlink_count"
+    printf 'shadow_symlink_count=%s\n' "$shadow_symlink_count"
+    printf 'shadow_symlink_targets_match=%s\n' "$shadow_symlink_target_match"
+    printf 'source_unsupported_special_file_count=%s\n' "$unsupported_count"
+    printf 'sync_symlinks=true\n'
+    printf 'mounted_symlink_verification=%s\n' "$mounted_symlink_status_label"
+  } >"$evidence_dir/parity-gates.env"
+}
 
 write_run_metadata() {
   cat >"$evidence_dir/run-metadata.env" <<EOF
@@ -462,12 +528,16 @@ reuse_shadow=$reuse_shadow
 push_status=$push_status_label
 run_honey=$run_honey
 honey_status=$honey_status_label
+mounted_symlink_verification=$mounted_symlink_status_label
 honey_start_mount=$honey_start_mount
 honey_smoke_max_depth=$honey_smoke_max_depth
 honey_smoke_timeout_secs=$honey_smoke_timeout_secs
 run_linux_lifecycle=$run_linux_lifecycle
 linux_lifecycle_status=$linux_lifecycle_status_label
 selected_hydration_file=$selected_rel
+source_symlink_count=$symlink_count
+shadow_symlink_count=$shadow_symlink_count
+shadow_symlink_targets_match=$shadow_symlink_target_match
 EOF
 }
 
@@ -475,12 +545,16 @@ write_result() {
   local status="$1"
   local proof="$2"
 
+  write_parity_gates
   cat >"$evidence_dir/result.env" <<EOF
 status=$status
 completed_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 proof=$proof
 parity_status=$parity_status
+parity_reason=$parity_reason
 source_symlink_count=$symlink_count
+shadow_symlink_count=$shadow_symlink_count
+shadow_symlink_targets_match=$shadow_symlink_target_match
 source_unsupported_special_file_count=$unsupported_count
 EOF
 }
@@ -504,21 +578,23 @@ dotfiles, or broad \`~/git\` takeover.
 
 Truth gate: full project parity is not claimed until a fresh host packet proves
 source symlinks rehydrate as symlinks with matching targets. See
-\`parity-gates.env\`, \`source-inventory/symlinks.txt\`, and
+\`parity-gates.env\`, \`source-inventory/symlink-targets.tsv\`, and
 \`source-inventory/unsupported-special-files.txt\`.
 
 Contents:
 
 - \`source-inventory/\`: branch, remotes, dirty status, counts, hidden dirs,
-  symlinks, unsupported special files, and bounded tree listing
+  symlinks with targets, unsupported special files, and bounded tree listing
 - \`shadow-inventory/\`: same inventory after the isolated copy
+- \`symlink-shadow-compare.log\`: local source/shadow symlink target comparison
 - \`tcfs-linux-xr-shadow.toml\` under \`state/\`: disposable config with
   \`sync_git_dirs = true\`, \`sync_hidden_dirs = true\`,
   \`git_sync_mode = "raw"\`, \`sync_symlinks = true\`, and
   \`sync_empty_dirs = true\`
 - \`push.log\`: shadow push transcript when \`--push\` ran
 - \`honey-linux-xr-shadow-commands.txt\`: honey mounted traversal/hydration
-  commands for the selected file and \`.git\` traversal
+  commands for the selected file, \`.git\` traversal, and mounted symlink
+  target verification
 - \`linux-lifecycle-companion.log\` and \`linux-lifecycle/\`: optional mounted
   write/readback, cache clear/rehydrate, dirty safe-unsync refusal, clean
   recursive unsync, and exact rehydrate companion evidence
@@ -545,6 +621,7 @@ create_bucket_if_requested() {
 }
 
 if [[ "$push_remote" == "1" ]]; then
+  push_available=1
   if [[ -z "${AWS_ACCESS_KEY_ID:-}" && "$endpoint" =~ ^http://(localhost|127\.0\.0\.1)(:[0-9]+)?$ ]]; then
     export AWS_ACCESS_KEY_ID=admin
   fi
@@ -568,6 +645,7 @@ if [[ "$resume_after_push" == "1" ]]; then
   [[ -f "$evidence_dir/push.log" ]] || fail "--resume-after-push requires existing push.log in $evidence_dir"
   grep -Fq 'Push complete:' "$evidence_dir/push.log" || fail "--resume-after-push requires push.log with 'Push complete:'"
   [[ -f "$state_json" ]] || fail "--resume-after-push requires existing state JSON: $state_json"
+  push_available=1
   push_status_label=0
   write_run_metadata
 fi
@@ -587,6 +665,7 @@ case "\$MOUNT_ROOT_RAW" in
 esac
 SMOKE_SCRIPT="\${TCFS_HONEY_SMOKE_SCRIPT:-$(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh")}"
 EXPECTED_CONTENT_FILE="\${TCFS_HONEY_EXPECTED_CONTENT_FILE:-$(shell_quote "$honey_remote_dir/selected-hydration-file.content")}"
+SYMLINK_TARGETS_FILE="\${TCFS_HONEY_SYMLINK_TARGETS_FILE:-$(shell_quote "$honey_remote_dir/symlink-targets.tsv")}"
 MOUNT_LOG="\${TCFS_HONEY_MOUNT_LOG:-$(shell_quote "$honey_remote_dir/mount.log")}"
 SMOKE_MAX_DEPTH="\${TCFS_HONEY_SMOKE_MAX_DEPTH:-$(shell_quote "$honey_smoke_max_depth")}"
 SMOKE_TIMEOUT_SECS="\${TCFS_HONEY_SMOKE_TIMEOUT_SECS:-$(shell_quote "$honey_smoke_timeout_secs")}"
@@ -638,6 +717,9 @@ fi
 if [[ -f "\$EXPECTED_CONTENT_FILE" ]]; then
   args+=(--expected-content-file "\$EXPECTED_CONTENT_FILE")
 fi
+if [[ -f "\$SYMLINK_TARGETS_FILE" ]]; then
+  args+=(--expected-symlink-targets-file "\$SYMLINK_TARGETS_FILE")
+fi
 
 if [[ "\$SMOKE_TIMEOUT_SECS" != "0" && "\$SMOKE_TIMEOUT_SECS" =~ ^[0-9]+$ ]] && command -v timeout >/dev/null 2>&1; then
   timeout "\$SMOKE_TIMEOUT_SECS" bash "\$SMOKE_SCRIPT" "\${args[@]}"
@@ -653,9 +735,10 @@ cat >"$honey_commands" <<EOF
 ssh $(shell_quote "$honey_host") 'mkdir -p $(shell_quote "$honey_remote_dir")'
 scp $(shell_quote "$REPO_ROOT/scripts/lazy-hydration-mounted-smoke.sh") $(shell_quote "$honey_host"):$(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh")
 scp $(shell_quote "$evidence_dir/selected-hydration-file.content") $(shell_quote "$honey_host"):$(shell_quote "$honey_remote_dir/selected-hydration-file.content")
+scp $(shell_quote "$inventory_dir/symlink-targets.tsv") $(shell_quote "$honey_host"):$(shell_quote "$honey_remote_dir/symlink-targets.tsv")
 scp $(shell_quote "$honey_script") $(shell_quote "$honey_host"):$(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")
 ssh $(shell_quote "$honey_host") 'chmod +x $(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh") $(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")'
-ssh $(shell_quote "$honey_host") 'TCFS_HONEY_START_MOUNT=1 TCFS_HONEY_SMOKE_SCRIPT=$(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh") TCFS_HONEY_EXPECTED_CONTENT_FILE=$(shell_quote "$honey_remote_dir/selected-hydration-file.content") TCFS_HONEY_MOUNT_LOG=$(shell_quote "$honey_remote_dir/mount.log") TCFS_HONEY_SMOKE_MAX_DEPTH=$(shell_quote "$honey_smoke_max_depth") TCFS_HONEY_SMOKE_TIMEOUT_SECS=$(shell_quote "$honey_smoke_timeout_secs") bash $(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")'
+ssh $(shell_quote "$honey_host") 'TCFS_HONEY_START_MOUNT=1 TCFS_HONEY_SMOKE_SCRIPT=$(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh") TCFS_HONEY_EXPECTED_CONTENT_FILE=$(shell_quote "$honey_remote_dir/selected-hydration-file.content") TCFS_HONEY_SYMLINK_TARGETS_FILE=$(shell_quote "$honey_remote_dir/symlink-targets.tsv") TCFS_HONEY_MOUNT_LOG=$(shell_quote "$honey_remote_dir/mount.log") TCFS_HONEY_SMOKE_MAX_DEPTH=$(shell_quote "$honey_smoke_max_depth") TCFS_HONEY_SMOKE_TIMEOUT_SECS=$(shell_quote "$honey_smoke_timeout_secs") bash $(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")'
 EOF
 
 if [[ "$run_honey" == "1" ]]; then
@@ -665,6 +748,7 @@ if [[ "$run_honey" == "1" ]]; then
   ssh "$honey_host" "mkdir -p $(shell_quote "$honey_remote_dir")"
   scp "$REPO_ROOT/scripts/lazy-hydration-mounted-smoke.sh" "$honey_host:$honey_remote_dir/lazy-hydration-mounted-smoke.sh"
   scp "$evidence_dir/selected-hydration-file.content" "$honey_host:$honey_remote_dir/selected-hydration-file.content"
+  scp "$inventory_dir/symlink-targets.tsv" "$honey_host:$honey_remote_dir/symlink-targets.tsv"
   scp "$honey_script" "$honey_host:$honey_remote_dir/honey-linux-xr-shadow-run.sh"
   # shellcheck disable=SC2029
   ssh "$honey_host" "chmod +x $(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh") $(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")"
@@ -686,10 +770,11 @@ if [[ "$run_honey" == "1" ]]; then
     ssh "$honey_host" "umask 077; cat > $(shell_quote "$remote_env_file")" <<<"$aws_env_payload"
   fi
 
-  remote_run_cmd="$(printf 'TCFS_HONEY_START_MOUNT=%q TCFS_HONEY_SMOKE_SCRIPT=%q TCFS_HONEY_EXPECTED_CONTENT_FILE=%q TCFS_HONEY_MOUNT_LOG=%q TCFS_HONEY_SMOKE_MAX_DEPTH=%q TCFS_HONEY_SMOKE_TIMEOUT_SECS=%q bash %q' \
+  remote_run_cmd="$(printf 'TCFS_HONEY_START_MOUNT=%q TCFS_HONEY_SMOKE_SCRIPT=%q TCFS_HONEY_EXPECTED_CONTENT_FILE=%q TCFS_HONEY_SYMLINK_TARGETS_FILE=%q TCFS_HONEY_MOUNT_LOG=%q TCFS_HONEY_SMOKE_MAX_DEPTH=%q TCFS_HONEY_SMOKE_TIMEOUT_SECS=%q bash %q' \
     "$honey_start_mount" \
     "$honey_remote_dir/lazy-hydration-mounted-smoke.sh" \
     "$honey_remote_dir/selected-hydration-file.content" \
+    "$honey_remote_dir/symlink-targets.tsv" \
     "$honey_remote_dir/mount.log" \
     "$honey_smoke_max_depth" \
     "$honey_smoke_timeout_secs" \
@@ -701,6 +786,7 @@ if [[ "$run_honey" == "1" ]]; then
   # shellcheck disable=SC2029
   ssh "$honey_host" "$remote_run_cmd" >"$evidence_dir/honey-linux-xr-shadow.log" 2>&1 || honey_rc=$?
   honey_status_label=$honey_rc
+  mounted_symlink_status_label=$honey_rc
   write_run_metadata
   if [[ "$honey_rc" -ne 0 ]]; then
     write_result "$honey_rc" honey-smoke-failed
@@ -744,9 +830,9 @@ fi
 if [[ "$push_available" == "0" ]]; then
   write_result plan-only inventory-shadow-config
 elif [[ "$push_rc" -eq 0 && "$run_honey" == "1" && "$honey_rc" -eq 0 && "$run_linux_lifecycle" == "1" && "$linux_lifecycle_rc" -eq 0 ]]; then
-  write_result 0 shadow-push-honey-linux-lifecycle
+  write_result 0 shadow-push-honey-linux-lifecycle-symlink-targets
 elif [[ "$push_rc" -eq 0 && "$run_honey" == "1" && "$honey_rc" -eq 0 ]]; then
-  write_result 0 shadow-push-honey-traversal
+  write_result 0 shadow-push-honey-traversal-symlink-targets
 elif [[ "$push_rc" -eq 0 && "$run_honey" == "0" && "$run_linux_lifecycle" == "0" ]]; then
   write_result 0 shadow-push
 fi

@@ -323,7 +323,9 @@ with raw `.git`, hidden dirs, and empty dirs enabled, and archives evidence
 under `docs/release/evidence/home-canary-linux-xr-shadow-<UTC>/`. It records
 symlinks and unsupported special files as truth gates; full project parity must
 stay blocked until a fresh packet proves inventoried links rehydrate as symlinks
-with matching targets.
+with matching targets. Current helper packets include source/shadow
+`symlink-targets.tsv`, a local source/shadow target comparison, and honey mounted
+`readlink` verification when `--run-honey` is used.
 
 Archived scoped canary evidence:
 
@@ -349,6 +351,7 @@ The helper's own behavior is covered by:
 
 ```bash
 scripts/test-home-canary-linux-xr-shadow.sh
+scripts/test-lazy-hydration-mounted-smoke.sh
 # or:
 task lazy:test-home-canary-linux-xr-shadow
 ```
