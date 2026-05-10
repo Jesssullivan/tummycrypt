@@ -1,0 +1,13 @@
+# Prepare remote work directory:
+ssh honey 'mkdir -p /tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run'
+
+# Copy expected content and the honey reverse runner:
+scp docs/release/evidence/neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/neo-initial-content.txt honey:/tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run/neo-initial-content.txt
+scp docs/release/evidence/neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/neo-mutated-content.txt honey:/tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run/neo-mutated-content.txt
+scp docs/release/evidence/neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/honey-reverse-run.sh honey:/tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run/honey-reverse-run.sh
+
+# Pull and unsync on honey:
+ssh honey 'TCFS_HONEY_INITIAL_CONTENT_FILE=/tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run/neo-initial-content.txt bash /tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run/honey-reverse-run.sh prepare-unsync'
+
+# After neo mutates and pushes, rehydrate honey:
+ssh honey 'TCFS_HONEY_MUTATED_CONTENT_FILE=/tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run/neo-mutated-content.txt bash /tmp/tcfs-neo-honey-reverse-unsynced-rehydrate-20260510T022858Z-honey/run/honey-reverse-run.sh rehydrate'

@@ -1,0 +1,107 @@
+[2m2026-05-10T05:40:36.665122Z[0m [32m INFO[0m [2mtcfsd[0m[2m:[0m tcfsd starting [3mversion[0m[2m=[0m"0.12.2" [3mmode[0m[2m=[0mDaemon [3mconfig[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/run/honey-state/tcfs-neo-honey-conflict.toml
+[2m2026-05-10T05:40:36.665595Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m daemon starting
+[2m2026-05-10T05:40:36.665698Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m device identity loaded [3mdevice[0m[2m=[0mhoney-conflict [3mid[0m[2m=[0m00000000-0000-4000-8000-0000000000b2
+[2m2026-05-10T05:40:36.665720Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-10T05:40:36.665732Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-10T05:40:36.665742Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+[2m2026-05-10T05:40:36.665766Z[0m [34mDEBUG[0m [2mopendal::services::s3::backend[0m[2m:[0m backend build started: S3Builder { config: S3Config { root: None, bucket: "tcfs", endpoint: Some("http://100.64.48.53:8333"), region: Some("us-east-1"), .. }, .. }
+[2m2026-05-10T05:40:36.665796Z[0m [34mDEBUG[0m [2mopendal::services::s3::backend[0m[2m:[0m backend use root /
+[2m2026-05-10T05:40:36.665803Z[0m [34mDEBUG[0m [2mopendal::services::s3::backend[0m[2m:[0m backend use bucket tcfs
+[2m2026-05-10T05:40:36.665839Z[0m [34mDEBUG[0m [2mreqsign::aws::config[0m[2m:[0m load_via_profile_config_file failed: No such file or directory (os error 2)
+[2m2026-05-10T05:40:36.665873Z[0m [34mDEBUG[0m [2mreqsign::aws::config[0m[2m:[0m load_via_profile_shared_credentials_file failed: No such file or directory (os error 2)
+[2m2026-05-10T05:40:36.665907Z[0m [34mDEBUG[0m [2mopendal::services::s3::backend[0m[2m:[0m backend use region: us-east-1
+[2m2026-05-10T05:40:36.665991Z[0m [34mDEBUG[0m [2mopendal::services::s3::backend[0m[2m:[0m backend use endpoint: http://100.64.48.53:8333/tcfs
+[2m2026-05-10T05:40:36.666118Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=/: list started
+[2m2026-05-10T05:40:36.666135Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=/: list created lister
+[2m2026-05-10T05:40:36.666221Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated scope: 20260510/us-east-1/s3/aws4_request
+[2m2026-05-10T05:40:36.666235Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated string to sign: AWS4-HMAC-SHA256
+20260510T054036Z
+20260510/us-east-1/s3/aws4_request
+d8392d7edd5bf59961b73fb9d6bb9869db5c3d3f9f4ad40cdd851a8060b69268
+[2m2026-05-10T05:40:36.666393Z[0m [34mDEBUG[0m [2mreqwest::connect[0m[2m:[0m starting new connection: http://100.64.48.53:8333/
+[2m2026-05-10T05:40:36.666420Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::connect::http[0m[2m:[0m connecting to 100.64.48.53:8333
+[2m2026-05-10T05:40:36.667633Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::connect::http[0m[2m:[0m connected to 100.64.48.53:8333
+[2m2026-05-10T05:40:36.671173Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.671697Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=/ listed=103: list finished
+[2m2026-05-10T05:40:36.671739Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m SeaweedFS: connected [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+[2m2026-05-10T05:40:36.671911Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/: list started
+[2m2026-05-10T05:40:36.671945Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/: list created lister
+[2m2026-05-10T05:40:36.672034Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated scope: 20260510/us-east-1/s3/aws4_request
+[2m2026-05-10T05:40:36.672049Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated string to sign: AWS4-HMAC-SHA256
+20260510T054036Z
+20260510/us-east-1/s3/aws4_request
+a714de5871a462a5089a6a9f8e04dcd09f9ce614c0d3f537e609d13a535a73ed
+[2m2026-05-10T05:40:36.672150Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.674621Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.674776Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/ listed=1: list finished
+[2m2026-05-10T05:40:36.674832Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/Projects/shared/conflict-notes.md: read started
+[2m2026-05-10T05:40:36.674886Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated scope: 20260510/us-east-1/s3/aws4_request
+[2m2026-05-10T05:40:36.674898Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated string to sign: AWS4-HMAC-SHA256
+20260510T054036Z
+20260510/us-east-1/s3/aws4_request
+077e008ba0fa2af472d2662b1054fa58bd89e2cfa5f0f0375a0508baef1c5061
+[2m2026-05-10T05:40:36.675118Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.677029Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.677135Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/Projects/shared/conflict-notes.md: read created reader
+[2m2026-05-10T05:40:36.677166Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/Projects/shared/conflict-notes.md read=203 size=0: read finished
+[2m2026-05-10T05:40:36.677204Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/Projects/shared/conflict-notes.md: read started
+[2m2026-05-10T05:40:36.677254Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated scope: 20260510/us-east-1/s3/aws4_request
+[2m2026-05-10T05:40:36.677266Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated string to sign: AWS4-HMAC-SHA256
+20260510T054036Z
+20260510/us-east-1/s3/aws4_request
+077e008ba0fa2af472d2662b1054fa58bd89e2cfa5f0f0375a0508baef1c5061
+[2m2026-05-10T05:40:36.677350Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.679290Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.679381Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/Projects/shared/conflict-notes.md: read created reader
+[2m2026-05-10T05:40:36.679411Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/Projects/shared/conflict-notes.md read=203 size=0: read finished
+[2m2026-05-10T05:40:36.679483Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/manifests/615b119402da42275efeca36838fa95ddc7dc66970078c090b751241173c5b4e: stat started
+[2m2026-05-10T05:40:36.679565Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated scope: 20260510/us-east-1/s3/aws4_request
+[2m2026-05-10T05:40:36.679616Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated string to sign: AWS4-HMAC-SHA256
+20260510T054036Z
+20260510/us-east-1/s3/aws4_request
+c86f5c4f760a1a096111d9be67f940fd62f90f4116d1ff1e7137fd3c10de5d2b
+[2m2026-05-10T05:40:36.679729Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.681830Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m pooling idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:40:36.681932Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/manifests/615b119402da42275efeca36838fa95ddc7dc66970078c090b751241173c5b4e: stat finished
+[2m2026-05-10T05:40:36.681965Z[0m [34mDEBUG[0m [2mtcfs_sync::reconcile[0m[2m:[0m fetched remote index [3mcount[0m[2m=[0m1
+[2m2026-05-10T05:40:36.682008Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m remote index discovery: cache already up to date [3mtotal[0m[2m=[0m1
+[2m2026-05-10T05:40:36.682259Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m fleet identity ready [3mdevice_name[0m[2m=[0mhoney-conflict [3mdevice_id[0m[2m=[0m00000000-0000-4000-8000-0000000000b2 [3mconflict_mode[0m[2m=[0mauto
+[2m2026-05-10T05:40:36.682283Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m blacklist configured [3mpatterns[0m[2m=[0m0 [3mgit_dirs[0m[2m=[0mfalse [3mhidden_dirs[0m[2m=[0mfalse
+[2m2026-05-10T05:40:36.682394Z[0m [32m INFO[0m [2mtcfsd::metrics[0m[2m:[0m metrics: listening on /metrics, /healthz, /readyz, /livez [3maddr[0m[2m=[0m127.0.0.1:0
+[2m2026-05-10T05:40:36.682712Z[0m [32m INFO[0m [2mtcfs_sync::watcher[0m[2m:[0m file watcher started [3mdir[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/root
+[2m2026-05-10T05:40:36.682737Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m file watcher active [3mdir[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/root
+[2m2026-05-10T05:40:36.682783Z[0m [32m INFO[0m [2mtcfs_sync::scheduler[0m[2m:[0m scheduler started [3mmax_concurrent[0m[2m=[0m4 [3mmax_retries[0m[2m=[0m3
+[2m2026-05-10T05:40:36.682857Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m gRPC: listening [3msocket[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/run/honey-state/tcfsd.sock
+[2m2026-05-10T05:40:36.683310Z[0m [32m INFO[0m [2mtcfsd::grpc[0m[2m:[0m gRPC server ready [3msocket[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/run/honey-state/tcfsd.sock
+[2m2026-05-10T05:40:36.772154Z[0m [34mDEBUG[0m [2mh2::codec::framed_write[0m[2m:[0m send [3mframe[0m[2m=[0mSettings { flags: (0x0), initial_window_size: 1048576, max_frame_size: 16384, max_header_list_size: 16384 }
+[2m2026-05-10T05:40:36.772644Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_read[0m[2m:[0m received [3mframe[0m[2m=[0mSettings { flags: (0x0), enable_push: 0, initial_window_size: 2097152, max_frame_size: 16384, max_header_list_size: 16384 }
+[2m2026-05-10T05:40:36.772677Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_write[0m[2m:[0m send [3mframe[0m[2m=[0mSettings { flags: (0x1: ACK) }
+[2m2026-05-10T05:40:36.772692Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_read[0m[2m:[0m received [3mframe[0m[2m=[0mSettings { flags: (0x1: ACK) }
+[2m2026-05-10T05:40:36.772701Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::proto::settings[0m[2m:[0m received settings ACK; applying Settings { flags: (0x0), initial_window_size: 1048576, max_frame_size: 16384, max_header_list_size: 16384 }
+[2m2026-05-10T05:40:36.772713Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_read[0m[2m:[0m received [3mframe[0m[2m=[0mWindowUpdate { stream_id: StreamId(0), size_increment: 5177345 }
+[2m2026-05-10T05:40:36.772735Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_write[0m[2m:[0m send [3mframe[0m[2m=[0mWindowUpdate { stream_id: StreamId(0), size_increment: 983041 }
+[2m2026-05-10T05:40:36.773097Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_read[0m[2m:[0m received [3mframe[0m[2m=[0mHeaders { stream_id: StreamId(1), flags: (0x4: END_HEADERS) }
+[2m2026-05-10T05:40:36.773304Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_read[0m[2m:[0m received [3mframe[0m[2m=[0mData { stream_id: StreamId(1) }
+[2m2026-05-10T05:40:36.773338Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_read[0m[2m:[0m received [3mframe[0m[2m=[0mData { stream_id: StreamId(1), flags: (0x1: END_STREAM) }
+[2m2026-05-10T05:40:36.773380Z[0m [33m WARN[0m [2mtcfsd::grpc[0m[2m:[0m AUTH BYPASS: request granted full permissions — set auth.require_session=true for production
+[2m2026-05-10T05:40:36.773426Z[0m [32m INFO[0m [2mtcfsd::grpc[0m[2m:[0m conflict resolution requested [3mpath[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/root/Projects/shared/conflict-notes.md [3mresolution[0m[2m=[0mkeep_both [3mdevice[0m[2m=[0m00000000-0000-4000-8000-0000000000b2
+[2m2026-05-10T05:40:37.273755Z[0m [34mDEBUG[0m [2mtcfs_sync::watcher[0m[2m:[0m emitting debounced event [3mpath[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/root/Projects/shared/conflict-notes.md [3mkind[0m[2m=[0mModified
+[2m2026-05-10T05:40:37.273806Z[0m [34mDEBUG[0m [2mtcfs_sync::watcher[0m[2m:[0m emitting debounced event [3mpath[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/root/Projects/shared/conflict-notes.conflict-00000000-0000-4000-8000-0000000000b2.md [3mkind[0m[2m=[0mModified
+[2m2026-05-10T05:40:37.273908Z[0m [34mDEBUG[0m [2mtcfs_sync::scheduler[0m[2m:[0m dispatching task [3mpath[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/root/Projects/shared/conflict-notes.md [3mop[0m[2m=[0mPush [3mretries[0m[2m=[0m0
+[2m2026-05-10T05:40:37.273950Z[0m [34mDEBUG[0m [2mtcfs_sync::scheduler[0m[2m:[0m dispatching task [3mpath[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/root/Projects/shared/conflict-notes.conflict-00000000-0000-4000-8000-0000000000b2.md [3mop[0m[2m=[0mPush [3mretries[0m[2m=[0m0
+[2m2026-05-10T05:42:01.461212Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m received SIGTERM, initiating graceful shutdown
+[2m2026-05-10T05:42:01.461260Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m state cache flushed
+[2m2026-05-10T05:42:01.461270Z[0m [32m INFO[0m [2mtcfsd::daemon[0m[2m:[0m shutdown complete
+[2m2026-05-10T05:42:01.461606Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_write[0m[2m:[0m send [3mframe[0m[2m=[0mGoAway { error_code: NO_ERROR, last_stream_id: StreamId(2147483647) }
+[2m2026-05-10T05:42:01.461634Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::codec::framed_write[0m[2m:[0m send [3mframe[0m[2m=[0mPing { ack: false, payload: [11, 123, 162, 240, 139, 155, 254, 84] }
+[2m2026-05-10T05:42:01.463580Z[0m [34mDEBUG[0m [1mConnection[0m[1m{[0m[3mpeer[0m[2m=[0mServer[1m}[0m[2m:[0m [2mh2::proto::connection[0m[2m:[0m Connection::poll; IO error [3merror[0m[2m=[0mConnectionReset
+[2m2026-05-10T05:42:01.463631Z[0m [34mDEBUG[0m [2mtonic::transport::server[0m[2m:[0m failed serving connection: connection error: connection reset
+[2m2026-05-10T05:42:01.463835Z[0m [34mDEBUG[0m [2mtcfs_sync::engine[0m[2m:[0m uploading [3mpath[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T054029Z-87207-honey/root/Projects/shared/conflict-notes.conflict-00000000-0000-4000-8000-0000000000b2.md [3mreason[0m[2m=[0mnew file
+[2m2026-05-10T05:42:01.464019Z[0m [34mDEBUG[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=neo-honey-conflict-daemon-keep-both-20260510T054020Z/index/Projects/shared/conflict-notes.conflict-00000000-0000-4000-8000-0000000000b2.md: read started
+[2m2026-05-10T05:42:01.464094Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated scope: 20260510/us-east-1/s3/aws4_request
+[2m2026-05-10T05:42:01.464107Z[0m [34mDEBUG[0m [2mreqsign::aws::v4[0m[2m:[0m calculated string to sign: AWS4-HMAC-SHA256
+20260510T054201Z
+20260510/us-east-1/s3/aws4_request
+6e0b81e83fe55c6287f76b05b4215dffab92f8157693baadd1f1ed9e0b97021e
+[2m2026-05-10T05:42:01.464246Z[0m [34mDEBUG[0m [2mhyper_util::client::legacy::pool[0m[2m:[0m reuse idle connection for ("http", 100.64.48.53:8333)
+[2m2026-05-10T05:42:01.466901Z[0m [32m INFO[0m [2mtcfs_sync::watcher[0m[2m:[0m watcher channel disconnected, stopping

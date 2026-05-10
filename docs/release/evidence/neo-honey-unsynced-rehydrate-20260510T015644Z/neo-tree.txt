@@ -1,0 +1,4 @@
+/Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo
+/Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects
+/Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared
+/Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared/notes.md

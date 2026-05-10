@@ -1,0 +1,22 @@
+{
+  "last_nats_seq": 0,
+  "device_id": "",
+  "entries": {
+    "/Users/jess/git/tummycrypt/docs/release/evidence/neo-honey-conflict-sibling-20260510T051328Z/remote-sibling-after-progress.content": {
+      "blake3": "4ea0de3d90c6fcd098d8b0c5fed897d51f1f35ae686c41a10d3fc9ee51de3055",
+      "size": 152,
+      "mtime": 1778390016,
+      "chunk_count": 1,
+      "remote_path": "neo-honey-conflict-sibling-20260510T051328Z/manifests/4ea0de3d90c6fcd098d8b0c5fed897d51f1f35ae686c41a10d3fc9ee51de3055",
+      "last_synced": 1778390016,
+      "vclock": {
+        "clocks": {
+          "00000000-0000-4000-8000-0000000000a1": 1,
+          "00000000-0000-4000-8000-0000000000b2": 1
+        }
+      },
+      "device_id": "00000000-0000-4000-8000-0000000000a1",
+      "status": "synced"
+    }
+  }
+}

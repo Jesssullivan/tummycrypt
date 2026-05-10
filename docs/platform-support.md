@@ -12,6 +12,9 @@ coverage and the clearest end-to-end validation story.
 - **CLI**: All commands (push, pull, reconcile, policy, resolve, mount, unsync)
 - **Daemon**: package artifacts install daemon binaries and service files; isolated daemon smoke is proven, while systemd-managed service behavior is a separate release gate
 - **Filesystem**: FUSE3 mount with clean-name on-demand hydration is host-proven on Linux x86_64 from repo-pinned tooling; packaged install-to-mount proof is still separate
+- **Project-tree canary**: `task lazy:home-canary-linux-xr-shadow` can stage a
+  real repo shadow for cross-host proof, but symlinks are currently an explicit
+  parity blocker because push defaults to `follow_symlinks=false`
 - **NFS loopback**: Alternative to FUSE (no kernel modules required), with current release evidence pending
 - **Fleet sync**: NATS JetStream with vector clock conflict detection
 - **D-Bus**: Interface crate exists, but the default backend is a stub and release UX/status integration is not yet proven

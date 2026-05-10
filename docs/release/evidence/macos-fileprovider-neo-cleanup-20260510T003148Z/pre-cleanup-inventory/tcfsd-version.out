@@ -1,0 +1,2 @@
+$ sh -c tcfsd\ --version\ 2\>/dev/null\ \|\|\ true
+tcfsd 0.12.2

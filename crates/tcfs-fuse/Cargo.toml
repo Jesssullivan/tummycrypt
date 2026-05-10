@@ -21,5 +21,10 @@ tracing = { workspace = true }
 default = []
 fuse = ["dep:fuse3", "dep:libc", "dep:bytes", "dep:futures-util"]
 
+[[test]]
+name = "mount_roundtrip"
+path = "tests/mount_roundtrip.rs"
+required-features = ["fuse"]
+
 [dev-dependencies]
 tempfile = { workspace = true }

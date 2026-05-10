@@ -1,0 +1,9 @@
+2026-05-10T03:56:30.026506Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T03:56:30.027670Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T03:56:30.028396Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pulling Projects/shared/mounted-reverse-notes.md → /Users/jess/TCFS Pilot/runs/mounted-reverse-read-20260510T035625Z-44117/neo/Projects/shared/mounted-reverse-notes.md
+2026-05-10T03:56:30.111111Z  INFO tcfs_sync::engine: downloaded remote=neo-mounted-reverse-read-20260510T035624Z/manifests/a8f7bcd6b818807095af324f0d276d511b55ed18744b547f52ee5022c7329941 local=/Users/jess/TCFS Pilot/runs/mounted-reverse-read-20260510T035625Z-44117/neo/Projects/shared/mounted-reverse-notes.md bytes=118
+
+Downloaded:
+  local:  /Users/jess/TCFS Pilot/runs/mounted-reverse-read-20260510T035625Z-44117/neo/Projects/shared/mounted-reverse-notes.md
+  bytes:  118 B

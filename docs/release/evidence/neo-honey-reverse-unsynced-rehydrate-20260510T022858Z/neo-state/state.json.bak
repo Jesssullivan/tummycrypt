@@ -1,0 +1,21 @@
+{
+  "last_nats_seq": 0,
+  "device_id": "",
+  "entries": {
+    "/Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T022858Z-50755/neo/Projects/shared/reverse-notes.md": {
+      "blake3": "67a1b261f42adc6078a18bf0df08b55a132b729590751d4efd5a7e1ca407b12e",
+      "size": 112,
+      "mtime": 1778380138,
+      "chunk_count": 1,
+      "remote_path": "neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/manifests/67a1b261f42adc6078a18bf0df08b55a132b729590751d4efd5a7e1ca407b12e",
+      "last_synced": 1778380138,
+      "vclock": {
+        "clocks": {
+          "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 1
+        }
+      },
+      "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a",
+      "status": "synced"
+    }
+  }
+}

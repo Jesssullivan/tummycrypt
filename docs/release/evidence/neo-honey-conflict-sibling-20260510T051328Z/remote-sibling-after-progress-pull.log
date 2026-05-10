@@ -1,0 +1,9 @@
+2026-05-10T05:13:35.984223Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T05:13:35.984433Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T05:13:35.984509Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pulling Projects/shared/conflict-independent-sibling.md → docs/release/evidence/neo-honey-conflict-sibling-20260510T051328Z/remote-sibling-after-progress.content
+2026-05-10T05:13:36.021352Z  INFO tcfs_sync::engine: downloaded remote=neo-honey-conflict-sibling-20260510T051328Z/manifests/4ea0de3d90c6fcd098d8b0c5fed897d51f1f35ae686c41a10d3fc9ee51de3055 local=docs/release/evidence/neo-honey-conflict-sibling-20260510T051328Z/remote-sibling-after-progress.content bytes=152
+
+Downloaded:
+  local:  docs/release/evidence/neo-honey-conflict-sibling-20260510T051328Z/remote-sibling-after-progress.content
+  bytes:  152 B

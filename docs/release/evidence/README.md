@@ -14,6 +14,26 @@ the repository.
 | `lazy-linux-20260508T170825Z/` | Linux FUSE lifecycle on `honey`: browse before hydration, exact `cat`, mounted write/readback, cache clear/rehydrate, dirty recursive `unsync` refusal, clean recursive `.tc` conversion, persisted `NotSynced` state | repo-archived transcript, config, mount log, remote prefix, remote pullback, unsync outputs, redacted metadata |
 | `fleet-pilot-20260509T1919Z/` | Isolated `Documents`/`git` fleet-pilot packet: neo seed to disposable prefix, honey mounted traversal/hydration, live `neo-honey` backend smoke | repo-archived fixture tree, transcripts, honey commands, mount log, remote prefix, and live SeaweedFS/NATS smoke log |
 | `fleet-pilot-extended-20260509T2152Z/` | Extended isolated fleet-pilot packet: neo seed to disposable prefix, honey mounted traversal/hydration, honey Linux lifecycle companion, and live `neo-honey` backend smoke | repo-archived fixture tree, transcripts, honey commands, mount log, remote prefix, mounted write/readback pullback, cache rehydrate log, recursive safe-unsync outputs, and live SeaweedFS/NATS smoke log |
+| `neo-honey-unsynced-rehydrate-20260510T015644Z/` | Same-fixture cross-host M3 proof: neo pushed a file, `tcfs unsync` removed neo's local copy to a `.tc` stub, honey traversed and mutated the mounted clean-name file, then neo pulled the same path | repo-archived config, state, remote prefix, honey traversal/mutation transcript, neo unsync/pull/status transcripts, exact content fixture, and `stub_after_pull=absent` |
+| `neo-honey-reverse-unsynced-rehydrate-20260510T022657Z/` | First reverse same-fixture M6 attempt: honey pulled/unsynced, neo mutated/pushed, honey pulled exact content but retained a stale `.tc` stub | blocker evidence for a stale honey Linux binary that lacked pull-side adjacent-stub cleanup; superseded by the passing rerun |
+| `neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/` | Reverse same-fixture M6 proof: honey pulled and `tcfs unsync` removed its local copy to a `.tc` stub, neo mutated and pushed the same path, then honey pulled exact neo bytes | repo-archived config, state, remote prefix, honey pull/unsync/rehydrate/status transcripts, exact content fixtures, and `stub_after_pull=absent` |
+| `neo-mounted-reverse-read-20260510T035826Z/` | M4 mounted reverse-read blocker packet: honey initial/mutated push passed, neo physical pull/unsync/status passed, then neo NFS loopback mount failed before mounted `cat` | repo-archived config, state, remote prefix, honey push transcripts, neo physical transcripts, and `neo-mount.log` showing `mount_nfs` `Operation not permitted`; no mounted read proof |
+| `honey-mounted-reverse-read-20260510T042203Z/` | Linux-mounted reverse-read proof: honey pulled and unsynced a physical copy to a `.tc` stub, neo mutated and pushed the same path, then honey read exact neo bytes through a mounted clean-name view | repo-archived config, state, remote prefix, honey pull/unsync/status transcripts, mounted `ls`/`find`/`cat` transcript, exact content fixtures, and `honey_physical_after_mounted_read=stub_present`; does not close neo/macOS mount blocker |
+| `neo-honey-delete-rename-unsynced-20260510T040456Z/` | M8 delete/rename while peer-unsynced current-behavior proof: honey pulled and unsynced two files, neo deleted one path and renamed another, honey old-path pulls failed and renamed new path hydrated exact bytes | repo-archived config, state, remote prefix, honey pull/unsync/delete/rename transcripts, exact content fixtures, and stale old stub status; not clean stale-placeholder UX |
+| `neo-honey-conflict-20260510T043741Z/` | Cross-host same-file conflict current-behavior proof: honey pulled and edited a file, neo pushed a divergent version, then honey attempted to push its local version | repo-archived config, state, device registry, remote prefix, neo push transcripts, honey conflict transcript, `sync state: conflict`, honey local-content preservation marker, and remote pullback proving neo bytes were not overwritten |
+| `neo-honey-conflict-keep-both-20260510T045810Z/` | First manual keep-both task attempt; the Taskfile alias did not forward the recovery flag, so only the existing conflict detection row ran | repo-archived detection-only conflict packet with `proof=cross-host-conflict-current-behavior`; superseded by `neo-honey-conflict-keep-both-20260510T045908Z/` |
+| `neo-honey-conflict-keep-both-20260510T045908Z/` | Manual keep-both recovery proof after cross-host conflict: honey preserved its losing local bytes under a sibling path, rehydrated the original path to neo's remote bytes, pushed the sibling copy, and neo pulled both paths back | repo-archived config, state, device registry, remote prefix, conflict transcript, recovery transcript, honey sync-status before/after recovery, original-path pullback hash matching neo bytes, and conflict-copy pullback hash matching honey bytes; this is manual recovery, not `tcfs resolve` UX |
+| `neo-honey-conflict-sibling-20260510T051328Z/` | Independent sibling progress proof after cross-host conflict: honey had one descendant in conflict while another edited sibling descendant pushed successfully | repo-archived config, state, device registry, remote prefix, conflict transcript, sibling push transcript, honey sync-status showing original file still `conflict` and sibling `synced`, remote pullback hash matching neo bytes for the conflicted file, and remote pullback hash matching honey bytes for the sibling |
+| `neo-honey-conflict-daemon-keep-both-20260510T054020Z/` | Superseded daemon keep-both attempt: Taskfile did not forward the explicit honey `tcfsd` path, so honey selected stale `tcfsd 0.12.2` from PATH | repo-archived conflict setup plus stale daemon log; retained as task-wiring/stale-binary blocker evidence only |
+| `neo-honey-conflict-daemon-keep-both-20260510T054401Z/` | Superseded daemon keep-both attempt using honey `tcfsd 0.12.12` before timeout handling was added | repo-archived conflict setup plus daemon log showing the keep-both request was accepted but the CLI resolve call hung; superseded by the bounded timeout packet |
+| `neo-honey-conflict-daemon-keep-both-20260510T054611Z/` | Daemon-backed `tcfs resolve --strategy keep-both` blocker packet: honey used isolated `tcfsd 0.12.12` with auth bypass, the daemon accepted the request, but the CLI RPC timed out after 30s | repo-archived config, state, device registry, remote prefix, conflict transcript, daemon log, timeout result, post-timeout pullbacks proving original remote bytes remained neo's and daemon-created conflict-copy bytes matched honey's; clean daemon resolve completion is not claimed |
+| `home-canary-linux-xr-shadow-20260510T002604Z/` | Local real project-tree shadow of `/Users/jess/git/linux-xr`: read-only source inventory, full isolated 7.9 GB shadow under `~/TCFS Pilot/real-canaries/`, disposable raw `.git`/hidden-dir config, and honey command packet | repo-archived inventory/config metadata; push/honey/lifecycle were not run; full project parity is explicitly blocked by 85 inventoried symlinks while push uses `follow_symlinks=false` |
+| `home-canary-linux-xr-shadow-20260510T023938Z/` | Real project-tree shadow canary against `/Users/jess/git/linux-xr`: completed 7.7 GB shadow push, honey mounted clean-name traversal/hydration, and Linux lifecycle companion | repo-archived source/shadow inventory, raw `.git`/hidden-dir config, completed `push.log`, honey mounted `ls`/`find -maxdepth 3`/`cat` transcript for `.clang-format`, mount log, Linux lifecycle write/readback/cache-clear/rehydrate/safe-unsync transcripts, and `result.env` with `proof=shadow-push-honey-linux-lifecycle`; full project parity remains blocked by 85 symlinks and `follow_symlinks=false` |
+| `macos-fileprovider-neo-cleanup-20260510T003148Z/` | Non-mutating neo FileProvider divergence inventory before cleanup | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; no `.pkg` install, stale app quarantine, or strict production preflight was run |
+| `macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/` | Non-mutating neo FileProvider divergence inventory with the published `v0.12.12` `.pkg` selected as source | repo-archived inventory plus package checksum pass, `pkgutil --check-signature` Developer ID/notarization output, and non-installing package structure smoke; no `.pkg` install, stale app quarantine, or strict production preflight was run |
+| `macos-fileprovider-strict-preflight-blocker-20260510T0040Z/` | Non-mutating strict production signing preflight against the existing `~/Applications/TCFSProvider.app` | preflight failed as expected: host and extension keychain access group entitlements/provisioning profiles are missing; ambient `tcfsd` is still `0.12.2` from the Nix profile; this is a blocker record, not Finder readiness |
+| `macos-pkg-install-attempt-20260510T0045Z/` | Non-interactive install attempt for the published `v0.12.12` macOS `.pkg` | blocked: `sudo -n installer` exited with status 1 because a password is required; `/Applications/TCFSProvider.app` remained absent; no stale user app quarantine occurred |
+| `macos-fileprovider-neo-cleanup-install-blocker-20260510T0048Z/` | Helper-based published `.pkg` install attempt after divergence inventory | blocked: `sudo -n installer` exited with status 1 because a password is required; the helper still wrote inventory, README, and install status; `/Applications/TCFSProvider.app` remained absent |
 | Production Developer ID `.pkg` hosted smoke attempt | Published `v0.12.12` package on GitHub-hosted `macos-15`: package download, structure check, install, installed FileProvider signing, installed CLI smoke, live config, and FileProvider config provisioning passed; remote fixture seed failed because the public Cloudflare quick-tunnel hostname did not resolve from the hosted runner | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25613963424> |
 | PZM testing-mode FileProvider package run | Mac App Development/testing-mode package build for deterministic conflict/status proof | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569345240> |
 | PZM testing-mode FileProvider smoke run | Enumerate/hydrate/evict/rehydrate, mutation proof already present from prior run, deterministic CLI conflict/status and exact FileProvider content preservation | <https://github.com/Jesssullivan/tummycrypt/actions/runs/25569596910> |
@@ -23,6 +43,111 @@ the repository.
 
 ## Scope Notes
 
+- `neo-honey-unsynced-rehydrate-20260510T015644Z/` closes the first
+  same-fixture cross-host rehydrate row. It proves neo can remove a clean local
+  copy with `tcfs unsync`, honey can edit that file through a mounted view, and
+  neo can pull exact honey bytes with `sync state: synced` and no stale adjacent
+  `.tc` file.
+- `neo-honey-reverse-unsynced-rehydrate-20260510T022858Z/` closes the reverse
+  same-fixture row. It proves honey can pull and unsync a physical copy, neo can
+  mutate and push the same path, and honey can pull exact neo bytes with
+  `sync state: synced` and no stale adjacent `.tc` file.
+- `neo-honey-reverse-unsynced-rehydrate-20260510T022657Z/` intentionally stays
+  indexed as blocker evidence. It showed the reverse row fails if the peer host
+  still runs an older `tcfs` binary without pull-side stale-stub cleanup.
+- `neo-mounted-reverse-read-20260510T035826Z/` is the current M4 live blocker.
+  It proves the pre-mount stages against a disposable prefix, but not the
+  mounted reverse read itself: neo/macOS has no macFUSE installed, and the NFS
+  loopback fallback failed at `mount_nfs` with `Operation not permitted`.
+- `honey-mounted-reverse-read-20260510T042203Z/` closes the Linux-mounted
+  equivalent of the reverse-read row. Honey pulled and unsynced a physical copy,
+  neo mutated and pushed the same path, and honey's mounted clean-name surface
+  listed and `cat`-read exact neo bytes while the physical honey root remained
+  stub-only. This is mounted VFS evidence, not production Finder evidence, and
+  it does not remove the neo/macOS mount blocker above.
+- `neo-honey-delete-rename-unsynced-20260510T040456Z/` proves M8 current
+  behavior only. Delete and rename old-path pulls fail deterministically, and
+  the renamed new path hydrates exact bytes, but old physical `.tc` stubs remain
+  present on honey. The helper uses the current safe order for same-hash rename:
+  delete the old remote path before publishing the new path. Clean tombstone or
+  stale-placeholder cleanup UX remains open; full conflict permutations also
+  remain open QA rows.
+- `neo-honey-conflict-20260510T043741Z/` closes the first cross-host
+  same-file conflict row at CLI/current-behavior depth. Honey pulled and edited
+  the file, neo pushed divergent bytes, honey's later push reported
+  `CONFLICT`, skipped upload, marked `sync state: conflict`, preserved honey's
+  local bytes, and a neo pullback proved the remote still held neo's bytes. This
+  does not prove Finder conflict UI, automatic conflict resolution, or
+  keep-synced/pin semantics.
+- `neo-honey-conflict-keep-both-20260510T045810Z/` is retained as superseded
+  task-wiring evidence. It used the intended keep-both prefix, but the Taskfile
+  alias had not forwarded `--honey-recover-keep-both`, so the packet only
+  repeated the detection/preservation proof.
+- `neo-honey-conflict-keep-both-20260510T045908Z/` extends the conflict row with
+  a manual keep-both recovery pattern. After honey recorded conflict state, it
+  copied the losing honey bytes to
+  `Projects/shared/conflict-notes.conflict-honey.md`, pulled the original path
+  back to neo's remote bytes, pushed the sibling copy, and neo pulled both paths
+  back with exact hash matches. This is a scriptable recovery pattern, not
+  daemon-backed `tcfs resolve`, Finder conflict UI, or automatic resolution.
+- `neo-honey-conflict-sibling-20260510T051328Z/` adds a partial M7 descendant
+  permutation. Honey records conflict on `Projects/shared/conflict-notes.md`,
+  then pushes `Projects/shared/conflict-independent-sibling.md`; sync-status
+  keeps the original file at `conflict` while the sibling reports `synced`, and
+  neo pullbacks prove the conflicted file still has neo bytes while the sibling
+  has honey bytes. This proves per-path sibling progress, not conflict-list UX
+  or automatic resolution.
+- `neo-honey-conflict-daemon-keep-both-20260510T054020Z/` and
+  `neo-honey-conflict-daemon-keep-both-20260510T054401Z/` are retained as
+  superseded daemon-resolution blocker packets: first a stale honey `tcfsd`
+  path-selection bug, then an unbounded hang with the explicit `0.12.12` daemon.
+- `neo-honey-conflict-daemon-keep-both-20260510T054611Z/` is the bounded
+  daemon-resolution blocker. It proves the helper can start isolated honey
+  `tcfsd 0.12.12` and reach `ResolveConflict(keep_both)` under
+  `auth.require_session=false`, but the CLI RPC timed out after 30 seconds.
+  Post-timeout pullbacks show partial side effects: the original remote path
+  still matched neo bytes and the daemon-created conflict copy matched honey
+  bytes. This is not a clean `tcfs resolve` UX claim.
+- `home-canary-linux-xr-shadow-20260510T002604Z/` did not mutate
+  `/Users/jess/git/linux-xr` and did not contact remote storage. It proves the
+  local source inventory and shadow/config packet only. Push, honey traversal,
+  Linux lifecycle, and full project parity remain open because the source
+  contains 85 symlinks and push still uses `follow_symlinks=false`.
+- `home-canary-linux-xr-shadow-20260510T023938Z/` is now the scoped real
+  project-tree canary packet. The original long push completed with 92,969
+  files and 7.7 GB uploaded, then the helper resumed from the completed
+  `push.log`/state without re-pushing. Honey mounted the prefix, listed clean
+  names including `.git`, ran bounded traversal at `max-depth=3`, and `cat`
+  hydrated `.clang-format` with exact 24,291-byte content. The Linux lifecycle
+  companion under the same prefix also passed mounted write/readback, cache
+  clear/rehydrate, dirty safe-unsync refusal, clean recursive unsync, and exact
+  rehydrate. This is a project-tree canary, not full project parity: the source
+  still contains 85 symlinks and push still uses `follow_symlinks=false`.
+- The runnable `macos-fileprovider-neo-cleanup-<UTC>/` packet is divergence
+  inventory and optional cleanup/install evidence. It is not production Finder
+  readiness unless strict production signing preflight passes against the
+  published `.pkg` install.
+- `macos-fileprovider-neo-cleanup-20260510T003148Z/` is inventory-only. It
+  recorded ambient divergence (`tcfs` from `target/debug`, `tcfsd` from the Nix
+  profile, and `~/Applications/TCFSProvider.app` present), but it did not
+  install the published package or unregister/quarantine stale registrations.
+- `macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/` verifies the published
+  package source without installing it. The package checksum and structure
+  smoke passed, and `pkgutil --check-signature` reported Developer ID Installer
+  signing plus Apple notarization. Production Finder remains open because the
+  package was not installed and strict preflight/Finder lifecycle did not run.
+- `macos-fileprovider-strict-preflight-blocker-20260510T0040Z/` is an explicit
+  blocker capture for the existing user app. It failed strict production
+  signing preflight because keychain access group entitlements and provisioning
+  profiles were missing. This reinforces that local Finder smoke must not be
+  described as production-adjacent from the stale user app.
+- `macos-pkg-install-attempt-20260510T0045Z/` shows that this non-interactive
+  shell cannot install the published package into `/Applications` because sudo
+  requires a password. The package source remains verified, but install and
+  post-install Finder preflight remain open on this host.
+- `macos-fileprovider-neo-cleanup-install-blocker-20260510T0048Z/` repeats the
+  same blocked install path through the cleanup helper after the helper was
+  hardened to use `sudo -n` and still write complete failure evidence.
 - PZM FileProvider runs are non-production Mac App Development/testing-mode
   evidence with the lab `SystemPolicyRule` profile. They do not prove a
   production Developer ID clean-host Finder lane.

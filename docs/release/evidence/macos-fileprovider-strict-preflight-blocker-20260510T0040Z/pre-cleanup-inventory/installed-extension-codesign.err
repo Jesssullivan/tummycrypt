@@ -1,0 +1,23 @@
+Executable=/Users/jess/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/MacOS/TCFSFileProvider
+Identifier=io.tinyland.tcfs.fileprovider
+Format=bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=10518 flags=0x2(adhoc) hashes=318+7 location=embedded
+VersionPlatform=1
+VersionMin=983040
+VersionSDK=1704960
+Hash type=sha256 size=32
+CandidateCDHash sha256=b6e016fb081092905d3701d8d91b725dc2fec5ef
+CandidateCDHashFull sha256=b6e016fb081092905d3701d8d91b725dc2fec5ef41c6303f8578c70f752a34a3
+Hash choices=sha256
+CMSDigest=b6e016fb081092905d3701d8d91b725dc2fec5ef41c6303f8578c70f752a34a3
+CMSDigestType=2
+Executable Segment base=0
+Executable Segment limit=3260416
+Executable Segment flags=0x1
+Page size=16384
+CDHash=b6e016fb081092905d3701d8d91b725dc2fec5ef
+Signature=adhoc
+Info.plist entries=9
+TeamIdentifier=not set
+Sealed Resources version=2 rules=13 files=0
+Internal requirements count=0 size=12

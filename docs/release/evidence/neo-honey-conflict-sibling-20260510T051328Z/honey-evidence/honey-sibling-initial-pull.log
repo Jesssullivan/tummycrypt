@@ -1,0 +1,9 @@
+[2m2026-05-10T05:13:35.153907Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-10T05:13:35.154052Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-10T05:13:35.154119Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pulling Projects/shared/conflict-independent-sibling.md → /tmp/tcfs-neo-honey-conflict-20260510T051328Z-63376-honey/root/Projects/shared/conflict-independent-sibling.md
+[2m2026-05-10T05:13:35.175458Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m downloaded [3mremote[0m[2m=[0mneo-honey-conflict-sibling-20260510T051328Z/manifests/07bc3f1c3d5c1a534755f22bdaf588e6ac4d95806a48c542de3f434c81b867e2 [3mlocal[0m[2m=[0m/tmp/tcfs-neo-honey-conflict-20260510T051328Z-63376-honey/root/Projects/shared/conflict-independent-sibling.md [3mbytes[0m[2m=[0m124
+
+Downloaded:
+  local:  /tmp/tcfs-neo-honey-conflict-20260510T051328Z-63376-honey/root/Projects/shared/conflict-independent-sibling.md
+  bytes:  124 B

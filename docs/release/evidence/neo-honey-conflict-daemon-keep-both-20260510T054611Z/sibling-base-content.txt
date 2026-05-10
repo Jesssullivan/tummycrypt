@@ -1,0 +1,4 @@
+# Independent sibling TCFS note
+
+version: sibling-base
+body: both peers start with this sibling before only honey edits it.

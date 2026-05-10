@@ -1,0 +1,24 @@
+{
+  "devices": [
+    {
+      "name": "neo-conflict",
+      "device_id": "00000000-0000-4000-8000-0000000000a1",
+      "public_key": "age1-device-neo-conflict",
+      "signing_key_hash": "neo0000000000000",
+      "description": "TCFS conflict helper neo fixture",
+      "enrolled_at": 1,
+      "revoked": false,
+      "last_nats_seq": 0
+    },
+    {
+      "name": "honey-conflict",
+      "device_id": "00000000-0000-4000-8000-0000000000b2",
+      "public_key": "age1-device-honey-conflict",
+      "signing_key_hash": "honey00000000000",
+      "description": "TCFS conflict helper honey fixture",
+      "enrolled_at": 1,
+      "revoked": false,
+      "last_nats_seq": 0
+    }
+  ]
+}

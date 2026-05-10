@@ -1,0 +1,26 @@
+# Prepare remote work directory:
+ssh honey 'mkdir -p /tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run'
+
+# Copy expected content and the honey conflict runner:
+scp docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/base-content.txt honey:/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/base-content.txt
+scp docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/neo-conflict-content.txt honey:/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/neo-conflict-content.txt
+scp docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/honey-conflict-content.txt honey:/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-content.txt
+scp docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/sibling-base-content.txt honey:/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/sibling-base-content.txt
+scp docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/honey-sibling-content.txt honey:/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-sibling-content.txt
+scp docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/neo-state/device-registry.json honey:/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/device-registry.json
+scp docs/release/evidence/neo-honey-conflict-daemon-keep-both-20260510T054401Z/honey-conflict-run.sh honey:/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-run.sh
+
+# Honey pulls base and edits locally:
+ssh honey 'TCFS_HONEY_BASE_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/base-content.txt TCFS_HONEY_CONFLICT_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-content.txt TCFS_HONEY_SIBLING_BASE_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/sibling-base-content.txt TCFS_HONEY_SIBLING_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-sibling-content.txt bash /tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-run.sh prepare'
+
+# After neo pushes divergent content, honey attempts push and must record conflict:
+ssh honey 'TCFS_HONEY_CONFLICT_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-content.txt bash /tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-run.sh push-conflict'
+
+# Optional independent sibling push after conflict detection:
+ssh honey 'TCFS_HONEY_SIBLING_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-sibling-content.txt bash /tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-run.sh push-sibling'
+
+# Optional manual keep-both recovery after conflict detection:
+ssh honey 'TCFS_HONEY_NEO_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/neo-conflict-content.txt TCFS_HONEY_CONFLICT_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-content.txt bash /tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-run.sh recover-keep-both'
+
+# Optional daemon-backed keep-both resolve after conflict detection:
+ssh honey 'TCFS_HONEY_NEO_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/neo-conflict-content.txt TCFS_HONEY_CONFLICT_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-content.txt bash /tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-conflict-run.sh resolve-keep-both'

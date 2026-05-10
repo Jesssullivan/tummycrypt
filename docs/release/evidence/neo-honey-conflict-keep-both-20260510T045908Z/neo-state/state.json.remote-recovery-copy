@@ -1,0 +1,21 @@
+{
+  "last_nats_seq": 0,
+  "device_id": "",
+  "entries": {
+    "/Users/jess/git/tummycrypt/docs/release/evidence/neo-honey-conflict-keep-both-20260510T045908Z/remote-conflict-copy.content": {
+      "blake3": "aebeb54c3dba131c367cf31e4de8a27dbf82436853a4e0f0626b4fee697cd34c",
+      "size": 130,
+      "mtime": 1778389157,
+      "chunk_count": 1,
+      "remote_path": "neo-honey-conflict-keep-both-20260510T045908Z/manifests/aebeb54c3dba131c367cf31e4de8a27dbf82436853a4e0f0626b4fee697cd34c",
+      "last_synced": 1778389157,
+      "vclock": {
+        "clocks": {
+          "00000000-0000-4000-8000-0000000000b2": 1
+        }
+      },
+      "device_id": "00000000-0000-4000-8000-0000000000a1",
+      "status": "synced"
+    }
+  }
+}

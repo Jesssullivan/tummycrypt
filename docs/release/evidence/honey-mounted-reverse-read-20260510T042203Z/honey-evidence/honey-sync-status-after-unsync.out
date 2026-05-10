@@ -1,0 +1,11 @@
+State cache: /tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/run/honey-state/state.json
+Tracked files: 1
+
+File: /tmp/tcfs-reverse-unsynced-rehydrate-20260510T042204Z-92360-honey/root/Projects/shared/reverse-notes.md
+  hash:       67a1b261f42adc60
+  size:       112 B
+  chunks:     1
+  remote:     honey-mounted-reverse-read-20260510T042203Z/manifests/67a1b261f42adc6078a18bf0df08b55a132b729590751d4efd5a7e1ca407b12e
+  last sync:  0 seconds ago
+  sync state: not_synced
+  sync check: up to date

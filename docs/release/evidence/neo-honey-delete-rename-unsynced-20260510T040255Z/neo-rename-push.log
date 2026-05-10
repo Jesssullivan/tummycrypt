@@ -1,0 +1,10 @@
+2026-05-10T04:03:01.362545Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T04:03:01.362618Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T04:03:01.362641Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pushing /Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040255Z-55529/neo/Projects/shared/rename-new.md → tcfs:neo-honey-delete-rename-unsynced-20260510T040255Z (endpoint: http://100.64.48.53:8333, device: 03d8a0bd...)
+2026-05-10T04:03:01.363860Z DEBUG tcfs_sync::engine: uploading path=/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040255Z-55529/neo/Projects/shared/rename-new.md reason=new file
+2026-05-10T04:03:01.405496Z  INFO tcfs_sync::engine: uploaded path=/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040255Z-55529/neo/Projects/shared/rename-new.md hash=4c6855523dd3ef8d752c80112582c5c4310b5f44b2082cbcf1f64649ebeec9af chunks=1 bytes=105 uploaded_bytes=0 streaming=false
+  hash:    4c6855523dd3ef8d
+  chunks:  1
+  bytes:   105 B
+  remote:  neo-honey-delete-rename-unsynced-20260510T040255Z/manifests/4c6855523dd3ef8d752c80112582c5c4310b5f44b2082cbcf1f64649ebeec9af

@@ -1,0 +1,4 @@
+/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040255Z-55529/neo
+/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040255Z-55529/neo/Projects
+/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040255Z-55529/neo/Projects/shared
+/Users/jess/TCFS Pilot/runs/delete-rename-unsynced-20260510T040255Z-55529/neo/Projects/shared/rename-new.md

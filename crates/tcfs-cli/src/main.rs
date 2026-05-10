@@ -1159,6 +1159,7 @@ async fn cmd_pull_with_operator(
     .with_context(|| format!("downloading {}", manifest_path))?;
 
     state.flush().context("flushing state cache")?;
+    remove_adjacent_stub_after_pull(&result.local_path).await?;
 
     pb.finish_with_message("done".to_string());
     println!();
@@ -1167,6 +1168,46 @@ async fn cmd_pull_with_operator(
     println!("  bytes:  {}", fmt_bytes(result.bytes));
 
     Ok(())
+}
+
+async fn remove_adjacent_stub_after_pull(local_path: &Path) -> Result<()> {
+    if tcfs_vfs::is_stub_path(local_path) {
+        return Ok(());
+    }
+
+    let file_name = match local_path.file_name() {
+        Some(name) => name,
+        None => return Ok(()),
+    };
+    let stub_path = local_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(tcfs_vfs::real_to_stub_name(file_name));
+
+    let stub_bytes = match tokio::fs::read(&stub_path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("reading adjacent stub: {}", stub_path.display()));
+        }
+    };
+    let Ok(stub_text) = String::from_utf8(stub_bytes) else {
+        return Ok(());
+    };
+    if tcfs_vfs::StubMeta::parse(&stub_text).is_err() {
+        return Ok(());
+    }
+
+    match tokio::fs::remove_file(&stub_path).await {
+        Ok(()) => {
+            println!("  removed stub: {}", stub_path.display());
+            Ok(())
+        }
+        Err(err) => {
+            Err(err).with_context(|| format!("removing stale stub: {}", stub_path.display()))
+        }
+    }
 }
 
 async fn cmd_pull(
@@ -4314,6 +4355,118 @@ mod tests {
                 other => panic!("expected tracked status after unsync, got {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cli_pull_after_unsync_hydrates_latest_remote_and_removes_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let neo_root = dir.path().join("neo");
+        let honey_root = dir.path().join("honey");
+        std::fs::create_dir_all(&neo_root).unwrap();
+        std::fs::create_dir_all(&honey_root).unwrap();
+        let neo_file = neo_root.join("shared.txt");
+        let honey_file = honey_root.join("shared.txt");
+        std::fs::write(&neo_file, b"version from neo").unwrap();
+
+        let op = memory_op();
+        let neo_state = dir.path().join("neo-state.json");
+        let honey_state = dir.path().join("honey-state.json");
+        let mut neo_config = test_config(&neo_root);
+        neo_config.sync.state_db = dir.path().join("neo-state.db");
+        let mut honey_config = test_config(&honey_root);
+        honey_config.sync.state_db = dir.path().join("honey-state.db");
+
+        cmd_push_with_operator(&neo_config, &op, &neo_file, None, &neo_state, "neo-device")
+            .await
+            .unwrap();
+
+        cmd_pull_with_operator(
+            &honey_config,
+            &op,
+            "shared.txt",
+            Some(&honey_file),
+            Some("data"),
+            &honey_state,
+            "honey-device",
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&honey_file).unwrap(), b"version from neo");
+
+        cmd_unsync(&neo_config, &neo_file, false).await.unwrap();
+        let stub_path = neo_root.join("shared.txt.tc");
+        assert!(
+            !neo_file.exists(),
+            "neo file should be removed after unsync"
+        );
+        assert!(stub_path.exists(), "neo stub should exist after unsync");
+
+        std::fs::write(&honey_file, b"version from honey after neo unsynced").unwrap();
+        cmd_push_with_operator(
+            &honey_config,
+            &op,
+            &honey_file,
+            None,
+            &honey_state,
+            "honey-device",
+        )
+        .await
+        .unwrap();
+
+        cmd_pull_with_operator(
+            &neo_config,
+            &op,
+            "shared.txt",
+            Some(&neo_file),
+            Some("data"),
+            &neo_state,
+            "neo-device",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&neo_file).unwrap(),
+            b"version from honey after neo unsynced"
+        );
+        assert!(
+            !stub_path.exists(),
+            "rehydrating a clean path should remove the adjacent stub"
+        );
+
+        let state = tcfs_sync::state::StateCache::open(&neo_state).unwrap();
+        let entry = state.get(&neo_file).expect("neo state after rehydrate");
+        assert_eq!(entry.status, tcfs_sync::state::FileSyncStatus::Synced);
+    }
+
+    #[tokio::test]
+    async fn cli_pull_adjacent_stub_cleanup_ignores_non_tcfs_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let pulled = dir.path().join("notes.md");
+        let adjacent = dir.path().join("notes.md.tc");
+        std::fs::write(&pulled, b"hydrated bytes").unwrap();
+        std::fs::write(&adjacent, b"user-owned sidecar, not a TCFS stub").unwrap();
+
+        remove_adjacent_stub_after_pull(&pulled).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&adjacent).unwrap(),
+            b"user-owned sidecar, not a TCFS stub"
+        );
+
+        let binary_pulled = dir.path().join("asset.bin");
+        let binary_adjacent = dir.path().join("asset.bin.tc");
+        std::fs::write(&binary_pulled, b"hydrated binary").unwrap();
+        std::fs::write(&binary_adjacent, [0xff, 0x00, 0xfe, 0x01]).unwrap();
+
+        remove_adjacent_stub_after_pull(&binary_pulled)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&binary_adjacent).unwrap(),
+            [0xff, 0x00, 0xfe, 0x01]
+        );
     }
 
     #[tokio::test]

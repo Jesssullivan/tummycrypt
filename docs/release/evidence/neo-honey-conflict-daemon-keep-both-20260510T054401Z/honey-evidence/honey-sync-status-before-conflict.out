@@ -1,0 +1,11 @@
+State cache: /tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/run/honey-state/state.json
+Tracked files: 1
+
+File: /tmp/tcfs-neo-honey-conflict-20260510T054416Z-92811-honey/root/Projects/shared/conflict-notes.md
+  hash:       ef92e12cf3e6e541
+  size:       102 B
+  chunks:     1
+  remote:     neo-honey-conflict-daemon-keep-both-20260510T054401Z/manifests/ef92e12cf3e6e54180cdfbd779d026209a4c9f215c01f21584ff1f47a9f5c6e8
+  last sync:  0 seconds ago
+  sync state: synced
+  sync check: needs sync (size changed: 102 → 130)

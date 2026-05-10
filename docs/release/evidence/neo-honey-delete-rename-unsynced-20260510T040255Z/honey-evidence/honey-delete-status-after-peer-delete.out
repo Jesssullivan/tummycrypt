@@ -1,0 +1,11 @@
+State cache: /tmp/tcfs-delete-rename-unsynced-20260510T040255Z-55529-honey/run/honey-state/state.json
+Tracked files: 2
+
+File: /tmp/tcfs-delete-rename-unsynced-20260510T040255Z-55529-honey/root/Projects/shared/delete-me.md
+  hash:       6890f2b804de7015
+  size:       105 B
+  chunks:     1
+  remote:     neo-honey-delete-rename-unsynced-20260510T040255Z/manifests/6890f2b804de7015c6f9dd72f8146b99fba9fa5bdc35a563cfb92d655c5624c7
+  last sync:  0 seconds ago
+  sync state: not_synced
+  sync check: up to date

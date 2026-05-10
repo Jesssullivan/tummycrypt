@@ -1,0 +1,4 @@
+/Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T043742Z-23874/neo
+/Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T043742Z-23874/neo/Projects
+/Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T043742Z-23874/neo/Projects/shared
+/Users/jess/TCFS Pilot/runs/neo-honey-conflict-20260510T043742Z-23874/neo/Projects/shared/conflict-notes.md

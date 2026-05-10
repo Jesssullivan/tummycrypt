@@ -93,6 +93,15 @@ pub trait VirtualFilesystem: Send + Sync {
         anyhow::bail!("ENOSYS: write not supported")
     }
 
+    /// Truncate an open file handle or path to `size` bytes.
+    ///
+    /// FUSE sends this for shell redirection, `cp`, and other `O_TRUNC`
+    /// replacement writes. Backends should preserve exact replacement
+    /// semantics, including shrinking a previously hydrated remote file.
+    async fn truncate(&self, _path: Option<&str>, _fh: Option<u64>, _size: u64) -> Result<VfsAttr> {
+        anyhow::bail!("ENOSYS: truncate not supported")
+    }
+
     /// Flush buffered writes to remote storage.
     ///
     /// Called on fsync(). For SeaweedFS-backed VFS, this chunks the file,

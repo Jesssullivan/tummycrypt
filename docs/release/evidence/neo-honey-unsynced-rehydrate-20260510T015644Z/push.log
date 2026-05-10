@@ -1,0 +1,11 @@
+2026-05-10T01:56:46.587487Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-10T01:56:46.587725Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-10T01:56:46.587850Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pushing /Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo → tcfs:neo-honey-unsynced-rehydrate-20260510T015644Z (endpoint: http://100.64.48.53:8333, device: 03d8a0bd...)
+2026-05-10T01:56:46.594930Z DEBUG tcfs_sync::engine: uploading path=/Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared/notes.md reason=new file
+2026-05-10T01:56:46.744051Z  INFO tcfs_sync::engine: uploaded path=/Users/jess/TCFS Pilot/runs/neo-honey-unsynced-rehydrate-20260510T015644Z/neo/Projects/shared/notes.md hash=513eeac39cd1109117c685e9d0fffa5ffbe36459f8897e2f033424dd816f59f9 chunks=1 bytes=122 uploaded_bytes=122 streaming=false
+
+Push complete:
+  uploaded: 1 files (122 B)
+  skipped:  0 files (unchanged)
+  total:    1 files

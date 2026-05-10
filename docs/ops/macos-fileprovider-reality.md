@@ -159,8 +159,8 @@ profiles, disables build-time embedded FileProvider config, and proves runtime
 config loaded from the shared Keychain. Do not treat it as clean-host `.pkg` or
 notarization proof.
 
-The follow-up no-embedded-config investigation resolved the local signing and
-Keychain blockers:
+The historical no-embedded-config investigation resolved the local signing and
+Keychain blockers for that source-tree app path:
 
 - the host app can now enrich the Keychain config from `master_key_file`
 - ad-hoc builds cannot carry `keychain-access-groups`; macOS rejects those
@@ -171,11 +171,12 @@ Keychain blockers:
   denied permission to read `config.json`
 - matching Developer ID profiles are now installed locally for both
   `io.tinyland.tcfs` and `io.tinyland.tcfs.fileprovider`
-- strict local release smoke now passes with exact-content hydration and
+- that source-tree release smoke passed with exact-content hydration and
   `loadConfig: loaded from shared Keychain`
 
-So the next production acceptance step is packaging/clean-host proof, not
-another raw-key diagnostic build.
+The May 10 neo cleanup packet below supersedes this as current local-host
+readiness. The next production acceptance step is still packaging/clean-host
+proof, not another raw-key diagnostic build.
 
 `swift/fileprovider/build.sh` now has explicit provisioning-profile hooks for
 that step:
@@ -318,10 +319,37 @@ TCFS_REQUIRE_PRODUCTION_SIGNING=1 \
 task lazy:macos-finder-signing-preflight
 ```
 
-On the current local `neo` app, strict signing preflight passes for the
-installed `~/Applications/TCFSProvider.app` with the profile pair above. Earlier
-ad-hoc diagnostic app copies intentionally failed this gate because they lacked
-the Keychain access-group entitlements and embedded provisioning profiles.
+The May 10, 2026 neo cleanup packet supersedes the older local-app assumption:
+the visible local FileProvider registration is still parented by
+`~/Applications/TCFSProvider.app`, not a published `.pkg` install under
+`/Applications/TCFSProvider.app`. That makes neo's Finder entry useful
+divergence evidence, but out of band for production package-to-Finder claims
+until the published package is installed and strict preflight passes.
+
+Current neo evidence:
+
+- `docs/release/evidence/macos-fileprovider-neo-cleanup-20260510T003148Z/`
+  inventories PATH resolution, app locations, PlugInKit records, CloudStorage
+  roots, configs, sockets, launchd labels, and a bounded `~/tcfs` tree before
+  any cleanup.
+- `docs/release/evidence/macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/`
+  verifies the published `v0.12.12` `.pkg` signature, notarization, payload
+  shape, and postinstall script without installing it.
+- `docs/release/evidence/macos-fileprovider-strict-preflight-blocker-20260510T0040Z/`
+  records strict preflight failure against the existing user app: missing
+  host/extension keychain access-group entitlements and missing embedded
+  provisioning profiles.
+- `docs/release/evidence/macos-fileprovider-neo-cleanup-install-blocker-20260510T0048Z/`
+  records the non-interactive install blocker: `sudo -n installer` required a
+  password, so `/Applications/TCFSProvider.app` remained absent.
+- Ambient `tcfs` resolves to `0.12.12`, but ambient `tcfsd` still resolves to
+  `0.12.2`; package or workspace smoke must pass explicit binary paths until
+  that divergence is removed.
+
+So a local neo Finder smoke can be diagnostic only. Before it becomes
+production-adjacent, install the published `.pkg` into `/Applications`, archive
+or quarantine stale user/build-tree registrations after inventory, and require
+`TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` to pass.
 
 After the signing/profile gate passes, production Finder evidence must also
 prove the runtime config source. The post-install smoke can make this fatal by
@@ -408,6 +436,13 @@ Notes:
   claiming clean-host acceptance, or pass
   `--allow-multiple-plugin-registrations` only for diagnostic runs; verbose
   `pluginkit` output includes the app/extension paths that need cleanup
+- on `neo`, run `task lazy:macos-fileprovider-neo-cleanup-packet` before any
+  cleanup. It archives binary versions, PATH resolution, app locations,
+  PlugInKit records, signing/profile state, CloudStorage roots, configs,
+  sockets, launchd labels, and bounded `~/tcfs` inventory. Use the published
+  `.pkg` as the install source, and require
+  `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` before
+  describing any local Finder smoke as production-adjacent.
 - the helper assumes `tcfsd` is already runnable with a real config; it does
   not fabricate temp-home state or start a fake backend
 - `#309` still tracks where this harness runs from a known-clean host per tag
@@ -527,7 +562,7 @@ executor blocker again:
   reachable public endpoint, or move the production `.pkg` smoke to a
   private/self-hosted Mac that can reach the backend.
 
-May 1, 2026 hosted evidence narrowed the current blocker:
+May 1, 2026 hosted evidence narrowed the blocker at that time:
 
 - `v0.12.6` built, notarized, and published automatically from release run
   `25197243787`.
@@ -541,6 +576,11 @@ May 1, 2026 hosted evidence narrowed the current blocker:
 - FileProvider enumeration still fails before TCFS extension logs appear because
   macOS reports `NSFileProviderErrorDomainDisabled` (`-2011`): Finder and
   `fileproviderd` log `Sync is not enabled for "TCFSProvider"`.
+
+The later `v0.12.12` hosted production attempt is the current package-lane
+truth for this sprint: it passed install/signing/installed-CLI/config gates,
+then failed earlier at storage fixture seeding because the public tunnel
+hostname no longer resolved from GitHub-hosted macOS.
 - The classification retry at `25198428805` now fails with an explicit
   `NSFileProviderErrorDomain -2011` diagnosis and captures the supporting Apple
   FileProvider logs in the workflow artifact.

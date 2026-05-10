@@ -303,7 +303,7 @@ impl PathFilesystem for TcfsFs {
         Ok(ReplyOpen { fh: 0, flags: 0 })
     }
 
-    async fn open(&self, _req: Request, path: &OsStr, _flags: u32) -> fuse3::Result<ReplyOpen> {
+    async fn open(&self, _req: Request, path: &OsStr, flags: u32) -> fuse3::Result<ReplyOpen> {
         let path_str = path.to_str().ok_or(Errno::from(libc::ENOENT))?;
 
         let (fh, _data) = tokio::time::timeout(VFS_TIMEOUT, self.vfs.open(path_str))
@@ -317,7 +317,60 @@ impl PathFilesystem for TcfsFs {
                 vfs_error_to_errno(&e)
             })?;
 
+        if flags & libc::O_TRUNC as u32 != 0 {
+            tokio::time::timeout(VFS_TIMEOUT, self.vfs.truncate(Some(path_str), Some(fh), 0))
+                .await
+                .map_err(|_| {
+                    warn!(path = %path_str, "FUSE OPEN truncate timed out");
+                    Errno::from(libc::EIO)
+                })?
+                .map_err(|e| {
+                    warn!(path = %path_str, error = %e, "FUSE OPEN truncate failed");
+                    vfs_error_to_errno(&e)
+                })?;
+        }
+
         Ok(ReplyOpen { fh, flags: 0 })
+    }
+
+    async fn setattr(
+        &self,
+        _req: Request,
+        path: Option<&OsStr>,
+        fh: Option<u64>,
+        set_attr: SetAttr,
+    ) -> fuse3::Result<ReplyAttr> {
+        let path_str = path.and_then(OsStr::to_str);
+
+        let attr = if let Some(size) = set_attr.size {
+            tokio::time::timeout(VFS_TIMEOUT, self.vfs.truncate(path_str, fh, size))
+                .await
+                .map_err(|_| {
+                    warn!(path = ?path_str, fh, size, "FUSE SETATTR truncate timed out");
+                    Errno::from(libc::EIO)
+                })?
+                .map_err(|e| {
+                    warn!(path = ?path_str, fh, size, error = %e, "FUSE SETATTR truncate failed");
+                    vfs_error_to_errno(&e)
+                })?
+        } else {
+            let path_str = path_str.ok_or_else(|| Errno::from(libc::ENOENT))?;
+            tokio::time::timeout(VFS_TIMEOUT, self.vfs.getattr(path_str))
+                .await
+                .map_err(|_| {
+                    warn!(path = %path_str, "FUSE SETATTR getattr timed out");
+                    Errno::from(libc::EIO)
+                })?
+                .map_err(|e| {
+                    warn!(path = %path_str, error = %e, "FUSE SETATTR getattr failed");
+                    vfs_error_to_errno(&e)
+                })?
+        };
+
+        Ok(ReplyAttr {
+            ttl: ATTR_TTL,
+            attr: to_fuse_attr(&attr),
+        })
     }
 
     async fn read(

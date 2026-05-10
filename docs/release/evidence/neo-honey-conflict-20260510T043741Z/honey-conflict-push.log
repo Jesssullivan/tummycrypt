@@ -1,0 +1,11 @@
+[2m2026-05-10T04:37:50.011703Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-10T04:37:50.011847Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-10T04:37:50.011912Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pushing /tmp/tcfs-neo-honey-conflict-20260510T043742Z-23874-honey/root/Projects/shared/conflict-notes.md → tcfs:neo-honey-conflict-20260510T043741Z (endpoint: http://100.64.48.53:8333, device: 00000000...)
+CONFLICT: Projects/shared/conflict-notes.md (local device: 00000000-0000-4000-8000-0000000000b2, remote device: 00000000-0000-4000-8000-0000000000a1)
+  Use 'tcfs device list' to see fleet, resolve with conflict_mode config
+  skipped (unchanged since last sync)
+honey conflict push ok: Projects/shared/conflict-notes.md
+honey_push_conflict=detected
+honey_local_content=preserved
+honey_sync_state=conflict

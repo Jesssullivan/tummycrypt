@@ -1,0 +1,4 @@
+# Conflict shared TCFS note
+
+version: honey-conflict
+body: honey kept these bytes locally when conflict detection skipped upload.

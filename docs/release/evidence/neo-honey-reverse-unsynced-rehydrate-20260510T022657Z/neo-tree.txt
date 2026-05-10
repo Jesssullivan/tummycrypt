@@ -1,0 +1,4 @@
+/Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T022658Z-47843/neo
+/Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T022658Z-47843/neo/Projects
+/Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T022658Z-47843/neo/Projects/shared
+/Users/jess/TCFS Pilot/runs/reverse-unsynced-rehydrate-20260510T022658Z-47843/neo/Projects/shared/reverse-notes.md

@@ -1,0 +1,18 @@
+# Prepare remote work directory:
+ssh honey 'mkdir -p /tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run'
+
+# Copy expected content and the honey conflict runner:
+scp docs/release/evidence/neo-honey-conflict-keep-both-20260510T045908Z/base-content.txt honey:/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/base-content.txt
+scp docs/release/evidence/neo-honey-conflict-keep-both-20260510T045908Z/neo-conflict-content.txt honey:/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/neo-conflict-content.txt
+scp docs/release/evidence/neo-honey-conflict-keep-both-20260510T045908Z/honey-conflict-content.txt honey:/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/honey-conflict-content.txt
+scp docs/release/evidence/neo-honey-conflict-keep-both-20260510T045908Z/neo-state/device-registry.json honey:/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/device-registry.json
+scp docs/release/evidence/neo-honey-conflict-keep-both-20260510T045908Z/honey-conflict-run.sh honey:/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/honey-conflict-run.sh
+
+# Honey pulls base and edits locally:
+ssh honey 'TCFS_HONEY_BASE_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/base-content.txt TCFS_HONEY_CONFLICT_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/honey-conflict-content.txt bash /tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/honey-conflict-run.sh prepare'
+
+# After neo pushes divergent content, honey attempts push and must record conflict:
+ssh honey 'TCFS_HONEY_CONFLICT_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/honey-conflict-content.txt bash /tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/honey-conflict-run.sh push-conflict'
+
+# Optional manual keep-both recovery after conflict detection:
+ssh honey 'TCFS_HONEY_NEO_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/neo-conflict-content.txt TCFS_HONEY_CONFLICT_CONTENT_FILE=/tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/honey-conflict-content.txt bash /tmp/tcfs-neo-honey-conflict-20260510T045910Z-48352-honey/run/honey-conflict-run.sh recover-keep-both'
