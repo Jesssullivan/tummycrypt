@@ -74,7 +74,7 @@ multi-machine neo/honey flows.
 | --- | --- | --- | --- |
 | P1 | Shadow real repo without mutating source | Source inventory, full isolated shadow, config/state under shadow | Green scoped packet: `home-canary-linux-xr-shadow-20260510T023938Z` inventories the source read-only and uses an isolated shadow; live source was not mutated |
 | P2 | Include `.git` and hidden dirs | `sync_git_dirs = true`, `sync_hidden_dirs = true`, `git_sync_mode = "raw"` | Green scoped packet: raw `.git`/hidden-dir config is archived, honey mounted traversal lists `.git`, and bounded `find -maxdepth 3`/selected `cat` passed |
-| P3 | Symlink truth gate | Inventory symlinks and either preserve them or block full parity claim | Current canary records 85 symlinks; full project parity blocked while push uses `follow_symlinks=false` |
+| P3 | Symlink truth gate | Inventory symlinks and preserve them as symlinks with matching targets, or keep full parity blocked | Code-level preservation is covered by local regressions and `sync_symlinks = true`; archived `linux-xr` evidence still records 85 skipped symlinks, so full project parity waits for a fresh host packet |
 | P4 | Unsupported special files | Inventory sockets/FIFOs/devices/permissions and record behavior | Green inventory: source and shadow record `unsupported_special_files=0` |
 | P5 | Large tree scale | Push/honey traversal/hydration completes without source mutation | Green scoped packet: push completed 92,969 files / 7.7 GB, honey mounted traversal/hydration passed, and Linux lifecycle companion passed; full parity still blocked by symlinks |
 
@@ -100,7 +100,7 @@ behavior into user-facing claims:
 | Claim | Claimable only after |
 | --- | --- |
 | Production Finder | Published `.pkg` is installed into `/Applications/TCFSProvider.app`, stale PlugInKit registrations are removed or quarantined after inventory, `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` is green, and CloudStorage/Finder enumerate, open, evict/rehydrate, mutate, and conflict/status evidence is archived under the production Developer ID label. |
-| Full `linux-xr` project parity | The isolated shadow canary completes push, traversal, selected hydrate, write/readback, cache clear/rehydrate, dirty safe-unsync refusal, clean recursive unsync, and exact rehydrate, and either preserves symlinks or records an accepted unsupported-symlink policy. The current 85 symlinks block the full parity claim. |
+| Full `linux-xr` project parity | The isolated shadow canary completes push, traversal, selected hydrate, write/readback, cache clear/rehydrate, dirty safe-unsync refusal, clean recursive unsync, exact rehydrate, and proves all inventoried symlinks rehydrate as symlinks with matching targets. The current archived packet does not meet that symlink bar. |
 | M4 mounted reverse read | Honey-originated bytes are visible from a neo mounted clean-name surface after neo was unsynced/evicted, with `ls`/`find`, `cat`, exact hashes, physical-stub state, and cache/state transcripts archived. The neo/macOS row is still blocked at mount permission. The Linux-equivalent mounted VFS row is green in `honey-mounted-reverse-read-20260510T042203Z/`, proving the behavior on honey but not production Finder. |
 | M8 delete/rename while peer-unsynced | Old deleted/renamed paths fail deterministically, the new rename target hydrates exact bytes, and product semantics decide whether stale physical `.tc` placeholders are tombstoned, removed, or intentionally retained with status. The live packet proves current behavior, not clean stale-stub UX. |
 | Cross-host conflict UX | Conflict detection/preservation is archived in `neo-honey-conflict-20260510T043741Z/`, manual keep-both recovery is archived in `neo-honey-conflict-keep-both-20260510T045908Z/`, independent sibling progress is archived in `neo-honey-conflict-sibling-20260510T051328Z/`, and daemon-backed keep-both is archived as a timeout/partial-side-effect blocker in `neo-honey-conflict-daemon-keep-both-20260510T054611Z/`; clean user-facing claim still needs conflict list/status, a returning daemon-backed `tcfs resolve`, and Finder/provider visibility where applicable. |
@@ -108,9 +108,10 @@ behavior into user-facing claims:
 
 ## Current High-Value Next Rows
 
-1. Keep full `linux-xr` parity blocked unless symlinks are preserved or accepted
-   as unsupported. The scoped shadow canary is green for push, bounded honey
-   traversal/hydration, and Linux lifecycle, but it still skipped 85 symlinks.
+1. Keep full `linux-xr` parity blocked until a fresh symlink-preserving host
+   packet lands. The scoped shadow canary is green for push, bounded honey
+   traversal/hydration, and Linux lifecycle, but the archived packet still
+   skipped 85 symlinks.
 2. Decide tombstone/stale-stub semantics before making any clean delete/rename
    UX claim; M8 current behavior is live-proven, but stale old stubs remain.
 3. Keep the neo/macOS M4 mounted reverse-read row open until a permitted mount

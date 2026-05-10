@@ -61,6 +61,11 @@ pub trait VirtualFilesystem: Send + Sync {
     /// `fh` is the handle returned by `open`. Returns the requested slice.
     async fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>>;
 
+    /// Read the target of a symbolic link.
+    async fn readlink(&self, _path: &str) -> Result<String> {
+        anyhow::bail!("EINVAL: not a symlink")
+    }
+
     /// Release (close) a file handle.
     ///
     /// For writable filesystems, this flushes any buffered writes to

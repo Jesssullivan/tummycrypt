@@ -33,7 +33,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 use tcfs_sync::conflict::VectorClock;
-use tcfs_sync::index_entry::{write_committed_index_entry, RemoteIndexEntry};
+use tcfs_sync::index_entry::{write_committed_index_entry, RemoteEntryKind, RemoteIndexEntry};
 use tcfs_sync::manifest::SyncManifest;
 
 use crate::cache::DiskCache;
@@ -488,14 +488,16 @@ impl TcfsVfs {
         }
     }
 
-    /// Fetch the real file size from an index entry by its S3 key.
-    async fn read_index_entry_size(&self, index_key: &str) -> u64 {
+    /// Fetch attributes from an index entry by its S3 key.
+    async fn read_index_entry_attr(&self, index_key: &str) -> Option<VfsAttr> {
         match self.op.read(index_key).await {
             Ok(data) => {
                 let text = String::from_utf8(data.to_bytes().to_vec()).unwrap_or_default();
-                IndexEntry::parse(&text).map(|e| e.size).unwrap_or(0)
+                IndexEntry::parse(&text)
+                    .ok()
+                    .map(|entry| self.attr_for_index_entry(&entry))
             }
-            Err(_) => 0,
+            Err(_) => None,
         }
     }
 
@@ -504,9 +506,21 @@ impl TcfsVfs {
         VfsAttr::file(size, self.uid, self.gid, self.mount_time)
     }
 
+    /// Synthesize symlink attributes.
+    fn symlink_attr(&self, size: u64) -> VfsAttr {
+        VfsAttr::symlink(size, self.uid, self.gid, self.mount_time)
+    }
+
     /// Synthesize directory attributes.
     fn dir_attr(&self) -> VfsAttr {
         VfsAttr::dir(self.uid, self.gid, self.mount_time)
+    }
+
+    fn attr_for_index_entry(&self, entry: &IndexEntry) -> VfsAttr {
+        match entry.kind {
+            RemoteEntryKind::RegularFile => self.file_attr(entry.size),
+            RemoteEntryKind::Symlink => self.symlink_attr(entry.size),
+        }
     }
 
     /// Core readdir logic returning `VfsDirEntry` with optional attrs.
@@ -557,15 +571,15 @@ impl TcfsVfs {
                 });
             } else {
                 let clean_name = first_component.to_string();
-                let attr = if with_attrs {
-                    let size = self.read_index_entry_size(&full_path).await;
-                    Some(self.file_attr(size))
-                } else {
-                    None
-                };
+                let parsed_attr = self.read_index_entry_attr(&full_path).await;
+                let kind = parsed_attr
+                    .as_ref()
+                    .map(|attr| attr.kind)
+                    .unwrap_or(VfsFileType::RegularFile);
+                let attr = if with_attrs { parsed_attr } else { None };
                 entries.push(VfsDirEntry {
                     name: clean_name,
-                    kind: VfsFileType::RegularFile,
+                    kind,
                     attr,
                 });
             }
@@ -612,12 +626,12 @@ impl VirtualFilesystem for TcfsVfs {
 
         // File: try index lookup (with and without .tc for backward compat)
         if let Some(entry) = self.get_index_entry(path).await {
-            return Ok(self.file_attr(entry.size));
+            return Ok(self.attr_for_index_entry(&entry));
         }
         // Try with .tc suffix (old index entries)
         let with_tc = format!("{}.tc", path.trim_end_matches('/'));
         if let Some(entry) = self.get_index_entry(&with_tc).await {
-            return Ok(self.file_attr(entry.size));
+            return Ok(self.attr_for_index_entry(&entry));
         }
 
         // Directory: check if any index entries exist under it
@@ -651,6 +665,19 @@ impl VirtualFilesystem for TcfsVfs {
         self.readdir_impl(path, true).await
     }
 
+    async fn readlink(&self, path: &str) -> Result<String> {
+        let entry = self
+            .get_index_entry(path)
+            .await
+            .context(format!("index entry not found: {}", path))?;
+        if entry.kind != RemoteEntryKind::Symlink {
+            anyhow::bail!("EINVAL: not a symlink: {}", path);
+        }
+        entry
+            .symlink_target
+            .context(format!("symlink index entry missing target: {}", path))
+    }
+
     async fn open(&self, path: &str) -> Result<(u64, Vec<u8>)> {
         // Try index lookup as-is, then with .tc suffix for backward compat
         let entry = match self.get_index_entry(path).await {
@@ -662,6 +689,10 @@ impl VirtualFilesystem for TcfsVfs {
                     .context(format!("index entry not found: {}", path))?
             }
         };
+
+        if entry.kind == RemoteEntryKind::Symlink {
+            anyhow::bail!("ELOOP: open called on symlink: {}", path);
+        }
 
         let manifest_path = entry.manifest_path(&self.prefix);
         let prefix = self.prefix.trim_end_matches('/');

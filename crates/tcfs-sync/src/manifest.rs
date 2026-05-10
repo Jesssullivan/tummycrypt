@@ -4,6 +4,7 @@
 //! transparently migrated on read via `from_bytes()`.
 
 use crate::conflict::VectorClock;
+use crate::index_entry::RemoteEntryKind;
 use serde::{Deserialize, Serialize};
 
 /// A manifest describing a synced file's chunks and metadata.
@@ -34,6 +35,66 @@ pub struct SyncManifest {
     pub encrypted_file_key: Option<String>,
 }
 
+/// A manifest for a POSIX symbolic link.
+///
+/// Symlinks intentionally use a separate v3 shape rather than pretending to be
+/// zero-byte regular files. Older clients that do not understand this shape
+/// fail to hydrate it instead of silently materializing the wrong file type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymlinkManifest {
+    /// Manifest format version (3 for symlink manifests)
+    pub version: u32,
+    /// Object kind discriminator.
+    pub kind: RemoteEntryKind,
+    /// Link target text exactly as returned by `readlink` for supported paths.
+    pub symlink_target: String,
+    /// Vector clock at the time of writing
+    pub vclock: VectorClock,
+    /// Device ID that wrote this manifest
+    pub written_by: String,
+    /// Unix timestamp when this manifest was written
+    pub written_at: u64,
+    /// Relative path of the symlink.
+    pub rel_path: Option<String>,
+}
+
+impl SymlinkManifest {
+    pub fn new(
+        symlink_target: impl Into<String>,
+        vclock: VectorClock,
+        written_by: String,
+        written_at: u64,
+        rel_path: Option<String>,
+    ) -> Self {
+        Self {
+            version: 3,
+            kind: RemoteEntryKind::Symlink,
+            symlink_target: symlink_target.into(),
+            vclock,
+            written_by,
+            written_at,
+            rel_path,
+        }
+    }
+
+    pub fn from_bytes(data: &[u8]) -> anyhow::Result<Self> {
+        let manifest: SymlinkManifest = serde_json::from_slice(data)
+            .map_err(|e| anyhow::anyhow!("parsing symlink manifest: {e}"))?;
+        if manifest.version != 3 {
+            anyhow::bail!("unsupported symlink manifest version: {}", manifest.version);
+        }
+        if manifest.kind != RemoteEntryKind::Symlink {
+            anyhow::bail!("manifest is not a symlink");
+        }
+        Ok(manifest)
+    }
+
+    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        serde_json::to_vec_pretty(self)
+            .map_err(|e| anyhow::anyhow!("serializing symlink manifest: {e}"))
+    }
+}
+
 impl SyncManifest {
     /// Parse manifest bytes, auto-detecting v1 (text) vs v2 (JSON).
     ///
@@ -43,9 +104,12 @@ impl SyncManifest {
         let text = String::from_utf8(data.to_vec())
             .map_err(|e| anyhow::anyhow!("manifest is not UTF-8: {e}"))?;
 
-        // Try JSON (v2) first
-        if let Ok(manifest) = serde_json::from_str::<SyncManifest>(&text) {
-            return Ok(manifest);
+        // Try JSON (v2) first. JSON-shaped manifests that do not match the
+        // regular-file schema must fail closed instead of being treated as v1
+        // newline manifests.
+        if text.trim_start().starts_with('{') {
+            return serde_json::from_str::<SyncManifest>(&text)
+                .map_err(|e| anyhow::anyhow!("parsing regular-file manifest JSON: {e}"));
         }
 
         // Fall back to v1 text format: newline-separated chunk hashes
@@ -136,6 +200,25 @@ mod tests {
     fn test_empty_manifest_fails() {
         let result = SyncManifest::from_bytes(b"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_symlink_manifest_roundtrip() {
+        let manifest = SymlinkManifest::new(
+            "../target.txt",
+            VectorClock::new(),
+            "neo".to_string(),
+            1000,
+            Some("link.txt".to_string()),
+        );
+
+        let bytes = manifest.to_bytes().unwrap();
+        let parsed = SymlinkManifest::from_bytes(&bytes).unwrap();
+
+        assert_eq!(parsed.version, 3);
+        assert_eq!(parsed.kind, crate::index_entry::RemoteEntryKind::Symlink);
+        assert_eq!(parsed.symlink_target, "../target.txt");
+        assert!(SyncManifest::from_bytes(&bytes).is_err());
     }
 
     #[test]

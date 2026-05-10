@@ -117,6 +117,34 @@ async fn readdir_after_create_uses_clean_names() {
 }
 
 #[tokio::test]
+async fn readdir_getattr_and_readlink_preserve_symlink_entries() {
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let cache = tempfile::tempdir().unwrap();
+    let vfs = memory_vfs_with_op(op.clone(), "test", cache.path().join("cache"));
+
+    let entry = tcfs_sync::index_entry::RemoteIndexEntry::new_symlink("linkhash", "target.txt");
+    tcfs_sync::index_entry::write_committed_index_entry(&op, "test/index/link.txt", &entry)
+        .await
+        .expect("write symlink index entry");
+
+    let entries = vfs.readdir("/").await.expect("readdir root");
+    let link = entries
+        .iter()
+        .find(|entry| entry.name == "link.txt")
+        .expect("link entry");
+    assert_eq!(link.kind, tcfs_vfs::types::VfsFileType::Symlink);
+
+    let attr = vfs.getattr("/link.txt").await.expect("getattr symlink");
+    assert_eq!(attr.kind, tcfs_vfs::types::VfsFileType::Symlink);
+    assert_eq!(attr.size, "target.txt".len() as u64);
+
+    let target = vfs.readlink("/link.txt").await.expect("readlink");
+    assert_eq!(target, "target.txt");
+}
+
+#[tokio::test]
 async fn readdir_is_lazy_and_open_hydrates_cache() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let op = Operator::new(opendal::services::Memory::default())

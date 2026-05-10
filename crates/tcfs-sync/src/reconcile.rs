@@ -816,6 +816,7 @@ fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap
         sync_hidden_dirs: blacklist.allows_hidden_dirs(),
         exclude_patterns: blacklist.glob_patterns(),
         follow_symlinks: false,
+        preserve_symlinks: false,
         sync_empty_dirs: false, // reconcile only cares about files
     };
     let result = crate::engine::collect_files(local_root, &config)?;

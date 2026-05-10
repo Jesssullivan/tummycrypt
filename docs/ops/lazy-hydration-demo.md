@@ -321,9 +321,9 @@ The helper inventories the live repo read-only, copies it to
 `~/TCFS Pilot/real-canaries/linux-xr-shadow-<UTC>`, writes a disposable config
 with raw `.git`, hidden dirs, and empty dirs enabled, and archives evidence
 under `docs/release/evidence/home-canary-linux-xr-shadow-<UTC>/`. It records
-symlinks and unsupported special files as truth gates; while TCFS push uses
-`follow_symlinks=false`, evidence must not claim full project parity when the
-source contains symlinks.
+symlinks and unsupported special files as truth gates; full project parity must
+stay blocked until a fresh packet proves inventoried links rehydrate as symlinks
+with matching targets.
 
 Archived scoped canary evidence:
 
@@ -336,8 +336,8 @@ Archived scoped canary evidence:
 - The Linux lifecycle companion passed mounted write/readback, cache
   clear/rehydrate, dirty safe-unsync refusal, clean recursive unsync, and exact
   rehydrate under the same disposable prefix.
-- Full project parity remains unclaimed because the source inventory records 85
-  symlinks and push still uses `follow_symlinks=false`.
+- Full project parity remains unclaimed for that archived packet because the
+  source inventory records 85 symlinks that were not proven as preserved links.
 
 Run the helper from `nix develop` or through direnv so the repo-pinned Rust,
 `go-task`, shell lint tools, `jq`, and S3 helper commands are active. The dev
