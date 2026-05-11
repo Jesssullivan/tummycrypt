@@ -498,8 +498,29 @@ compute_parity_status() {
   fi
 }
 
+status_from_rc_label() {
+  local label="$1"
+  case "$label" in
+    0)
+      printf 'passed'
+      ;;
+    not-run | pending)
+      printf '%s' "$label"
+      ;;
+    *)
+      if [[ "$label" =~ ^[0-9]+$ ]]; then
+        printf 'failed'
+      else
+        printf '%s' "$label"
+      fi
+      ;;
+  esac
+}
+
 write_parity_gates() {
   compute_parity_status
+  local mounted_symlink_status
+  mounted_symlink_status="$(status_from_rc_label "$mounted_symlink_status_label")"
   {
     printf 'status=%s\n' "$parity_status"
     printf 'reason=%s\n' "$parity_reason"
@@ -509,10 +530,14 @@ write_parity_gates() {
     printf 'source_unsupported_special_file_count=%s\n' "$unsupported_count"
     printf 'sync_symlinks=true\n'
     printf 'mounted_symlink_verification=%s\n' "$mounted_symlink_status_label"
+    printf 'mounted_symlink_verification_rc=%s\n' "$mounted_symlink_status_label"
+    printf 'mounted_symlink_verification_status=%s\n' "$mounted_symlink_status"
   } >"$evidence_dir/parity-gates.env"
 }
 
 write_run_metadata() {
+  local mounted_symlink_status
+  mounted_symlink_status="$(status_from_rc_label "$mounted_symlink_status_label")"
   cat >"$evidence_dir/run-metadata.env" <<EOF
 created_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 run_id=$run_id
@@ -529,6 +554,8 @@ push_status=$push_status_label
 run_honey=$run_honey
 honey_status=$honey_status_label
 mounted_symlink_verification=$mounted_symlink_status_label
+mounted_symlink_verification_rc=$mounted_symlink_status_label
+mounted_symlink_verification_status=$mounted_symlink_status
 honey_start_mount=$honey_start_mount
 honey_smoke_max_depth=$honey_smoke_max_depth
 honey_smoke_timeout_secs=$honey_smoke_timeout_secs
@@ -674,6 +701,21 @@ EXPECTED_FILE=$(shell_quote "$selected_rel")
 if [[ -n "\${TCFS_HONEY_ENV_FILE:-}" ]]; then
   # shellcheck disable=SC1090
   source "\$TCFS_HONEY_ENV_FILE"
+fi
+
+echo "tcfs binary: \$TCFS_BIN"
+if command -v "\$TCFS_BIN" >/dev/null 2>&1; then
+  echo "tcfs binary resolved: \$(command -v "\$TCFS_BIN")"
+fi
+tcfs_version="\$("\$TCFS_BIN" --version 2>&1)" || {
+  printf 'failed to run tcfs --version through %s\n' "\$TCFS_BIN" >&2
+  printf '%s\n' "\$tcfs_version" >&2
+  exit 1
+}
+echo "tcfs version: \$tcfs_version"
+if [[ -n "\${TCFS_HONEY_EXPECTED_VERSION_CONTAINS:-}" && "\$tcfs_version" != *"\$TCFS_HONEY_EXPECTED_VERSION_CONTAINS"* ]]; then
+  printf 'tcfs version mismatch: expected output containing %s\n' "\$TCFS_HONEY_EXPECTED_VERSION_CONTAINS" >&2
+  exit 1
 fi
 
 mkdir -p "\$MOUNT_ROOT"

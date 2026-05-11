@@ -29,6 +29,7 @@ the repository.
 | `neo-honey-conflict-daemon-keep-both-20260510T054611Z/` | Daemon-backed `tcfs resolve --strategy keep-both` blocker packet: honey used isolated `tcfsd 0.12.12` with auth bypass, the daemon accepted the request, but the CLI RPC timed out after 30s | repo-archived config, state, device registry, remote prefix, conflict transcript, daemon log, timeout result, post-timeout pullbacks proving original remote bytes remained neo's and daemon-created conflict-copy bytes matched honey's; clean daemon resolve completion is not claimed |
 | `home-canary-linux-xr-shadow-20260510T002604Z/` | Local real project-tree shadow of `/Users/jess/git/linux-xr`: read-only source inventory, full isolated 7.9 GB shadow under `~/TCFS Pilot/real-canaries/`, disposable raw `.git`/hidden-dir config, and honey command packet | repo-archived inventory/config metadata; push/honey/lifecycle were not run; full project parity is explicitly blocked because this archived packet did not prove the 85 inventoried symlinks as preserved links |
 | `home-canary-linux-xr-shadow-20260510T023938Z/` | Real project-tree shadow canary against `/Users/jess/git/linux-xr`: completed 7.7 GB shadow push, honey mounted clean-name traversal/hydration, and Linux lifecycle companion | repo-archived source/shadow inventory, raw `.git`/hidden-dir config, completed `push.log`, honey mounted `ls`/`find -maxdepth 3`/`cat` transcript for `.clang-format`, mount log, Linux lifecycle write/readback/cache-clear/rehydrate/safe-unsync transcripts, and `result.env` with `proof=shadow-push-honey-linux-lifecycle`; full project parity remains blocked because this archived packet skipped 85 symlinks |
+| `home-canary-linux-xr-shadow-20260510T201809Z/` | Partial/blocking real project-tree shadow canary with `sync_symlinks = true`: completed 7.7 GB shadow push and local source/shadow target manifests matched for 85 symlinks | repo-archived source/shadow inventory, symlink target manifests, completed `push.log` with 93,054 uploads and 85 symlink uploads, honey command/mount logs, failed honey mounted symlink verification at `Documentation/Changes`, failed Linux lifecycle mounted `cat`, and pre-fix S3 posture observations; not full project parity |
 | `macos-fileprovider-neo-cleanup-20260510T003148Z/` | Non-mutating neo FileProvider divergence inventory before cleanup | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/` | Non-mutating neo FileProvider divergence inventory with the published `v0.12.12` `.pkg` selected as source | repo-archived inventory plus package checksum pass, `pkgutil --check-signature` Developer ID/notarization output, and non-installing package structure smoke; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-strict-preflight-blocker-20260510T0040Z/` | Non-mutating strict production signing preflight against the existing `~/Applications/TCFSProvider.app` | preflight failed as expected: host and extension keychain access group entitlements/provisioning profiles are missing; ambient `tcfsd` is still `0.12.2` from the Nix profile; this is a blocker record, not Finder readiness |
@@ -123,6 +124,16 @@ the repository.
   clear/rehydrate, dirty safe-unsync refusal, clean recursive unsync, and exact
   rehydrate. This is a project-tree canary, not full project parity: the source
   contains 85 symlinks that this packet did not prove as preserved links.
+- `home-canary-linux-xr-shadow-20260510T201809Z/` is the fresh symlink-enabled
+  canary attempt and is intentionally indexed as blocker/storage evidence. It
+  preserved all 85 source symlink targets in the isolated shadow, pushed the
+  shadow with `sync_symlinks = true`, and recorded 85 symlink uploads, but honey
+  mounted symlink verification failed on `Documentation/Changes` and the Linux
+  lifecycle companion failed during mounted `cat`. Its S3 notes captured
+  pre-fix large raw-Git behavior, including `.idx` tiny-object expansion and
+  large `.pack` snapshot memory. Full `linux-xr` parity remains unclaimed until
+  a rebuilt neo+honey host packet passes mounted symlink target verification and
+  lifecycle.
 - The runnable `macos-fileprovider-neo-cleanup-<UTC>/` packet is divergence
   inventory and optional cleanup/install evidence. It is not production Finder
   readiness unless strict production signing preflight passes against the

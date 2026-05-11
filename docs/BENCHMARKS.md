@@ -34,14 +34,54 @@ All values are median throughput.
 
 End-to-end latency for push and pull operations against local SeaweedFS:
 
-| File Size | Push (chunk + upload) | Pull (download + reassemble) | Notes |
-|-----------|----------------------|------------------------------|-------|
-| 1 KiB | TBD | TBD | Single chunk |
-| 1 MiB | TBD | TBD | ~128 chunks |
-| 100 MiB | TBD | TBD | ~12,800 chunks |
-| 1 GiB | TBD | TBD | ~128,000 chunks |
+| Workload | Push (chunk + upload) | Pull (download + reassemble) | Object count | Notes |
+|-----------|----------------------|------------------------------|--------------|-------|
+| 1 KiB file | TBD | TBD | TBD | Single small chunk |
+| 1 MiB file | TBD | TBD | TBD | Small-profile chunks |
+| 100 MiB source file | TBD | TBD | TBD | Streaming path |
+| 1 GiB binary/blob | TBD | TBD | TBD | Large-file profile |
+| Raw Git `.pack` | TBD | TBD | TBD | Large-file profile, content-addressed chunk objects |
+| Raw Git `.idx` | TBD | TBD | TBD | Must use the large-file profile; small-profile regressions create excessive S3 object counts |
+| Full project tree | TBD | TBD | TBD | Record total files, total bytes, chunk objects, manifests, index writes, retries, and endpoint class |
 
 > Push/pull latencies depend on SeaweedFS deployment topology and will be measured in a future sprint with the local dev stack running.
+
+## S3 Storage Posture
+
+TCFS is S3-first, so correctness evidence is not enough for production storage
+claims. A live packet that proves exact content can still expose unacceptable
+object-count, retry, latency, or endpoint posture. Future evidence packets
+should record:
+
+| Dimension | Required evidence |
+|-----------|-------------------|
+| Endpoint class | local dev SeaweedFS, private Tailscale SeaweedFS, public HTTPS tunnel, or production-like endpoint |
+| Transport/security | `enforce_tls` setting, credential source, bucket/prefix isolation, and whether the run is safe for public CI |
+| Large-object shape | source path, file size, selected chunk profile, chunk count, uploaded bytes, skipped bytes, manifest size, and index write timing |
+| Queue/concurrency | engine-level file/chunk fanout, OpenDAL concurrency limit, retry counts, and backoff behavior |
+| Hydration latency | list/index latency, cold first-byte read, full-file hydrate, cache-hit read, and cache-clear/rehydrate timing |
+
+The raw-Git project-tree canary is intentionally allowed to expose these
+storage bottlenecks, but those observations are performance evidence, not a
+production storage posture claim.
+
+Pre-fix host observations from
+`docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:
+
+- A 395,849,892-byte raw Git `.idx` used the old small-file profile and produced
+  72,598 chunks, roughly 5.3 KiB per chunk on average.
+- The adjacent 6,216,046,897-byte raw Git `.pack` produced 70,856 chunks, and a
+  process sample during snapshot preparation showed about 6.1 GiB resident
+  footprint before the streaming snapshot memory fix.
+- The packet used a disposable Tailscale SeaweedFS endpoint with HTTP transport
+  and forwarded AWS-style credentials; that is useful lab evidence, not a
+  production storage endpoint proof.
+
+The follow-up work routes `.idx` files through the large-file profile, keeps
+streaming upload snapshots to chunk metadata plus whole-file hash, and adds
+bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default 4, cap
+64). These changes still need a fresh host rerun before any post-fix throughput,
+object-count, or memory claim is made.
 
 ## Compression Ratios
 

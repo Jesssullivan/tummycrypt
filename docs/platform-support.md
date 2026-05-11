@@ -14,9 +14,11 @@ coverage and the clearest end-to-end validation story.
 - **Filesystem**: FUSE3 mount with clean-name on-demand hydration is host-proven on Linux x86_64 from repo-pinned tooling; packaged install-to-mount proof is still separate
 - **Project-tree canary**: `task lazy:home-canary-linux-xr-shadow` can stage a
   real repo shadow for cross-host proof. POSIX symlink preservation is available
-  through `sync_symlinks = true`, but full `linux-xr` parity still needs a fresh
-  host packet proving all inventoried links rehydrate as links with matching
-  targets
+  through `sync_symlinks = true`, and the latest host packet proved local
+  source/shadow target manifests plus symlink uploads. Full `linux-xr` parity is
+  still unclaimed because mounted symlink verification and the lifecycle
+  companion failed; the next packet needs rebuilt neo+honey binaries and
+  matching mounted `readlink` targets
 - **NFS loopback**: Alternative to FUSE (no kernel modules required), with current release evidence pending
 - **Fleet sync**: NATS JetStream with vector clock conflict detection
 - **D-Bus**: Interface crate exists, but the default backend is a stub and release UX/status integration is not yet proven

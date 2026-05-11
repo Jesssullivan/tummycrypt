@@ -322,7 +322,7 @@ The helper inventories the live repo read-only, copies it to
 with raw `.git`, hidden dirs, and empty dirs enabled, and archives evidence
 under `docs/release/evidence/home-canary-linux-xr-shadow-<UTC>/`. It records
 symlinks and unsupported special files as truth gates; full project parity must
-stay blocked until a fresh packet proves inventoried links rehydrate as symlinks
+stay blocked until a future packet proves inventoried links rehydrate as symlinks
 with matching targets. Current helper packets include source/shadow
 `symlink-targets.tsv`, a local source/shadow target comparison, and honey mounted
 `readlink` verification when `--run-honey` is used.
@@ -340,6 +340,13 @@ Archived scoped canary evidence:
   rehydrate under the same disposable prefix.
 - Full project parity remains unclaimed for that archived packet because the
   source inventory records 85 symlinks that were not proven as preserved links.
+- [home-canary-linux-xr-shadow-20260510T201809Z](../release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/)
+  is the fresh `sync_symlinks = true` blocker packet. It completed the shadow
+  push, preserved local source/shadow target manifests for 85 symlinks, and
+  recorded 85 symlink uploads, but honey mounted symlink verification failed at
+  `Documentation/Changes` and the Linux lifecycle companion failed during
+  mounted `cat`. Its storage notes are pre-fix S3 posture evidence, not
+  post-fix throughput proof.
 
 Run the helper from `nix develop` or through direnv so the repo-pinned Rust,
 `go-task`, shell lint tools, `jq`, and S3 helper commands are active. The dev

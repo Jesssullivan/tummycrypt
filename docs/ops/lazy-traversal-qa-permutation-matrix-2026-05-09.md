@@ -72,11 +72,25 @@ multi-machine neo/honey flows.
 
 | ID | Scenario | Required proof | Current status |
 | --- | --- | --- | --- |
-| P1 | Shadow real repo without mutating source | Source inventory, full isolated shadow, config/state under shadow | Green scoped packet: `home-canary-linux-xr-shadow-20260510T023938Z` inventories the source read-only and uses an isolated shadow; live source was not mutated |
-| P2 | Include `.git` and hidden dirs | `sync_git_dirs = true`, `sync_hidden_dirs = true`, `git_sync_mode = "raw"` | Green scoped packet: raw `.git`/hidden-dir config is archived, honey mounted traversal lists `.git`, and bounded `find -maxdepth 3`/selected `cat` passed |
-| P3 | Symlink truth gate | Inventory symlinks and preserve them as symlinks with matching targets, or keep full parity blocked | Code-level preservation is covered by local regressions and `sync_symlinks = true`; the canary helper now archives `symlink-targets.tsv` and wires mounted `readlink` verification, but archived `linux-xr` evidence still skipped 85 symlinks, so full project parity waits for a fresh host packet |
+| P1 | Shadow real repo without mutating source | Source inventory, full isolated shadow, config/state under shadow | Green for isolation: `home-canary-linux-xr-shadow-20260510T023938Z` and partial `20260510T201809Z` both inventory the source read-only and use isolated shadows; live source was not mutated |
+| P2 | Include `.git` and hidden dirs | `sync_git_dirs = true`, `sync_hidden_dirs = true`, `git_sync_mode = "raw"` | Green in the scoped `20260510T023938Z` packet for raw `.git`/hidden-dir traversal/hydration; the symlink-enabled `20260510T201809Z` packet also archives the raw config and push but failed later in mounted verification/lifecycle |
+| P3 | Symlink truth gate | Inventory symlinks and preserve them as symlinks with matching targets, or keep full parity blocked | Code-level preservation is covered by local regressions and `sync_symlinks = true`; `20260510T201809Z` proves local source/shadow target manifests match and records 85 symlink uploads, but honey mounted `readlink` verification failed on `Documentation/Changes`, so full project parity remains blocked |
 | P4 | Unsupported special files | Inventory sockets/FIFOs/devices/permissions and record behavior | Green inventory: source and shadow record `unsupported_special_files=0` |
-| P5 | Large tree scale | Push/honey traversal/hydration completes without source mutation | Green scoped packet: push completed 92,969 files / 7.7 GB, honey mounted traversal/hydration passed, and Linux lifecycle companion passed; full parity still blocked by symlinks |
+| P5 | Large tree scale | Push/honey traversal/hydration completes without source mutation | Green scoped packet: `20260510T023938Z` push completed 92,969 files / 7.7 GB with honey traversal/hydration and lifecycle passing. The symlink-enabled `20260510T201809Z` push completed 93,054 uploads / 7.7 GB, but mounted symlink verification and lifecycle failed, so it is blocker evidence |
+
+## Storage / S3 Performance Permutations
+
+Correctness packets and storage posture packets answer different questions. A
+run can prove exact content and traversal while still revealing S3 object-count,
+queueing, retry, or endpoint problems that block production claims.
+
+| ID | Scenario | Required proof | Current status |
+| --- | --- | --- | --- |
+| S1 | Large raw-Git index push | `.git/objects/pack/*.idx` uses a large-file chunk profile, records chunk count and push duration, and does not explode into tiny S3 objects | `20260510T201809Z` exposed the old small-profile behavior: a 395,849,892-byte `.idx` became 72,598 chunks. Code-level regression now routes `.idx` through the pack/binary profile, but host performance proof must be rerun with rebuilt binaries |
+| S2 | Large raw-Git pack push | Multi-GB `.pack` files push without unbounded memory growth, with archived chunk count, bytes uploaded, retry count, and wall-clock duration | `20260510T201809Z` captured pre-fix behavior: a 6,216,046,897-byte `.pack` produced 70,856 chunks and sampled about 6.1 GiB footprint during snapshot preparation. Streaming snapshot memory is fixed locally, but post-fix proof remains open |
+| S3 | Endpoint posture | Packet records endpoint class, TLS policy, credential source, bucket/prefix isolation, and whether public CI can reach it safely | Open. Existing packets use disposable prefixes, but production-like endpoint class and public-runner reachability remain separate proof rows |
+| S4 | Queue/concurrency behavior | Upload engine records whether file and chunk writes are sequential or bounded-parallel, and retries are visible in evidence | Code-level support now uses bounded per-file chunk fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY`, with upload logs carrying `chunk_upload_concurrency`; host proof still needs a rerun with object counts, retries, and timings |
+| S5 | Hydration latency on S3 | Cold list, first-byte hydrate, full hydrate, cache-hit read, and cache-clear/rehydrate timings are archived for representative small and large files | Open. Current traversal rows prove exact bytes, not latency SLOs |
 
 ## QA Evidence Minimums
 
@@ -89,6 +103,7 @@ Every live QA packet should archive:
 - exact content fixtures and hashes before/after hydrate, mutate, unsync, and rehydrate
 - command transcript for `ls`/`find`, `cat`, `tcfs pull`, `tcfs unsync`, and `tcfs sync-status`
 - stale placeholder/stub checks after rehydrate
+- storage metrics for S3-backed packets: endpoint class, TLS policy, object/chunk counts, selected chunk profile, bytes uploaded/skipped, retry counts, queue/concurrency settings, and wall-clock duration for large objects
 - platform signing/profile/build details for FileProvider runs
 - blocker notes when a row is not claimed, especially symlinks, tombstones, keep-synced/pin semantics, and production Finder signing
 
@@ -105,15 +120,17 @@ behavior into user-facing claims:
 | M8 delete/rename while peer-unsynced | Old deleted/renamed paths fail deterministically, the new rename target hydrates exact bytes, and product semantics decide whether stale physical `.tc` placeholders are tombstoned, removed, or intentionally retained with status. The live packet proves current behavior, not clean stale-stub UX. |
 | Cross-host conflict UX | Conflict detection/preservation is archived in `neo-honey-conflict-20260510T043741Z/`, manual keep-both recovery is archived in `neo-honey-conflict-keep-both-20260510T045908Z/`, independent sibling progress is archived in `neo-honey-conflict-sibling-20260510T051328Z/`, and daemon-backed keep-both is archived as a timeout/partial-side-effect blocker in `neo-honey-conflict-daemon-keep-both-20260510T054611Z/`; clean user-facing claim still needs conflict list/status, a returning daemon-backed `tcfs resolve`, and Finder/provider visibility where applicable. |
 | Keep synced / pin | A product-level pin/keep-local affordance exists with status reporting, local storage guarantees, eviction rules, and conflict behavior. Until then, "keep synced" remains a planning term, not a proven QA row. |
+| S3 production storage posture | Representative packets prove correctness plus acceptable endpoint, TLS, credential, object-count, retry, queue/concurrency, large-object push, and hydration latency behavior. Raw correctness packets are supporting evidence only. |
 
 ## Current High-Value Next Rows
 
-1. Keep full `linux-xr` parity blocked until a fresh symlink-preserving host
-   packet lands. The scoped shadow canary is green for push, bounded honey
-   traversal/hydration, and Linux lifecycle, but the archived packet still
-   skipped 85 symlinks. The next run must archive source/shadow
-   `symlink-targets.tsv`, mounted `readlink` verification, and matching target
-   counts before the row can move.
+1. Keep full `linux-xr` parity blocked. The scoped `20260510T023938Z` shadow
+   canary is green for push, bounded honey traversal/hydration, and Linux
+   lifecycle, but skipped 85 symlinks. The fresh symlink-enabled
+   `20260510T201809Z` packet proves local target manifests and symlink uploads,
+   but mounted `readlink` verification and lifecycle failed. The next run needs
+   rebuilt neo+honey binaries and matching mounted target counts before the row
+   can move.
 2. Decide tombstone/stale-stub semantics before making any clean delete/rename
    UX claim; M8 current behavior is live-proven, but stale old stubs remain.
 3. Keep the neo/macOS M4 mounted reverse-read row open until a permitted mount
@@ -125,3 +142,9 @@ behavior into user-facing claims:
    Finder/provider visibility.
 5. Keep Finder rows under PZM testing-mode or production Developer ID labels;
    do not mix those evidence classes.
+6. Treat S3 posture as its own proof lane. The raw-Git canary should keep
+   exposing object-count and throughput behavior, but do not let exact-content
+   success imply production storage readiness. The next host proof is to rerun
+   large `.idx`/`.pack` paths with the rebuilt chunk-profile, streaming-memory,
+   and bounded chunk-upload fanout changes, then decide whether multipart or
+   native SeaweedFS semantics are the next product change.

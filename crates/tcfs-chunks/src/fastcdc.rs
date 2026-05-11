@@ -6,7 +6,7 @@
 //!
 //! Chunk size targets:
 //!   - Default (small files): min 2KB, avg 4KB, max 16KB
-//!   - Pack files (.pack, .bin): min 32KB, avg 64KB, max 256KB
+//!   - Pack/index/binary files (.pack, .idx, .bin): min 32KB, avg 64KB, max 256KB
 //!
 //! Each chunk is content-addressed by its BLAKE3 hash.
 
@@ -40,7 +40,7 @@ impl ChunkSizes {
         max_size: 16 * 1024, // 16KB
     };
 
-    /// For pack/binary files (reduced overhead for large sequential data)
+    /// For pack/index/binary files (reduced overhead for large sequential data)
     pub const PACK: ChunkSizes = ChunkSizes {
         min_size: 32 * 1024,  // 32KB
         avg_size: 64 * 1024,  // 64KB
@@ -50,7 +50,7 @@ impl ChunkSizes {
     /// Select chunk sizes based on file extension
     pub fn for_path(path: &Path) -> Self {
         match path.extension().and_then(|e| e.to_str()) {
-            Some("pack") | Some("bin") | Some("iso") | Some("img") => Self::PACK,
+            Some("pack") | Some("idx") | Some("bin") | Some("iso") | Some("img") => Self::PACK,
             _ => Self::SMALL,
         }
     }
@@ -152,6 +152,47 @@ pub fn chunk_file_streaming(path: &Path) -> Result<Vec<ChunkWithData>> {
     Ok(chunks)
 }
 
+/// Chunk a large file using the streaming interface, keeping only chunk
+/// metadata and the whole-file hash.
+pub fn chunk_file_streaming_metadata(path: &Path) -> Result<(Vec<Chunk>, crate::blake3::Hash)> {
+    let file = std::fs::File::open(path).map_err(|e| {
+        anyhow::anyhow!(
+            "opening file for streaming chunk metadata: {}: {e}",
+            path.display()
+        )
+    })?;
+
+    let file_len = file
+        .metadata()
+        .map_err(|e| anyhow::anyhow!("stat for streaming chunk metadata: {}: {e}", path.display()))?
+        .len();
+
+    if file_len == 0 {
+        return Ok((vec![], crate::blake3::hash_bytes(&[])));
+    }
+
+    let sizes = ChunkSizes::for_path(path);
+
+    let chunker =
+        fastcdc::v2020::StreamCDC::new(file, sizes.min_size, sizes.avg_size, sizes.max_size);
+
+    let mut chunks = Vec::new();
+    let mut file_hasher = blake3::Hasher::new();
+
+    for result in chunker {
+        let entry = result.map_err(|e| anyhow::anyhow!("streaming chunk metadata error: {e}"))?;
+        let hash = crate::blake3::hash_bytes(&entry.data);
+        file_hasher.update(&entry.data);
+        chunks.push(Chunk {
+            offset: entry.offset,
+            length: entry.data.len(),
+            hash,
+        });
+    }
+
+    Ok((chunks, file_hasher.finalize()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +279,65 @@ mod tests {
             assert_eq!(mem.length, stream.data.len(), "chunk {i} length mismatch");
             assert_eq!(mem.hash, stream.hash, "chunk {i} hash mismatch");
         }
+    }
+
+    #[test]
+    fn streaming_metadata_matches_streaming_chunks() {
+        let data: Vec<u8> = (0u64..524288)
+            .map(|i| (i.wrapping_mul(17) ^ (i >> 9)) as u8)
+            .collect();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &data).unwrap();
+
+        let stream_chunks = chunk_file_streaming(tmp.path()).unwrap();
+        let (metadata_chunks, file_hash) = chunk_file_streaming_metadata(tmp.path()).unwrap();
+
+        assert_eq!(
+            crate::blake3::hash_bytes(&data),
+            file_hash,
+            "metadata pass should preserve the whole-file hash"
+        );
+        assert_eq!(metadata_chunks.len(), stream_chunks.len());
+
+        for (i, (metadata, stream)) in metadata_chunks.iter().zip(stream_chunks.iter()).enumerate()
+        {
+            assert_eq!(metadata.offset, stream.offset, "chunk {i} offset mismatch");
+            assert_eq!(
+                metadata.length,
+                stream.data.len(),
+                "chunk {i} length mismatch"
+            );
+            assert_eq!(metadata.hash, stream.hash, "chunk {i} hash mismatch");
+        }
+    }
+
+    #[test]
+    fn git_pack_index_uses_pack_chunk_profile() {
+        let sizes = ChunkSizes::for_path(Path::new(".git/objects/pack/pack-example.idx"));
+
+        assert_eq!(sizes.min_size, ChunkSizes::PACK.min_size);
+        assert_eq!(sizes.avg_size, ChunkSizes::PACK.avg_size);
+        assert_eq!(sizes.max_size, ChunkSizes::PACK.max_size);
+    }
+
+    #[test]
+    fn git_pack_index_profile_avoids_tiny_chunk_explosion() {
+        let data: Vec<u8> = (0u64..(8 * 1024 * 1024))
+            .map(|i| (i.wrapping_mul(31) ^ (i >> 7) ^ (i >> 17)) as u8)
+            .collect();
+
+        let small_chunks = chunk_data(&data, ChunkSizes::SMALL).len();
+        let idx_chunks = chunk_data(
+            &data,
+            ChunkSizes::for_path(Path::new(".git/objects/pack/pack-example.idx")),
+        )
+        .len();
+
+        assert!(
+            idx_chunks * 4 < small_chunks,
+            "idx profile should avoid small-profile object explosion: small={small_chunks} idx={idx_chunks}"
+        );
     }
 
     #[test]

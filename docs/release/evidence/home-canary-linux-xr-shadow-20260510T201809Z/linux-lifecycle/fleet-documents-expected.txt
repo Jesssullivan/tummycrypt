@@ -1,0 +1,4 @@
+# TCFS Fleet Pilot
+
+This isolated Documents fixture should traverse remotely without hydrating the
+whole tree. It is safe to delete after the proof packet is archived.
