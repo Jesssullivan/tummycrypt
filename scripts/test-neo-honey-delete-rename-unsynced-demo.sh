@@ -128,8 +128,8 @@ printf ' %q' "$@" >>"$TCFS_FAKE_SSH_LOG"
 printf '\n' >>"$TCFS_FAKE_SSH_LOG"
 case "$*" in
   *prepare-unsync*) printf 'honey delete/rename prepare unsync ok\n' ;;
-  *verify-delete*) printf 'honey peer-delete verify ok: Projects/shared/delete-me.md\ndelete_old_pull=failed_as_expected\ndelete_stub_after_failed_pull=present\n' ;;
-  *verify-rename*) printf 'honey peer-rename verify ok: Projects/shared/rename-old.md -> Projects/shared/rename-new.md\nrename_old_pull=failed_as_expected\nrename_new_pull=synced\nrename_old_stub_after_new_pull=present\n' ;;
+  *verify-delete*) printf 'honey peer-delete verify ok: Projects/shared/delete-me.md\ndelete_old_pull=failed_as_expected\ndelete_old_pull_repeat=failed_as_expected\ndelete_stub_after_failed_pull=present\n' ;;
+  *verify-rename*) printf 'honey peer-rename verify ok: Projects/shared/rename-old.md -> Projects/shared/rename-new.md\nrename_old_pull=failed_as_expected\nrename_old_pull_repeat=failed_as_expected\nrename_new_pull=synced\nrename_new_pull_repeat=synced\nrename_old_stub_after_new_pull=present\n' ;;
 esac
 EOF
 
@@ -166,9 +166,15 @@ assert_contains "$RUN_EVIDENCE/neo-rename-push.log" "fake push ok"
 assert_contains "$RUN_EVIDENCE/neo-rename-delete-old.log" "fake rm ok"
 assert_contains "$RUN_EVIDENCE/honey-prepare-unsync.log" "honey delete/rename prepare unsync ok"
 assert_contains "$RUN_EVIDENCE/honey-verify-delete.log" "delete_old_pull=failed_as_expected"
+assert_contains "$RUN_EVIDENCE/honey-verify-delete.log" "delete_old_pull_repeat=failed_as_expected"
 assert_contains "$RUN_EVIDENCE/honey-verify-rename.log" "rename_new_pull=synced"
+assert_contains "$RUN_EVIDENCE/honey-verify-rename.log" "rename_old_pull_repeat=failed_as_expected"
+assert_contains "$RUN_EVIDENCE/honey-verify-rename.log" "rename_new_pull_repeat=synced"
 assert_contains "$RUN_EVIDENCE/result.env" "status=0"
 assert_contains "$RUN_EVIDENCE/result.env" "proof=delete-rename-peer-unsynced-current-behavior"
+assert_contains "$RUN_EVIDENCE/result.env" "delete_old_pull_repeat=failed_as_expected"
+assert_contains "$RUN_EVIDENCE/result.env" "rename_old_pull_repeat=failed_as_expected"
+assert_contains "$RUN_EVIDENCE/result.env" "rename_new_pull_repeat=synced"
 assert_contains "$RUN_EVIDENCE/result.env" "stale_old_stub_cleanup=not-implemented"
 assert_contains "$RUN_EVIDENCE/neo-tree-after-delete-rename.txt" "Projects/shared/rename-new.md"
 test ! -e "$RUN_NEO/Projects/shared/delete-me.md"

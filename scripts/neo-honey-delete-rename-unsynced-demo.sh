@@ -472,7 +472,12 @@ case "\$mode" in
       echo "delete old path unexpectedly rehydrated" >&2
       exit 1
     fi
+    if "\$TCFS_BIN" --config "\$CONFIG_PATH" pull "\$DELETE_FILE" "\$DELETE_PATH" --prefix "\$PREFIX" --state "\$STATE_JSON" >"\$EVIDENCE_DIR/honey-delete-pull-after-peer-delete-repeat.log" 2>&1; then
+      echo "delete old path unexpectedly rehydrated on repeated pull" >&2
+      exit 1
+    fi
     "\$TCFS_BIN" --config "\$CONFIG_PATH" sync-status "\$DELETE_PATH" >"\$EVIDENCE_DIR/honey-delete-status-after-peer-delete.out" 2>&1 || true
+    "\$TCFS_BIN" --config "\$CONFIG_PATH" sync-status "\$DELETE_STUB" >"\$EVIDENCE_DIR/honey-delete-stub-status-after-peer-delete.out" 2>&1 || true
     if [[ -e "\$DELETE_STUB" ]]; then
       delete_stub_after_failed_pull=present
     else
@@ -480,11 +485,13 @@ case "\$mode" in
     fi
     {
       echo "delete_old_pull=failed_as_expected"
+      echo "delete_old_pull_repeat=failed_as_expected"
       echo "delete_stub_after_failed_pull=\$delete_stub_after_failed_pull"
       echo "delete_stub_path=\$DELETE_STUB"
     } >"\$EVIDENCE_DIR/honey-delete-peer-result.env"
     echo "honey peer-delete verify ok: \$DELETE_FILE"
     echo "delete_old_pull=failed_as_expected"
+    echo "delete_old_pull_repeat=failed_as_expected"
     echo "delete_stub_after_failed_pull=\$delete_stub_after_failed_pull"
     ;;
   verify-rename)
@@ -492,7 +499,15 @@ case "\$mode" in
       echo "rename old path unexpectedly rehydrated" >&2
       exit 1
     fi
+    if "\$TCFS_BIN" --config "\$CONFIG_PATH" pull "\$RENAME_OLD_FILE" "\$RENAME_OLD_PATH" --prefix "\$PREFIX" --state "\$STATE_JSON" >"\$EVIDENCE_DIR/honey-rename-old-pull-after-peer-rename-repeat.log" 2>&1; then
+      echo "rename old path unexpectedly rehydrated on repeated pull" >&2
+      exit 1
+    fi
+    "\$TCFS_BIN" --config "\$CONFIG_PATH" sync-status "\$RENAME_OLD_PATH" >"\$EVIDENCE_DIR/honey-rename-old-status-after-peer-rename.out" 2>&1 || true
+    "\$TCFS_BIN" --config "\$CONFIG_PATH" sync-status "\$RENAME_OLD_STUB" >"\$EVIDENCE_DIR/honey-rename-old-stub-status-after-peer-rename.out" 2>&1 || true
     "\$TCFS_BIN" --config "\$CONFIG_PATH" pull "\$RENAME_NEW_FILE" "\$RENAME_NEW_PATH" --prefix "\$PREFIX" --state "\$STATE_JSON" >"\$EVIDENCE_DIR/honey-rename-new-pull.log" 2>&1
+    cmp -s "\$RENAME_CONTENT" "\$RENAME_NEW_PATH"
+    "\$TCFS_BIN" --config "\$CONFIG_PATH" pull "\$RENAME_NEW_FILE" "\$RENAME_NEW_PATH" --prefix "\$PREFIX" --state "\$STATE_JSON" >"\$EVIDENCE_DIR/honey-rename-new-pull-repeat.log" 2>&1
     cmp -s "\$RENAME_CONTENT" "\$RENAME_NEW_PATH"
     "\$TCFS_BIN" --config "\$CONFIG_PATH" sync-status "\$RENAME_NEW_PATH" >"\$EVIDENCE_DIR/honey-rename-new-status.out" 2>&1
     grep -q "sync state: synced" "\$EVIDENCE_DIR/honey-rename-new-status.out"
@@ -508,7 +523,9 @@ case "\$mode" in
     fi
     {
       echo "rename_old_pull=failed_as_expected"
+      echo "rename_old_pull_repeat=failed_as_expected"
       echo "rename_new_pull=synced"
+      echo "rename_new_pull_repeat=synced"
       echo "rename_old_stub_after_new_pull=\$rename_old_stub_after_new_pull"
       echo "rename_new_stub_after_pull=\$rename_new_stub_after_pull"
       echo "rename_old_stub_path=\$RENAME_OLD_STUB"
@@ -516,7 +533,9 @@ case "\$mode" in
     } >"\$EVIDENCE_DIR/honey-rename-peer-result.env"
     echo "honey peer-rename verify ok: \$RENAME_OLD_FILE -> \$RENAME_NEW_FILE"
     echo "rename_old_pull=failed_as_expected"
+    echo "rename_old_pull_repeat=failed_as_expected"
     echo "rename_new_pull=synced"
+    echo "rename_new_pull_repeat=synced"
     echo "rename_old_stub_after_new_pull=\$rename_old_stub_after_new_pull"
     ;;
   *)
@@ -657,16 +676,22 @@ if [[ "$run_honey" == "1" ]]; then
   fi
 
   grep -q "delete_old_pull=failed_as_expected" "$honey_delete_log" || fail "delete verification missing failed old-path marker"
+  grep -q "delete_old_pull_repeat=failed_as_expected" "$honey_delete_log" || fail "delete verification missing repeated failed old-path marker"
   grep -q "rename_old_pull=failed_as_expected" "$honey_rename_log" || fail "rename verification missing failed old-path marker"
+  grep -q "rename_old_pull_repeat=failed_as_expected" "$honey_rename_log" || fail "rename verification missing repeated failed old-path marker"
   grep -q "rename_new_pull=synced" "$honey_rename_log" || fail "rename verification missing new-path hydration marker"
+  grep -q "rename_new_pull_repeat=synced" "$honey_rename_log" || fail "rename verification missing repeated new-path hydration marker"
 
   cat >"$result_env" <<EOF
 status=0
 completed_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 proof=delete-rename-peer-unsynced-current-behavior
 delete_old_pull=failed_as_expected
+delete_old_pull_repeat=failed_as_expected
 rename_old_pull=failed_as_expected
+rename_old_pull_repeat=failed_as_expected
 rename_new_pull=synced
+rename_new_pull_repeat=synced
 stale_old_stub_cleanup=not-implemented
 EOF
 else
@@ -717,8 +742,11 @@ Important files:
 - \`neo-delete.log\`: neo \`tcfs rm\` delete transcript, when run
 - \`neo-rename-push.log\`: neo new-path publish transcript, when run
 - \`neo-rename-delete-old.log\`: neo old-path remote delete transcript, when run
-- \`honey-verify-delete.log\`: old-path pull failure and delete-stub status
-- \`honey-verify-rename.log\`: old-path pull failure, new-path hydrate, and stale old-stub status
+- \`honey-verify-delete.log\`: old-path pull failure, repeated old-path pull
+  failure, stale delete-stub status, and stale delete-stub \`sync-status\`
+- \`honey-verify-rename.log\`: old-path pull failure, repeated old-path pull
+  failure, new-path hydrate, repeated new-path hydrate, stale old-stub status,
+  and old/new path \`sync-status\`
 - \`honey-evidence/\`: detailed remote transcripts, copied back when available
 - \`result.env\`: plan/current-behavior status
 
