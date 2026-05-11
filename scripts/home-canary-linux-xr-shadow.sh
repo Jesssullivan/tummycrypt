@@ -717,6 +717,25 @@ if [[ -n "\${TCFS_HONEY_EXPECTED_VERSION_CONTAINS:-}" && "\$tcfs_version" != *"\
   printf 'tcfs version mismatch: expected output containing %s\n' "\$TCFS_HONEY_EXPECTED_VERSION_CONTAINS" >&2
   exit 1
 fi
+tcfs_sha256=""
+if command -v sha256sum >/dev/null 2>&1; then
+  tcfs_sha256="\$(sha256sum "\$TCFS_BIN" | awk '{print \$1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  tcfs_sha256="\$(shasum -a 256 "\$TCFS_BIN" | awk '{print \$1}')"
+fi
+if [[ -n "\$tcfs_sha256" ]]; then
+  echo "tcfs sha256: \$tcfs_sha256"
+fi
+if [[ -n "\${TCFS_HONEY_EXPECTED_SHA256:-}" ]]; then
+  if [[ -z "\$tcfs_sha256" ]]; then
+    printf 'tcfs sha256 check requested but no sha256 tool is available\n' >&2
+    exit 1
+  fi
+  if [[ "\$tcfs_sha256" != "\$TCFS_HONEY_EXPECTED_SHA256" ]]; then
+    printf 'tcfs sha256 mismatch: expected %s got %s\n' "\$TCFS_HONEY_EXPECTED_SHA256" "\$tcfs_sha256" >&2
+    exit 1
+  fi
+fi
 
 mkdir -p "\$MOUNT_ROOT"
 mount_started=0
@@ -780,7 +799,7 @@ scp $(shell_quote "$evidence_dir/selected-hydration-file.content") $(shell_quote
 scp $(shell_quote "$inventory_dir/symlink-targets.tsv") $(shell_quote "$honey_host"):$(shell_quote "$honey_remote_dir/symlink-targets.tsv")
 scp $(shell_quote "$honey_script") $(shell_quote "$honey_host"):$(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")
 ssh $(shell_quote "$honey_host") 'chmod +x $(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh") $(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")'
-ssh $(shell_quote "$honey_host") 'TCFS_HONEY_START_MOUNT=1 TCFS_HONEY_SMOKE_SCRIPT=$(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh") TCFS_HONEY_EXPECTED_CONTENT_FILE=$(shell_quote "$honey_remote_dir/selected-hydration-file.content") TCFS_HONEY_SYMLINK_TARGETS_FILE=$(shell_quote "$honey_remote_dir/symlink-targets.tsv") TCFS_HONEY_MOUNT_LOG=$(shell_quote "$honey_remote_dir/mount.log") TCFS_HONEY_SMOKE_MAX_DEPTH=$(shell_quote "$honey_smoke_max_depth") TCFS_HONEY_SMOKE_TIMEOUT_SECS=$(shell_quote "$honey_smoke_timeout_secs") bash $(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")'
+ssh $(shell_quote "$honey_host") 'TCFS_HONEY_EXPECTED_VERSION_CONTAINS=$(shell_quote "${TCFS_HONEY_EXPECTED_VERSION_CONTAINS:-}") TCFS_HONEY_EXPECTED_SHA256=$(shell_quote "${TCFS_HONEY_EXPECTED_SHA256:-}") TCFS_HONEY_START_MOUNT=1 TCFS_HONEY_SMOKE_SCRIPT=$(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh") TCFS_HONEY_EXPECTED_CONTENT_FILE=$(shell_quote "$honey_remote_dir/selected-hydration-file.content") TCFS_HONEY_SYMLINK_TARGETS_FILE=$(shell_quote "$honey_remote_dir/symlink-targets.tsv") TCFS_HONEY_MOUNT_LOG=$(shell_quote "$honey_remote_dir/mount.log") TCFS_HONEY_SMOKE_MAX_DEPTH=$(shell_quote "$honey_smoke_max_depth") TCFS_HONEY_SMOKE_TIMEOUT_SECS=$(shell_quote "$honey_smoke_timeout_secs") bash $(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")'
 EOF
 
 if [[ "$run_honey" == "1" ]]; then
@@ -812,7 +831,9 @@ if [[ "$run_honey" == "1" ]]; then
     ssh "$honey_host" "umask 077; cat > $(shell_quote "$remote_env_file")" <<<"$aws_env_payload"
   fi
 
-  remote_run_cmd="$(printf 'TCFS_HONEY_START_MOUNT=%q TCFS_HONEY_SMOKE_SCRIPT=%q TCFS_HONEY_EXPECTED_CONTENT_FILE=%q TCFS_HONEY_SYMLINK_TARGETS_FILE=%q TCFS_HONEY_MOUNT_LOG=%q TCFS_HONEY_SMOKE_MAX_DEPTH=%q TCFS_HONEY_SMOKE_TIMEOUT_SECS=%q bash %q' \
+  remote_run_cmd="$(printf 'TCFS_HONEY_EXPECTED_VERSION_CONTAINS=%q TCFS_HONEY_EXPECTED_SHA256=%q TCFS_HONEY_START_MOUNT=%q TCFS_HONEY_SMOKE_SCRIPT=%q TCFS_HONEY_EXPECTED_CONTENT_FILE=%q TCFS_HONEY_SYMLINK_TARGETS_FILE=%q TCFS_HONEY_MOUNT_LOG=%q TCFS_HONEY_SMOKE_MAX_DEPTH=%q TCFS_HONEY_SMOKE_TIMEOUT_SECS=%q bash %q' \
+    "${TCFS_HONEY_EXPECTED_VERSION_CONTAINS:-}" \
+    "${TCFS_HONEY_EXPECTED_SHA256:-}" \
     "$honey_start_mount" \
     "$honey_remote_dir/lazy-hydration-mounted-smoke.sh" \
     "$honey_remote_dir/selected-hydration-file.content" \
