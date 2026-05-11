@@ -80,8 +80,14 @@ Pre-fix host observations from
 The follow-up work routes `.idx` files through the large-file profile, keeps
 streaming upload snapshots to chunk metadata plus whole-file hash, and adds
 bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default 4, cap
-64). These changes still need a fresh host rerun before any post-fix throughput,
-object-count, or memory claim is made.
+64). Fresh-prefix bulk proof can now opt in to
+`TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1` to skip per-chunk remote existence checks,
+and `TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS=N` records bounded chunk progress for
+objects, including a terminal progress row once the object reaches at least `N`
+chunks. The fresh-prefix shortcut is only valid for a new disposable prefix;
+evidence should preserve the `chunk_exists_check=false` upload log field when it
+is enabled. These changes still need a fresh release-build host rerun before any
+production throughput, object-count, or memory claim is made.
 
 ## Compression Ratios
 

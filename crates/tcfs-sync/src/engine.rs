@@ -69,6 +69,47 @@ fn upload_chunk_concurrency() -> usize {
     )
 }
 
+fn upload_assume_fresh_prefix_from_env_value(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "yes" | "on"))
+}
+
+fn upload_assume_fresh_prefix() -> bool {
+    upload_assume_fresh_prefix_from_env_value(
+        std::env::var("TCFS_UPLOAD_ASSUME_FRESH_PREFIX")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn upload_progress_every_chunks_from_env_value(value: Option<&str>) -> usize {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn upload_progress_every_chunks() -> usize {
+    upload_progress_every_chunks_from_env_value(
+        std::env::var("TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn should_record_chunk_upload_progress(
+    completed_chunks: usize,
+    num_chunks: usize,
+    every_chunks: usize,
+) -> bool {
+    if every_chunks == 0 {
+        return false;
+    }
+
+    completed_chunks % every_chunks == 0
+        || (completed_chunks == num_chunks && num_chunks >= every_chunks)
+}
+
 async fn retry_with_backoff<T, E, Action, ActionFuture, Sleep, SleepFuture, OnRetry>(
     max_attempts: u32,
     mut action: Action,
@@ -168,8 +209,9 @@ async fn maybe_upload_chunk(
     upload_data: Vec<u8>,
     chunk_idx: usize,
     logical_len: u64,
+    assume_fresh_prefix: bool,
 ) -> Result<u64> {
-    if !op.exists(&chunk_key).await.unwrap_or(false) {
+    if assume_fresh_prefix || !op.exists(&chunk_key).await.unwrap_or(false) {
         write_chunk_with_retry(&op, &chunk_key, upload_data, chunk_idx).await?;
         return Ok(logical_len);
     }
@@ -183,6 +225,28 @@ async fn await_next_chunk_upload(pending: &mut JoinSet<Result<u64>>) -> Result<u
         .await
         .context("chunk upload task set unexpectedly empty")?;
     joined.context("chunk upload task panicked or was cancelled")?
+}
+
+fn record_chunk_upload_progress(
+    local_path: &Path,
+    completed_chunks: usize,
+    num_chunks: usize,
+    uploaded_bytes: u64,
+    streaming: bool,
+    every_chunks: usize,
+) {
+    if !should_record_chunk_upload_progress(completed_chunks, num_chunks, every_chunks) {
+        return;
+    }
+
+    info!(
+        path = %local_path.display(),
+        completed_chunks,
+        chunks = num_chunks,
+        uploaded_bytes,
+        streaming,
+        "chunk upload progress"
+    );
 }
 
 /// Read a key from remote storage with exponential backoff retry.
@@ -714,10 +778,37 @@ pub async fn upload_file_with_device(
     let file_meta = std::fs::metadata(local_path)
         .with_context(|| format!("stat for chunking: {}", local_path.display()))?;
     let use_streaming = file_meta.len() >= tcfs_chunks::STREAMING_THRESHOLD;
+    let prepare_started = std::time::Instant::now();
+    debug!(
+        path = %local_path.display(),
+        bytes = file_meta.len(),
+        streaming = use_streaming,
+        "preparing upload snapshot"
+    );
     let snapshot = prepare_upload_snapshot(local_path, use_streaming)?;
+    let snapshot_chunks = match &snapshot.source {
+        UploadSourceSnapshot::InMemory(_) => 0,
+        UploadSourceSnapshot::Streaming(chunks) => chunks.len(),
+    };
+    debug!(
+        path = %local_path.display(),
+        bytes = snapshot.file_size,
+        streaming = use_streaming,
+        chunks = snapshot_chunks,
+        elapsed_ms = prepare_started.elapsed().as_millis(),
+        "prepared upload snapshot"
+    );
     let file_size = snapshot.file_size;
     let file_hash_hex = snapshot.file_hash_hex.clone();
+    let verify_started = std::time::Instant::now();
     ensure_source_matches_snapshot(local_path, &snapshot, "upload preparation")?;
+    debug!(
+        path = %local_path.display(),
+        bytes = file_size,
+        streaming = use_streaming,
+        elapsed_ms = verify_started.elapsed().as_millis(),
+        "verified upload snapshot"
+    );
 
     // Build remote manifest path (using the file's content hash)
     let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
@@ -916,6 +1007,8 @@ pub async fn upload_file_with_device(
     let mut bytes_uploaded = 0u64;
     let num_chunks;
     let chunk_upload_concurrency = upload_chunk_concurrency();
+    let assume_fresh_prefix = upload_assume_fresh_prefix();
+    let progress_every_chunks = upload_progress_every_chunks();
 
     // Generate per-file encryption key if encryption is enabled
     #[cfg(feature = "crypto")]
@@ -933,7 +1026,13 @@ pub async fn upload_file_with_device(
 
     if use_streaming {
         // ── Streaming path: prepared snapshot chunks ─────────
-        debug!(path = %local_path.display(), size = file_size, "using streaming chunker");
+        debug!(
+            path = %local_path.display(),
+            size = file_size,
+            chunk_upload_concurrency,
+            chunk_exists_check = !assume_fresh_prefix,
+            "using streaming chunker"
+        );
         let UploadSourceSnapshot::Streaming(streaming_chunks) = &snapshot.source else {
             unreachable!("streaming upload expected streaming snapshot")
         };
@@ -980,6 +1079,7 @@ pub async fn upload_file_with_device(
                 upload_data,
                 i,
                 chunk.length as u64,
+                assume_fresh_prefix,
             ));
 
             while pending_uploads.len() >= chunk_upload_concurrency {
@@ -992,6 +1092,14 @@ pub async fn upload_file_with_device(
                         &format!("chunk {completed_chunks}/{num_chunks}"),
                     );
                 }
+                record_chunk_upload_progress(
+                    local_path,
+                    completed_chunks,
+                    num_chunks,
+                    bytes_uploaded,
+                    true,
+                    progress_every_chunks,
+                );
             }
         }
 
@@ -1005,6 +1113,14 @@ pub async fn upload_file_with_device(
                     &format!("chunk {completed_chunks}/{num_chunks}"),
                 );
             }
+            record_chunk_upload_progress(
+                local_path,
+                completed_chunks,
+                num_chunks,
+                bytes_uploaded,
+                true,
+                progress_every_chunks,
+            );
         }
     } else {
         // ── In-memory path: prepared snapshot bytes ───────────────
@@ -1058,6 +1174,7 @@ pub async fn upload_file_with_device(
                 upload_data,
                 i,
                 chunk.length as u64,
+                assume_fresh_prefix,
             ));
 
             while pending_uploads.len() >= chunk_upload_concurrency {
@@ -1070,6 +1187,14 @@ pub async fn upload_file_with_device(
                         &format!("chunk {completed_chunks}/{num_chunks}"),
                     );
                 }
+                record_chunk_upload_progress(
+                    local_path,
+                    completed_chunks,
+                    num_chunks,
+                    bytes_uploaded,
+                    false,
+                    progress_every_chunks,
+                );
             }
         }
 
@@ -1083,6 +1208,14 @@ pub async fn upload_file_with_device(
                     &format!("chunk {completed_chunks}/{num_chunks}"),
                 );
             }
+            record_chunk_upload_progress(
+                local_path,
+                completed_chunks,
+                num_chunks,
+                bytes_uploaded,
+                false,
+                progress_every_chunks,
+            );
         }
     }
 
@@ -1165,6 +1298,7 @@ pub async fn upload_file_with_device(
         uploaded_bytes = bytes_uploaded,
         streaming = use_streaming,
         chunk_upload_concurrency,
+        chunk_exists_check = !assume_fresh_prefix,
         "uploaded"
     );
 
@@ -2158,6 +2292,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn upload_assume_fresh_prefix_env_is_strictly_opt_in() {
+        assert!(!upload_assume_fresh_prefix_from_env_value(None));
+        assert!(!upload_assume_fresh_prefix_from_env_value(Some("")));
+        assert!(!upload_assume_fresh_prefix_from_env_value(Some("0")));
+        assert!(!upload_assume_fresh_prefix_from_env_value(Some("false")));
+        assert!(!upload_assume_fresh_prefix_from_env_value(Some("TRUE")));
+        assert!(upload_assume_fresh_prefix_from_env_value(Some("1")));
+        assert!(upload_assume_fresh_prefix_from_env_value(Some("true")));
+        assert!(upload_assume_fresh_prefix_from_env_value(Some(" yes ")));
+        assert!(upload_assume_fresh_prefix_from_env_value(Some("on")));
+    }
+
+    #[test]
+    fn upload_progress_every_chunks_env_defaults_to_disabled() {
+        assert_eq!(upload_progress_every_chunks_from_env_value(None), 0);
+        assert_eq!(upload_progress_every_chunks_from_env_value(Some("")), 0);
+        assert_eq!(
+            upload_progress_every_chunks_from_env_value(Some("not-a-number")),
+            0
+        );
+        assert_eq!(upload_progress_every_chunks_from_env_value(Some("0")), 0);
+        assert_eq!(
+            upload_progress_every_chunks_from_env_value(Some("5000")),
+            5000
+        );
+    }
+
+    #[test]
+    fn chunk_upload_progress_records_interval_and_large_final_rows() {
+        assert!(!should_record_chunk_upload_progress(1, 1, 0));
+        assert!(!should_record_chunk_upload_progress(1, 4999, 5000));
+        assert!(!should_record_chunk_upload_progress(4999, 4999, 5000));
+        assert!(should_record_chunk_upload_progress(5000, 10001, 5000));
+        assert!(should_record_chunk_upload_progress(10000, 10001, 5000));
+        assert!(should_record_chunk_upload_progress(10001, 10001, 5000));
+    }
+
     // ── collect_files (empty dir detection) ──────────────────────────────
     #[test]
     fn collect_finds_empty_dirs() {
@@ -2596,6 +2768,25 @@ mod tests {
             *delays.lock().unwrap(),
             vec![std::time::Duration::from_millis(100)]
         );
+    }
+
+    #[tokio::test]
+    async fn maybe_upload_chunk_assume_fresh_prefix_skips_exists_gate() {
+        let op = memory_op();
+        let key = "data/chunks/existing".to_string();
+        op.write(&key, b"old".to_vec()).await.unwrap();
+
+        let skipped = maybe_upload_chunk(op.clone(), key.clone(), b"new".to_vec(), 0, 3, false)
+            .await
+            .unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(op.read(&key).await.unwrap().to_bytes(), b"old".as_slice());
+
+        let uploaded = maybe_upload_chunk(op.clone(), key.clone(), b"new".to_vec(), 0, 3, true)
+            .await
+            .unwrap();
+        assert_eq!(uploaded, 3);
+        assert_eq!(op.read(&key).await.unwrap().to_bytes(), b"new".as_slice());
     }
 
     #[tokio::test]

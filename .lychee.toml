@@ -6,6 +6,8 @@ exclude = [
   "^https://developer.apple.com/documentation/fskit$",
   "^https://developer.apple.com/documentation/fileprovider$",
   "^https://developer.apple.com/documentation/fileprovider/nsfileproviderreplicatedextension$",
+  # Debian package pages intermittently return 503 to GitHub-hosted link checks.
+  "^https://packages.debian.org/",
   "your-org",
   "localhost",
   "127\\.0\\.0\\.1",
