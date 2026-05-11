@@ -42,6 +42,8 @@ EXPECTED_CONTENT="${TMPDIR}/expected.txt"
 mkdir -p "${MOUNT_ROOT}/projects/alpha/notes" "${MOUNT_ROOT}/empty"
 
 printf 'remote hydrated contents' >"${MOUNT_ROOT}/projects/alpha/notes/plan.txt"
+printf 'legitimate source fixture\n' >"${MOUNT_ROOT}/projects/alpha/notes/parser.tc"
+printf 'legitimate source fixture\n' >"${MOUNT_ROOT}/projects/alpha/notes/schema.tcf"
 printf 'remote hydrated contents' >"${EXPECTED_CONTENT}"
 ln -s notes/plan.txt "${MOUNT_ROOT}/projects/alpha/plan-link"
 printf 'projects/alpha/plan-link\tnotes/plan.txt\n' >"${TMPDIR}/symlink-targets.tsv"
@@ -79,14 +81,39 @@ bash "${SCRIPT}" \
     >"${ROOT_SUFFIX_OUT}"
 assert_contains "${ROOT_SUFFIX_OUT}" "lazy hydration mounted smoke passed"
 
-printf 'physical stub leak' >"${MOUNT_ROOT}/projects/alpha/notes/leaked.tc"
+cat >"${MOUNT_ROOT}/projects/alpha/notes/leaked.tc" <<'EOF'
+version https://tummycrypt.io/tcfs/v1
+chunks 23
+compressed 0
+fetched 0
+oid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e239
+origin seaweedfs://filer.example.com/bucket/path/to/file
+size 94371840
+EOF
 assert_fails_contains \
-    "mounted view exposed physical stub suffixes" \
+    "mounted view exposed physical TCFS stubs" \
     bash "${SCRIPT}" \
         --mount-root "${MOUNT_ROOT}" \
         --expected-file "projects/alpha/notes/plan.txt" \
         --max-depth 5
 rm "${MOUNT_ROOT}/projects/alpha/notes/leaked.tc"
+
+cat >"${MOUNT_ROOT}/projects/alpha/notes/leaked.tcf" <<'EOF'
+version https://tummycrypt.io/tcfs/v1
+chunks 0
+compressed 0
+fetched 0
+oid blake3:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e239
+origin seaweedfs://filer.example.com/bucket/path/to/dir
+size 0
+EOF
+assert_fails_contains \
+    "projects/alpha/notes/leaked.tcf" \
+    bash "${SCRIPT}" \
+        --mount-root "${MOUNT_ROOT}" \
+        --expected-file "projects/alpha/notes/plan.txt" \
+        --max-depth 5
+rm "${MOUNT_ROOT}/projects/alpha/notes/leaked.tcf"
 
 assert_fails_contains \
     "cat output did not match --expected-content" \

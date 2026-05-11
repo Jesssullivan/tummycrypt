@@ -603,9 +603,10 @@ dotfiles, or broad \`~/git\` takeover.
 - Config: \`$config_path\`
 - State JSON: \`$state_json\`
 
-Truth gate: full project parity is not claimed until a fresh host packet proves
-source symlinks rehydrate as symlinks with matching targets. See
-\`parity-gates.env\`, \`source-inventory/symlink-targets.tsv\`, and
+Truth gate: scoped project-tree parity is claimable only when
+\`parity-gates.env\` reports \`scoped-project-tree-parity-evidence-complete\`.
+Symlink-enabled packets must prove source symlinks rehydrate as symlinks with
+matching targets. See \`source-inventory/symlink-targets.tsv\` and
 \`source-inventory/unsupported-special-files.txt\`.
 
 Contents:

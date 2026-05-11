@@ -1,0 +1,4 @@
+# Run this after the desktop-honey commands have mounted or verified honey.
+scp docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/linux-lifecycle/fleet-documents-expected.txt honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260511T074110Z/linux-lifecycle/fleet-documents-expected.txt
+scp docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/linux-lifecycle/honey-fleet-run.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260511T074110Z/linux-lifecycle/honey-fleet-run.sh
+ssh honey 'TCFS_HONEY_SMOKE_SCRIPT=/tmp/tcfs-home-canary-linux-xr-shadow-20260511T074110Z/linux-lifecycle/lazy-hydration-mounted-smoke.sh TCFS_HONEY_FLEET_EXPECTED_CONTENT_FILE=/tmp/tcfs-home-canary-linux-xr-shadow-20260511T074110Z/linux-lifecycle/fleet-documents-expected.txt bash /tmp/tcfs-home-canary-linux-xr-shadow-20260511T074110Z/linux-lifecycle/honey-fleet-run.sh'

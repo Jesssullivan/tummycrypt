@@ -1,0 +1,24 @@
+[daemon]
+socket = "docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/linux-lifecycle/desktop-state/no-daemon.sock"
+
+[storage]
+endpoint = "http://100.64.48.53:8333"
+region = "us-east-1"
+bucket = "tcfs"
+remote_prefix = "home-canary-linux-xr-shadow-20260511T040100Z/linux-lifecycle"
+enforce_tls = false
+
+[sync]
+state_db = "docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/linux-lifecycle/desktop-state/state.db"
+sync_root = "/Users/jess/TCFS Pilot/runs/fleet-parity-20260511T075241Z-20286"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_empty_dirs = true
+
+[fuse]
+cache_dir = "docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/linux-lifecycle/desktop-state/cache"
+cache_max_mb = 64
+negative_cache_ttl_secs = 1
+
+[crypto]
+enabled = false

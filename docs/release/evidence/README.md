@@ -30,6 +30,7 @@ the repository.
 | `home-canary-linux-xr-shadow-20260510T002604Z/` | Local real project-tree shadow of `/Users/jess/git/linux-xr`: read-only source inventory, full isolated 7.9 GB shadow under `~/TCFS Pilot/real-canaries/`, disposable raw `.git`/hidden-dir config, and honey command packet | repo-archived inventory/config metadata; push/honey/lifecycle were not run; full project parity is explicitly blocked because this archived packet did not prove the 85 inventoried symlinks as preserved links |
 | `home-canary-linux-xr-shadow-20260510T023938Z/` | Real project-tree shadow canary against `/Users/jess/git/linux-xr`: completed 7.7 GB shadow push, honey mounted clean-name traversal/hydration, and Linux lifecycle companion | repo-archived source/shadow inventory, raw `.git`/hidden-dir config, completed `push.log`, honey mounted `ls`/`find -maxdepth 3`/`cat` transcript for `.clang-format`, mount log, Linux lifecycle write/readback/cache-clear/rehydrate/safe-unsync transcripts, and `result.env` with `proof=shadow-push-honey-linux-lifecycle`; full project parity remains blocked because this archived packet skipped 85 symlinks |
 | `home-canary-linux-xr-shadow-20260510T201809Z/` | Partial/blocking real project-tree shadow canary with `sync_symlinks = true`: completed 7.7 GB shadow push and local source/shadow target manifests matched for 85 symlinks | repo-archived source/shadow inventory, symlink target manifests, completed `push.log` with 93,054 uploads and 85 symlink uploads, honey command/mount logs, failed honey mounted symlink verification at `Documentation/Changes`, failed Linux lifecycle mounted `cat`, and pre-fix S3 posture observations; not full project parity |
+| `home-canary-linux-xr-shadow-20260511T040325Z/` | Scoped `linux-xr` isolated-shadow project-tree parity canary with `sync_symlinks = true`: reused the completed 7.7 GB push, honey mounted bounded traversal/hydration passed, 85 symlink targets matched through mounted `readlink`, and the Linux lifecycle companion passed | repo-archived source/shadow inventory, symlink target manifests, completed `push.log`, push storage summary, honey mounted `ls`/`find -maxdepth 8`/`cat` transcript, mounted symlink verification, mount log, Linux lifecycle write/readback/cache-clear/rehydrate/safe-unsync transcripts, and `result.env` with `proof=shadow-push-honey-linux-lifecycle-symlink-targets`; this is functional isolated project-tree evidence, not production Finder, broad home-directory, or production S3 posture proof |
 | `macos-fileprovider-neo-cleanup-20260510T003148Z/` | Non-mutating neo FileProvider divergence inventory before cleanup | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/` | Non-mutating neo FileProvider divergence inventory with the published `v0.12.12` `.pkg` selected as source | repo-archived inventory plus package checksum pass, `pkgutil --check-signature` Developer ID/notarization output, and non-installing package structure smoke; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-strict-preflight-blocker-20260510T0040Z/` | Non-mutating strict production signing preflight against the existing `~/Applications/TCFSProvider.app` | preflight failed as expected: host and extension keychain access group entitlements/provisioning profiles are missing; ambient `tcfsd` is still `0.12.2` from the Nix profile; this is a blocker record, not Finder readiness |
@@ -114,7 +115,7 @@ the repository.
   local source inventory and shadow/config packet only. Push, honey traversal,
   Linux lifecycle, and full project parity remain open because the source
   contains 85 symlinks and this packet did not prove them as preserved links.
-- `home-canary-linux-xr-shadow-20260510T023938Z/` is now the scoped real
+- `home-canary-linux-xr-shadow-20260510T023938Z/` is the earlier scoped real
   project-tree canary packet. The original long push completed with 92,969
   files and 7.7 GB uploaded, then the helper resumed from the completed
   `push.log`/state without re-pushing. Honey mounted the prefix, listed clean
@@ -122,8 +123,8 @@ the repository.
   hydrated `.clang-format` with exact 24,291-byte content. The Linux lifecycle
   companion under the same prefix also passed mounted write/readback, cache
   clear/rehydrate, dirty safe-unsync refusal, clean recursive unsync, and exact
-  rehydrate. This is a project-tree canary, not full project parity: the source
-  contains 85 symlinks that this packet did not prove as preserved links.
+  rehydrate. It remains useful as a pre-symlink baseline; the source contains
+  85 symlinks that this packet did not prove as preserved links.
 - `home-canary-linux-xr-shadow-20260510T201809Z/` is the fresh symlink-enabled
   canary attempt and is intentionally indexed as blocker/storage evidence. It
   preserved all 85 source symlink targets in the isolated shadow, pushed the
@@ -131,9 +132,18 @@ the repository.
   mounted symlink verification failed on `Documentation/Changes` and the Linux
   lifecycle companion failed during mounted `cat`. Its S3 notes captured
   pre-fix large raw-Git behavior, including `.idx` tiny-object expansion and
-  large `.pack` snapshot memory. Full `linux-xr` parity remains unclaimed until
-  a rebuilt neo+honey host packet passes mounted symlink target verification and
-  lifecycle.
+  large `.pack` snapshot memory.
+- `home-canary-linux-xr-shadow-20260511T040325Z/` is the current scoped
+  isolated-shadow `linux-xr` project-tree parity packet. It did not mutate the
+  live source repo. The push completed before the final storage telemetry
+  changes, then the helper resumed from the completed `push.log`/state without
+  re-pushing. Honey mounted the prefix, ran bounded traversal at `max-depth=8`,
+  hydrated `.clang-format` with exact 24,291-byte content, verified all 85
+  mounted symlink targets with `readlink`, and passed the Linux lifecycle
+  companion. This closes the scoped project-tree parity bar for this isolated
+  shadow only; production Finder, broad home-directory takeover, neo/macOS M4,
+  tombstone UX, keep-synced/pin semantics, and production S3 posture remain
+  separate open gates.
 - The runnable `macos-fileprovider-neo-cleanup-<UTC>/` packet is divergence
   inventory and optional cleanup/install evidence. It is not production Finder
   readiness unless strict production signing preflight passes against the
