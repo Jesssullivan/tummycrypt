@@ -1,0 +1,2 @@
+TCFS Desktop honey fixture
+This file starts in an isolated Desktop demo folder and should hydrate lazily on honey.

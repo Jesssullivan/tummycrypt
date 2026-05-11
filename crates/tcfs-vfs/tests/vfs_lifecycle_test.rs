@@ -144,6 +144,80 @@ async fn readdir_getattr_and_readlink_preserve_symlink_entries() {
     assert_eq!(target, "target.txt");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pushed_symlink_json_index_reads_through_vfs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source_root = tmp.path().join("source");
+    let docs = source_root.join("docs");
+    std::fs::create_dir_all(&docs).expect("create source docs");
+    std::fs::write(docs.join("target.txt"), b"pushed symlink target").expect("write target");
+    std::os::unix::fs::symlink("target.txt", docs.join("link.txt")).expect("create symlink");
+
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "pushed-symlink-json-contract";
+    let mut state =
+        tcfs_sync::state::StateCache::open(&tmp.path().join("state.json")).expect("state cache");
+    let collect = tcfs_sync::engine::CollectConfig {
+        preserve_symlinks: true,
+        sync_empty_dirs: false,
+        ..Default::default()
+    };
+
+    let (uploaded, skipped, _) = tcfs_sync::engine::push_tree_with_device(
+        &op,
+        &source_root,
+        prefix,
+        &mut state,
+        None,
+        "",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("push source tree");
+    assert_eq!(uploaded, 2);
+    assert_eq!(skipped, 0);
+
+    let raw_index = op
+        .read(&format!("{prefix}/index/docs/link.txt"))
+        .await
+        .expect("read symlink index")
+        .to_bytes();
+    let raw_index = String::from_utf8_lossy(&raw_index);
+    assert!(
+        raw_index.trim_start().starts_with('{'),
+        "sync push should write versioned JSON for symlinks: {raw_index}"
+    );
+    assert!(
+        raw_index.contains(r#""kind": "symlink""#),
+        "symlink index should carry v3 kind discriminator: {raw_index}"
+    );
+
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+    let entries = reader.readdir("/docs").await.expect("readdir /docs");
+    let link = entries
+        .iter()
+        .find(|entry| entry.name == "link.txt")
+        .expect("link entry from pushed index");
+    assert_eq!(link.kind, tcfs_vfs::types::VfsFileType::Symlink);
+
+    let attr = reader
+        .getattr("/docs/link.txt")
+        .await
+        .expect("getattr pushed symlink");
+    assert_eq!(attr.kind, tcfs_vfs::types::VfsFileType::Symlink);
+    assert_eq!(attr.size, "target.txt".len() as u64);
+
+    let target = reader
+        .readlink("/docs/link.txt")
+        .await
+        .expect("readlink pushed symlink");
+    assert_eq!(target, "target.txt");
+}
+
 #[tokio::test]
 async fn readdir_is_lazy_and_open_hydrates_cache() {
     let tmp = tempfile::tempdir().expect("tempdir");

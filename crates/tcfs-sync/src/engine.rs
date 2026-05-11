@@ -13,7 +13,9 @@
 
 use anyhow::{Context, Result};
 use opendal::Operator;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
@@ -32,8 +34,39 @@ const CHUNK_MAX_RETRIES: u32 = 3;
 /// Base delay between retries (doubles each attempt: 100ms, 200ms, 400ms).
 const CHUNK_RETRY_BASE_MS: u64 = 100;
 
+/// Default bounded fanout for per-file chunk uploads.
+const DEFAULT_UPLOAD_CHUNK_CONCURRENCY: usize = 4;
+
+/// Hard cap for `TCFS_UPLOAD_CHUNK_CONCURRENCY`.
+const MAX_UPLOAD_CHUNK_CONCURRENCY: usize = 64;
+
 fn retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(CHUNK_RETRY_BASE_MS * 2u64.saturating_pow(attempt))
+}
+
+fn upload_chunk_concurrency_from_env_value(value: Option<&str>) -> usize {
+    let Some(raw) = value else {
+        return DEFAULT_UPLOAD_CHUNK_CONCURRENCY;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_UPLOAD_CHUNK_CONCURRENCY;
+    }
+
+    trimmed
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_UPLOAD_CHUNK_CONCURRENCY))
+        .unwrap_or(DEFAULT_UPLOAD_CHUNK_CONCURRENCY)
+}
+
+fn upload_chunk_concurrency() -> usize {
+    upload_chunk_concurrency_from_env_value(
+        std::env::var("TCFS_UPLOAD_CHUNK_CONCURRENCY")
+            .ok()
+            .as_deref(),
+    )
 }
 
 async fn retry_with_backoff<T, E, Action, ActionFuture, Sleep, SleepFuture, OnRetry>(
@@ -127,6 +160,29 @@ async fn write_chunk_with_retry(
         tokio::time::sleep,
     )
     .await
+}
+
+async fn maybe_upload_chunk(
+    op: Operator,
+    chunk_key: String,
+    upload_data: Vec<u8>,
+    chunk_idx: usize,
+    logical_len: u64,
+) -> Result<u64> {
+    if !op.exists(&chunk_key).await.unwrap_or(false) {
+        write_chunk_with_retry(&op, &chunk_key, upload_data, chunk_idx).await?;
+        return Ok(logical_len);
+    }
+
+    Ok(0)
+}
+
+async fn await_next_chunk_upload(pending: &mut JoinSet<Result<u64>>) -> Result<u64> {
+    let joined = pending
+        .join_next()
+        .await
+        .context("chunk upload task set unexpectedly empty")?;
+    joined.context("chunk upload task panicked or was cancelled")?
 }
 
 /// Read a key from remote storage with exponential backoff retry.
@@ -468,7 +524,7 @@ pub struct UploadResult {
 #[derive(Debug)]
 enum UploadSourceSnapshot {
     InMemory(Vec<u8>),
-    Streaming(Vec<tcfs_chunks::ChunkWithData>),
+    Streaming(Vec<tcfs_chunks::Chunk>),
 }
 
 #[derive(Debug)]
@@ -480,19 +536,15 @@ struct UploadSnapshot {
 
 fn prepare_upload_snapshot(local_path: &Path, use_streaming: bool) -> Result<UploadSnapshot> {
     if use_streaming {
-        let chunks = tcfs_chunks::chunk_file_streaming(local_path).with_context(|| {
-            format!(
-                "streaming chunk for upload snapshot: {}",
-                local_path.display()
-            )
-        })?;
-        let mut hasher = blake3::Hasher::new();
-        let mut file_size = 0u64;
-        for chunk in &chunks {
-            hasher.update(&chunk.data);
-            file_size += chunk.data.len() as u64;
-        }
-        let file_hash_hex = tcfs_chunks::hash_to_hex(&hasher.finalize());
+        let (chunks, file_hash) = tcfs_chunks::chunk_file_streaming_metadata(local_path)
+            .with_context(|| {
+                format!(
+                    "streaming chunk metadata for upload snapshot: {}",
+                    local_path.display()
+                )
+            })?;
+        let file_size = chunks.iter().map(|chunk| chunk.length as u64).sum();
+        let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
         Ok(UploadSnapshot {
             file_hash_hex,
             file_size,
@@ -508,6 +560,30 @@ fn prepare_upload_snapshot(local_path: &Path, use_streaming: bool) -> Result<Upl
             source: UploadSourceSnapshot::InMemory(data),
         })
     }
+}
+
+fn read_verified_snapshot_chunk_from(
+    file: &mut std::fs::File,
+    local_path: &Path,
+    chunk: &tcfs_chunks::Chunk,
+    chunk_idx: usize,
+) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(chunk.offset))
+        .with_context(|| format!("seeking chunk {chunk_idx}: {}", local_path.display()))?;
+
+    let mut data = vec![0u8; chunk.length];
+    file.read_exact(&mut data)
+        .with_context(|| format!("reading chunk {chunk_idx}: {}", local_path.display()))?;
+
+    let actual_hash = tcfs_chunks::hash_bytes(&data);
+    if actual_hash != chunk.hash {
+        anyhow::bail!(
+            "file changed during streaming upload: chunk {chunk_idx} hash mismatch for {}",
+            local_path.display()
+        );
+    }
+
+    Ok(data)
 }
 
 fn ensure_source_matches_snapshot(
@@ -839,6 +915,7 @@ pub async fn upload_file_with_device(
     let mut chunk_hashes = Vec::new();
     let mut bytes_uploaded = 0u64;
     let num_chunks;
+    let chunk_upload_concurrency = upload_chunk_concurrency();
 
     // Generate per-file encryption key if encryption is enabled
     #[cfg(feature = "crypto")]
@@ -863,40 +940,69 @@ pub async fn upload_file_with_device(
 
         num_chunks = streaming_chunks.len();
         chunk_hashes.reserve(num_chunks);
+        let mut pending_uploads = JoinSet::new();
+        let mut completed_chunks = 0usize;
+        let mut snapshot_file = std::fs::File::open(local_path).with_context(|| {
+            format!(
+                "opening streaming upload source after snapshot: {}",
+                local_path.display()
+            )
+        })?;
 
         for (i, chunk) in streaming_chunks.iter().enumerate() {
+            let chunk_data =
+                read_verified_snapshot_chunk_from(&mut snapshot_file, local_path, chunk, i)?;
+
             #[cfg(feature = "crypto")]
             let (upload_data, chunk_hash_hex) =
                 if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
-                    let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, &chunk.data)
+                    let ciphertext = tcfs_crypto::encrypt_chunk(fk, i as u64, fid, &chunk_data)
                         .with_context(|| format!("encrypting chunk {i}"))?;
                     let ct_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
                     (ciphertext, ct_hash)
                 } else {
                     let h = tcfs_chunks::hash_to_hex(&chunk.hash);
-                    (chunk.data.clone(), h)
+                    (chunk_data.clone(), h)
                 };
 
             #[cfg(not(feature = "crypto"))]
             let (upload_data, chunk_hash_hex) = {
                 let h = tcfs_chunks::hash_to_hex(&chunk.hash);
-                (chunk.data.clone(), h)
+                (chunk_data.clone(), h)
             };
 
             let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
-
-            if !op.exists(&chunk_key).await.unwrap_or(false) {
-                write_chunk_with_retry(op, &chunk_key, upload_data, i).await?;
-                bytes_uploaded += chunk.data.len() as u64;
-            }
-
             chunk_hashes.push(chunk_hash_hex);
 
+            pending_uploads.spawn(maybe_upload_chunk(
+                op.clone(),
+                chunk_key,
+                upload_data,
+                i,
+                chunk.length as u64,
+            ));
+
+            while pending_uploads.len() >= chunk_upload_concurrency {
+                bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+                completed_chunks += 1;
+                if let Some(cb) = progress {
+                    cb(
+                        completed_chunks as u64,
+                        num_chunks as u64,
+                        &format!("chunk {completed_chunks}/{num_chunks}"),
+                    );
+                }
+            }
+        }
+
+        while !pending_uploads.is_empty() {
+            bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+            completed_chunks += 1;
             if let Some(cb) = progress {
                 cb(
-                    (i + 1) as u64,
+                    completed_chunks as u64,
                     num_chunks as u64,
-                    &format!("chunk {}/{num_chunks}", i + 1),
+                    &format!("chunk {completed_chunks}/{num_chunks}"),
                 );
             }
         }
@@ -909,6 +1015,8 @@ pub async fn upload_file_with_device(
 
         num_chunks = chunks.len();
         chunk_hashes.reserve(num_chunks);
+        let mut pending_uploads = JoinSet::new();
+        let mut completed_chunks = 0usize;
 
         for (i, chunk) in chunks.iter().enumerate() {
             let start = chunk.offset as usize;
@@ -942,19 +1050,37 @@ pub async fn upload_file_with_device(
             };
 
             let chunk_key = format!("{remote_prefix}/chunks/{chunk_hash_hex}");
-
-            if !op.exists(&chunk_key).await.unwrap_or(false) {
-                write_chunk_with_retry(op, &chunk_key, upload_data, i).await?;
-                bytes_uploaded += chunk.length as u64;
-            }
-
             chunk_hashes.push(chunk_hash_hex);
 
+            pending_uploads.spawn(maybe_upload_chunk(
+                op.clone(),
+                chunk_key,
+                upload_data,
+                i,
+                chunk.length as u64,
+            ));
+
+            while pending_uploads.len() >= chunk_upload_concurrency {
+                bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+                completed_chunks += 1;
+                if let Some(cb) = progress {
+                    cb(
+                        completed_chunks as u64,
+                        num_chunks as u64,
+                        &format!("chunk {completed_chunks}/{num_chunks}"),
+                    );
+                }
+            }
+        }
+
+        while !pending_uploads.is_empty() {
+            bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+            completed_chunks += 1;
             if let Some(cb) = progress {
                 cb(
-                    (i + 1) as u64,
+                    completed_chunks as u64,
                     num_chunks as u64,
-                    &format!("chunk {}/{num_chunks}", i + 1),
+                    &format!("chunk {completed_chunks}/{num_chunks}"),
                 );
             }
         }
@@ -1038,6 +1164,7 @@ pub async fn upload_file_with_device(
         bytes = file_size,
         uploaded_bytes = bytes_uploaded,
         streaming = use_streaming,
+        chunk_upload_concurrency,
         "uploaded"
     );
 
@@ -1952,6 +2079,83 @@ mod tests {
             .into_iter()
             .map(|entry| entry.path().to_string())
             .collect()
+    }
+
+    #[test]
+    fn streaming_upload_snapshot_keeps_chunk_metadata() {
+        let data: Vec<u8> = (0u64..524288)
+            .map(|i| (i.wrapping_mul(19) ^ (i >> 8)) as u8)
+            .collect();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &data).unwrap();
+
+        let snapshot = prepare_upload_snapshot(tmp.path(), true).unwrap();
+
+        assert_eq!(snapshot.file_size, data.len() as u64);
+        assert_eq!(
+            snapshot.file_hash_hex,
+            tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
+        );
+        let UploadSourceSnapshot::Streaming(chunks) = snapshot.source else {
+            panic!("streaming snapshot should keep chunk metadata");
+        };
+        assert_eq!(
+            chunks.iter().map(|chunk| chunk.length).sum::<usize>(),
+            data.len()
+        );
+    }
+
+    #[test]
+    fn verified_snapshot_chunk_refuses_mutated_source_bytes() {
+        let data: Vec<u8> = (0u64..524288)
+            .map(|i| (i.wrapping_mul(23) ^ (i >> 6)) as u8)
+            .collect();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &data).unwrap();
+
+        let snapshot = prepare_upload_snapshot(tmp.path(), true).unwrap();
+        let UploadSourceSnapshot::Streaming(chunks) = snapshot.source else {
+            panic!("streaming snapshot should keep chunk metadata");
+        };
+        assert!(!chunks.is_empty());
+
+        let mut mutated = data;
+        mutated[0] ^= 0xff;
+        std::fs::write(tmp.path(), mutated).unwrap();
+
+        let mut file = std::fs::File::open(tmp.path()).unwrap();
+        let err =
+            read_verified_snapshot_chunk_from(&mut file, tmp.path(), &chunks[0], 0).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("file changed during streaming upload"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn upload_chunk_concurrency_env_is_bounded() {
+        assert_eq!(
+            upload_chunk_concurrency_from_env_value(None),
+            DEFAULT_UPLOAD_CHUNK_CONCURRENCY
+        );
+        assert_eq!(
+            upload_chunk_concurrency_from_env_value(Some("")),
+            DEFAULT_UPLOAD_CHUNK_CONCURRENCY
+        );
+        assert_eq!(
+            upload_chunk_concurrency_from_env_value(Some("not-a-number")),
+            DEFAULT_UPLOAD_CHUNK_CONCURRENCY
+        );
+        assert_eq!(
+            upload_chunk_concurrency_from_env_value(Some("0")),
+            DEFAULT_UPLOAD_CHUNK_CONCURRENCY
+        );
+        assert_eq!(upload_chunk_concurrency_from_env_value(Some("7")), 7);
+        assert_eq!(
+            upload_chunk_concurrency_from_env_value(Some("999")),
+            MAX_UPLOAD_CHUNK_CONCURRENCY
+        );
     }
 
     // ── collect_files (empty dir detection) ──────────────────────────────
