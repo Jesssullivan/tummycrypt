@@ -132,6 +132,11 @@ RESUME_EVIDENCE="$TMPDIR/resume-evidence"
 RESUME_STATE="$TMPDIR/resume-state"
 mkdir -p "$RESUME_EVIDENCE" "$RESUME_STATE"
 cat >"$RESUME_EVIDENCE/push.log" <<'EOF'
+2026-05-11T05:59:59.000000Z  WARN tcfs_sync::storage: transient object write failure key=tcfs/chunks/demo attempt=1 delay_ms=50
+2026-05-11T06:00:00.000000Z  INFO tcfs_sync::engine: chunk upload progress path=/tmp/shadow/.git/objects/pack/pack-demo.idx completed_chunks=5 chunks=10 uploaded_bytes=200 streaming=true
+2026-05-11T06:00:01.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/.git/objects/pack/pack-demo.idx hash=111 chunks=10 bytes=1000 uploaded_bytes=400 streaming=true chunk_upload_concurrency=4 chunk_exists_check=false
+2026-05-11T06:00:02.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/space dir/read me.txt hash=222 chunks=2 bytes=20 uploaded_bytes=20 streaming=false chunk_upload_concurrency=4 chunk_exists_check=false
+2026-05-11T06:00:03.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/empty.txt hash=333 chunks=0 bytes=0 uploaded_bytes=0 streaming=false chunk_upload_concurrency=4 chunk_exists_check=false
 Push complete:
   uploaded: 2 files (42 B)
 EOF
@@ -152,6 +157,26 @@ assert_contains "$RESUME_EVIDENCE/run-metadata.env" "resume_after_push=1"
 assert_contains "$RESUME_EVIDENCE/run-metadata.env" "reuse_shadow=1"
 assert_contains "$RESUME_EVIDENCE/result.env" "status=0"
 assert_contains "$RESUME_EVIDENCE/result.env" "proof=shadow-push"
+assert_contains "$RESUME_EVIDENCE/README.md" "push-storage-summary.env"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "upload_rows=3"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_upload_progress_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "total_file_bytes=1020"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "total_uploaded_bytes=420"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "dedupe_or_existing_bytes=600"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "total_chunks=12"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "streaming_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "zero_chunk_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_exists_check_false_rows=3"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_upload_concurrency_values=4"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "warn_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "retry_warning_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "error_rows=0"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "pack_index_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "pack_index_chunks=10"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "max_chunks=10"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "max_chunks_path=/tmp/shadow/.git/objects/pack/pack-demo.idx"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "TCFS Push Storage Summary"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "Dedupe or existing bytes"
 
 assert_fails_contains \
   "refusing to canary full HOME" \

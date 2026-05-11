@@ -619,6 +619,8 @@ Contents:
   \`git_sync_mode = "raw"\`, \`sync_symlinks = true\`, and
   \`sync_empty_dirs = true\`
 - \`push.log\`: shadow push transcript when \`--push\` ran
+- \`push-storage-summary.env\` and \`push-storage-summary.md\`: storage-facing
+  totals extracted from \`push.log\` when push evidence is present
 - \`honey-linux-xr-shadow-commands.txt\`: honey mounted traversal/hydration
   commands for the selected file, \`.git\` traversal, and mounted symlink
   target verification
@@ -626,6 +628,198 @@ Contents:
   write/readback, cache clear/rehydrate, dirty safe-unsync refusal, clean
   recursive unsync, and exact rehydrate companion evidence
 EOF
+}
+
+write_push_storage_summary() {
+  local log_path="$evidence_dir/push.log"
+  local env_path="$evidence_dir/push-storage-summary.env"
+  local md_path="$evidence_dir/push-storage-summary.md"
+
+  [[ -f "$log_path" ]] || return 0
+
+  awk '
+    function value_after(line, key, rest, parts) {
+      rest = line
+      start = index(rest, key "=")
+      if (start == 0) {
+        return ""
+      }
+      rest = substr(rest, start + length(key) + 1)
+      split(rest, parts, " ")
+      return parts[1]
+    }
+    function uploaded_path(line, rest, stop) {
+      start = index(line, "uploaded path=")
+      if (start == 0) {
+        return ""
+      }
+      rest = substr(line, start + length("uploaded path="))
+      stop = index(rest, " hash=")
+      if (stop == 0) {
+        return ""
+      }
+      return substr(rest, 1, stop - 1)
+    }
+    function add_concurrency(value) {
+      if (value == "" || value in seen_concurrency) {
+        return
+      }
+      seen_concurrency[value] = 1
+      if (concurrency_values == "") {
+        concurrency_values = value
+      } else {
+        concurrency_values = concurrency_values "," value
+      }
+    }
+    /chunk upload progress/ {
+      progress_rows += 1
+      next
+    }
+    / WARN / {
+      warn_rows += 1
+      if ($0 ~ /attempt=/ && $0 ~ /delay_ms=/) {
+        retry_warning_rows += 1
+      }
+    }
+    / ERROR / {
+      error_rows += 1
+    }
+    /uploaded path=/ {
+      rows += 1
+      if (first_timestamp == "") {
+        first_timestamp = $1
+      }
+      last_timestamp = $1
+
+      path = uploaded_path($0)
+      chunks = value_after($0, "chunks") + 0
+      bytes = value_after($0, "bytes") + 0
+      uploaded_bytes = value_after($0, "uploaded_bytes") + 0
+      streaming = value_after($0, "streaming")
+      exists_check = value_after($0, "chunk_exists_check")
+      concurrency = value_after($0, "chunk_upload_concurrency")
+
+      total_chunks += chunks
+      total_file_bytes += bytes
+      total_uploaded_bytes += uploaded_bytes
+      add_concurrency(concurrency)
+
+      if (streaming == "true") {
+        streaming_rows += 1
+      } else if (streaming == "false") {
+        non_streaming_rows += 1
+      }
+
+      if (exists_check == "true") {
+        chunk_exists_check_true_rows += 1
+      } else if (exists_check == "false") {
+        chunk_exists_check_false_rows += 1
+      } else {
+        chunk_exists_check_absent_rows += 1
+      }
+
+      if (chunks == 0) {
+        zero_chunk_rows += 1
+      }
+      if (path ~ /\.git\/objects\/pack\/.*\.pack$/) {
+        pack_rows += 1
+        pack_chunks += chunks
+        pack_bytes += bytes
+        pack_uploaded_bytes += uploaded_bytes
+      } else if (path ~ /\.git\/objects\/pack\/.*\.idx$/) {
+        pack_index_rows += 1
+        pack_index_chunks += chunks
+        pack_index_bytes += bytes
+        pack_index_uploaded_bytes += uploaded_bytes
+      }
+
+      if (rows == 1 || chunks > max_chunks) {
+        max_chunks = chunks
+        max_chunks_path = path
+      }
+      if (rows == 1 || bytes > max_bytes) {
+        max_bytes = bytes
+        max_bytes_path = path
+      }
+    }
+    END {
+      dedupe_or_existing_bytes = total_file_bytes - total_uploaded_bytes
+      if (dedupe_or_existing_bytes < 0) {
+        dedupe_or_existing_bytes = 0
+      }
+      print "upload_rows=" rows + 0
+      print "chunk_upload_progress_rows=" progress_rows + 0
+      print "first_upload_timestamp=" first_timestamp
+      print "last_upload_timestamp=" last_timestamp
+      print "total_file_bytes=" total_file_bytes + 0
+      print "total_uploaded_bytes=" total_uploaded_bytes + 0
+      print "dedupe_or_existing_bytes=" dedupe_or_existing_bytes + 0
+      print "total_chunks=" total_chunks + 0
+      print "streaming_rows=" streaming_rows + 0
+      print "non_streaming_rows=" non_streaming_rows + 0
+      print "zero_chunk_rows=" zero_chunk_rows + 0
+      print "chunk_exists_check_true_rows=" chunk_exists_check_true_rows + 0
+      print "chunk_exists_check_false_rows=" chunk_exists_check_false_rows + 0
+      print "chunk_exists_check_absent_rows=" chunk_exists_check_absent_rows + 0
+      print "chunk_upload_concurrency_values=" concurrency_values
+      print "warn_rows=" warn_rows + 0
+      print "retry_warning_rows=" retry_warning_rows + 0
+      print "error_rows=" error_rows + 0
+      print "pack_rows=" pack_rows + 0
+      print "pack_chunks=" pack_chunks + 0
+      print "pack_file_bytes=" pack_bytes + 0
+      print "pack_uploaded_bytes=" pack_uploaded_bytes + 0
+      print "pack_index_rows=" pack_index_rows + 0
+      print "pack_index_chunks=" pack_index_chunks + 0
+      print "pack_index_file_bytes=" pack_index_bytes + 0
+      print "pack_index_uploaded_bytes=" pack_index_uploaded_bytes + 0
+      print "max_chunks=" max_chunks + 0
+      print "max_chunks_path=" max_chunks_path
+      print "max_bytes=" max_bytes + 0
+      print "max_bytes_path=" max_bytes_path
+    }
+  ' "$log_path" >"$env_path"
+
+  awk -F= '
+    {
+      key = $1
+      value = substr($0, index($0, "=") + 1)
+      values[key] = value
+    }
+    END {
+      print "# TCFS Push Storage Summary"
+      print ""
+      print "Derived from `push.log`."
+      print ""
+      print "| Metric | Value |"
+      print "| --- | --- |"
+      print "| Upload rows | " values["upload_rows"] " |"
+      print "| Chunk progress rows | " values["chunk_upload_progress_rows"] " |"
+      print "| First upload timestamp | " values["first_upload_timestamp"] " |"
+      print "| Last upload timestamp | " values["last_upload_timestamp"] " |"
+      print "| Total file bytes | " values["total_file_bytes"] " |"
+      print "| Total uploaded bytes | " values["total_uploaded_bytes"] " |"
+      print "| Dedupe or existing bytes | " values["dedupe_or_existing_bytes"] " |"
+      print "| Total chunks | " values["total_chunks"] " |"
+      print "| Streaming rows | " values["streaming_rows"] " |"
+      print "| Zero-chunk rows | " values["zero_chunk_rows"] " |"
+      print "| Chunk exists check true rows | " values["chunk_exists_check_true_rows"] " |"
+      print "| Chunk exists check false rows | " values["chunk_exists_check_false_rows"] " |"
+      print "| Chunk exists check absent rows | " values["chunk_exists_check_absent_rows"] " |"
+      print "| Chunk upload concurrency values | " values["chunk_upload_concurrency_values"] " |"
+      print "| Warning rows | " values["warn_rows"] " |"
+      print "| Retry warning rows | " values["retry_warning_rows"] " |"
+      print "| Error rows | " values["error_rows"] " |"
+      print "| Pack rows | " values["pack_rows"] " |"
+      print "| Pack chunks | " values["pack_chunks"] " |"
+      print "| Pack index rows | " values["pack_index_rows"] " |"
+      print "| Pack index chunks | " values["pack_index_chunks"] " |"
+      print "| Max chunks | " values["max_chunks"] " |"
+      print "| Max chunks path | `" values["max_chunks_path"] "` |"
+      print "| Max bytes | " values["max_bytes"] " |"
+      print "| Max bytes path | `" values["max_bytes_path"] "` |"
+    }
+  ' "$env_path" >"$md_path"
 }
 
 cp "$config_path" "$evidence_dir/tcfs-linux-xr-shadow.toml"
@@ -661,6 +855,7 @@ if [[ "$push_remote" == "1" ]]; then
   printf 'pushing shadow to disposable prefix: %s\n' "$remote"
   "${tcfs_cmd[@]}" --config "$config_path" push "$shadow_canon" --prefix "$prefix" --state "$state_json" \
     >"$evidence_dir/push.log" 2>&1 || push_rc=$?
+  write_push_storage_summary
   push_status_label=$push_rc
   write_run_metadata
   if [[ "$push_rc" -ne 0 ]]; then
@@ -673,6 +868,7 @@ if [[ "$resume_after_push" == "1" ]]; then
   grep -Fq 'Push complete:' "$evidence_dir/push.log" || fail "--resume-after-push requires push.log with 'Push complete:'"
   [[ -f "$state_json" ]] || fail "--resume-after-push requires existing state JSON: $state_json"
   push_available=1
+  write_push_storage_summary
   push_status_label=0
   write_run_metadata
 fi
@@ -885,6 +1081,7 @@ if [[ "$run_linux_lifecycle" == "1" ]]; then
 fi
 
 write_run_metadata
+write_push_storage_summary
 write_readme
 push_available=0
 if [[ "$push_remote" == "1" || "$resume_after_push" == "1" ]]; then
