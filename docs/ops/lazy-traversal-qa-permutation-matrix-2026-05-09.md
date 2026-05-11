@@ -89,7 +89,7 @@ queueing, retry, or endpoint problems that block production claims.
 | S1 | Large raw-Git index push | `.git/objects/pack/*.idx` uses a large-file chunk profile, records chunk count and push duration, and does not explode into tiny S3 objects | `20260510T201809Z` exposed the old small-profile behavior: a 395,849,892-byte `.idx` became 72,598 chunks. Code-level regression now routes `.idx` through the pack/binary profile, but host performance proof must be rerun with rebuilt binaries |
 | S2 | Large raw-Git pack push | Multi-GB `.pack` files push without unbounded memory growth, with archived chunk count, bytes uploaded, retry count, and wall-clock duration | `20260510T201809Z` captured pre-fix behavior: a 6,216,046,897-byte `.pack` produced 70,856 chunks and sampled about 6.1 GiB footprint during snapshot preparation. Streaming snapshot memory is fixed locally, but post-fix proof remains open |
 | S3 | Endpoint posture | Packet records endpoint class, TLS policy, credential source, bucket/prefix isolation, and whether public CI can reach it safely | Open. Existing packets use disposable prefixes, but production-like endpoint class and public-runner reachability remain separate proof rows |
-| S4 | Queue/concurrency behavior | Upload engine records whether file and chunk writes are sequential or bounded-parallel, and retries are visible in evidence | Code-level support now uses bounded per-file chunk fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY`, with upload logs carrying `chunk_upload_concurrency`; host proof still needs a rerun with object counts, retries, and timings |
+| S4 | Queue/concurrency behavior | Upload engine records whether file and chunk writes are sequential or bounded-parallel, and retries are visible in evidence | Code-level support now uses bounded per-file chunk fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY`, optional disposable-prefix chunk writes via `TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1` with `chunk_exists_check=false` in logs, and bounded progress rows via `TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS`; host proof still needs a release-build rerun with object counts, retries, and timings |
 | S5 | Hydration latency on S3 | Cold list, first-byte hydrate, full hydrate, cache-hit read, and cache-clear/rehydrate timings are archived for representative small and large files | Open. Current traversal rows prove exact bytes, not latency SLOs |
 
 ## QA Evidence Minimums
@@ -148,3 +148,19 @@ behavior into user-facing claims:
    large `.idx`/`.pack` paths with the rebuilt chunk-profile, streaming-memory,
    and bounded chunk-upload fanout changes, then decide whether multipart or
    native SeaweedFS semantics are the next product change.
+
+## Next Mutation Detail
+
+These rows are the planning targets for the next QA packets and should not be
+reported as product claims until evidence lands:
+
+| ID | Mutation | Acceptance notes |
+| --- | --- | --- |
+| S6 | Post-fix release-binary raw-Git canary on a new disposable S3 prefix | Archive release build provenance, endpoint/TLS/credential posture, object counts, retries, memory peak, wall-clock timings, `chunk_exists_check` mode, progress rows, and hydration latency. Debug-binary evidence remains functional evidence only. |
+| P6 | Mounted symlink closure for `linux-xr` | Prove all inventoried symlinks rehydrate as symlinks with matching `readlink` targets from the honey mounted view, then run the Linux lifecycle companion against the same prefix. Shadow inventory alone is not enough. |
+| M8-A | Delete/rename while peer-unsynced tombstone details | Add `sync-status` for stale `.tc` paths, repeated pull/open idempotence, mounted old-path behavior, delete-then-recreate same relative path, and rename same-hash versus different-hash cases. Keep product tombstone semantics open until accepted. |
+| M5-D2 | Daemon-backed conflict resolve closure | Assert the RPC returns, winning bytes remain at the original path, losing bytes land at the daemon conflict-copy path, final state is synced, a second resolve is idempotent, and timeout paths leave no partial files. |
+| K1 | Keep-synced / pin acceptance | Define the product surface before testing: status wording, local storage guarantee, eviction refusal or allowance, watcher/reconcile behavior, peer delete/edit behavior, and conflict behavior. |
+| R1 | Mounted remount and stale-index behavior | Mutate the remote while a local physical root is stub-only, restart/remount the daemon, and prove clean-name reads pick up the latest index without stale negative-cache behavior. This is Linux mounted VFS evidence, not neo/macOS M4 closure. |
+| F8 | Finder PZM peer-update/evict smoke | Under the PZM/testing-mode label only, mirror M3/M6 with FileProvider evict/dehydrate, peer update, requestDownload, exact latest bytes, and CLI status/log evidence. Production Finder remains blocked by Developer ID package proof. |
+| M7-A | Three-machine/offline descendant matrix | Add a third device with one offline subtree, one conflicted child, one independent delete/rename sibling, and exact proof that unrelated descendants continue syncing while local conflicted content is preserved. |
