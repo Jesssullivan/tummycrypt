@@ -1,0 +1,2 @@
+origin	git@github.com:tinyland-inc/linux-xr.git (fetch)
+origin	git@github.com:tinyland-inc/linux-xr.git (push)

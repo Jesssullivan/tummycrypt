@@ -1,0 +1,2 @@
+/Users/jess/git/linux-xr/.git
+/Users/jess/git/linux-xr/.github

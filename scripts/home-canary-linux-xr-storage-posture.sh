@@ -41,6 +41,8 @@ Options:
                           TCFS_UPLOAD_CHUNK_CONCURRENCY. Default: 4
   --progress-every-chunks <n>
                           TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS. Default: 1024
+  --chunk-timeout-secs <n>
+                          TCFS_UPLOAD_CHUNK_TIMEOUT_SECS. Default: 300; 0 disables
   --no-assume-fresh-prefix
                           Do not set TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1
   --allow-debug-binary   Permit target/debug/cargo-run style binaries
@@ -141,6 +143,7 @@ honey_smoke_timeout_secs="${TCFS_HONEY_SMOKE_TIMEOUT_SECS:-900}"
 forward_aws_env="$(bool_env TCFS_HONEY_FORWARD_AWS_ENV "${TCFS_HONEY_FORWARD_AWS_ENV:-0}")"
 upload_concurrency="${TCFS_UPLOAD_CHUNK_CONCURRENCY:-4}"
 progress_every_chunks="${TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS:-1024}"
+chunk_timeout_secs="${TCFS_UPLOAD_CHUNK_TIMEOUT_SECS:-300}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -243,6 +246,11 @@ while [[ $# -gt 0 ]]; do
       progress_every_chunks="$2"
       shift 2
       ;;
+    --chunk-timeout-secs)
+      [[ $# -ge 2 ]] || fail "--chunk-timeout-secs requires a value"
+      chunk_timeout_secs="$2"
+      shift 2
+      ;;
     --no-assume-fresh-prefix)
       assume_fresh_prefix=0
       shift
@@ -267,6 +275,7 @@ done
 
 [[ "$upload_concurrency" =~ ^[0-9]+$ ]] || fail "--upload-concurrency must be numeric"
 [[ "$progress_every_chunks" =~ ^[0-9]+$ ]] || fail "--progress-every-chunks must be numeric"
+[[ "$chunk_timeout_secs" =~ ^[0-9]+$ ]] || fail "--chunk-timeout-secs must be numeric"
 [[ "$honey_smoke_max_depth" =~ ^[0-9]+$ ]] || fail "--honey-smoke-max-depth must be numeric"
 [[ "$honey_smoke_timeout_secs" =~ ^[0-9]+$ ]] || fail "--honey-smoke-timeout-secs must be numeric"
 
@@ -362,6 +371,7 @@ tcfs_sha256=$tcfs_sha256
 assume_fresh_prefix=$assume_fresh_prefix
 upload_concurrency=$upload_concurrency
 progress_every_chunks=$progress_every_chunks
+chunk_timeout_secs=$chunk_timeout_secs
 run_honey=$run_honey
 run_linux_lifecycle=$run_linux_lifecycle
 honey_host=$honey_host
@@ -389,7 +399,8 @@ Required claim boundary:
 - use a fresh disposable remote prefix
 - preserve \`chunk_exists_check=false\` when fresh-prefix mode is enabled
 - preserve chunk progress rows, concurrency, retry/warning counts, object
-  counts, endpoint posture, and push wall-clock/memory evidence where available
+  counts, chunk timeout posture, endpoint posture, and push wall-clock/memory
+  evidence where available
 - keep production Finder, broad home-directory takeover, and on-prem cutover out
   of this packet
 
@@ -445,6 +456,7 @@ child_args+=(
 
 export TCFS_UPLOAD_CHUNK_CONCURRENCY="$upload_concurrency"
 export TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS="$progress_every_chunks"
+export TCFS_UPLOAD_CHUNK_TIMEOUT_SECS="$chunk_timeout_secs"
 if [[ "$assume_fresh_prefix" == "1" ]]; then
   export TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1
 else

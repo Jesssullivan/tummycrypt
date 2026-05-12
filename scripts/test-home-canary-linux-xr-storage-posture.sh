@@ -85,6 +85,7 @@ OUT="$TMPDIR/positive.out"
   --tcfs-bin "$BIN_DIR/tcfs" \
   --upload-concurrency 7 \
   --progress-every-chunks 19 \
+  --chunk-timeout-secs 23 \
   --honey-host honey-test \
   >"$OUT"
 
@@ -100,6 +101,7 @@ assert_contains "$EVIDENCE/storage-posture.env" "tcfs_version=tcfs 0.12.12-test"
 assert_contains "$EVIDENCE/storage-posture.env" "assume_fresh_prefix=1"
 assert_contains "$EVIDENCE/storage-posture.env" "upload_concurrency=7"
 assert_contains "$EVIDENCE/storage-posture.env" "progress_every_chunks=19"
+assert_contains "$EVIDENCE/storage-posture.env" "chunk_timeout_secs=23"
 assert_contains "$EVIDENCE/storage-posture.env" "production_storage_posture_claim=0"
 assert_contains "$EVIDENCE/storage-posture.md" "production S3 posture claim."
 assert_contains "$EVIDENCE/run-metadata.env" "push=0"

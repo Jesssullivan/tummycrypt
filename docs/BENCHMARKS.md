@@ -58,7 +58,7 @@ should record:
 | Endpoint class | local dev SeaweedFS, private Tailscale SeaweedFS, public HTTPS tunnel, or production-like endpoint |
 | Transport/security | `enforce_tls` setting, credential source, bucket/prefix isolation, and whether the run is safe for public CI |
 | Large-object shape | source path, file size, selected chunk profile, chunk count, uploaded bytes, skipped bytes, manifest size, and index write timing |
-| Queue/concurrency | engine-level file/chunk fanout, OpenDAL concurrency limit, retry counts, and backoff behavior |
+| Queue/concurrency | engine-level file/chunk fanout, OpenDAL concurrency limit, per-chunk timeout posture, retry counts, timeout counts, and backoff behavior |
 | Hydration latency | list/index latency, cold first-byte read, full-file hydrate, cache-hit read, and cache-clear/rehydrate timing |
 
 The raw-Git project-tree canary is intentionally allowed to expose these
@@ -82,6 +82,20 @@ Functional follow-up observations from
   Treat this packet as functional and storage-observation evidence, not a
   production storage posture proof.
 
+Partial release-binary storage observations from
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260512T034347Z/`:
+
+- The packet used the release `tcfs 0.12.12` binary with a fresh disposable
+  prefix, upload concurrency 8, `TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1`, and
+  `chunk_exists_check=false`.
+- The dominant 6,216,046,897-byte raw-Git `.pack` completed with 70,856 chunks,
+  but showed repeated multi-minute gaps with no progress row and no retry row.
+- The adjacent 45,641,304-byte `.rev` completed with 8,405 chunks and showed the
+  same stall shape.
+- The run was stopped during the normal project-file walk at 4,046 uploaded rows
+  after 5,277.06 seconds, with no retry rows. Treat this as storage blocker
+  evidence only; `result.env` records `proof=push-failed`.
+
 Pre-fix host observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:
 
@@ -97,7 +111,10 @@ Pre-fix host observations from
 The follow-up work routes `.idx` files through the large-file profile, keeps
 streaming upload snapshots to chunk metadata plus whole-file hash, and adds
 bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default 4, cap
-64). Fresh-prefix bulk proof can now opt in to
+64). Chunk upload attempts are bounded by
+`TCFS_UPLOAD_CHUNK_TIMEOUT_SECS` (default 300, cap 3600, `0` disables) so a
+wedged S3 write slot becomes a retry row instead of an unobservable stall.
+Fresh-prefix bulk proof can now opt in to
 `TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1` to skip per-chunk remote existence checks,
 and `TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS=N` records bounded chunk progress for
 objects, including a terminal progress row once the object reaches at least `N`
@@ -109,8 +126,8 @@ production throughput, object-count, or memory claim is made.
 The release-binary rerun path is now codified as
 `task lazy:home-canary-linux-xr-storage-posture`. That wrapper delegates the
 same isolated-shadow mechanics to `scripts/home-canary-linux-xr-shadow.sh`, but
-adds a release-binary guard, fresh-prefix guard, upload concurrency/progress
-defaults, endpoint/TLS and credential-presence metadata, and an explicit
+adds a release-binary guard, fresh-prefix guard, upload concurrency, progress,
+and timeout defaults, endpoint/TLS and credential-presence metadata, and an explicit
 `production_storage_posture_claim=0` boundary. It is a harness for the next
 packet, not evidence that the packet has passed.
 
