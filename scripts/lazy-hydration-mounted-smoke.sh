@@ -6,8 +6,9 @@ usage() {
 Usage: scripts/lazy-hydration-mounted-smoke.sh [options]
 
 Verify an already-mounted TCFS lazy hydration surface:
-clean names are visible through ls/find, raw .tc/.tcf suffixes do not leak into
-the mounted view, and cat of a remote-backed file hydrates and returns content.
+clean names are visible through ls/find, physical TCFS .tc/.tcf stubs do not
+leak into the mounted view, and cat of a remote-backed file hydrates and
+returns content.
 
 This helper intentionally does not start tcfsd, seed storage, or mount a remote.
 Use it after a real or disposable backend has been seeded and mounted.
@@ -43,6 +44,38 @@ validate_relpath() {
       fail "$label must not contain .. path segments: $rel"
       ;;
   esac
+}
+
+has_tcfs_stub_suffix() {
+  local path="$1"
+
+  case "${path##*/}" in
+    *.tc|*.tcf) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_tcfs_physical_stub_file() {
+  local path="$1"
+
+  has_tcfs_stub_suffix "$path" || return 1
+  [[ -f "$path" && -r "$path" ]] || return 1
+
+  LC_ALL=C head -c 4096 "$path" 2>/dev/null | awk '
+    NR == 1 {
+      if ($0 != "version https://tummycrypt.io/tcfs/v1") {
+        exit 1
+      }
+    }
+    $1 == "oid" && $2 ~ /^blake3:[0-9A-Fa-f]+$/ { oid = 1 }
+    $1 == "origin" && $2 ~ /^seaweedfs:\/\// { origin = 1 }
+    $1 == "size" && $2 ~ /^[0-9]+$/ { size = 1 }
+    END {
+      if (NR == 0 || !oid || !origin || !size) {
+        exit 1
+      }
+    }
+  '
 }
 
 MOUNT_ROOT=""
@@ -185,15 +218,13 @@ while IFS= read -r path; do
     continue
   fi
 
-  case "${rel##*/}" in
-    *.tc|*.tcf)
-      printf '%s\n' "$rel"
-      ;;
-  esac
+  if is_tcfs_physical_stub_file "$path"; then
+    printf '%s\n' "$rel"
+  fi
 done <"$listing" >"$stub_leaks"
 
 if [[ -s "$stub_leaks" ]]; then
-  echo "mounted view exposed physical stub suffixes:" >&2
+  echo "mounted view exposed physical TCFS stubs:" >&2
   cat "$stub_leaks" >&2
   exit 1
 fi

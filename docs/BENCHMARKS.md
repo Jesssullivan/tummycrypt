@@ -65,6 +65,23 @@ The raw-Git project-tree canary is intentionally allowed to expose these
 storage bottlenecks, but those observations are performance evidence, not a
 production storage posture claim.
 
+Functional follow-up observations from
+`docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`:
+
+- The isolated `linux-xr` correctness packet passed push reuse, honey mounted
+  `find -maxdepth 8`, selected hydrate, all 85 mounted symlink `readlink`
+  checks, and the Linux lifecycle companion.
+- `push-storage-summary.env` records 92,969 upload rows, 8,047,721,728 uploaded
+  bytes, 405,519 total chunks, `chunk_upload_concurrency_values=4`, and no push
+  errors.
+- Raw Git pack/index shape is still the dominant storage load: pack rows
+  account for 70,857 chunks and 6,216,112,937 bytes, while pack-index rows now
+  account for 4,600 chunks and 395,854,856 bytes.
+- The push started before the final fresh-prefix/progress telemetry landed, so
+  `chunk_exists_check_absent_rows=92969` and `chunk_upload_progress_rows=0`.
+  Treat this packet as functional and storage-observation evidence, not a
+  production storage posture proof.
+
 Pre-fix host observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:
 
