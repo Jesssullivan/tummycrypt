@@ -267,23 +267,25 @@ host_plists=()
 extension_profiles=()
 extension_plists=()
 
-for profile in "${profile_files[@]}"; do
-  plist="$tmp_dir/profile-${#host_plists[@]}-${#extension_plists[@]}.plist"
-  if ! decode_profile "$profile" "$plist"; then
-    printf 'warning: could not decode provisioning profile: %s\n' "$profile" >&2
-    continue
-  fi
+if ((${#profile_files[@]} > 0)); then
+  for profile in "${profile_files[@]}"; do
+    plist="$tmp_dir/profile-${#host_plists[@]}-${#extension_plists[@]}.plist"
+    if ! decode_profile "$profile" "$plist"; then
+      printf 'warning: could not decode provisioning profile: %s\n' "$profile" >&2
+      continue
+    fi
 
-  if profile_matches_bundle "$plist" "$HOST_BUNDLE_ID" \
-    && profile_entitlement_true "$plist" "$REQUIRED_HOST_ENTITLEMENT"; then
-    host_profiles+=("$profile")
-    host_plists+=("$plist")
-  fi
-  if profile_matches_bundle "$plist" "$EXTENSION_BUNDLE_ID"; then
-    extension_profiles+=("$profile")
-    extension_plists+=("$plist")
-  fi
-done
+    if profile_matches_bundle "$plist" "$HOST_BUNDLE_ID" \
+      && profile_entitlement_true "$plist" "$REQUIRED_HOST_ENTITLEMENT"; then
+      host_profiles+=("$profile")
+      host_plists+=("$plist")
+    fi
+    if profile_matches_bundle "$plist" "$EXTENSION_BUNDLE_ID"; then
+      extension_profiles+=("$profile")
+      extension_plists+=("$plist")
+    fi
+  done
+fi
 
 if [[ "$ENV_ONLY" != "1" ]]; then
   printf 'profiles dir: %s\n' "$PROFILES_DIR"
@@ -304,21 +306,23 @@ extension_choice=""
 host_choice_plist=""
 extension_choice_plist=""
 
-for host_index in "${!host_profiles[@]}"; do
-  host_app_id="$(profile_application_id "${host_plists[$host_index]}")"
-  host_team_prefix="$(team_prefix_from_app_id "$host_app_id" "$HOST_BUNDLE_ID")"
-  for extension_index in "${!extension_profiles[@]}"; do
-    extension_app_id="$(profile_application_id "${extension_plists[$extension_index]}")"
-    extension_team_prefix="$(team_prefix_from_app_id "$extension_app_id" "$EXTENSION_BUNDLE_ID")"
-    if [[ -n "$host_team_prefix" && "$host_team_prefix" == "$extension_team_prefix" ]]; then
-      host_choice="${host_profiles[$host_index]}"
-      extension_choice="${extension_profiles[$extension_index]}"
-      host_choice_plist="${host_plists[$host_index]}"
-      extension_choice_plist="${extension_plists[$extension_index]}"
-      break 2
-    fi
+if ((${#host_profiles[@]} > 0 && ${#extension_profiles[@]} > 0)); then
+  for host_index in "${!host_profiles[@]}"; do
+    host_app_id="$(profile_application_id "${host_plists[$host_index]}")"
+    host_team_prefix="$(team_prefix_from_app_id "$host_app_id" "$HOST_BUNDLE_ID")"
+    for extension_index in "${!extension_profiles[@]}"; do
+      extension_app_id="$(profile_application_id "${extension_plists[$extension_index]}")"
+      extension_team_prefix="$(team_prefix_from_app_id "$extension_app_id" "$EXTENSION_BUNDLE_ID")"
+      if [[ -n "$host_team_prefix" && "$host_team_prefix" == "$extension_team_prefix" ]]; then
+        host_choice="${host_profiles[$host_index]}"
+        extension_choice="${extension_profiles[$extension_index]}"
+        host_choice_plist="${host_plists[$host_index]}"
+        extension_choice_plist="${extension_plists[$extension_index]}"
+        break 2
+      fi
+    done
   done
-done
+fi
 
 if [[ -n "$host_choice" && -n "$extension_choice" ]]; then
   if [[ "$ENV_ONLY" != "1" ]]; then

@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use opendal::Operator;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use unicode_normalization::UnicodeNormalization;
@@ -46,6 +46,9 @@ const DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 300;
 
 /// Hard cap for `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS`.
 const MAX_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 3600;
+
+/// Hard cap for `TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS`.
+const MAX_UPLOAD_PROGRESS_HEARTBEAT_SECS: u64 = 3600;
 
 fn retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(CHUNK_RETRY_BASE_MS * 2u64.saturating_pow(attempt))
@@ -104,6 +107,30 @@ fn upload_progress_every_chunks() -> usize {
     )
 }
 
+fn upload_progress_heartbeat_from_env_value(value: Option<&str>) -> Option<Duration> {
+    let seconds = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    if seconds == 0 {
+        return None;
+    }
+
+    Some(Duration::from_secs(
+        seconds.min(MAX_UPLOAD_PROGRESS_HEARTBEAT_SECS),
+    ))
+}
+
+fn upload_progress_heartbeat() -> Option<Duration> {
+    upload_progress_heartbeat_from_env_value(
+        std::env::var("TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
 fn upload_chunk_timeout_from_env_value(value: Option<&str>) -> Option<Duration> {
     let seconds = match value.map(str::trim).filter(|value| !value.is_empty()) {
         None => DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS,
@@ -139,6 +166,15 @@ fn should_record_chunk_upload_progress(
 
     completed_chunks % every_chunks == 0
         || (completed_chunks == num_chunks && num_chunks >= every_chunks)
+}
+
+fn rate_per_sec(units: u64, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= f64::EPSILON {
+        0.0
+    } else {
+        units as f64 / seconds
+    }
 }
 
 async fn retry_with_backoff<T, E, Action, ActionFuture, Sleep, SleepFuture, OnRetry>(
@@ -344,6 +380,50 @@ async fn await_next_chunk_upload(pending: &mut JoinSet<Result<u64>>) -> Result<u
         .await
         .context("chunk upload task set unexpectedly empty")?;
     joined.context("chunk upload task panicked or was cancelled")?
+}
+
+struct ChunkUploadWaitContext<'a> {
+    local_path: &'a Path,
+    upload_started: Instant,
+    completed_chunks: usize,
+    num_chunks: usize,
+    uploaded_bytes: u64,
+    streaming: bool,
+    chunk_upload_concurrency: usize,
+    heartbeat: Option<Duration>,
+}
+
+async fn await_next_chunk_upload_with_heartbeat(
+    pending: &mut JoinSet<Result<u64>>,
+    context: ChunkUploadWaitContext<'_>,
+) -> Result<u64> {
+    let Some(heartbeat) = context.heartbeat else {
+        return await_next_chunk_upload(pending).await;
+    };
+
+    let wait_started = Instant::now();
+    loop {
+        match tokio::time::timeout(heartbeat, await_next_chunk_upload(pending)).await {
+            Ok(result) => return result,
+            Err(_) => {
+                let file_elapsed = context.upload_started.elapsed();
+                info!(
+                    path = %context.local_path.display(),
+                    completed_chunks = context.completed_chunks,
+                    chunks = context.num_chunks,
+                    uploaded_bytes = context.uploaded_bytes,
+                    file_elapsed_ms = file_elapsed.as_millis() as u64,
+                    completed_chunks_per_sec = rate_per_sec(context.completed_chunks as u64, file_elapsed),
+                    uploaded_bytes_per_sec = rate_per_sec(context.uploaded_bytes, file_elapsed),
+                    streaming = context.streaming,
+                    pending_uploads = pending.len(),
+                    chunk_upload_concurrency = context.chunk_upload_concurrency,
+                    wait_elapsed_ms = wait_started.elapsed().as_millis() as u64,
+                    "chunk upload heartbeat"
+                );
+            }
+        }
+    }
 }
 
 fn record_chunk_upload_progress(
@@ -565,6 +645,17 @@ async fn publish_manifest_for_rel_path(
     manifest_bytes: Vec<u8>,
     entry: RemoteIndexEntry,
 ) -> Result<()> {
+    if upload_assume_fresh_prefix() {
+        return publish_manifest_for_rel_path_fresh(
+            op,
+            remote_prefix,
+            rel_path,
+            manifest_bytes,
+            entry,
+        )
+        .await;
+    }
+
     publish_manifest_for_rel_path_with_hook(
         op,
         remote_prefix,
@@ -574,6 +665,25 @@ async fn publish_manifest_for_rel_path(
         |_| Ok(()),
     )
     .await
+}
+
+async fn publish_manifest_for_rel_path_fresh(
+    op: &Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    manifest_bytes: Vec<u8>,
+    entry: RemoteIndexEntry,
+) -> Result<()> {
+    let prefix = remote_prefix.trim_end_matches('/');
+    let index_key = format!("{prefix}/index/{rel_path}");
+    let manifest_prefix = manifest_path_prefix(prefix);
+    let final_manifest_key = manifest_key(&manifest_prefix, &entry.manifest_hash);
+
+    op.write(&final_manifest_key, manifest_bytes)
+        .await
+        .with_context(|| format!("uploading fresh-prefix manifest: {final_manifest_key}"))?;
+    write_committed_index_entry(op, &index_key, &entry).await?;
+    Ok(())
 }
 
 async fn publish_manifest_for_rel_path_with_hook<F>(
@@ -931,6 +1041,7 @@ pub async fn upload_file_with_device(
 
     // Build remote manifest path (using the file's content hash)
     let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
+    let assume_fresh_prefix = upload_assume_fresh_prefix();
 
     // Get the local vclock from state (or start fresh)
     let mut local_vclock = tracked_state
@@ -950,7 +1061,7 @@ pub async fn upload_file_with_device(
     // fall back to checking the same-hash manifest path.
     let mut outcome = None;
     let mut remote_vclock_snapshot: Option<crate::conflict::VectorClock> = None;
-    if !device_id.is_empty() {
+    if !device_id.is_empty() && !assume_fresh_prefix {
         let remote_manifest_obj = if let Some(rp) = rel_path {
             // Look up the index entry to find what manifest is currently stored
             let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
@@ -1071,7 +1182,8 @@ pub async fn upload_file_with_device(
 
     // Check if this exact content is already stored (content-addressed dedup)
     // Only check when we haven't already done the remote manifest check above
-    if outcome.is_none()
+    if !assume_fresh_prefix
+        && outcome.is_none()
         && op.exists(&remote_manifest).await.unwrap_or(false)
         && device_id.is_empty()
     {
@@ -1126,12 +1238,13 @@ pub async fn upload_file_with_device(
     let mut bytes_uploaded = 0u64;
     let num_chunks;
     let chunk_upload_concurrency = upload_chunk_concurrency();
-    let assume_fresh_prefix = upload_assume_fresh_prefix();
     let progress_every_chunks = upload_progress_every_chunks();
+    let progress_heartbeat = upload_progress_heartbeat();
     let chunk_write_timeout = upload_chunk_timeout();
     let chunk_write_timeout_secs = chunk_write_timeout
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let upload_started = Instant::now();
 
     // Generate per-file encryption key if encryption is enabled
     #[cfg(feature = "crypto")]
@@ -1208,7 +1321,20 @@ pub async fn upload_file_with_device(
             ));
 
             while pending_uploads.len() >= chunk_upload_concurrency {
-                bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+                bytes_uploaded += await_next_chunk_upload_with_heartbeat(
+                    &mut pending_uploads,
+                    ChunkUploadWaitContext {
+                        local_path,
+                        upload_started,
+                        completed_chunks,
+                        num_chunks,
+                        uploaded_bytes: bytes_uploaded,
+                        streaming: true,
+                        chunk_upload_concurrency,
+                        heartbeat: progress_heartbeat,
+                    },
+                )
+                .await?;
                 completed_chunks += 1;
                 if let Some(cb) = progress {
                     cb(
@@ -1229,7 +1355,20 @@ pub async fn upload_file_with_device(
         }
 
         while !pending_uploads.is_empty() {
-            bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+            bytes_uploaded += await_next_chunk_upload_with_heartbeat(
+                &mut pending_uploads,
+                ChunkUploadWaitContext {
+                    local_path,
+                    upload_started,
+                    completed_chunks,
+                    num_chunks,
+                    uploaded_bytes: bytes_uploaded,
+                    streaming: true,
+                    chunk_upload_concurrency,
+                    heartbeat: progress_heartbeat,
+                },
+            )
+            .await?;
             completed_chunks += 1;
             if let Some(cb) = progress {
                 cb(
@@ -1304,7 +1443,20 @@ pub async fn upload_file_with_device(
             ));
 
             while pending_uploads.len() >= chunk_upload_concurrency {
-                bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+                bytes_uploaded += await_next_chunk_upload_with_heartbeat(
+                    &mut pending_uploads,
+                    ChunkUploadWaitContext {
+                        local_path,
+                        upload_started,
+                        completed_chunks,
+                        num_chunks,
+                        uploaded_bytes: bytes_uploaded,
+                        streaming: false,
+                        chunk_upload_concurrency,
+                        heartbeat: progress_heartbeat,
+                    },
+                )
+                .await?;
                 completed_chunks += 1;
                 if let Some(cb) = progress {
                     cb(
@@ -1325,7 +1477,20 @@ pub async fn upload_file_with_device(
         }
 
         while !pending_uploads.is_empty() {
-            bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+            bytes_uploaded += await_next_chunk_upload_with_heartbeat(
+                &mut pending_uploads,
+                ChunkUploadWaitContext {
+                    local_path,
+                    upload_started,
+                    completed_chunks,
+                    num_chunks,
+                    uploaded_bytes: bytes_uploaded,
+                    streaming: false,
+                    chunk_upload_concurrency,
+                    heartbeat: progress_heartbeat,
+                },
+            )
+            .await?;
             completed_chunks += 1;
             if let Some(cb) = progress {
                 cb(
@@ -1416,13 +1581,19 @@ pub async fn upload_file_with_device(
         }
     }
 
+    let upload_elapsed = upload_started.elapsed();
     info!(
         path = %local_path.display(),
         hash = %file_hash_hex,
         chunks = num_chunks,
         bytes = file_size,
         uploaded_bytes = bytes_uploaded,
+        upload_elapsed_ms = upload_elapsed.as_millis() as u64,
+        upload_chunks_per_sec = rate_per_sec(num_chunks as u64, upload_elapsed),
+        upload_bytes_per_sec = rate_per_sec(bytes_uploaded, upload_elapsed),
         streaming = use_streaming,
+        fresh_prefix_publish = assume_fresh_prefix,
+        remote_conflict_check = !assume_fresh_prefix && !device_id.is_empty(),
         chunk_upload_concurrency,
         chunk_exists_check = !assume_fresh_prefix,
         chunk_write_timeout_secs,
@@ -1490,10 +1661,12 @@ pub async fn upload_symlink_with_device(
     )
     .await?;
 
+    let assume_fresh_prefix = upload_assume_fresh_prefix();
     info!(
         path = %local_path.display(),
         target = %target,
         hash = %symlink_hash,
+        fresh_prefix_publish = assume_fresh_prefix,
         "uploaded symlink"
     );
 
@@ -2444,6 +2617,25 @@ mod tests {
         assert_eq!(
             upload_progress_every_chunks_from_env_value(Some("5000")),
             5000
+        );
+    }
+
+    #[test]
+    fn upload_progress_heartbeat_env_defaults_to_disabled() {
+        assert_eq!(upload_progress_heartbeat_from_env_value(None), None);
+        assert_eq!(upload_progress_heartbeat_from_env_value(Some("")), None);
+        assert_eq!(
+            upload_progress_heartbeat_from_env_value(Some("not-a-number")),
+            None
+        );
+        assert_eq!(upload_progress_heartbeat_from_env_value(Some("0")), None);
+        assert_eq!(
+            upload_progress_heartbeat_from_env_value(Some("15")),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            upload_progress_heartbeat_from_env_value(Some("999999")),
+            Some(Duration::from_secs(MAX_UPLOAD_PROGRESS_HEARTBEAT_SECS))
         );
     }
 
@@ -3440,6 +3632,34 @@ mod tests {
         );
         assert!(op.exists("data/manifests/new456").await.unwrap());
         assert_eq!(staging_manifest_keys(&op).await.len(), 1);
+
+        match parse_index_entry_record(&op.read("data/index/doc.txt").await.unwrap().to_vec())
+            .unwrap()
+        {
+            ParsedIndexEntry::Legacy(_) => panic!("expected committed v2 index entry"),
+            ParsedIndexEntry::V2(entry) => {
+                assert_eq!(entry.state, IndexEntryState::Committed);
+                assert_eq!(entry.current.unwrap().manifest_hash, "new456");
+                assert!(entry.pending.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_prefix_publish_writes_committed_index_without_staging() {
+        let op = memory_op();
+        publish_manifest_for_rel_path_fresh(
+            &op,
+            "data",
+            "doc.txt",
+            test_manifest_bytes("new456", 11),
+            RemoteIndexEntry::new("new456", 11, 1),
+        )
+        .await
+        .unwrap();
+
+        assert!(op.exists("data/manifests/new456").await.unwrap());
+        assert!(staging_manifest_keys(&op).await.is_empty());
 
         match parse_index_entry_record(&op.read("data/index/doc.txt").await.unwrap().to_vec())
             .unwrap()

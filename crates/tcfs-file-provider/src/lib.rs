@@ -93,6 +93,9 @@ pub struct TcfsChangeEvent {
 #[cfg(feature = "direct")]
 mod direct;
 
+#[cfg(any(feature = "direct", feature = "grpc"))]
+mod storage_bounds;
+
 #[cfg(feature = "direct")]
 pub use direct::*;
 

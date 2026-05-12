@@ -135,9 +135,10 @@ cat >"$RESUME_EVIDENCE/push.log" <<'EOF'
 2026-05-11T05:59:59.000000Z  WARN tcfs_sync::storage: transient object write failure key=tcfs/chunks/demo attempt=1 delay_ms=50
 2026-05-11T05:59:59.500000Z  WARN tcfs_sync::engine: chunk upload failed, retrying key=tcfs/chunks/slow chunk=7 bytes=1024 attempt=1 max=3 kind=timeout timeout_ms=300000 elapsed_ms=300001 delay_ms=100 error=chunk upload timed out after 300000 ms
 2026-05-11T06:00:00.000000Z  INFO tcfs_sync::engine: chunk upload progress path=/tmp/shadow/.git/objects/pack/pack-demo.idx completed_chunks=5 chunks=10 uploaded_bytes=200 streaming=true
-2026-05-11T06:00:01.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/.git/objects/pack/pack-demo.idx hash=111 chunks=10 bytes=1000 uploaded_bytes=400 streaming=true chunk_upload_concurrency=4 chunk_exists_check=false chunk_write_timeout_secs=300
-2026-05-11T06:00:02.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/space dir/read me.txt hash=222 chunks=2 bytes=20 uploaded_bytes=20 streaming=false chunk_upload_concurrency=4 chunk_exists_check=false chunk_write_timeout_secs=300
-2026-05-11T06:00:03.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/empty.txt hash=333 chunks=0 bytes=0 uploaded_bytes=0 streaming=false chunk_upload_concurrency=4 chunk_exists_check=false chunk_write_timeout_secs=300
+2026-05-11T06:00:00.500000Z  INFO tcfs_sync::engine: chunk upload heartbeat path=/tmp/shadow/.git/objects/pack/pack-demo.idx completed_chunks=5 chunks=10 uploaded_bytes=200 file_elapsed_ms=60000 completed_chunks_per_sec=0.083333 uploaded_bytes_per_sec=3.333333 streaming=true pending_uploads=4 chunk_upload_concurrency=4 wait_elapsed_ms=60000
+2026-05-11T06:00:01.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/.git/objects/pack/pack-demo.idx hash=111 chunks=10 bytes=1000 uploaded_bytes=400 upload_elapsed_ms=1000 upload_chunks_per_sec=10 upload_bytes_per_sec=400 streaming=true fresh_prefix_publish=true remote_conflict_check=false chunk_upload_concurrency=4 chunk_exists_check=false chunk_write_timeout_secs=300
+2026-05-11T06:00:02.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/space dir/read me.txt hash=222 chunks=2 bytes=20 uploaded_bytes=20 upload_elapsed_ms=200 upload_chunks_per_sec=10 upload_bytes_per_sec=100 streaming=false fresh_prefix_publish=true remote_conflict_check=false chunk_upload_concurrency=4 chunk_exists_check=false chunk_write_timeout_secs=300
+2026-05-11T06:00:03.000000Z  INFO tcfs_sync::engine: uploaded path=/tmp/shadow/empty.txt hash=333 chunks=0 bytes=0 uploaded_bytes=0 upload_elapsed_ms=10 upload_chunks_per_sec=0 upload_bytes_per_sec=0 streaming=false fresh_prefix_publish=false remote_conflict_check=true chunk_upload_concurrency=4 chunk_exists_check=true chunk_write_timeout_secs=300
 Push complete:
   uploaded: 2 files (42 B)
 EOF
@@ -161,13 +162,24 @@ assert_contains "$RESUME_EVIDENCE/result.env" "proof=shadow-push"
 assert_contains "$RESUME_EVIDENCE/README.md" "push-storage-summary.env"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "upload_rows=3"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_upload_progress_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_upload_heartbeat_rows=1"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "total_file_bytes=1020"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "total_uploaded_bytes=420"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "dedupe_or_existing_bytes=600"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "total_chunks=12"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "total_upload_elapsed_ms=1210"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "max_upload_elapsed_ms=1000"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "max_upload_elapsed_path=/tmp/shadow/.git/objects/pack/pack-demo.idx"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "max_upload_bytes_per_sec=400"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "max_upload_chunks_per_sec=10"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "streaming_rows=1"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "zero_chunk_rows=1"
-assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_exists_check_false_rows=3"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "fresh_prefix_publish_true_rows=2"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "fresh_prefix_publish_false_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "remote_conflict_check_true_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "remote_conflict_check_false_rows=2"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_exists_check_true_rows=1"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_exists_check_false_rows=2"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_upload_concurrency_values=4"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_write_timeout_secs_values=300"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "warn_rows=2"
@@ -180,6 +192,9 @@ assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "max_chunks=10"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "max_chunks_path=/tmp/shadow/.git/objects/pack/pack-demo.idx"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "TCFS Push Storage Summary"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "Dedupe or existing bytes"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "Chunk heartbeat rows"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "Max upload elapsed ms"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "Fresh-prefix publish true rows"
 
 assert_fails_contains \
   "refusing to canary full HOME" \

@@ -69,6 +69,14 @@ if [[ "${1:-}" == "--version" ]]; then
   printf 'tcfs 0.12.12-test\n'
   exit 0
 fi
+for arg in "$@"; do
+  if [[ "$arg" == "push" ]]; then
+    printf '2026-05-12T00:00:00Z  INFO tcfs_sync::engine: chunk upload heartbeat path=/tmp/linux-xr/.git/objects/pack/pack-test.pack completed_chunks=0 chunks=2 uploaded_bytes=0 file_elapsed_ms=1000 completed_chunks_per_sec=0 uploaded_bytes_per_sec=0 streaming=true pending_uploads=2 chunk_upload_concurrency=%s wait_elapsed_ms=1000\n' "${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}"
+    printf '2026-05-12T00:00:01Z  INFO tcfs_sync::engine: uploaded path=/tmp/linux-xr/.git/objects/pack/pack-test.pack hash=abc chunks=2 bytes=8192 uploaded_bytes=8192 upload_elapsed_ms=1000 upload_chunks_per_sec=2 upload_bytes_per_sec=8192 streaming=true fresh_prefix_publish=true remote_conflict_check=false chunk_upload_concurrency=%s chunk_exists_check=false chunk_write_timeout_secs=%s\n' "${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}" "${TCFS_UPLOAD_CHUNK_TIMEOUT_SECS:-0}"
+    printf 'Push complete: 1 files\n'
+    exit 0
+  fi
+done
 printf 'unexpected fake tcfs invocation: %s\n' "$*" >&2
 exit 64
 EOF
@@ -86,6 +94,12 @@ OUT="$TMPDIR/positive.out"
   --upload-concurrency 7 \
   --progress-every-chunks 19 \
   --chunk-timeout-secs 23 \
+  --progress-heartbeat-secs 11 \
+  --s3-connect-timeout-secs 5 \
+  --s3-pool-idle-timeout-secs 13 \
+  --s3-pool-max-idle-per-host 7 \
+  --s3-http1-only \
+  --socket-sample-interval-secs 3 \
   --honey-host honey-test \
   >"$OUT"
 
@@ -102,10 +116,52 @@ assert_contains "$EVIDENCE/storage-posture.env" "assume_fresh_prefix=1"
 assert_contains "$EVIDENCE/storage-posture.env" "upload_concurrency=7"
 assert_contains "$EVIDENCE/storage-posture.env" "progress_every_chunks=19"
 assert_contains "$EVIDENCE/storage-posture.env" "chunk_timeout_secs=23"
+assert_contains "$EVIDENCE/storage-posture.env" "progress_heartbeat_secs=11"
+assert_contains "$EVIDENCE/storage-posture.env" "storage_max_concurrent_ops=7"
+assert_contains "$EVIDENCE/storage-posture.env" "storage_s3_connect_timeout_secs=5"
+assert_contains "$EVIDENCE/storage-posture.env" "storage_s3_pool_idle_timeout_secs=13"
+assert_contains "$EVIDENCE/storage-posture.env" "storage_s3_pool_max_idle_per_host=7"
+assert_contains "$EVIDENCE/storage-posture.env" "storage_s3_http1_only=1"
+assert_contains "$EVIDENCE/storage-posture.env" "socket_sample_interval_secs=3"
 assert_contains "$EVIDENCE/storage-posture.env" "production_storage_posture_claim=0"
 assert_contains "$EVIDENCE/storage-posture.md" "production S3 posture claim."
 assert_contains "$EVIDENCE/run-metadata.env" "push=0"
+assert_contains "$EVIDENCE/run-metadata.env" "storage_max_concurrent_ops=7"
 assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "sync_symlinks = true"
+assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "max_concurrent_ops = 7"
+assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "s3_connect_timeout_secs = 5"
+assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "s3_pool_idle_timeout_secs = 13"
+assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "s3_pool_max_idle_per_host = 7"
+assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "s3_http1_only = true"
+
+PUSH_EVIDENCE="$TMPDIR/push-evidence"
+"${RUN_ENV[@]}" bash "$SCRIPT" \
+  --source "$SOURCE" \
+  --shadow-root "$TMPDIR/push-shadow" \
+  --evidence-dir "$PUSH_EVIDENCE" \
+  --state-dir "$TMPDIR/push-state" \
+  --remote seaweedfs://localhost:8333/tcfs/home-canary-linux-xr-storage-posture-socket-test \
+  --tcfs-bin "$BIN_DIR/tcfs" \
+  --push \
+  --upload-concurrency 2 \
+  --progress-every-chunks 1 \
+  --chunk-timeout-secs 17 \
+  --progress-heartbeat-secs 9 \
+  --socket-sample-interval-secs 1 \
+  >"$TMPDIR/push.out"
+assert_contains "$PUSH_EVIDENCE/storage-posture.env" "helper_status=0"
+assert_contains "$PUSH_EVIDENCE/storage-posture.env" "storage_max_concurrent_ops=2"
+assert_contains "$PUSH_EVIDENCE/s3-socket-samples.tsv" $'sampled_at_utc\ttcfs_pids\ts3_established_sockets\thighwater\tlimit'
+assert_contains "$PUSH_EVIDENCE/s3-socket-summary.env" "socket_sample_interval_secs=1"
+assert_contains "$PUSH_EVIDENCE/s3-socket-summary.env" "socket_sample_limit=2"
+assert_contains "$PUSH_EVIDENCE/s3-socket-summary.env" "socket_highwater_exceeded_upload_concurrency=0"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "chunk_upload_heartbeat_rows=1"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "chunk_upload_concurrency_values=2"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "chunk_write_timeout_secs_values=17"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "max_upload_elapsed_ms=1000"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "max_upload_bytes_per_sec=8192"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "fresh_prefix_publish_true_rows=1"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "remote_conflict_check_false_rows=1"
 
 cat >"$DEBUG_BIN_DIR/tcfs" <<'EOF'
 #!/usr/bin/env bash
