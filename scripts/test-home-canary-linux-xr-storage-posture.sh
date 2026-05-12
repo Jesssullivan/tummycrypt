@@ -72,7 +72,7 @@ fi
 for arg in "$@"; do
   if [[ "$arg" == "push" ]]; then
     printf '2026-05-12T00:00:00Z  INFO tcfs_sync::engine: chunk upload heartbeat path=/tmp/linux-xr/.git/objects/pack/pack-test.pack completed_chunks=0 chunks=2 uploaded_bytes=0 file_elapsed_ms=1000 completed_chunks_per_sec=0 uploaded_bytes_per_sec=0 streaming=true pending_uploads=2 chunk_upload_concurrency=%s wait_elapsed_ms=1000\n' "${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}"
-    printf '2026-05-12T00:00:01Z  INFO tcfs_sync::engine: uploaded path=/tmp/linux-xr/.git/objects/pack/pack-test.pack hash=abc chunks=2 bytes=8192 uploaded_bytes=8192 upload_elapsed_ms=1000 upload_chunks_per_sec=2 upload_bytes_per_sec=8192 streaming=true chunk_upload_concurrency=%s chunk_exists_check=false chunk_write_timeout_secs=%s\n' "${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}" "${TCFS_UPLOAD_CHUNK_TIMEOUT_SECS:-0}"
+    printf '2026-05-12T00:00:01Z  INFO tcfs_sync::engine: uploaded path=/tmp/linux-xr/.git/objects/pack/pack-test.pack hash=abc chunks=2 bytes=8192 uploaded_bytes=8192 upload_elapsed_ms=1000 upload_chunks_per_sec=2 upload_bytes_per_sec=8192 streaming=true fresh_prefix_publish=true remote_conflict_check=false chunk_upload_concurrency=%s chunk_exists_check=false chunk_write_timeout_secs=%s\n' "${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}" "${TCFS_UPLOAD_CHUNK_TIMEOUT_SECS:-0}"
     printf 'Push complete: 1 files\n'
     exit 0
   fi
@@ -160,6 +160,8 @@ assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "chunk_upload_concurre
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "chunk_write_timeout_secs_values=17"
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "max_upload_elapsed_ms=1000"
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "max_upload_bytes_per_sec=8192"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "fresh_prefix_publish_true_rows=1"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "remote_conflict_check_false_rows=1"
 
 cat >"$DEBUG_BIN_DIR/tcfs" <<'EOF'
 #!/usr/bin/env bash

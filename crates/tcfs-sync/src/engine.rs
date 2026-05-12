@@ -645,6 +645,17 @@ async fn publish_manifest_for_rel_path(
     manifest_bytes: Vec<u8>,
     entry: RemoteIndexEntry,
 ) -> Result<()> {
+    if upload_assume_fresh_prefix() {
+        return publish_manifest_for_rel_path_fresh(
+            op,
+            remote_prefix,
+            rel_path,
+            manifest_bytes,
+            entry,
+        )
+        .await;
+    }
+
     publish_manifest_for_rel_path_with_hook(
         op,
         remote_prefix,
@@ -654,6 +665,25 @@ async fn publish_manifest_for_rel_path(
         |_| Ok(()),
     )
     .await
+}
+
+async fn publish_manifest_for_rel_path_fresh(
+    op: &Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    manifest_bytes: Vec<u8>,
+    entry: RemoteIndexEntry,
+) -> Result<()> {
+    let prefix = remote_prefix.trim_end_matches('/');
+    let index_key = format!("{prefix}/index/{rel_path}");
+    let manifest_prefix = manifest_path_prefix(prefix);
+    let final_manifest_key = manifest_key(&manifest_prefix, &entry.manifest_hash);
+
+    op.write(&final_manifest_key, manifest_bytes)
+        .await
+        .with_context(|| format!("uploading fresh-prefix manifest: {final_manifest_key}"))?;
+    write_committed_index_entry(op, &index_key, &entry).await?;
+    Ok(())
 }
 
 async fn publish_manifest_for_rel_path_with_hook<F>(
@@ -1011,6 +1041,7 @@ pub async fn upload_file_with_device(
 
     // Build remote manifest path (using the file's content hash)
     let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
+    let assume_fresh_prefix = upload_assume_fresh_prefix();
 
     // Get the local vclock from state (or start fresh)
     let mut local_vclock = tracked_state
@@ -1030,7 +1061,7 @@ pub async fn upload_file_with_device(
     // fall back to checking the same-hash manifest path.
     let mut outcome = None;
     let mut remote_vclock_snapshot: Option<crate::conflict::VectorClock> = None;
-    if !device_id.is_empty() {
+    if !device_id.is_empty() && !assume_fresh_prefix {
         let remote_manifest_obj = if let Some(rp) = rel_path {
             // Look up the index entry to find what manifest is currently stored
             let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
@@ -1151,7 +1182,8 @@ pub async fn upload_file_with_device(
 
     // Check if this exact content is already stored (content-addressed dedup)
     // Only check when we haven't already done the remote manifest check above
-    if outcome.is_none()
+    if !assume_fresh_prefix
+        && outcome.is_none()
         && op.exists(&remote_manifest).await.unwrap_or(false)
         && device_id.is_empty()
     {
@@ -1206,7 +1238,6 @@ pub async fn upload_file_with_device(
     let mut bytes_uploaded = 0u64;
     let num_chunks;
     let chunk_upload_concurrency = upload_chunk_concurrency();
-    let assume_fresh_prefix = upload_assume_fresh_prefix();
     let progress_every_chunks = upload_progress_every_chunks();
     let progress_heartbeat = upload_progress_heartbeat();
     let chunk_write_timeout = upload_chunk_timeout();
@@ -1561,6 +1592,8 @@ pub async fn upload_file_with_device(
         upload_chunks_per_sec = rate_per_sec(num_chunks as u64, upload_elapsed),
         upload_bytes_per_sec = rate_per_sec(bytes_uploaded, upload_elapsed),
         streaming = use_streaming,
+        fresh_prefix_publish = assume_fresh_prefix,
+        remote_conflict_check = !assume_fresh_prefix && !device_id.is_empty(),
         chunk_upload_concurrency,
         chunk_exists_check = !assume_fresh_prefix,
         chunk_write_timeout_secs,
@@ -1628,10 +1661,12 @@ pub async fn upload_symlink_with_device(
     )
     .await?;
 
+    let assume_fresh_prefix = upload_assume_fresh_prefix();
     info!(
         path = %local_path.display(),
         target = %target,
         hash = %symlink_hash,
+        fresh_prefix_publish = assume_fresh_prefix,
         "uploaded symlink"
     );
 
@@ -3597,6 +3632,34 @@ mod tests {
         );
         assert!(op.exists("data/manifests/new456").await.unwrap());
         assert_eq!(staging_manifest_keys(&op).await.len(), 1);
+
+        match parse_index_entry_record(&op.read("data/index/doc.txt").await.unwrap().to_vec())
+            .unwrap()
+        {
+            ParsedIndexEntry::Legacy(_) => panic!("expected committed v2 index entry"),
+            ParsedIndexEntry::V2(entry) => {
+                assert_eq!(entry.state, IndexEntryState::Committed);
+                assert_eq!(entry.current.unwrap().manifest_hash, "new456");
+                assert!(entry.pending.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_prefix_publish_writes_committed_index_without_staging() {
+        let op = memory_op();
+        publish_manifest_for_rel_path_fresh(
+            &op,
+            "data",
+            "doc.txt",
+            test_manifest_bytes("new456", 11),
+            RemoteIndexEntry::new("new456", 11, 1),
+        )
+        .await
+        .unwrap();
+
+        assert!(op.exists("data/manifests/new456").await.unwrap());
+        assert!(staging_manifest_keys(&op).await.is_empty());
 
         match parse_index_entry_record(&op.read("data/index/doc.txt").await.unwrap().to_vec())
             .unwrap()

@@ -741,6 +741,8 @@ write_push_storage_summary() {
       upload_bytes_per_sec = value_after($0, "upload_bytes_per_sec") + 0
       upload_chunks_per_sec = value_after($0, "upload_chunks_per_sec") + 0
       streaming = value_after($0, "streaming")
+      fresh_prefix_publish = value_after($0, "fresh_prefix_publish")
+      remote_conflict_check = value_after($0, "remote_conflict_check")
       exists_check = value_after($0, "chunk_exists_check")
       concurrency = value_after($0, "chunk_upload_concurrency")
       chunk_write_timeout = value_after($0, "chunk_write_timeout_secs")
@@ -756,6 +758,22 @@ write_push_storage_summary() {
         streaming_rows += 1
       } else if (streaming == "false") {
         non_streaming_rows += 1
+      }
+
+      if (fresh_prefix_publish == "true") {
+        fresh_prefix_publish_true_rows += 1
+      } else if (fresh_prefix_publish == "false") {
+        fresh_prefix_publish_false_rows += 1
+      } else {
+        fresh_prefix_publish_absent_rows += 1
+      }
+
+      if (remote_conflict_check == "true") {
+        remote_conflict_check_true_rows += 1
+      } else if (remote_conflict_check == "false") {
+        remote_conflict_check_false_rows += 1
+      } else {
+        remote_conflict_check_absent_rows += 1
       }
 
       if (exists_check == "true") {
@@ -822,6 +840,12 @@ write_push_storage_summary() {
       print "streaming_rows=" streaming_rows + 0
       print "non_streaming_rows=" non_streaming_rows + 0
       print "zero_chunk_rows=" zero_chunk_rows + 0
+      print "fresh_prefix_publish_true_rows=" fresh_prefix_publish_true_rows + 0
+      print "fresh_prefix_publish_false_rows=" fresh_prefix_publish_false_rows + 0
+      print "fresh_prefix_publish_absent_rows=" fresh_prefix_publish_absent_rows + 0
+      print "remote_conflict_check_true_rows=" remote_conflict_check_true_rows + 0
+      print "remote_conflict_check_false_rows=" remote_conflict_check_false_rows + 0
+      print "remote_conflict_check_absent_rows=" remote_conflict_check_absent_rows + 0
       print "chunk_exists_check_true_rows=" chunk_exists_check_true_rows + 0
       print "chunk_exists_check_false_rows=" chunk_exists_check_false_rows + 0
       print "chunk_exists_check_absent_rows=" chunk_exists_check_absent_rows + 0
@@ -875,6 +899,12 @@ write_push_storage_summary() {
       print "| Max upload chunks/sec | " values["max_upload_chunks_per_sec"] " |"
       print "| Streaming rows | " values["streaming_rows"] " |"
       print "| Zero-chunk rows | " values["zero_chunk_rows"] " |"
+      print "| Fresh-prefix publish true rows | " values["fresh_prefix_publish_true_rows"] " |"
+      print "| Fresh-prefix publish false rows | " values["fresh_prefix_publish_false_rows"] " |"
+      print "| Fresh-prefix publish absent rows | " values["fresh_prefix_publish_absent_rows"] " |"
+      print "| Remote conflict check true rows | " values["remote_conflict_check_true_rows"] " |"
+      print "| Remote conflict check false rows | " values["remote_conflict_check_false_rows"] " |"
+      print "| Remote conflict check absent rows | " values["remote_conflict_check_absent_rows"] " |"
       print "| Chunk exists check true rows | " values["chunk_exists_check_true_rows"] " |"
       print "| Chunk exists check false rows | " values["chunk_exists_check_false_rows"] " |"
       print "| Chunk exists check absent rows | " values["chunk_exists_check_absent_rows"] " |"
