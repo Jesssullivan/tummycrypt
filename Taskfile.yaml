@@ -632,6 +632,9 @@ tasks:
           if [[ -n "${PROGRESS_EVERY_CHUNKS:-}" ]]; then
             args+=(--progress-every-chunks "$PROGRESS_EVERY_CHUNKS")
           fi
+          if [[ -n "${CHUNK_TIMEOUT_SECS:-}" ]]; then
+            args+=(--chunk-timeout-secs "$CHUNK_TIMEOUT_SECS")
+          fi
           if [[ "${PUSH:-0}" == "1" ]]; then
             args+=(--push)
           fi

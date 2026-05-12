@@ -672,6 +672,17 @@ write_push_storage_summary() {
         concurrency_values = concurrency_values "," value
       }
     }
+    function add_chunk_write_timeout(value) {
+      if (value == "" || value in seen_chunk_write_timeout) {
+        return
+      }
+      seen_chunk_write_timeout[value] = 1
+      if (chunk_write_timeout_values == "") {
+        chunk_write_timeout_values = value
+      } else {
+        chunk_write_timeout_values = chunk_write_timeout_values "," value
+      }
+    }
     /chunk upload progress/ {
       progress_rows += 1
       next
@@ -680,6 +691,9 @@ write_push_storage_summary() {
       warn_rows += 1
       if ($0 ~ /attempt=/ && $0 ~ /delay_ms=/) {
         retry_warning_rows += 1
+      }
+      if ($0 ~ /kind=timeout/ || $0 ~ /chunk upload timed out/) {
+        timeout_retry_warning_rows += 1
       }
     }
     / ERROR / {
@@ -699,11 +713,13 @@ write_push_storage_summary() {
       streaming = value_after($0, "streaming")
       exists_check = value_after($0, "chunk_exists_check")
       concurrency = value_after($0, "chunk_upload_concurrency")
+      chunk_write_timeout = value_after($0, "chunk_write_timeout_secs")
 
       total_chunks += chunks
       total_file_bytes += bytes
       total_uploaded_bytes += uploaded_bytes
       add_concurrency(concurrency)
+      add_chunk_write_timeout(chunk_write_timeout)
 
       if (streaming == "true") {
         streaming_rows += 1
@@ -763,8 +779,10 @@ write_push_storage_summary() {
       print "chunk_exists_check_false_rows=" chunk_exists_check_false_rows + 0
       print "chunk_exists_check_absent_rows=" chunk_exists_check_absent_rows + 0
       print "chunk_upload_concurrency_values=" concurrency_values
+      print "chunk_write_timeout_secs_values=" chunk_write_timeout_values
       print "warn_rows=" warn_rows + 0
       print "retry_warning_rows=" retry_warning_rows + 0
+      print "timeout_retry_warning_rows=" timeout_retry_warning_rows + 0
       print "error_rows=" error_rows + 0
       print "pack_rows=" pack_rows + 0
       print "pack_chunks=" pack_chunks + 0
@@ -808,8 +826,10 @@ write_push_storage_summary() {
       print "| Chunk exists check false rows | " values["chunk_exists_check_false_rows"] " |"
       print "| Chunk exists check absent rows | " values["chunk_exists_check_absent_rows"] " |"
       print "| Chunk upload concurrency values | " values["chunk_upload_concurrency_values"] " |"
+      print "| Chunk write timeout seconds values | " values["chunk_write_timeout_secs_values"] " |"
       print "| Warning rows | " values["warn_rows"] " |"
       print "| Retry warning rows | " values["retry_warning_rows"] " |"
+      print "| Timeout retry warning rows | " values["timeout_retry_warning_rows"] " |"
       print "| Error rows | " values["error_rows"] " |"
       print "| Pack rows | " values["pack_rows"] " |"
       print "| Pack chunks | " values["pack_chunks"] " |"

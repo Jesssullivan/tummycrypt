@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use opendal::Operator;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use unicode_normalization::UnicodeNormalization;
@@ -39,6 +40,12 @@ const DEFAULT_UPLOAD_CHUNK_CONCURRENCY: usize = 4;
 
 /// Hard cap for `TCFS_UPLOAD_CHUNK_CONCURRENCY`.
 const MAX_UPLOAD_CHUNK_CONCURRENCY: usize = 64;
+
+/// Default per-attempt timeout for chunk uploads.
+const DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 300;
+
+/// Hard cap for `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS`.
+const MAX_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 3600;
 
 fn retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(CHUNK_RETRY_BASE_MS * 2u64.saturating_pow(attempt))
@@ -97,6 +104,30 @@ fn upload_progress_every_chunks() -> usize {
     )
 }
 
+fn upload_chunk_timeout_from_env_value(value: Option<&str>) -> Option<Duration> {
+    let seconds = match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS,
+        Some("0") => return None,
+        Some(raw) => raw
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or(DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS),
+    };
+
+    Some(Duration::from_secs(
+        seconds.min(MAX_UPLOAD_CHUNK_TIMEOUT_SECS),
+    ))
+}
+
+fn upload_chunk_timeout() -> Option<Duration> {
+    upload_chunk_timeout_from_env_value(
+        std::env::var("TCFS_UPLOAD_CHUNK_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
 fn should_record_chunk_upload_progress(
     completed_chunks: usize,
     num_chunks: usize,
@@ -149,6 +180,8 @@ where
 async fn write_chunk_with_retry_inner<Write, WriteFuture, Sleep, SleepFuture>(
     key: &str,
     chunk_idx: usize,
+    logical_len: u64,
+    write_timeout: Option<Duration>,
     mut write: Write,
     sleep: Sleep,
 ) -> Result<()>
@@ -158,14 +191,87 @@ where
     Sleep: FnMut(std::time::Duration) -> SleepFuture,
     SleepFuture: std::future::Future<Output = ()>,
 {
+    #[derive(Debug)]
+    enum ChunkUploadError {
+        Transport {
+            source: anyhow::Error,
+            elapsed: Duration,
+        },
+        Timeout {
+            timeout: Duration,
+            elapsed: Duration,
+        },
+    }
+
+    impl ChunkUploadError {
+        fn kind(&self) -> &'static str {
+            match self {
+                Self::Transport { .. } => "transport",
+                Self::Timeout { .. } => "timeout",
+            }
+        }
+
+        fn elapsed(&self) -> Duration {
+            match self {
+                Self::Transport { elapsed, .. } | Self::Timeout { elapsed, .. } => *elapsed,
+            }
+        }
+
+        fn timeout_ms(&self) -> u128 {
+            match self {
+                Self::Transport { .. } => 0,
+                Self::Timeout { timeout, .. } => timeout.as_millis(),
+            }
+        }
+    }
+
+    impl std::fmt::Display for ChunkUploadError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Transport { source, .. } => write!(f, "{source}"),
+                Self::Timeout { timeout, .. } => {
+                    write!(f, "chunk upload timed out after {} ms", timeout.as_millis())
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for ChunkUploadError {}
+
     retry_with_backoff(
         CHUNK_MAX_RETRIES,
-        |_| write(),
-        |attempt, delay, err: &anyhow::Error| {
+        |_| {
+            let fut = write();
+            async move {
+                let started = std::time::Instant::now();
+                match write_timeout {
+                    Some(limit) => match tokio::time::timeout(limit, fut).await {
+                        Ok(result) => result.map_err(|source| ChunkUploadError::Transport {
+                            source,
+                            elapsed: started.elapsed(),
+                        }),
+                        Err(_) => Err(ChunkUploadError::Timeout {
+                            timeout: limit,
+                            elapsed: started.elapsed(),
+                        }),
+                    },
+                    None => fut.await.map_err(|source| ChunkUploadError::Transport {
+                        source,
+                        elapsed: started.elapsed(),
+                    }),
+                }
+            }
+        },
+        |attempt, delay, err: &ChunkUploadError| {
             warn!(
+                key = key,
                 chunk = chunk_idx,
+                bytes = logical_len,
                 attempt,
                 max = CHUNK_MAX_RETRIES,
+                kind = err.kind(),
+                timeout_ms = err.timeout_ms(),
+                elapsed_ms = err.elapsed().as_millis(),
                 delay_ms = delay.as_millis(),
                 error = %err,
                 "chunk upload failed, retrying"
@@ -174,7 +280,7 @@ where
         sleep,
     )
     .await
-    .map_err(|err| err.context(format!("uploading chunk {chunk_idx}: {key}")))
+    .map_err(|err| anyhow::Error::new(err).context(format!("uploading chunk {chunk_idx}: {key}")))
 }
 
 /// Write a chunk to remote storage with exponential backoff retry.
@@ -185,10 +291,14 @@ async fn write_chunk_with_retry(
     key: &str,
     data: Vec<u8>,
     chunk_idx: usize,
+    logical_len: u64,
+    write_timeout: Option<Duration>,
 ) -> Result<()> {
     write_chunk_with_retry_inner(
         key,
         chunk_idx,
+        logical_len,
+        write_timeout,
         || {
             let data = data.clone();
             async move {
@@ -210,9 +320,18 @@ async fn maybe_upload_chunk(
     chunk_idx: usize,
     logical_len: u64,
     assume_fresh_prefix: bool,
+    write_timeout: Option<Duration>,
 ) -> Result<u64> {
     if assume_fresh_prefix || !op.exists(&chunk_key).await.unwrap_or(false) {
-        write_chunk_with_retry(&op, &chunk_key, upload_data, chunk_idx).await?;
+        write_chunk_with_retry(
+            &op,
+            &chunk_key,
+            upload_data,
+            chunk_idx,
+            logical_len,
+            write_timeout,
+        )
+        .await?;
         return Ok(logical_len);
     }
 
@@ -1009,6 +1128,10 @@ pub async fn upload_file_with_device(
     let chunk_upload_concurrency = upload_chunk_concurrency();
     let assume_fresh_prefix = upload_assume_fresh_prefix();
     let progress_every_chunks = upload_progress_every_chunks();
+    let chunk_write_timeout = upload_chunk_timeout();
+    let chunk_write_timeout_secs = chunk_write_timeout
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
 
     // Generate per-file encryption key if encryption is enabled
     #[cfg(feature = "crypto")]
@@ -1031,6 +1154,7 @@ pub async fn upload_file_with_device(
             size = file_size,
             chunk_upload_concurrency,
             chunk_exists_check = !assume_fresh_prefix,
+            chunk_write_timeout_secs,
             "using streaming chunker"
         );
         let UploadSourceSnapshot::Streaming(streaming_chunks) = &snapshot.source else {
@@ -1080,6 +1204,7 @@ pub async fn upload_file_with_device(
                 i,
                 chunk.length as u64,
                 assume_fresh_prefix,
+                chunk_write_timeout,
             ));
 
             while pending_uploads.len() >= chunk_upload_concurrency {
@@ -1175,6 +1300,7 @@ pub async fn upload_file_with_device(
                 i,
                 chunk.length as u64,
                 assume_fresh_prefix,
+                chunk_write_timeout,
             ));
 
             while pending_uploads.len() >= chunk_upload_concurrency {
@@ -1299,6 +1425,7 @@ pub async fn upload_file_with_device(
         streaming = use_streaming,
         chunk_upload_concurrency,
         chunk_exists_check = !assume_fresh_prefix,
+        chunk_write_timeout_secs,
         "uploaded"
     );
 
@@ -2731,6 +2858,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn upload_chunk_timeout_env_is_bounded() {
+        assert_eq!(
+            upload_chunk_timeout_from_env_value(None),
+            Some(Duration::from_secs(DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS))
+        );
+        assert_eq!(upload_chunk_timeout_from_env_value(Some("0")), None);
+        assert_eq!(
+            upload_chunk_timeout_from_env_value(Some("15")),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            upload_chunk_timeout_from_env_value(Some("not-a-number")),
+            Some(Duration::from_secs(DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS))
+        );
+        assert_eq!(
+            upload_chunk_timeout_from_env_value(Some("999999")),
+            Some(Duration::from_secs(MAX_UPLOAD_CHUNK_TIMEOUT_SECS))
+        );
+    }
+
     #[tokio::test]
     async fn chunk_upload_retry_succeeds_after_transient_failure() {
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -2739,6 +2887,8 @@ mod tests {
         write_chunk_with_retry_inner(
             "data/chunks/abc123",
             0,
+            3,
+            None,
             {
                 let attempts = attempts.clone();
                 move || {
@@ -2776,17 +2926,60 @@ mod tests {
         let key = "data/chunks/existing".to_string();
         op.write(&key, b"old".to_vec()).await.unwrap();
 
-        let skipped = maybe_upload_chunk(op.clone(), key.clone(), b"new".to_vec(), 0, 3, false)
-            .await
-            .unwrap();
+        let skipped =
+            maybe_upload_chunk(op.clone(), key.clone(), b"new".to_vec(), 0, 3, false, None)
+                .await
+                .unwrap();
         assert_eq!(skipped, 0);
         assert_eq!(op.read(&key).await.unwrap().to_bytes(), b"old".as_slice());
 
-        let uploaded = maybe_upload_chunk(op.clone(), key.clone(), b"new".to_vec(), 0, 3, true)
-            .await
-            .unwrap();
+        let uploaded =
+            maybe_upload_chunk(op.clone(), key.clone(), b"new".to_vec(), 0, 3, true, None)
+                .await
+                .unwrap();
         assert_eq!(uploaded, 3);
         assert_eq!(op.read(&key).await.unwrap().to_bytes(), b"new".as_slice());
+    }
+
+    #[tokio::test]
+    async fn chunk_upload_timeout_retries_then_succeeds() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+
+        write_chunk_with_retry_inner(
+            "data/chunks/slow-once",
+            7,
+            1024,
+            Some(Duration::from_millis(1)),
+            {
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        Ok(())
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![std::time::Duration::from_millis(100)]
+        );
     }
 
     #[tokio::test]
@@ -2797,6 +2990,8 @@ mod tests {
         let err = write_chunk_with_retry_inner(
             "data/chunks/abc123",
             0,
+            3,
+            None,
             {
                 let attempts = attempts.clone();
                 move || {
@@ -2821,6 +3016,50 @@ mod tests {
         assert!(err
             .to_string()
             .contains("uploading chunk 0: data/chunks/abc123"));
+        assert_eq!(attempts.load(Ordering::SeqCst), CHUNK_MAX_RETRIES as usize);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(200),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_upload_timeout_exhausts_with_context() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+
+        let err = write_chunk_with_retry_inner(
+            "data/chunks/never-finishes",
+            9,
+            2048,
+            Some(Duration::from_millis(1)),
+            {
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        std::future::pending::<Result<()>>().await
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("uploading chunk 9: data/chunks/never-finishes"));
+        assert!(message.contains("chunk upload timed out"));
         assert_eq!(attempts.load(Ordering::SeqCst), CHUNK_MAX_RETRIES as usize);
         assert_eq!(
             *delays.lock().unwrap(),
