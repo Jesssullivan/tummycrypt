@@ -141,6 +141,15 @@ honey_start_mount="$(bool_env TCFS_HONEY_START_MOUNT "${TCFS_HONEY_START_MOUNT:-
 honey_smoke_max_depth="${TCFS_HONEY_SMOKE_MAX_DEPTH:-8}"
 honey_smoke_timeout_secs="${TCFS_HONEY_SMOKE_TIMEOUT_SECS:-900}"
 forward_aws_env="$(bool_env TCFS_HONEY_FORWARD_AWS_ENV "${TCFS_HONEY_FORWARD_AWS_ENV:-0}")"
+storage_max_concurrent_ops="${TCFS_STORAGE_MAX_CONCURRENT_OPS:-${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}}"
+storage_s3_connect_timeout_secs="${TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS:-0}"
+storage_s3_pool_idle_timeout_secs="${TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS:-0}"
+storage_s3_pool_max_idle_per_host="${TCFS_STORAGE_S3_POOL_MAX_IDLE_PER_HOST:-0}"
+storage_s3_http1_only="$(bool_env TCFS_STORAGE_S3_HTTP1_ONLY "${TCFS_STORAGE_S3_HTTP1_ONLY:-0}")"
+storage_s3_http1_only_toml=false
+if [[ "$storage_s3_http1_only" == "1" ]]; then
+  storage_s3_http1_only_toml=true
+fi
 keep_shadow=0
 
 while [[ $# -gt 0 ]]; do
@@ -263,6 +272,10 @@ fi
 [[ "$remote" == seaweedfs://* ]] || fail "remote must start with seaweedfs://"
 [[ "$honey_smoke_max_depth" =~ ^[0-9]+$ ]] || fail "--honey-smoke-max-depth must be an integer"
 [[ "$honey_smoke_timeout_secs" =~ ^[0-9]+$ ]] || fail "--honey-smoke-timeout-secs must be an integer"
+[[ "$storage_max_concurrent_ops" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_MAX_CONCURRENT_OPS must be an integer"
+[[ "$storage_s3_connect_timeout_secs" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS must be an integer"
+[[ "$storage_s3_pool_idle_timeout_secs" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS must be an integer"
+[[ "$storage_s3_pool_max_idle_per_host" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_S3_POOL_MAX_IDLE_PER_HOST must be an integer"
 case "$honey_remote_dir" in
   *[[:space:]]*) fail "--honey-remote-dir must not contain whitespace: $honey_remote_dir" ;;
 esac
@@ -421,6 +434,11 @@ region = "$region"
 bucket = "$bucket"
 remote_prefix = "$prefix"
 enforce_tls = false
+max_concurrent_ops = $storage_max_concurrent_ops
+s3_connect_timeout_secs = $storage_s3_connect_timeout_secs
+s3_pool_idle_timeout_secs = $storage_s3_pool_idle_timeout_secs
+s3_pool_max_idle_per_host = $storage_s3_pool_max_idle_per_host
+s3_http1_only = $storage_s3_http1_only_toml
 
 [sync]
 state_db = "$state_canon/state.db"
@@ -565,6 +583,11 @@ selected_hydration_file=$selected_rel
 source_symlink_count=$symlink_count
 shadow_symlink_count=$shadow_symlink_count
 shadow_symlink_targets_match=$shadow_symlink_target_match
+storage_max_concurrent_ops=$storage_max_concurrent_ops
+storage_s3_connect_timeout_secs=$storage_s3_connect_timeout_secs
+storage_s3_pool_idle_timeout_secs=$storage_s3_pool_idle_timeout_secs
+storage_s3_pool_max_idle_per_host=$storage_s3_pool_max_idle_per_host
+storage_s3_http1_only=$storage_s3_http1_only
 EOF
 }
 
@@ -687,6 +710,10 @@ write_push_storage_summary() {
       progress_rows += 1
       next
     }
+    /chunk upload heartbeat/ {
+      heartbeat_rows += 1
+      next
+    }
     / WARN / {
       warn_rows += 1
       if ($0 ~ /attempt=/ && $0 ~ /delay_ms=/) {
@@ -766,6 +793,7 @@ write_push_storage_summary() {
       }
       print "upload_rows=" rows + 0
       print "chunk_upload_progress_rows=" progress_rows + 0
+      print "chunk_upload_heartbeat_rows=" heartbeat_rows + 0
       print "first_upload_timestamp=" first_timestamp
       print "last_upload_timestamp=" last_timestamp
       print "total_file_bytes=" total_file_bytes + 0
@@ -814,6 +842,7 @@ write_push_storage_summary() {
       print "| --- | --- |"
       print "| Upload rows | " values["upload_rows"] " |"
       print "| Chunk progress rows | " values["chunk_upload_progress_rows"] " |"
+      print "| Chunk heartbeat rows | " values["chunk_upload_heartbeat_rows"] " |"
       print "| First upload timestamp | " values["first_upload_timestamp"] " |"
       print "| Last upload timestamp | " values["last_upload_timestamp"] " |"
       print "| Total file bytes | " values["total_file_bytes"] " |"

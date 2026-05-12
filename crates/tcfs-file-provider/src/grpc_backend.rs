@@ -167,23 +167,7 @@ fn target_from_config(config: &serde_json::Value) -> DaemonTarget {
 }
 
 fn build_direct_operator(config: &serde_json::Value) -> Option<opendal::Operator> {
-    let endpoint = config["s3_endpoint"].as_str().unwrap_or_default();
-    let bucket = config["s3_bucket"].as_str().unwrap_or("tcfs");
-    let access = config["s3_access"].as_str().unwrap_or_default();
-    let secret = config["s3_secret"].as_str().unwrap_or_default();
-
-    if endpoint.is_empty() || access.is_empty() || secret.is_empty() {
-        return None;
-    }
-
-    tcfs_storage::operator::build_operator(&tcfs_storage::operator::StorageConfig {
-        endpoint: endpoint.to_string(),
-        region: "us-east-1".to_string(),
-        bucket: bucket.to_string(),
-        access_key_id: access.to_string(),
-        secret_access_key: secret.to_string(),
-    })
-    .ok()
+    crate::storage_bounds::build_operator_from_json(config)
 }
 
 fn master_key_from_bytes(bytes: &[u8]) -> anyhow::Result<tcfs_crypto::MasterKey> {

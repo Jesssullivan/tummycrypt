@@ -167,6 +167,7 @@ fn live_operator_for_endpoint(endpoint: &str) -> Option<opendal::Operator> {
         bucket,
         access_key_id: access,
         secret_access_key: secret,
+        ..Default::default()
     };
 
     tcfs_storage::operator::build_operator(&config).ok()

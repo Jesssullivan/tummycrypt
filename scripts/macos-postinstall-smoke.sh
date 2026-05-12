@@ -763,6 +763,9 @@ check_host_download_request_log() {
       failure_output="$(grep -F "requestDownload: $item_identifier:" "$direct_log" || true)"
     fi
     if [[ -n "$failure_output" ]]; then
+      if grep -Fq "$success_pattern" <<<"$failure_output"; then
+        return 0
+      fi
       printf '%s\n' "$failure_output" >&2
       echo "FileProvider host app download request failed" >&2
       exit 1
@@ -785,6 +788,9 @@ check_host_download_request_log() {
     failure_output="$(grep -F "nonce=$action_nonce" <<<"$failure_output" || true)"
   fi
   if [[ -n "$failure_output" ]]; then
+    if grep -Fq "$success_pattern" <<<"$failure_output"; then
+      return 0
+    fi
     printf '%s\n' "$failure_output" >&2
     echo "FileProvider host app download request failed" >&2
     exit 1
@@ -814,6 +820,9 @@ check_host_evict_log() {
       failure_output="$(grep -F "evict: $item_identifier:" "$direct_log" || true)"
     fi
     if [[ -n "$failure_output" ]]; then
+      if grep -Fq "$success_pattern" <<<"$failure_output"; then
+        return 0
+      fi
       printf '%s\n' "$failure_output" >&2
       echo "FileProvider host app eviction request failed" >&2
       exit 1
@@ -836,6 +845,9 @@ check_host_evict_log() {
     failure_output="$(grep -F "nonce=$action_nonce" <<<"$failure_output" || true)"
   fi
   if [[ -n "$failure_output" ]]; then
+    if grep -Fq "$success_pattern" <<<"$failure_output"; then
+      return 0
+    fi
     printf '%s\n' "$failure_output" >&2
     echo "FileProvider host app eviction request failed" >&2
     exit 1

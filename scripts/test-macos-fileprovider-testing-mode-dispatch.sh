@@ -330,7 +330,7 @@ bash "$SCRIPT" \
   --no-watch \
   >"${TMPDIR}/keychain.out" \
   2>"${TMPDIR}/keychain.err"
-assert_contains "$FAKE_LOG" "-f signing_keychain=\\~/Library/Keychains/tcfs-fileprovider-lab.keychain-db"
+assert_contains "$FAKE_LOG" "-f signing_keychain=~/Library/Keychains/tcfs-fileprovider-lab.keychain-db"
 
 FAKE_LOG="${TMPDIR}/gh-p12.log"
 PATH="$FAKE_BIN:$PATH" \
@@ -345,7 +345,7 @@ bash "$SCRIPT" \
   --no-watch \
   >"${TMPDIR}/p12.out" \
   2>"${TMPDIR}/p12.err"
-assert_contains "$FAKE_LOG" "-f signing_p12_path=\\~/Certificates.p12"
+assert_contains "$FAKE_LOG" "-f signing_p12_path=~/Certificates.p12"
 
 FAKE_LOG="${TMPDIR}/gh-p12-password-file.log"
 PATH="$FAKE_BIN:$PATH" \
@@ -361,8 +361,8 @@ bash "$SCRIPT" \
   --no-watch \
   >"${TMPDIR}/p12-password-file.out" \
   2>"${TMPDIR}/p12-password-file.err"
-assert_contains "$FAKE_LOG" "-f signing_p12_path=\\~/Certificates.p12"
-assert_contains "$FAKE_LOG" "-f signing_p12_password_file=\\~/tcfs-fileprovider-lab.p12-password"
+assert_contains "$FAKE_LOG" "-f signing_p12_path=~/Certificates.p12"
+assert_contains "$FAKE_LOG" "-f signing_p12_password_file=~/tcfs-fileprovider-lab.p12-password"
 
 FAKE_LOG="${TMPDIR}/gh-profiles-dir.log"
 PATH="$FAKE_BIN:$PATH" \
@@ -378,8 +378,8 @@ bash "$SCRIPT" \
   --no-watch \
   >"${TMPDIR}/profiles-dir.out" \
   2>"${TMPDIR}/profiles-dir.err"
-assert_contains "$FAKE_LOG" "-f signing_p12_path=\\~/Certificates.p12"
-assert_contains "$FAKE_LOG" "-f profiles_dir=\\~/git/tummycrypt/build/asc-fileprovider-lab"
+assert_contains "$FAKE_LOG" "-f signing_p12_path=~/Certificates.p12"
+assert_contains "$FAKE_LOG" "-f profiles_dir=~/git/tummycrypt/build/asc-fileprovider-lab"
 
 FAKE_LOG="${TMPDIR}/gh-no-runner.log"
 assert_fails_contains \

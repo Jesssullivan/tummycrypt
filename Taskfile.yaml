@@ -635,6 +635,24 @@ tasks:
           if [[ -n "${CHUNK_TIMEOUT_SECS:-}" ]]; then
             args+=(--chunk-timeout-secs "$CHUNK_TIMEOUT_SECS")
           fi
+          if [[ -n "${PROGRESS_HEARTBEAT_SECS:-}" ]]; then
+            args+=(--progress-heartbeat-secs "$PROGRESS_HEARTBEAT_SECS")
+          fi
+          if [[ -n "${S3_CONNECT_TIMEOUT_SECS:-}" ]]; then
+            args+=(--s3-connect-timeout-secs "$S3_CONNECT_TIMEOUT_SECS")
+          fi
+          if [[ -n "${S3_POOL_IDLE_TIMEOUT_SECS:-}" ]]; then
+            args+=(--s3-pool-idle-timeout-secs "$S3_POOL_IDLE_TIMEOUT_SECS")
+          fi
+          if [[ -n "${S3_POOL_MAX_IDLE_PER_HOST:-}" ]]; then
+            args+=(--s3-pool-max-idle-per-host "$S3_POOL_MAX_IDLE_PER_HOST")
+          fi
+          if [[ "${S3_HTTP1_ONLY:-0}" == "1" ]]; then
+            args+=(--s3-http1-only)
+          fi
+          if [[ -n "${SOCKET_SAMPLE_INTERVAL_SECS:-}" ]]; then
+            args+=(--socket-sample-interval-secs "$SOCKET_SAMPLE_INTERVAL_SECS")
+          fi
           if [[ "${PUSH:-0}" == "1" ]]; then
             args+=(--push)
           fi

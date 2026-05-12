@@ -151,9 +151,11 @@ if [[ "$MOUNT_ROOT" != "/" ]]; then
 fi
 
 validate_relpath "--expected-file" "$EXPECTED_FILE_REL"
-for entry in "${EXPECT_ENTRIES[@]}"; do
-  validate_relpath "--expect-entry" "$entry"
-done
+if ((${#EXPECT_ENTRIES[@]} > 0)); then
+  for entry in "${EXPECT_ENTRIES[@]}"; do
+    validate_relpath "--expect-entry" "$entry"
+  done
+fi
 
 if [[ -n "$EXPECTED_CONTENT" && -n "$EXPECTED_CONTENT_FILE" ]]; then
   echo "--expected-content and --expected-content-file are mutually exclusive" >&2
@@ -229,12 +231,14 @@ if [[ -s "$stub_leaks" ]]; then
   exit 1
 fi
 
-for entry in "${EXPECT_ENTRIES[@]}"; do
-  if [[ ! -e "$MOUNT_ROOT/$entry" ]]; then
-    echo "expected entry missing from mounted view: $entry" >&2
-    exit 1
-  fi
-done
+if ((${#EXPECT_ENTRIES[@]} > 0)); then
+  for entry in "${EXPECT_ENTRIES[@]}"; do
+    if [[ ! -e "$MOUNT_ROOT/$entry" ]]; then
+      echo "expected entry missing from mounted view: $entry" >&2
+      exit 1
+    fi
+  done
+fi
 
 if [[ -n "$EXPECTED_SYMLINK_TARGETS_FILE" ]]; then
   symlink_count=0

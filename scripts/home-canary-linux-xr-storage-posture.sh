@@ -43,6 +43,17 @@ Options:
                           TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS. Default: 1024
   --chunk-timeout-secs <n>
                           TCFS_UPLOAD_CHUNK_TIMEOUT_SECS. Default: 300; 0 disables
+  --progress-heartbeat-secs <n>
+                          TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS. Default: 60; 0 disables
+  --s3-connect-timeout-secs <n>
+                          storage.s3_connect_timeout_secs. Default: 10
+  --s3-pool-idle-timeout-secs <n>
+                          storage.s3_pool_idle_timeout_secs. Default: 15
+  --s3-pool-max-idle-per-host <n>
+                          storage.s3_pool_max_idle_per_host. Default: upload concurrency
+  --s3-http1-only         Set storage.s3_http1_only = true
+  --socket-sample-interval-secs <n>
+                          Sample local tcfs S3 TCP sockets during push. Default: 5; 0 disables
   --no-assume-fresh-prefix
                           Do not set TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1
   --allow-debug-binary   Permit target/debug/cargo-run style binaries
@@ -144,6 +155,12 @@ forward_aws_env="$(bool_env TCFS_HONEY_FORWARD_AWS_ENV "${TCFS_HONEY_FORWARD_AWS
 upload_concurrency="${TCFS_UPLOAD_CHUNK_CONCURRENCY:-4}"
 progress_every_chunks="${TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS:-1024}"
 chunk_timeout_secs="${TCFS_UPLOAD_CHUNK_TIMEOUT_SECS:-300}"
+progress_heartbeat_secs="${TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS:-60}"
+storage_s3_connect_timeout_secs="${TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS:-10}"
+storage_s3_pool_idle_timeout_secs="${TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS:-15}"
+storage_s3_pool_max_idle_per_host="${TCFS_STORAGE_S3_POOL_MAX_IDLE_PER_HOST:-}"
+storage_s3_http1_only="$(bool_env TCFS_STORAGE_S3_HTTP1_ONLY "${TCFS_STORAGE_S3_HTTP1_ONLY:-0}")"
+socket_sample_interval_secs="${TCFS_STORAGE_SOCKET_SAMPLE_INTERVAL_SECS:-5}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -251,6 +268,35 @@ while [[ $# -gt 0 ]]; do
       chunk_timeout_secs="$2"
       shift 2
       ;;
+    --progress-heartbeat-secs)
+      [[ $# -ge 2 ]] || fail "--progress-heartbeat-secs requires a value"
+      progress_heartbeat_secs="$2"
+      shift 2
+      ;;
+    --s3-connect-timeout-secs)
+      [[ $# -ge 2 ]] || fail "--s3-connect-timeout-secs requires a value"
+      storage_s3_connect_timeout_secs="$2"
+      shift 2
+      ;;
+    --s3-pool-idle-timeout-secs)
+      [[ $# -ge 2 ]] || fail "--s3-pool-idle-timeout-secs requires a value"
+      storage_s3_pool_idle_timeout_secs="$2"
+      shift 2
+      ;;
+    --s3-pool-max-idle-per-host)
+      [[ $# -ge 2 ]] || fail "--s3-pool-max-idle-per-host requires a value"
+      storage_s3_pool_max_idle_per_host="$2"
+      shift 2
+      ;;
+    --s3-http1-only)
+      storage_s3_http1_only=1
+      shift
+      ;;
+    --socket-sample-interval-secs)
+      [[ $# -ge 2 ]] || fail "--socket-sample-interval-secs requires a value"
+      socket_sample_interval_secs="$2"
+      shift 2
+      ;;
     --no-assume-fresh-prefix)
       assume_fresh_prefix=0
       shift
@@ -276,6 +322,14 @@ done
 [[ "$upload_concurrency" =~ ^[0-9]+$ ]] || fail "--upload-concurrency must be numeric"
 [[ "$progress_every_chunks" =~ ^[0-9]+$ ]] || fail "--progress-every-chunks must be numeric"
 [[ "$chunk_timeout_secs" =~ ^[0-9]+$ ]] || fail "--chunk-timeout-secs must be numeric"
+[[ "$progress_heartbeat_secs" =~ ^[0-9]+$ ]] || fail "--progress-heartbeat-secs must be numeric"
+[[ "$storage_s3_connect_timeout_secs" =~ ^[0-9]+$ ]] || fail "--s3-connect-timeout-secs must be numeric"
+[[ "$storage_s3_pool_idle_timeout_secs" =~ ^[0-9]+$ ]] || fail "--s3-pool-idle-timeout-secs must be numeric"
+if [[ -z "$storage_s3_pool_max_idle_per_host" ]]; then
+  storage_s3_pool_max_idle_per_host="$upload_concurrency"
+fi
+[[ "$storage_s3_pool_max_idle_per_host" =~ ^[0-9]+$ ]] || fail "--s3-pool-max-idle-per-host must be numeric"
+[[ "$socket_sample_interval_secs" =~ ^[0-9]+$ ]] || fail "--socket-sample-interval-secs must be numeric"
 [[ "$honey_smoke_max_depth" =~ ^[0-9]+$ ]] || fail "--honey-smoke-max-depth must be numeric"
 [[ "$honey_smoke_timeout_secs" =~ ^[0-9]+$ ]] || fail "--honey-smoke-timeout-secs must be numeric"
 
@@ -372,6 +426,13 @@ assume_fresh_prefix=$assume_fresh_prefix
 upload_concurrency=$upload_concurrency
 progress_every_chunks=$progress_every_chunks
 chunk_timeout_secs=$chunk_timeout_secs
+progress_heartbeat_secs=$progress_heartbeat_secs
+storage_max_concurrent_ops=$upload_concurrency
+storage_s3_connect_timeout_secs=$storage_s3_connect_timeout_secs
+storage_s3_pool_idle_timeout_secs=$storage_s3_pool_idle_timeout_secs
+storage_s3_pool_max_idle_per_host=$storage_s3_pool_max_idle_per_host
+storage_s3_http1_only=$storage_s3_http1_only
+socket_sample_interval_secs=$socket_sample_interval_secs
 run_honey=$run_honey
 run_linux_lifecycle=$run_linux_lifecycle
 honey_host=$honey_host
@@ -399,8 +460,8 @@ Required claim boundary:
 - use a fresh disposable remote prefix
 - preserve \`chunk_exists_check=false\` when fresh-prefix mode is enabled
 - preserve chunk progress rows, concurrency, retry/warning counts, object
-  counts, chunk timeout posture, endpoint posture, and push wall-clock/memory
-  evidence where available
+  counts, chunk timeout posture, endpoint posture, S3 HTTP client limits,
+  heartbeat rows, and push wall-clock/memory evidence where available
 - keep production Finder, broad home-directory takeover, and on-prem cutover out
   of this packet
 
@@ -457,15 +518,100 @@ child_args+=(
 export TCFS_UPLOAD_CHUNK_CONCURRENCY="$upload_concurrency"
 export TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS="$progress_every_chunks"
 export TCFS_UPLOAD_CHUNK_TIMEOUT_SECS="$chunk_timeout_secs"
+export TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS="$progress_heartbeat_secs"
+export TCFS_STORAGE_MAX_CONCURRENT_OPS="$upload_concurrency"
+export TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS="$storage_s3_connect_timeout_secs"
+export TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS="$storage_s3_pool_idle_timeout_secs"
+export TCFS_STORAGE_S3_POOL_MAX_IDLE_PER_HOST="$storage_s3_pool_max_idle_per_host"
+export TCFS_STORAGE_S3_HTTP1_ONLY="$storage_s3_http1_only"
 if [[ "$assume_fresh_prefix" == "1" ]]; then
   export TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1
 else
   unset TCFS_UPLOAD_ASSUME_FRESH_PREFIX
 fi
 
+sample_s3_sockets() {
+  local helper_pid="$1"
+  local samples_path="$evidence_dir/s3-socket-samples.tsv"
+  local summary_path="$evidence_dir/s3-socket-summary.env"
+  local highwater=0
+  local highwater_pids=""
+  local highwater_at=""
+
+  printf 'sampled_at_utc\ttcfs_pids\ts3_established_sockets\thighwater\tlimit\n' >"$samples_path"
+
+  while kill -0 "$helper_pid" >/dev/null 2>&1; do
+    local sampled_at
+    local pids
+    local socket_count=0
+    sampled_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    pids="$(
+      ps -axo pid=,command= | awk -v bin="$tcfs_bin" -v prefix="$prefix" '
+        index($0, bin) > 0 && index($0, " push ") > 0 && index($0, prefix) > 0 {
+          print $1
+        }
+      '
+    )"
+
+    if [[ -n "$pids" ]] && command -v lsof >/dev/null 2>&1; then
+      local pid
+      for pid in $pids; do
+        local pid_socket_count
+        pid_socket_count="$(
+          lsof -nP -a -p "$pid" -iTCP 2>/dev/null | awk -v endpoint="$remote_host" '
+            NR > 1 && index($0, endpoint) > 0 && $0 ~ /ESTABLISHED/ {
+              count += 1
+            }
+            END { print count + 0 }
+          '
+        )"
+        socket_count=$((socket_count + pid_socket_count))
+      done
+    fi
+
+    if (( socket_count > highwater )); then
+      highwater="$socket_count"
+      highwater_pids="${pids//$'\n'/,}"
+      highwater_at="$sampled_at"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$sampled_at" \
+      "${pids//$'\n'/,}" \
+      "$socket_count" \
+      "$highwater" \
+      "$upload_concurrency" >>"$samples_path"
+
+    sleep "$socket_sample_interval_secs"
+  done
+
+  {
+    printf 'socket_sample_interval_secs=%s\n' "$socket_sample_interval_secs"
+    printf 'socket_sample_limit=%s\n' "$upload_concurrency"
+    printf 'socket_highwater=%s\n' "$highwater"
+    printf 'socket_highwater_at_utc=%s\n' "$highwater_at"
+    printf 'socket_highwater_pids=%s\n' "$highwater_pids"
+    if (( highwater > upload_concurrency )); then
+      printf 'socket_highwater_exceeded_upload_concurrency=1\n'
+    else
+      printf 'socket_highwater_exceeded_upload_concurrency=0\n'
+    fi
+  } >"$summary_path"
+}
+
 set +e
-"$REPO_ROOT/scripts/home-canary-linux-xr-shadow.sh" "${child_args[@]}"
-helper_rc=$?
+if [[ "$push_remote" == "1" && "$socket_sample_interval_secs" != "0" ]]; then
+  "$REPO_ROOT/scripts/home-canary-linux-xr-shadow.sh" "${child_args[@]}" &
+  helper_pid=$!
+  sample_s3_sockets "$helper_pid" &
+  sampler_pid=$!
+  wait "$helper_pid"
+  helper_rc=$?
+  wait "$sampler_pid" >/dev/null 2>&1 || true
+else
+  "$REPO_ROOT/scripts/home-canary-linux-xr-shadow.sh" "${child_args[@]}"
+  helper_rc=$?
+fi
 set -e
 
 write_posture_metadata "$helper_rc"

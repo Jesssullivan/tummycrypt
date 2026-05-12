@@ -177,10 +177,6 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             Err(_) => return ptr::null_mut(),
         };
 
-        let endpoint = config["s3_endpoint"].as_str().unwrap_or_default();
-        let bucket = config["s3_bucket"].as_str().unwrap_or("tcfs");
-        let access = config["s3_access"].as_str().unwrap_or_default();
-        let secret = config["s3_secret"].as_str().unwrap_or_default();
         let prefix = config["remote_prefix"]
             .as_str()
             .unwrap_or("default")
@@ -207,18 +203,11 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             Err(_) => return ptr::null_mut(),
         };
 
-        let operator =
-            tcfs_storage::operator::build_operator(&tcfs_storage::operator::StorageConfig {
-                endpoint: endpoint.to_string(),
-                region: "us-east-1".to_string(),
-                bucket: bucket.to_string(),
-                access_key_id: access.to_string(),
-                secret_access_key: secret.to_string(),
-            });
+        let operator = crate::storage_bounds::build_operator_from_json(&config);
 
         let operator = match operator {
-            Ok(op) => op,
-            Err(_) => return ptr::null_mut(),
+            Some(op) => op,
+            None => return ptr::null_mut(),
         };
 
         Box::into_raw(Box::new(TcfsProvider {

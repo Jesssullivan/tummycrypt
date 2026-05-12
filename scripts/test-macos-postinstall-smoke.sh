@@ -246,7 +246,7 @@ cat >"$FAKE_BIN/log" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
 if [[ "$args" == *"io.tinyland.tcfs.fileprovider"* && "$args" == *"loadConfig:"* ]]; then
-  if [[ -v TCFS_FAKE_EXTENSION_LOG ]]; then
+  if [[ "${TCFS_FAKE_EXTENSION_LOG+x}" == "x" ]]; then
     if [[ -n "$TCFS_FAKE_EXTENSION_LOG" ]]; then
       printf '%s\n' "$TCFS_FAKE_EXTENSION_LOG"
     fi
@@ -258,7 +258,7 @@ elif [[ "$args" == *"io.tinyland.tcfs.fileprovider"* && "$args" == *"hydration_s
     printf '2026-04-30 TCFSFileProvider enumerator enumerateProviderItems: item=Projects/tcfs-odrive-parity/conflict-status.txt hydration_state=conflict\n'
   fi
 elif [[ "$args" == *"com.apple.FileProvider"* || "$args" == *"fileproviderd"* || "$args" == *"Sync is not enabled"* ]]; then
-  if [[ -v TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG && -n "$TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG" ]]; then
+  if [[ "${TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG+x}" == "x" && -n "$TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG" ]]; then
     printf '%s\n' "$TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG"
   fi
 else

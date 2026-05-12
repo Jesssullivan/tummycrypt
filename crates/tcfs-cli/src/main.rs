@@ -1949,8 +1949,16 @@ async fn cmd_mount(
         bucket: bucket.clone(),
         access_key_id: access_key,
         secret_access_key: secret_key,
+        s3_connect_timeout_secs: config.storage.s3_connect_timeout_secs,
+        s3_pool_idle_timeout_secs: config.storage.s3_pool_idle_timeout_secs,
+        s3_pool_max_idle_per_host: config.storage.s3_pool_max_idle_per_host,
+        s3_http1_only: config.storage.s3_http1_only,
     };
-    let op = tcfs_storage::build_operator(&storage_cfg).context("building storage operator")?;
+    let op = tcfs_storage::operator::build_operator_with_limits(
+        &storage_cfg,
+        config.storage.max_concurrent_ops,
+    )
+    .context("building storage operator")?;
 
     let cache_dir = expand_tilde(&config.fuse.cache_dir);
     let neg_ttl = config.fuse.negative_cache_ttl_secs;

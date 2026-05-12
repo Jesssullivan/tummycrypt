@@ -198,17 +198,15 @@ impl TcfsProviderHandle {
             message: format!("failed to create tokio runtime: {e}"),
         })?;
 
-        let operator =
-            tcfs_storage::operator::build_operator(&tcfs_storage::operator::StorageConfig {
-                endpoint: config.s3_endpoint,
-                region: "us-east-1".to_string(),
-                bucket: config.s3_bucket,
-                access_key_id: config.access_key,
-                secret_access_key: config.s3_secret,
-            })
-            .map_err(|e| ProviderError::Storage {
-                message: e.to_string(),
-            })?;
+        let operator = crate::storage_bounds::build_operator_from_parts_with_env(
+            config.s3_endpoint,
+            config.s3_bucket,
+            config.access_key,
+            config.s3_secret,
+        )
+        .map_err(|e| ProviderError::Storage {
+            message: e.to_string(),
+        })?;
 
         Ok(Arc::new(Self {
             runtime,

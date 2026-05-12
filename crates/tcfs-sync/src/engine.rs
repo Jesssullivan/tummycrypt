@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use opendal::Operator;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use unicode_normalization::UnicodeNormalization;
@@ -46,6 +46,9 @@ const DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 300;
 
 /// Hard cap for `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS`.
 const MAX_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 3600;
+
+/// Hard cap for `TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS`.
+const MAX_UPLOAD_PROGRESS_HEARTBEAT_SECS: u64 = 3600;
 
 fn retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(CHUNK_RETRY_BASE_MS * 2u64.saturating_pow(attempt))
@@ -99,6 +102,30 @@ fn upload_progress_every_chunks_from_env_value(value: Option<&str>) -> usize {
 fn upload_progress_every_chunks() -> usize {
     upload_progress_every_chunks_from_env_value(
         std::env::var("TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn upload_progress_heartbeat_from_env_value(value: Option<&str>) -> Option<Duration> {
+    let seconds = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    if seconds == 0 {
+        return None;
+    }
+
+    Some(Duration::from_secs(
+        seconds.min(MAX_UPLOAD_PROGRESS_HEARTBEAT_SECS),
+    ))
+}
+
+fn upload_progress_heartbeat() -> Option<Duration> {
+    upload_progress_heartbeat_from_env_value(
+        std::env::var("TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS")
             .ok()
             .as_deref(),
     )
@@ -344,6 +371,45 @@ async fn await_next_chunk_upload(pending: &mut JoinSet<Result<u64>>) -> Result<u
         .await
         .context("chunk upload task set unexpectedly empty")?;
     joined.context("chunk upload task panicked or was cancelled")?
+}
+
+struct ChunkUploadWaitContext<'a> {
+    local_path: &'a Path,
+    completed_chunks: usize,
+    num_chunks: usize,
+    uploaded_bytes: u64,
+    streaming: bool,
+    chunk_upload_concurrency: usize,
+    heartbeat: Option<Duration>,
+}
+
+async fn await_next_chunk_upload_with_heartbeat(
+    pending: &mut JoinSet<Result<u64>>,
+    context: ChunkUploadWaitContext<'_>,
+) -> Result<u64> {
+    let Some(heartbeat) = context.heartbeat else {
+        return await_next_chunk_upload(pending).await;
+    };
+
+    let wait_started = Instant::now();
+    loop {
+        match tokio::time::timeout(heartbeat, await_next_chunk_upload(pending)).await {
+            Ok(result) => return result,
+            Err(_) => {
+                info!(
+                    path = %context.local_path.display(),
+                    completed_chunks = context.completed_chunks,
+                    chunks = context.num_chunks,
+                    uploaded_bytes = context.uploaded_bytes,
+                    streaming = context.streaming,
+                    pending_uploads = pending.len(),
+                    chunk_upload_concurrency = context.chunk_upload_concurrency,
+                    wait_elapsed_ms = wait_started.elapsed().as_millis() as u64,
+                    "chunk upload heartbeat"
+                );
+            }
+        }
+    }
 }
 
 fn record_chunk_upload_progress(
@@ -1128,6 +1194,7 @@ pub async fn upload_file_with_device(
     let chunk_upload_concurrency = upload_chunk_concurrency();
     let assume_fresh_prefix = upload_assume_fresh_prefix();
     let progress_every_chunks = upload_progress_every_chunks();
+    let progress_heartbeat = upload_progress_heartbeat();
     let chunk_write_timeout = upload_chunk_timeout();
     let chunk_write_timeout_secs = chunk_write_timeout
         .map(|duration| duration.as_secs())
@@ -1208,7 +1275,19 @@ pub async fn upload_file_with_device(
             ));
 
             while pending_uploads.len() >= chunk_upload_concurrency {
-                bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+                bytes_uploaded += await_next_chunk_upload_with_heartbeat(
+                    &mut pending_uploads,
+                    ChunkUploadWaitContext {
+                        local_path,
+                        completed_chunks,
+                        num_chunks,
+                        uploaded_bytes: bytes_uploaded,
+                        streaming: true,
+                        chunk_upload_concurrency,
+                        heartbeat: progress_heartbeat,
+                    },
+                )
+                .await?;
                 completed_chunks += 1;
                 if let Some(cb) = progress {
                     cb(
@@ -1229,7 +1308,19 @@ pub async fn upload_file_with_device(
         }
 
         while !pending_uploads.is_empty() {
-            bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+            bytes_uploaded += await_next_chunk_upload_with_heartbeat(
+                &mut pending_uploads,
+                ChunkUploadWaitContext {
+                    local_path,
+                    completed_chunks,
+                    num_chunks,
+                    uploaded_bytes: bytes_uploaded,
+                    streaming: true,
+                    chunk_upload_concurrency,
+                    heartbeat: progress_heartbeat,
+                },
+            )
+            .await?;
             completed_chunks += 1;
             if let Some(cb) = progress {
                 cb(
@@ -1304,7 +1395,19 @@ pub async fn upload_file_with_device(
             ));
 
             while pending_uploads.len() >= chunk_upload_concurrency {
-                bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+                bytes_uploaded += await_next_chunk_upload_with_heartbeat(
+                    &mut pending_uploads,
+                    ChunkUploadWaitContext {
+                        local_path,
+                        completed_chunks,
+                        num_chunks,
+                        uploaded_bytes: bytes_uploaded,
+                        streaming: false,
+                        chunk_upload_concurrency,
+                        heartbeat: progress_heartbeat,
+                    },
+                )
+                .await?;
                 completed_chunks += 1;
                 if let Some(cb) = progress {
                     cb(
@@ -1325,7 +1428,19 @@ pub async fn upload_file_with_device(
         }
 
         while !pending_uploads.is_empty() {
-            bytes_uploaded += await_next_chunk_upload(&mut pending_uploads).await?;
+            bytes_uploaded += await_next_chunk_upload_with_heartbeat(
+                &mut pending_uploads,
+                ChunkUploadWaitContext {
+                    local_path,
+                    completed_chunks,
+                    num_chunks,
+                    uploaded_bytes: bytes_uploaded,
+                    streaming: false,
+                    chunk_upload_concurrency,
+                    heartbeat: progress_heartbeat,
+                },
+            )
+            .await?;
             completed_chunks += 1;
             if let Some(cb) = progress {
                 cb(
@@ -2444,6 +2559,25 @@ mod tests {
         assert_eq!(
             upload_progress_every_chunks_from_env_value(Some("5000")),
             5000
+        );
+    }
+
+    #[test]
+    fn upload_progress_heartbeat_env_defaults_to_disabled() {
+        assert_eq!(upload_progress_heartbeat_from_env_value(None), None);
+        assert_eq!(upload_progress_heartbeat_from_env_value(Some("")), None);
+        assert_eq!(
+            upload_progress_heartbeat_from_env_value(Some("not-a-number")),
+            None
+        );
+        assert_eq!(upload_progress_heartbeat_from_env_value(Some("0")), None);
+        assert_eq!(
+            upload_progress_heartbeat_from_env_value(Some("15")),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            upload_progress_heartbeat_from_env_value(Some("999999")),
+            Some(Duration::from_secs(MAX_UPLOAD_PROGRESS_HEARTBEAT_SECS))
         );
     }
 
