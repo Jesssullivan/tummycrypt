@@ -306,6 +306,300 @@ async fn readdir_is_lazy_and_open_hydrates_cache() {
 }
 
 #[tokio::test]
+async fn unsync_path_evicts_cache_and_rehydrates_on_demand() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "mounted-unsync-rehydrate-contract";
+    let content = b"cached bytes should leave the machine and rehydrate on demand";
+
+    let writer = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("writer-cache"));
+    writer
+        .mkdir("/", OsStr::new("docs"), 0o755)
+        .await
+        .expect("mkdir docs");
+    let (fh, _) = writer
+        .create("/docs", OsStr::new("remote.txt"), 0o644)
+        .await
+        .expect("create remote file");
+    writer
+        .write(fh, 0, content)
+        .await
+        .expect("write remote file");
+    writer.release(fh).await.expect("flush remote file");
+
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+    let (read_fh, hydrated) = reader
+        .open("/docs/remote.txt")
+        .await
+        .expect("initial hydrate");
+    assert_eq!(&hydrated, content);
+    reader.release(read_fh).await.expect("release initial read");
+    assert_eq!(
+        reader
+            .disk_cache()
+            .stats()
+            .await
+            .expect("cache stats after initial hydrate")
+            .entry_count,
+        1,
+        "initial open should populate the reader cache"
+    );
+
+    let unsynced = reader
+        .unsync_path("/docs/remote.txt")
+        .await
+        .expect("unsync mounted path");
+    assert_eq!(unsynced.path, "/docs/remote.txt");
+    assert!(unsynced.was_cached, "unsync should evict cached bytes");
+    assert_eq!(unsynced.bytes_freed, content.len() as u64);
+    assert_eq!(
+        reader
+            .disk_cache()
+            .stats()
+            .await
+            .expect("cache stats after unsync")
+            .entry_count,
+        0,
+        "unsync should leave no local cached content"
+    );
+
+    let entries = reader.readdir("/docs").await.expect("readdir after unsync");
+    let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(
+        names.contains(&"remote.txt"),
+        "unsynced remote entry should remain listable through the clean mounted name: {names:?}"
+    );
+    assert!(
+        !names.contains(&"remote.txt.tc"),
+        "mounted unsync should not expose a physical stub suffix: {names:?}"
+    );
+
+    let already_unsynced = reader
+        .unsync_path("/docs/remote.txt")
+        .await
+        .expect("unsync already-uncached mounted path");
+    assert!(
+        !already_unsynced.was_cached,
+        "second unsync should report no local bytes to evict"
+    );
+    assert_eq!(already_unsynced.bytes_freed, 0);
+
+    let (rehydrated_fh, rehydrated) = reader
+        .open("/docs/remote.txt")
+        .await
+        .expect("rehydrate after unsync");
+    assert_eq!(&rehydrated, content);
+    reader
+        .release(rehydrated_fh)
+        .await
+        .expect("release rehydrated file");
+    assert_eq!(
+        reader
+            .disk_cache()
+            .stats()
+            .await
+            .expect("cache stats after rehydrate")
+            .entry_count,
+        1,
+        "open after unsync should restore exactly one cached entry"
+    );
+}
+
+#[tokio::test]
+async fn remote_create_after_negative_lookup_hydrates_after_invalidate_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "mounted-negative-cache-invalidate-contract";
+    let content = b"peer-created bytes after negative lookup";
+
+    let reader = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("reader-cache"));
+    assert!(
+        reader.getattr("/docs/new.txt").await.is_err(),
+        "missing path should seed the reader negative cache"
+    );
+
+    let writer = memory_vfs_with_op(op, prefix, tmp.path().join("writer-cache"));
+    writer
+        .mkdir("/", OsStr::new("docs"), 0o755)
+        .await
+        .expect("mkdir docs");
+    let (fh, _) = writer
+        .create("/docs", OsStr::new("new.txt"), 0o644)
+        .await
+        .expect("create peer file");
+    writer.write(fh, 0, content).await.expect("write peer file");
+    writer.release(fh).await.expect("flush peer file");
+
+    assert!(
+        reader.getattr("/docs/new.txt").await.is_err(),
+        "negative cache should suppress the new peer file until invalidated"
+    );
+
+    reader.invalidate_path("/docs/new.txt");
+
+    let attr = reader
+        .getattr("/docs/new.txt")
+        .await
+        .expect("getattr after invalidation");
+    assert_eq!(attr.kind, tcfs_vfs::types::VfsFileType::RegularFile);
+    assert_eq!(attr.size, content.len() as u64);
+
+    let entries = reader
+        .readdirplus("/docs")
+        .await
+        .expect("readdirplus after invalidation");
+    let entry = entries
+        .iter()
+        .find(|entry| entry.name == "new.txt")
+        .expect("new file entry");
+    assert_eq!(entry.kind, tcfs_vfs::types::VfsFileType::RegularFile);
+    assert_eq!(
+        entry.attr.as_ref().map(|attr| attr.size),
+        Some(content.len() as u64)
+    );
+
+    let (read_fh, hydrated) = reader
+        .open("/docs/new.txt")
+        .await
+        .expect("hydrate peer-created file after invalidation");
+    assert_eq!(&hydrated, content);
+    reader.release(read_fh).await.expect("release peer file");
+}
+
+#[tokio::test]
+async fn remote_delete_while_unhydrated_drops_mounted_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "mounted-delete-peer-unsynced-contract";
+    let content = b"remote bytes that should never hydrate before delete";
+
+    let writer = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("writer-cache"));
+    writer
+        .mkdir("/", OsStr::new("docs"), 0o755)
+        .await
+        .expect("mkdir docs");
+    let (fh, _) = writer
+        .create("/docs", OsStr::new("doomed.txt"), 0o644)
+        .await
+        .expect("create doomed");
+    writer.write(fh, 0, content).await.expect("write doomed");
+    writer.release(fh).await.expect("flush doomed");
+
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+    let before = reader
+        .readdir("/docs")
+        .await
+        .expect("readdir before delete");
+    let before_names: Vec<&str> = before.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(before_names.contains(&"doomed.txt"));
+    assert_eq!(
+        reader
+            .disk_cache()
+            .stats()
+            .await
+            .expect("cache stats before delete")
+            .entry_count,
+        0,
+        "readdir should leave the peer-unhydrated reader cache empty"
+    );
+
+    writer
+        .unlink("/docs", OsStr::new("doomed.txt"))
+        .await
+        .expect("remote delete");
+
+    let after = reader.readdir("/docs").await.expect("readdir after delete");
+    let after_names: Vec<&str> = after.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(
+        !after_names.contains(&"doomed.txt"),
+        "deleted remote entry should disappear from mounted view: {after_names:?}"
+    );
+    assert!(
+        reader.open("/docs/doomed.txt").await.is_err(),
+        "deleted unhydrated entry should not open from a stale listing"
+    );
+}
+
+#[tokio::test]
+async fn remote_rename_while_unhydrated_hydrates_new_mounted_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "mounted-rename-peer-unsynced-contract";
+    let content = b"remote bytes should hydrate only through the renamed path";
+
+    let writer = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("writer-cache"));
+    writer
+        .mkdir("/", OsStr::new("docs"), 0o755)
+        .await
+        .expect("mkdir docs");
+    let (fh, _) = writer
+        .create("/docs", OsStr::new("old.txt"), 0o644)
+        .await
+        .expect("create old");
+    writer.write(fh, 0, content).await.expect("write old");
+    writer.release(fh).await.expect("flush old");
+
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+    let before = reader
+        .readdir("/docs")
+        .await
+        .expect("readdir before rename");
+    let before_names: Vec<&str> = before.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(before_names.contains(&"old.txt"));
+    assert!(!before_names.contains(&"new.txt"));
+    assert_eq!(
+        reader
+            .disk_cache()
+            .stats()
+            .await
+            .expect("cache stats before rename")
+            .entry_count,
+        0,
+        "reader should still be unhydrated before peer rename"
+    );
+
+    writer
+        .rename(
+            "/docs",
+            OsStr::new("old.txt"),
+            "/docs",
+            OsStr::new("new.txt"),
+        )
+        .await
+        .expect("remote rename");
+
+    let after = reader.readdir("/docs").await.expect("readdir after rename");
+    let after_names: Vec<&str> = after.iter().map(|entry| entry.name.as_str()).collect();
+    assert!(
+        !after_names.contains(&"old.txt"),
+        "old path should disappear after peer rename: {after_names:?}"
+    );
+    assert!(
+        after_names.contains(&"new.txt"),
+        "new path should appear after peer rename: {after_names:?}"
+    );
+    assert!(
+        reader.open("/docs/old.txt").await.is_err(),
+        "old unhydrated path should not hydrate after rename"
+    );
+
+    let (fh, hydrated) = reader
+        .open("/docs/new.txt")
+        .await
+        .expect("hydrate renamed path");
+    assert_eq!(&hydrated, content);
+    reader.release(fh).await.expect("release renamed path");
+}
+
+#[tokio::test]
 async fn hydrated_remote_file_edit_flushes_exact_content() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let op = Operator::new(opendal::services::Memory::default())

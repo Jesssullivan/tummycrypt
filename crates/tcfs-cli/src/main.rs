@@ -4468,6 +4468,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_pull_after_peer_delete_recreate_over_unsynced_stub_uses_recreated_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let neo_root = dir.path().join("neo");
+        let honey_root = dir.path().join("honey");
+        std::fs::create_dir_all(&neo_root).unwrap();
+        std::fs::create_dir_all(&honey_root).unwrap();
+        let neo_file = neo_root.join("shared.txt");
+        let honey_file = honey_root.join("shared.txt");
+        std::fs::write(&neo_file, b"version from neo").unwrap();
+
+        let op = memory_op();
+        let neo_state = dir.path().join("neo-state.json");
+        let honey_state = dir.path().join("honey-state.json");
+        let mut neo_config = test_config(&neo_root);
+        neo_config.sync.state_db = dir.path().join("neo-state.db");
+        let mut honey_config = test_config(&honey_root);
+        honey_config.sync.state_db = dir.path().join("honey-state.db");
+
+        cmd_push_with_operator(&neo_config, &op, &neo_file, None, &neo_state, "neo-device")
+            .await
+            .unwrap();
+        cmd_pull_with_operator(
+            &honey_config,
+            &op,
+            "shared.txt",
+            Some(&honey_file),
+            Some("data"),
+            &honey_state,
+            "honey-device",
+        )
+        .await
+        .unwrap();
+
+        cmd_unsync(&neo_config, &neo_file, false).await.unwrap();
+        let stub_path = neo_root.join("shared.txt.tc");
+        assert!(stub_path.exists(), "neo should keep only a physical stub");
+        assert!(!neo_file.exists(), "neo hydrated file should be removed");
+
+        let mut delete_state = tcfs_sync::state::StateCache::open(&honey_state).unwrap();
+        tcfs_sync::engine::delete_remote_file(
+            &op,
+            "shared.txt",
+            "data",
+            &mut delete_state,
+            Some(&honey_root),
+        )
+        .await
+        .unwrap();
+
+        cmd_pull_with_operator(
+            &neo_config,
+            &op,
+            "shared.txt",
+            Some(&neo_file),
+            Some("data"),
+            &neo_state,
+            "neo-device",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            stub_path.exists(),
+            "remote delete should not remove local stub"
+        );
+        assert!(
+            !neo_file.exists(),
+            "failed pull should not hydrate local file"
+        );
+
+        std::fs::write(&honey_file, b"recreated after delete").unwrap();
+        cmd_push_with_operator(
+            &honey_config,
+            &op,
+            &honey_file,
+            None,
+            &honey_state,
+            "honey-device",
+        )
+        .await
+        .unwrap();
+
+        cmd_pull_with_operator(
+            &neo_config,
+            &op,
+            "shared.txt",
+            Some(&neo_file),
+            Some("data"),
+            &neo_state,
+            "neo-device",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&neo_file).unwrap(), b"recreated after delete");
+        assert!(
+            !stub_path.exists(),
+            "rehydrating recreated remote path should remove the adjacent stub"
+        );
+    }
+
+    #[tokio::test]
     async fn cli_pull_adjacent_stub_cleanup_ignores_non_tcfs_files() {
         let dir = tempfile::tempdir().unwrap();
         let pulled = dir.path().join("notes.md");
