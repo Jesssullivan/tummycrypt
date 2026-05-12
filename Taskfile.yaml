@@ -629,6 +629,9 @@ tasks:
           if [[ -n "${UPLOAD_CONCURRENCY:-}" ]]; then
             args+=(--upload-concurrency "$UPLOAD_CONCURRENCY")
           fi
+          if [[ -n "${FILE_UPLOAD_CONCURRENCY:-}" ]]; then
+            args+=(--file-upload-concurrency "$FILE_UPLOAD_CONCURRENCY")
+          fi
           if [[ -n "${PROGRESS_EVERY_CHUNKS:-}" ]]; then
             args+=(--progress-every-chunks "$PROGRESS_EVERY_CHUNKS")
           fi

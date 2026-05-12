@@ -39,6 +39,8 @@ Options:
   --forward-aws-env      Forward AWS env to honey companions
   --upload-concurrency <n>
                           TCFS_UPLOAD_CHUNK_CONCURRENCY. Default: 4
+  --file-upload-concurrency <n>
+                          TCFS_UPLOAD_FILE_CONCURRENCY. Default: 1
   --progress-every-chunks <n>
                           TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS. Default: 1024
   --chunk-timeout-secs <n>
@@ -153,6 +155,7 @@ honey_smoke_max_depth="${TCFS_HONEY_SMOKE_MAX_DEPTH:-8}"
 honey_smoke_timeout_secs="${TCFS_HONEY_SMOKE_TIMEOUT_SECS:-900}"
 forward_aws_env="$(bool_env TCFS_HONEY_FORWARD_AWS_ENV "${TCFS_HONEY_FORWARD_AWS_ENV:-0}")"
 upload_concurrency="${TCFS_UPLOAD_CHUNK_CONCURRENCY:-4}"
+file_upload_concurrency="${TCFS_UPLOAD_FILE_CONCURRENCY:-1}"
 progress_every_chunks="${TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS:-1024}"
 chunk_timeout_secs="${TCFS_UPLOAD_CHUNK_TIMEOUT_SECS:-300}"
 progress_heartbeat_secs="${TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS:-60}"
@@ -258,6 +261,11 @@ while [[ $# -gt 0 ]]; do
       upload_concurrency="$2"
       shift 2
       ;;
+    --file-upload-concurrency)
+      [[ $# -ge 2 ]] || fail "--file-upload-concurrency requires a value"
+      file_upload_concurrency="$2"
+      shift 2
+      ;;
     --progress-every-chunks)
       [[ $# -ge 2 ]] || fail "--progress-every-chunks requires a value"
       progress_every_chunks="$2"
@@ -320,6 +328,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$upload_concurrency" =~ ^[0-9]+$ ]] || fail "--upload-concurrency must be numeric"
+[[ "$file_upload_concurrency" =~ ^[0-9]+$ ]] || fail "--file-upload-concurrency must be numeric"
 [[ "$progress_every_chunks" =~ ^[0-9]+$ ]] || fail "--progress-every-chunks must be numeric"
 [[ "$chunk_timeout_secs" =~ ^[0-9]+$ ]] || fail "--chunk-timeout-secs must be numeric"
 [[ "$progress_heartbeat_secs" =~ ^[0-9]+$ ]] || fail "--progress-heartbeat-secs must be numeric"
@@ -424,6 +433,7 @@ tcfs_version=$tcfs_version
 tcfs_sha256=$tcfs_sha256
 assume_fresh_prefix=$assume_fresh_prefix
 upload_concurrency=$upload_concurrency
+file_upload_concurrency=$file_upload_concurrency
 progress_every_chunks=$progress_every_chunks
 chunk_timeout_secs=$chunk_timeout_secs
 progress_heartbeat_secs=$progress_heartbeat_secs
@@ -516,6 +526,7 @@ child_args+=(
 )
 
 export TCFS_UPLOAD_CHUNK_CONCURRENCY="$upload_concurrency"
+export TCFS_UPLOAD_FILE_CONCURRENCY="$file_upload_concurrency"
 export TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS="$progress_every_chunks"
 export TCFS_UPLOAD_CHUNK_TIMEOUT_SECS="$chunk_timeout_secs"
 export TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS="$progress_heartbeat_secs"

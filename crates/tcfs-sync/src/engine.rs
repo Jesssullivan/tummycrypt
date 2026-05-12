@@ -27,7 +27,7 @@ use crate::index_entry::{
     write_committed_index_entry, write_preparing_index_entry, PendingIndexEntry, RemoteIndexEntry,
 };
 use crate::manifest::{SymlinkManifest, SyncManifest};
-use crate::state::{make_sync_state_full, FileSyncStatus, StateCache};
+use crate::state::{make_sync_state_full, FileSyncStatus, StateCache, SyncState};
 
 /// Maximum number of retry attempts for chunk upload/download operations.
 const CHUNK_MAX_RETRIES: u32 = 3;
@@ -40,6 +40,12 @@ const DEFAULT_UPLOAD_CHUNK_CONCURRENCY: usize = 4;
 
 /// Hard cap for `TCFS_UPLOAD_CHUNK_CONCURRENCY`.
 const MAX_UPLOAD_CHUNK_CONCURRENCY: usize = 64;
+
+/// Default bounded fanout for fresh-prefix tree file uploads.
+const DEFAULT_UPLOAD_FILE_CONCURRENCY: usize = 1;
+
+/// Hard cap for `TCFS_UPLOAD_FILE_CONCURRENCY`.
+const MAX_UPLOAD_FILE_CONCURRENCY: usize = 64;
 
 /// Default per-attempt timeout for chunk uploads.
 const DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 300;
@@ -79,6 +85,31 @@ fn upload_chunk_concurrency() -> usize {
     )
 }
 
+fn upload_file_concurrency_from_env_value(value: Option<&str>) -> usize {
+    let Some(raw) = value else {
+        return DEFAULT_UPLOAD_FILE_CONCURRENCY;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_UPLOAD_FILE_CONCURRENCY;
+    }
+
+    trimmed
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_UPLOAD_FILE_CONCURRENCY))
+        .unwrap_or(DEFAULT_UPLOAD_FILE_CONCURRENCY)
+}
+
+fn upload_file_concurrency() -> usize {
+    upload_file_concurrency_from_env_value(
+        std::env::var("TCFS_UPLOAD_FILE_CONCURRENCY")
+            .ok()
+            .as_deref(),
+    )
+}
+
 fn upload_assume_fresh_prefix_from_env_value(value: Option<&str>) -> bool {
     matches!(value.map(str::trim), Some("1" | "true" | "yes" | "on"))
 }
@@ -89,6 +120,28 @@ fn upload_assume_fresh_prefix() -> bool {
             .ok()
             .as_deref(),
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UploadRuntimeOptions {
+    assume_fresh_prefix: bool,
+    file_upload_concurrency: usize,
+}
+
+impl UploadRuntimeOptions {
+    fn from_env() -> Self {
+        Self {
+            assume_fresh_prefix: upload_assume_fresh_prefix(),
+            file_upload_concurrency: upload_file_concurrency(),
+        }
+    }
+}
+
+fn should_upload_files_concurrently(
+    runtime: UploadRuntimeOptions,
+    encryption_present: bool,
+) -> bool {
+    runtime.assume_fresh_prefix && runtime.file_upload_concurrency > 1 && !encryption_present
 }
 
 fn upload_progress_every_chunks_from_env_value(value: Option<&str>) -> usize {
@@ -645,7 +698,26 @@ async fn publish_manifest_for_rel_path(
     manifest_bytes: Vec<u8>,
     entry: RemoteIndexEntry,
 ) -> Result<()> {
-    if upload_assume_fresh_prefix() {
+    publish_manifest_for_rel_path_with_mode(
+        op,
+        remote_prefix,
+        rel_path,
+        manifest_bytes,
+        entry,
+        upload_assume_fresh_prefix(),
+    )
+    .await
+}
+
+async fn publish_manifest_for_rel_path_with_mode(
+    op: &Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    manifest_bytes: Vec<u8>,
+    entry: RemoteIndexEntry,
+    assume_fresh_prefix: bool,
+) -> Result<()> {
+    if assume_fresh_prefix {
         return publish_manifest_for_rel_path_fresh(
             op,
             remote_prefix,
@@ -973,12 +1045,46 @@ pub async fn upload_file_with_device(
     encryption: OptionalEncryption<'_>,
 ) -> Result<UploadResult> {
     let tracked_state = state.get(local_path).cloned();
-
-    // Fast-path: check if file is already up-to-date
     let sync_reason = state.needs_sync(local_path)?;
+    let (result, state_update) = upload_file_with_device_with_state(
+        op,
+        local_path,
+        remote_prefix,
+        progress,
+        device_id,
+        rel_path,
+        encryption,
+        tracked_state,
+        sync_reason,
+        UploadRuntimeOptions::from_env(),
+    )
+    .await?;
+
+    if let Some(sync_state) = state_update {
+        state.set(local_path, sync_state);
+    }
+
+    Ok(result)
+}
+
+#[allow(unused_variables)]
+#[allow(clippy::too_many_arguments)]
+async fn upload_file_with_device_with_state(
+    op: &Operator,
+    local_path: &Path,
+    remote_prefix: &str,
+    progress: Option<&ProgressFn>,
+    device_id: &str,
+    rel_path: Option<&str>,
+    encryption: OptionalEncryption<'_>,
+    tracked_state: Option<SyncState>,
+    sync_reason: Option<String>,
+    runtime: UploadRuntimeOptions,
+) -> Result<(UploadResult, Option<SyncState>)> {
+    // Fast-path: check if file is already up-to-date
     match sync_reason.as_deref() {
         None => {
-            let cached = state.get(local_path).ok_or_else(|| {
+            let cached = tracked_state.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "state entry vanished during upload for {}",
                     local_path.display()
@@ -994,7 +1100,7 @@ pub async fn upload_file_with_device(
                 outcome: Some(SyncOutcome::UpToDate),
             };
             debug!(path = %local_path.display(), "skip: unchanged since last sync");
-            return Ok(result);
+            return Ok((result, None));
         }
         Some(reason) => {
             debug!(path = %local_path.display(), reason = %reason, "uploading");
@@ -1041,7 +1147,7 @@ pub async fn upload_file_with_device(
 
     // Build remote manifest path (using the file's content hash)
     let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
-    let assume_fresh_prefix = upload_assume_fresh_prefix();
+    let assume_fresh_prefix = runtime.assume_fresh_prefix;
 
     // Get the local vclock from state (or start fresh)
     let mut local_vclock = tracked_state
@@ -1115,15 +1221,18 @@ pub async fn upload_file_with_device(
             match &sync_outcome {
                 SyncOutcome::RemoteNewer => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "remote-newer skip")?;
-                    return Ok(UploadResult {
-                        path: local_path.to_path_buf(),
-                        remote_path: remote_manifest.clone(),
-                        hash: file_hash_hex,
-                        chunks: 0,
-                        bytes: file_size,
-                        skipped: true,
-                        outcome: Some(sync_outcome),
-                    });
+                    return Ok((
+                        UploadResult {
+                            path: local_path.to_path_buf(),
+                            remote_path: remote_manifest.clone(),
+                            hash: file_hash_hex,
+                            chunks: 0,
+                            bytes: file_size,
+                            skipped: true,
+                            outcome: Some(sync_outcome),
+                        },
+                        None,
+                    ));
                 }
                 SyncOutcome::Conflict(ref conflict_info) => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "conflict skip")?;
@@ -1138,16 +1247,18 @@ pub async fn upload_file_with_device(
                     )?;
                     sync_state.conflict = Some(conflict_info.clone());
                     sync_state.status = FileSyncStatus::Conflict;
-                    state.set(local_path, sync_state);
-                    return Ok(UploadResult {
-                        path: local_path.to_path_buf(),
-                        remote_path: remote_manifest.clone(),
-                        hash: file_hash_hex,
-                        chunks: 0,
-                        bytes: file_size,
-                        skipped: true,
-                        outcome: Some(sync_outcome),
-                    });
+                    return Ok((
+                        UploadResult {
+                            path: local_path.to_path_buf(),
+                            remote_path: remote_manifest.clone(),
+                            hash: file_hash_hex,
+                            chunks: 0,
+                            bytes: file_size,
+                            skipped: true,
+                            outcome: Some(sync_outcome),
+                        },
+                        Some(sync_state),
+                    ));
                 }
                 SyncOutcome::UpToDate => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "up-to-date skip")?;
@@ -1160,16 +1271,18 @@ pub async fn upload_file_with_device(
                         local_vclock,
                         device_id.to_string(),
                     )?;
-                    state.set(local_path, sync_state);
-                    return Ok(UploadResult {
-                        path: local_path.to_path_buf(),
-                        remote_path: remote_manifest,
-                        hash: file_hash_hex,
-                        chunks: 0,
-                        bytes: file_size,
-                        skipped: true,
-                        outcome: Some(sync_outcome),
-                    });
+                    return Ok((
+                        UploadResult {
+                            path: local_path.to_path_buf(),
+                            remote_path: remote_manifest,
+                            hash: file_hash_hex,
+                            chunks: 0,
+                            bytes: file_size,
+                            skipped: true,
+                            outcome: Some(sync_outcome),
+                        },
+                        Some(sync_state),
+                    ));
                 }
                 SyncOutcome::LocalNewer => {
                     // Defer vclock merge until after successful manifest upload
@@ -1216,16 +1329,18 @@ pub async fn upload_file_with_device(
             local_vclock,
             device_id.to_string(),
         )?;
-        state.set(local_path, sync_state);
-        return Ok(UploadResult {
-            path: local_path.to_path_buf(),
-            remote_path,
-            hash: file_hash_hex,
-            chunks: chunk_count,
-            bytes: file_size,
-            skipped: false,
-            outcome: None,
-        });
+        return Ok((
+            UploadResult {
+                path: local_path.to_path_buf(),
+                remote_path,
+                hash: file_hash_hex,
+                chunks: chunk_count,
+                bytes: file_size,
+                skipped: false,
+                outcome: None,
+            },
+            Some(sync_state),
+        ));
     }
 
     // Tick local vclock before writing
@@ -1559,12 +1674,13 @@ pub async fn upload_file_with_device(
 
     let manifest_bytes = manifest.to_bytes()?;
     if let Some(rp) = rel_path {
-        publish_manifest_for_rel_path(
+        publish_manifest_for_rel_path_with_mode(
             op,
             remote_prefix,
             rp,
             manifest_bytes,
             RemoteIndexEntry::new(file_hash_hex.clone(), file_size, num_chunks),
+            assume_fresh_prefix,
         )
         .await?;
     } else {
@@ -1609,17 +1725,18 @@ pub async fn upload_file_with_device(
         local_vclock,
         device_id.to_string(),
     )?;
-    state.set(local_path, sync_state);
-
-    Ok(UploadResult {
-        path: local_path.to_path_buf(),
-        remote_path: remote_manifest,
-        hash: file_hash_hex,
-        chunks: num_chunks,
-        bytes: file_size,
-        skipped: false,
-        outcome,
-    })
+    Ok((
+        UploadResult {
+            path: local_path.to_path_buf(),
+            remote_path: remote_manifest,
+            hash: file_hash_hex,
+            chunks: num_chunks,
+            bytes: file_size,
+            skipped: false,
+            outcome,
+        },
+        Some(sync_state),
+    ))
 }
 
 /// Upload a symbolic link as a first-class symlink entry.
@@ -2018,6 +2135,32 @@ pub async fn push_tree_with_device(
     collect_cfg: Option<&CollectConfig>,
     encryption: OptionalEncryption<'_>,
 ) -> Result<(usize, usize, u64)> {
+    push_tree_with_device_with_runtime(
+        op,
+        local_root,
+        remote_prefix,
+        state,
+        progress,
+        device_id,
+        collect_cfg,
+        encryption,
+        UploadRuntimeOptions::from_env(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn push_tree_with_device_with_runtime(
+    op: &Operator,
+    local_root: &Path,
+    remote_prefix: &str,
+    state: &mut StateCache,
+    progress: Option<&ProgressFn>,
+    device_id: &str,
+    collect_cfg: Option<&CollectConfig>,
+    encryption: OptionalEncryption<'_>,
+    runtime: UploadRuntimeOptions,
+) -> Result<(usize, usize, u64)> {
     let mut uploaded = 0usize;
     let mut skipped = 0usize;
     let mut bytes = 0u64;
@@ -2025,40 +2168,73 @@ pub async fn push_tree_with_device(
     let cfg = collect_cfg.cloned().unwrap_or_default();
     let result = collect_files(local_root, &cfg)?;
     let total = result.files.len() + result.symlinks.len();
+    let remote_prefix = remote_path_prefix(remote_prefix);
 
-    for (i, path) in result.files.iter().enumerate() {
-        let rel = path.strip_prefix(local_root).unwrap_or(path);
-        let rel_str = normalize_rel_path_text(&rel.to_string_lossy());
-
-        let msg = format!("[{}/{}] {}", i + 1, total, rel.display());
-        if let Some(cb) = progress {
-            cb(i as u64, total as u64, &msg);
-        }
-
-        match upload_file_with_device(
+    if should_upload_files_concurrently(runtime, encryption.is_some()) {
+        let stats = push_regular_files_concurrently(
             op,
-            path,
-            &remote_path_prefix(remote_prefix),
+            local_root,
+            &remote_prefix,
             state,
-            None,
+            progress,
             device_id,
-            Some(&rel_str),
-            encryption,
+            &result.files,
+            total,
+            runtime,
         )
-        .await
-        {
-            Ok(result) => {
-                if result.skipped {
-                    skipped += 1;
-                } else {
-                    // Path publication is owned by upload_file_with_device so
-                    // the manifest and index sequence stays crash-aware.
-                    uploaded += 1;
-                    bytes += result.bytes;
-                }
+        .await?;
+        uploaded += stats.0;
+        skipped += stats.1;
+        bytes += stats.2;
+    } else {
+        for (i, path) in result.files.iter().enumerate() {
+            let rel = path.strip_prefix(local_root).unwrap_or(path);
+            let rel_str = normalize_rel_path_text(&rel.to_string_lossy());
+
+            let msg = format!("[{}/{}] {}", i + 1, total, rel.display());
+            if let Some(cb) = progress {
+                cb(i as u64, total as u64, &msg);
             }
-            Err(e) => {
-                warn!(path = %path.display(), "upload failed: {e}");
+
+            let tracked_state = state.get(path).cloned();
+            let sync_reason = match state.needs_sync(path) {
+                Ok(reason) => reason,
+                Err(e) => {
+                    warn!(path = %path.display(), "upload preflight failed: {e}");
+                    continue;
+                }
+            };
+
+            match upload_file_with_device_with_state(
+                op,
+                path,
+                &remote_prefix,
+                None,
+                device_id,
+                Some(&rel_str),
+                encryption,
+                tracked_state,
+                sync_reason,
+                runtime,
+            )
+            .await
+            {
+                Ok((result, state_update)) => {
+                    if let Some(sync_state) = state_update {
+                        state.set(&result.path, sync_state);
+                    }
+                    if result.skipped {
+                        skipped += 1;
+                    } else {
+                        // Path publication is owned by upload_file_with_device so
+                        // the manifest and index sequence stays crash-aware.
+                        uploaded += 1;
+                        bytes += result.bytes;
+                    }
+                }
+                Err(e) => {
+                    warn!(path = %path.display(), "upload failed: {e}");
+                }
             }
         }
     }
@@ -2073,15 +2249,7 @@ pub async fn push_tree_with_device(
             cb((ordinal - 1) as u64, total as u64, &msg);
         }
 
-        match upload_symlink_with_device(
-            op,
-            path,
-            &remote_path_prefix(remote_prefix),
-            state,
-            device_id,
-            &rel_str,
-        )
-        .await
+        match upload_symlink_with_device(op, path, &remote_prefix, state, device_id, &rel_str).await
         {
             Ok(result) => {
                 if result.skipped {
@@ -2105,11 +2273,7 @@ pub async fn push_tree_with_device(
         }
         if let Ok(rel) = dir.strip_prefix(local_root) {
             let rel_str = normalize_rel_path_text(&rel.to_string_lossy());
-            let marker_key = format!(
-                "{}/index/{}/.tcfs_dir",
-                remote_path_prefix(remote_prefix),
-                rel_str
-            );
+            let marker_key = format!("{}/index/{}/.tcfs_dir", remote_prefix, rel_str);
             let marker_content = b"type=directory\n";
             if let Err(e) = op.write(&marker_key, marker_content.to_vec()).await {
                 warn!(dir = %dir.display(), "failed to write empty dir marker: {e}");
@@ -2121,6 +2285,134 @@ pub async fn push_tree_with_device(
 
     // Flush state cache after tree push
     state.flush()?;
+
+    Ok((uploaded, skipped, bytes))
+}
+
+type TreeUploadTaskResult = Result<(UploadResult, Option<SyncState>)>;
+
+async fn await_next_tree_upload(
+    pending: &mut JoinSet<(PathBuf, TreeUploadTaskResult)>,
+) -> Option<(PathBuf, TreeUploadTaskResult)> {
+    match pending.join_next().await {
+        Some(Ok(result)) => Some(result),
+        Some(Err(e)) => {
+            warn!("file upload task panicked or was cancelled: {e}");
+            None
+        }
+        None => None,
+    }
+}
+
+fn apply_tree_upload_result(
+    path: PathBuf,
+    result: TreeUploadTaskResult,
+    state: &mut StateCache,
+    uploaded: &mut usize,
+    skipped: &mut usize,
+    bytes: &mut u64,
+) {
+    match result {
+        Ok((result, state_update)) => {
+            if let Some(sync_state) = state_update {
+                state.set(&result.path, sync_state);
+            }
+            if result.skipped {
+                *skipped += 1;
+            } else {
+                *uploaded += 1;
+                *bytes += result.bytes;
+            }
+        }
+        Err(e) => {
+            warn!(path = %path.display(), "upload failed: {e}");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn push_regular_files_concurrently(
+    op: &Operator,
+    local_root: &Path,
+    remote_prefix: &str,
+    state: &mut StateCache,
+    progress: Option<&ProgressFn>,
+    device_id: &str,
+    files: &[PathBuf],
+    total: usize,
+    runtime: UploadRuntimeOptions,
+) -> Result<(usize, usize, u64)> {
+    let mut uploaded = 0usize;
+    let mut skipped = 0usize;
+    let mut bytes = 0u64;
+    let mut pending = JoinSet::new();
+    let concurrency = runtime.file_upload_concurrency;
+
+    info!(
+        files = files.len(),
+        file_upload_concurrency = concurrency,
+        fresh_prefix_publish = runtime.assume_fresh_prefix,
+        "uploading tree files with bounded file concurrency"
+    );
+
+    for (i, path) in files.iter().enumerate() {
+        let rel = path.strip_prefix(local_root).unwrap_or(path);
+        let rel_str = normalize_rel_path_text(&rel.to_string_lossy());
+
+        let msg = format!("[{}/{}] {}", i + 1, total, rel.display());
+        if let Some(cb) = progress {
+            cb(i as u64, total as u64, &msg);
+        }
+
+        let tracked_state = state.get(path).cloned();
+        let sync_reason = match state.needs_sync(path) {
+            Ok(reason) => reason,
+            Err(e) => {
+                warn!(path = %path.display(), "upload preflight failed: {e}");
+                continue;
+            }
+        };
+
+        let op = op.clone();
+        let path = path.clone();
+        let remote_prefix = remote_prefix.to_string();
+        let device_id = device_id.to_string();
+        pending.spawn(async move {
+            let result = upload_file_with_device_with_state(
+                &op,
+                &path,
+                &remote_prefix,
+                None,
+                &device_id,
+                Some(&rel_str),
+                None,
+                tracked_state,
+                sync_reason,
+                runtime,
+            )
+            .await;
+            (path, result)
+        });
+
+        while pending.len() >= concurrency {
+            if let Some((path, result)) = await_next_tree_upload(&mut pending).await {
+                apply_tree_upload_result(
+                    path,
+                    result,
+                    state,
+                    &mut uploaded,
+                    &mut skipped,
+                    &mut bytes,
+                );
+            }
+        }
+    }
+
+    while !pending.is_empty() {
+        if let Some((path, result)) = await_next_tree_upload(&mut pending).await {
+            apply_tree_upload_result(path, result, state, &mut uploaded, &mut skipped, &mut bytes);
+        }
+    }
 
     Ok((uploaded, skipped, bytes))
 }
@@ -2515,6 +2807,13 @@ mod tests {
             .collect()
     }
 
+    fn committed_manifest_hash(raw: &[u8]) -> String {
+        match parse_index_entry_record(raw).unwrap() {
+            ParsedIndexEntry::Legacy(entry) => entry.manifest_hash,
+            ParsedIndexEntry::V2(entry) => entry.current.unwrap().manifest_hash,
+        }
+    }
+
     #[test]
     fn streaming_upload_snapshot_keeps_chunk_metadata() {
         let data: Vec<u8> = (0u64..524288)
@@ -2590,6 +2889,63 @@ mod tests {
             upload_chunk_concurrency_from_env_value(Some("999")),
             MAX_UPLOAD_CHUNK_CONCURRENCY
         );
+    }
+
+    #[test]
+    fn upload_file_concurrency_env_is_bounded() {
+        assert_eq!(
+            upload_file_concurrency_from_env_value(None),
+            DEFAULT_UPLOAD_FILE_CONCURRENCY
+        );
+        assert_eq!(
+            upload_file_concurrency_from_env_value(Some("")),
+            DEFAULT_UPLOAD_FILE_CONCURRENCY
+        );
+        assert_eq!(
+            upload_file_concurrency_from_env_value(Some("not-a-number")),
+            DEFAULT_UPLOAD_FILE_CONCURRENCY
+        );
+        assert_eq!(
+            upload_file_concurrency_from_env_value(Some("0")),
+            DEFAULT_UPLOAD_FILE_CONCURRENCY
+        );
+        assert_eq!(upload_file_concurrency_from_env_value(Some("7")), 7);
+        assert_eq!(
+            upload_file_concurrency_from_env_value(Some("999")),
+            MAX_UPLOAD_FILE_CONCURRENCY
+        );
+    }
+
+    #[test]
+    fn file_concurrency_requires_fresh_prefix_and_plaintext_uploads() {
+        assert!(!should_upload_files_concurrently(
+            UploadRuntimeOptions {
+                assume_fresh_prefix: false,
+                file_upload_concurrency: 8,
+            },
+            false,
+        ));
+        assert!(!should_upload_files_concurrently(
+            UploadRuntimeOptions {
+                assume_fresh_prefix: true,
+                file_upload_concurrency: 1,
+            },
+            false,
+        ));
+        assert!(!should_upload_files_concurrently(
+            UploadRuntimeOptions {
+                assume_fresh_prefix: true,
+                file_upload_concurrency: 8,
+            },
+            true,
+        ));
+        assert!(should_upload_files_concurrently(
+            UploadRuntimeOptions {
+                assume_fresh_prefix: true,
+                file_upload_concurrency: 8,
+            },
+            false,
+        ));
     }
 
     #[test]
@@ -3671,6 +4027,139 @@ mod tests {
                 assert!(entry.pending.is_none());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn push_tree_fresh_prefix_file_concurrency_uploads_many_files_and_flushes_state() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("source");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let mut expected_bytes = 0u64;
+        for i in 0..24 {
+            let data = format!("parallel file {i:02}\n").into_bytes();
+            expected_bytes += data.len() as u64;
+            std::fs::write(root.join("docs").join(format!("file-{i:02}.txt")), data).unwrap();
+        }
+
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+        let runtime = UploadRuntimeOptions {
+            assume_fresh_prefix: true,
+            file_upload_concurrency: 6,
+        };
+
+        let (uploaded, skipped, bytes) = push_tree_with_device_with_runtime(
+            &op,
+            &root,
+            "data",
+            &mut state,
+            None,
+            "",
+            Some(&no_empty_dirs_config()),
+            None,
+            runtime,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(uploaded, 24);
+        assert_eq!(skipped, 0);
+        assert_eq!(bytes, expected_bytes);
+        assert_eq!(state.len(), 24);
+        assert!(state_path.exists(), "tree push should flush state to disk");
+        assert!(staging_manifest_keys(&op).await.is_empty());
+        assert!(op.exists("data/index/docs/file-00.txt").await.unwrap());
+        assert!(op.exists("data/index/docs/file-23.txt").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn push_tree_concurrent_fresh_prefix_preserves_duplicate_content_index_entries() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("source");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let content = b"same bytes at two paths";
+        std::fs::write(root.join("docs/a.txt"), content).unwrap();
+        std::fs::write(root.join("docs/b.txt"), content).unwrap();
+
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let runtime = UploadRuntimeOptions {
+            assume_fresh_prefix: true,
+            file_upload_concurrency: 2,
+        };
+
+        let (uploaded, skipped, bytes) = push_tree_with_device_with_runtime(
+            &op,
+            &root,
+            "data",
+            &mut state,
+            None,
+            "",
+            Some(&no_empty_dirs_config()),
+            None,
+            runtime,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(uploaded, 2);
+        assert_eq!(skipped, 0);
+        assert_eq!(bytes, (content.len() * 2) as u64);
+        let a_raw = op.read("data/index/docs/a.txt").await.unwrap().to_vec();
+        let b_raw = op.read("data/index/docs/b.txt").await.unwrap().to_vec();
+        let a_hash = committed_manifest_hash(&a_raw);
+        let b_hash = committed_manifest_hash(&b_raw);
+        assert_eq!(a_hash, b_hash);
+        assert!(op
+            .exists(&format!("data/manifests/{a_hash}"))
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn push_tree_concurrent_file_error_keeps_successful_state_updates() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        let ok_a = root.join("ok-a.txt");
+        let missing = root.join("missing.txt");
+        let ok_b = root.join("ok-b.txt");
+        std::fs::write(&ok_a, b"first good file").unwrap();
+        std::fs::write(&ok_b, b"second good file").unwrap();
+
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let runtime = UploadRuntimeOptions {
+            assume_fresh_prefix: true,
+            file_upload_concurrency: 4,
+        };
+        let files = vec![ok_a.clone(), missing, ok_b.clone()];
+
+        let (uploaded, skipped, bytes) = push_regular_files_concurrently(
+            &op,
+            &root,
+            "data",
+            &mut state,
+            None,
+            "",
+            &files,
+            files.len(),
+            runtime,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(uploaded, 2);
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            bytes,
+            b"first good file".len() as u64 + b"second good file".len() as u64
+        );
+        assert!(state.get(&ok_a).is_some());
+        assert!(state.get(&ok_b).is_some());
+        assert!(op.exists("data/index/ok-a.txt").await.unwrap());
+        assert!(op.exists("data/index/ok-b.txt").await.unwrap());
     }
 
     #[tokio::test]
