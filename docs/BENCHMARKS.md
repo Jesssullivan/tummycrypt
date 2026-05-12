@@ -82,6 +82,20 @@ Functional follow-up observations from
   Treat this packet as functional and storage-observation evidence, not a
   production storage posture proof.
 
+Partial release-binary storage observations from
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260512T034347Z/`:
+
+- The packet used the release `tcfs 0.12.12` binary with a fresh disposable
+  prefix, upload concurrency 8, `TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1`, and
+  `chunk_exists_check=false`.
+- The dominant 6,216,046,897-byte raw-Git `.pack` completed with 70,856 chunks,
+  but showed repeated multi-minute gaps with no progress row and no retry row.
+- The adjacent 45,641,304-byte `.rev` completed with 8,405 chunks and showed the
+  same stall shape.
+- The run was stopped during the normal project-file walk at 4,046 uploaded rows
+  after 5,277.06 seconds, with no retry rows. Treat this as storage blocker
+  evidence only; `result.env` records `proof=push-failed`.
+
 Pre-fix host observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:
 

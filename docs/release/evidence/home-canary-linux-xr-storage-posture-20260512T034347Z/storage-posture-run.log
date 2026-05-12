@@ -1,0 +1,106 @@
+task: [lazy:home-canary-linux-xr-storage-posture] bash -euo pipefail <<'EOF'
+args=()
+
+if [[ -n "${SOURCE:-}" ]]; then
+  args+=(--source "$SOURCE")
+fi
+if [[ -n "${SHADOW_ROOT:-}" ]]; then
+  args+=(--shadow-root "$SHADOW_ROOT")
+fi
+if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+  args+=(--evidence-dir "$EVIDENCE_DIR")
+fi
+if [[ -n "${REMOTE:-}" ]]; then
+  args+=(--remote "$REMOTE")
+fi
+if [[ -n "${STATE_DIR:-}" ]]; then
+  args+=(--state-dir "$STATE_DIR")
+fi
+if [[ -n "${TCFS_BIN:-}" ]]; then
+  args+=(--tcfs-bin "$TCFS_BIN")
+fi
+if [[ -n "${HONEY_HOST:-}" ]]; then
+  args+=(--honey-host "$HONEY_HOST")
+fi
+if [[ -n "${HONEY_MOUNT_ROOT:-}" ]]; then
+  args+=(--honey-mount-root "$HONEY_MOUNT_ROOT")
+fi
+if [[ -n "${HONEY_REMOTE_DIR:-}" ]]; then
+  args+=(--honey-remote-dir "$HONEY_REMOTE_DIR")
+fi
+if [[ -n "${HONEY_TCFS_BIN:-}" ]]; then
+  args+=(--honey-tcfs-bin "$HONEY_TCFS_BIN")
+fi
+if [[ -n "${UPLOAD_CONCURRENCY:-}" ]]; then
+  args+=(--upload-concurrency "$UPLOAD_CONCURRENCY")
+fi
+if [[ -n "${PROGRESS_EVERY_CHUNKS:-}" ]]; then
+  args+=(--progress-every-chunks "$PROGRESS_EVERY_CHUNKS")
+fi
+if [[ "${PUSH:-0}" == "1" ]]; then
+  args+=(--push)
+fi
+if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
+  args+=(--create-bucket)
+fi
+if [[ "${RUN_HONEY:-0}" == "1" ]]; then
+  args+=(--run-honey)
+fi
+if [[ "${HONEY_START_MOUNT:-0}" == "1" ]]; then
+  args+=(--honey-start-mount)
+fi
+if [[ "${HONEY_EXISTING_MOUNT:-0}" == "1" ]]; then
+  args+=(--honey-existing-mount)
+fi
+if [[ "${RUN_LINUX_LIFECYCLE:-0}" == "1" ]]; then
+  args+=(--run-linux-lifecycle)
+fi
+if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
+  args+=(--forward-aws-env)
+fi
+if [[ "${NO_ASSUME_FRESH_PREFIX:-0}" == "1" ]]; then
+  args+=(--no-assume-fresh-prefix)
+fi
+if [[ "${ALLOW_DEBUG_BINARY:-0}" == "1" ]]; then
+  args+=(--allow-debug-binary)
+fi
+if [[ "${ALLOW_NON_POSTURE_PREFIX:-0}" == "1" ]]; then
+  args+=(--allow-non-posture-prefix)
+fi
+
+scripts/home-canary-linux-xr-storage-posture.sh "${args[@]}"
+EOF
+
+inventorying source: /Users/jess/git/linux-xr
+creating isolated shadow: /Users/jess/TCFS Pilot/real-canaries/linux-xr-storage-posture-20260512T034347Z
+pushing shadow to disposable prefix: seaweedfs://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260512T034347Z
+/Users/jess/git/tummycrypt/scripts/home-canary-linux-xr-shadow.sh: line 866: syntax error near unexpected token `then'
+error: 'tcfs' requires a subcommand but one was not provided
+  [subcommands: status, config, kdbx, push, pull, sync-status, mount, unmount, cache, unsync, init, device, auth, rotate-credentials, rotate-key, reconcile, policy, rm, resolve, trash, migrate-prefix, help]
+
+Usage: tcfs [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+scripts/home-canary-linux-xr-storage-posture.sh: line 457: --honey-smoke-max-depth: command not found
+scripts/home-canary-linux-xr-storage-posture.sh: line 458: --honey-smoke-timeout-secs: command not found
+scripts/home-canary-linux-xr-storage-posture.sh: line 459: syntax error near unexpected token `)'
+scripts/home-canary-linux-xr-storage-posture.sh: line 459: `)'
+task: Failed to run task "lazy:home-canary-linux-xr-storage-posture": exit status 2
+     5277.06 real        84.70 user        99.92 sys
+          1059913728  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              521240  page reclaims
+             1102966  page faults
+                   0  swaps
+                   0  block input operations
+                   3  block output operations
+             2520501  messages sent
+             3025752  messages received
+                 321  signals received
+              166214  voluntary context switches
+             5411438  involuntary context switches
+          2239353004  instructions retired
+          1412905973  cycles elapsed
+            22020696  peak memory footprint
