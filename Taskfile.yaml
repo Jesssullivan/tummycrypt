@@ -107,8 +107,8 @@ tasks:
   lazy:check:
     desc: Run lazy hydration harness/static regression checks
     cmds:
-      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
-      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/home-canary-linux-xr-storage-posture.sh scripts/test-home-canary-linux-xr-storage-posture.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/home-canary-linux-xr-storage-posture.sh scripts/test-home-canary-linux-xr-storage-posture.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
       - python3 -m py_compile scripts/asc-fileprovider-lab-provision.py
       - task: lazy:test-linux-lifecycle-demo
       - task: lazy:test-mounted-smoke
@@ -120,6 +120,7 @@ tasks:
       - task: lazy:test-neo-honey-delete-rename-unsynced
       - task: lazy:test-neo-honey-conflict
       - task: lazy:test-home-canary-linux-xr-shadow
+      - task: lazy:test-home-canary-linux-xr-storage-posture
       - task: lazy:test-macos-fileprovider-neo-cleanup
       - task: lazy:test-macos-profile-inventory
       - task: lazy:test-macos-preflight
@@ -587,6 +588,88 @@ tasks:
     desc: Regression-test the linux-xr shadow canary helper
     cmds:
       - bash scripts/test-home-canary-linux-xr-shadow.sh
+
+  lazy:home-canary-linux-xr-storage-posture:
+    desc: "S3 posture canary: release-binary fresh-prefix linux-xr shadow packet"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${SOURCE:-}" ]]; then
+            args+=(--source "$SOURCE")
+          fi
+          if [[ -n "${SHADOW_ROOT:-}" ]]; then
+            args+=(--shadow-root "$SHADOW_ROOT")
+          fi
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${REMOTE:-}" ]]; then
+            args+=(--remote "$REMOTE")
+          fi
+          if [[ -n "${STATE_DIR:-}" ]]; then
+            args+=(--state-dir "$STATE_DIR")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs-bin "$TCFS_BIN")
+          fi
+          if [[ -n "${HONEY_HOST:-}" ]]; then
+            args+=(--honey-host "$HONEY_HOST")
+          fi
+          if [[ -n "${HONEY_MOUNT_ROOT:-}" ]]; then
+            args+=(--honey-mount-root "$HONEY_MOUNT_ROOT")
+          fi
+          if [[ -n "${HONEY_REMOTE_DIR:-}" ]]; then
+            args+=(--honey-remote-dir "$HONEY_REMOTE_DIR")
+          fi
+          if [[ -n "${HONEY_TCFS_BIN:-}" ]]; then
+            args+=(--honey-tcfs-bin "$HONEY_TCFS_BIN")
+          fi
+          if [[ -n "${UPLOAD_CONCURRENCY:-}" ]]; then
+            args+=(--upload-concurrency "$UPLOAD_CONCURRENCY")
+          fi
+          if [[ -n "${PROGRESS_EVERY_CHUNKS:-}" ]]; then
+            args+=(--progress-every-chunks "$PROGRESS_EVERY_CHUNKS")
+          fi
+          if [[ "${PUSH:-0}" == "1" ]]; then
+            args+=(--push)
+          fi
+          if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
+            args+=(--create-bucket)
+          fi
+          if [[ "${RUN_HONEY:-0}" == "1" ]]; then
+            args+=(--run-honey)
+          fi
+          if [[ "${HONEY_START_MOUNT:-0}" == "1" ]]; then
+            args+=(--honey-start-mount)
+          fi
+          if [[ "${HONEY_EXISTING_MOUNT:-0}" == "1" ]]; then
+            args+=(--honey-existing-mount)
+          fi
+          if [[ "${RUN_LINUX_LIFECYCLE:-0}" == "1" ]]; then
+            args+=(--run-linux-lifecycle)
+          fi
+          if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
+            args+=(--forward-aws-env)
+          fi
+          if [[ "${NO_ASSUME_FRESH_PREFIX:-0}" == "1" ]]; then
+            args+=(--no-assume-fresh-prefix)
+          fi
+          if [[ "${ALLOW_DEBUG_BINARY:-0}" == "1" ]]; then
+            args+=(--allow-debug-binary)
+          fi
+          if [[ "${ALLOW_NON_POSTURE_PREFIX:-0}" == "1" ]]; then
+            args+=(--allow-non-posture-prefix)
+          fi
+
+          scripts/home-canary-linux-xr-storage-posture.sh "${args[@]}"
+          EOF
+
+  lazy:test-home-canary-linux-xr-storage-posture:
+    desc: Regression-test the linux-xr storage posture canary wrapper
+    cmds:
+      - bash scripts/test-home-canary-linux-xr-storage-posture.sh
 
   lazy:macos-fileprovider-neo-cleanup-packet:
     desc: "Archive neo FileProvider divergence and optionally install the published pkg"

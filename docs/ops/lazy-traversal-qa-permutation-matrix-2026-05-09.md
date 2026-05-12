@@ -88,8 +88,8 @@ queueing, retry, or endpoint problems that block production claims.
 | --- | --- | --- | --- |
 | S1 | Large raw-Git index push | `.git/objects/pack/*.idx` uses a large-file chunk profile, records chunk count and push duration, and does not explode into tiny S3 objects | `20260510T201809Z` exposed the old small-profile behavior: a 395,849,892-byte `.idx` became 72,598 chunks. `20260511T040325Z` records the improved shape at 4,600 total pack-index chunks, but the push predates final telemetry and used debug binaries, so release-build storage proof remains open |
 | S2 | Large raw-Git pack push | Multi-GB `.pack` files push without unbounded memory growth, with archived chunk count, bytes uploaded, retry count, and wall-clock duration | `20260511T040325Z` records the dominant pack shape: 2 pack rows, 70,857 pack chunks, 6,216,112,937 pack bytes, and max object `pack-cca8376c...pack` at 70,856 chunks / 6,216,046,897 bytes. Production posture still needs release-build memory/timing/retry evidence |
-| S3 | Endpoint posture | Packet records endpoint class, TLS policy, credential source, bucket/prefix isolation, and whether public CI can reach it safely | Open. Existing packets use disposable prefixes, but production-like endpoint class and public-runner reachability remain separate proof rows |
-| S4 | Queue/concurrency behavior | Upload engine records whether file and chunk writes are sequential or bounded-parallel, and retries are visible in evidence | `20260511T040325Z` records `chunk_upload_concurrency_values=4`, but `chunk_exists_check_absent_rows=92969` and `chunk_upload_progress_rows=0` because the push started before the final telemetry landed. Host proof still needs a release-build rerun with fresh-prefix mode, object counts, retries, and timings |
+| S3 | Endpoint posture | Packet records endpoint class, TLS policy, credential source, bucket/prefix isolation, and whether public CI can reach it safely | Open. Existing packets use disposable prefixes, but production-like endpoint class and public-runner reachability remain separate proof rows. `task lazy:home-canary-linux-xr-storage-posture` now records endpoint/TLS posture and credential presence without secret values for the next packet |
+| S4 | Queue/concurrency behavior | Upload engine records whether file and chunk writes are sequential or bounded-parallel, and retries are visible in evidence | `20260511T040325Z` records `chunk_upload_concurrency_values=4`, but `chunk_exists_check_absent_rows=92969` and `chunk_upload_progress_rows=0` because the push started before the final telemetry landed. Host proof still needs a release-build rerun with fresh-prefix mode, object counts, retries, and timings; the new storage-posture task is the intended harness |
 | S5 | Hydration latency on S3 | Cold list, first-byte hydrate, full hydrate, cache-hit read, and cache-clear/rehydrate timings are archived for representative small and large files | Open. Current traversal rows prove exact bytes, not latency SLOs |
 
 ## QA Evidence Minimums
@@ -143,8 +143,9 @@ behavior into user-facing claims:
    exposing object-count and throughput behavior, but do not let exact-content
    success imply production storage readiness. The next host proof is to rerun
    large `.idx`/`.pack` paths with the rebuilt chunk-profile, streaming-memory,
-   and bounded chunk-upload fanout changes, then decide whether multipart or
-   native SeaweedFS semantics are the next product change.
+   and bounded chunk-upload fanout changes via
+   `task lazy:home-canary-linux-xr-storage-posture`, then decide whether
+   multipart or native SeaweedFS semantics are the next product change.
 
 ## Next Mutation Detail
 
@@ -153,8 +154,8 @@ reported as product claims until evidence lands:
 
 | ID | Mutation | Acceptance notes |
 | --- | --- | --- |
-| S6 | Post-fix release-binary raw-Git canary on a new disposable S3 prefix | Archive release build provenance, endpoint/TLS/credential posture, object counts, retries, memory peak, wall-clock timings, `chunk_exists_check` mode, progress rows, and hydration latency. Debug-binary evidence remains functional evidence only. |
-| P6 | Release-binary `linux-xr` storage rerun | Functional mounted symlink closure is green in `20260511T040325Z`. The remaining large-tree rerun is storage-focused: use release binaries on a new disposable prefix, archive fresh telemetry, and keep correctness success separate from production storage posture. |
+| S6 | Post-fix release-binary raw-Git canary on a new disposable S3 prefix | Archive release build provenance, endpoint/TLS/credential posture, object counts, retries, memory peak, wall-clock timings, `chunk_exists_check` mode, progress rows, and hydration latency. `task lazy:home-canary-linux-xr-storage-posture` is the harness. Debug-binary evidence remains functional evidence only. |
+| P6 | Release-binary `linux-xr` storage rerun | Functional mounted symlink closure is green in `20260511T040325Z`. The remaining large-tree rerun is storage-focused: use release binaries on a new disposable prefix through the storage-posture wrapper, archive fresh telemetry, and keep correctness success separate from production storage posture. |
 | M8-A | Delete/rename while peer-unsynced tombstone details | Helper support now records stale `.tc` `sync-status`, repeated old-path pull failure, and repeated new-path hydrate success. Remaining rows are mounted old-path behavior, delete-then-recreate same relative path, and rename same-hash versus different-hash cases. Keep product tombstone semantics open until accepted. |
 | M5-D2 | Daemon-backed conflict resolve closure | Assert the RPC returns, winning bytes remain at the original path, losing bytes land at the daemon conflict-copy path, final state is synced, a second resolve is idempotent, and timeout paths leave no partial files. |
 | K1 | Keep-synced / pin acceptance | Define the product surface before testing: status wording, local storage guarantee, eviction refusal or allowance, watcher/reconcile behavior, peer delete/edit behavior, and conflict behavior. |

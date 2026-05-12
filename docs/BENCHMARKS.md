@@ -106,6 +106,14 @@ evidence should preserve the `chunk_exists_check=false` upload log field when it
 is enabled. These changes still need a fresh release-build host rerun before any
 production throughput, object-count, or memory claim is made.
 
+The release-binary rerun path is now codified as
+`task lazy:home-canary-linux-xr-storage-posture`. That wrapper delegates the
+same isolated-shadow mechanics to `scripts/home-canary-linux-xr-shadow.sh`, but
+adds a release-binary guard, fresh-prefix guard, upload concurrency/progress
+defaults, endpoint/TLS and credential-presence metadata, and an explicit
+`production_storage_posture_claim=0` boundary. It is a harness for the next
+packet, not evidence that the packet has passed.
+
 ## Compression Ratios
 
 zstd level 3 compression ratios by file type:
