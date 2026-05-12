@@ -168,6 +168,15 @@ fn should_record_chunk_upload_progress(
         || (completed_chunks == num_chunks && num_chunks >= every_chunks)
 }
 
+fn rate_per_sec(units: u64, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= f64::EPSILON {
+        0.0
+    } else {
+        units as f64 / seconds
+    }
+}
+
 async fn retry_with_backoff<T, E, Action, ActionFuture, Sleep, SleepFuture, OnRetry>(
     max_attempts: u32,
     mut action: Action,
@@ -375,6 +384,7 @@ async fn await_next_chunk_upload(pending: &mut JoinSet<Result<u64>>) -> Result<u
 
 struct ChunkUploadWaitContext<'a> {
     local_path: &'a Path,
+    upload_started: Instant,
     completed_chunks: usize,
     num_chunks: usize,
     uploaded_bytes: u64,
@@ -396,11 +406,15 @@ async fn await_next_chunk_upload_with_heartbeat(
         match tokio::time::timeout(heartbeat, await_next_chunk_upload(pending)).await {
             Ok(result) => return result,
             Err(_) => {
+                let file_elapsed = context.upload_started.elapsed();
                 info!(
                     path = %context.local_path.display(),
                     completed_chunks = context.completed_chunks,
                     chunks = context.num_chunks,
                     uploaded_bytes = context.uploaded_bytes,
+                    file_elapsed_ms = file_elapsed.as_millis() as u64,
+                    completed_chunks_per_sec = rate_per_sec(context.completed_chunks as u64, file_elapsed),
+                    uploaded_bytes_per_sec = rate_per_sec(context.uploaded_bytes, file_elapsed),
                     streaming = context.streaming,
                     pending_uploads = pending.len(),
                     chunk_upload_concurrency = context.chunk_upload_concurrency,
@@ -1199,6 +1213,7 @@ pub async fn upload_file_with_device(
     let chunk_write_timeout_secs = chunk_write_timeout
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let upload_started = Instant::now();
 
     // Generate per-file encryption key if encryption is enabled
     #[cfg(feature = "crypto")]
@@ -1279,6 +1294,7 @@ pub async fn upload_file_with_device(
                     &mut pending_uploads,
                     ChunkUploadWaitContext {
                         local_path,
+                        upload_started,
                         completed_chunks,
                         num_chunks,
                         uploaded_bytes: bytes_uploaded,
@@ -1312,6 +1328,7 @@ pub async fn upload_file_with_device(
                 &mut pending_uploads,
                 ChunkUploadWaitContext {
                     local_path,
+                    upload_started,
                     completed_chunks,
                     num_chunks,
                     uploaded_bytes: bytes_uploaded,
@@ -1399,6 +1416,7 @@ pub async fn upload_file_with_device(
                     &mut pending_uploads,
                     ChunkUploadWaitContext {
                         local_path,
+                        upload_started,
                         completed_chunks,
                         num_chunks,
                         uploaded_bytes: bytes_uploaded,
@@ -1432,6 +1450,7 @@ pub async fn upload_file_with_device(
                 &mut pending_uploads,
                 ChunkUploadWaitContext {
                     local_path,
+                    upload_started,
                     completed_chunks,
                     num_chunks,
                     uploaded_bytes: bytes_uploaded,
@@ -1531,12 +1550,16 @@ pub async fn upload_file_with_device(
         }
     }
 
+    let upload_elapsed = upload_started.elapsed();
     info!(
         path = %local_path.display(),
         hash = %file_hash_hex,
         chunks = num_chunks,
         bytes = file_size,
         uploaded_bytes = bytes_uploaded,
+        upload_elapsed_ms = upload_elapsed.as_millis() as u64,
+        upload_chunks_per_sec = rate_per_sec(num_chunks as u64, upload_elapsed),
+        upload_bytes_per_sec = rate_per_sec(bytes_uploaded, upload_elapsed),
         streaming = use_streaming,
         chunk_upload_concurrency,
         chunk_exists_check = !assume_fresh_prefix,

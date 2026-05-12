@@ -737,6 +737,9 @@ write_push_storage_summary() {
       chunks = value_after($0, "chunks") + 0
       bytes = value_after($0, "bytes") + 0
       uploaded_bytes = value_after($0, "uploaded_bytes") + 0
+      upload_elapsed_ms = value_after($0, "upload_elapsed_ms") + 0
+      upload_bytes_per_sec = value_after($0, "upload_bytes_per_sec") + 0
+      upload_chunks_per_sec = value_after($0, "upload_chunks_per_sec") + 0
       streaming = value_after($0, "streaming")
       exists_check = value_after($0, "chunk_exists_check")
       concurrency = value_after($0, "chunk_upload_concurrency")
@@ -745,6 +748,7 @@ write_push_storage_summary() {
       total_chunks += chunks
       total_file_bytes += bytes
       total_uploaded_bytes += uploaded_bytes
+      total_upload_elapsed_ms += upload_elapsed_ms
       add_concurrency(concurrency)
       add_chunk_write_timeout(chunk_write_timeout)
 
@@ -785,6 +789,16 @@ write_push_storage_summary() {
         max_bytes = bytes
         max_bytes_path = path
       }
+      if (rows == 1 || upload_elapsed_ms > max_upload_elapsed_ms) {
+        max_upload_elapsed_ms = upload_elapsed_ms
+        max_upload_elapsed_path = path
+      }
+      if (upload_bytes_per_sec > max_upload_bytes_per_sec) {
+        max_upload_bytes_per_sec = upload_bytes_per_sec
+      }
+      if (upload_chunks_per_sec > max_upload_chunks_per_sec) {
+        max_upload_chunks_per_sec = upload_chunks_per_sec
+      }
     }
     END {
       dedupe_or_existing_bytes = total_file_bytes - total_uploaded_bytes
@@ -800,6 +814,11 @@ write_push_storage_summary() {
       print "total_uploaded_bytes=" total_uploaded_bytes + 0
       print "dedupe_or_existing_bytes=" dedupe_or_existing_bytes + 0
       print "total_chunks=" total_chunks + 0
+      print "total_upload_elapsed_ms=" total_upload_elapsed_ms + 0
+      print "max_upload_elapsed_ms=" max_upload_elapsed_ms + 0
+      print "max_upload_elapsed_path=" max_upload_elapsed_path
+      print "max_upload_bytes_per_sec=" max_upload_bytes_per_sec + 0
+      print "max_upload_chunks_per_sec=" max_upload_chunks_per_sec + 0
       print "streaming_rows=" streaming_rows + 0
       print "non_streaming_rows=" non_streaming_rows + 0
       print "zero_chunk_rows=" zero_chunk_rows + 0
@@ -849,6 +868,11 @@ write_push_storage_summary() {
       print "| Total uploaded bytes | " values["total_uploaded_bytes"] " |"
       print "| Dedupe or existing bytes | " values["dedupe_or_existing_bytes"] " |"
       print "| Total chunks | " values["total_chunks"] " |"
+      print "| Total upload elapsed ms | " values["total_upload_elapsed_ms"] " |"
+      print "| Max upload elapsed ms | " values["max_upload_elapsed_ms"] " |"
+      print "| Max upload elapsed path | " values["max_upload_elapsed_path"] " |"
+      print "| Max upload bytes/sec | " values["max_upload_bytes_per_sec"] " |"
+      print "| Max upload chunks/sec | " values["max_upload_chunks_per_sec"] " |"
       print "| Streaming rows | " values["streaming_rows"] " |"
       print "| Zero-chunk rows | " values["zero_chunk_rows"] " |"
       print "| Chunk exists check true rows | " values["chunk_exists_check_true_rows"] " |"
