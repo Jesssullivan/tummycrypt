@@ -54,8 +54,11 @@ Planning-pass validation:
   `chunk_upload_concurrency=8` were active, timeout/transport retry rows were
   captured, and socket samples were archived, but the 6.2 GB raw Git pack
   reached only 853 / 70,856 chunks before the run was intentionally stopped.
-  Treat the next step as a storage/object-model decision, not another
-  client-concurrency bump.
+  The first storage/object-model decision is now implemented: raw Git `.pack`
+  files use the large sequential FastCDC profile while `.idx` files stay on the
+  moderate pack-index profile. Treat the next step as a release-binary rerun
+  that proves reduced object count and stable endpoint/retry posture, not
+  another client-concurrency bump.
 - `task lazy:macos-fileprovider-neo-cleanup-packet` archives neo FileProvider
   divergence before cleanup and can install the published `.pkg`; it requires
   strict production signing preflight before any production-adjacent Finder

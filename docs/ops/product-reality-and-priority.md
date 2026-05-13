@@ -184,7 +184,9 @@ post-PR `#367` blocker packet
 `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/`
 enabled fresh-prefix `file_upload_concurrency=8` and captured timeout/retry
 telemetry, but the 6.2 GB raw Git pack reached only 853 / 70,856 chunks before
-the run was intentionally stopped. Do not claim production S3 posture or broad
+the run was intentionally stopped. Current code now routes raw Git `.pack`
+files through a large sequential FastCDC profile to reduce that object-count
+burden before the next rerun. Do not claim production S3 posture or broad
 home-directory readiness from the current evidence.
 
 The representation contract for that demo is:

@@ -26,7 +26,8 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 - Real project-tree canary lane: `task lazy:home-canary-linux-xr-shadow`;
   `home-canary-linux-xr-shadow-20260511T040325Z/` is scoped green for the
   isolated `linux-xr` shadow, while production S3 posture remains a separate
-  blocker lane
+  blocker lane. The first storage-object fix is in code: raw Git `.pack` files
+  now use the large sequential FastCDC profile before the next storage rerun
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

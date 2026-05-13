@@ -108,10 +108,15 @@ Pre-fix host observations from
   and forwarded AWS-style credentials; that is useful lab evidence, not a
   production storage endpoint proof.
 
-The follow-up work routes `.idx` files through the large-file profile, keeps
-streaming upload snapshots to chunk metadata plus whole-file hash, and adds
-bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default 4, cap
-64). Chunk upload attempts are bounded by
+The follow-up work routes `.idx` files through the moderate pack-index profile,
+keeps streaming upload snapshots to chunk metadata plus whole-file hash, and
+adds bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default 4,
+cap 64). After the `20260513` packet showed that one 6.2 GB raw Git `.pack`
+could still require 70,856 chunk writes, `.pack` / `.iso` / `.img` files now use
+the large sequential FastCDC profile: 1 MiB minimum, 4 MiB average, 16 MiB
+maximum. That keeps content-defined boundaries while reducing the dominant
+object-count burden before the next storage-posture rerun. Chunk upload attempts
+are bounded by
 `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS` (default 300, cap 3600, `0` disables) so a
 wedged S3 write slot becomes a retry row instead of an unobservable stall.
 Fresh-prefix bulk proof can now opt in to
