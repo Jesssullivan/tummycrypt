@@ -92,6 +92,7 @@ OUT="$TMPDIR/positive.out"
   --remote seaweedfs://example.invalid/tcfs/home-canary-linux-xr-storage-posture-test \
   --tcfs-bin "$BIN_DIR/tcfs" \
   --upload-concurrency 7 \
+  --file-upload-concurrency 5 \
   --progress-every-chunks 19 \
   --chunk-timeout-secs 23 \
   --progress-heartbeat-secs 11 \
@@ -114,6 +115,7 @@ assert_contains "$EVIDENCE/storage-posture.env" "tcfs_binary_profile=cargo-relea
 assert_contains "$EVIDENCE/storage-posture.env" "tcfs_version=tcfs 0.12.12-test"
 assert_contains "$EVIDENCE/storage-posture.env" "assume_fresh_prefix=1"
 assert_contains "$EVIDENCE/storage-posture.env" "upload_concurrency=7"
+assert_contains "$EVIDENCE/storage-posture.env" "file_upload_concurrency=5"
 assert_contains "$EVIDENCE/storage-posture.env" "progress_every_chunks=19"
 assert_contains "$EVIDENCE/storage-posture.env" "chunk_timeout_secs=23"
 assert_contains "$EVIDENCE/storage-posture.env" "progress_heartbeat_secs=11"
@@ -144,6 +146,7 @@ PUSH_EVIDENCE="$TMPDIR/push-evidence"
   --tcfs-bin "$BIN_DIR/tcfs" \
   --push \
   --upload-concurrency 2 \
+  --file-upload-concurrency 4 \
   --progress-every-chunks 1 \
   --chunk-timeout-secs 17 \
   --progress-heartbeat-secs 9 \
@@ -151,6 +154,7 @@ PUSH_EVIDENCE="$TMPDIR/push-evidence"
   >"$TMPDIR/push.out"
 assert_contains "$PUSH_EVIDENCE/storage-posture.env" "helper_status=0"
 assert_contains "$PUSH_EVIDENCE/storage-posture.env" "storage_max_concurrent_ops=2"
+assert_contains "$PUSH_EVIDENCE/storage-posture.env" "file_upload_concurrency=4"
 assert_contains "$PUSH_EVIDENCE/s3-socket-samples.tsv" $'sampled_at_utc\ttcfs_pids\ts3_established_sockets\thighwater\tlimit'
 assert_contains "$PUSH_EVIDENCE/s3-socket-summary.env" "socket_sample_interval_secs=1"
 assert_contains "$PUSH_EVIDENCE/s3-socket-summary.env" "socket_sample_limit=2"
@@ -218,6 +222,7 @@ ALLOW_EVIDENCE="$TMPDIR/allow-evidence"
 
 assert_contains "$ALLOW_EVIDENCE/storage-posture.env" "tcfs_binary_profile=debug"
 assert_contains "$ALLOW_EVIDENCE/storage-posture.env" "assume_fresh_prefix=0"
+assert_contains "$ALLOW_EVIDENCE/storage-posture.env" "file_upload_concurrency=1"
 assert_contains "$ALLOW_EVIDENCE/storage-posture.env" "remote_prefix=nonstandard-prefix"
 
 printf 'home canary linux-xr storage posture tests passed\n'
