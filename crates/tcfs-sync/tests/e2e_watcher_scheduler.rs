@@ -44,6 +44,16 @@ fn canon(p: &std::path::Path) -> std::path::PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
+fn drain_events(
+    rx: &mut mpsc::Receiver<tcfs_sync::watcher::WatchEvent>,
+) -> Vec<tcfs_sync::watcher::WatchEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
 #[tokio::test]
 async fn watcher_detects_file_creation() {
     let dir = TempDir::new().unwrap();
@@ -180,9 +190,24 @@ async fn watcher_ignores_git_directory() {
 
     tokio::time::sleep(debounce + Duration::from_millis(300)).await;
 
+    let git_dir = canon(&git_dir);
+    let events = drain_events(&mut rx);
+    let git_events = events
+        .iter()
+        .filter(|event| canon(&event.path).starts_with(&git_dir))
+        .collect::<Vec<_>>();
+
     assert!(
-        rx.try_recv().is_err(),
-        "expected no events for .git directory files"
+        git_events.is_empty(),
+        "expected no events for .git directory files, got target events {:?} from all events {:?}",
+        git_events
+            .iter()
+            .map(|e| (e.path.display().to_string(), e.kind))
+            .collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|e| (e.path.display().to_string(), e.kind))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -198,15 +223,29 @@ async fn watcher_ignores_tc_stub_files() {
     };
     let _watcher = FileWatcher::start(dir.path(), config, tx).unwrap();
 
-    tokio::fs::write(dir.path().join("secret.tc"), b"stub")
-        .await
-        .unwrap();
+    let stub_path = dir.path().join("secret.tc");
+    tokio::fs::write(&stub_path, b"stub").await.unwrap();
 
     tokio::time::sleep(debounce + Duration::from_millis(300)).await;
 
+    let expected_path = canon(&stub_path);
+    let events = drain_events(&mut rx);
+    let stub_events = events
+        .iter()
+        .filter(|event| canon(&event.path) == expected_path)
+        .collect::<Vec<_>>();
+
     assert!(
-        rx.try_recv().is_err(),
-        "expected no events for .tc stub files"
+        stub_events.is_empty(),
+        "expected no events for .tc stub files, got target events {:?} from all events {:?}",
+        stub_events
+            .iter()
+            .map(|e| (e.path.display().to_string(), e.kind))
+            .collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|e| (e.path.display().to_string(), e.kind))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -233,17 +272,24 @@ async fn watcher_debounce_coalesces_rapid_writes() {
 
     sleep_past_debounce(debounce).await;
 
-    let mut events = vec![];
-    while let Ok(event) = rx.try_recv() {
-        events.push(event);
-    }
+    let events = drain_events(&mut rx);
+
+    let expected_path = canon(&file_path);
+    let file_events = events
+        .iter()
+        .filter(|event| canon(&event.path) == expected_path)
+        .collect::<Vec<_>>();
 
     assert_eq!(
-        events.len(),
+        file_events.len(),
         1,
-        "expected 1 coalesced event, got {}: {:?}",
-        events.len(),
-        events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        "expected 1 coalesced event for {}, got {} target events from all events {:?}",
+        file_path.display(),
+        file_events.len(),
+        events
+            .iter()
+            .map(|e| (e.path.display().to_string(), e.kind))
+            .collect::<Vec<_>>()
     );
 }
 

@@ -1,0 +1,128 @@
+plan-only: fixture created but not pushed. Re-run with --push when ready.
+desktop fixture root: /Users/jess/TCFS Pilot/runs/fleet-parity-20260513T180654Z-67250
+expected file: Projects/tcfs-odrive-parity/honey-readme.txt
+remote prefix: seaweedfs://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle
+evidence dir: /Users/jess/git/tummycrypt/docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/linux-lifecycle/desktop-honey
+honey commands: /Users/jess/git/tummycrypt/docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/linux-lifecycle/desktop-honey/honey-commands.txt
+running Linux lifecycle companion on honey
+evidence dir: /tmp/tcfs-home-canary-linux-xr-shadow-20260513T174944Z/linux-lifecycle/linux-lifecycle/evidence
+remote: seaweedfs://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle
+temp root: /tmp/tcfs-lazy-linux-demo.3Oi8ZF
+tcfs command: /home/jess/.nix-profile/bin/tcfs
+
+[1/9] seed fixture into remote prefix
+[2m2026-05-13T18:07:02.221053Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-13T18:07:02.221080Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-13T18:07:02.221098Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pushing /tmp/tcfs-lazy-linux-demo.3Oi8ZF/source → tcfs:home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle (endpoint: http://100.64.48.53:8333, device: d1176e5d...)
+[2m2026-05-13T18:07:02.228086Z[0m [31mERROR[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed Unexpected (temporary) at read => send http request
+
+Context:
+   url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   called: http_util::Client::send
+   service: s3
+   path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   range: 0-
+
+Source:
+   error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md): client error (Connect): tcp connect error: Connection refused (os error 111)
+
+[2m2026-05-13T18:07:02.228120Z[0m [33m WARN[0m [2mopendal::layers::retry[0m[2m:[0m will retry after 1.630305231s because: Unexpected (temporary) at read, context: { url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, called: http_util::Client::send, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => send http request, source: error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md)
+[2m2026-05-13T18:07:03.860580Z[0m [31mERROR[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed Unexpected (temporary) at read => send http request
+
+Context:
+   url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   called: http_util::Client::send
+   service: s3
+   path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   range: 0-
+
+Source:
+   error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md): client error (Connect): tcp connect error: Connection refused (os error 111)
+
+[2m2026-05-13T18:07:03.860607Z[0m [33m WARN[0m [2mopendal::layers::retry[0m[2m:[0m will retry after 3.374727964s because: Unexpected (temporary) at read, context: { url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, called: http_util::Client::send, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => send http request, source: error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md)
+[2m2026-05-13T18:07:07.237726Z[0m [31mERROR[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed Unexpected (temporary) at read => send http request
+
+Context:
+   url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   called: http_util::Client::send
+   service: s3
+   path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   range: 0-
+
+Source:
+   error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md): client error (Connect): tcp connect error: Connection refused (os error 111)
+
+[2m2026-05-13T18:07:07.237754Z[0m [33m WARN[0m [2mopendal::layers::retry[0m[2m:[0m will retry after 5.062812448s because: Unexpected (temporary) at read, context: { url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, called: http_util::Client::send, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => send http request, source: error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md)
+[2m2026-05-13T18:07:12.302321Z[0m [31mERROR[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed Unexpected (temporary) at read => send http request
+
+Context:
+   url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   called: http_util::Client::send
+   service: s3
+   path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   range: 0-
+
+Source:
+   error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md): client error (Connect): tcp connect error: Connection refused (os error 111)
+
+[2m2026-05-13T18:07:12.302352Z[0m [33m WARN[0m [2mopendal::layers::retry[0m[2m:[0m will retry after 8.447348595s because: Unexpected (temporary) at read, context: { url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, called: http_util::Client::send, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => send http request, source: error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md)
+[2m2026-05-13T18:07:20.751426Z[0m [31mERROR[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed Unexpected (temporary) at read => send http request
+
+Context:
+   url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   called: http_util::Client::send
+   service: s3
+   path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md
+   range: 0-
+
+Source:
+   error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md): client error (Connect): tcp connect error: Connection refused (os error 111)
+
+[2m2026-05-13T18:07:20.751453Z[0m [33m WARN[0m [2mopendal::layers::retry[0m[2m:[0m will retry after 31.991168022s because: Unexpected (temporary) at read, context: { url: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, called: http_util::Client::send, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => send http request, source: error sending request for url (http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md)
+[2m2026-05-13T18:07:52.746417Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "454", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A597CDD4020ED2B3A", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md", request_id: "18AF324A597CDD4020ED2B3A" }
+[2m2026-05-13T18:07:52.748128Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "562", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A599D70CEE611B647", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-13T18:07:52.749654Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "556", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A59B53AF0E4A4BE4C", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-13T18:07:52.759380Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "454", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A5A4A313CE9BAB685", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/README.md", request_id: "18AF324A5A4A313CE9BAB685" }
+[2m2026-05-13T18:07:52.769373Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "562", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A5AE2CA4E1EEA10F7", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-13T18:07:52.783517Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.3Oi8ZF/source/docs/README.md [3mhash[0m[2m=[0mfc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m25 [3muploaded_bytes[0m[2m=[0m25 [3mstreaming[0m[2m=[0mfalse
+[2m2026-05-13T18:07:52.785129Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "466", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A5BD3A3F3B9A5E0D9", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt", request_id: "18AF324A5BD3A3F3B9A5E0D9" }
+[2m2026-05-13T18:07:52.786525Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "562", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A5BEA0E49E855A67A", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-13T18:07:52.787880Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "556", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A5BFF0242F8262F59", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-13T18:07:52.792208Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "466", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A5C4098A1BDA646C2", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt", request_id: "18AF324A5C4098A1BDA646C2" }
+[2m2026-05-13T18:07:52.800206Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "562", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AF324A5CB9E7EA6F09FA67", "date": "Wed, 13 May 2026 18:07:52 GMT"} }, service: s3, path: home-canary-linux-xr-storage-posture-20260513T174942Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-13T18:07:52.809358Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.3Oi8ZF/source/docs/deep/remote.txt [3mhash[0m[2m=[0mbd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m77 [3muploaded_bytes[0m[2m=[0m77 [3mstreaming[0m[2m=[0mfalse
+
+Push complete:
+  uploaded: 2 files (102 B)
+  skipped:  0 files (unchanged)
+  total:    2 files
+
+[2/9] start direct fuse mount
+mounted at: /tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount
+
+[3/9] prove traversal does not hydrate content
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/README.md
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/deep
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/deep/remote.txt
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/empty-dir
+
+[4/9] cat remote-backed file and verify hydration
+mounted root: /tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount
+listing parent before cat: /tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/deep
+total 0
+drwxr-xr-x. 2 jess jess 0 May 13 14:07 .
+drwxr-xr-x. 2 jess jess 0 May 13 14:07 ..
+-rw-r--r--. 1 jess jess 0 May 13 14:07 remote.txt
+find evidence (max depth 6):
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/README.md
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/deep
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/deep/remote.txt
+/tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/empty-dir
+cat hydrate target: docs/deep/remote.txt
+cat: /tmp/tcfs-lazy-linux-demo.3Oi8ZF/mount/docs/deep/remote.txt: No such file or directory
+Linux lifecycle companion failed; see /Users/jess/git/tummycrypt/docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/linux-lifecycle/honey-linux-lifecycle.log

@@ -1,6 +1,6 @@
 # Product Reality And Priority
 
-As of May 9, 2026, `tummycrypt` is in a much better state operationally than
+As of May 13, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
 The latest release is `v0.12.12`, and most release-facing surfaces now have
@@ -21,6 +21,7 @@ Use this document as the short answer to:
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
 | Fleet sync / backend path | materially exercised on real hosts; current live transcripts are archived in the fleet pilot packets | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; the extended fleet packet carries that lifecycle proof as a honey companion next to isolated `Documents`/`git` traversal and live backend smoke; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux and fleet evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| Real project-tree canary / storage posture | scoped isolated `linux-xr` shadow parity is green, including symlink target preservation through honey-mounted traversal, but production storage posture is still blocked for raw multi-GB Git packs over the current tailnet HTTP SeaweedFS path | `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`, PR `#367`, and blocker packet `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/` |
 | macOS | experimental but real; current packages prove package/signing/install paths, earlier hosted lanes proved storage/daemon gates, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; the latest hosted production `.pkg` attempt failed before daemon/Finder on an expired public storage endpoint, so production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | planned / skeleton | code exists, but there is no release-grade CLI, daemon, or Explorer flow |
@@ -172,6 +173,19 @@ testing-mode FileProvider lane now proves mutation upload/readback under run
 `25565943781` and deterministic conflict/status content preservation under run
 `25569596910`. The canonical acceptance target is now
 [Lazy Hydration Demo Acceptance](lazy-hydration-demo.md).
+
+The realistic home/project-tree canary is now split into two truths.
+Functional isolated project-tree behavior is green in
+`docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`: the
+shadowed `linux-xr` tree could be pushed, traversed from honey, hydrate selected
+content, preserve all 85 symlink targets through the mounted view, and pass the
+Linux lifecycle companion. Production storage posture is not green:
+post-PR `#367` blocker packet
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/`
+enabled fresh-prefix `file_upload_concurrency=8` and captured timeout/retry
+telemetry, but the 6.2 GB raw Git pack reached only 853 / 70,856 chunks before
+the run was intentionally stopped. Do not claim production S3 posture or broad
+home-directory readiness from the current evidence.
 
 The representation contract for that demo is:
 

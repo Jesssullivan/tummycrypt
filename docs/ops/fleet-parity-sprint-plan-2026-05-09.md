@@ -4,11 +4,11 @@ This sprint follows the usage-reality proof packet. Its job is to move from
 separate lane proofs to one grounded "work from any machine" acceptance packet
 for TCFS, without overstating Finder, on-prem, or release-artifact readiness.
 
-Current repo base after the follow-up grounding pass:
+Storage-posture evidence base after the May 13 follow-through:
 
 - repo: `Jesssullivan/tummycrypt`
 - branch: `main`
-- commit: `4fbcfb8a0ac1d672fdaa04021cc0210883f4120d`
+- commit: `9428513be22f9b55f45cda3713881130b612e9c0`
 - open PRs: none
 - open GitHub issues: `#280`, `#298`, `#309`, `#312`, `#327`
 - closed prerequisite: `#308`
@@ -47,6 +47,15 @@ Planning-pass validation:
   `readlink`, and the Linux lifecycle companion passed. This closes the scoped
   isolated-shadow project-tree parity bar only; it does not claim broad home
   takeover, production Finder, or production S3 posture.
+- PR `#367` landed opt-in fresh-prefix file upload concurrency plus
+  timeout/retry telemetry. The post-merge storage-posture packet
+  `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/`
+  is blocker evidence: `file_upload_concurrency=8` and
+  `chunk_upload_concurrency=8` were active, timeout/transport retry rows were
+  captured, and socket samples were archived, but the 6.2 GB raw Git pack
+  reached only 853 / 70,856 chunks before the run was intentionally stopped.
+  Treat the next step as a storage/object-model decision, not another
+  client-concurrency bump.
 - `task lazy:macos-fileprovider-neo-cleanup-packet` archives neo FileProvider
   divergence before cleanup and can install the published `.pkg`; it requires
   strict production signing preflight before any production-adjacent Finder
@@ -120,8 +129,13 @@ Planning-pass validation:
   package install/signing/installed-CLI/config gates, then failed before daemon
   and Finder because the public Cloudflare quick-tunnel endpoint no longer
   resolved from GitHub-hosted macOS.
-- Remote checks for `4fbcfb8` were green: CI `25614098609`, Docs
-  `25614098594`, and Nix CI `25614098629`.
+- PR `#367` merged on green. The May 13 merge push for `9428513` has Docs
+  green in run `25816193832`; CI `25816193953` later failed only in
+  `watcher_debounce_coalesces_rapid_writes` after Linux emitted multiple
+  notify paths for one rapid-write burst. The follow-up fix narrows the test to
+  the product contract, per-target-path coalescing, and the focused local test
+  passes. Treat the next remote CI run as the closure gate for this doc/evidence
+  refresh.
 
 ## Readiness Answer
 

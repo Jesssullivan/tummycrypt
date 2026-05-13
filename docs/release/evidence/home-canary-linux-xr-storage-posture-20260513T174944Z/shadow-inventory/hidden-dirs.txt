@@ -1,0 +1,2 @@
+/Users/jess/TCFS Pilot/real-canaries/linux-xr-storage-posture-20260513T174944Z/.git
+/Users/jess/TCFS Pilot/real-canaries/linux-xr-storage-posture-20260513T174944Z/.github

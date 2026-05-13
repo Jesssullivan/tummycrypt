@@ -1,6 +1,6 @@
 # Lazy Hydration Demo Acceptance
 
-As of May 8, 2026, the core lazy traversal and hydration code exists and the
+As of May 13, 2026, the core lazy traversal and hydration code exists and the
 repo has named harnesses for Linux terminal, mounted-view, Desktop-to-honey,
 and macOS Finder/FileProvider proof. Evidence coverage is now split more
 precisely: PZM proves the macOS testing-mode FileProvider enumerate/hydrate
@@ -48,6 +48,19 @@ and records that network assumption with the evidence.
 Each demo run should use a unique remote prefix such as
 `lazy-demo/${date-or-run-id}` so seed data can be inspected or removed without
 colliding with real user state.
+
+Project-tree correctness and storage posture are separate acceptance lanes.
+The scoped isolated `linux-xr` shadow packet
+`docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/` proves
+large-tree traversal, selected hydration, mounted symlink target preservation,
+and the Linux lifecycle companion on a copied project tree. The
+post-PR `#367` storage-posture packet
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/`
+is intentionally recorded as blocker evidence: fresh-prefix file upload
+concurrency, retry/timeout telemetry, and socket sampling are visible, but the
+multi-GB raw Git pack did not reach a practical same-session acceptance bar on
+the current tailnet HTTP SeaweedFS endpoint. Do not use that packet to claim
+production S3 posture or broad `~/git`/home-directory readiness.
 
 ## Linux Terminal Acceptance
 

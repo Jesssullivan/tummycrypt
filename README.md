@@ -24,8 +24,9 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 - Next fleet parity sprint: [docs/ops/fleet-parity-sprint-plan-2026-05-09.md](docs/ops/fleet-parity-sprint-plan-2026-05-09.md)
 - Lazy traversal QA matrix: [docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md](docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md)
 - Real project-tree canary lane: `task lazy:home-canary-linux-xr-shadow`;
-  current evidence is scoped, and full `linux-xr` parity remains blocked on a
-  passing symlink-enabled host packet
+  `home-canary-linux-xr-shadow-20260511T040325Z/` is scoped green for the
+  isolated `linux-xr` shadow, while production S3 posture remains a separate
+  blocker lane
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
@@ -115,7 +116,7 @@ macOS desktop naming: `TCFSProvider.app` is only the host app, and
 
 ## Architecture
 
-18 workspace crates organized in layers:
+19 workspace crates organized in layers:
 
 ```
 crates/

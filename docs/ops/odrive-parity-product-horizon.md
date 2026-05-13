@@ -86,6 +86,19 @@ conflict-status log, so visible Finder status/progress remains observational.
 Production Finder lifecycle evidence remains open: arbitrary clean-host
 enablement, conflict, and visible status/progress are not yet release gates.
 
+The current project-tree evidence is closer to odrive-style daily workflow, but
+still not production-smooth. The isolated `linux-xr` shadow packet
+`docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/` proves
+clean remote traversal, selected hydration, symlink target preservation, and the
+Linux lifecycle companion on a real large repo copy. The storage-posture lane
+remains a blocker: post-PR `#367` packet
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/`
+shows fresh-prefix file concurrency and retry/timeout telemetry are visible, but
+the multi-GB raw Git pack did not reach a practical same-session acceptance bar
+over the current tailnet HTTP SeaweedFS endpoint. odrive parity therefore still
+requires a storage/object-model decision before broad `~/git` or home-directory
+claims.
+
 ## Linux <> Finder Parity Evidence
 
 Parity should be assessed at the user-behavior level:
@@ -300,22 +313,26 @@ CloudStorage root rather than making `~/Desktop` the first FileProvider test.
 
 Highest-value work from here:
 
-1. Extend lifecycle status visibility beyond the archived Linux mutation,
+1. Decide the large-project storage shape before another full raw-Git canary:
+   multipart/native SeaweedFS writes, batching/package strategy for multi-GB Git
+   object packs, TLS/endpoint posture, and whether raw `.git` sync remains the
+   default for large active repos.
+2. Extend lifecycle status visibility beyond the archived Linux mutation,
    recursive safe-unsync, conflict detection, manual keep-both recovery, and
    independent sibling progress proof into richer CLI/TUI/Finder
    conflict/progress surfaces.
-2. Run and archive clean-host macOS Finder/FileProvider evidence.
-3. Run and archive the dedicated arbitrary-folder sync demo using
+3. Run and archive clean-host macOS Finder/FileProvider evidence.
+4. Run and archive the dedicated arbitrary-folder sync demo using
    `~/Desktop/TCFS Demo` and honey.
-4. Document the current folder policy CLI (`set`, `get`, `list`, `pin`,
+5. Document the current folder policy CLI (`set`, `get`, `list`, `pin`,
    `unpin`) as primitives, then decide the user-facing keep-synced contract
    before treating pinning as a proven product mode.
-5. Surface auto-unsync results in CLI/TUI and desktop notifications.
-6. Prove dirty-child unsync safety for directories in acceptance tests.
-7. Prove status/progress/badges in Finder instead of treating them as comments
+6. Surface auto-unsync results in CLI/TUI and desktop notifications.
+7. Prove dirty-child unsync safety for directories in acceptance tests.
+8. Prove status/progress/badges in Finder instead of treating them as comments
    in Swift code.
-8. Split backup semantics from sync semantics before claiming odrive backup
+9. Split backup semantics from sync semantics before claiming odrive backup
    parity.
-9. Add a diagnostic dump command that captures config redactions, daemon health,
+10. Add a diagnostic dump command that captures config redactions, daemon health,
    storage/NATS reachability, active transfers, recent errors, and FileProvider
    registration state.

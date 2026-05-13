@@ -10,8 +10,8 @@ continues.
 | Surface | Current state |
 | --- | --- |
 | Canonical repo | `Jesssullivan/tummycrypt` |
-| Checkpoint commit | `4fbcfb8a0ac1d672fdaa04021cc0210883f4120d` |
-| Open PRs | none at the 2026-05-09 hosted-smoke grounding pass |
+| Checkpoint commit | `9428513be22f9b55f45cda3713881130b612e9c0` |
+| Open PRs | none after PR `#367` merged on May 13, 2026 |
 | Current release | `v0.12.12` |
 | Primary milestone | GitHub milestone `#9 M10: Usage Reality & Product Parity` |
 
@@ -21,8 +21,8 @@ Open issues at audit time:
 
 | Issue | Current decision |
 | --- | --- |
-| `#280` distribution proof | Keep open. Homebrew/Nix, Linux `.deb`/`.rpm`, and amd64 container proof are archived for `v0.12.12`; remaining blockers are production macOS `.pkg` clean-host proof and native arm64 container registry proof on a future tag. |
-| `#309` production macOS `.pkg`/Finder proof | Keep open. PZM testing-mode FileProvider proof is green but explicitly non-production. Hosted production `.pkg` attempt `25613963424` passed package install/signing/installed-CLI/config gates, then failed before daemon/Finder because the public quick-tunnel storage endpoint no longer resolved. |
+| `#280` distribution proof | Keep open. Homebrew/Nix, Linux `.deb`/`.rpm`, and amd64 container proof are archived for `v0.12.12`; remaining blockers are production macOS `.pkg` clean-host proof, native arm64 container registry proof on a future tag, and production storage posture before broad project-tree distribution claims. |
+| `#309` production macOS `.pkg`/Finder proof | Keep open. PZM testing-mode FileProvider proof is green but explicitly non-production. Hosted production `.pkg` attempt `25613963424` passed package install/signing/installed-CLI/config gates, then failed before daemon/Finder because the public quick-tunnel storage endpoint no longer resolved. The post-PR `#367` `linux-xr` storage-posture packet is blocker evidence, not Finder or production storage proof. |
 | `#312` tinyland branch tranche | Keep open. PR #351 recorded a non-destructive prune proposal; next decision is operator approve/defer for Tranche A. |
 | `#327` on-prem OpenTofu migration/cutover | Keep open. Source/runbook work is ready, but live mutation waits on a named downtime window, rollback owner, and post-cut smoke owner. |
 | `#298` residual Civo PVC retirement | Keep open until `#327` completes or an operator explicitly overrides the dependency. |
@@ -57,13 +57,14 @@ truth.
 | Linux mounted FUSE | Expanded lifecycle proof is archived in `docs/release/evidence/lazy-linux-20260508T170825Z/`: browse before hydration, exact `cat`, mounted write/readback, cache clear/rehydrate, recursive safe-unsync refusal/success. | Packaged mount/systemd first-use as continuously proven on every supported distro. |
 | Fleet pilot | Extended isolated cross-host pilot proof is archived in `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/`: local seed to disposable prefix, honey mounted traversal/hydration of `Documents` and `git`, honey Linux lifecycle companion for mounted write/readback, cache clear/rehydrate, recursive safe-unsync refusal/success, and live `neo-honey` SeaweedFS/NATS smoke. | Real `~/Documents` / `~/git` takeover, production Finder, same-fixture cross-host edit/pullback, or on-prem/OpenTofu cutover. |
 | K8s/on-prem backend | Live backend works; source-owned OpenTofu migration/cutover is planned and renderable. | That NATS/SeaweedFS are already source-owned or storage-mobile. |
-| CI/test coverage | Current `main` at `4fbcfb8` has green CI `25614098609`, Docs `25614098594`, and Nix CI `25614098629`: Rust build/lint/test, Docs, Nix CI/Nix Build, cargo-deny, Secret Scan, FileProvider staticlib, and iOS typecheck. | Production Finder, iOS device, Kubernetes rollout, accessibility, or visible badge/progress UX. |
+| CI/test coverage | PR `#367` merged on green. The merge push at `9428513` has Docs green (`25816193832`), Nix CI green (`25816193804`), and CI red (`25816193953`) only in `watcher_debounce_coalesces_rapid_writes`; the follow-up fix changes the assertion to the product contract, per-target-path coalescing, and passes locally. | Production Finder, iOS device, Kubernetes rollout, accessibility, visible badge/progress UX, production storage posture, or remote closure of the follow-up CI run before a release-facing claim. |
 | Fuzzing | Four cargo-fuzz targets exist under `fuzz/`. | Continuous fuzz execution in CI or `task check`; fuzz is present but not currently a release gate. |
 | macOS package/FileProvider | PZM testing-mode lane is green through enumerate, hydrate, evict, rehydrate, mutation upload/readback, CLI conflict state, and exact FileProvider content preservation. Hosted production `.pkg` attempt `25613963424` adds install/signing/installed-CLI/config proof but stops at stale public storage reachability before daemon/Finder. | Production Developer ID clean-host Finder lifecycle or visible Finder conflict/status UX. |
 | iOS | Host app, extension, generated bindings, and simulator type-check surface exist. | Active release target, TestFlight/App Store readiness, real-device Files.app behavior, or write support. |
 | Distribution | `v0.12.12` Homebrew/Nix, Linux `.deb`/`.rpm`, and amd64 container proof are archived. Release workflow is ready to publish arm64 container images on the next cut. | Native arm64 container proof for the current tag or production macOS `.pkg` clean-host proof. |
 | Signing | Semantic release tags now fail closed on Developer ID signing/profile inputs; PZM testing-mode uses Mac App Development signing material and managed lab policy. | That Mac App Development testing-mode evidence substitutes for production Developer ID distribution evidence. |
 | E2E/runners | PZM, `neo`, and `honey` have named roles in lab acceptance docs. GitHub-hosted macOS lanes need public storage endpoints. | That hosted macOS can replace a clean physical production Finder host. |
+| S3 storage posture | PR `#367` landed opt-in fresh-prefix file upload concurrency plus timeout/retry telemetry. The post-merge `home-canary-linux-xr-storage-posture-20260513T174944Z/` packet proves those controls are observable, but the 6.2 GB raw Git pack reached only 853 / 70,856 chunks before the run was stopped and the endpoint is tailnet HTTP SeaweedFS. | Production S3 posture, broad `~/git`/home-directory management, or a claim that more client concurrency alone solves large project-tree storage. |
 | Helm/Kubernetes charts | `tcfs-stack` is an umbrella control-plane chart with external SeaweedFS credentials and endpoint; `tcfs-backend` is the direct worker chart. | Blank-cluster storage bootstrap or easy standalone chart install without KEDA/ServiceMonitor CRDs unless optional resources are disabled. |
 | Remote governance | `origin` is canonical. `tinyland` has a prune proposal. `yoga` is documentation-only retired. | Any remote branch deletion without explicit operator approval. |
 
@@ -73,12 +74,16 @@ truth.
    superseded fix/chore branches.
 2. Keep `#280` focused on native arm64 container proof on the next tag and
    production macOS `.pkg` clean-host proof.
-3. Keep `#309` focused on production Developer ID Finder lifecycle, not more
-   PZM testing-mode proof unless the lab harness changes.
-4. Schedule `#327` only with a named downtime window, rollback owner, and
+3. Keep `#309` focused on production Developer ID Finder lifecycle and the
+   storage/object-model decision exposed by the `linux-xr` canary. Do not turn
+   the post-PR `#367` storage blocker into a success claim.
+4. Decide the large-project storage product shape before another full raw-Git
+   canary: multipart/native SeaweedFS writes, large-tree batching, TLS endpoint
+   posture, and raw `.git` defaults.
+5. Schedule `#327` only with a named downtime window, rollback owner, and
    post-cut smoke owner.
-5. Leave `#298` blocked until the on-prem cutover decision is grounded.
-6. Keep `TIN-131`, `TIN-132`, and `TIN-133` as Linear mirrors; do not expand
+6. Leave `#298` blocked until the on-prem cutover decision is grounded.
+7. Keep `TIN-131`, `TIN-132`, and `TIN-133` as Linear mirrors; do not expand
    Linear into a second source of truth for exact proof claims.
 
 ## Related Docs
