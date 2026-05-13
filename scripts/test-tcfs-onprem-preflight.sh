@@ -87,7 +87,7 @@ assert_contains() {
 
     if ! grep -Fq "${expected}" "${file}"; then
         printf 'expected to find %s in %s\n' "${expected}" "${file}" >&2
-        printf '--- output ---\n' >&2
+        printf '%s\n' '--- output ---' >&2
         cat "${file}" >&2
         exit 1
     fi
@@ -99,7 +99,7 @@ assert_not_contains() {
 
     if grep -Fq "${unexpected}" "${file}"; then
         printf 'did not expect to find %s in %s\n' "${unexpected}" "${file}" >&2
-        printf '--- output ---\n' >&2
+        printf '%s\n' '--- output ---' >&2
         cat "${file}" >&2
         exit 1
     fi

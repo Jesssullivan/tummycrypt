@@ -111,6 +111,12 @@ Current source-owned resources:
 Source-owned command rendering now exists for the downtime copy lane:
 
 ```bash
+TCFS_DOWNTIME_WINDOW='YYYY-MM-DD HH:MM-HH:MM TZ' \
+  TCFS_PREFLIGHT_OWNER='name' \
+  TCFS_ROLLBACK_OWNER='name' \
+  TCFS_POSTCUT_SMOKE_OWNER='name' \
+  TCFS_CONTEXT=honey \
+  just onprem-cutover-packet
 TCFS_CONTEXT=honey just onprem-migration-plan facts
 TCFS_CONTEXT=honey just onprem-migration-plan render-target-pvc-commands
 TCFS_CONTEXT=honey just onprem-migration-plan render-import-pods
@@ -126,6 +132,12 @@ for the maintenance window, not to authorize live mutation. The rendered
 transfer path streams from the source node-local PV path over SSH into a
 target-PVC import Pod, which avoids the unsafe single-Pod honey-to-bumble mount
 assumption.
+
+`just onprem-cutover-packet` is the required operator-facing wrapper before
+executing the live lane. It refuses to render unless the downtime window,
+preflight owner, rollback owner, and post-cut smoke owner are explicitly named,
+then prints the ordered pre-window evidence, downtime render commands, stop
+lines, and completion checks. It still does not mutate Kubernetes or OpenTofu.
 
 `render-target-pvc-commands` renders the reviewed OpenTofu plan/apply pair for
 creating retained target PVCs only. `render-candidate-apply-commands` renders
@@ -151,22 +163,24 @@ Acceptable data movement shapes:
 
 Use this order for the eventual live migration:
 
-1. Run preflight and data inventory.
-2. Quiesce writers.
-3. Create target retained PVCs with `render-target-pvc-commands`.
-4. Render and apply import Pods with `render-import-pods`.
-5. Stop the worker and source StatefulSets, then copy/import data with
+1. Render `just onprem-cutover-packet` with the approved downtime window and
+   named owners, then attach that output to the tracker.
+2. Run preflight and data inventory.
+3. Quiesce writers.
+4. Create target retained PVCs with `render-target-pvc-commands`.
+5. Render and apply import Pods with `render-import-pods`.
+6. Stop the worker and source StatefulSets, then copy/import data with
    `render-transfer-commands`.
-6. Start replacement NATS and SeaweedFS workloads plus non-canonical candidate
+7. Start replacement NATS and SeaweedFS workloads plus non-canonical candidate
    tailnet Services with `render-candidate-apply-commands`.
-7. Smoke candidate Services and candidate tailnet hostnames with
+8. Smoke candidate Services and candidate tailnet hostnames with
    `render-candidate-smoke-commands`.
-8. Remove canonical Tailscale annotations from old Services through the chosen
+9. Remove canonical Tailscale annotations from old Services through the chosen
    authority path in `render-cutover-commands`.
-9. Assign canonical hostnames to source-owned Services through reviewed
+10. Assign canonical hostnames to source-owned Services through reviewed
     OpenTofu plan/apply output from `render-cutover-commands`.
-10. Run fleet smoke.
-11. Keep old retained PVs until rollback is explicitly declared unnecessary.
+11. Run fleet smoke.
+12. Keep old retained PVs until rollback is explicitly declared unnecessary.
 
 ## Rollback
 
