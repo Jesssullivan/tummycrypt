@@ -33,6 +33,16 @@ assert_not_contains() {
   fi
 }
 
+assert_fake_gh_input() {
+  local file="$1"
+  local field="$2"
+  local value="$3"
+  local encoded
+
+  encoded="$(printf '%q' "${field}=${value}")"
+  assert_contains "$file" "-f $encoded"
+}
+
 assert_fails_contains() {
   local expected="$1"
   shift
@@ -330,7 +340,7 @@ bash "$SCRIPT" \
   --no-watch \
   >"${TMPDIR}/keychain.out" \
   2>"${TMPDIR}/keychain.err"
-assert_contains "$FAKE_LOG" "-f signing_keychain=~/Library/Keychains/tcfs-fileprovider-lab.keychain-db"
+assert_fake_gh_input "$FAKE_LOG" "signing_keychain" "$LITERAL_KEYCHAIN"
 
 FAKE_LOG="${TMPDIR}/gh-p12.log"
 PATH="$FAKE_BIN:$PATH" \
@@ -345,7 +355,7 @@ bash "$SCRIPT" \
   --no-watch \
   >"${TMPDIR}/p12.out" \
   2>"${TMPDIR}/p12.err"
-assert_contains "$FAKE_LOG" "-f signing_p12_path=~/Certificates.p12"
+assert_fake_gh_input "$FAKE_LOG" "signing_p12_path" "$LITERAL_P12"
 
 FAKE_LOG="${TMPDIR}/gh-p12-password-file.log"
 PATH="$FAKE_BIN:$PATH" \
@@ -361,8 +371,8 @@ bash "$SCRIPT" \
   --no-watch \
   >"${TMPDIR}/p12-password-file.out" \
   2>"${TMPDIR}/p12-password-file.err"
-assert_contains "$FAKE_LOG" "-f signing_p12_path=~/Certificates.p12"
-assert_contains "$FAKE_LOG" "-f signing_p12_password_file=~/tcfs-fileprovider-lab.p12-password"
+assert_fake_gh_input "$FAKE_LOG" "signing_p12_path" "$LITERAL_P12"
+assert_fake_gh_input "$FAKE_LOG" "signing_p12_password_file" "$LITERAL_P12_PASSWORD_FILE"
 
 FAKE_LOG="${TMPDIR}/gh-profiles-dir.log"
 PATH="$FAKE_BIN:$PATH" \
@@ -378,8 +388,8 @@ bash "$SCRIPT" \
   --no-watch \
   >"${TMPDIR}/profiles-dir.out" \
   2>"${TMPDIR}/profiles-dir.err"
-assert_contains "$FAKE_LOG" "-f signing_p12_path=~/Certificates.p12"
-assert_contains "$FAKE_LOG" "-f profiles_dir=~/git/tummycrypt/build/asc-fileprovider-lab"
+assert_fake_gh_input "$FAKE_LOG" "signing_p12_path" "$LITERAL_P12"
+assert_fake_gh_input "$FAKE_LOG" "profiles_dir" "$LITERAL_PROFILES_DIR"
 
 FAKE_LOG="${TMPDIR}/gh-no-runner.log"
 assert_fails_contains \
