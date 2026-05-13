@@ -88,7 +88,9 @@ info() {
 
 shell_quote() {
     local value="$1"
-    printf "'%s'" "${value//\'/\'\\\'\'}"
+    printf "'"
+    printf '%s' "${value}" | sed "s/'/'\\\\''/g"
+    printf "'"
 }
 
 kubectl_command() {

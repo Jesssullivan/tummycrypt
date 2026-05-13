@@ -71,6 +71,22 @@ with preflight, rollback, and post-cut smoke owners. The lazy hydration and PZM
 FileProvider proof lanes should continue against disposable/live smoke
 endpoints rather than depending on this migration.
 
+Before any operator follows the rendered migration commands, render the
+source-owned cutover packet and attach it to `#327`/`TIN-720`:
+
+```bash
+TCFS_DOWNTIME_WINDOW='YYYY-MM-DD HH:MM-HH:MM TZ' \
+  TCFS_PREFLIGHT_OWNER='name' \
+  TCFS_ROLLBACK_OWNER='name' \
+  TCFS_POSTCUT_SMOKE_OWNER='name' \
+  TCFS_CONTEXT=honey \
+  just onprem-cutover-packet
+```
+
+The packet is non-mutating. Its job is to fail fast when the maintenance
+window or owner assignments are still placeholders, then print the ordered
+preflight, render, cutover, smoke, and rollback commands for review.
+
 Reasons:
 
 - The backend worker objects are Helm-shaped, but NATS and SeaweedFS are not.
@@ -100,7 +116,7 @@ Minimum migration gates:
 Use the read-only preflight before changing either path:
 
 ```bash
-bash scripts/tcfs-onprem-preflight.sh
+TCFS_CONTEXT=honey just onprem-preflight
 ```
 
 ## Preflight

@@ -51,6 +51,14 @@ onprem-data-inventory:
 onprem-migration-plan *ARGS:
     bash scripts/tcfs-onprem-migration-plan.sh {{ARGS}}
 
+# Render the non-mutating downtime cutover packet after window/owners are named
+onprem-cutover-packet:
+    bash scripts/tcfs-onprem-cutover-packet.sh
+
+# Regression test the non-mutating TCFS cutover packet renderer
+onprem-cutover-packet-test:
+    bash scripts/test-tcfs-onprem-cutover-packet.sh
+
 # Regression test the non-mutating TCFS migration command renderer
 onprem-migration-plan-test:
     bash scripts/test-tcfs-onprem-migration-plan.sh
