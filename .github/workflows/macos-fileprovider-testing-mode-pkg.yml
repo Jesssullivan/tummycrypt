@@ -120,6 +120,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Build staticlib
         shell: bash

@@ -159,6 +159,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-bin: false
 
       - name: Install Linux cross-compilation tools
         if: matrix.cross
@@ -652,6 +653,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Build staticlib
         run: cargo build -p tcfs-file-provider --release --no-default-features --features grpc
