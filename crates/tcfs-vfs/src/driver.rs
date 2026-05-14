@@ -1181,19 +1181,27 @@ mod tests {
     }
 
     #[test]
-    fn test_index_key_legacy_tc_suffix_uses_clean_remote_key() {
+    fn test_index_key_preserves_tc_suffix_for_exact_lookup() {
         let vfs = make_vfs("data");
         assert_eq!(
             vfs.index_key_for("/src/main.rs.tc"),
+            Some("data/index/src/main.rs.tc".to_string())
+        );
+        assert_eq!(
+            vfs.legacy_stub_index_key_for("/src/main.rs.tc"),
             Some("data/index/src/main.rs".to_string())
         );
     }
 
     #[test]
-    fn test_index_key_strips_tcf_suffix() {
+    fn test_index_key_preserves_tcf_suffix_for_exact_lookup() {
         let vfs = make_vfs("data");
         assert_eq!(
             vfs.index_key_for("/doc.pdf.tcf"),
+            Some("data/index/doc.pdf.tcf".to_string())
+        );
+        assert_eq!(
+            vfs.legacy_stub_index_key_for("/doc.pdf.tcf"),
             Some("data/index/doc.pdf".to_string())
         );
     }
