@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -53,6 +53,13 @@ const DIR_MARKER: &str = ".tcfs_dir";
 
 /// Content stored in directory marker index entries.
 const DIR_MARKER_CONTENT: &[u8] = b"type=directory\n";
+
+/// Positive directory hints learned from `readdir`.
+///
+/// S3-compatible backends often return prefix entries that are directories, not
+/// readable index objects. A short hint lets the following FUSE `lookup`/`stat`
+/// answer as a directory without first attempting a noisy missing object read.
+const DIR_HINT_TTL: Duration = Duration::from_secs(2);
 
 /// An open file handle — holds content in memory, tracks write state.
 struct FileHandle {
@@ -109,6 +116,8 @@ pub struct TcfsVfs {
     master_key: Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>>,
     /// If true, unlink moves index entries to .tcfs-trash/ instead of deleting.
     trash_enabled: bool,
+    /// Recently observed remote directories from list results.
+    known_dirs: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 impl TcfsVfs {
@@ -146,6 +155,7 @@ impl TcfsVfs {
             vclocks: Arc::new(Mutex::new(HashMap::new())),
             master_key: Arc::new(tokio::sync::Mutex::new(None)),
             trash_enabled: false,
+            known_dirs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -516,6 +526,40 @@ impl TcfsVfs {
         VfsAttr::dir(self.uid, self.gid, self.mount_time)
     }
 
+    fn child_virtual_path(parent: &str, child: &str) -> String {
+        if parent == "/" {
+            format!("/{child}")
+        } else {
+            format!("{}/{}", parent.trim_end_matches('/'), child)
+        }
+    }
+
+    async fn remember_dir_hints<I>(&self, paths: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let now = Instant::now();
+        let mut known_dirs = self.known_dirs.write().await;
+        known_dirs.retain(|_, seen_at| now.duration_since(*seen_at) <= DIR_HINT_TTL);
+        for path in paths {
+            self.negative_cache.remove(&path);
+            known_dirs.insert(path, now);
+        }
+    }
+
+    async fn has_recent_dir_hint(&self, path: &str) -> bool {
+        let now = Instant::now();
+        let mut known_dirs = self.known_dirs.write().await;
+        match known_dirs.get(path).copied() {
+            Some(seen_at) if now.duration_since(seen_at) <= DIR_HINT_TTL => true,
+            Some(_) => {
+                known_dirs.remove(path);
+                false
+            }
+            None => false,
+        }
+    }
+
     fn attr_for_index_entry(&self, entry: &IndexEntry) -> VfsAttr {
         match entry.kind {
             RemoteEntryKind::RegularFile => self.file_attr(entry.size),
@@ -534,7 +578,9 @@ impl TcfsVfs {
             .context("listing index entries")?;
 
         let mut seen_dirs: HashSet<String> = HashSet::new();
+        let mut pending_files: Vec<(String, String)> = Vec::new();
         let mut entries: Vec<VfsDirEntry> = Vec::new();
+        let mut discovered_dir_paths: Vec<String> = Vec::new();
 
         for entry in raw_entries {
             let full_path = entry.path().to_string();
@@ -552,7 +598,7 @@ impl TcfsVfs {
                 continue;
             }
 
-            let is_dir = rel.contains('/') || rel.ends_with('/');
+            let is_dir = entry.metadata().is_dir() || rel.contains('/') || rel.ends_with('/');
 
             if is_dir {
                 let dir_name = first_component.trim_end_matches('/').to_string();
@@ -560,6 +606,7 @@ impl TcfsVfs {
                     continue;
                 }
                 seen_dirs.insert(dir_name.clone());
+                discovered_dir_paths.push(Self::child_virtual_path(path, &dir_name));
                 entries.push(VfsDirEntry {
                     name: dir_name,
                     kind: VfsFileType::Directory,
@@ -570,19 +617,41 @@ impl TcfsVfs {
                     },
                 });
             } else {
-                let clean_name = first_component.to_string();
-                let parsed_attr = self.read_index_entry_attr(&full_path).await;
-                let kind = parsed_attr
-                    .as_ref()
-                    .map(|attr| attr.kind)
-                    .unwrap_or(VfsFileType::RegularFile);
-                let attr = if with_attrs { parsed_attr } else { None };
-                entries.push(VfsDirEntry {
-                    name: clean_name,
-                    kind,
-                    attr,
-                });
+                pending_files.push((first_component.to_string(), full_path));
             }
+        }
+
+        for (clean_name, full_path) in pending_files {
+            if seen_dirs.contains(&clean_name) {
+                debug!(
+                    path = %path,
+                    name = %clean_name,
+                    key = %full_path,
+                    "readdir: skipping leaf object shadowed by a directory prefix"
+                );
+                continue;
+            }
+
+            let Some(parsed_attr) = self.read_index_entry_attr(&full_path).await else {
+                debug!(
+                    path = %path,
+                    name = %clean_name,
+                    key = %full_path,
+                    "readdir: skipping unreadable or non-index leaf object"
+                );
+                continue;
+            };
+            let kind = parsed_attr.kind;
+            let attr = if with_attrs { Some(parsed_attr) } else { None };
+            entries.push(VfsDirEntry {
+                name: clean_name,
+                kind,
+                attr,
+            });
+        }
+
+        if !discovered_dir_paths.is_empty() {
+            self.remember_dir_hints(discovered_dir_paths).await;
         }
 
         // Fallback: if root dir is empty and prefix is empty, discover prefixes
@@ -593,6 +662,8 @@ impl TcfsVfs {
                 if let Ok(idx_entries) = self.op.list(&probe).await {
                     if !idx_entries.is_empty() && !seen_dirs.contains(&pfx) {
                         seen_dirs.insert(pfx.clone());
+                        self.remember_dir_hints([Self::child_virtual_path(path, &pfx)])
+                            .await;
                         entries.push(VfsDirEntry {
                             name: pfx,
                             kind: VfsFileType::Directory,
@@ -622,6 +693,10 @@ impl VirtualFilesystem for TcfsVfs {
         // Negative cache short-circuit
         if self.negative_cache.is_negative(path) {
             anyhow::bail!("ENOENT (negative cache): {}", path);
+        }
+
+        if self.has_recent_dir_hint(path).await {
+            return Ok(self.dir_attr());
         }
 
         // File: try index lookup (with and without .tc for backward compat)

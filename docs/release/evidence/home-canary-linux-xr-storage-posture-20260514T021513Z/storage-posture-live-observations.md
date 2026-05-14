@@ -74,7 +74,11 @@ an intentional policy for generated large source/data files.
   storage concurrency.
 - The honey mount log contains 274 S3 `NoSuchKey` warnings during traversal
   probe paths. The smoke passed, but the miss path is too noisy for a polished
-  production browse-before-hydrate experience.
+  production browse-before-hydrate experience. Follow-up VFS work now avoids
+  treating list-returned directory prefixes as readable file index entries and
+  keeps a short-lived positive directory hint for the lookup that follows
+  `readdir`; rerun honey against a fresh build before claiming the archived
+  warning count is closed.
 - Total chunks are still high at 327,482 because normal project files and
   generated headers remain on the default profile. That is now a measured
   productionization follow-up, not a blocker to the `.pack`/`.rev` fix.

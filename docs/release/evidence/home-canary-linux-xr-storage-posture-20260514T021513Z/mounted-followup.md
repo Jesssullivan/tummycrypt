@@ -21,6 +21,8 @@ companion was not run in this storage packet.
 
 Operational note: `honey-mount.log` contains 274 S3 `NoSuchKey` warnings while
 the mounted traversal probes index paths. The smoke still completed with
-`honey_status=0`, but production polish should either eliminate that lookup
-shape or demote the expected miss path so normal browse-before-hydrate does not
-look noisy.
+`honey_status=0`. Follow-up VFS work now treats list-returned prefix entries as
+directories instead of speculative readable file index objects and records
+short-lived directory hints for the immediate lookup path. This packet should be
+rerun on honey before claiming the production browse-before-hydrate warning
+count is closed.

@@ -794,6 +794,26 @@ async fn getattr_directory_prefix_placeholder_is_not_file() {
         .expect("write empty directory prefix object");
 
     let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+
+    let root_entries = reader.readdirplus("/").await.expect("readdirplus root");
+    let docs_entries: Vec<_> = root_entries
+        .iter()
+        .filter(|entry| entry.name == "docs")
+        .collect();
+    assert_eq!(
+        docs_entries.len(),
+        1,
+        "directory prefix placeholder should not create duplicate docs entries: {root_entries:?}"
+    );
+    assert_eq!(
+        docs_entries[0].kind,
+        tcfs_vfs::types::VfsFileType::Directory
+    );
+    assert_eq!(
+        docs_entries[0].attr.as_ref().map(|attr| attr.kind),
+        Some(tcfs_vfs::types::VfsFileType::Directory)
+    );
+
     let attr = reader.getattr("/docs").await.expect("getattr /docs");
     assert_eq!(attr.kind, tcfs_vfs::types::VfsFileType::Directory);
 

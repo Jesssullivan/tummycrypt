@@ -217,7 +217,7 @@ fn should_record_chunk_upload_progress(
         return false;
     }
 
-    completed_chunks % every_chunks == 0
+    completed_chunks.is_multiple_of(every_chunks)
         || (completed_chunks == num_chunks && num_chunks >= every_chunks)
 }
 
