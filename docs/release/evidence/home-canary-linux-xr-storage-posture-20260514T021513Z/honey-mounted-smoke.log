@@ -1,0 +1,8 @@
+started_at_utc=2026-05-14T05:07:57Z
+remote_dir=/tmp/tcfs-home-canary-linux-xr-shadow-20260514T021514Z
+tcfs binary: tcfs
+tcfs binary resolved: /home/jess/.nix-profile/bin/tcfs
+tcfs version: tcfs 0.12.2
+sha256sum: tcfs: Is a directory
+completed_at_utc=2026-05-14T05:08:05Z
+status=1

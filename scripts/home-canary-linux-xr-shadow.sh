@@ -288,6 +288,7 @@ home_canon="$(canonical_existing_path "$HOME")"
 git_canon="$home_canon/git"
 shadow_canon="$(make_physical_dir "$shadow_root")"
 mkdir -p "$evidence_dir"
+evidence_dir="$(cd "$evidence_dir" && pwd -P)"
 if [[ -z "$state_dir" ]]; then
   state_dir="$evidence_dir/state"
 fi
@@ -424,7 +425,10 @@ fi
 
 config_path="$state_canon/tcfs-linux-xr-shadow.toml"
 state_json="$state_canon/push-state.json"
-cat >"$config_path" <<EOF
+if [[ "$resume_after_push" == "1" && -f "$config_path" ]]; then
+  :
+else
+  cat >"$config_path" <<EOF
 [daemon]
 socket = "$state_canon/no-daemon.sock"
 
@@ -459,6 +463,7 @@ negative_cache_ttl_secs = 1
 [crypto]
 enabled = false
 EOF
+fi
 
 symlink_count="$(awk -F= '$1 == "symlinks" { print $2 }' "$inventory_dir/counts.env")"
 shadow_symlink_count="$(awk -F= '$1 == "symlinks" { print $2 }' "$shadow_inventory_dir/counts.env")"
@@ -642,7 +647,7 @@ Contents:
   \`sync_git_dirs = true\`, \`sync_hidden_dirs = true\`,
   \`git_sync_mode = "raw"\`, \`sync_symlinks = true\`, and
   \`sync_empty_dirs = true\`
-- \`push.log\`: shadow push transcript when \`--push\` ran
+- \`push.log\` or \`push.log.gz\`: shadow push transcript when \`--push\` ran
 - \`push-storage-summary.env\` and \`push-storage-summary.md\`: storage-facing
   totals extracted from \`push.log\` when push evidence is present
 - \`honey-linux-xr-shadow-commands.txt\`: honey mounted traversal/hydration
@@ -926,6 +931,24 @@ write_push_storage_summary() {
   ' "$env_path" >"$md_path"
 }
 
+push_log_has_completion() {
+  local log_path="$evidence_dir/push.log"
+  local gzip_log_path="$evidence_dir/push.log.gz"
+
+  if [[ -f "$log_path" ]]; then
+    grep -Fq 'Push complete:' "$log_path"
+    return $?
+  fi
+
+  if [[ -f "$gzip_log_path" ]]; then
+    command -v gzip >/dev/null 2>&1 || fail "--resume-after-push found push.log.gz but gzip is unavailable"
+    gzip -cd "$gzip_log_path" | awk 'index($0, "Push complete:") { found = 1 } END { exit found ? 0 : 1 }'
+    return $?
+  fi
+
+  return 2
+}
+
 cp "$config_path" "$evidence_dir/tcfs-linux-xr-shadow.toml"
 write_run_metadata
 write_readme
@@ -968,8 +991,10 @@ if [[ "$push_remote" == "1" ]]; then
 fi
 
 if [[ "$resume_after_push" == "1" ]]; then
-  [[ -f "$evidence_dir/push.log" ]] || fail "--resume-after-push requires existing push.log in $evidence_dir"
-  grep -Fq 'Push complete:' "$evidence_dir/push.log" || fail "--resume-after-push requires push.log with 'Push complete:'"
+  if ! push_log_has_completion; then
+    [[ -f "$evidence_dir/push.log" || -f "$evidence_dir/push.log.gz" ]] || fail "--resume-after-push requires existing push.log or push.log.gz in $evidence_dir"
+    fail "--resume-after-push requires push.log or push.log.gz with 'Push complete:'"
+  fi
   [[ -f "$state_json" ]] || fail "--resume-after-push requires existing state JSON: $state_json"
   push_available=1
   write_push_storage_summary
@@ -1003,12 +1028,19 @@ if [[ -n "\${TCFS_HONEY_ENV_FILE:-}" ]]; then
   source "\$TCFS_HONEY_ENV_FILE"
 fi
 
-echo "tcfs binary: \$TCFS_BIN"
+echo "tcfs binary requested: \$TCFS_BIN"
+tcfs_resolved="\$TCFS_BIN"
 if command -v "\$TCFS_BIN" >/dev/null 2>&1; then
-  echo "tcfs binary resolved: \$(command -v "\$TCFS_BIN")"
+  tcfs_resolved="\$(command -v "\$TCFS_BIN")"
+elif [[ -x "\$TCFS_BIN" ]]; then
+  tcfs_resolved="\$TCFS_BIN"
+else
+  printf 'tcfs binary is not executable or on PATH: %s\n' "\$TCFS_BIN" >&2
+  exit 1
 fi
-tcfs_version="\$("\$TCFS_BIN" --version 2>&1)" || {
-  printf 'failed to run tcfs --version through %s\n' "\$TCFS_BIN" >&2
+echo "tcfs binary resolved: \$tcfs_resolved"
+tcfs_version="\$("\$tcfs_resolved" --version 2>&1)" || {
+  printf 'failed to run tcfs --version through %s\n' "\$tcfs_resolved" >&2
   printf '%s\n' "\$tcfs_version" >&2
   exit 1
 }
@@ -1019,9 +1051,9 @@ if [[ -n "\${TCFS_HONEY_EXPECTED_VERSION_CONTAINS:-}" && "\$tcfs_version" != *"\
 fi
 tcfs_sha256=""
 if command -v sha256sum >/dev/null 2>&1; then
-  tcfs_sha256="\$(sha256sum "\$TCFS_BIN" | awk '{print \$1}')"
+  tcfs_sha256="\$(sha256sum "\$tcfs_resolved" | awk '{print \$1}')"
 elif command -v shasum >/dev/null 2>&1; then
-  tcfs_sha256="\$(shasum -a 256 "\$TCFS_BIN" | awk '{print \$1}')"
+  tcfs_sha256="\$(shasum -a 256 "\$tcfs_resolved" | awk '{print \$1}')"
 fi
 if [[ -n "\$tcfs_sha256" ]]; then
   echo "tcfs sha256: \$tcfs_sha256"
@@ -1041,13 +1073,13 @@ mkdir -p "\$MOUNT_ROOT"
 mount_started=0
 cleanup_mount() {
   if [[ "\$mount_started" == "1" && "\${TCFS_HONEY_KEEP_MOUNT:-0}" != "1" ]]; then
-    "\$TCFS_BIN" unmount "\$MOUNT_ROOT" >/dev/null 2>&1 || fusermount3 -u "\$MOUNT_ROOT" >/dev/null 2>&1 || true
+    "\$tcfs_resolved" unmount "\$MOUNT_ROOT" >/dev/null 2>&1 || fusermount3 -u "\$MOUNT_ROOT" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup_mount EXIT
 
 if [[ "\${TCFS_HONEY_START_MOUNT:-0}" == "1" ]]; then
-  nohup "\$TCFS_BIN" mount "\$REMOTE" "\$MOUNT_ROOT" >"\$MOUNT_LOG" 2>&1 &
+  nohup "\$tcfs_resolved" mount "\$REMOTE" "\$MOUNT_ROOT" >"\$MOUNT_LOG" 2>&1 &
   mount_pid="\$!"
   mount_started=1
   for _ in {1..300}; do

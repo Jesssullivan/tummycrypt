@@ -15,16 +15,28 @@ This packet was run from `main` `c0c2c0c` with a rebuilt release
 
 ## Result
 
-The push completed:
+The release-binary push completed:
 
-- `result.env`: `status=0`, `proof=shadow-push`
-- `parity_status=full-project-parity-not-claimed`
-- `parity_reason=mounted honey traversal and symlink target verification were not run`
 - `push-storage-summary.env`: `upload_rows=92969`, `total_file_bytes=8233794656`,
   `total_chunks=327482`, `error_rows=0`, `retry_warning_rows=0`
 
-This is storage-shape progress, not scoped project-tree parity, production
-Finder, broad home-directory, or production S3 posture evidence.
+The follow-up mounted honey smoke also passed against the same remote prefix:
+
+- `mounted-followup.env`: `honey_status=0`,
+  `proof=shadow-push-honey-traversal-symlink-targets`
+- `honey-linux-xr-shadow.log`: pinned honey
+  `/nix/store/h0b39zzhmk54n0ixbl8jq66pk55sbdhr-tcfs-cli-0.12.12/bin/tcfs`,
+  `tcfs 0.12.12`, SHA-256
+  `1cde5b3563487999c94780c5cf0d7834487ef8acb27fe96a77868669aa08c361`,
+  mounted `find -maxdepth 8`, 85 mounted symlink target checks, and exact
+  `.clang-format` hydration.
+- `result.env`: `status=0`,
+  `proof=shadow-push-honey-traversal-symlink-targets`,
+  `parity_status=full-project-parity-not-claimed`,
+  `parity_reason=Linux lifecycle companion was not run`.
+
+This is storage-shape plus mounted traversal progress, not production Finder,
+broad home-directory, or production S3 posture evidence.
 
 ## Object Model
 
@@ -53,15 +65,16 @@ an intentional policy for generated large source/data files.
 
 ## Remaining Blockers
 
-- Honey traversal, mounted hydration, symlink target verification, and Linux
-  lifecycle were intentionally disabled for this push-only rerun.
+- The Linux lifecycle companion was not run in this storage packet. The older
+  project-tree correctness packet remains the lifecycle reference.
 - The endpoint was plaintext tailnet HTTP, so this is not production TLS
   storage posture.
 - Socket sampling reached highwater 11 while upload concurrency was 8. The S3
   HTTP client/socket accounting needs another pass before claiming bounded
   storage concurrency.
-- The live source had 85 symlinks. Source/shadow target manifests matched, but
-  this packet did not verify mounted remote symlink targets.
+- The honey mount log contains 274 S3 `NoSuchKey` warnings during traversal
+  probe paths. The smoke passed, but the miss path is too noisy for a polished
+  production browse-before-hydrate experience.
 - Total chunks are still high at 327,482 because normal project files and
   generated headers remain on the default profile. That is now a measured
   productionization follow-up, not a blocker to the `.pack`/`.rev` fix.

@@ -33,6 +33,17 @@ const DIR_TTL: Duration = Duration::from_secs(1);
 /// S3 backend is slow or unreachable.
 const VFS_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn parse_bool_flag(value: Option<&str>) -> bool {
+    match value.map(str::trim).map(str::to_ascii_lowercase) {
+        Some(value) => matches!(value.as_str(), "1" | "true" | "yes" | "on"),
+        None => false,
+    }
+}
+
+fn force_readdir_plus_enabled_from_env() -> bool {
+    parse_bool_flag(std::env::var("TCFS_FUSE_FORCE_READDIRPLUS").ok().as_deref())
+}
+
 /// Map VFS/anyhow errors to appropriate POSIX errno values.
 fn vfs_error_to_errno(err: &anyhow::Error) -> Errno {
     let msg = format!("{err:#}").to_lowercase();
@@ -657,12 +668,19 @@ pub async fn mount(
     let mut opts = MountOptions::default();
     opts.fs_name("tcfs");
     opts.read_only(cfg.read_only);
-    opts.force_readdir_plus(true);
+    let force_readdir_plus = force_readdir_plus_enabled_from_env();
+    if force_readdir_plus {
+        opts.force_readdir_plus(true);
+    }
     if cfg.allow_other {
         opts.allow_other(true);
     }
 
-    info!(mountpoint = %cfg.mountpoint.display(), "mounting tcfs via FUSE3 (unprivileged)");
+    info!(
+        mountpoint = %cfg.mountpoint.display(),
+        force_readdir_plus,
+        "mounting tcfs via FUSE3 (unprivileged)"
+    );
 
     let handle = Session::new(opts)
         .mount_with_unprivileged(fs, &cfg.mountpoint)
@@ -717,5 +735,17 @@ mod tests {
     fn errno_mapping_default_eio() {
         let err = anyhow::anyhow!("some unknown storage error");
         assert_eq!(vfs_error_to_errno(&err), Errno::from(libc::EIO));
+    }
+
+    #[test]
+    fn force_readdir_plus_flag_is_opt_in() {
+        assert!(!parse_bool_flag(None));
+        assert!(!parse_bool_flag(Some("")));
+        assert!(!parse_bool_flag(Some("0")));
+        assert!(!parse_bool_flag(Some("false")));
+        assert!(parse_bool_flag(Some("1")));
+        assert!(parse_bool_flag(Some("true")));
+        assert!(parse_bool_flag(Some("YES")));
+        assert!(parse_bool_flag(Some(" on ")));
     }
 }

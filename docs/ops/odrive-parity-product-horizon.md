@@ -91,16 +91,18 @@ still not production-smooth. The isolated `linux-xr` shadow packet
 `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/` proves
 clean remote traversal, selected hydration, symlink target preservation, and the
 Linux lifecycle companion on a real large repo copy. The storage-posture lane
-has moved from blocker-only to push-only progress:
+has moved from blocker-only to mounted follow-up progress:
 `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`
 completed the 7.7 GB shadow with the release binary, kept the dominant 6.2 GB
 raw Git `.pack` at 1,211 chunks, and reduced the adjacent 45.6 MB `.rev` from
-8,405 chunks to 8 chunks. It is still not an odrive-parity storage claim
-because honey traversal/lifecycle were not run, the endpoint was plaintext
-tailnet HTTP, socket highwater exceeded configured upload concurrency, `.idx`
-still reaches 4,599 chunks, and generated large source headers still create
-thousands of chunks. Broad `~/git` or home-directory claims remain out of
-scope.
+8,405 chunks to 8 chunks. A mounted follow-up on `honey` reused that prefix and
+passed `find -maxdepth 8`, all 85 mounted symlink target checks, and exact
+`.clang-format` hydration. It is still not an odrive-parity storage claim
+because the storage packet did not run the Linux lifecycle companion, the
+endpoint was plaintext tailnet HTTP, socket highwater exceeded configured upload
+concurrency, `.idx` still reaches 4,599 chunks, and generated large source
+headers still create thousands of chunks. Broad `~/git` or home-directory
+claims remain out of scope.
 
 ## Linux <> Finder Parity Evidence
 

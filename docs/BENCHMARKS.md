@@ -120,7 +120,7 @@ Push-only release-binary storage observations from
   `parity_status=full-project-parity-not-claimed` because honey traversal,
   mounted lifecycle, and remote symlink-target verification were disabled.
 
-Push-only release-binary storage observations from
+Release-binary storage observations from
 `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`:
 
 - The packet used the rebuilt release `tcfs 0.12.12` binary from `main`
@@ -140,9 +140,12 @@ Push-only release-binary storage observations from
   chunks.
 - Socket sampling again reached highwater 11 while configured upload
   concurrency was 8. The endpoint was plaintext tailnet HTTP.
-- `result.env` records `proof=shadow-push` and
-  `parity_status=full-project-parity-not-claimed` because honey traversal,
-  mounted lifecycle, and remote symlink-target verification were disabled.
+- A follow-up mounted honey smoke reused the same prefix with pinned honey
+  `tcfs 0.12.12` and passed `find -maxdepth 8`, 85 mounted symlink target
+  checks, and exact `.clang-format` hydration.
+- `result.env` records `proof=shadow-push-honey-traversal-symlink-targets` and
+  `parity_status=full-project-parity-not-claimed` because the Linux lifecycle
+  companion was not run in this storage packet.
 
 Pre-fix host observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:
@@ -175,9 +178,9 @@ and `TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS=N` records bounded chunk progress for
 objects, including a terminal progress row once the object reaches at least `N`
 chunks. The fresh-prefix shortcut is only valid for a new disposable prefix;
 evidence should preserve the `chunk_exists_check=false` upload log field when it
-is enabled. The push-only reruns prove the `.pack`/`.rev` object-count
-decisions but still do not support a production throughput, endpoint, or full
-parity claim.
+is enabled. The current rerun proves the `.pack`/`.rev` object-count decisions
+and same-prefix mounted traversal, but still does not support a production
+throughput, endpoint, or full parity claim.
 
 The release-binary rerun path is codified as
 `task lazy:home-canary-linux-xr-storage-posture`. That wrapper delegates the

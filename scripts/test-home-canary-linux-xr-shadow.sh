@@ -114,8 +114,11 @@ assert_contains "$EVIDENCE/honey-linux-xr-shadow-commands.txt" "TCFS_HONEY_EXPEC
 assert_contains "$EVIDENCE/honey-linux-xr-shadow-commands.txt" "TCFS_HONEY_EXPECTED_SHA256="
 assert_contains "$EVIDENCE/honey-linux-xr-shadow-commands.txt" "TCFS_HONEY_SYMLINK_TARGETS_FILE="
 assert_contains "$EVIDENCE/honey-linux-xr-shadow-commands.txt" "TCFS_HONEY_SMOKE_TIMEOUT_SECS=900"
-assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "tcfs mount"
-assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "tcfs --version"
+assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "tcfs binary requested:"
+assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "tcfs_resolved="
+assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "sha256sum \"\$tcfs_resolved\""
+assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "\"\$tcfs_resolved\" mount"
+assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "--version"
 assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "TCFS_HONEY_EXPECTED_VERSION_CONTAINS"
 assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "TCFS_HONEY_EXPECTED_SHA256"
 assert_contains "$EVIDENCE/honey-linux-xr-shadow-run.sh" "tcfs sha256:"
@@ -196,6 +199,26 @@ assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "Chunk heartbeat rows
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "Max upload elapsed ms"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.md" "Fresh-prefix publish true rows"
 
+GZIP_RESUME_EVIDENCE="$TMPDIR/resume-evidence-gzip"
+GZIP_RESUME_STATE="$TMPDIR/resume-state-gzip"
+mkdir -p "$GZIP_RESUME_EVIDENCE" "$GZIP_RESUME_STATE"
+gzip -c "$RESUME_EVIDENCE/push.log" >"$GZIP_RESUME_EVIDENCE/push.log.gz"
+printf '{}\n' >"$GZIP_RESUME_STATE/push-state.json"
+
+HOME="$HOME_OK" bash "$SCRIPT" \
+  --source "$SOURCE" \
+  --shadow-root "$SHADOW" \
+  --evidence-dir "$GZIP_RESUME_EVIDENCE" \
+  --state-dir "$GZIP_RESUME_STATE" \
+  --remote seaweedfs://example.invalid/tcfs/home-canary-test \
+  --resume-after-push \
+  --reuse-shadow \
+  >"$TMPDIR/resume-gzip.out"
+
+assert_contains "$GZIP_RESUME_EVIDENCE/run-metadata.env" "resume_after_push=1"
+assert_contains "$GZIP_RESUME_EVIDENCE/result.env" "status=0"
+assert_contains "$GZIP_RESUME_EVIDENCE/result.env" "proof=shadow-push"
+
 assert_fails_contains \
   "refusing to canary full HOME" \
   env HOME="$HOME_OK" bash "$SCRIPT" \
@@ -219,7 +242,7 @@ mkdir -p "$BAD_RESUME_EVIDENCE" "$BAD_RESUME_STATE"
 printf 'still running\n' >"$BAD_RESUME_EVIDENCE/push.log"
 printf '{}\n' >"$BAD_RESUME_STATE/push-state.json"
 assert_fails_contains \
-  "--resume-after-push requires push.log with 'Push complete:'" \
+  "--resume-after-push requires push.log or push.log.gz with 'Push complete:'" \
   env HOME="$HOME_OK" bash "$SCRIPT" \
     --source "$SOURCE" \
     --shadow-root "$SHADOW" \

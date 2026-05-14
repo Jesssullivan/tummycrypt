@@ -21,3 +21,9 @@ Required claim boundary:
 The underlying inventory/shadow/push mechanics are delegated to
 `scripts/home-canary-linux-xr-shadow.sh`; this wrapper records the
 storage-posture defaults in `storage-posture.env`.
+
+Mounted follow-up: `mounted-followup.env` and `honey-linux-xr-shadow.log`
+reuse this completed prefix and prove honey mounted traversal, selected
+hydration, and all 85 symlink target checks. The Linux lifecycle companion,
+production TLS endpoint posture, and storage socket/object-count closure remain
+outside this packet.

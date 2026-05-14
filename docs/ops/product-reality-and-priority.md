@@ -21,7 +21,7 @@ Use this document as the short answer to:
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
 | Fleet sync / backend path | materially exercised on real hosts; current live transcripts are archived in the fleet pilot packets | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; the extended fleet packet carries that lifecycle proof as a honey companion next to isolated `Documents`/`git` traversal and live backend smoke; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux and fleet evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
-| Real project-tree canary / storage posture | scoped isolated `linux-xr` shadow parity is green, including symlink target preservation through honey-mounted traversal. Release-binary push-only storage-posture reruns completed the 7.7 GB shadow and reduced the dominant 6.2 GB raw Git `.pack` from 70,856 chunks to 1,211 chunks, then reduced the adjacent 45.6 MB `.rev` from 8,405 chunks to 8 chunks; production storage posture remains open because honey traversal/lifecycle were not run in the storage packets, the endpoint is plaintext tailnet HTTP, socket highwater exceeded configured upload concurrency, `.idx` still reaches 4,599 chunks, and generated large source headers still create thousands of chunks | `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`, PR `#367`, and blocker packet `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/` |
+| Real project-tree canary / storage posture | scoped isolated `linux-xr` shadow parity is green, including symlink target preservation through honey-mounted traversal. The current release-binary storage-posture packet completed the 7.7 GB shadow, then reused that prefix for honey mounted `find -maxdepth 8`, exact `.clang-format` hydration, and all 85 mounted symlink target checks. The dominant 6.2 GB raw Git `.pack` is down from 70,856 chunks to 1,211 chunks, and the adjacent 45.6 MB `.rev` is down from 8,405 chunks to 8 chunks; production storage posture remains open because the storage packet did not run the Linux lifecycle companion, the endpoint is plaintext tailnet HTTP, socket highwater exceeded configured upload concurrency, `.idx` still reaches 4,599 chunks, and generated large source headers still create thousands of chunks | `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`, PR `#367`, and blocker packet `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/` |
 | macOS | experimental but real; current packages prove package/signing/install paths, earlier hosted lanes proved storage/daemon gates, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; the latest hosted production `.pkg` attempt failed before daemon/Finder on an expired public storage endpoint, so production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | planned / skeleton | code exists, but there is no release-grade CLI, daemon, or Explorer flow |
@@ -180,14 +180,16 @@ Functional isolated project-tree behavior is green in
 shadowed `linux-xr` tree could be pushed, traversed from honey, hydrate selected
 content, preserve all 85 symlink targets through the mounted view, and pass the
 Linux lifecycle companion. Production storage posture is not green, but the
-push-only storage lane has narrowed: `20260513T220442Z` reduced the dominant
+storage lane has narrowed: `20260513T220442Z` reduced the dominant
 6.2 GB raw Git `.pack` from 70,856 chunks to 1,211 chunks, and
 `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`
 reduced the adjacent 45.6 MB `.rev` from 8,405 chunks to 8 chunks while
-completing the 7.7 GB shadow with no retry or error rows. Do not claim
-production S3 posture or broad home-directory readiness until honey
-traversal/lifecycle, endpoint/TLS posture, socket accounting, `.idx`, and
-generated-large-file policy are closed.
+completing the 7.7 GB shadow with no retry or error rows. A follow-up against
+that same prefix also passed honey mounted `find -maxdepth 8`, all 85 mounted
+symlink target checks, and exact `.clang-format` hydration. Do not claim
+production S3 posture or broad home-directory readiness until the storage
+packet also has lifecycle evidence, endpoint/TLS posture, socket accounting,
+`.idx`, and generated-large-file policy closed.
 
 The representation contract for that demo is:
 

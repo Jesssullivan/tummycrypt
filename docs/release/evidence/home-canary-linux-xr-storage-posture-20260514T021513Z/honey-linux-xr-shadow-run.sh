@@ -2,16 +2,16 @@
 set -euo pipefail
 
 REMOTE=seaweedfs://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260514T021513Z
-TCFS_BIN=tcfs
-MOUNT_ROOT_RAW='/tmp/tcfs-home-canary-linux-xr-shadow-20260514T021514Z/mount'
+TCFS_BIN=/nix/store/h0b39zzhmk54n0ixbl8jq66pk55sbdhr-tcfs-cli-0.12.12/bin/tcfs
+MOUNT_ROOT_RAW='/tmp/tcfs-home-canary-linux-xr-shadow-20260514T051756Z/mount'
 case "$MOUNT_ROOT_RAW" in
   "~/"*) MOUNT_ROOT="${HOME}/${MOUNT_ROOT_RAW#\~/}" ;;
   *) MOUNT_ROOT="$MOUNT_ROOT_RAW" ;;
 esac
-SMOKE_SCRIPT="${TCFS_HONEY_SMOKE_SCRIPT:-/tmp/tcfs-home-canary-linux-xr-shadow-20260514T021514Z/lazy-hydration-mounted-smoke.sh}"
-EXPECTED_CONTENT_FILE="${TCFS_HONEY_EXPECTED_CONTENT_FILE:-/tmp/tcfs-home-canary-linux-xr-shadow-20260514T021514Z/selected-hydration-file.content}"
-SYMLINK_TARGETS_FILE="${TCFS_HONEY_SYMLINK_TARGETS_FILE:-/tmp/tcfs-home-canary-linux-xr-shadow-20260514T021514Z/symlink-targets.tsv}"
-MOUNT_LOG="${TCFS_HONEY_MOUNT_LOG:-/tmp/tcfs-home-canary-linux-xr-shadow-20260514T021514Z/mount.log}"
+SMOKE_SCRIPT="${TCFS_HONEY_SMOKE_SCRIPT:-/tmp/tcfs-home-canary-linux-xr-shadow-20260514T051756Z/lazy-hydration-mounted-smoke.sh}"
+EXPECTED_CONTENT_FILE="${TCFS_HONEY_EXPECTED_CONTENT_FILE:-/tmp/tcfs-home-canary-linux-xr-shadow-20260514T051756Z/selected-hydration-file.content}"
+SYMLINK_TARGETS_FILE="${TCFS_HONEY_SYMLINK_TARGETS_FILE:-/tmp/tcfs-home-canary-linux-xr-shadow-20260514T051756Z/symlink-targets.tsv}"
+MOUNT_LOG="${TCFS_HONEY_MOUNT_LOG:-/tmp/tcfs-home-canary-linux-xr-shadow-20260514T051756Z/mount.log}"
 SMOKE_MAX_DEPTH="${TCFS_HONEY_SMOKE_MAX_DEPTH:-8}"
 SMOKE_TIMEOUT_SECS="${TCFS_HONEY_SMOKE_TIMEOUT_SECS:-900}"
 EXPECTED_FILE=.clang-format
@@ -21,12 +21,19 @@ if [[ -n "${TCFS_HONEY_ENV_FILE:-}" ]]; then
   source "$TCFS_HONEY_ENV_FILE"
 fi
 
-echo "tcfs binary: $TCFS_BIN"
+echo "tcfs binary requested: $TCFS_BIN"
+tcfs_resolved="$TCFS_BIN"
 if command -v "$TCFS_BIN" >/dev/null 2>&1; then
-  echo "tcfs binary resolved: $(command -v "$TCFS_BIN")"
+  tcfs_resolved="$(command -v "$TCFS_BIN")"
+elif [[ -x "$TCFS_BIN" ]]; then
+  tcfs_resolved="$TCFS_BIN"
+else
+  printf 'tcfs binary is not executable or on PATH: %s\n' "$TCFS_BIN" >&2
+  exit 1
 fi
-tcfs_version="$("$TCFS_BIN" --version 2>&1)" || {
-  printf 'failed to run tcfs --version through %s\n' "$TCFS_BIN" >&2
+echo "tcfs binary resolved: $tcfs_resolved"
+tcfs_version="$("$tcfs_resolved" --version 2>&1)" || {
+  printf 'failed to run tcfs --version through %s\n' "$tcfs_resolved" >&2
   printf '%s\n' "$tcfs_version" >&2
   exit 1
 }
@@ -37,9 +44,9 @@ if [[ -n "${TCFS_HONEY_EXPECTED_VERSION_CONTAINS:-}" && "$tcfs_version" != *"$TC
 fi
 tcfs_sha256=""
 if command -v sha256sum >/dev/null 2>&1; then
-  tcfs_sha256="$(sha256sum "$TCFS_BIN" | awk '{print $1}')"
+  tcfs_sha256="$(sha256sum "$tcfs_resolved" | awk '{print $1}')"
 elif command -v shasum >/dev/null 2>&1; then
-  tcfs_sha256="$(shasum -a 256 "$TCFS_BIN" | awk '{print $1}')"
+  tcfs_sha256="$(shasum -a 256 "$tcfs_resolved" | awk '{print $1}')"
 fi
 if [[ -n "$tcfs_sha256" ]]; then
   echo "tcfs sha256: $tcfs_sha256"
@@ -59,13 +66,13 @@ mkdir -p "$MOUNT_ROOT"
 mount_started=0
 cleanup_mount() {
   if [[ "$mount_started" == "1" && "${TCFS_HONEY_KEEP_MOUNT:-0}" != "1" ]]; then
-    "$TCFS_BIN" unmount "$MOUNT_ROOT" >/dev/null 2>&1 || fusermount3 -u "$MOUNT_ROOT" >/dev/null 2>&1 || true
+    "$tcfs_resolved" unmount "$MOUNT_ROOT" >/dev/null 2>&1 || fusermount3 -u "$MOUNT_ROOT" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup_mount EXIT
 
 if [[ "${TCFS_HONEY_START_MOUNT:-0}" == "1" ]]; then
-  nohup "$TCFS_BIN" mount "$REMOTE" "$MOUNT_ROOT" >"$MOUNT_LOG" 2>&1 &
+  nohup "$tcfs_resolved" mount "$REMOTE" "$MOUNT_ROOT" >"$MOUNT_LOG" 2>&1 &
   mount_pid="$!"
   mount_started=1
   for _ in {1..300}; do

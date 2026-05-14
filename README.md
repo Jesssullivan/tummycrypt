@@ -25,11 +25,12 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 - Lazy traversal QA matrix: [docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md](docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md)
 - Real project-tree canary lane: `task lazy:home-canary-linux-xr-shadow`;
   `home-canary-linux-xr-shadow-20260511T040325Z/` is scoped green for the
-  isolated `linux-xr` shadow. The storage-posture lane has a push-only
-  release-binary packet that completes the 7.7 GB shadow and proves the raw Git
-  `.pack` and `.rev` object-count fixes; production S3/Finder posture remains
-  separate because honey traversal/lifecycle, TLS endpoint posture, socket
-  accounting, and generated-large-file policy are still open
+  isolated `linux-xr` shadow. The storage-posture lane now has a release-binary
+  packet that completes the 7.7 GB shadow, proves honey mounted traversal and
+  all 85 symlink targets on the same prefix, and proves the raw Git `.pack` and
+  `.rev` object-count fixes; production S3/Finder posture remains separate
+  because lifecycle, TLS endpoint posture, socket accounting, and
+  generated-large-file policy are still open
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

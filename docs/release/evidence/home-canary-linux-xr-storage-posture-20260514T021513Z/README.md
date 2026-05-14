@@ -1,6 +1,6 @@
 # TCFS Home Canary linux-xr Shadow Evidence
 
-Created: 2026-05-14T04:16:37Z
+Created: 2026-05-14T05:27:21Z
 
 This bundle inventories the live source read-only, copies it to an isolated
 shadow, and roots TCFS state/config at that shadow. It does not mutate the live
@@ -29,10 +29,9 @@ Contents:
   `sync_git_dirs = true`, `sync_hidden_dirs = true`,
   `git_sync_mode = "raw"`, `sync_symlinks = true`, and
   `sync_empty_dirs = true`
-- `push.log.gz`: compressed shadow push transcript from the `--push` run
+- `push.log` or `push.log.gz`: shadow push transcript when `--push` ran
 - `push-storage-summary.env` and `push-storage-summary.md`: storage-facing
-  totals extracted from `push.log` before compression when push evidence is
-  present
+  totals extracted from `push.log` when push evidence is present
 - `honey-linux-xr-shadow-commands.txt`: honey mounted traversal/hydration
   commands for the selected file, `.git` traversal, and mounted symlink
   target verification

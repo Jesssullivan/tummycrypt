@@ -1,0 +1,26 @@
+# TCFS linux-xr Mounted Follow-up
+
+This follow-up reuses the completed release-binary storage prefix from
+`home-canary-linux-xr-storage-posture-20260514T021513Z` and proves mounted
+large-tree behavior on `honey` without pushing the 7.7 GB shadow again.
+
+- `honey-linux-xr-shadow.log`: `tcfs 0.12.12` from the pinned Nix store path,
+  SHA-256 `1cde5b3563487999c94780c5cf0d7834487ef8acb27fe96a77868669aa08c361`,
+  mounted `find -maxdepth 8`, all 85 mounted symlink targets verified, and
+  exact `.clang-format` hydration.
+- `honey-mount.log`: mount transcript for the same remote prefix.
+- `honey-mounted-smoke.log`: first failed attempt, retained as a stale-client
+  and harness bug record. It selected honey's ambient `tcfs 0.12.2` and tried
+  to hash the unresolved `tcfs` token.
+
+Claim boundary: this closes the storage packet's mounted traversal and symlink
+verification gap. It still does not claim production S3 posture because the
+endpoint is plaintext tailnet HTTP, socket accounting remains open, `.idx` and
+generated large headers remain object-count follow-ups, and the Linux lifecycle
+companion was not run in this storage packet.
+
+Operational note: `honey-mount.log` contains 274 S3 `NoSuchKey` warnings while
+the mounted traversal probes index paths. The smoke still completed with
+`honey_status=0`, but production polish should either eliminate that lookup
+shape or demote the expected miss path so normal browse-before-hydrate does not
+look noisy.

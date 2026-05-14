@@ -48,13 +48,14 @@ Planning-pass validation:
   isolated-shadow project-tree parity bar only; it does not claim broad home
   takeover, production Finder, or production S3 posture.
 - PR `#367` landed opt-in fresh-prefix file upload concurrency plus
-  timeout/retry telemetry. The current push-only storage-posture packet
+  timeout/retry telemetry. The current storage-posture packet
   `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`
   completes the 7.7 GB shadow with `file_upload_concurrency=8`,
   `chunk_upload_concurrency=8`, no retry or error rows, and reduced raw Git
-  `.pack`/`.rev` object counts. Treat the next step as generated-large-file,
-  `.idx`, socket-accounting, endpoint/TLS, and honey lifecycle closure, not
-  another client-concurrency bump.
+  `.pack`/`.rev` object counts; the same prefix now also has honey mounted
+  traversal/hydration and all 85 mounted symlink target checks. Treat the next
+  step as generated-large-file, `.idx`, socket-accounting, endpoint/TLS, and
+  storage-packet lifecycle closure, not another client-concurrency bump.
 - `task lazy:macos-fileprovider-neo-cleanup-packet` archives neo FileProvider
   divergence before cleanup and can install the published `.pkg`; it requires
   strict production signing preflight before any production-adjacent Finder
