@@ -96,6 +96,30 @@ Partial release-binary storage observations from
   after 5,277.06 seconds, with no retry rows. Treat this as storage blocker
   evidence only; `result.env` records `proof=push-failed`.
 
+Push-only release-binary storage observations from
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`:
+
+- The packet used the rebuilt release `tcfs 0.12.12` binary from `main`
+  `74ac016`, with SHA-256
+  `92a456cb810850f76a6cd2bdd88582ff1b795b8b7b042e6d1e33c5170b1697cc`.
+- The fresh-prefix push completed with 92,969 upload rows, 8,233,794,656 file
+  bytes, 335,831 total chunks, `file_upload_concurrency=8`,
+  `chunk_upload_concurrency=8`, `chunk_exists_check=false`, and zero error or
+  retry-warning rows.
+- The dominant 6,216,046,897-byte raw Git `.pack` now completed as 1,211
+  chunks instead of 70,856 chunks. The adjacent `.idx` profile completed as
+  4,599 chunks for 395,849,892 bytes.
+- The adjacent 45,641,304-byte `.rev` still used the small/default profile in
+  this packet and produced 8,405 chunks. Current code now routes `.rev` through
+  the same large sequential profile as `.pack`; a later packet must prove the
+  reduced reverse-index object count.
+- Socket sampling reached highwater 11 while configured upload concurrency was
+  8, so the S3 HTTP client/socket accounting remains an open storage-posture
+  issue. The endpoint was plaintext tailnet HTTP.
+- `result.env` records `proof=shadow-push` and
+  `parity_status=full-project-parity-not-claimed` because honey traversal,
+  mounted lifecycle, and remote symlink-target verification were disabled.
+
 Pre-fix host observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:
 
@@ -112,11 +136,11 @@ The follow-up work routes `.idx` files through the moderate pack-index profile,
 keeps streaming upload snapshots to chunk metadata plus whole-file hash, and
 adds bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default 4,
 cap 64). After the `20260513` packet showed that one 6.2 GB raw Git `.pack`
-could still require 70,856 chunk writes, `.pack` / `.iso` / `.img` files now use
-the large sequential FastCDC profile: 1 MiB minimum, 4 MiB average, 16 MiB
-maximum. That keeps content-defined boundaries while reducing the dominant
-object-count burden before the next storage-posture rerun. Chunk upload attempts
-are bounded by
+could still require 70,856 chunk writes, `.pack` / `.rev` / `.iso` / `.img`
+files now use the large sequential FastCDC profile: 1 MiB minimum, 4 MiB
+average, 16 MiB maximum. That keeps content-defined boundaries while reducing
+the dominant Git pack-family object-count burden before the next storage-posture
+rerun. Chunk upload attempts are bounded by
 `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS` (default 300, cap 3600, `0` disables) so a
 wedged S3 write slot becomes a retry row instead of an unobservable stall.
 Fresh-prefix bulk proof can now opt in to
@@ -125,16 +149,15 @@ and `TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS=N` records bounded chunk progress for
 objects, including a terminal progress row once the object reaches at least `N`
 chunks. The fresh-prefix shortcut is only valid for a new disposable prefix;
 evidence should preserve the `chunk_exists_check=false` upload log field when it
-is enabled. These changes still need a fresh release-build host rerun before any
-production throughput, object-count, or memory claim is made.
+is enabled. The push-only rerun proves the `.pack` object-count decision but
+still does not support a production throughput, endpoint, or full parity claim.
 
-The release-binary rerun path is now codified as
+The release-binary rerun path is codified as
 `task lazy:home-canary-linux-xr-storage-posture`. That wrapper delegates the
 same isolated-shadow mechanics to `scripts/home-canary-linux-xr-shadow.sh`, but
 adds a release-binary guard, fresh-prefix guard, upload concurrency, progress,
 and timeout defaults, endpoint/TLS and credential-presence metadata, and an explicit
-`production_storage_posture_claim=0` boundary. It is a harness for the next
-packet, not evidence that the packet has passed.
+`production_storage_posture_claim=0` boundary.
 
 ## Compression Ratios
 

@@ -7,7 +7,7 @@
 //! Chunk size targets:
 //!   - Default (small files): min 2KB, avg 4KB, max 16KB
 //!   - Pack index/binary files (.idx, .bin): min 32KB, avg 64KB, max 256KB
-//!   - Large sequential files (.pack, .iso, .img): min 1MB, avg 4MB, max 16MB
+//!   - Large sequential files (.pack, .rev, .iso, .img): min 1MB, avg 4MB, max 16MB
 //!
 //! Each chunk is content-addressed by its BLAKE3 hash.
 
@@ -51,6 +51,7 @@ impl ChunkSizes {
     /// For large sequential artifacts where remote object count dominates.
     ///
     /// Git `.pack` files are already Git-internal compressed packfiles. The
+    /// adjacent `.rev` reverse-index files are pack-derived sequential data.
     /// project-tree canary showed that 64KB average chunks turn one 6.2GB pack
     /// into about 70k remote objects, which is too many for the S3/SeaweedFS
     /// posture we want to prove. This profile keeps content-defined boundaries
@@ -64,7 +65,7 @@ impl ChunkSizes {
     /// Select chunk sizes based on file extension
     pub fn for_path(path: &Path) -> Self {
         match path.extension().and_then(|e| e.to_str()) {
-            Some("pack") | Some("iso") | Some("img") => Self::LARGE_SEQUENTIAL,
+            Some("pack") | Some("rev") | Some("iso") | Some("img") => Self::LARGE_SEQUENTIAL,
             Some("idx") | Some("bin") => Self::PACK,
             _ => Self::SMALL,
         }
@@ -346,6 +347,15 @@ mod tests {
     }
 
     #[test]
+    fn git_pack_reverse_index_uses_large_sequential_chunk_profile() {
+        let sizes = ChunkSizes::for_path(Path::new(".git/objects/pack/pack-example.rev"));
+
+        assert_eq!(sizes.min_size, ChunkSizes::LARGE_SEQUENTIAL.min_size);
+        assert_eq!(sizes.avg_size, ChunkSizes::LARGE_SEQUENTIAL.avg_size);
+        assert_eq!(sizes.max_size, ChunkSizes::LARGE_SEQUENTIAL.max_size);
+    }
+
+    #[test]
     fn git_pack_index_profile_avoids_tiny_chunk_explosion() {
         let data: Vec<u8> = (0u64..(8 * 1024 * 1024))
             .map(|i| (i.wrapping_mul(31) ^ (i >> 7) ^ (i >> 17)) as u8)
@@ -380,6 +390,25 @@ mod tests {
         assert!(
             large_chunks * 16 < old_pack_chunks,
             "large pack profile should materially reduce object count: pack={old_pack_chunks} large={large_chunks}"
+        );
+    }
+
+    #[test]
+    fn git_pack_reverse_index_large_profile_avoids_remote_object_explosion() {
+        let data: Vec<u8> = (0u64..(32 * 1024 * 1024))
+            .map(|i| (i.wrapping_mul(29) ^ i.rotate_left(11) ^ (i >> 13) ^ 0x5A5A5A5A) as u8)
+            .collect();
+
+        let small_chunks = chunk_data(&data, ChunkSizes::SMALL).len();
+        let rev_chunks = chunk_data(
+            &data,
+            ChunkSizes::for_path(Path::new(".git/objects/pack/pack-example.rev")),
+        )
+        .len();
+
+        assert!(
+            rev_chunks * 64 < small_chunks,
+            "large reverse-index profile should materially reduce object count: small={small_chunks} rev={rev_chunks}"
         );
     }
 

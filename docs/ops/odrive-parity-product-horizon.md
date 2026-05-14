@@ -91,13 +91,15 @@ still not production-smooth. The isolated `linux-xr` shadow packet
 `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/` proves
 clean remote traversal, selected hydration, symlink target preservation, and the
 Linux lifecycle companion on a real large repo copy. The storage-posture lane
-remains a blocker: post-PR `#367` packet
-`docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/`
-shows fresh-prefix file concurrency and retry/timeout telemetry are visible, but
-the multi-GB raw Git pack did not reach a practical same-session acceptance bar
-over the current tailnet HTTP SeaweedFS endpoint. odrive parity therefore still
-requires a storage/object-model decision before broad `~/git` or home-directory
-claims.
+has moved from blocker-only to push-only progress:
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`
+completed the 7.7 GB shadow with the release binary and reduced the dominant
+6.2 GB raw Git `.pack` from 70,856 chunks to 1,211 chunks. It is still not an
+odrive-parity storage claim because honey traversal/lifecycle were not run, the
+endpoint was plaintext tailnet HTTP, socket highwater exceeded configured upload
+concurrency, and `.rev` reverse-index files needed the follow-up large-profile
+fix before the next rerun. Broad `~/git` or home-directory claims remain out of
+scope.
 
 ## Linux <> Finder Parity Evidence
 
