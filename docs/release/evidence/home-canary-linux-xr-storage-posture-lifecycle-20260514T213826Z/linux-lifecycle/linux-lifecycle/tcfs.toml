@@ -1,0 +1,24 @@
+[daemon]
+socket = "/tmp/tcfs-lazy-linux-demo.4VC0jd/no-daemon.sock"
+
+[storage]
+endpoint = "http://100.64.48.53:8333"
+region = "us-east-1"
+bucket = "tcfs"
+remote_prefix = "home-canary-linux-xr-storage-posture-20260514T021513Z/linux-lifecycle/linux-lifecycle"
+enforce_tls = false
+
+[sync]
+state_db = "/tmp/tcfs-lazy-linux-demo.4VC0jd/state.db"
+sync_root = "/tmp/tcfs-lazy-linux-demo.4VC0jd/source"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_empty_dirs = true
+
+[fuse]
+cache_dir = "/tmp/tcfs-lazy-linux-demo.4VC0jd/cache"
+cache_max_mb = 64
+negative_cache_ttl_secs = 1
+
+[crypto]
+enabled = false

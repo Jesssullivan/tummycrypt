@@ -20,6 +20,10 @@ Options:
   --state-dir <path>     Local TCFS state/config dir. Default: <evidence-dir>/state
   --tcfs-bin <path>      Release tcfs binary. Default: target/release/tcfs
   --push                 Push the shadow to the disposable prefix
+  --resume-after-push    Reuse existing completed push evidence/state and run
+                          post-push companions without rerunning push
+  --reuse-shadow         Do not recopy source into shadow; inventory the
+                          existing shadow as the pushed snapshot
   --create-bucket        Best-effort bucket creation before push
   --run-honey            Run honey mounted traversal smoke after push
   --run-linux-lifecycle  Run Linux lifecycle companion on honey after push
@@ -61,6 +65,7 @@ Options:
   --allow-debug-binary   Permit target/debug/cargo-run style binaries
   --allow-non-posture-prefix
                           Permit explicit remote prefixes without "storage-posture"
+  --keep-shadow          Do not print cleanup hint for the delegated shadow
   -h, --help             Show this help
 
 Environment mirrors:
@@ -70,10 +75,13 @@ Environment mirrors:
   TCFS_STORAGE_POSTURE_REMOTE
   TCFS_STORAGE_POSTURE_STATE_DIR
   TCFS_STORAGE_POSTURE_PUSH=1
+  TCFS_STORAGE_POSTURE_RESUME_AFTER_PUSH=1
+  TCFS_STORAGE_POSTURE_REUSE_SHADOW=1
   TCFS_STORAGE_POSTURE_CREATE_BUCKET=1
   TCFS_STORAGE_POSTURE_RUN_HONEY=1
   TCFS_STORAGE_POSTURE_RUN_LINUX_LIFECYCLE=1
   TCFS_STORAGE_POSTURE_ALLOW_DEBUG_BINARY=1
+  TCFS_STORAGE_POSTURE_KEEP_SHADOW=1
 EOF
 }
 
@@ -139,12 +147,15 @@ remote="${TCFS_STORAGE_POSTURE_REMOTE:-seaweedfs://localhost:8333/tcfs/${run_id}
 state_dir="${TCFS_STORAGE_POSTURE_STATE_DIR:-}"
 tcfs_bin="${TCFS_BIN:-${TCFS_STORAGE_POSTURE_TCFS_BIN:-}}"
 push_remote="$(bool_env TCFS_STORAGE_POSTURE_PUSH "${TCFS_STORAGE_POSTURE_PUSH:-0}")"
+resume_after_push="$(bool_env TCFS_STORAGE_POSTURE_RESUME_AFTER_PUSH "${TCFS_STORAGE_POSTURE_RESUME_AFTER_PUSH:-0}")"
+reuse_shadow="$(bool_env TCFS_STORAGE_POSTURE_REUSE_SHADOW "${TCFS_STORAGE_POSTURE_REUSE_SHADOW:-0}")"
 create_bucket="$(bool_env TCFS_STORAGE_POSTURE_CREATE_BUCKET "${TCFS_STORAGE_POSTURE_CREATE_BUCKET:-0}")"
 run_honey="$(bool_env TCFS_STORAGE_POSTURE_RUN_HONEY "${TCFS_STORAGE_POSTURE_RUN_HONEY:-0}")"
 run_linux_lifecycle="$(bool_env TCFS_STORAGE_POSTURE_RUN_LINUX_LIFECYCLE "${TCFS_STORAGE_POSTURE_RUN_LINUX_LIFECYCLE:-0}")"
 allow_debug_binary="$(bool_env TCFS_STORAGE_POSTURE_ALLOW_DEBUG_BINARY "${TCFS_STORAGE_POSTURE_ALLOW_DEBUG_BINARY:-0}")"
 allow_non_posture_prefix="$(bool_env TCFS_STORAGE_POSTURE_ALLOW_NON_POSTURE_PREFIX "${TCFS_STORAGE_POSTURE_ALLOW_NON_POSTURE_PREFIX:-0}")"
 assume_fresh_prefix="$(bool_env TCFS_STORAGE_POSTURE_ASSUME_FRESH_PREFIX "${TCFS_STORAGE_POSTURE_ASSUME_FRESH_PREFIX:-1}")"
+keep_shadow="$(bool_env TCFS_STORAGE_POSTURE_KEEP_SHADOW "${TCFS_STORAGE_POSTURE_KEEP_SHADOW:-0}")"
 honey_host="${TCFS_HONEY_HOST:-honey}"
 honey_mount_root="${TCFS_HONEY_MOUNT_ROOT:-}"
 honey_remote_dir="${TCFS_HONEY_REMOTE_DIR:-}"
@@ -203,6 +214,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --push)
       push_remote=1
+      shift
+      ;;
+    --resume-after-push)
+      resume_after_push=1
+      shift
+      ;;
+    --reuse-shadow)
+      reuse_shadow=1
       shift
       ;;
     --create-bucket)
@@ -321,6 +340,10 @@ while [[ $# -gt 0 ]]; do
       allow_non_posture_prefix=1
       shift
       ;;
+    --keep-shadow)
+      keep_shadow=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -345,6 +368,9 @@ fi
 [[ "$socket_sample_interval_secs" =~ ^[0-9]+$ ]] || fail "--socket-sample-interval-secs must be numeric"
 [[ "$honey_smoke_max_depth" =~ ^[0-9]+$ ]] || fail "--honey-smoke-max-depth must be numeric"
 [[ "$honey_smoke_timeout_secs" =~ ^[0-9]+$ ]] || fail "--honey-smoke-timeout-secs must be numeric"
+if [[ "$push_remote" == "1" && "$resume_after_push" == "1" ]]; then
+  fail "--push and --resume-after-push are mutually exclusive"
+fi
 
 if [[ -z "$tcfs_bin" ]]; then
   if [[ -x "$REPO_ROOT/target/release/tcfs" ]]; then
@@ -429,6 +455,8 @@ credential_aws_session_token_present=$aws_session_token_present
 credential_source=$credential_source
 prefix_guard=storage-posture
 push=$push_remote
+resume_after_push=$resume_after_push
+reuse_shadow=$reuse_shadow
 create_bucket=$create_bucket
 state_dir=$state_dir
 tcfs_bin=$tcfs_bin
@@ -459,6 +487,7 @@ honey_remote_dir=$honey_remote_dir
 honey_start_mount=$honey_start_mount
 honey_existing_mount=$honey_existing_mount
 forward_aws_env=$forward_aws_env
+keep_shadow=$keep_shadow
 production_storage_posture_claim=0
 EOF
   if [[ -n "$tcfs_file_type" ]]; then
@@ -505,6 +534,12 @@ child_args+=(--state-dir "$state_dir")
 if [[ "$push_remote" == "1" ]]; then
   child_args+=(--push)
 fi
+if [[ "$resume_after_push" == "1" ]]; then
+  child_args+=(--resume-after-push)
+fi
+if [[ "$reuse_shadow" == "1" ]]; then
+  child_args+=(--reuse-shadow)
+fi
 if [[ "$create_bucket" == "1" ]]; then
   child_args+=(--create-bucket)
 fi
@@ -528,6 +563,9 @@ if [[ -n "$honey_mount_root" ]]; then
 fi
 if [[ -n "$honey_remote_dir" ]]; then
   child_args+=(--honey-remote-dir "$honey_remote_dir")
+fi
+if [[ "$keep_shadow" == "1" ]]; then
+  child_args+=(--keep-shadow)
 fi
 child_args+=(
   --honey-host "$honey_host"

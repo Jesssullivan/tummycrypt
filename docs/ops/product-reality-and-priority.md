@@ -1,6 +1,6 @@
 # Product Reality And Priority
 
-As of May 13, 2026, `tummycrypt` is in a much better state operationally than
+As of May 14, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
 The latest release is `v0.12.12`, and most release-facing surfaces now have
@@ -21,7 +21,7 @@ Use this document as the short answer to:
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
 | Fleet sync / backend path | materially exercised on real hosts; current live transcripts are archived in the fleet pilot packets | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; the extended fleet packet carries that lifecycle proof as a honey companion next to isolated `Documents`/`git` traversal and live backend smoke; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux and fleet evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
-| Real project-tree canary / storage posture | scoped isolated `linux-xr` shadow parity is green, including symlink target preservation through honey-mounted traversal. The current release-binary storage-posture packet completed the 7.7 GB shadow, then reused that prefix for honey mounted `find -maxdepth 8`, exact `.clang-format` hydration, and all 85 mounted symlink target checks. The mounted warning follow-up is now closed: the exact `.tc` filename fix rerun dropped S3 `NoSuchKey` warnings from 274 to 0 while preserving real ftrace `.tc` filenames. The dominant 6.2 GB raw Git `.pack` is down from 70,856 chunks to 1,211 chunks, and the adjacent 45.6 MB `.rev` is down from 8,405 chunks to 8 chunks; production storage posture remains open because the storage packet did not run the Linux lifecycle companion, the endpoint is plaintext tailnet HTTP, socket highwater exceeded configured upload concurrency, `.idx` still reaches 4,599 chunks, and generated large source headers still create thousands of chunks | `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`, PR `#367`, and blocker packet `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/` |
+| Real project-tree canary / storage posture | scoped isolated `linux-xr` shadow parity is green, including symlink target preservation through honey-mounted traversal. The current release-binary storage-posture packet completed the 7.7 GB shadow, then reused that prefix for honey mounted `find -maxdepth 8`, exact `.clang-format` hydration, and all 85 mounted symlink target checks. The mounted warning follow-up is closed: the exact `.tc` filename fix rerun dropped S3 `NoSuchKey` warnings from 274 to 0 while preserving real ftrace `.tc` filenames. The lifecycle companion now reuses that same prefix and reports `scoped-project-tree-parity-evidence-complete`, including mounted write/readback, cache clear/rehydrate, dirty recursive safe-unsync refusal, and clean recursive safe-unsync success. Production storage posture remains open because the endpoint is plaintext tailnet HTTP, socket highwater exceeded configured upload concurrency, `.idx` still reaches 4,599 chunks, and generated large source headers still create thousands of chunks | `docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`, `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`, PR `#367`, and blocker packet `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/` |
 | macOS | experimental but real; current packages prove package/signing/install paths, earlier hosted lanes proved storage/daemon gates, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile; the latest hosted production `.pkg` attempt failed before daemon/Finder on an expired public storage endpoint, so production Finder enablement/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | planned / skeleton | code exists, but there is no release-grade CLI, daemon, or Explorer flow |
@@ -186,10 +186,12 @@ storage lane has narrowed: `20260513T220442Z` reduced the dominant
 reduced the adjacent 45.6 MB `.rev` from 8,405 chunks to 8 chunks while
 completing the 7.7 GB shadow with no retry or error rows. A follow-up against
 that same prefix also passed honey mounted `find -maxdepth 8`, all 85 mounted
-symlink target checks, and exact `.clang-format` hydration. Do not claim
-production S3 posture or broad home-directory readiness until the storage
-packet also has lifecycle evidence, endpoint/TLS posture, socket accounting,
-`.idx`, and generated-large-file policy closed.
+symlink target checks, and exact `.clang-format` hydration. The lifecycle
+companion `home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`
+closes the same-prefix mounted write/readback, cache clear/rehydrate, and
+recursive safe-unsync row. Do not claim production S3 posture or broad
+home-directory readiness until endpoint/TLS posture, socket accounting, `.idx`,
+and generated-large-file policy are closed.
 
 The representation contract for that demo is:
 

@@ -56,9 +56,11 @@ Planning-pass validation:
   traversal/hydration and all 85 mounted symlink target checks. The exact `.tc`
   filename follow-up
   `docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`
-  drops mounted S3 `NoSuchKey` warnings from 274 to 0. Treat the next step as
-  generated-large-file, `.idx`, socket-accounting, endpoint/TLS, and
-  storage-packet lifecycle closure, not another client-concurrency bump.
+  drops mounted S3 `NoSuchKey` warnings from 274 to 0. The lifecycle companion
+  `docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`
+  reuses that same prefix and reports `scoped-project-tree-parity-evidence-complete`.
+  Treat the next step as generated-large-file, `.idx`, socket-accounting, and
+  endpoint/TLS closure, not another client-concurrency bump.
 - `task lazy:macos-fileprovider-neo-cleanup-packet` archives neo FileProvider
   divergence before cleanup and can install the published `.pkg`; it requires
   strict production signing preflight before any production-adjacent Finder

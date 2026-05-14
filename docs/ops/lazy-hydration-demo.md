@@ -63,10 +63,13 @@ sampling, and the raw Git `.pack`/`.rev` object-count fixes on a completed
 `.clang-format` hydration. The later exact `.tc` filename follow-up
 `docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`
 dropped mounted S3 `NoSuchKey` warnings from 274 to 0 while preserving real
-linux-xr ftrace `.tc` filenames. The Linux lifecycle companion was still not
-run in that storage packet and the endpoint was plaintext tailnet HTTP. Do not
-use that packet to claim production S3 posture or broad `~/git`/home-directory
-readiness.
+linux-xr ftrace `.tc` filenames. The later lifecycle companion
+`docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`
+reused that same prefix and passed mounted traversal/hydration, all 85 symlink
+targets, mounted write/readback, cache clear/rehydrate, dirty recursive
+safe-unsync refusal, and clean recursive safe-unsync success. The endpoint was
+still plaintext tailnet HTTP, so do not use that packet to claim production S3
+posture or broad `~/git`/home-directory readiness.
 
 ## Linux Terminal Acceptance
 

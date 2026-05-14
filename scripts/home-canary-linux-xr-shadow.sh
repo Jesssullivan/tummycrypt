@@ -661,12 +661,22 @@ EOF
 
 write_push_storage_summary() {
   local log_path="$evidence_dir/push.log"
+  local gzip_log_path="$evidence_dir/push.log.gz"
   local env_path="$evidence_dir/push-storage-summary.env"
   local md_path="$evidence_dir/push-storage-summary.md"
+  local log_is_gzip=0
 
-  [[ -f "$log_path" ]] || return 0
+  if [[ -f "$log_path" ]]; then
+    :
+  elif [[ -f "$gzip_log_path" ]]; then
+    command -v gzip >/dev/null 2>&1 || fail "found push.log.gz but gzip is unavailable"
+    log_is_gzip=1
+  else
+    return 0
+  fi
 
-  awk '
+  summarize_push_log() {
+    awk '
     function value_after(line, key, rest, parts) {
       rest = line
       start = index(rest, key "=")
@@ -873,7 +883,14 @@ write_push_storage_summary() {
       print "max_bytes=" max_bytes + 0
       print "max_bytes_path=" max_bytes_path
     }
-  ' "$log_path" >"$env_path"
+  '
+  }
+
+  if [[ "$log_is_gzip" == "1" ]]; then
+    gzip -cd "$gzip_log_path" | summarize_push_log >"$env_path"
+  else
+    summarize_push_log <"$log_path" >"$env_path"
+  fi
 
   awk -F= '
     {

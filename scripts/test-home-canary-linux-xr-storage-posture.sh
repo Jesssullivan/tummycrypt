@@ -111,6 +111,8 @@ assert_contains "$EVIDENCE/storage-posture.env" "remote_prefix=home-canary-linux
 assert_contains "$EVIDENCE/storage-posture.env" "credential_source=unset_or_helper_default"
 assert_contains "$EVIDENCE/storage-posture.env" "credential_aws_secret_access_key_present=0"
 assert_contains "$EVIDENCE/storage-posture.env" "state_dir=$STATE"
+assert_contains "$EVIDENCE/storage-posture.env" "resume_after_push=0"
+assert_contains "$EVIDENCE/storage-posture.env" "reuse_shadow=0"
 assert_contains "$EVIDENCE/storage-posture.env" "tcfs_binary_profile=cargo-release"
 assert_contains "$EVIDENCE/storage-posture.env" "tcfs_version=tcfs 0.12.12-test"
 assert_contains "$EVIDENCE/storage-posture.env" "assume_fresh_prefix=1"
@@ -130,6 +132,7 @@ assert_contains "$EVIDENCE/storage-posture.env" "git_pack_reverse_index_chunk_pr
 assert_contains "$EVIDENCE/storage-posture.env" "git_index_chunk_profile=min=32KiB avg=64KiB max=256KiB"
 assert_contains "$EVIDENCE/storage-posture.env" "socket_sample_interval_secs=3"
 assert_contains "$EVIDENCE/storage-posture.env" "production_storage_posture_claim=0"
+assert_contains "$EVIDENCE/storage-posture.env" "keep_shadow=0"
 assert_contains "$EVIDENCE/storage-posture.md" "production S3 posture claim."
 assert_contains "$EVIDENCE/storage-posture.md" "raw Git \`.pack\` and \`.rev\` files use the large"
 assert_contains "$EVIDENCE/run-metadata.env" "push=0"
@@ -171,6 +174,48 @@ assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "max_upload_elapsed_ms
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "max_upload_bytes_per_sec=8192"
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "fresh_prefix_publish_true_rows=1"
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "remote_conflict_check_false_rows=1"
+
+gzip -f "$PUSH_EVIDENCE/push.log"
+rm -f "$PUSH_EVIDENCE/push-storage-summary.env" "$PUSH_EVIDENCE/push-storage-summary.md"
+printf '{}\n' >"$TMPDIR/push-state/push-state.json"
+"${RUN_ENV[@]}" bash "$SCRIPT" \
+  --source "$SOURCE" \
+  --shadow-root "$TMPDIR/push-shadow" \
+  --evidence-dir "$PUSH_EVIDENCE" \
+  --state-dir "$TMPDIR/push-state" \
+  --remote seaweedfs://localhost:8333/tcfs/home-canary-linux-xr-storage-posture-socket-test \
+  --tcfs-bin "$BIN_DIR/tcfs" \
+  --resume-after-push \
+  --reuse-shadow \
+  --keep-shadow \
+  >"$TMPDIR/resume.out"
+assert_contains "$PUSH_EVIDENCE/storage-posture.env" "helper_status=0"
+assert_contains "$PUSH_EVIDENCE/storage-posture.env" "push=0"
+assert_contains "$PUSH_EVIDENCE/storage-posture.env" "resume_after_push=1"
+assert_contains "$PUSH_EVIDENCE/storage-posture.env" "reuse_shadow=1"
+assert_contains "$PUSH_EVIDENCE/storage-posture.env" "keep_shadow=1"
+assert_contains "$PUSH_EVIDENCE/run-metadata.env" "push=0"
+assert_contains "$PUSH_EVIDENCE/run-metadata.env" "resume_after_push=1"
+assert_contains "$PUSH_EVIDENCE/run-metadata.env" "reuse_shadow=1"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "upload_rows=1"
+assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "chunk_upload_concurrency_values=2"
+if grep -Fq "shadow cleanup after review" "$TMPDIR/resume.out"; then
+  printf 'did not expect cleanup hint when --keep-shadow is set\n' >&2
+  cat "$TMPDIR/resume.out" >&2
+  exit 1
+fi
+
+assert_fails_contains \
+  "--push and --resume-after-push are mutually exclusive" \
+  env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN HOME="$HOME_OK" bash "$SCRIPT" \
+    --source "$SOURCE" \
+    --shadow-root "$TMPDIR/conflict-shadow" \
+    --evidence-dir "$TMPDIR/conflict-evidence" \
+    --state-dir "$TMPDIR/conflict-state" \
+    --remote seaweedfs://example.invalid/tcfs/home-canary-linux-xr-storage-posture-conflict \
+    --tcfs-bin "$BIN_DIR/tcfs" \
+    --push \
+    --resume-after-push
 
 cat >"$DEBUG_BIN_DIR/tcfs" <<'EOF'
 #!/usr/bin/env bash

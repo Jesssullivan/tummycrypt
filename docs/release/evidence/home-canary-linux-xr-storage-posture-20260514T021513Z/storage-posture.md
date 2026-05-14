@@ -24,6 +24,7 @@ storage-posture defaults in `storage-posture.env`.
 
 Mounted follow-up: `mounted-followup.env` and `honey-linux-xr-shadow.log`
 reuse this completed prefix and prove honey mounted traversal, selected
-hydration, and all 85 symlink target checks. The Linux lifecycle companion,
-production TLS endpoint posture, and storage socket/object-count closure remain
-outside this packet.
+hydration, and all 85 symlink target checks. Later companion packets close the
+mounted warning row and scoped Linux lifecycle row for this prefix; production
+TLS endpoint posture and storage socket/object-count closure remain outside
+this packet.

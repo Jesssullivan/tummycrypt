@@ -38,6 +38,9 @@ mount/tools/testing/selftests/ftrace/test.d/00basic/basic1.tc
 
 This closes the mounted traversal warning/noise follow-up for this prefix. It
 does not upgrade the storage packet to production S3 posture because the packet
-still used plaintext tailnet HTTP SeaweedFS, did not run the Linux lifecycle
-companion, and still carries the measured `.idx`, generated-header, and socket
-accounting follow-ups from the original storage-posture evidence.
+still used plaintext tailnet HTTP SeaweedFS and still carries the measured
+`.idx`, generated-header, and socket accounting follow-ups from the original
+storage-posture evidence. A later companion,
+`docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`,
+reused this prefix and closed the scoped Linux lifecycle row without changing
+those production storage posture blockers.

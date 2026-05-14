@@ -16,8 +16,9 @@ coverage and the clearest end-to-end validation story.
   real repo shadow for cross-host proof. POSIX symlink preservation is available
   through `sync_symlinks = true`, and the current scoped packet proved mounted
   honey traversal/hydration, all 85 mounted symlink targets, and the Linux
-  lifecycle companion. This is isolated project-tree parity, not broad
-  home-directory takeover, production Finder, or production S3 posture
+  lifecycle companion. The release-binary storage-posture prefix now has the
+  same scoped lifecycle companion as well. This is isolated project-tree parity,
+  not broad home-directory takeover, production Finder, or production S3 posture
 - **NFS loopback**: Alternative to FUSE (no kernel modules required), with current release evidence pending
 - **Fleet sync**: NATS JetStream with vector clock conflict detection
 - **D-Bus**: Interface crate exists, but the default backend is a stub and release UX/status integration is not yet proven

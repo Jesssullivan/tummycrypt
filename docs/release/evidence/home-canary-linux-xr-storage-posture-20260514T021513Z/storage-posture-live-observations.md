@@ -65,8 +65,12 @@ an intentional policy for generated large source/data files.
 
 ## Remaining Blockers
 
-- The Linux lifecycle companion was not run in this storage packet. The older
-  project-tree correctness packet remains the lifecycle reference.
+- At original packet time, the Linux lifecycle companion was not run and the
+  older project-tree correctness packet remained the lifecycle reference.
+- Superseding note: the later companion
+  `docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`
+  reused this same prefix and closed the scoped lifecycle row, while preserving
+  the production storage posture blockers below.
 - The endpoint was plaintext tailnet HTTP, so this is not production TLS
   storage posture.
 - Socket sampling reached highwater 11 while upload concurrency was 8. The S3

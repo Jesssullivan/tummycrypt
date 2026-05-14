@@ -152,7 +152,26 @@ Release-binary storage observations from
   as TCFS stub aliases during mounted lookup.
 - `result.env` records `proof=shadow-push-honey-traversal-symlink-targets` and
   `parity_status=full-project-parity-not-claimed` because the Linux lifecycle
-  companion was not run in this storage packet.
+  companion was not part of the original packet.
+
+Lifecycle companion observations from
+`docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`:
+
+- The packet reused the completed `20260514T021513Z` prefix and shadow; it did
+  not recopy `/Users/jess/git/linux-xr` or rerun the 7.7 GB push.
+- `parity-gates.env` records
+  `status=scoped-project-tree-parity-evidence-complete` and
+  `proof=shadow-push-honey-linux-lifecycle-symlink-targets`.
+- Honey reused the same large prefix with the exact `.tc` filename fix binary
+  and passed `find -maxdepth 8`, exact `.clang-format` hydration, and all 85
+  mounted symlink target checks with 0 actual `WARN`, `ERROR`, or `NoSuchKey`
+  rows in the honey smoke and mount logs.
+- The nested Linux lifecycle companion passed mounted write/readback, exact
+  remote pullback, cache clear/rehydrate, dirty recursive safe-unsync refusal,
+  and clean recursive safe-unsync success.
+- This closes the scoped lifecycle row for the storage packet, but it remains a
+  lab storage packet: endpoint TLS, socket highwater, `.idx`, and generated
+  large-file policy are still production storage posture follow-ups.
 
 Pre-fix host observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:

@@ -562,6 +562,12 @@ tasks:
           if [[ "${PUSH:-0}" == "1" ]]; then
             args+=(--push)
           fi
+          if [[ "${RESUME_AFTER_PUSH:-0}" == "1" ]]; then
+            args+=(--resume-after-push)
+          fi
+          if [[ "${REUSE_SHADOW:-0}" == "1" ]]; then
+            args+=(--reuse-shadow)
+          fi
           if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
             args+=(--create-bucket)
           fi
@@ -579,6 +585,9 @@ tasks:
           fi
           if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
             args+=(--forward-aws-env)
+          fi
+          if [[ "${KEEP_SHADOW:-0}" == "1" ]]; then
+            args+=(--keep-shadow)
           fi
 
           scripts/home-canary-linux-xr-shadow.sh "${args[@]}"
@@ -659,6 +668,12 @@ tasks:
           if [[ "${PUSH:-0}" == "1" ]]; then
             args+=(--push)
           fi
+          if [[ "${RESUME_AFTER_PUSH:-0}" == "1" ]]; then
+            args+=(--resume-after-push)
+          fi
+          if [[ "${REUSE_SHADOW:-0}" == "1" ]]; then
+            args+=(--reuse-shadow)
+          fi
           if [[ "${CREATE_BUCKET:-0}" == "1" ]]; then
             args+=(--create-bucket)
           fi
@@ -685,6 +700,9 @@ tasks:
           fi
           if [[ "${ALLOW_NON_POSTURE_PREFIX:-0}" == "1" ]]; then
             args+=(--allow-non-posture-prefix)
+          fi
+          if [[ "${KEEP_SHADOW:-0}" == "1" ]]; then
+            args+=(--keep-shadow)
           fi
 
           scripts/home-canary-linux-xr-storage-posture.sh "${args[@]}"
