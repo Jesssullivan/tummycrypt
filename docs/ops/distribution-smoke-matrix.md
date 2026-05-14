@@ -29,11 +29,14 @@ repo proves Homebrew fresh/upgrade, Darwin Nix profile install, Ubuntu 24.04
 `.deb` fresh/upgrade on arm64 and amd64, Debian 13 `.deb` fresh install on
 arm64 and amd64, and Fedora 42 x86_64 daemon-only RPM fresh/upgrade. Container
 evidence proves explicit amd64 pull/version/startup logs but records a missing
-native `linux/arm64/v8` image manifest. The release workflow is configured to
-publish both architectures on the next cut, but that still needs tagged
-registry proof before upgrading the current evidence row. Production macOS
-`.pkg` current-tag proof remains a separate follow-up check even though older
-release and CI evidence exists for parts of that surface.
+native `linux/arm64/v8` image manifest. The
+`container-v01212-manifest-refresh-20260514T224746Z/` registry metadata refresh
+reconfirmed that gap: the `v0.12.12` image index still exposes Linux amd64 plus
+an unknown/unknown manifest, with no Linux arm64 image. The release workflow is
+configured to publish both architectures on the next cut, but that still needs
+tagged registry proof before upgrading the current evidence row. Production
+macOS `.pkg` current-tag proof remains a separate follow-up check even though
+older release and CI evidence exists for parts of that surface.
 
 ## Out-Of-Scope Published Helpers
 
@@ -253,8 +256,9 @@ Success criteria:
 
 Full cluster rollout proof remains an infra-level check and should be paired with
 the live fleet runbooks when container packaging or worker behavior changes.
-The current `v0.12.12` evidence proves amd64 only; native `linux/arm64/v8`
-pulls are not yet published.
+The current `v0.12.12` evidence proves amd64 only. The 2026-05-14 manifest
+refresh still shows no native `linux/arm64/v8` image manifest, so arm64 pulls
+are not yet published for this tag.
 
 ### Nix
 

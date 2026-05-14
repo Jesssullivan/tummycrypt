@@ -1,0 +1,9 @@
+Client:
+ Version:           27.5.1
+ API version:       1.47
+ Go version:        go1.24.10
+ Git commit:        v27.5.1
+ Built:             Thu Jan  1 00:00:00 1970
+ OS/Arch:           darwin/arm64
+ Context:           default
+Cannot connect to the Docker daemon at unix:///var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T/podman/podman-machine-default-api.sock. Is the docker daemon running?
