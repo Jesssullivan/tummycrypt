@@ -1,0 +1,67 @@
+# TCFS linux-xr Storage Posture Live Observations
+
+This packet was run from `main` `c0c2c0c` with a rebuilt release
+`target/release/tcfs` binary:
+
+- `tcfs_version=tcfs 0.12.12`
+- `tcfs_sha256=0cacfac3ab32adecf471a4b8ebea4450aa9763033d8c9ef1dad52e4098e86856`
+- `remote=seaweedfs://100.64.48.53:8333/tcfs/home-canary-linux-xr-storage-posture-20260514T021513Z`
+- `transport_tls=false`
+- `file_upload_concurrency=8`
+- `chunk_upload_concurrency=8`
+- `chunk_write_timeout_secs=300`
+- `fresh_prefix_publish=true`
+- `chunk_exists_check=false`
+
+## Result
+
+The push completed:
+
+- `result.env`: `status=0`, `proof=shadow-push`
+- `parity_status=full-project-parity-not-claimed`
+- `parity_reason=mounted honey traversal and symlink target verification were not run`
+- `push-storage-summary.env`: `upload_rows=92969`, `total_file_bytes=8233794656`,
+  `total_chunks=327482`, `error_rows=0`, `retry_warning_rows=0`
+
+This is storage-shape progress, not scoped project-tree parity, production
+Finder, broad home-directory, or production S3 posture evidence.
+
+## Object Model
+
+The raw Git `.pack` and `.rev` large sequential profile fixes both worked:
+
+- Earlier blocker packet: the 6,216,046,897-byte `.pack` reached 70,856 chunks.
+- `20260513T220442Z`: the same dominant `.pack` completed as 1,211 chunks.
+- Earlier packet: the adjacent 45,641,304-byte `.rev` produced 8,405 chunks.
+- This packet: the same `.rev` completed as 8 chunks.
+
+The moderate `.idx` profile remains the largest Git-pack-family object count:
+
+- `.idx` rows: 4,599 chunks for the dominant 395,849,892-byte index.
+
+The next object-count hotspot is not raw Git pack metadata. Large generated
+source headers in the Linux tree still use the default small-file profile:
+
+- `drivers/gpu/drm/amd/include/asic_reg/dcn/dcn_3_2_0_sh_mask.h` was
+  23,949,786 bytes and produced 2,986 chunks.
+- `drivers/gpu/drm/amd/include/asic_reg/nbio/nbio_7_2_0_sh_mask.h` was
+  16,414,003 bytes and produced 2,121 chunks.
+
+That is acceptable for this proof packet because the run completed without
+retry or error rows, but it keeps production storage posture open until TCFS has
+an intentional policy for generated large source/data files.
+
+## Remaining Blockers
+
+- Honey traversal, mounted hydration, symlink target verification, and Linux
+  lifecycle were intentionally disabled for this push-only rerun.
+- The endpoint was plaintext tailnet HTTP, so this is not production TLS
+  storage posture.
+- Socket sampling reached highwater 11 while upload concurrency was 8. The S3
+  HTTP client/socket accounting needs another pass before claiming bounded
+  storage concurrency.
+- The live source had 85 symlinks. Source/shadow target manifests matched, but
+  this packet did not verify mounted remote symlink targets.
+- Total chunks are still high at 327,482 because normal project files and
+  generated headers remain on the default profile. That is now a measured
+  productionization follow-up, not a blocker to the `.pack`/`.rev` fix.

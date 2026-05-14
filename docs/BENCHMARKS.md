@@ -120,6 +120,30 @@ Push-only release-binary storage observations from
   `parity_status=full-project-parity-not-claimed` because honey traversal,
   mounted lifecycle, and remote symlink-target verification were disabled.
 
+Push-only release-binary storage observations from
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`:
+
+- The packet used the rebuilt release `tcfs 0.12.12` binary from `main`
+  `c0c2c0c`, with SHA-256
+  `0cacfac3ab32adecf471a4b8ebea4450aa9763033d8c9ef1dad52e4098e86856`.
+- The fresh-prefix push completed with 92,969 upload rows, 8,233,794,656 file
+  bytes, 327,482 total chunks, `file_upload_concurrency=8`,
+  `chunk_upload_concurrency=8`, `chunk_exists_check=false`, and zero error or
+  retry-warning rows.
+- The dominant 6,216,046,897-byte raw Git `.pack` stayed at 1,211 chunks. The
+  adjacent 45,641,304-byte `.rev` now completed as 8 chunks instead of 8,405
+  chunks.
+- The `.idx` row remains 4,599 chunks for 395,849,892 bytes. Outside raw Git
+  pack metadata, generated AMD register headers are now the largest measured
+  object-count hotspots: a 23,949,786-byte `dcn_3_2_0_sh_mask.h` produced
+  2,986 chunks, and a 16,414,003-byte `nbio_7_2_0_sh_mask.h` produced 2,121
+  chunks.
+- Socket sampling again reached highwater 11 while configured upload
+  concurrency was 8. The endpoint was plaintext tailnet HTTP.
+- `result.env` records `proof=shadow-push` and
+  `parity_status=full-project-parity-not-claimed` because honey traversal,
+  mounted lifecycle, and remote symlink-target verification were disabled.
+
 Pre-fix host observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:
 
@@ -138,9 +162,11 @@ adds bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default 4,
 cap 64). After the `20260513` packet showed that one 6.2 GB raw Git `.pack`
 could still require 70,856 chunk writes, `.pack` / `.rev` / `.iso` / `.img`
 files now use the large sequential FastCDC profile: 1 MiB minimum, 4 MiB
-average, 16 MiB maximum. That keeps content-defined boundaries while reducing
-the dominant Git pack-family object-count burden before the next storage-posture
-rerun. Chunk upload attempts are bounded by
+average, 16 MiB maximum. The `20260514` packet proves both raw Git `.pack` and
+`.rev` reductions on the full `linux-xr` shadow; the next object-model decision
+is whether `.idx` and generated large source/data files need a similar policy
+or whether their measured chunk counts are acceptable. Chunk upload attempts are
+bounded by
 `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS` (default 300, cap 3600, `0` disables) so a
 wedged S3 write slot becomes a retry row instead of an unobservable stall.
 Fresh-prefix bulk proof can now opt in to
@@ -149,8 +175,9 @@ and `TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS=N` records bounded chunk progress for
 objects, including a terminal progress row once the object reaches at least `N`
 chunks. The fresh-prefix shortcut is only valid for a new disposable prefix;
 evidence should preserve the `chunk_exists_check=false` upload log field when it
-is enabled. The push-only rerun proves the `.pack` object-count decision but
-still does not support a production throughput, endpoint, or full parity claim.
+is enabled. The push-only reruns prove the `.pack`/`.rev` object-count
+decisions but still do not support a production throughput, endpoint, or full
+parity claim.
 
 The release-binary rerun path is codified as
 `task lazy:home-canary-linux-xr-storage-posture`. That wrapper delegates the

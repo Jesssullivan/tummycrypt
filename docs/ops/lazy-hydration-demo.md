@@ -54,13 +54,14 @@ The scoped isolated `linux-xr` shadow packet
 `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/` proves
 large-tree traversal, selected hydration, mounted symlink target preservation,
 and the Linux lifecycle companion on a copied project tree. The
-post-PR `#367` storage-posture packet
-`docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/`
-is intentionally recorded as blocker evidence: fresh-prefix file upload
-concurrency, retry/timeout telemetry, and socket sampling are visible, but the
-multi-GB raw Git pack did not reach a practical same-session acceptance bar on
-the current tailnet HTTP SeaweedFS endpoint. Do not use that packet to claim
-production S3 posture or broad `~/git`/home-directory readiness.
+current storage-posture packet
+`docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`
+is intentionally recorded as push-only evidence: fresh-prefix file upload
+concurrency, retry/timeout telemetry, socket sampling, and the raw Git
+`.pack`/`.rev` object-count fixes are visible on a completed 7.7 GB push, but
+honey traversal/lifecycle were disabled and the endpoint was plaintext tailnet
+HTTP. Do not use that packet to claim production S3 posture or broad
+`~/git`/home-directory readiness.
 
 ## Linux Terminal Acceptance
 

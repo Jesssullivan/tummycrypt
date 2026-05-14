@@ -27,9 +27,9 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   `home-canary-linux-xr-shadow-20260511T040325Z/` is scoped green for the
   isolated `linux-xr` shadow. The storage-posture lane has a push-only
   release-binary packet that completes the 7.7 GB shadow and proves the raw Git
-  `.pack` object-count fix; production S3/Finder posture remains separate, and
-  `.rev` reverse-index files now share the large sequential FastCDC profile for
-  the next rerun
+  `.pack` and `.rev` object-count fixes; production S3/Finder posture remains
+  separate because honey traversal/lifecycle, TLS endpoint posture, socket
+  accounting, and generated-large-file policy are still open
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
