@@ -60,9 +60,12 @@ records fresh-prefix file upload concurrency, retry/timeout telemetry, socket
 sampling, and the raw Git `.pack`/`.rev` object-count fixes on a completed
 7.7 GB push. A follow-up against the same prefix passed honey mounted
 `find -maxdepth 8`, all 85 mounted symlink target checks, and exact
-`.clang-format` hydration, but the Linux lifecycle companion was not run in
-that storage packet and the endpoint was plaintext tailnet HTTP. Do not use
-that packet to claim production S3 posture or broad `~/git`/home-directory
+`.clang-format` hydration. The later exact `.tc` filename follow-up
+`docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`
+dropped mounted S3 `NoSuchKey` warnings from 274 to 0 while preserving real
+linux-xr ftrace `.tc` filenames. The Linux lifecycle companion was still not
+run in that storage packet and the endpoint was plaintext tailnet HTTP. Do not
+use that packet to claim production S3 posture or broad `~/git`/home-directory
 readiness.
 
 ## Linux Terminal Acceptance

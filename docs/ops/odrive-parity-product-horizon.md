@@ -97,8 +97,10 @@ completed the 7.7 GB shadow with the release binary, kept the dominant 6.2 GB
 raw Git `.pack` at 1,211 chunks, and reduced the adjacent 45.6 MB `.rev` from
 8,405 chunks to 8 chunks. A mounted follow-up on `honey` reused that prefix and
 passed `find -maxdepth 8`, all 85 mounted symlink target checks, and exact
-`.clang-format` hydration. It is still not an odrive-parity storage claim
-because the storage packet did not run the Linux lifecycle companion, the
+`.clang-format` hydration. A later exact `.tc` filename follow-up against that
+same prefix dropped mounted S3 `NoSuchKey` warnings from 274 to 0 and preserved
+real linux-xr ftrace `.tc` filenames. It is still not an odrive-parity storage
+claim because the storage packet did not run the Linux lifecycle companion, the
 endpoint was plaintext tailnet HTTP, socket highwater exceeded configured upload
 concurrency, `.idx` still reaches 4,599 chunks, and generated large source
 headers still create thousands of chunks. Broad `~/git` or home-directory

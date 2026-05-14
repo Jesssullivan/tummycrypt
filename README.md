@@ -28,9 +28,11 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   isolated `linux-xr` shadow. The storage-posture lane now has a release-binary
   packet that completes the 7.7 GB shadow, proves honey mounted traversal and
   all 85 symlink targets on the same prefix, and proves the raw Git `.pack` and
-  `.rev` object-count fixes; production S3/Finder posture remains separate
-  because lifecycle, TLS endpoint posture, socket accounting, and
-  generated-large-file policy are still open
+  `.rev` object-count fixes. The mounted warning follow-up dropped S3
+  `NoSuchKey` rows from 274 to 0 by preserving real `.tc` filenames during VFS
+  lookup; production S3/Finder posture remains separate because lifecycle, TLS
+  endpoint posture, socket accounting, and generated-large-file policy are
+  still open
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

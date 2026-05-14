@@ -117,6 +117,51 @@ async fn readdir_after_create_uses_clean_names() {
 }
 
 #[tokio::test]
+async fn real_tc_extension_is_not_treated_as_stub_suffix() {
+    let vfs = memory_vfs("test");
+
+    vfs.mkdir("/", OsStr::new("docs"), 0o755)
+        .await
+        .expect("mkdir docs");
+    let (fh, _) = vfs
+        .create("/docs", OsStr::new("ftrace.tc"), 0o644)
+        .await
+        .expect("create real .tc file");
+    vfs.write(fh, 0, b"real project file with .tc extension")
+        .await
+        .expect("write real .tc file");
+    vfs.release(fh).await.expect("release real .tc file");
+
+    let entries = vfs.readdir("/docs").await.expect("readdir /docs");
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        names.contains(&"ftrace.tc"),
+        "real .tc filenames should remain visible: {names:?}"
+    );
+    assert!(
+        !names.contains(&"ftrace"),
+        "real .tc filenames must not be exposed as stripped stub names: {names:?}"
+    );
+
+    assert!(
+        vfs.getattr("/docs/ftrace").await.is_err(),
+        "clean path without .tc should not alias a real .tc file"
+    );
+    let attr = vfs
+        .getattr("/docs/ftrace.tc")
+        .await
+        .expect("getattr exact .tc file");
+    assert_eq!(attr.kind, tcfs_vfs::types::VfsFileType::RegularFile);
+
+    let (read_fh, data) = vfs
+        .open("/docs/ftrace.tc")
+        .await
+        .expect("open exact .tc file");
+    assert_eq!(&data, b"real project file with .tc extension");
+    vfs.release(read_fh).await.expect("release exact .tc file");
+}
+
+#[tokio::test]
 async fn readdir_getattr_and_readlink_preserve_symlink_entries() {
     let op = Operator::new(opendal::services::Memory::default())
         .unwrap()
@@ -892,6 +937,36 @@ async fn open_accepts_clean_and_legacy_stub_paths() {
     vfs.release(stub_fh)
         .await
         .expect("release legacy stub path");
+}
+
+#[tokio::test]
+async fn exact_tc_file_wins_over_legacy_stub_fallback() {
+    let vfs = memory_vfs("test");
+
+    let (clean_fh, _) = vfs
+        .create("/", OsStr::new("dupe.txt"), 0o644)
+        .await
+        .expect("create clean file");
+    vfs.write(clean_fh, 0, b"clean file content")
+        .await
+        .expect("write clean file");
+    vfs.release(clean_fh).await.expect("release clean file");
+
+    let (tc_fh, _) = vfs
+        .create("/", OsStr::new("dupe.txt.tc"), 0o644)
+        .await
+        .expect("create exact .tc file");
+    vfs.write(tc_fh, 0, b"exact .tc file content")
+        .await
+        .expect("write exact .tc file");
+    vfs.release(tc_fh).await.expect("release exact .tc file");
+
+    let (read_fh, data) = vfs.open("/dupe.txt.tc").await.expect("open exact .tc file");
+    assert_eq!(
+        &data, b"exact .tc file content",
+        "exact remote .tc entry should win over legacy clean-path fallback"
+    );
+    vfs.release(read_fh).await.expect("release exact .tc read");
 }
 
 #[tokio::test]

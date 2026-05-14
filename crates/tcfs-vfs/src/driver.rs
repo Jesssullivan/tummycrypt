@@ -1,9 +1,9 @@
 //! Concrete `VirtualFilesystem` implementation for tcfs.
 //!
-//! Maps a SeaweedFS prefix to a virtual directory tree with clean user-facing
-//! names. Physical `.tc`/`.tcf` stubs are still supported for compatibility and
-//! offline/dehydrated sync-root paths, but mounted VFS entries are not exposed
-//! with a `.tc` suffix.
+//! Maps a SeaweedFS prefix to a virtual directory tree with user-facing names.
+//! Physical `.tc`/`.tcf` stub paths are still supported as a legacy lookup
+//! fallback for offline/dehydrated sync-root paths, but exact remote filenames
+//! always win so a real project file ending in `.tc` stays addressable as such.
 //! This is the core filesystem logic, decoupled from any specific mount
 //! protocol (FUSE, NFS, FileProvider).
 //!
@@ -398,25 +398,37 @@ impl TcfsVfs {
         Ok(())
     }
 
-    /// Build the index path for a virtual FS path.
-    ///
-    /// `/src/main.rs` -> `{prefix}/index/src/main.rs`
-    /// `/src/main.rs.tc` -> `{prefix}/index/src/main.rs` (legacy/physical stub compat)
-    fn index_key_for(&self, vpath: &str) -> Option<String> {
-        let rel = vpath.trim_start_matches('/');
+    fn index_key_for_rel(&self, rel: &str) -> Option<String> {
         if rel.is_empty() {
             return None;
         }
-        let real = rel
-            .strip_suffix(".tc")
-            .or_else(|| rel.strip_suffix(".tcf"))
-            .unwrap_or(rel);
         let prefix = self.prefix.trim_end_matches('/');
         if prefix.is_empty() {
-            Some(format!("index/{}", real))
+            Some(format!("index/{}", rel))
         } else {
-            Some(format!("{}/index/{}", prefix, real))
+            Some(format!("{}/index/{}", prefix, rel))
         }
+    }
+
+    /// Build the exact index path for a virtual FS path.
+    ///
+    /// `/src/main.rs` -> `{prefix}/index/src/main.rs`
+    /// `/tests/fail.tc` -> `{prefix}/index/tests/fail.tc`
+    fn index_key_for(&self, vpath: &str) -> Option<String> {
+        self.index_key_for_rel(vpath.trim_start_matches('/'))
+    }
+
+    /// Build the clean-path compatibility key for a physical stub path.
+    ///
+    /// `/src/main.rs.tc` -> `{prefix}/index/src/main.rs`.
+    /// This is only a fallback after the exact `.tc` key was absent, because
+    /// real source trees can legitimately contain files ending in `.tc`.
+    fn legacy_stub_index_key_for(&self, vpath: &str) -> Option<String> {
+        let rel = vpath.trim_start_matches('/');
+        let real = rel
+            .strip_suffix(".tc")
+            .or_else(|| rel.strip_suffix(".tcf"))?;
+        self.index_key_for_rel(real)
     }
 
     /// The index prefix for directory listing: `{prefix}/index/{rel_dir}/`
@@ -466,9 +478,7 @@ impl TcfsVfs {
             .collect()
     }
 
-    /// Fetch and parse an IndexEntry for a virtual path.
-    async fn get_index_entry(&self, vpath: &str) -> Option<IndexEntry> {
-        let key = self.index_key_for(vpath)?;
+    async fn get_index_entry_at_key(&self, vpath: &str, key: String) -> Option<IndexEntry> {
         debug!(vpath = %vpath, key = %key, "get_index_entry: reading S3 key");
         let data = match self.op.read(&key).await {
             Ok(d) => d,
@@ -496,6 +506,22 @@ impl TcfsVfs {
                 None
             }
         }
+    }
+
+    /// Fetch and parse an IndexEntry for a virtual path using its exact key.
+    async fn get_index_entry(&self, vpath: &str) -> Option<IndexEntry> {
+        let key = self.index_key_for(vpath)?;
+        self.get_index_entry_at_key(vpath, key).await
+    }
+
+    /// Fetch an IndexEntry using exact lookup first, then legacy stub fallback.
+    async fn get_index_entry_with_legacy_stub_fallback(&self, vpath: &str) -> Option<IndexEntry> {
+        if let Some(entry) = self.get_index_entry(vpath).await {
+            return Some(entry);
+        }
+
+        let key = self.legacy_stub_index_key_for(vpath)?;
+        self.get_index_entry_at_key(vpath, key).await
     }
 
     /// Fetch attributes from an index entry by its S3 key.
@@ -699,13 +725,9 @@ impl VirtualFilesystem for TcfsVfs {
             return Ok(self.dir_attr());
         }
 
-        // File: try index lookup (with and without .tc for backward compat)
-        if let Some(entry) = self.get_index_entry(path).await {
-            return Ok(self.attr_for_index_entry(&entry));
-        }
-        // Try with .tc suffix (old index entries)
-        let with_tc = format!("{}.tc", path.trim_end_matches('/'));
-        if let Some(entry) = self.get_index_entry(&with_tc).await {
+        // File: exact index lookup first; legacy physical-stub fallback only
+        // when the exact `.tc`/`.tcf` filename is absent.
+        if let Some(entry) = self.get_index_entry_with_legacy_stub_fallback(path).await {
             return Ok(self.attr_for_index_entry(&entry));
         }
 
@@ -742,7 +764,7 @@ impl VirtualFilesystem for TcfsVfs {
 
     async fn readlink(&self, path: &str) -> Result<String> {
         let entry = self
-            .get_index_entry(path)
+            .get_index_entry_with_legacy_stub_fallback(path)
             .await
             .context(format!("index entry not found: {}", path))?;
         if entry.kind != RemoteEntryKind::Symlink {
@@ -754,16 +776,10 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn open(&self, path: &str) -> Result<(u64, Vec<u8>)> {
-        // Try index lookup as-is, then with .tc suffix for backward compat
-        let entry = match self.get_index_entry(path).await {
-            Some(e) => e,
-            None => {
-                let with_tc = format!("{}.tc", path.trim_end_matches('/'));
-                self.get_index_entry(&with_tc)
-                    .await
-                    .context(format!("index entry not found: {}", path))?
-            }
-        };
+        let entry = self
+            .get_index_entry_with_legacy_stub_fallback(path)
+            .await
+            .context(format!("index entry not found: {}", path))?;
 
         if entry.kind == RemoteEntryKind::Symlink {
             anyhow::bail!("ELOOP: open called on symlink: {}", path);

@@ -143,6 +143,13 @@ Release-binary storage observations from
 - A follow-up mounted honey smoke reused the same prefix with pinned honey
   `tcfs 0.12.12` and passed `find -maxdepth 8`, 85 mounted symlink target
   checks, and exact `.clang-format` hydration.
+- The mounted warning follow-up
+  `docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`
+  closed the S3 `NoSuchKey` noise row: the original mounted run and the
+  directory-prefix-only rerun each recorded 274 warnings, while the exact
+  `.tc` filename fix rerun recorded 0 `NoSuchKey`, 0 WARN, and 0 ERROR rows.
+  The root cause was real linux-xr ftrace files ending in `.tc` being treated
+  as TCFS stub aliases during mounted lookup.
 - `result.env` records `proof=shadow-push-honey-traversal-symlink-targets` and
   `parity_status=full-project-parity-not-claimed` because the Linux lifecycle
   companion was not run in this storage packet.
