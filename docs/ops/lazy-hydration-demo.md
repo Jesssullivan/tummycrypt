@@ -111,8 +111,11 @@ scanning before restore execution. Source-built follow-up packets fix that path:
 301.84s, and exact regular-file/symlink restoration; the newer
 `restore-proof-source-fix-empty-dirs-20260515T183805Z/` records
 `state_entry_count=4610`, `restored_symlink_state_count=9`, and exact restore
-of all 12 empty directories with `--require-empty-dirs`. Packaged Nix/Homebrew
-restore remains a separate gate.
+of all 12 empty directories with `--require-empty-dirs`. The current rebuilt
+Nix flake package binary now passes the same fresh-tree restore gate in
+`restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/`: 4,601 regular
+files, 9 symlinks, synced state for all 4,610 restored paths, and 12 empty
+directories. Homebrew restore remains a separate stale-package gate.
 
 ## Linux Terminal Acceptance
 

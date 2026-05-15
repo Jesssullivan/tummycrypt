@@ -69,3 +69,10 @@ Contents:
   with exact restoration for 4,601 regular files, 9 symlinks, synced state for
   all 4,610 restored paths, and all 12 empty directories with
   `--require-empty-dirs`.
+- `restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/`: rebuilt current
+  Nix flake package follow-up using
+  `/nix/store/wyvzha767a98waypmc9zln286pap7d5i-tcfs-cli-0.12.12/bin/tcfs`
+  (`tcfs_sha256=5ee0939f2d1f02cada1c46e429849613b5303fb930e0039a4622d5b712df95a8`).
+  It reports `status=passed` for the same fresh-tree restore contract: 4,601
+  regular files, 9 symlinks, synced state for all 4,610 restored paths, and all
+  12 empty directories with `--require-empty-dirs`.

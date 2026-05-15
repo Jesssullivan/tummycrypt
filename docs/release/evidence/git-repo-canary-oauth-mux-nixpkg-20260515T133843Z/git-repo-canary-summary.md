@@ -22,5 +22,8 @@ Boundaries:
   proves restore-from-remote, cross-host rehydrate, and safe-unsync behavior.
   This packet now has a source-built restore proof under
   `restore-proof-source-fix-empty-dirs-20260515T183805Z/` for regular files,
-  symlinks, restored sync state, and all archived empty directories. Packaged
-  Nix/Homebrew restore remains unproven until rebuilt from the source fix.
+  symlinks, restored sync state, and all archived empty directories. It also has
+  a rebuilt current Nix package restore proof under
+  `restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/` for the same
+  restore contract. Homebrew restore remains unproven until the stale formula
+  lane is rebuilt and rerun.
