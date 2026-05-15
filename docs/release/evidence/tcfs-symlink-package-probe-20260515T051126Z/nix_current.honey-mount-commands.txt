@@ -1,0 +1,8 @@
+# Mounted package/current symlink parse proof for producer label: nix_current
+ssh honey 'mkdir -p /tmp/tcfs-symlink-mounted-probe-20260515T051126Z'
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-mounted-smoke.sh honey:/tmp/tcfs-symlink-mounted-probe-20260515T051126Z/lazy-hydration-mounted-smoke.sh
+scp /Users/jess/git/tummycrypt/docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/target.txt.expected honey:/tmp/tcfs-symlink-mounted-probe-20260515T051126Z/target.txt.expected
+scp /Users/jess/git/tummycrypt/docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/symlink-targets.tsv honey:/tmp/tcfs-symlink-mounted-probe-20260515T051126Z/symlink-targets.tsv
+scp /Users/jess/git/tummycrypt/docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/nix_current.honey-mount-run.sh honey:/tmp/tcfs-symlink-mounted-probe-20260515T051126Z/nix_current.honey-mount-run.sh
+ssh honey 'chmod +x /tmp/tcfs-symlink-mounted-probe-20260515T051126Z/lazy-hydration-mounted-smoke.sh /tmp/tcfs-symlink-mounted-probe-20260515T051126Z/nix_current.honey-mount-run.sh'
+ssh honey 'bash /tmp/tcfs-symlink-mounted-probe-20260515T051126Z/nix_current.honey-mount-run.sh'

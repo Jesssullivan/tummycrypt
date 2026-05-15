@@ -1,0 +1,19 @@
+tcfs binary requested: /tmp/tcfs-current-srcbin-a76d48db3e06/bin/tcfs
+tcfs binary resolved: /tmp/tcfs-current-srcbin-a76d48db3e06/bin/tcfs
+tcfs version: tcfs 0.12.12
+tcfs sha256: dc9b1758274b9c19d4ed470537486e989a23a07bb78e2f004d91eac56e946e43
+mounted root: /tmp/tcfs-symlink-mounted-probe-20260515T051126Z/mount-nix_current
+listing parent before cat: /tmp/tcfs-symlink-mounted-probe-20260515T051126Z/mount-nix_current
+total 5
+drwxr-xr-x. 2 jess jess    0 May 15 01:11 .
+drwxr-xr-x. 3 jess jess 4096 May 15 01:11 ..
+lrwxrwxrwx. 1 jess jess   10 May 15 01:11 link.txt -> target.txt
+-rw-r--r--. 1 jess jess    7 May 15 01:11 target.txt
+find evidence (max depth 2):
+/tmp/tcfs-symlink-mounted-probe-20260515T051126Z/mount-nix_current
+/tmp/tcfs-symlink-mounted-probe-20260515T051126Z/mount-nix_current/link.txt
+/tmp/tcfs-symlink-mounted-probe-20260515T051126Z/mount-nix_current/target.txt
+symlink target checks passed: 1
+cat hydrate target: target.txt
+cat byte count: 7
+lazy hydration mounted smoke passed

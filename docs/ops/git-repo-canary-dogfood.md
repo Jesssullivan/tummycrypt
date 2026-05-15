@@ -25,19 +25,25 @@ Packaged binaries remain below the dogfood bar, but the blocker is now
 narrower. The installed Homebrew `tcfs 0.12.12` binary skips symlinks even when
 the canary config sets `sync_symlinks = true`; current-checkout Nix and
 source-built `tcfs 0.12.12` preserve the same tiny symlink fixture in
-`docs/release/evidence/tcfs-symlink-package-probe-20260515T041947Z/`. The first
-staged honey `tcfs 0.12.12` binary still failed to parse version-3 symlink index
-entries, so the next package gate is Homebrew rebuild/publish plus current
-package-mounted parse and target verification before moving live repos into
-TCFS.
+`docs/release/evidence/tcfs-symlink-package-probe-20260515T041947Z/`. A follow-up
+tiny mounted probe,
+`docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/`, proves a
+neo current-checkout Nix producer can be mounted and read on honey with the
+current source-built Linux binary, including `link.txt -> target.txt`. This is
+not yet packaged-consumer proof because honey's packaged profile still reports
+`tcfs 0.12.2`, and the first staged honey `tcfs 0.12.12` binary failed to parse
+version-3 symlink index entries. The next package gate remains Homebrew
+rebuild/publish plus current package-mounted parse and target verification before
+moving live repos into TCFS.
 
 Use `task lazy:tcfs-symlink-package-probe` to recheck packaged or candidate
 binaries before repeating the real repo canary. The helper writes a fresh
 evidence packet with each candidate binary path, version, SHA-256, config, push
-log, and a `preserved` / `skipped` / `push_failed` symlink verdict. A package
-candidate is not dogfood-ready until this probe reports `overall_status=passed`
-and the subsequent honey mount can parse and verify the same symlink index
-format.
+log, and a `preserved` / `skipped` / `push_failed` symlink verdict. Add
+`--run-honey-mount` when the candidate should also prove mounted parse and
+target verification on honey. A package candidate is not dogfood-ready until
+this probe reports `overall_status=passed` and the honey mount can parse and
+verify the same symlink index format using the packaged/current consumer binary.
 
 Do not use the current `neo` Finder/CloudStorage root for active repos yet. The
 local Provider registration is still a diagnostic surface until a published
@@ -109,6 +115,18 @@ CANDIDATES="homebrew=/opt/homebrew/opt/tcfs/bin/tcfs source_built=$PWD/target/co
 ENDPOINT=http://HOST:8333 \
 BUCKET=tcfs \
 task lazy:tcfs-symlink-package-probe
+```
+
+Tiny mounted parse/target proof after choosing one preserved producer:
+
+```bash
+scripts/tcfs-symlink-package-probe.sh \
+  --endpoint http://HOST:8333 \
+  --bucket tcfs \
+  --candidate nix_current=/nix/store/...-tcfs-cli-0.12.12/bin/tcfs \
+  --run-honey-mount \
+  --mount-label nix_current \
+  --honey-tcfs-bin /path/on/honey/to/tcfs
 ```
 
 Large clean repo stress pass:

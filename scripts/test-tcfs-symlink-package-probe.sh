@@ -111,4 +111,59 @@ bash "$SCRIPT" \
   >"$TMPDIR/pass.out"
 assert_contains "$PASS_EVIDENCE/result.env" "overall_status=passed"
 
+FAKEBIN="$TMPDIR/fakebin"
+mkdir -p "$FAKEBIN"
+SSH_LOG="$TMPDIR/ssh.log"
+SCP_LOG="$TMPDIR/scp.log"
+export SSH_LOG SCP_LOG
+
+cat >"$FAKEBIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ssh %s\n' "$*" >>"$SSH_LOG"
+cmd="${*:2}"
+case "$cmd" in
+  *honey-mount-run.sh*)
+    printf 'tcfs binary requested: /tmp/tcfs-current\n'
+    printf 'tcfs binary resolved: /tmp/tcfs-current\n'
+    printf 'tcfs version: tcfs mount-test\n'
+    printf 'mounted root: /tmp/tcfs-mounted-package-test/mount-preserved\n'
+    printf 'symlink target checks passed: 1\n'
+    printf 'cat hydrate target: target.txt\n'
+    printf 'lazy hydration mounted smoke passed\n'
+    ;;
+  *'.mount.log'*)
+    printf 'mount log fixture\n'
+    ;;
+esac
+EOF
+chmod +x "$FAKEBIN/ssh"
+
+cat >"$FAKEBIN/scp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'scp %s\n' "$*" >>"$SCP_LOG"
+EOF
+chmod +x "$FAKEBIN/scp"
+
+MOUNT_EVIDENCE="$TMPDIR/mount-evidence"
+PATH="$FAKEBIN:$PATH" bash "$SCRIPT" \
+  --run-honey-mount \
+  --mount-label preserved \
+  --endpoint http://example.invalid:8333 \
+  --bucket tcfs-test \
+  --prefix-base package-probe-mount \
+  --evidence-dir "$MOUNT_EVIDENCE" \
+  --candidate preserved="$PRESERVED" \
+  >"$TMPDIR/mount.out"
+assert_contains "$MOUNT_EVIDENCE/result.env" "candidate_1_honey_mount_status=passed"
+assert_contains "$MOUNT_EVIDENCE/result.env" "honey_mount_count=1"
+assert_contains "$MOUNT_EVIDENCE/result.env" "overall_status=passed"
+assert_contains "$MOUNT_EVIDENCE/preserved.honey-mount.log" "lazy hydration mounted smoke passed"
+assert_contains "$MOUNT_EVIDENCE/preserved.honey-mount.mount.log" "mount log fixture"
+assert_contains "$MOUNT_EVIDENCE/preserved.honey-mount-run.sh" "link.txt"
+assert_contains "$MOUNT_EVIDENCE/preserved.honey-mount-run.sh" "package-probe-mount-preserved"
+assert_contains "$SCP_LOG" "lazy-hydration-mounted-smoke.sh"
+assert_contains "$SSH_LOG" "preserved.honey-mount-run.sh"
+
 printf 'tcfs symlink package probe tests passed\n'
