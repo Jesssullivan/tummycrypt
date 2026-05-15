@@ -107,8 +107,8 @@ tasks:
   lazy:check:
     desc: Run lazy hydration harness/static regression checks
     cmds:
-      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/git-repo-canary.sh scripts/test-git-repo-canary.sh scripts/tcfs-symlink-package-probe.sh scripts/test-tcfs-symlink-package-probe.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/home-canary-linux-xr-storage-posture.sh scripts/test-home-canary-linux-xr-storage-posture.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
-      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/git-repo-canary.sh scripts/test-git-repo-canary.sh scripts/tcfs-symlink-package-probe.sh scripts/test-tcfs-symlink-package-probe.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/home-canary-linux-xr-storage-posture.sh scripts/test-home-canary-linux-xr-storage-posture.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - bash -n scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/git-repo-canary.sh scripts/test-git-repo-canary.sh scripts/git-repo-restore-proof.sh scripts/test-git-repo-restore-proof.sh scripts/tcfs-symlink-package-probe.sh scripts/test-tcfs-symlink-package-probe.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/home-canary-linux-xr-storage-posture.sh scripts/test-home-canary-linux-xr-storage-posture.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
+      - shellcheck scripts/lazy-hydration-linux-demo.sh scripts/lazy-hydration-linux-lifecycle-demo.sh scripts/test-lazy-hydration-linux-lifecycle-demo.sh scripts/lazy-hydration-mounted-smoke.sh scripts/test-lazy-hydration-mounted-smoke.sh scripts/lazy-hydration-desktop-honey-demo.sh scripts/test-lazy-hydration-desktop-honey-demo.sh scripts/fleet-parity-pilot-demo.sh scripts/test-fleet-parity-pilot-demo.sh scripts/neo-honey-unsynced-rehydrate-demo.sh scripts/test-neo-honey-unsynced-rehydrate-demo.sh scripts/neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/test-neo-honey-reverse-unsynced-rehydrate-demo.sh scripts/neo-mounted-reverse-read-demo.sh scripts/test-neo-mounted-reverse-read-demo.sh scripts/neo-honey-delete-rename-unsynced-demo.sh scripts/test-neo-honey-delete-rename-unsynced-demo.sh scripts/neo-honey-conflict-demo.sh scripts/test-neo-honey-conflict-demo.sh scripts/git-repo-canary.sh scripts/test-git-repo-canary.sh scripts/git-repo-restore-proof.sh scripts/test-git-repo-restore-proof.sh scripts/tcfs-symlink-package-probe.sh scripts/test-tcfs-symlink-package-probe.sh scripts/home-canary-linux-xr-shadow.sh scripts/test-home-canary-linux-xr-shadow.sh scripts/home-canary-linux-xr-storage-posture.sh scripts/test-home-canary-linux-xr-storage-posture.sh scripts/macos-fileprovider-neo-cleanup-packet.sh scripts/test-macos-fileprovider-neo-cleanup-packet.sh scripts/macos-developer-cert-match.sh scripts/macos-fileprovider-profile-inventory.sh scripts/test-macos-fileprovider-profile-inventory.sh scripts/macos-fileprovider-preflight.sh scripts/test-macos-fileprovider-preflight.sh scripts/macos-postinstall-smoke.sh scripts/macos-build-pkg.sh scripts/macos-pkg-postinstall.sh scripts/macos-pkg-structure-smoke.sh scripts/macos-fileprovider-testing-mode-dispatch.sh scripts/macos-fileprovider-lab-gatekeeper-override.sh scripts/macos-codesign-p12-probe.sh scripts/test-macos-build-pkg.sh scripts/test-macos-postinstall-smoke.sh scripts/test-macos-pkg-structure-smoke.sh scripts/test-macos-fileprovider-testing-mode-dispatch.sh scripts/test-macos-fileprovider-lab-gatekeeper-override.sh scripts/test-asc-fileprovider-lab-provision.sh scripts/test-fileprovider-provision-config.sh scripts/test-release-workflow-fileprovider.sh scripts/test-release-workflow-container.sh swift/fileprovider/provision-config.sh swift/fileprovider/build.sh
       - python3 -m py_compile scripts/asc-fileprovider-lab-provision.py
       - task: lazy:test-linux-lifecycle-demo
       - task: lazy:test-mounted-smoke
@@ -120,6 +120,7 @@ tasks:
       - task: lazy:test-neo-honey-delete-rename-unsynced
       - task: lazy:test-neo-honey-conflict
       - task: lazy:test-git-repo-canary
+      - task: lazy:test-git-repo-restore-proof
       - task: lazy:test-tcfs-symlink-package-probe
       - task: lazy:test-home-canary-linux-xr-shadow
       - task: lazy:test-home-canary-linux-xr-storage-posture
@@ -611,6 +612,46 @@ tasks:
     desc: Regression-test the generic git repo canary helper
     cmds:
       - bash scripts/test-git-repo-canary.sh
+
+  lazy:git-repo-restore-proof:
+    desc: "Fresh-tree restore proof for an existing pushed git repo canary packet"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${RESTORE_ROOT:-}" ]]; then
+            args+=(--restore-root "$RESTORE_ROOT")
+          fi
+          if [[ -n "${TCFS_RESTORE_CONFIG:-}" ]]; then
+            args+=(--config "$TCFS_RESTORE_CONFIG")
+          fi
+          if [[ -n "${CONFIG:-}" ]]; then
+            args+=(--config "$CONFIG")
+          fi
+          if [[ -n "${TCFS_BIN:-}" ]]; then
+            args+=(--tcfs-bin "$TCFS_BIN")
+          fi
+          if [[ -n "${TCFS_STATE_PATH:-}" ]]; then
+            args+=(--state "$TCFS_STATE_PATH")
+          fi
+          if [[ -n "${RESTORE_RECONCILE_TIMEOUT_SECS:-}" ]]; then
+            args+=(--reconcile-timeout-secs "$RESTORE_RECONCILE_TIMEOUT_SECS")
+          fi
+          if [[ "${REQUIRE_EMPTY_DIRS:-0}" == "1" ]]; then
+            args+=(--require-empty-dirs)
+          fi
+
+          scripts/git-repo-restore-proof.sh "${args[@]}"
+          EOF
+
+  lazy:test-git-repo-restore-proof:
+    desc: Regression-test the git repo fresh-tree restore proof helper
+    cmds:
+      - bash scripts/test-git-repo-restore-proof.sh
 
   lazy:tcfs-symlink-package-probe:
     desc: "Probe candidate package/current tcfs binaries for sync_symlinks behavior"

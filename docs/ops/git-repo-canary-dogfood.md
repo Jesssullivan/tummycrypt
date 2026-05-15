@@ -43,6 +43,18 @@ continues to skip symlinks. The next gates before moving live repos into TCFS
 are Homebrew rebuild/publish if Homebrew is the client lane, `linux-xr-fast` as
 the larger clean stress canary, and fresh-tree restore/rollback proof.
 
+The fresh-tree restore gate is now executable, but not green.
+`task lazy:git-repo-restore-proof` takes an existing pushed canary packet,
+restores into `~/TCFS Pilot/restore-proofs/`, and archives regular-file hash,
+symlink-target, empty-dir, and reconcile logs under `<packet>/restore-proof/`.
+The first run against
+`docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`
+timed out during `tcfs reconcile` dry-run remote-index scanning after 120s,
+before any restore mutation. Treat that as a restore/rollback blocker, not as a
+failed content comparison. The helper also records the current empty-directory
+gap separately: `reconcile` restores regular files and symlinks, while empty
+directories remain a distinct full-tree parity gate.
+
 Use `task lazy:tcfs-symlink-package-probe` to recheck packaged or candidate
 binaries before repeating the real repo canary. The helper writes a fresh
 evidence packet with each candidate binary path, version, SHA-256, config, push
@@ -148,6 +160,16 @@ REMOTE=seaweedfs://HOST:8333/tcfs/git-repo-canary-linux-xr-fast-manual \
 task lazy:git-repo-canary
 ```
 
+Fresh-tree restore/rollback proof for an existing pushed packet:
+
+```bash
+EVIDENCE_DIR=docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z \
+task lazy:git-repo-restore-proof
+```
+
+Use `RESTORE_RECONCILE_TIMEOUT_SECS=<seconds>` to bound each reconcile command.
+Use `REQUIRE_EMPTY_DIRS=1` only when empty-directory parity is part of the gate.
+
 The helper refuses dirty worktrees unless `ALLOW_DIRTY_SOURCE=1` or
 `--allow-dirty-source` is set. Dirty snapshots are allowed only as explicit
 evidence; they are not a default dogfood target.
@@ -196,6 +218,8 @@ A live repo can become a candidate only after a shadow packet proves all of:
 6. clean recursive `tcfs unsync` succeeds and dirty recursive unsync refuses
 7. exact rehydrate after unsync/cache-clear passes
 8. rollback is demonstrated by recreating a fresh local tree from the remote
-   prefix
+   prefix; current blocker:
+   `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`
+   timed out in reconcile dry-run remote-index scan before restore execution
 9. source symlinks are not skipped during push and rehydrate as symlinks with
    exact matching targets

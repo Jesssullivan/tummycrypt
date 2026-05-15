@@ -100,7 +100,12 @@ it repeats the same shadow push, honey traversal/hydration, 9 mounted symlink
 target checks, and lifecycle companion with explicit current Nix flake package
 binaries on both hosts. Do not read either packet as Homebrew readiness:
 Homebrew `tcfs 0.12.12` still skips symlinks. Live repo moves still need the
-larger clean stress canary plus restore/rollback proof.
+larger clean stress canary plus restore/rollback proof. The restore gate is now
+measured by `task lazy:git-repo-restore-proof`; the first Nix packet run is
+archived under
+`docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`
+as a blocker because `tcfs reconcile` dry-run timed out during remote-index
+scanning before restore execution.
 
 ## Linux Terminal Acceptance
 

@@ -1,0 +1,5 @@
+2026-05-15T15:04:52.848008Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-15T15:04:52.848080Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-15T15:04:52.848103Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Reconciling /Users/jess/TCFS Pilot/restore-proofs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z-restore-20260515T150452Z ↔ http://100.64.48.53:8333:git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/
+2026-05-15T15:04:52.849409Z DEBUG tcfs_sync::reconcile: collected local files count=0

@@ -47,6 +47,9 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   traversal/hydration, 9 mounted symlink target checks, and the Linux lifecycle
   companion. Homebrew `0.12.12` remains stale and skips symlinks; live repo
   moves still need the larger clean stress canary plus restore/rollback proof.
+  `task lazy:git-repo-restore-proof` now records that restore gate; the first
+  Nix packet run timed out during `tcfs reconcile` remote-index dry-run and is
+  archived as a blocker under the Nix packet.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
