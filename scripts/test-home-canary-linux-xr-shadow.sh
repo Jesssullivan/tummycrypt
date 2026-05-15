@@ -80,16 +80,21 @@ HOME="$HOME_OK" bash "$SCRIPT" \
 assert_contains "$OUT" "home canary evidence:"
 assert_contains "$OUT" "parity gate: full-project-parity-not-claimed"
 assert_contains "$EVIDENCE/README.md" "TCFS Home Canary linux-xr Shadow Evidence"
+assert_contains "$EVIDENCE/README.md" "push-run-metadata.env"
 assert_contains "$EVIDENCE/run-metadata.env" "source=$SOURCE_CANON"
 assert_contains "$EVIDENCE/run-metadata.env" "push=0"
 assert_contains "$EVIDENCE/run-metadata.env" "honey_start_mount=1"
 assert_contains "$EVIDENCE/run-metadata.env" "honey_smoke_max_depth=8"
 assert_contains "$EVIDENCE/run-metadata.env" "honey_smoke_timeout_secs=900"
+assert_contains "$EVIDENCE/run-metadata.env" "upload_assume_fresh_prefix=0"
+assert_contains "$EVIDENCE/run-metadata.env" "upload_file_concurrency=0"
+assert_contains "$EVIDENCE/run-metadata.env" "upload_chunk_concurrency=0"
 assert_contains "$EVIDENCE/result.env" "status=plan-only"
 assert_contains "$EVIDENCE/result.env" "proof=inventory-shadow-config"
 assert_contains "$EVIDENCE/parity-gates.env" "source_symlink_count=2"
 assert_contains "$EVIDENCE/parity-gates.env" "shadow_symlink_count=2"
 assert_contains "$EVIDENCE/parity-gates.env" "shadow_symlink_targets_match=1"
+assert_contains "$EVIDENCE/parity-gates.env" "push_skipped_symlink_count=0"
 assert_contains "$EVIDENCE/parity-gates.env" "mounted_symlink_verification=not-run"
 assert_contains "$EVIDENCE/parity-gates.env" "mounted_symlink_verification_rc=not-run"
 assert_contains "$EVIDENCE/parity-gates.env" "mounted_symlink_verification_status=not-run"
@@ -135,6 +140,7 @@ RESUME_EVIDENCE="$TMPDIR/resume-evidence"
 RESUME_STATE="$TMPDIR/resume-state"
 mkdir -p "$RESUME_EVIDENCE" "$RESUME_STATE"
 cat >"$RESUME_EVIDENCE/push.log" <<'EOF'
+2026-05-11T05:59:58.000000Z  WARN tcfs_sync::engine: skipping symlink (follow_symlinks=false) path=/tmp/shadow/readme-link target=README.md
 2026-05-11T05:59:59.000000Z  WARN tcfs_sync::storage: transient object write failure key=tcfs/chunks/demo attempt=1 delay_ms=50
 2026-05-11T05:59:59.500000Z  WARN tcfs_sync::engine: chunk upload failed, retrying key=tcfs/chunks/slow chunk=7 bytes=1024 attempt=1 max=3 kind=timeout timeout_ms=300000 elapsed_ms=300001 delay_ms=100 error=chunk upload timed out after 300000 ms
 2026-05-11T06:00:00.000000Z  INFO tcfs_sync::engine: chunk upload progress path=/tmp/shadow/.git/objects/pack/pack-demo.idx completed_chunks=5 chunks=10 uploaded_bytes=200 streaming=true
@@ -160,8 +166,13 @@ HOME="$HOME_OK" bash "$SCRIPT" \
 assert_contains "$RESUME_EVIDENCE/shadow-copy.log" "reused existing shadow"
 assert_contains "$RESUME_EVIDENCE/run-metadata.env" "resume_after_push=1"
 assert_contains "$RESUME_EVIDENCE/run-metadata.env" "reuse_shadow=1"
+assert_contains "$RESUME_EVIDENCE/run-metadata.env" "upload_assume_fresh_prefix=0"
 assert_contains "$RESUME_EVIDENCE/result.env" "status=0"
 assert_contains "$RESUME_EVIDENCE/result.env" "proof=shadow-push"
+assert_contains "$RESUME_EVIDENCE/result.env" "parity_status=full-project-parity-not-claimed"
+assert_contains "$RESUME_EVIDENCE/result.env" "parity_reason=shadow push skipped symlink entries even though this lane requires symlink preservation"
+assert_contains "$RESUME_EVIDENCE/result.env" "push_skipped_symlink_count=1"
+assert_contains "$RESUME_EVIDENCE/parity-gates.env" "push_skipped_symlink_count=1"
 assert_contains "$RESUME_EVIDENCE/README.md" "push-storage-summary.env"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "upload_rows=3"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_upload_progress_rows=1"
@@ -185,7 +196,7 @@ assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_exists_check_
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_exists_check_false_rows=2"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_upload_concurrency_values=4"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "chunk_write_timeout_secs_values=300"
-assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "warn_rows=2"
+assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "warn_rows=3"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "retry_warning_rows=2"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "timeout_retry_warning_rows=1"
 assert_contains "$RESUME_EVIDENCE/push-storage-summary.env" "error_rows=0"
@@ -218,6 +229,7 @@ HOME="$HOME_OK" bash "$SCRIPT" \
 assert_contains "$GZIP_RESUME_EVIDENCE/run-metadata.env" "resume_after_push=1"
 assert_contains "$GZIP_RESUME_EVIDENCE/result.env" "status=0"
 assert_contains "$GZIP_RESUME_EVIDENCE/result.env" "proof=shadow-push"
+assert_contains "$GZIP_RESUME_EVIDENCE/result.env" "push_skipped_symlink_count=1"
 
 assert_fails_contains \
   "refusing to canary full HOME" \

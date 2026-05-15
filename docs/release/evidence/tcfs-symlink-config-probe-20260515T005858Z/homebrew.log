@@ -1,0 +1,12 @@
+2026-05-15T00:58:58.285365Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-15T00:58:58.286850Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-15T00:58:58.290027Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pushing /var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-probe.yXO63o/source → tcfs:symlink-probe-homebrew-20260515T005858Z (endpoint: http://100.64.48.53:8333, device: 03d8a0bd...)
+2026-05-15T00:58:58.323485Z  WARN tcfs_sync::engine: skipping symlink (follow_symlinks=false) path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-probe.yXO63o/source/link.txt target=target.txt
+2026-05-15T00:58:58.324755Z DEBUG tcfs_sync::engine: uploading path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-probe.yXO63o/source/target.txt reason=new file
+2026-05-15T00:58:59.159501Z  INFO tcfs_sync::engine: uploaded path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-probe.yXO63o/source/target.txt hash=e09273d12ecbea9b52bf8a5e60c0fd5313a284901beb82be338b3259dddaaae9 chunks=1 bytes=7 uploaded_bytes=7 streaming=false
+
+Push complete:
+  uploaded: 1 files (7 B)
+  skipped:  0 files (unchanged)
+  total:    1 files

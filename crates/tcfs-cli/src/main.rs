@@ -4212,6 +4212,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_config_reads_canary_sync_symlink_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("tcfs-canary.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[daemon]
+socket = "{socket}"
+
+[storage]
+endpoint = "http://localhost:8333"
+bucket = "tcfs"
+remote_prefix = "git-repo-canary"
+enforce_tls = false
+
+[sync]
+state_db = "{state_db}"
+sync_root = "{sync_root}"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_git_dirs = true
+git_sync_mode = "raw"
+sync_hidden_dirs = true
+sync_symlinks = true
+sync_empty_dirs = true
+
+[crypto]
+enabled = false
+"#,
+                socket = dir.path().join("no-daemon.sock").display(),
+                state_db = dir.path().join("state.db").display(),
+                sync_root = dir.path().join("shadow").display(),
+            ),
+        )
+        .unwrap();
+
+        let config = load_config(&config_path).await.unwrap();
+        let collect = collect_config_from_sync(&config);
+
+        assert!(config.sync.sync_symlinks);
+        assert!(collect.preserve_symlinks);
+        assert!(!collect.follow_symlinks);
+    }
+
+    #[tokio::test]
     async fn cli_push_status_pull_workflow_round_trips_file() {
         let dir = tempfile::tempdir().unwrap();
         let sync_root = dir.path().join("sync");
@@ -4257,6 +4303,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(std::fs::read(&pulled).unwrap(), b"hello from tcfs");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_directory_push_preserves_symlink_when_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        std::fs::write(sync_root.join("target.txt"), b"target").unwrap();
+        std::os::unix::fs::symlink("target.txt", sync_root.join("link.txt")).unwrap();
+
+        let op = memory_op();
+        let state_path = dir.path().join("state.json");
+        let mut config = test_config(&sync_root);
+        config.sync.sync_symlinks = true;
+
+        cmd_push_with_operator(&config, &op, &sync_root, None, &state_path, "test-device")
+            .await
+            .unwrap();
+
+        let index_bytes = op.read("data/index/link.txt").await.unwrap().to_bytes();
+        let entry = tcfs_sync::index_entry::parse_index_entry(&index_bytes).unwrap();
+        assert!(entry.is_symlink());
+        assert_eq!(entry.symlink_target.as_deref(), Some("target.txt"));
     }
 
     #[tokio::test]

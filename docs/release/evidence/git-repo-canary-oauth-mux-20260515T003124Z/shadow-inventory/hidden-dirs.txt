@@ -1,0 +1,5 @@
+/Users/jess/TCFS Pilot/real-canaries/oauth-mux-shadow-20260515T003124Z/.claude
+/Users/jess/TCFS Pilot/real-canaries/oauth-mux-shadow-20260515T003124Z/.direnv
+/Users/jess/TCFS Pilot/real-canaries/oauth-mux-shadow-20260515T003124Z/.git
+/Users/jess/TCFS Pilot/real-canaries/oauth-mux-shadow-20260515T003124Z/.github
+/Users/jess/TCFS Pilot/real-canaries/oauth-mux-shadow-20260515T003124Z/.zig-cache

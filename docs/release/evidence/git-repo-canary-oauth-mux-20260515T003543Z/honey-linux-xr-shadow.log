@@ -1,0 +1,82 @@
+tcfs binary requested: /tmp/tcfs-0.12.12-linux-x86_64-canary/tcfs-0.12.12-linux-x86_64/tcfs
+tcfs binary resolved: /tmp/tcfs-0.12.12-linux-x86_64-canary/tcfs-0.12.12-linux-x86_64/tcfs
+tcfs version: tcfs 0.12.12
+tcfs sha256: c7cc12258fad227e6bc0bcfc2320f846aa720eb99561b048467f6657a868d4fe
+mounted root: /tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount
+listing parent before cat: /tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.claude
+total 1
+drwxr-xr-x. 2 jess jess   0 May 14 20:37 .
+drwxr-xr-x. 2 jess jess   0 May 14 20:37 ..
+-rw-r--r--. 1 jess jess 105 May 14 20:37 settings.local.json
+find evidence (max depth 8):
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.claude
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.claude/settings.local.json
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.direnv
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.direnv/bin
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.direnv/bin/nix-direnv-reload
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.direnv/flake-profile-a5d5b61aa8a61b7d9d765e1daf971a9a578f1cfa.rc
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.envrc
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/COMMIT_EDITMSG
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/FETCH_HEAD
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/HEAD
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/ORIG_HEAD
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/config
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/description
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/applypatch-msg.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/commit-msg.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/fsmonitor-watchman.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/post-update.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/pre-applypatch.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/pre-commit.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/pre-merge-commit.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/pre-push.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/pre-rebase.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/pre-receive.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/prepare-commit-msg.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/push-to-checkout.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/sendemail-validate.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/hooks/update.sample
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/index
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/info
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/info/exclude
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/HEAD
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/backup
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/backup/local-main-pre-public-transfer-20260428235945
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex-managed-handoff-productionization
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/claude-runtime-fixtures
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/codex-experimental-defaults
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/daemon-supervisor-contract
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/daemon-supervisor-e2e
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/final-release-evidence
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/homebrew-dogfood-qa
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/initial-implementation-pr
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/live-qa-quota-classification
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/mcp-audience-mismatch
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/npm-private-provenance-toggle
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/npm-public-access-provenance
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/npm-unscoped-platform-packages
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/npm-windows-package-rename
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/onboarding-productization
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/product-adoption-planning
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/production-publication-sprint
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/relative-config-provider-proof
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/release-gate-evidence
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/runtime-identity-status-artifact
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/stay-afloat-broker-e2e
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/stay-afloat-handoff-ux
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/system-package-install-qa
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/tin-906-next-claim
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/tin-907-scheduler-hints
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/tin-909-loop-status-metadata
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/codex/update-gap-map-after-handoff
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/initial-implementation
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/jess
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T003544Z/mount/.git/logs/refs/heads/jess/broker-mcp-codex-adapter
+expected symlink is not a symlink in mounted view: .direnv/flake-inputs/01x5k4nlxcpyd85nnr0b9gm89rm8ff4x-source

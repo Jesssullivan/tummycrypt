@@ -1,0 +1,4 @@
+/Users/jess/git/oauth-mux/.claude
+/Users/jess/git/oauth-mux/.direnv
+/Users/jess/git/oauth-mux/.git
+/Users/jess/git/oauth-mux/.github

@@ -1,0 +1,4 @@
+# Run this after the desktop-honey commands have mounted or verified honey.
+scp /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/linux-lifecycle/fleet-documents-expected.txt honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260515T021811Z/linux-lifecycle/fleet-documents-expected.txt
+scp /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/linux-lifecycle/honey-fleet-run.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260515T021811Z/linux-lifecycle/honey-fleet-run.sh
+ssh honey 'TCFS_HONEY_SMOKE_SCRIPT=/tmp/tcfs-home-canary-linux-xr-shadow-20260515T021811Z/linux-lifecycle/lazy-hydration-mounted-smoke.sh TCFS_HONEY_FLEET_EXPECTED_CONTENT_FILE=/tmp/tcfs-home-canary-linux-xr-shadow-20260515T021811Z/linux-lifecycle/fleet-documents-expected.txt bash /tmp/tcfs-home-canary-linux-xr-shadow-20260515T021811Z/linux-lifecycle/honey-fleet-run.sh'

@@ -23,6 +23,7 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 - Feature/objective matrix: [docs/ops/feature-objective-matrix-2026-05-09.md](docs/ops/feature-objective-matrix-2026-05-09.md)
 - Next fleet parity sprint: [docs/ops/fleet-parity-sprint-plan-2026-05-09.md](docs/ops/fleet-parity-sprint-plan-2026-05-09.md)
 - Lazy traversal QA matrix: [docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md](docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md)
+- Git repo dogfood canary: [docs/ops/git-repo-canary-dogfood.md](docs/ops/git-repo-canary-dogfood.md)
 - Real project-tree canary lane: `task lazy:home-canary-linux-xr-shadow`;
   `home-canary-linux-xr-shadow-20260511T040325Z/` is scoped green for the
   isolated `linux-xr` shadow. The storage-posture lane now has a release-binary
@@ -34,6 +35,18 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   `scoped-project-tree-parity-evidence-complete`; production S3/Finder posture
   remains separate because TLS endpoint posture, socket accounting,
   generated-large-file policy, and production desktop UX are still open
+- Next dogfood lane: `task lazy:git-repo-canary` creates a shadow-first packet
+  for one clean git worktree, defaulting to `~/git/oauth-mux`. It is the safe
+  path toward repo mobility before any live repo, broad `~/git`, `~/Documents`,
+  dotfile, or home-directory takeover. The current green small-repo packet is
+  `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`:
+  source-built `tcfs` on `neo` pushed the clean `oauth-mux` shadow with
+  symlinks preserved, a current source-built Linux binary on `honey` passed
+  mounted traversal/hydration plus mounted symlink target checks, and the Linux
+  lifecycle companion passed. Packaged binaries remain the blocker: Homebrew
+  `0.12.12` skipped symlinks, and an older staged honey `0.12.12` could not
+  parse the version-3 symlink index entries. Rebuild/publish and reproving the
+  package is required before live repo moves.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

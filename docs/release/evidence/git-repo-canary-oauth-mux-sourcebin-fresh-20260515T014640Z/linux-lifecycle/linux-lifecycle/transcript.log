@@ -1,0 +1,94 @@
+evidence dir: /tmp/tcfs-home-canary-linux-xr-shadow-20260515T021811Z/linux-lifecycle/linux-lifecycle/evidence
+remote: seaweedfs://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/linux-lifecycle/linux-lifecycle
+temp root: /tmp/tcfs-lazy-linux-demo.uvHQpp
+tcfs command: /tmp/tcfs-current-srcbin-a76d48db3e06/bin/tcfs
+
+[1/9] seed fixture into remote prefix
+[2m2026-05-15T02:18:51.970284Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-15T02:18:51.970310Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-15T02:18:51.970322Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pushing /tmp/tcfs-lazy-linux-demo.uvHQpp/source → tcfs:git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/linux-lifecycle/linux-lifecycle (endpoint: http://100.64.48.53:8333, device: d1176e5d...)
+
+Push complete:
+  uploaded: 0 files (0 B)
+  skipped:  2 files (unchanged)
+  total:    2 files
+
+[2/9] start direct fuse mount
+mounted at: /tmp/tcfs-lazy-linux-demo.uvHQpp/mount
+
+[3/9] prove traversal does not hydrate content
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/README.md
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/deep
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/deep/mounted-write.txt
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/deep/remote.txt
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/empty-dir
+
+[4/9] cat remote-backed file and verify hydration
+mounted root: /tmp/tcfs-lazy-linux-demo.uvHQpp/mount
+listing parent before cat: /tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/deep
+total 1
+drwxr-xr-x. 2 jess jess  0 May 14 22:18 .
+drwxr-xr-x. 2 jess jess  0 May 14 22:18 ..
+-rw-r--r--. 1 jess jess 60 May 14 22:18 mounted-write.txt
+-rw-r--r--. 1 jess jess 77 May 14 22:18 remote.txt
+find evidence (max depth 6):
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/README.md
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/deep
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/deep/mounted-write.txt
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/deep/remote.txt
+/tmp/tcfs-lazy-linux-demo.uvHQpp/mount/docs/empty-dir
+cat hydrate target: docs/deep/remote.txt
+cat byte count: 77
+lazy hydration mounted smoke passed
+cache after first cat: entries=1 bytes=77
+
+[5/9] write and edit through mounted view, then verify exact remote pull
+[2m2026-05-15T02:18:52.274482Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-15T02:18:52.274527Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-15T02:18:52.274541Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pulling docs/deep/mounted-write.txt → /tmp/tcfs-lazy-linux-demo.uvHQpp/mounted-write-remote-pull
+[2m2026-05-15T02:18:52.282517Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m downloaded [3mremote[0m[2m=[0mgit-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/linux-lifecycle/linux-lifecycle/manifests/566dc4e5cc6d1993149202667f448a51529639ec2751e6db8427095d49cf7af6 [3mlocal[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.uvHQpp/mounted-write-remote-pull [3mbytes[0m[2m=[0m60
+
+Downloaded:
+  local:  /tmp/tcfs-lazy-linux-demo.uvHQpp/mounted-write-remote-pull
+  bytes:  60 B
+remote mounted-write pull matched exact edited content
+
+[6/9] clear mount cache as mounted-surface dehydration
+cache after clear: entries=0
+
+[7/9] cat again and verify rehydration
+cache after re-cat: entries=1 bytes=77
+
+[8/9] prove recursive safe-unsync refuses dirty descendants
+Refusing to unsync directory with dirty descendants: /tmp/tcfs-lazy-linux-demo.uvHQpp/source/docs
+  dirty:
+    /tmp/tcfs-lazy-linux-demo.uvHQpp/source/docs/README.md (size changed: 25 → 38)
+  summary: 0 converted, 0 skipped, 1 dirty
+Error: 1 dirty descendant(s) with local changes. Use --force to unsync anyway.
+
+[9/9] restore clean content and prove recursive safe-unsync succeeds
+Unsynced directory: /tmp/tcfs-lazy-linux-demo.uvHQpp/source/docs
+  converted:
+    /tmp/tcfs-lazy-linux-demo.uvHQpp/source/docs/README.md → /tmp/tcfs-lazy-linux-demo.uvHQpp/source/docs/README.md.tc
+    /tmp/tcfs-lazy-linux-demo.uvHQpp/source/docs/deep/remote.txt → /tmp/tcfs-lazy-linux-demo.uvHQpp/source/docs/deep/remote.txt.tc
+  summary: 2 converted, 0 skipped, 0 dirty
+State cache: /tmp/tcfs-lazy-linux-demo.uvHQpp/state.json
+Tracked files: 3
+
+File: /tmp/tcfs-lazy-linux-demo.uvHQpp/source/docs/README.md
+  hash:       fc6ae05dfa7398a4
+  size:       25 B
+  chunks:     0
+  remote:     git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0
+  last sync:  1 seconds ago
+  sync state: not_synced
+  sync check: up to date
+
+lazy hydration Linux lifecycle demo passed
+evidence written to: /tmp/tcfs-home-canary-linux-xr-shadow-20260515T021811Z/linux-lifecycle/linux-lifecycle/evidence

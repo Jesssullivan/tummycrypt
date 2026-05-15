@@ -71,6 +71,32 @@ safe-unsync refusal, and clean recursive safe-unsync success. The endpoint was
 still plaintext tailnet HTTP, so do not use that packet to claim production S3
 posture or broad `~/git`/home-directory readiness.
 
+The next dogfood step is a generic shadow-first repo canary, not live `~/git`
+takeover:
+
+```bash
+SOURCE="$HOME/git/oauth-mux" \
+NAME=oauth-mux \
+REMOTE=seaweedfs://HOST:8333/tcfs/git-repo-canary-oauth-mux-manual \
+task lazy:git-repo-canary
+```
+
+Use `PUSH=1 RUN_HONEY=1 HONEY_START_MOUNT=1 RUN_LINUX_LIFECYCLE=1` only after
+the disposable backend and honey credentials are ready. The helper refuses
+dirty sources by default and records that the packet does not mutate the live
+repo, does not claim production Finder, and does not claim broad
+home-directory management. For repo canaries with symlinks, `parity-gates.env`
+must show `push_skipped_symlink_count=0`; any `skipping symlink` rows in
+`push.log` block scoped project-tree parity.
+
+The current small clean repo proof is
+`docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`.
+It used source-built binaries on both hosts, passed fresh-prefix push with 0
+skipped symlinks, honey mounted traversal/hydration, 9 mounted symlink target
+checks, and the Linux lifecycle companion. Do not read that as packaged
+readiness: Homebrew `tcfs 0.12.12` skipped symlinks, and the first staged honey
+`tcfs 0.12.12` failed mounted symlink parsing for version-3 index entries.
+
 ## Linux Terminal Acceptance
 
 Use a real S3/SeaweedFS-compatible backend or an explicit disposable backend,

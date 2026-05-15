@@ -142,6 +142,9 @@ honey_smoke_max_depth="${TCFS_HONEY_SMOKE_MAX_DEPTH:-8}"
 honey_smoke_timeout_secs="${TCFS_HONEY_SMOKE_TIMEOUT_SECS:-900}"
 forward_aws_env="$(bool_env TCFS_HONEY_FORWARD_AWS_ENV "${TCFS_HONEY_FORWARD_AWS_ENV:-0}")"
 storage_max_concurrent_ops="${TCFS_STORAGE_MAX_CONCURRENT_OPS:-${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}}"
+upload_assume_fresh_prefix="$(bool_env TCFS_UPLOAD_ASSUME_FRESH_PREFIX "${TCFS_UPLOAD_ASSUME_FRESH_PREFIX:-0}")"
+upload_file_concurrency="${TCFS_UPLOAD_FILE_CONCURRENCY:-0}"
+upload_chunk_concurrency="${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}"
 storage_s3_connect_timeout_secs="${TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS:-0}"
 storage_s3_pool_idle_timeout_secs="${TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS:-0}"
 storage_s3_pool_max_idle_per_host="${TCFS_STORAGE_S3_POOL_MAX_IDLE_PER_HOST:-0}"
@@ -273,6 +276,8 @@ fi
 [[ "$honey_smoke_max_depth" =~ ^[0-9]+$ ]] || fail "--honey-smoke-max-depth must be an integer"
 [[ "$honey_smoke_timeout_secs" =~ ^[0-9]+$ ]] || fail "--honey-smoke-timeout-secs must be an integer"
 [[ "$storage_max_concurrent_ops" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_MAX_CONCURRENT_OPS must be an integer"
+[[ "$upload_file_concurrency" =~ ^[0-9]+$ ]] || fail "TCFS_UPLOAD_FILE_CONCURRENCY must be an integer"
+[[ "$upload_chunk_concurrency" =~ ^[0-9]+$ ]] || fail "TCFS_UPLOAD_CHUNK_CONCURRENCY must be an integer"
 [[ "$storage_s3_connect_timeout_secs" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS must be an integer"
 [[ "$storage_s3_pool_idle_timeout_secs" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS must be an integer"
 [[ "$storage_s3_pool_max_idle_per_host" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_S3_POOL_MAX_IDLE_PER_HOST must be an integer"
@@ -320,6 +325,7 @@ endpoint="http://${remote_host}"
 region="${TCFS_S3_REGION:-us-east-1}"
 
 tcfs_cmd=()
+tcfs_cmd_is_cargo_fallback=0
 if [[ -n "$tcfs_bin" ]]; then
   [[ -x "$tcfs_bin" ]] || fail "--tcfs-bin is not executable: $tcfs_bin"
   tcfs_cmd=("$tcfs_bin")
@@ -327,6 +333,32 @@ elif [[ -x "$REPO_ROOT/target/debug/tcfs" ]]; then
   tcfs_cmd=("$REPO_ROOT/target/debug/tcfs")
 else
   tcfs_cmd=(cargo run --quiet -p tcfs-cli --)
+  tcfs_cmd_is_cargo_fallback=1
+fi
+tcfs_cmd_display="$(printf '%q ' "${tcfs_cmd[@]}")"
+tcfs_cmd_display="${tcfs_cmd_display% }"
+tcfs_version="not-run"
+tcfs_version_status="not-run"
+if [[ "$push_remote" == "1" || -n "$tcfs_bin" || -x "$REPO_ROOT/target/debug/tcfs" || ( "$resume_after_push" == "1" && "$tcfs_cmd_is_cargo_fallback" != "1" ) ]]; then
+  if tcfs_version="$("${tcfs_cmd[@]}" --version 2>&1)"; then
+    tcfs_version_status=ok
+  else
+    tcfs_version_status=failed
+  fi
+  tcfs_version="${tcfs_version//$'\n'/ }"
+fi
+tcfs_sha256="not-run"
+tcfs_sha256_status="not-run"
+if [[ "${#tcfs_cmd[@]}" -eq 1 && -x "${tcfs_cmd[0]}" ]]; then
+  if command -v shasum >/dev/null 2>&1; then
+    tcfs_sha256="$(shasum -a 256 "${tcfs_cmd[0]}" | awk '{ print $1 }')"
+    tcfs_sha256_status=ok
+  elif command -v sha256sum >/dev/null 2>&1; then
+    tcfs_sha256="$(sha256sum "${tcfs_cmd[0]}" | awk '{ print $1 }')"
+    tcfs_sha256_status=ok
+  else
+    tcfs_sha256_status=missing-tool
+  fi
 fi
 
 inventory_dir="$evidence_dir/source-inventory"
@@ -479,6 +511,7 @@ push_status_label=0
 honey_status_label=0
 linux_lifecycle_status_label=0
 mounted_symlink_status_label=not-run
+push_skipped_symlink_count=0
 if [[ "$push_remote" == "1" ]]; then
   push_status_label=pending
 fi
@@ -493,7 +526,30 @@ if [[ "$run_linux_lifecycle" == "1" ]]; then
   linux_lifecycle_status_label=pending
 fi
 
+count_push_skipped_symlinks() {
+  local log_path="$evidence_dir/push.log"
+  local gzip_log_path="$evidence_dir/push.log.gz"
+
+  if [[ -f "$log_path" ]]; then
+    awk 'index($0, "skipping symlink") { count += 1 } END { print count + 0 }' "$log_path"
+    return 0
+  fi
+
+  if [[ -f "$gzip_log_path" ]]; then
+    command -v gzip >/dev/null 2>&1 || fail "found push.log.gz but gzip is unavailable"
+    gzip -cd "$gzip_log_path" | awk 'index($0, "skipping symlink") { count += 1 } END { print count + 0 }'
+    return 0
+  fi
+
+  printf '0\n'
+}
+
+refresh_push_runtime_gates() {
+  push_skipped_symlink_count="$(count_push_skipped_symlinks)"
+}
+
 compute_parity_status() {
+  refresh_push_runtime_gates
   parity_status="full-project-parity-not-claimed"
   parity_reason="full project parity requires push, mounted traversal/hydration, mounted symlink target verification, Linux lifecycle, and zero unsupported special files"
 
@@ -507,6 +563,8 @@ compute_parity_status() {
     parity_reason="shadow push evidence is not present"
   elif [[ "$push_rc" -ne 0 ]]; then
     parity_reason="shadow push failed"
+  elif [[ "$push_skipped_symlink_count" != "0" ]]; then
+    parity_reason="shadow push skipped symlink entries even though this lane requires symlink preservation"
   elif [[ "$run_honey" != "1" ]]; then
     parity_reason="mounted honey traversal and symlink target verification were not run"
   elif [[ "$honey_rc" -ne 0 ]]; then
@@ -550,6 +608,7 @@ write_parity_gates() {
     printf 'source_symlink_count=%s\n' "$symlink_count"
     printf 'shadow_symlink_count=%s\n' "$shadow_symlink_count"
     printf 'shadow_symlink_targets_match=%s\n' "$shadow_symlink_target_match"
+    printf 'push_skipped_symlink_count=%s\n' "$push_skipped_symlink_count"
     printf 'source_unsupported_special_file_count=%s\n' "$unsupported_count"
     printf 'sync_symlinks=true\n'
     printf 'mounted_symlink_verification=%s\n' "$mounted_symlink_status_label"
@@ -559,6 +618,7 @@ write_parity_gates() {
 }
 
 write_run_metadata() {
+  refresh_push_runtime_gates
   local mounted_symlink_status
   mounted_symlink_status="$(status_from_rc_label "$mounted_symlink_status_label")"
   cat >"$evidence_dir/run-metadata.env" <<EOF
@@ -570,6 +630,11 @@ remote=$remote
 remote_prefix=$prefix
 config_path=$config_path
 state_json=$state_json
+tcfs_command=$tcfs_cmd_display
+tcfs_version_status=$tcfs_version_status
+tcfs_version=$tcfs_version
+tcfs_sha256_status=$tcfs_sha256_status
+tcfs_sha256=$tcfs_sha256
 push=$push_remote
 resume_after_push=$resume_after_push
 reuse_shadow=$reuse_shadow
@@ -588,7 +653,11 @@ selected_hydration_file=$selected_rel
 source_symlink_count=$symlink_count
 shadow_symlink_count=$shadow_symlink_count
 shadow_symlink_targets_match=$shadow_symlink_target_match
+push_skipped_symlink_count=$push_skipped_symlink_count
 storage_max_concurrent_ops=$storage_max_concurrent_ops
+upload_assume_fresh_prefix=$upload_assume_fresh_prefix
+upload_file_concurrency=$upload_file_concurrency
+upload_chunk_concurrency=$upload_chunk_concurrency
 storage_s3_connect_timeout_secs=$storage_s3_connect_timeout_secs
 storage_s3_pool_idle_timeout_secs=$storage_s3_pool_idle_timeout_secs
 storage_s3_pool_max_idle_per_host=$storage_s3_pool_max_idle_per_host
@@ -610,6 +679,7 @@ parity_reason=$parity_reason
 source_symlink_count=$symlink_count
 shadow_symlink_count=$shadow_symlink_count
 shadow_symlink_targets_match=$shadow_symlink_target_match
+push_skipped_symlink_count=$push_skipped_symlink_count
 source_unsupported_special_file_count=$unsupported_count
 EOF
 }
@@ -634,8 +704,10 @@ dotfiles, or broad \`~/git\` takeover.
 Truth gate: scoped project-tree parity is claimable only when
 \`parity-gates.env\` reports \`scoped-project-tree-parity-evidence-complete\`.
 Symlink-enabled packets must prove source symlinks rehydrate as symlinks with
-matching targets. See \`source-inventory/symlink-targets.tsv\` and
-\`source-inventory/unsupported-special-files.txt\`.
+matching targets, and \`push.log\` must not contain skipped symlink rows. See
+\`source-inventory/symlink-targets.tsv\`,
+\`source-inventory/unsupported-special-files.txt\`, and
+\`parity-gates.env\`.
 
 Contents:
 
@@ -648,6 +720,8 @@ Contents:
   \`git_sync_mode = "raw"\`, \`sync_symlinks = true\`, and
   \`sync_empty_dirs = true\`
 - \`push.log\` or \`push.log.gz\`: shadow push transcript when \`--push\` ran
+- \`push-run-metadata.env\`: push-time run metadata, preserved before later
+  resume/honey/lifecycle passes update \`run-metadata.env\`
 - \`push-storage-summary.env\` and \`push-storage-summary.md\`: storage-facing
   totals extracted from \`push.log\` when push evidence is present
 - \`honey-linux-xr-shadow-commands.txt\`: honey mounted traversal/hydration
@@ -1002,6 +1076,7 @@ if [[ "$push_remote" == "1" ]]; then
   write_push_storage_summary
   push_status_label=$push_rc
   write_run_metadata
+  cp -p "$evidence_dir/run-metadata.env" "$evidence_dir/push-run-metadata.env"
   if [[ "$push_rc" -ne 0 ]]; then
     write_result "$push_rc" push-failed
   fi
@@ -1151,7 +1226,10 @@ ssh $(shell_quote "$honey_host") 'chmod +x $(shell_quote "$honey_remote_dir/lazy
 ssh $(shell_quote "$honey_host") 'TCFS_HONEY_EXPECTED_VERSION_CONTAINS=$(shell_quote "${TCFS_HONEY_EXPECTED_VERSION_CONTAINS:-}") TCFS_HONEY_EXPECTED_SHA256=$(shell_quote "${TCFS_HONEY_EXPECTED_SHA256:-}") TCFS_HONEY_START_MOUNT=1 TCFS_HONEY_SMOKE_SCRIPT=$(shell_quote "$honey_remote_dir/lazy-hydration-mounted-smoke.sh") TCFS_HONEY_EXPECTED_CONTENT_FILE=$(shell_quote "$honey_remote_dir/selected-hydration-file.content") TCFS_HONEY_SYMLINK_TARGETS_FILE=$(shell_quote "$honey_remote_dir/symlink-targets.tsv") TCFS_HONEY_MOUNT_LOG=$(shell_quote "$honey_remote_dir/mount.log") TCFS_HONEY_SMOKE_MAX_DEPTH=$(shell_quote "$honey_smoke_max_depth") TCFS_HONEY_SMOKE_TIMEOUT_SECS=$(shell_quote "$honey_smoke_timeout_secs") bash $(shell_quote "$honey_remote_dir/honey-linux-xr-shadow-run.sh")'
 EOF
 
-if [[ "$run_honey" == "1" ]]; then
+if [[ "$run_honey" == "1" && "$push_remote" == "1" && "$push_rc" -ne 0 ]]; then
+  honey_status_label=skipped-push-failed
+  mounted_symlink_status_label=skipped-push-failed
+elif [[ "$run_honey" == "1" ]]; then
   command -v ssh >/dev/null 2>&1 || fail "ssh not found"
   command -v scp >/dev/null 2>&1 || fail "scp not found"
   # shellcheck disable=SC2029
@@ -1209,7 +1287,9 @@ if [[ "$run_honey" == "1" ]]; then
 fi
 
 linux_lifecycle_remote="${remote%/}/linux-lifecycle"
-if [[ "$run_linux_lifecycle" == "1" ]]; then
+if [[ "$run_linux_lifecycle" == "1" && "$push_remote" == "1" && "$push_rc" -ne 0 ]]; then
+  linux_lifecycle_status_label=skipped-push-failed
+elif [[ "$run_linux_lifecycle" == "1" ]]; then
   args=(
     --remote "$linux_lifecycle_remote"
     --evidence-dir "$evidence_dir/linux-lifecycle"
