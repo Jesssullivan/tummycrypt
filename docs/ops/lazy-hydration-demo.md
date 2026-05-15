@@ -93,12 +93,14 @@ The current small clean repo proof is
 `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`.
 It used source-built binaries on both hosts, passed fresh-prefix push with 0
 skipped symlinks, honey mounted traversal/hydration, 9 mounted symlink target
-checks, and the Linux lifecycle companion. Do not read that as packaged
-readiness: Homebrew `tcfs 0.12.12` skipped symlinks, and the first staged honey
-`tcfs 0.12.12` failed mounted symlink parsing for version-3 index entries.
-Current Nix flake packages now pass the tiny symlink mounted parse/target probe
-on neo and honey (`tcfs-symlink-package-probe-20260515T060330Z/`), but the
-small repo canary still needs a package-backed rerun before live repo moves.
+checks, and the Linux lifecycle companion. The current Nix package-backed small
+repo proof is
+`docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`;
+it repeats the same shadow push, honey traversal/hydration, 9 mounted symlink
+target checks, and lifecycle companion with explicit current Nix flake package
+binaries on both hosts. Do not read either packet as Homebrew readiness:
+Homebrew `tcfs 0.12.12` still skips symlinks. Live repo moves still need the
+larger clean stress canary plus restore/rollback proof.
 
 ## Linux Terminal Acceptance
 

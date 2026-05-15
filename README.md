@@ -38,18 +38,15 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 - Next dogfood lane: `task lazy:git-repo-canary` creates a shadow-first packet
   for one clean git worktree, defaulting to `~/git/oauth-mux`. It is the safe
   path toward repo mobility before any live repo, broad `~/git`, `~/Documents`,
-  dotfile, or home-directory takeover. The current green small-repo packet is
-  `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`:
-  source-built `tcfs` on `neo` pushed the clean `oauth-mux` shadow with
-  symlinks preserved, a current source-built Linux binary on `honey` passed
-  mounted traversal/hydration plus mounted symlink target checks, and the Linux
-  lifecycle companion passed. Package-current proof is narrowed but still not
-  closed: Homebrew `0.12.12` skipped symlinks, while the current source-built
-  and current-checkout Nix `0.12.12` binaries preserve them in the tiny package
-  probe. Tiny neo-to-honey mounted parse/target probes now pass for current Nix
-  as producer and consumer, but Homebrew remains stale. Rebuild/publish
-  Homebrew and repeat the package-backed small-repo canary before live repo
-  moves.
+  dotfile, or home-directory takeover. The current green small-repo packets are
+  `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`
+  for source-built binaries and
+  `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`
+  for explicit current Nix flake package binaries on both `neo` and `honey`.
+  Both prove clean shadow push, 0 skipped symlinks, honey mounted
+  traversal/hydration, 9 mounted symlink target checks, and the Linux lifecycle
+  companion. Homebrew `0.12.12` remains stale and skips symlinks; live repo
+  moves still need the larger clean stress canary plus restore/rollback proof.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

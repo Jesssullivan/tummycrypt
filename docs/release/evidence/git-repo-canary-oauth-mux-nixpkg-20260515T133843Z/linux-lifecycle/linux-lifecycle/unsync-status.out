@@ -1,0 +1,11 @@
+State cache: /tmp/tcfs-lazy-linux-demo.rDBLG2/state.json
+Tracked files: 3
+
+File: /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/README.md
+  hash:       fc6ae05dfa7398a4
+  size:       25 B
+  chunks:     1
+  remote:     git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0
+  last sync:  0 seconds ago
+  sync state: not_synced
+  sync check: up to date

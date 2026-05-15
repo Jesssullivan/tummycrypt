@@ -1,0 +1,3 @@
+path=/nix/store/xq14ldwyl6bbabcggfvc4vrg9ml7pw1c-tcfs-cli-0.12.12/bin/tcfs
+tcfs 0.12.12
+dc9b1758274b9c19d4ed470537486e989a23a07bb78e2f004d91eac56e946e43  /nix/store/xq14ldwyl6bbabcggfvc4vrg9ml7pw1c-tcfs-cli-0.12.12/bin/tcfs

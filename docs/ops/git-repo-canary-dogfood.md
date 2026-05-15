@@ -13,18 +13,24 @@ remote traversal, selected hydration, mounted write/readback, cache
 clear/rehydrate, recursive safe-unsync refusal/success, and symlink target
 preservation on `honey`.
 
-The generic `oauth-mux` canary is now green only when both hosts use
-source-built binaries from current source. The packet
+The generic `oauth-mux` canary is now green when both hosts use either
+source-built binaries from current source or explicit current Nix flake package
+binaries. The packet
 `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`
 uses source-built `tcfs` on `neo` for the push and a Nix-built current-source
 Linux `tcfs` on `honey` for mounted traversal/hydration, mounted symlink target
 checks, and the Linux lifecycle companion. It proves the shadow-first workflow
 for one clean repo; it does not make live `~/git/oauth-mux` managed by TCFS.
+The package-backed packet
+`docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`
+uses current Nix flake package binaries on both `neo` and `honey`, publishes
+4,601 regular files / 356,520,343 bytes with 0 skipped symlinks, verifies all 9
+mounted symlink targets on honey, and passes the same Linux lifecycle companion.
 
-Packaged binaries remain below the dogfood bar, but the blocker is now
-narrower. The installed Homebrew `tcfs 0.12.12` binary skips symlinks even when
-the canary config sets `sync_symlinks = true`; current-checkout Nix and
-source-built `tcfs 0.12.12` preserve the same tiny symlink fixture in
+The remaining package blocker is Homebrew. The installed Homebrew
+`tcfs 0.12.12` binary skips symlinks even when the canary config sets
+`sync_symlinks = true`; current-checkout Nix and source-built `tcfs 0.12.12`
+preserve the same tiny symlink fixture in
 `docs/release/evidence/tcfs-symlink-package-probe-20260515T041947Z/`. A follow-up
 tiny mounted probe,
 `docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/`, proves a
@@ -33,10 +39,9 @@ current source-built Linux binary, including `link.txt -> target.txt`. A second
 follow-up, `docs/release/evidence/tcfs-symlink-package-probe-20260515T060330Z/`,
 proves the same tiny mounted parse/target check with current Nix flake packages
 on both neo and honey. This is still not Homebrew proof: installed Homebrew
-continues to skip symlinks, and the first staged honey `tcfs 0.12.12` binary
-failed to parse version-3 symlink index entries. The next package gate remains
-Homebrew rebuild/publish plus package-backed small-repo canary proof before
-moving live repos into TCFS.
+continues to skip symlinks. The next gates before moving live repos into TCFS
+are Homebrew rebuild/publish if Homebrew is the client lane, `linux-xr-fast` as
+the larger clean stress canary, and fresh-tree restore/rollback proof.
 
 Use `task lazy:tcfs-symlink-package-probe` to recheck packaged or candidate
 binaries before repeating the real repo canary. The helper writes a fresh
@@ -46,8 +51,9 @@ log, and a `preserved` / `skipped` / `push_failed` symlink verdict. Add
 target verification on honey. A package candidate is not dogfood-ready until
 this probe reports `overall_status=passed` and the honey mount can parse and
 verify the same symlink index format using the packaged/current consumer binary.
-Current Nix flake producer/consumer proof is green for the tiny fixture; Homebrew
-is the remaining package-current blocker.
+Current Nix flake producer/consumer proof is green for both the tiny fixture and
+the clean `oauth-mux` shadow canary; Homebrew is the remaining package-current
+blocker.
 
 Do not use the current `neo` Finder/CloudStorage root for active repos yet. The
 local Provider registration is still a diagnostic surface until a published

@@ -1,0 +1,103 @@
+evidence dir: /tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/linux-lifecycle/linux-lifecycle/evidence
+remote: seaweedfs://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle
+temp root: /tmp/tcfs-lazy-linux-demo.rDBLG2
+tcfs command: /nix/store/xq14ldwyl6bbabcggfvc4vrg9ml7pw1c-tcfs-cli-0.12.12/bin/tcfs
+
+[1/9] seed fixture into remote prefix
+[2m2026-05-15T13:48:48.251725Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-15T13:48:48.251758Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-15T13:48:48.251770Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pushing /tmp/tcfs-lazy-linux-demo.rDBLG2/source → tcfs:git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle (endpoint: http://100.64.48.53:8333, device: d1176e5d...)
+[2m2026-05-15T13:48:48.258933Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "446", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC150404D0E025480BDB3", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/README.md", request_id: "18AFC150404D0E025480BDB3" }
+[2m2026-05-15T13:48:48.260724Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "554", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC1504094F2F3D7BF575D", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-15T13:48:48.262777Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "548", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC15040B1F355B3F4B833", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/chunks/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-15T13:48:48.276440Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/README.md: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "446", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC150416AD06D687AA6EC", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/README.md, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/README.md", request_id: "18AFC150416AD06D687AA6EC" }
+[2m2026-05-15T13:48:48.290342Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "554", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC15042523E4351D74059", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 }
+[2m2026-05-15T13:48:48.303312Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/README.md [3mhash[0m[2m=[0mfc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0 [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m25 [3muploaded_bytes[0m[2m=[0m25 [3mupload_elapsed_ms[0m[2m=[0m42 [3mupload_chunks_per_sec[0m[2m=[0m23.504879307380783 [3mupload_bytes_per_sec[0m[2m=[0m587.6219826845196 [3mstreaming[0m[2m=[0mfalse [3mfresh_prefix_publish[0m[2m=[0mfalse [3mremote_conflict_check[0m[2m=[0mtrue [3mchunk_upload_concurrency[0m[2m=[0m4 [3mchunk_exists_check[0m[2m=[0mtrue [3mchunk_write_timeout_secs[0m[2m=[0m300
+[2m2026-05-15T13:48:48.305860Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "458", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC150434310E705E19B52", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt", request_id: "18AFC150434310E705E19B52" }
+[2m2026-05-15T13:48:48.309040Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "554", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC15043685B7AD89129BB", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-15T13:48:48.311324Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "548", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC15043951B1F648216F3", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/chunks/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-15T13:48:48.321641Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt: read failed NotFound (permanent) at read, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "458", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC1504425E69B4CE58006", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt, range: 0- } => S3Error { code: "NoSuchKey", message: "The specified key does not exist.", resource: "/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/index/docs/deep/remote.txt", request_id: "18AFC1504425E69B4CE58006" }
+[2m2026-05-15T13:48:48.335872Z[0m [33m WARN[0m [2mopendal::services[0m[2m:[0m service=s3 name=tcfs path=git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1: stat failed NotFound (permanent) at stat, context: { uri: http://100.64.48.53:8333/tcfs/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1, response: Parts { status: 404, version: HTTP/1.1, headers: {"accept-ranges": "bytes", "content-length": "554", "content-type": "application/xml", "server": "SeaweedFS 30GB 4.23", "vary": "Origin", "x-amz-request-id": "18AFC150450B90A857D64360", "date": "Fri, 15 May 2026 13:48:48 GMT"} }, service: s3, path: git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/bd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 }
+[2m2026-05-15T13:48:48.347037Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/deep/remote.txt [3mhash[0m[2m=[0mbd130d300f1664b215946530c541de597de7deeadd9f12560b8bfd0061791ca1 [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m77 [3muploaded_bytes[0m[2m=[0m77 [3mupload_elapsed_ms[0m[2m=[0m37 [3mupload_chunks_per_sec[0m[2m=[0m26.41884661339183 [3mupload_bytes_per_sec[0m[2m=[0m2034.2511892311709 [3mstreaming[0m[2m=[0mfalse [3mfresh_prefix_publish[0m[2m=[0mfalse [3mremote_conflict_check[0m[2m=[0mtrue [3mchunk_upload_concurrency[0m[2m=[0m4 [3mchunk_exists_check[0m[2m=[0mtrue [3mchunk_write_timeout_secs[0m[2m=[0m300
+
+Push complete:
+  uploaded: 2 files (102 B)
+  skipped:  0 files (unchanged)
+  total:    2 files
+
+[2/9] start direct fuse mount
+mounted at: /tmp/tcfs-lazy-linux-demo.rDBLG2/mount
+
+[3/9] prove traversal does not hydrate content
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/README.md
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/deep
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/deep/remote.txt
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/empty-dir
+
+[4/9] cat remote-backed file and verify hydration
+mounted root: /tmp/tcfs-lazy-linux-demo.rDBLG2/mount
+listing parent before cat: /tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/deep
+total 1
+drwxr-xr-x. 2 jess jess  0 May 15 09:48 .
+drwxr-xr-x. 2 jess jess  0 May 15 09:48 ..
+-rw-r--r--. 1 jess jess 77 May 15 09:48 remote.txt
+find evidence (max depth 6):
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/README.md
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/deep
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/deep/remote.txt
+/tmp/tcfs-lazy-linux-demo.rDBLG2/mount/docs/empty-dir
+cat hydrate target: docs/deep/remote.txt
+cat byte count: 77
+lazy hydration mounted smoke passed
+cache after first cat: entries=1 bytes=77
+
+[5/9] write and edit through mounted view, then verify exact remote pull
+[2m2026-05-15T13:48:48.725556Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-05-15T13:48:48.725615Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-05-15T13:48:48.725631Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://100.64.48.53:8333
+Pulling docs/deep/mounted-write.txt → /tmp/tcfs-lazy-linux-demo.rDBLG2/mounted-write-remote-pull
+[2m2026-05-15T13:48:48.744825Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m downloaded [3mremote[0m[2m=[0mgit-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/566dc4e5cc6d1993149202667f448a51529639ec2751e6db8427095d49cf7af6 [3mlocal[0m[2m=[0m/tmp/tcfs-lazy-linux-demo.rDBLG2/mounted-write-remote-pull [3mbytes[0m[2m=[0m60
+
+Downloaded:
+  local:  /tmp/tcfs-lazy-linux-demo.rDBLG2/mounted-write-remote-pull
+  bytes:  60 B
+remote mounted-write pull matched exact edited content
+
+[6/9] clear mount cache as mounted-surface dehydration
+cache after clear: entries=0
+
+[7/9] cat again and verify rehydration
+cache after re-cat: entries=1 bytes=77
+
+[8/9] prove recursive safe-unsync refuses dirty descendants
+Refusing to unsync directory with dirty descendants: /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs
+  dirty:
+    /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/README.md (size changed: 25 → 38)
+  summary: 0 converted, 0 skipped, 1 dirty
+Error: 1 dirty descendant(s) with local changes. Use --force to unsync anyway.
+
+[9/9] restore clean content and prove recursive safe-unsync succeeds
+Unsynced directory: /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs
+  converted:
+    /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/README.md → /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/README.md.tc
+    /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/deep/remote.txt → /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/deep/remote.txt.tc
+  summary: 2 converted, 0 skipped, 0 dirty
+State cache: /tmp/tcfs-lazy-linux-demo.rDBLG2/state.json
+Tracked files: 3
+
+File: /tmp/tcfs-lazy-linux-demo.rDBLG2/source/docs/README.md
+  hash:       fc6ae05dfa7398a4
+  size:       25 B
+  chunks:     1
+  remote:     git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/linux-lifecycle/linux-lifecycle/manifests/fc6ae05dfa7398a4506deba1b79c788b5e3cf06ae90eb6ec38d037151e9854c0
+  last sync:  0 seconds ago
+  sync state: not_synced
+  sync check: up to date
+
+lazy hydration Linux lifecycle demo passed
+evidence written to: /tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/linux-lifecycle/linux-lifecycle/evidence
