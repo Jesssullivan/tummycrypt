@@ -42,6 +42,7 @@ the repository.
 | `git-repo-canary-oauth-mux-20260515T003124Z/` | Stopped first live generic git repo canary against clean `~/git/oauth-mux`; records the release-binary symlink push blocker and slow sequential push shape | release-binary push transcript starts with nine `skipping symlink (follow_symlinks=false)` rows, so `parity-gates.env` keeps `status=full-project-parity-not-claimed`; run was stopped after the blocker was observed and does not claim push completion, honey traversal, Linux lifecycle, Finder readiness, broad `~/git`, or home-directory takeover |
 | `git-repo-canary-oauth-mux-20260515T003543Z/` | Stopped live generic git repo canary against clean `~/git/oauth-mux`; records a symlink push blocker | release-binary push transcript starts with nine `skipping symlink (follow_symlinks=false)` rows, so `parity-gates.env` keeps `status=full-project-parity-not-claimed`; run was stopped after the blocker was observed and does not claim push completion, honey traversal, Linux lifecycle, Finder readiness, broad `~/git`, or home-directory takeover |
 | `tcfs-symlink-config-probe-20260515T005858Z/` | Tiny disposable symlink config probe comparing installed Homebrew `tcfs 0.12.12` to source-built `target/codex-verify/debug/tcfs` | same `sync_symlinks = true` fixture: Homebrew skipped `link.txt -> target.txt`, while source-built `main` preserved the symlink and uploaded two entries; this narrows the generic repo canary blocker to packaged-binary divergence and does not claim production readiness, Finder readiness, broad home takeover, or completed repo parity |
+| `tcfs-symlink-package-probe-20260515T041947Z/` | Repeatable package/current symlink probe comparing installed Homebrew, source-built local, and current-checkout Nix `tcfs 0.12.12` binaries | same `sync_symlinks = true` fixture: Homebrew `b93824d...` skipped `link.txt -> target.txt`; source-built `b2a970...` and Nix current `2ca9e1...` preserved the symlink and uploaded two entries; `overall_status=blocked` because the published Homebrew package remains stale, so this narrows the next dogfood gate to Homebrew rebuild/publish plus cross-host mounted parse proof |
 | `git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/` | Green source-built generic git repo canary against clean `~/git/oauth-mux`: source-built neo push, current-source honey mounted traversal/hydration, mounted symlink target verification, and Linux lifecycle companion | repo-archived source/shadow inventory, completed fresh-prefix push with 4,593 uploaded file rows / 356,107,080 bytes / zero skipped symlinks / all rows `fresh_prefix_publish=true`, push-time metadata, honey smoke with explicit source-built Linux binary SHA, mounted symlink `readlink` checks for 9 symlinks, Linux lifecycle write/readback/cache-clear/rehydrate/recursive safe-unsync transcripts, and `result.env` with `proof=shadow-push-honey-linux-lifecycle-symlink-targets`; this is isolated shadow proof only, not live repo takeover or packaged-binary readiness |
 | `macos-fileprovider-neo-cleanup-20260510T003148Z/` | Non-mutating neo FileProvider divergence inventory before cleanup | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/` | Non-mutating neo FileProvider divergence inventory with the published `v0.12.12` `.pkg` selected as source | repo-archived inventory plus package checksum pass, `pkgutil --check-signature` Developer ID/notarization output, and non-installing package structure smoke; no `.pkg` install, stale app quarantine, or strict production preflight was run |
@@ -158,10 +159,12 @@ the repository.
   separate open gates.
 - `git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/` closes the
   first small clean real-repo shadow canary when source-built binaries are
-  explicitly selected on both hosts. The Homebrew `0.12.12` and earlier staged
-  honey `0.12.12` attempts remain important package-drift evidence: version
-  strings alone are not enough for repo dogfood readiness. Rebuild/publish the
-  symlink-preserving package lane before moving any live repo into TCFS.
+  explicitly selected on both hosts. `tcfs-symlink-package-probe-20260515T041947Z/`
+  narrows the package gap: current-checkout Nix and source-built binaries
+  preserve symlinks, but installed Homebrew `0.12.12` still skips them. Version
+  strings alone are not enough for repo dogfood readiness. Rebuild/publish
+  Homebrew and reprove cross-host mounted parsing before moving any live repo
+  into TCFS.
 - The runnable `macos-fileprovider-neo-cleanup-<UTC>/` packet is divergence
   inventory and optional cleanup/install evidence. It is not production Finder
   readiness unless strict production signing preflight passes against the

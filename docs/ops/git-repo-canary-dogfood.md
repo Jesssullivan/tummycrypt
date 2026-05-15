@@ -21,13 +21,23 @@ Linux `tcfs` on `honey` for mounted traversal/hydration, mounted symlink target
 checks, and the Linux lifecycle companion. It proves the shadow-first workflow
 for one clean repo; it does not make live `~/git/oauth-mux` managed by TCFS.
 
-Packaged binaries remain below the dogfood bar. The installed Homebrew
-`tcfs 0.12.12` binary skips symlinks even when the canary config sets
-`sync_symlinks = true`; the first staged honey `tcfs 0.12.12` binary mounted
-the tree but failed to parse version-3 symlink index entries. Treat
-`docs/release/evidence/tcfs-symlink-config-probe-20260515T005858Z/` and the
-failed honey pass inside the green packet as package-drift evidence that must
-be cleared before moving live repos into TCFS.
+Packaged binaries remain below the dogfood bar, but the blocker is now
+narrower. The installed Homebrew `tcfs 0.12.12` binary skips symlinks even when
+the canary config sets `sync_symlinks = true`; current-checkout Nix and
+source-built `tcfs 0.12.12` preserve the same tiny symlink fixture in
+`docs/release/evidence/tcfs-symlink-package-probe-20260515T041947Z/`. The first
+staged honey `tcfs 0.12.12` binary still failed to parse version-3 symlink index
+entries, so the next package gate is Homebrew rebuild/publish plus current
+package-mounted parse and target verification before moving live repos into
+TCFS.
+
+Use `task lazy:tcfs-symlink-package-probe` to recheck packaged or candidate
+binaries before repeating the real repo canary. The helper writes a fresh
+evidence packet with each candidate binary path, version, SHA-256, config, push
+log, and a `preserved` / `skipped` / `push_failed` symlink verdict. A package
+candidate is not dogfood-ready until this probe reports `overall_status=passed`
+and the subsequent honey mount can parse and verify the same symlink index
+format.
 
 Do not use the current `neo` Finder/CloudStorage root for active repos yet. The
 local Provider registration is still a diagnostic surface until a published
@@ -90,6 +100,15 @@ RUN_HONEY=1 \
 HONEY_START_MOUNT=1 \
 RUN_LINUX_LIFECYCLE=1 \
 task lazy:git-repo-canary
+```
+
+Package/current symlink probe:
+
+```bash
+CANDIDATES="homebrew=/opt/homebrew/opt/tcfs/bin/tcfs source_built=$PWD/target/codex-verify/debug/tcfs" \
+ENDPOINT=http://HOST:8333 \
+BUCKET=tcfs \
+task lazy:tcfs-symlink-package-probe
 ```
 
 Large clean repo stress pass:

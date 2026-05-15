@@ -43,10 +43,11 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   source-built `tcfs` on `neo` pushed the clean `oauth-mux` shadow with
   symlinks preserved, a current source-built Linux binary on `honey` passed
   mounted traversal/hydration plus mounted symlink target checks, and the Linux
-  lifecycle companion passed. Packaged binaries remain the blocker: Homebrew
-  `0.12.12` skipped symlinks, and an older staged honey `0.12.12` could not
-  parse the version-3 symlink index entries. Rebuild/publish and reproving the
-  package is required before live repo moves.
+  lifecycle companion passed. Package-current proof is narrowed but still not
+  closed: Homebrew `0.12.12` skipped symlinks, while the current source-built
+  and current-checkout Nix `0.12.12` binaries preserve them in the tiny package
+  probe. Rebuild/publish Homebrew and reprove cross-host mounted parsing before
+  live repo moves.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

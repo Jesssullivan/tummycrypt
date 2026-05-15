@@ -1,0 +1,23 @@
+[daemon]
+socket = "/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.2SeEyR/no-daemon-homebrew.sock"
+
+[storage]
+endpoint = "http://100.64.48.53:8333"
+region = "us-east-1"
+bucket = "tcfs"
+remote_prefix = "tcfs-symlink-package-probe-20260515T041947Z-homebrew"
+enforce_tls = false
+
+[sync]
+state_db = "/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.2SeEyR/state/homebrew.db"
+sync_root = "/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.2SeEyR/source"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_git_dirs = true
+git_sync_mode = "raw"
+sync_hidden_dirs = true
+sync_symlinks = true
+sync_empty_dirs = true
+
+[crypto]
+enabled = false
