@@ -29,6 +29,7 @@ use crate::state::{StateCache, StateCacheBackend, SyncState};
 const REMOTE_INDEX_READ_CONCURRENCY: usize = 32;
 const REMOTE_PULL_CONCURRENCY: usize = 16;
 const DIR_MARKER: &str = ".tcfs_dir";
+const DIR_MARKER_SUFFIX: &str = "/.tcfs_dir";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -75,6 +76,9 @@ pub enum ReconcileAction {
         rel_path: String,
         info: ConflictInfo,
     },
+    CreateDirectory {
+        rel_path: String,
+    },
     UpToDate {
         rel_path: String,
     },
@@ -85,6 +89,7 @@ pub enum ReconcileAction {
 pub struct ReconcileSummary {
     pub pushes: usize,
     pub pulls: usize,
+    pub directories: usize,
     pub local_deletes: usize,
     pub remote_deletes: usize,
     pub conflicts: usize,
@@ -114,6 +119,7 @@ pub struct ReconcileConfig {
 pub struct ExecutionResult {
     pub pushed: usize,
     pub pulled: usize,
+    pub directories_created: usize,
     pub deleted_local: usize,
     pub deleted_remote: usize,
     pub conflicts_recorded: usize,
@@ -230,6 +236,37 @@ pub async fn list_remote_index(
     }
 
     debug!(count = result.len(), "fetched remote index");
+    Ok(result)
+}
+
+async fn list_remote_empty_dirs(op: &Operator, remote_prefix: &str) -> Result<HashSet<String>> {
+    let index_prefix = format!("{}/index/", remote_prefix.trim_end_matches('/'));
+    let entries = op
+        .list_with(&index_prefix)
+        .recursive(true)
+        .await
+        .context("listing remote directory markers")?;
+
+    let mut result = HashSet::new();
+    for entry in entries {
+        let full_key = entry.path();
+        let rel_path = crate::engine::normalize_rel_path_text(
+            full_key.strip_prefix(&index_prefix).unwrap_or(full_key),
+        );
+
+        let Some(dir_path) = rel_path.strip_suffix(DIR_MARKER_SUFFIX) else {
+            continue;
+        };
+        if dir_path.is_empty() {
+            continue;
+        }
+        result.insert(dir_path.to_string());
+    }
+
+    debug!(
+        count = result.len(),
+        "fetched remote empty directory markers"
+    );
     Ok(result)
 }
 
@@ -491,6 +528,11 @@ pub async fn reconcile(
     // 2. Fetch remote index
     let remote_index = list_remote_index(op, remote_prefix).await?;
     debug!(count = remote_index.len(), "fetched remote index");
+    let remote_empty_dirs = list_remote_empty_dirs(op, remote_prefix).await?;
+    debug!(
+        count = remote_empty_dirs.len(),
+        "fetched remote empty directory markers"
+    );
 
     // 3. Build alignment — union of all known paths
     let mut all_paths: HashSet<String> = HashSet::new();
@@ -530,25 +572,40 @@ pub async fn reconcile(
             ReconcileAction::DeleteLocal { .. } => summary.local_deletes += 1,
             ReconcileAction::DeleteRemote { .. } => summary.remote_deletes += 1,
             ReconcileAction::Conflict { .. } => summary.conflicts += 1,
+            ReconcileAction::CreateDirectory { .. } => summary.directories += 1,
             ReconcileAction::UpToDate { .. } => summary.up_to_date += 1,
         }
 
         actions.push(action);
     }
 
+    let mut remote_empty_dirs = remote_empty_dirs.into_iter().collect::<Vec<_>>();
+    remote_empty_dirs.sort();
+    for rel_path in &remote_empty_dirs {
+        if local_root.join(rel_path).is_dir() {
+            continue;
+        }
+        summary.directories += 1;
+        actions.push(ReconcileAction::CreateDirectory {
+            rel_path: rel_path.clone(),
+        });
+    }
+
     // 5. Sort: conflicts first, then pulls, pushes, deletes, up-to-date last
     actions.sort_by_key(|a| match a {
         ReconcileAction::Conflict { .. } => 0,
-        ReconcileAction::Pull { .. } => 1,
-        ReconcileAction::Push { .. } => 2,
-        ReconcileAction::DeleteLocal { .. } => 3,
-        ReconcileAction::DeleteRemote { .. } => 4,
-        ReconcileAction::UpToDate { .. } => 5,
+        ReconcileAction::CreateDirectory { .. } => 1,
+        ReconcileAction::Pull { .. } => 2,
+        ReconcileAction::Push { .. } => 3,
+        ReconcileAction::DeleteLocal { .. } => 4,
+        ReconcileAction::DeleteRemote { .. } => 5,
+        ReconcileAction::UpToDate { .. } => 6,
     });
 
     info!(
         pushes = summary.pushes,
         pulls = summary.pulls,
+        directories = summary.directories,
         conflicts = summary.conflicts,
         up_to_date = summary.up_to_date,
         "reconciliation plan generated"
@@ -757,7 +814,8 @@ pub async fn execute_plan(
                 ReconcileAction::Pull {
                     reason: PullReason::NewRemote,
                     ..
-                } | ReconcileAction::UpToDate { .. }
+                } | ReconcileAction::CreateDirectory { .. }
+                    | ReconcileAction::UpToDate { .. }
             )
         })
         && plan.actions.iter().any(|action| {
@@ -909,6 +967,20 @@ pub async fn execute_plan(
                 result.conflicts_recorded += 1;
             }
 
+            ReconcileAction::CreateDirectory { rel_path } => {
+                let local_path = local_root.join(rel_path);
+                match std::fs::create_dir_all(&local_path) {
+                    Ok(()) => {
+                        result.directories_created += 1;
+                    }
+                    Err(e) => {
+                        result
+                            .errors
+                            .push((rel_path.clone(), format!("create directory failed: {e}")));
+                    }
+                }
+            }
+
             ReconcileAction::UpToDate { .. } => {
                 // No-op
             }
@@ -940,8 +1012,24 @@ async fn execute_new_remote_pulls_concurrent(
 ) -> Result<ExecutionResult> {
     let read_permits = Arc::new(Semaphore::new(REMOTE_PULL_CONCURRENCY));
     let mut tasks = JoinSet::new();
+    let mut result = ExecutionResult::default();
 
     for action in &plan.actions {
+        if let ReconcileAction::CreateDirectory { rel_path } = action {
+            let local_path = local_root.join(rel_path);
+            match std::fs::create_dir_all(&local_path) {
+                Ok(()) => {
+                    result.directories_created += 1;
+                }
+                Err(e) => {
+                    result
+                        .errors
+                        .push((rel_path.clone(), format!("create directory failed: {e}")));
+                }
+            }
+            continue;
+        }
+
         let ReconcileAction::Pull {
             rel_path,
             manifest_hash,
@@ -996,7 +1084,6 @@ async fn execute_new_remote_pulls_concurrent(
         });
     }
 
-    let mut result = ExecutionResult::default();
     while let Some(joined) = tasks.join_next().await {
         match joined {
             Ok((_, Ok(download))) => {
@@ -1136,6 +1223,32 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert!(index.contains_key("file.txt"));
         assert!(!index.contains_key("empty/.tcfs_dir"));
+    }
+
+    #[tokio::test]
+    async fn list_remote_empty_dirs_finds_directory_markers() {
+        let op = memory_op();
+        op.write("data/index/empty/.tcfs_dir", b"type=directory\n".to_vec())
+            .await
+            .unwrap();
+        op.write(
+            "data/index/nested/also-empty/.tcfs_dir",
+            b"type=directory\n".to_vec(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/index/file.txt",
+            RemoteIndexEntry::new("aaa", 100, 1).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+
+        let dirs = list_remote_empty_dirs(&op, "data").await.unwrap();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.contains("empty"));
+        assert!(dirs.contains("nested/also-empty"));
+        assert!(!dirs.contains("file.txt"));
     }
 
     #[tokio::test]
@@ -1369,6 +1482,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_remote_only_directory_marker_generates_create_directory() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+
+        op.write("data/index/empty/.tcfs_dir", b"type=directory\n".to_vec())
+            .await
+            .unwrap();
+
+        let state_path = dir.path().join("state.json");
+        let state = crate::state::StateCache::open(&state_path).unwrap();
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.summary.directories, 1);
+        assert!(
+            plan.actions.iter().any(
+                |a| matches!(a, ReconcileAction::CreateDirectory { rel_path } if rel_path == "empty")
+            ),
+            "create-dir action should target empty/"
+        );
+    }
+
+    #[tokio::test]
     async fn execute_plan_new_remote_pulls_restore_files_and_state() {
         let op = memory_op();
         let dir = tempfile::tempdir().unwrap();
@@ -1469,6 +1610,60 @@ mod tests {
         assert_eq!(beta_state.status, crate::state::FileSyncStatus::Synced);
         assert_eq!(alpha_state.device_id, "honey");
         assert_eq!(beta_state.device_id, "honey");
+    }
+
+    #[tokio::test]
+    async fn execute_plan_restores_remote_empty_directories() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let restore_root = dir.path().join("restore");
+        std::fs::create_dir_all(&restore_root).unwrap();
+
+        op.write("data/index/empty/.tcfs_dir", b"type=directory\n".to_vec())
+            .await
+            .unwrap();
+        op.write(
+            "data/index/nested/also-empty/.tcfs_dir",
+            b"type=directory\n".to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let mut restore_state =
+            crate::state::StateCache::open(&dir.path().join("restore-state.json")).unwrap();
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(
+            &op,
+            &restore_root,
+            "data",
+            &restore_state,
+            "honey",
+            &blacklist,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(plan.summary.directories, 2);
+        let result = execute_plan(
+            &plan,
+            &op,
+            &restore_root,
+            "data",
+            &mut restore_state,
+            "honey",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.directories_created, 2);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(restore_root.join("empty").is_dir());
+        assert!(restore_root.join("nested/also-empty").is_dir());
     }
 
     #[cfg(unix)]

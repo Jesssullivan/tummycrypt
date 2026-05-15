@@ -44,8 +44,8 @@ are Homebrew rebuild/publish if Homebrew is the client lane, `linux-xr-fast` as
 the larger clean stress canary, and package-backed fresh-tree restore/rollback
 proof.
 
-The fresh-tree restore gate is now green for source-built binaries, with one
-recorded full-tree gap.
+The fresh-tree restore gate is now green for source-built binaries, including
+empty directories.
 `task lazy:git-repo-restore-proof` takes an existing pushed canary packet,
 restores into `~/TCFS Pilot/restore-proofs/`, and archives regular-file hash,
 symlink-target, empty-dir, state, and reconcile logs under a proof directory.
@@ -53,10 +53,11 @@ The first run against
 `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`
 timed out during `tcfs reconcile` dry-run remote-index scanning after 120s,
 before any restore mutation. The source-built follow-up
-`restore-proof-source-fix-symlink-state-20260515T171712Z/` restores 4,601
-regular files and 9 symlinks exactly and records synced state for all 4,610
-restored paths. Treat packaged Nix/Homebrew restore and empty-directory restore
-as the remaining restore/rollback gates.
+`restore-proof-source-fix-empty-dirs-20260515T183805Z/` restores 4,601 regular
+files, 9 symlinks, synced state for all 4,610 restored paths, and all 12
+archived empty directories with `--require-empty-dirs`. Treat packaged
+Nix/Homebrew restore as the remaining restore/rollback gate before live repo
+moves.
 
 Use `task lazy:tcfs-symlink-package-probe` to recheck packaged or candidate
 binaries before repeating the real repo canary. The helper writes a fresh

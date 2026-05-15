@@ -174,10 +174,14 @@ the repository.
   Version strings alone are not enough for repo dogfood readiness.
   `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/` records
   the next restore blocker: `tcfs reconcile` dry-run timed out after 120s while
-  scanning the remote index. Rebuild/publish Homebrew if Homebrew is the client
-  lane, fix or bypass restore, then run the larger clean `linux-xr-fast` stress
-  canary and green fresh-tree restore/rollback proof before moving any live
-  repo into TCFS.
+  scanning the remote index. The later source-built
+  `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-empty-dirs-20260515T183805Z/`
+  packet proves fresh-tree restore for 4,601 regular files, 9 symlinks, synced
+  state for 4,610 paths, and all 12 empty directories with
+  `--require-empty-dirs`. Rebuild/publish Homebrew if Homebrew is the client
+  lane, prove packaged restore, then run the larger clean `linux-xr-fast`
+  stress canary and green package-backed restore/rollback proof before moving
+  any live repo into TCFS.
 - The runnable `macos-fileprovider-neo-cleanup-<UTC>/` packet is divergence
   inventory and optional cleanup/install evidence. It is not production Finder
   readiness unless strict production signing preflight passes against the

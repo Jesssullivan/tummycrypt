@@ -3881,9 +3881,10 @@ async fn cmd_reconcile(
     // Display plan
     println!();
     println!(
-        "Plan: {} push, {} pull, {} delete-local, {} delete-remote, {} conflict, {} up-to-date",
+        "Plan: {} push, {} pull, {} create-dir, {} delete-local, {} delete-remote, {} conflict, {} up-to-date",
         plan.summary.pushes,
         plan.summary.pulls,
+        plan.summary.directories,
         plan.summary.local_deletes,
         plan.summary.remote_deletes,
         plan.summary.conflicts,
@@ -3916,6 +3917,9 @@ async fn cmd_reconcile(
                     "  ! conflict  {rel_path}  (local: {}, remote: {})",
                     info.local_device, info.remote_device
                 )
+            }
+            tcfs_sync::reconcile::ReconcileAction::CreateDirectory { rel_path } => {
+                println!("  + create-dir  {rel_path}")
             }
             tcfs_sync::reconcile::ReconcileAction::UpToDate { rel_path } => {
                 println!("  = up-to-date  {rel_path}")
@@ -3980,9 +3984,10 @@ async fn cmd_reconcile(
         state.flush().context("flushing state cache")?;
 
         println!(
-            "Done: {} pushed, {} pulled, {} deleted, {} conflicts, {} errors",
+            "Done: {} pushed, {} pulled, {} dirs-created, {} deleted, {} conflicts, {} errors",
             result.pushed,
             result.pulled,
+            result.directories_created,
             result.deleted_local + result.deleted_remote,
             result.conflicts_recorded,
             result.errors.len()

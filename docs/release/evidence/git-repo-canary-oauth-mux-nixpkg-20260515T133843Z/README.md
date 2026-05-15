@@ -56,11 +56,16 @@ Contents:
 - `restore-proof-source-fix-20260515T1657Z/`: source-built follow-up using
   `target/debug/tcfs` after the remote-index/fresh-pull fixes. It reports
   `status=passed` with exact restoration for 4,601 regular files and 9 symlinks;
-  the only recorded gap is empty directories, which `tcfs reconcile` does not
-  restore yet. This is not a packaged Nix/Homebrew restore claim until those
-  packages are rebuilt and rerun.
+  empty directories were still a gap in this older packet. This is not a
+  packaged Nix/Homebrew restore claim until those packages are rebuilt and
+  rerun.
 - `restore-proof-source-fix-symlink-state-20260515T171712Z/`: newer
   source-built follow-up after symlink state tracking was fixed. It preserves
   the same regular-file and symlink restore proof and records
   `state_entry_count=4610` plus `restored_symlink_state_count=9`; empty
-  directories remain the only restore mismatch.
+  directories remained the only restore mismatch in this superseded packet.
+- `restore-proof-source-fix-empty-dirs-20260515T183805Z/`: latest source-built
+  follow-up after directory-marker restore was fixed. It reports `status=passed`
+  with exact restoration for 4,601 regular files, 9 symlinks, synced state for
+  all 4,610 restored paths, and all 12 empty directories with
+  `--require-empty-dirs`.

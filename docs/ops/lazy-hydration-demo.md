@@ -109,10 +109,10 @@ as a blocker because `tcfs reconcile` dry-run timed out during remote-index
 scanning before restore execution. Source-built follow-up packets fix that path:
 `restore-proof-source-fix-20260515T1657Z/` proves dry-run within 120s, execute in
 301.84s, and exact regular-file/symlink restoration; the newer
-`restore-proof-source-fix-symlink-state-20260515T171712Z/` records
-`state_entry_count=4610` and `restored_symlink_state_count=9` as well. Empty
-directories are still not restored by `tcfs reconcile`, so packaged Nix/Homebrew
-and empty-dir restore remain separate gates.
+`restore-proof-source-fix-empty-dirs-20260515T183805Z/` records
+`state_entry_count=4610`, `restored_symlink_state_count=9`, and exact restore
+of all 12 empty directories with `--require-empty-dirs`. Packaged Nix/Homebrew
+restore remains a separate gate.
 
 ## Linux Terminal Acceptance
 

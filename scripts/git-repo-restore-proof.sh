@@ -467,8 +467,8 @@ unsupported_special_files_match=0
 [[ "$unsupported_diff_rc" -eq 0 ]] && unsupported_special_files_match=1
 
 status=passed
-proof=fresh-tree-restore-regular-files-and-symlinks
-reason="regular files and symlink targets restored exactly; empty dirs recorded but not required"
+proof=fresh-tree-restore-files-symlinks-empty-dirs
+reason="regular files, symlink targets, and empty directories restored exactly"
 
 if [[ "$regular_files_match" != "1" ]]; then
   status=failed

@@ -120,6 +120,11 @@ if [[ "$execute" == "1" ]]; then
   mkdir -p "$restore_path"
   (
     cd "$FAKE_RESTORE_SOURCE"
+    find . -type d -empty -print | while IFS= read -r path; do
+      rel="${path#./}"
+      [[ "$rel" == "." ]] && continue
+      mkdir -p "$restore_path/$rel"
+    done
     find . -type f -print | while IFS= read -r path; do
       rel="${path#./}"
       mkdir -p "$restore_path/$(dirname "$rel")"
@@ -145,17 +150,18 @@ FAKE_RESTORE_SOURCE="$SHADOW" bash "$SCRIPT" \
 
 assert_contains "$TMPDIR/positive.out" "restore proof status: passed"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "status=passed"
-assert_contains "$PACKET/restore-proof/restore-proof.env" "proof=fresh-tree-restore-files-and-symlinks-empty-dirs-gap"
+assert_contains "$PACKET/restore-proof/restore-proof.env" "proof=fresh-tree-restore-files-symlinks-empty-dirs"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "regular_files_match=1"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "symlink_targets_match=1"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "state_manifest_status=unavailable"
-assert_contains "$PACKET/restore-proof/restore-proof.env" "empty_dirs_match=0"
+assert_contains "$PACKET/restore-proof/restore-proof.env" "empty_dirs_match=1"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "shadow_empty_dir_count=1"
-assert_contains "$PACKET/restore-proof/restore-proof.env" "restored_empty_dir_count=0"
+assert_contains "$PACKET/restore-proof/restore-proof.env" "restored_empty_dir_count=1"
 assert_contains "$PACKET/restore-proof/README.md" "TCFS Git Repo Fresh-Tree Restore Proof"
 test -f "$PACKET/restore-proof/reconcile-dry-run.log"
 test -f "$PACKET/restore-proof/reconcile-execute.log"
 test -L "$RESTORE/readme-link"
+test -d "$RESTORE/empty-dir"
 
 CUSTOM_RESTORE="$TMPDIR/restored tree custom"
 CUSTOM_RESTORE_DIR="$PACKET/restore-proof-custom"
@@ -172,13 +178,28 @@ assert_contains "$CUSTOM_RESTORE_DIR/restore-proof.env" "status=passed"
 test -f "$CUSTOM_RESTORE_DIR/reconcile-execute.log"
 
 REQUIRE_RESTORE="$TMPDIR/restored tree require"
+FAKE_RESTORE_SOURCE="$SHADOW" bash "$SCRIPT" \
+  --evidence-dir "$PACKET" \
+  --restore-root "$REQUIRE_RESTORE" \
+  --config "$CONFIG" \
+  --state "$TMPDIR/restore-state-require.json" \
+  --require-empty-dirs \
+  >"$TMPDIR/require-empty.out"
+assert_contains "$TMPDIR/require-empty.out" "restore proof status: passed"
+
+NO_EMPTY_RESTORE="$TMPDIR/restored tree no empty"
+NO_EMPTY_SOURCE="$TMPDIR/no empty source"
+mkdir -p "$NO_EMPTY_SOURCE/src"
+cp -a "$SHADOW/README.md" "$NO_EMPTY_SOURCE/README.md"
+cp -a "$SHADOW/src/main.rs" "$NO_EMPTY_SOURCE/src/main.rs"
+ln -s README.md "$NO_EMPTY_SOURCE/readme-link"
 assert_fails_contains \
-  "restore proof status: failed" \
-  env FAKE_RESTORE_SOURCE="$SHADOW" bash "$SCRIPT" \
+  "empty directory manifest mismatch" \
+  env FAKE_RESTORE_SOURCE="$NO_EMPTY_SOURCE" bash "$SCRIPT" \
     --evidence-dir "$PACKET" \
-    --restore-root "$REQUIRE_RESTORE" \
+    --restore-root "$NO_EMPTY_RESTORE" \
     --config "$CONFIG" \
-    --state "$TMPDIR/restore-state-require.json" \
+    --state "$TMPDIR/restore-state-no-empty.json" \
     --require-empty-dirs
 
 BROKEN_RESTORE="$TMPDIR/restored tree broken"

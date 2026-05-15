@@ -21,9 +21,6 @@ Boundaries:
 - A live repo should not be physically moved into TCFS until a shadow packet
   proves restore-from-remote, cross-host rehydrate, and safe-unsync behavior.
   This packet now has a source-built restore proof under
-  `restore-proof-source-fix-20260515T1657Z/` for regular files and symlinks, with
-  empty directories still recorded as a reconcile gap. The newer
-  `restore-proof-source-fix-symlink-state-20260515T171712Z/` proof also records
-  restored sync state for all 4,610 restored paths, including 9 symlinks.
-  Packaged Nix/Homebrew restore remains unproven until rebuilt from the source
-  fix.
+  `restore-proof-source-fix-empty-dirs-20260515T183805Z/` for regular files,
+  symlinks, restored sync state, and all archived empty directories. Packaged
+  Nix/Homebrew restore remains unproven until rebuilt from the source fix.
