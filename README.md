@@ -46,10 +46,10 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   lifecycle companion passed. Package-current proof is narrowed but still not
   closed: Homebrew `0.12.12` skipped symlinks, while the current source-built
   and current-checkout Nix `0.12.12` binaries preserve them in the tiny package
-  probe. A tiny neo-Nix producer to honey-source mounted parse/target probe now
-  passes, but honey's packaged profile is still older. Rebuild/publish Homebrew
-  and reprove cross-host mounted parsing with packaged/current consumers before
-  live repo moves.
+  probe. Tiny neo-to-honey mounted parse/target probes now pass for current Nix
+  as producer and consumer, but Homebrew remains stale. Rebuild/publish
+  Homebrew and repeat the package-backed small-repo canary before live repo
+  moves.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

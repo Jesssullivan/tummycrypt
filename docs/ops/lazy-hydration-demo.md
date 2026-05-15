@@ -96,6 +96,9 @@ skipped symlinks, honey mounted traversal/hydration, 9 mounted symlink target
 checks, and the Linux lifecycle companion. Do not read that as packaged
 readiness: Homebrew `tcfs 0.12.12` skipped symlinks, and the first staged honey
 `tcfs 0.12.12` failed mounted symlink parsing for version-3 index entries.
+Current Nix flake packages now pass the tiny symlink mounted parse/target probe
+on neo and honey (`tcfs-symlink-package-probe-20260515T060330Z/`), but the
+small repo canary still needs a package-backed rerun before live repo moves.
 
 ## Linux Terminal Acceptance
 

@@ -1,0 +1,11 @@
+$ ssh honey nix build --accept-flake-config --no-link --print-out-paths github:Jesssullivan/tummycrypt/b4a1ba7#tcfs-cli
+evaluation warning: crane will use a placeholder value since `name` cannot be found in /nix/store/j6afk3vsrsj1zg2r6h8s942qjn11k0lz-source/Cargo.toml
+                    to silence this warning consider one of the following:
+                    - setting `pname = "...";` in the derivation arguments explicitly
+                    - setting `package.name = "..."` or `package.metadata.crane.name` = "..." or `workspace.metadata.crane.name` = "..." in the root Cargo.toml
+                    - explicitly looking up the values from a different Cargo.toml via
+                      `craneLib.crateNameFromCargoToml { cargoToml = ./path/to/Cargo.toml; }`
+
+                    To find the source of this warning, rerun nix with:
+                    `NIX_ABORT_ON_WARN=1 nix --option pure-eval false --show-trace ...`
+/nix/store/yw9k9r34ma131ab3casy2h9129ds8qgb-tcfs-cli-0.12.12

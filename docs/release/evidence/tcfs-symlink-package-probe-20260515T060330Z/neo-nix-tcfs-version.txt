@@ -1,0 +1,4 @@
+$ /nix/store/gp0cpr4vy5wijx53w45zf4xc6jb15nbi-tcfs-cli-0.12.12/bin/tcfs --version
+tcfs 0.12.12
+$ shasum -a 256 /nix/store/gp0cpr4vy5wijx53w45zf4xc6jb15nbi-tcfs-cli-0.12.12/bin/tcfs
+a58ef5a390e3883ccafce816f3273ded511df56a2f97bbae6c7a3e5bc88df87b  /nix/store/gp0cpr4vy5wijx53w45zf4xc6jb15nbi-tcfs-cli-0.12.12/bin/tcfs

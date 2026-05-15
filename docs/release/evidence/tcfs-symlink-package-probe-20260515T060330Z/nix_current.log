@@ -1,0 +1,15 @@
+2026-05-15T06:03:31.103132Z  WARN tcfs_secrets: S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+2026-05-15T06:03:31.103290Z  INFO tcfs: CLI credentials loaded source=env:AWS_ACCESS_KEY_ID
+2026-05-15T06:03:31.103373Z  WARN tcfs_storage::operator: S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. endpoint=http://100.64.48.53:8333
+Pushing /var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.NKe2rE/source → tcfs:tcfs-symlink-nix-consumer-probe-20260515T060330Z-nix_current (endpoint: http://100.64.48.53:8333, device: 03d8a0bd...)
+2026-05-15T06:03:31.108139Z DEBUG tcfs_sync::engine: uploading path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.NKe2rE/source/target.txt reason=new file
+2026-05-15T06:03:31.108175Z DEBUG tcfs_sync::engine: preparing upload snapshot path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.NKe2rE/source/target.txt bytes=7 streaming=false
+2026-05-15T06:03:31.108257Z DEBUG tcfs_sync::engine: prepared upload snapshot path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.NKe2rE/source/target.txt bytes=7 streaming=false chunks=0 elapsed_ms=0
+2026-05-15T06:03:31.108302Z DEBUG tcfs_sync::engine: verified upload snapshot path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.NKe2rE/source/target.txt bytes=7 streaming=false elapsed_ms=0
+2026-05-15T06:03:33.519087Z  INFO tcfs_sync::engine: uploaded path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.NKe2rE/source/target.txt hash=e09273d12ecbea9b52bf8a5e60c0fd5313a284901beb82be338b3259dddaaae9 chunks=1 bytes=7 uploaded_bytes=7 upload_elapsed_ms=2225 upload_chunks_per_sec=0.4492724427251271 upload_bytes_per_sec=3.14490709907589 streaming=false fresh_prefix_publish=false remote_conflict_check=true chunk_upload_concurrency=4 chunk_exists_check=true chunk_write_timeout_secs=300
+2026-05-15T06:03:33.975690Z  INFO tcfs_sync::engine: uploaded symlink path=/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T//tcfs-symlink-package-probe.NKe2rE/source/link.txt target=target.txt hash=19f7b080f8352228bf867dfa974659ff8c62633665cf7383ba9b0c8765c828a6 fresh_prefix_publish=false
+
+Push complete:
+  uploaded: 2 files (17 B)
+  skipped:  0 files (unchanged)
+  total:    2 files

@@ -29,11 +29,13 @@ source-built `tcfs 0.12.12` preserve the same tiny symlink fixture in
 tiny mounted probe,
 `docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/`, proves a
 neo current-checkout Nix producer can be mounted and read on honey with the
-current source-built Linux binary, including `link.txt -> target.txt`. This is
-not yet packaged-consumer proof because honey's packaged profile still reports
-`tcfs 0.12.2`, and the first staged honey `tcfs 0.12.12` binary failed to parse
-version-3 symlink index entries. The next package gate remains Homebrew
-rebuild/publish plus current package-mounted parse and target verification before
+current source-built Linux binary, including `link.txt -> target.txt`. A second
+follow-up, `docs/release/evidence/tcfs-symlink-package-probe-20260515T060330Z/`,
+proves the same tiny mounted parse/target check with current Nix flake packages
+on both neo and honey. This is still not Homebrew proof: installed Homebrew
+continues to skip symlinks, and the first staged honey `tcfs 0.12.12` binary
+failed to parse version-3 symlink index entries. The next package gate remains
+Homebrew rebuild/publish plus package-backed small-repo canary proof before
 moving live repos into TCFS.
 
 Use `task lazy:tcfs-symlink-package-probe` to recheck packaged or candidate
@@ -44,6 +46,8 @@ log, and a `preserved` / `skipped` / `push_failed` symlink verdict. Add
 target verification on honey. A package candidate is not dogfood-ready until
 this probe reports `overall_status=passed` and the honey mount can parse and
 verify the same symlink index format using the packaged/current consumer binary.
+Current Nix flake producer/consumer proof is green for the tiny fixture; Homebrew
+is the remaining package-current blocker.
 
 Do not use the current `neo` Finder/CloudStorage root for active repos yet. The
 local Provider registration is still a diagnostic surface until a published
