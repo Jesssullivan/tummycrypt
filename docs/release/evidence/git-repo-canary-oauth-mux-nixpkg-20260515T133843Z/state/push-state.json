@@ -46562,7 +46562,7 @@
       "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a",
       "status": "synced"
     },
-    "/Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/resolve-npm-token.sh": {
+    "/Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/redacted-token-helper.sh": {
       "blake3": "fde1bc3cbe4a99db77df96e8a28f9197c255692e2880a843ff8736a136ef2797",
       "size": 2708,
       "mtime": 1777435187,

@@ -50,6 +50,9 @@ async fn roundtrip_symlink_preserves_link_target() {
     .expect("push tree with symlink");
 
     assert_eq!(uploaded, 2);
+    let link_state = state.get(&tmp.path().join("link.txt")).unwrap();
+    assert_eq!(link_state.status, tcfs_sync::state::FileSyncStatus::Synced);
+    assert_eq!(link_state.device_id, "neo");
 
     let link_manifest =
         tcfs_sync::engine::resolve_manifest_path(&op, "link.txt", prefix, Some(tmp.path()))
@@ -61,14 +64,32 @@ async fn roundtrip_symlink_preserves_link_target() {
     assert_eq!(index.symlink_target.as_deref(), Some("target.txt"));
 
     let out = tmp.path().join("out/link.txt");
+    let mut restore_state =
+        tcfs_sync::state::StateCache::open(&tmp.path().join("restore-state.db")).unwrap();
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     std::fs::write(&out, b"stale regular file").unwrap();
-    tcfs_sync::engine::download_file(&op, &link_manifest, &out, prefix, None)
-        .await
-        .expect("download symlink");
+    let download = tcfs_sync::engine::download_file_with_device(
+        &op,
+        &link_manifest,
+        &out,
+        prefix,
+        None,
+        "honey",
+        Some(&mut restore_state),
+        None,
+    )
+    .await
+    .expect("download symlink");
 
     let restored = std::fs::read_link(out).unwrap();
     assert_eq!(restored, std::path::PathBuf::from("target.txt"));
+    assert!(download.sync_state.is_some());
+    let restored_state = restore_state.get(&tmp.path().join("out/link.txt")).unwrap();
+    assert_eq!(
+        restored_state.status,
+        tcfs_sync::state::FileSyncStatus::Synced
+    );
+    assert_eq!(restored_state.device_id, "honey");
 }
 
 #[cfg(unix)]

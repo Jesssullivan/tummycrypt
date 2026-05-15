@@ -100,12 +100,19 @@ it repeats the same shadow push, honey traversal/hydration, 9 mounted symlink
 target checks, and lifecycle companion with explicit current Nix flake package
 binaries on both hosts. Do not read either packet as Homebrew readiness:
 Homebrew `tcfs 0.12.12` still skips symlinks. Live repo moves still need the
-larger clean stress canary plus restore/rollback proof. The restore gate is now
-measured by `task lazy:git-repo-restore-proof`; the first Nix packet run is
+larger clean stress canary plus package-backed restore/rollback proof. The
+restore gate is now measured by `task lazy:git-repo-restore-proof`; the first
+Nix packet run is
 archived under
 `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`
 as a blocker because `tcfs reconcile` dry-run timed out during remote-index
-scanning before restore execution.
+scanning before restore execution. Source-built follow-up packets fix that path:
+`restore-proof-source-fix-20260515T1657Z/` proves dry-run within 120s, execute in
+301.84s, and exact regular-file/symlink restoration; the newer
+`restore-proof-source-fix-symlink-state-20260515T171712Z/` records
+`state_entry_count=4610` and `restored_symlink_state_count=9` as well. Empty
+directories are still not restored by `tcfs reconcile`, so packaged Nix/Homebrew
+and empty-dir restore remain separate gates.
 
 ## Linux Terminal Acceptance
 

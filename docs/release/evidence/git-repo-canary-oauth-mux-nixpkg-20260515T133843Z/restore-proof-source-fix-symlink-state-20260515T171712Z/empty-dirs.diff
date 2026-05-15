@@ -1,0 +1,15 @@
+--- /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-symlink-state-20260515T171712Z/shadow-empty-dirs.txt	2026-05-15 13:27:10.752409348 -0400
++++ /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-symlink-state-20260515T171712Z/restored-empty-dirs.txt	2026-05-15 13:27:10.755619039 -0400
+@@ -1,12 +0,0 @@
+-.git/objects/info
+-.git/objects/pack
+-.git/worktrees/oauth-mux-broker/refs
+-dist/live-qa/codex-dogfood-20260508T154113Z
+-dist/live-qa/codex-dogfood-20260508T154928Z
+-dist/live-qa/codex-dogfood-20260508T155036Z
+-dist/live-qa/codex-dogfood-20260508T155057Z
+-dist/live-qa/local-20260501T222138Z/state
+-dist/live-qa/local-20260501T222215Z/state
+-dist/live-qa/local-20260501T222425Z/state
+-dist/live-qa/local-20260501T222444Z/state
+-dist/live-qa/local-20260501T222534Z/state

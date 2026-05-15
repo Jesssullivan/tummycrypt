@@ -8,18 +8,27 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use opendal::Operator;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::blacklist::Blacklist;
 use crate::conflict::{compare_clocks, ConflictInfo};
 use crate::engine::{self, OptionalEncryption, ProgressFn};
-use crate::index_entry::{resolve_visible_index_entry, RemoteIndexEntry};
+use crate::index_entry::{
+    manifest_key, parse_index_entry_record, resolve_visible_index_entry, RemoteIndexEntry,
+};
 use crate::manifest::SyncManifest;
 use crate::state::{StateCache, StateCacheBackend, SyncState};
+
+const REMOTE_INDEX_READ_CONCURRENCY: usize = 32;
+const REMOTE_PULL_CONCURRENCY: usize = 16;
+const DIR_MARKER: &str = ".tcfs_dir";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -159,47 +168,121 @@ pub async fn list_remote_index(
     remote_prefix: &str,
 ) -> Result<HashMap<String, RemoteIndexEntry>> {
     let index_prefix = format!("{}/index/", remote_prefix.trim_end_matches('/'));
+    let manifest_prefix = format!("{}/manifests/", remote_prefix.trim_end_matches('/'));
     let entries = op
         .list_with(&index_prefix)
         .recursive(true)
         .await
         .context("listing remote index")?;
 
-    let mut result = HashMap::new();
+    let manifest_keys = Arc::new(list_remote_manifest_keys(op, &manifest_prefix).await?);
+    let read_permits = Arc::new(Semaphore::new(REMOTE_INDEX_READ_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+
     for entry in entries {
-        let full_key = entry.path();
+        let full_key = entry.path().to_string();
         let rel_path = crate::engine::normalize_rel_path_text(
-            full_key.strip_prefix(&index_prefix).unwrap_or(full_key),
+            full_key.strip_prefix(&index_prefix).unwrap_or(&full_key),
         );
 
-        // Skip directory markers and empty paths
-        if rel_path.is_empty() || rel_path.ends_with('/') {
+        // Skip directory markers and empty paths.
+        if rel_path.is_empty()
+            || rel_path.ends_with('/')
+            || rel_path == DIR_MARKER
+            || rel_path.ends_with("/.tcfs_dir")
+        {
             continue;
         }
 
-        match op.read(full_key).await {
-            Ok(_) => {
-                let manifest_prefix = format!("{}/manifests", remote_prefix.trim_end_matches('/'));
-                match resolve_visible_index_entry(op, full_key, &manifest_prefix).await {
-                    Ok(Some(visible)) => {
-                        result.insert(rel_path, visible);
-                    }
-                    Ok(None) => {
-                        debug!(key = full_key, "skipping non-visible index entry");
-                    }
-                    Err(e) => {
-                        warn!(key = full_key, error = %e, "skipping unreadable index entry");
-                    }
-                }
+        let op = op.clone();
+        let manifest_prefix = manifest_prefix.clone();
+        let manifest_keys = Arc::clone(&manifest_keys);
+        let read_permits = Arc::clone(&read_permits);
+        tasks.spawn(async move {
+            let _permit = read_permits
+                .acquire_owned()
+                .await
+                .context("acquiring remote index read permit")?;
+            let visible =
+                read_visible_remote_index_entry(&op, &full_key, &manifest_prefix, &manifest_keys)
+                    .await
+                    .with_context(|| format!("reading remote index entry: {full_key}"))?;
+            Ok::<_, anyhow::Error>((rel_path, full_key, visible))
+        });
+    }
+
+    let mut result = HashMap::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok((rel_path, _full_key, Some(visible)))) => {
+                result.insert(rel_path, visible);
+            }
+            Ok(Ok((_rel_path, full_key, None))) => {
+                debug!(key = full_key, "skipping non-visible index entry");
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "skipping unreadable index entry");
             }
             Err(e) => {
-                warn!(key = full_key, error = %e, "skipping unreadable index entry");
+                warn!(error = %e, "remote index entry task failed");
             }
         }
     }
 
     debug!(count = result.len(), "fetched remote index");
     Ok(result)
+}
+
+async fn list_remote_manifest_keys(
+    op: &Operator,
+    manifest_prefix: &str,
+) -> Result<HashSet<String>> {
+    let entries = op
+        .list_with(manifest_prefix)
+        .recursive(true)
+        .await
+        .context("listing remote manifests")?;
+
+    let mut result = HashSet::new();
+    for entry in entries {
+        let key = entry.path();
+        if key.is_empty() || key.ends_with('/') {
+            continue;
+        }
+        result.insert(key.to_string());
+    }
+
+    debug!(count = result.len(), "fetched remote manifest keys");
+    Ok(result)
+}
+
+async fn read_visible_remote_index_entry(
+    op: &Operator,
+    index_key: &str,
+    manifest_prefix: &str,
+    manifest_keys: &HashSet<String>,
+) -> Result<Option<RemoteIndexEntry>> {
+    let bytes = op
+        .read(index_key)
+        .await
+        .with_context(|| format!("reading index entry: {index_key}"))?;
+    let parsed = parse_index_entry_record(&bytes.to_vec())
+        .with_context(|| format!("parsing index entry: {index_key}"))?;
+
+    if parsed.pending_entry().is_some() {
+        return resolve_visible_index_entry(op, index_key, manifest_prefix).await;
+    }
+
+    if let Some(current) = parsed.visible_entry() {
+        let current_manifest_key = manifest_key(manifest_prefix, &current.manifest_hash);
+        if manifest_keys.contains(&current_manifest_key) {
+            return Ok(Some(current.clone()));
+        }
+
+        anyhow::bail!("index entry points to missing manifest: {current_manifest_key}");
+    }
+
+    Ok(None)
 }
 
 /// Scan manifests and chunk objects under a prefix and report chunks that are
@@ -666,6 +749,47 @@ pub async fn execute_plan(
     encryption: OptionalEncryption<'_>,
     progress: Option<&ProgressFn>,
 ) -> Result<ExecutionResult> {
+    if encryption.is_none()
+        && progress.is_none()
+        && plan.actions.iter().all(|action| {
+            matches!(
+                action,
+                ReconcileAction::Pull {
+                    reason: PullReason::NewRemote,
+                    ..
+                } | ReconcileAction::UpToDate { .. }
+            )
+        })
+        && plan.actions.iter().any(|action| {
+            matches!(
+                action,
+                ReconcileAction::Pull {
+                    reason: PullReason::NewRemote,
+                    ..
+                }
+            )
+        })
+    {
+        let result = execute_new_remote_pulls_concurrent(
+            plan,
+            op,
+            local_root,
+            remote_prefix,
+            state,
+            device_id,
+        )
+        .await?;
+        if let Err(e) = state.flush() {
+            warn!(error = %e, "failed to flush state cache after concurrent pull execution");
+        }
+        info!(
+            pulled = result.pulled,
+            errors = result.errors.len(),
+            "concurrent pull execution complete"
+        );
+        return Ok(result);
+    }
+
     let mut result = ExecutionResult::default();
 
     for action in &plan.actions {
@@ -806,6 +930,96 @@ pub async fn execute_plan(
     Ok(result)
 }
 
+async fn execute_new_remote_pulls_concurrent(
+    plan: &ReconcilePlan,
+    op: &Operator,
+    local_root: &Path,
+    remote_prefix: &str,
+    state: &mut StateCache,
+    device_id: &str,
+) -> Result<ExecutionResult> {
+    let read_permits = Arc::new(Semaphore::new(REMOTE_PULL_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+
+    for action in &plan.actions {
+        let ReconcileAction::Pull {
+            rel_path,
+            manifest_hash,
+            reason: PullReason::NewRemote,
+            ..
+        } = action
+        else {
+            continue;
+        };
+
+        let op = op.clone();
+        let rel_path = rel_path.clone();
+        let local_path = local_root.join(&rel_path);
+        let remote_prefix = remote_prefix.to_string();
+        let manifest_path = format!(
+            "{}/manifests/{}",
+            remote_prefix.trim_end_matches('/'),
+            manifest_hash
+        );
+        let device_id = device_id.to_string();
+        let read_permits = Arc::clone(&read_permits);
+
+        tasks.spawn(async move {
+            let pull_result = async {
+                let _permit = read_permits
+                    .acquire_owned()
+                    .await
+                    .context("acquiring remote pull permit")?;
+
+                if let Some(parent) = local_path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .with_context(|| format!("creating dir: {}", parent.display()))?;
+                }
+
+                engine::download_file_with_device(
+                    &op,
+                    &manifest_path,
+                    &local_path,
+                    &remote_prefix,
+                    None,
+                    &device_id,
+                    None,
+                    None,
+                )
+                .await
+                .with_context(|| format!("pull failed: {rel_path}"))
+            }
+            .await;
+
+            (rel_path, pull_result)
+        });
+    }
+
+    let mut result = ExecutionResult::default();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok((_, Ok(download))) => {
+                result.pulled += 1;
+                result.bytes_downloaded += download.bytes;
+                if let Some(sync_state) = download.sync_state {
+                    state.set(&download.local_path, sync_state);
+                }
+            }
+            Ok((rel_path, Err(e))) => {
+                result.errors.push((rel_path, e.to_string()));
+            }
+            Err(e) => {
+                result
+                    .errors
+                    .push(("<concurrent-pull-task>".into(), e.to_string()));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Collect local files into a `rel_path → PathBuf` map, applying the blacklist.
@@ -897,6 +1111,31 @@ mod tests {
         assert_eq!(index["file1.txt"].manifest_hash, "aaa");
         assert_eq!(index["file2.txt"].manifest_hash, "bbb");
         assert_eq!(index["file2.txt"].size, 200);
+    }
+
+    #[tokio::test]
+    async fn list_remote_index_skips_directory_markers() {
+        let op = memory_op();
+        op.write("data/index/empty/.tcfs_dir", b"directory".to_vec())
+            .await
+            .unwrap();
+        op.write(
+            "data/index/file.txt",
+            RemoteIndexEntry::new("aaa", 100, 1).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/manifests/aaa",
+            br#"{"version":2,"file_hash":"aaa","file_size":100,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let index = list_remote_index(&op, "data").await.unwrap();
+        assert_eq!(index.len(), 1);
+        assert!(index.contains_key("file.txt"));
+        assert!(!index.contains_key("empty/.tcfs_dir"));
     }
 
     #[tokio::test]
@@ -1127,6 +1366,181 @@ mod tests {
             plan.actions.iter().any(|a| matches!(a, ReconcileAction::Pull { rel_path, .. } if rel_path == "remote_only.txt")),
             "pull action should target remote_only.txt"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_plan_new_remote_pulls_restore_files_and_state() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        let restore_root = dir.path().join("restore");
+        std::fs::create_dir_all(source_root.join("nested")).unwrap();
+        std::fs::create_dir_all(&restore_root).unwrap();
+
+        let alpha = source_root.join("alpha.txt");
+        let beta = source_root.join("nested/beta.txt");
+        std::fs::write(&alpha, b"alpha from neo").unwrap();
+        std::fs::write(&beta, b"beta from neo").unwrap();
+
+        let mut source_state =
+            crate::state::StateCache::open(&dir.path().join("source-state.json")).unwrap();
+        crate::engine::upload_file_with_device(
+            &op,
+            &alpha,
+            "data",
+            &mut source_state,
+            None,
+            "neo",
+            Some("alpha.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::engine::upload_file_with_device(
+            &op,
+            &beta,
+            "data",
+            &mut source_state,
+            None,
+            "neo",
+            Some("nested/beta.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut restore_state =
+            crate::state::StateCache::open(&dir.path().join("restore-state.json")).unwrap();
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(
+            &op,
+            &restore_root,
+            "data",
+            &restore_state,
+            "honey",
+            &blacklist,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(plan.summary.pulls, 2);
+        assert!(plan.actions.iter().all(|action| {
+            matches!(
+                action,
+                ReconcileAction::Pull {
+                    reason: PullReason::NewRemote,
+                    ..
+                }
+            )
+        }));
+
+        let result = execute_plan(
+            &plan,
+            &op,
+            &restore_root,
+            "data",
+            &mut restore_state,
+            "honey",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.pulled, 2);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            std::fs::read(restore_root.join("alpha.txt")).unwrap(),
+            b"alpha from neo"
+        );
+        assert_eq!(
+            std::fs::read(restore_root.join("nested/beta.txt")).unwrap(),
+            b"beta from neo"
+        );
+
+        let alpha_state = restore_state.get(&restore_root.join("alpha.txt")).unwrap();
+        let beta_state = restore_state
+            .get(&restore_root.join("nested/beta.txt"))
+            .unwrap();
+        assert_eq!(alpha_state.status, crate::state::FileSyncStatus::Synced);
+        assert_eq!(beta_state.status, crate::state::FileSyncStatus::Synced);
+        assert_eq!(alpha_state.device_id, "honey");
+        assert_eq!(beta_state.device_id, "honey");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_plan_new_remote_pull_restores_symlink_state() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        let restore_root = dir.path().join("restore");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&restore_root).unwrap();
+
+        let target = source_root.join("target.txt");
+        let link = source_root.join("link.txt");
+        std::fs::write(&target, b"target").unwrap();
+        std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+        let mut source_state =
+            crate::state::StateCache::open(&dir.path().join("source-state.json")).unwrap();
+        crate::engine::upload_symlink_with_device(
+            &op,
+            &link,
+            "data",
+            &mut source_state,
+            "neo",
+            "link.txt",
+        )
+        .await
+        .unwrap();
+
+        let mut restore_state =
+            crate::state::StateCache::open(&dir.path().join("restore-state.json")).unwrap();
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(
+            &op,
+            &restore_root,
+            "data",
+            &restore_state,
+            "honey",
+            &blacklist,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(plan.summary.pulls, 1);
+
+        let result = execute_plan(
+            &plan,
+            &op,
+            &restore_root,
+            "data",
+            &mut restore_state,
+            "honey",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.pulled, 1);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            std::fs::read_link(restore_root.join("link.txt")).unwrap(),
+            PathBuf::from("target.txt")
+        );
+
+        let link_state = restore_state.get(&restore_root.join("link.txt")).unwrap();
+        assert_eq!(link_state.status, crate::state::FileSyncStatus::Synced);
+        assert_eq!(link_state.device_id, "honey");
     }
 
     // ── reconcile plan: both exist, up-to-date ───────────────────────────

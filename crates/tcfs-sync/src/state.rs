@@ -946,19 +946,16 @@ impl StateCacheBackend for StateBackend {
 
 /// Convert a path to a normalized string key for the HashMap.
 ///
-/// Uses `canonicalize` to resolve symlinks (for example `/var` ->
-/// `/private/var` on macOS). When the file itself is gone, fall back to
-/// canonicalizing the parent directory and reattaching the filename so remove
-/// and lookup still hit the same key that was used while the file existed.
+/// Canonicalizes the parent directory (for example `/var` -> `/private/var` on
+/// macOS) but preserves the final path component. That keeps first-class
+/// symlinks keyed by the link path instead of the link target, while still
+/// making delete/remove lookups stable after the file itself is gone.
 fn path_key(path: &Path) -> String {
-    std::fs::canonicalize(path)
-        .or_else(|_| {
-            path.parent()
-                .and_then(|parent| std::fs::canonicalize(parent).ok())
-                .map(|parent| parent.join(path.file_name().unwrap_or_default()))
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent"))
-        })
-        .unwrap_or_else(|_| path.to_path_buf())
+    path.parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        .or_else(|| std::fs::canonicalize(path).ok())
+        .unwrap_or_else(|| path.to_path_buf())
         .to_string_lossy()
         .into_owned()
 }
@@ -1027,6 +1024,37 @@ mod tests {
         let path = dir.path().join("state.json");
         let cache = StateCache::open(&path).unwrap();
         assert!(cache.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_keys_preserve_terminal_symlink_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&target, b"target").unwrap();
+        std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+        let mut cache = StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &link,
+            SyncState {
+                blake3: "hash".into(),
+                size: 10,
+                mtime: 0,
+                chunk_count: 0,
+                remote_path: "data/manifests/hash".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+
+        assert!(cache.get(&link).is_some());
+        assert!(cache.get(&target).is_none());
+        assert!(cache.get_by_rel_path("link.txt").is_some());
     }
 
     #[test]

@@ -5154,7 +5154,7 @@
 /Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/release-handoff.sh
 /Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/release-local.sh
 /Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/release-smoke.sh
-/Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/resolve-npm-token.sh
+/Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/redacted-token-helper.sh
 /Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/review-codex-wire-capture.py
 /Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/smoke-broker.sh
 /Users/jess/TCFS Pilot/real-canaries/oauth-mux-nixpkg-shadow-20260515T133844Z/scripts/smoke-codex-401-propagation.sh

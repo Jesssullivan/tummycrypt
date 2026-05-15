@@ -13,9 +13,10 @@
 
 use anyhow::{Context, Result};
 use opendal::Operator;
+use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use unicode_normalization::UnicodeNormalization;
@@ -999,6 +1000,16 @@ pub struct DownloadResult {
     pub remote_path: String,
     pub local_path: PathBuf,
     pub bytes: u64,
+    pub sync_state: Option<SyncState>,
+}
+
+fn unique_tmp_path(local_path: &Path, marker: &str) -> PathBuf {
+    let mut file_name = local_path
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from(".tcfs"));
+    file_name.push(format!(".{marker}.{}", Uuid::new_v4()));
+    local_path.with_file_name(file_name)
 }
 
 /// Upload a single file to SeaweedFS, chunking it via FastCDC.
@@ -1744,7 +1755,7 @@ pub async fn upload_symlink_with_device(
     op: &Operator,
     local_path: &Path,
     remote_prefix: &str,
-    _state: &mut StateCache,
+    state: &mut StateCache,
     device_id: &str,
     rel_path: &str,
 ) -> Result<UploadResult> {
@@ -1777,6 +1788,16 @@ pub async fn upload_symlink_with_device(
         RemoteIndexEntry::new_symlink(symlink_hash.clone(), target.clone()),
     )
     .await?;
+
+    let sync_state = make_symlink_sync_state(
+        local_path,
+        symlink_hash.clone(),
+        remote_manifest.clone(),
+        manifest.vclock.clone(),
+        device_id.to_string(),
+        target.len() as u64,
+    )?;
+    state.set(local_path, sync_state);
 
     let assume_fresh_prefix = upload_assume_fresh_prefix();
     info!(
@@ -1847,7 +1868,7 @@ pub async fn download_file_with_device(
     remote_prefix: &str,
     progress: Option<&ProgressFn>,
     _device_id: &str,
-    state: Option<&mut StateCache>,
+    mut state: Option<&mut StateCache>,
     encryption: OptionalEncryption<'_>,
 ) -> Result<DownloadResult> {
     // Read manifest with retry so transient storage failures don't abort pull
@@ -1858,6 +1879,29 @@ pub async fn download_file_with_device(
 
     if let Ok(manifest) = SymlinkManifest::from_bytes(&manifest_bytes) {
         create_local_symlink(local_path, &manifest.symlink_target).await?;
+        let mut sync_state_for_result = None;
+        if !_device_id.is_empty() {
+            let mut local_vclock = state
+                .as_ref()
+                .and_then(|state| state.get(local_path))
+                .map(|s| s.vclock.clone())
+                .unwrap_or_default();
+            local_vclock.merge(&manifest.vclock);
+
+            let sync_state = make_symlink_sync_state(
+                local_path,
+                symlink_manifest_hash(&manifest.symlink_target),
+                remote_manifest.to_string(),
+                local_vclock,
+                _device_id.to_string(),
+                manifest.symlink_target.len() as u64,
+            )?;
+            if let Some(state) = state.as_deref_mut() {
+                state.set(local_path, sync_state.clone());
+            }
+            sync_state_for_result = Some(sync_state);
+        }
+
         info!(
             remote = %remote_manifest,
             local = %local_path.display(),
@@ -1868,6 +1912,7 @@ pub async fn download_file_with_device(
             remote_path: remote_manifest.to_string(),
             local_path: local_path.to_path_buf(),
             bytes: manifest.symlink_target.len() as u64,
+            sync_state: sync_state_for_result,
         });
     }
 
@@ -1884,7 +1929,7 @@ pub async fn download_file_with_device(
                 .with_context(|| format!("creating dir: {}", parent.display()))?;
         }
 
-        let tmp = local_path.with_extension("tcfs_tmp");
+        let tmp = unique_tmp_path(local_path, "tcfs_tmp");
         tokio::fs::write(&tmp, &[])
             .await
             .with_context(|| format!("writing empty tmp: {}", tmp.display()))?;
@@ -1902,25 +1947,27 @@ pub async fn download_file_with_device(
                 .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
         }
 
-        // Merge remote vclock into local state
-        if let Some(state) = state {
-            if !_device_id.is_empty() {
-                let mut local_vclock = state
-                    .get(local_path)
-                    .map(|s| s.vclock.clone())
-                    .unwrap_or_default();
-                local_vclock.merge(&manifest.vclock);
+        let mut sync_state_for_result = None;
+        if !_device_id.is_empty() {
+            let mut local_vclock = state
+                .as_ref()
+                .and_then(|state| state.get(local_path))
+                .map(|s| s.vclock.clone())
+                .unwrap_or_default();
+            local_vclock.merge(&manifest.vclock);
 
-                let sync_state = make_sync_state_full(
-                    local_path,
-                    manifest.file_hash.clone(),
-                    0,
-                    remote_manifest.to_string(),
-                    local_vclock,
-                    _device_id.to_string(),
-                )?;
-                state.set(local_path, sync_state);
+            let sync_state = make_sync_state_full(
+                local_path,
+                manifest.file_hash.clone(),
+                0,
+                remote_manifest.to_string(),
+                local_vclock,
+                _device_id.to_string(),
+            )?;
+            if let Some(state) = state.as_deref_mut() {
+                state.set(local_path, sync_state.clone());
             }
+            sync_state_for_result = Some(sync_state);
         }
 
         info!(
@@ -1934,6 +1981,7 @@ pub async fn download_file_with_device(
             remote_path: remote_manifest.to_string(),
             local_path: local_path.to_path_buf(),
             bytes: 0,
+            sync_state: sync_state_for_result,
         });
     }
 
@@ -2016,7 +2064,7 @@ pub async fn download_file_with_device(
             .with_context(|| format!("creating dir: {}", parent.display()))?;
     }
 
-    let tmp = local_path.with_extension("tcfs_tmp");
+    let tmp = unique_tmp_path(local_path, "tcfs_tmp");
     tokio::fs::write(&tmp, &assembled)
         .await
         .with_context(|| format!("writing tmp: {}", tmp.display()))?;
@@ -2034,28 +2082,30 @@ pub async fn download_file_with_device(
             .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
     }
 
-    // Merge remote vclock into local state if we have a state cache
-    if let Some(state) = state {
-        if !_device_id.is_empty() {
-            let mut local_vclock = state
-                .get(local_path)
-                .map(|s| s.vclock.clone())
-                .unwrap_or_default();
-            local_vclock.merge(&manifest.vclock);
+    let mut sync_state_for_result = None;
+    if !_device_id.is_empty() {
+        let mut local_vclock = state
+            .as_ref()
+            .and_then(|state| state.get(local_path))
+            .map(|s| s.vclock.clone())
+            .unwrap_or_default();
+        local_vclock.merge(&manifest.vclock);
 
-            let file_hash = tcfs_chunks::hash_bytes(&assembled);
-            let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
+        let file_hash = tcfs_chunks::hash_bytes(&assembled);
+        let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
 
-            let sync_state = make_sync_state_full(
-                local_path,
-                file_hash_hex,
-                total,
-                remote_manifest.to_string(),
-                local_vclock,
-                _device_id.to_string(),
-            )?;
-            state.set(local_path, sync_state);
+        let sync_state = make_sync_state_full(
+            local_path,
+            file_hash_hex,
+            total,
+            remote_manifest.to_string(),
+            local_vclock,
+            _device_id.to_string(),
+        )?;
+        if let Some(state) = state.as_deref_mut() {
+            state.set(local_path, sync_state.clone());
         }
+        sync_state_for_result = Some(sync_state);
     }
 
     info!(
@@ -2069,6 +2119,7 @@ pub async fn download_file_with_device(
         remote_path: remote_manifest.to_string(),
         local_path: local_path.to_path_buf(),
         bytes,
+        sync_state: sync_state_for_result,
     })
 }
 
@@ -2079,7 +2130,7 @@ async fn create_local_symlink(local_path: &Path, target: &str) -> Result<()> {
             .with_context(|| format!("creating dir: {}", parent.display()))?;
     }
 
-    let tmp = local_path.with_extension("tcfs_symlink_tmp");
+    let tmp = unique_tmp_path(local_path, "tcfs_symlink_tmp");
     let _ = tokio::fs::remove_file(&tmp).await;
 
     #[cfg(unix)]
@@ -2098,6 +2149,41 @@ async fn create_local_symlink(local_path: &Path, target: &str) -> Result<()> {
         .await
         .with_context(|| format!("renaming symlink to: {}", local_path.display()))?;
     Ok(())
+}
+
+fn make_symlink_sync_state(
+    local_path: &Path,
+    hash_hex: String,
+    remote_path: String,
+    vclock: VectorClock,
+    device_id: String,
+    size: u64,
+) -> Result<SyncState> {
+    let meta = std::fs::symlink_metadata(local_path)
+        .with_context(|| format!("stat symlink for sync state: {}", local_path.display()))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    Ok(SyncState {
+        blake3: hash_hex,
+        size,
+        mtime,
+        chunk_count: 0,
+        remote_path,
+        last_synced: now,
+        vclock,
+        device_id,
+        conflict: None,
+        status: FileSyncStatus::Synced,
+    })
 }
 
 /// Walk a local directory and upload all changed files.

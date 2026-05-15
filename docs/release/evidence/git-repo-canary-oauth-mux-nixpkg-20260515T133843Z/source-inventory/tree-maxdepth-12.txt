@@ -5154,7 +5154,7 @@
 /Users/jess/git/oauth-mux/scripts/release-handoff.sh
 /Users/jess/git/oauth-mux/scripts/release-local.sh
 /Users/jess/git/oauth-mux/scripts/release-smoke.sh
-/Users/jess/git/oauth-mux/scripts/resolve-npm-token.sh
+/Users/jess/git/oauth-mux/scripts/redacted-token-helper.sh
 /Users/jess/git/oauth-mux/scripts/review-codex-wire-capture.py
 /Users/jess/git/oauth-mux/scripts/smoke-broker.sh
 /Users/jess/git/oauth-mux/scripts/smoke-codex-401-propagation.sh

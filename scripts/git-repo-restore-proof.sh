@@ -15,6 +15,7 @@ symlink targets against the archived shadow.
 Options:
   --evidence-dir <path>  Existing pushed canary evidence packet
   --restore-root <path>  Fresh restore root. Default: ~/TCFS Pilot/restore-proofs/<packet>-restore-<UTC>
+  --restore-dir <path>   Evidence subdirectory. Default: <evidence>/restore-proof
   --config <path>        tcfs config. Default: <evidence>/state/tcfs-git-repo-canary.toml
   --tcfs-bin <path>      tcfs binary. Default: TCFS_BIN, packet run-metadata tcfs_command, or tcfs
   --state <path>         Restore state JSON. Default: <evidence>/restore-state.json
@@ -26,6 +27,7 @@ Options:
 Environment mirrors:
   EVIDENCE_DIR
   RESTORE_ROOT
+  RESTORE_PROOF_DIR
   TCFS_RESTORE_CONFIG
   TCFS_BIN
   TCFS_STATE_PATH
@@ -146,10 +148,45 @@ count_lines() {
   wc -l <"$file" | tr -d ' '
 }
 
+write_state_manifest() {
+  local state_file="$1"
+  local root="$2"
+  local out="$3"
+
+  [[ -f "$state_file" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+
+  local root_prefix="${root%/}/"
+  jq -r --arg root "$root_prefix" '
+    ($root | length) as $root_len
+    | (.entries // {})
+    | to_entries[]
+    | select(.key | startswith($root))
+    | [(.key[$root_len:]), (.value.status // ""), (.value.device_id // ""), (.value.remote_path // "")]
+    | @tsv
+  ' "$state_file" | LC_ALL=C sort >"$out"
+}
+
+count_symlink_state_matches() {
+  local symlinks_file="$1"
+  local state_manifest="$2"
+  local count=0
+
+  while IFS=$'\t' read -r rel _target; do
+    [[ -n "$rel" ]] || continue
+    if awk -F '\t' -v rel="$rel" '$1 == rel && $2 == "synced" { found = 1 } END { exit found ? 0 : 1 }' "$state_manifest"; then
+      count=$((count + 1))
+    fi
+  done <"$symlinks_file"
+
+  printf '%s\n' "$count"
+}
+
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
 evidence_dir="${EVIDENCE_DIR:-}"
 restore_root="${RESTORE_ROOT:-}"
+restore_dir="${RESTORE_PROOF_DIR:-}"
 config_path="${TCFS_RESTORE_CONFIG:-}"
 tcfs_bin="${TCFS_BIN:-}"
 state_path="${TCFS_STATE_PATH:-}"
@@ -166,6 +203,11 @@ while [[ $# -gt 0 ]]; do
     --restore-root)
       [[ $# -ge 2 ]] || fail "--restore-root requires a value"
       restore_root="$2"
+      shift 2
+      ;;
+    --restore-dir)
+      [[ $# -ge 2 ]] || fail "--restore-dir requires a value"
+      restore_dir="$2"
       shift 2
       ;;
     --config)
@@ -253,8 +295,11 @@ if [[ -z "$state_path" ]]; then
 fi
 mkdir -p "$(dirname "$state_path")"
 
-restore_dir="$evidence_dir/restore-proof"
+if [[ -z "$restore_dir" ]]; then
+  restore_dir="$evidence_dir/restore-proof"
+fi
 mkdir -p "$restore_dir"
+restore_dir="$(cd "$restore_dir" && pwd -P)"
 
 tcfs_version_status=ok
 tcfs_version="$("$tcfs_bin" --version 2>&1)" || tcfs_version_status=failed
@@ -378,6 +423,15 @@ write_empty_dir_manifest "$restore_root" "$restore_dir/restored-empty-dirs.txt"
 write_unsupported_manifest "$shadow_root" "$restore_dir/shadow-unsupported-special-files.txt"
 write_unsupported_manifest "$restore_root" "$restore_dir/restored-unsupported-special-files.txt"
 
+state_manifest_status=unavailable
+state_entry_count=0
+restored_symlink_state_count=0
+if write_state_manifest "$state_path" "$restore_root" "$restore_dir/restored-state.tsv"; then
+  state_manifest_status=ok
+  state_entry_count="$(count_lines "$restore_dir/restored-state.tsv")"
+  restored_symlink_state_count="$(count_symlink_state_matches "$restore_dir/restored-symlink-targets.tsv" "$restore_dir/restored-state.tsv")"
+fi
+
 regular_diff_rc=0
 diff -u "$restore_dir/shadow-regular-sha256.tsv" "$restore_dir/restored-regular-sha256.tsv" \
   >"$restore_dir/regular-files.diff" || regular_diff_rc=$?
@@ -455,6 +509,9 @@ restored_regular_file_count=$restored_regular_count
 symlink_targets_match=$symlink_targets_match
 shadow_symlink_count=$shadow_symlink_count
 restored_symlink_count=$restored_symlink_count
+state_manifest_status=$state_manifest_status
+state_entry_count=$state_entry_count
+restored_symlink_state_count=$restored_symlink_state_count
 empty_dirs_match=$empty_dirs_match
 shadow_empty_dir_count=$shadow_empty_dir_count
 restored_empty_dir_count=$restored_empty_dir_count
@@ -492,6 +549,8 @@ Files:
   hash manifests
 - \`shadow-symlink-targets.tsv\` / \`restored-symlink-targets.tsv\`: symlink
   target manifests
+- \`restored-state.tsv\`: restored sync-state entries when the state JSON and
+  \`jq\` are available
 - \`shadow-empty-dirs.txt\` / \`restored-empty-dirs.txt\`: recorded empty-dir
   manifests. Empty directories are a known separate gate unless
   \`--require-empty-dirs\` is used.

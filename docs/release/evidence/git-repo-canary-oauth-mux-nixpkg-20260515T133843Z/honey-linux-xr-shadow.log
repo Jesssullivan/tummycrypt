@@ -5166,7 +5166,7 @@ find evidence (max depth 8):
 /tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/mount/scripts/release-handoff.sh
 /tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/mount/scripts/release-local.sh
 /tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/mount/scripts/release-smoke.sh
-/tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/mount/scripts/resolve-npm-token.sh
+/tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/mount/scripts/redacted-token-helper.sh
 /tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/mount/scripts/review-codex-wire-capture.py
 /tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/mount/scripts/smoke-broker.sh
 /tmp/tcfs-home-canary-linux-xr-shadow-20260515T133844Z/mount/scripts/smoke-codex-401-propagation.sh

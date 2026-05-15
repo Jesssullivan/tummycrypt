@@ -41,19 +41,22 @@ proves the same tiny mounted parse/target check with current Nix flake packages
 on both neo and honey. This is still not Homebrew proof: installed Homebrew
 continues to skip symlinks. The next gates before moving live repos into TCFS
 are Homebrew rebuild/publish if Homebrew is the client lane, `linux-xr-fast` as
-the larger clean stress canary, and fresh-tree restore/rollback proof.
+the larger clean stress canary, and package-backed fresh-tree restore/rollback
+proof.
 
-The fresh-tree restore gate is now executable, but not green.
+The fresh-tree restore gate is now green for source-built binaries, with one
+recorded full-tree gap.
 `task lazy:git-repo-restore-proof` takes an existing pushed canary packet,
 restores into `~/TCFS Pilot/restore-proofs/`, and archives regular-file hash,
-symlink-target, empty-dir, and reconcile logs under `<packet>/restore-proof/`.
+symlink-target, empty-dir, state, and reconcile logs under a proof directory.
 The first run against
 `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`
 timed out during `tcfs reconcile` dry-run remote-index scanning after 120s,
-before any restore mutation. Treat that as a restore/rollback blocker, not as a
-failed content comparison. The helper also records the current empty-directory
-gap separately: `reconcile` restores regular files and symlinks, while empty
-directories remain a distinct full-tree parity gate.
+before any restore mutation. The source-built follow-up
+`restore-proof-source-fix-symlink-state-20260515T171712Z/` restores 4,601
+regular files and 9 symlinks exactly and records synced state for all 4,610
+restored paths. Treat packaged Nix/Homebrew restore and empty-directory restore
+as the remaining restore/rollback gates.
 
 Use `task lazy:tcfs-symlink-package-probe` to recheck packaged or candidate
 binaries before repeating the real repo canary. The helper writes a fresh
@@ -168,6 +171,8 @@ task lazy:git-repo-restore-proof
 ```
 
 Use `RESTORE_RECONCILE_TIMEOUT_SECS=<seconds>` to bound each reconcile command.
+Use `RESTORE_PROOF_DIR=<packet>/restore-proof-<label>` when adding a follow-up
+proof without overwriting an earlier blocker packet.
 Use `REQUIRE_EMPTY_DIRS=1` only when empty-directory parity is part of the gate.
 
 The helper refuses dirty worktrees unless `ALLOW_DIRTY_SOURCE=1` or

@@ -46,10 +46,17 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   Both prove clean shadow push, 0 skipped symlinks, honey mounted
   traversal/hydration, 9 mounted symlink target checks, and the Linux lifecycle
   companion. Homebrew `0.12.12` remains stale and skips symlinks; live repo
-  moves still need the larger clean stress canary plus restore/rollback proof.
+  moves still need the larger clean stress canary plus package-backed
+  restore/rollback proof.
   `task lazy:git-repo-restore-proof` now records that restore gate; the first
   Nix packet run timed out during `tcfs reconcile` remote-index dry-run and is
-  archived as a blocker under the Nix packet.
+  archived as a blocker under the Nix packet. Follow-up source-built proofs fix
+  the remote-index timeout and restore all 4,601 regular files plus 9 symlinks
+  exactly. The latest packet,
+  `restore-proof-source-fix-symlink-state-20260515T171712Z/`, also records
+  `state_entry_count=4610` and `restored_symlink_state_count=9`; empty
+  directories remain a separate reconcile gap, and packaged Nix/Homebrew restore
+  still needs a rebuild proof.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

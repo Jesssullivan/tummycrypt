@@ -1,0 +1,15 @@
+--- docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-20260515T1657Z/shadow-empty-dirs.txt	2026-05-15 13:01:51.928716534 -0400
++++ docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-20260515T1657Z/restored-empty-dirs.txt	2026-05-15 13:01:51.929593381 -0400
+@@ -1,12 +0,0 @@
+-.git/objects/info
+-.git/objects/pack
+-.git/worktrees/oauth-mux-broker/refs
+-dist/live-qa/codex-dogfood-20260508T154113Z
+-dist/live-qa/codex-dogfood-20260508T154928Z
+-dist/live-qa/codex-dogfood-20260508T155036Z
+-dist/live-qa/codex-dogfood-20260508T155057Z
+-dist/live-qa/local-20260501T222138Z/state
+-dist/live-qa/local-20260501T222215Z/state
+-dist/live-qa/local-20260501T222425Z/state
+-dist/live-qa/local-20260501T222444Z/state
+-dist/live-qa/local-20260501T222534Z/state

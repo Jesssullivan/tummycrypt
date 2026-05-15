@@ -148,6 +148,7 @@ assert_contains "$PACKET/restore-proof/restore-proof.env" "status=passed"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "proof=fresh-tree-restore-files-and-symlinks-empty-dirs-gap"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "regular_files_match=1"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "symlink_targets_match=1"
+assert_contains "$PACKET/restore-proof/restore-proof.env" "state_manifest_status=unavailable"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "empty_dirs_match=0"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "shadow_empty_dir_count=1"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "restored_empty_dir_count=0"
@@ -155,6 +156,20 @@ assert_contains "$PACKET/restore-proof/README.md" "TCFS Git Repo Fresh-Tree Rest
 test -f "$PACKET/restore-proof/reconcile-dry-run.log"
 test -f "$PACKET/restore-proof/reconcile-execute.log"
 test -L "$RESTORE/readme-link"
+
+CUSTOM_RESTORE="$TMPDIR/restored tree custom"
+CUSTOM_RESTORE_DIR="$PACKET/restore-proof-custom"
+FAKE_RESTORE_SOURCE="$SHADOW" bash "$SCRIPT" \
+  --evidence-dir "$PACKET" \
+  --restore-root "$CUSTOM_RESTORE" \
+  --restore-dir "$CUSTOM_RESTORE_DIR" \
+  --config "$CONFIG" \
+  --state "$TMPDIR/restore-state-custom.json" \
+  >"$TMPDIR/custom-dir.out"
+
+assert_contains "$TMPDIR/custom-dir.out" "restore proof status: passed"
+assert_contains "$CUSTOM_RESTORE_DIR/restore-proof.env" "status=passed"
+test -f "$CUSTOM_RESTORE_DIR/reconcile-execute.log"
 
 REQUIRE_RESTORE="$TMPDIR/restored tree require"
 assert_fails_contains \

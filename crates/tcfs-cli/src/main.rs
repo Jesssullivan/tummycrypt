@@ -3927,10 +3927,16 @@ async fn cmd_reconcile(
         println!();
         println!("Dry run — no changes made. Use --execute to apply.");
         if !orphan_chunk_cleanup_grace.is_zero() {
-            println!(
-                "Orphan chunk cleanup runs during execute with a {} second grace period.",
-                config.sync.orphan_chunk_cleanup_grace_secs
-            );
+            if plan_may_orphan_remote_chunks(&plan) {
+                println!(
+                    "Orphan chunk cleanup runs during execute with a {} second grace period.",
+                    config.sync.orphan_chunk_cleanup_grace_secs
+                );
+            } else {
+                println!(
+                    "Orphan chunk cleanup will be skipped during execute; this plan does not overwrite or delete remote data."
+                );
+            }
         }
         return Ok(());
     }
@@ -3987,7 +3993,7 @@ async fn cmd_reconcile(
         }
     }
 
-    if !orphan_chunk_cleanup_grace.is_zero() {
+    if !orphan_chunk_cleanup_grace.is_zero() && plan_may_orphan_remote_chunks(&plan) {
         println!();
         println!(
             "Sweeping orphaned remote chunks older than {} seconds...",
@@ -4015,9 +4021,26 @@ async fn cmd_reconcile(
         for (chunk, err) in &cleanup.delete_errors {
             eprintln!("  orphan cleanup error: {chunk}: {err}");
         }
+    } else if execute && !orphan_chunk_cleanup_grace.is_zero() {
+        println!();
+        println!(
+            "Skipping orphan chunk cleanup; this plan did not overwrite or delete remote data."
+        );
     }
 
     Ok(())
+}
+
+fn plan_may_orphan_remote_chunks(plan: &tcfs_sync::reconcile::ReconcilePlan) -> bool {
+    plan.actions.iter().any(|action| {
+        matches!(
+            action,
+            tcfs_sync::reconcile::ReconcileAction::Push {
+                reason: tcfs_sync::reconcile::PushReason::LocalNewer,
+                ..
+            } | tcfs_sync::reconcile::ReconcileAction::DeleteRemote { .. }
+        )
+    })
 }
 
 // ── `tcfs resolve` ───────────────────────────────────────────────────────────
@@ -4190,6 +4213,44 @@ mod tests {
             .decode(wrapped_b64)
             .unwrap();
         tcfs_crypto::unwrap_key(master_key, &wrapped).is_ok()
+    }
+
+    fn plan_with_actions(
+        actions: Vec<tcfs_sync::reconcile::ReconcileAction>,
+    ) -> tcfs_sync::reconcile::ReconcilePlan {
+        tcfs_sync::reconcile::ReconcilePlan {
+            actions,
+            summary: tcfs_sync::reconcile::ReconcileSummary::default(),
+            device_id: "test-device".into(),
+            generated_at: 0,
+        }
+    }
+
+    #[test]
+    fn reconcile_cleanup_skips_pull_only_plans() {
+        let plan = plan_with_actions(vec![tcfs_sync::reconcile::ReconcileAction::Pull {
+            rel_path: "doc.txt".into(),
+            manifest_hash: "hash".into(),
+            size: 12,
+            reason: tcfs_sync::reconcile::PullReason::NewRemote,
+        }]);
+
+        assert!(!plan_may_orphan_remote_chunks(&plan));
+    }
+
+    #[test]
+    fn reconcile_cleanup_runs_for_remote_overwrite_or_delete() {
+        let overwrite = plan_with_actions(vec![tcfs_sync::reconcile::ReconcileAction::Push {
+            local_path: PathBuf::from("doc.txt"),
+            rel_path: "doc.txt".into(),
+            reason: tcfs_sync::reconcile::PushReason::LocalNewer,
+        }]);
+        let delete = plan_with_actions(vec![tcfs_sync::reconcile::ReconcileAction::DeleteRemote {
+            rel_path: "old.txt".into(),
+        }]);
+
+        assert!(plan_may_orphan_remote_chunks(&overwrite));
+        assert!(plan_may_orphan_remote_chunks(&delete));
     }
 
     #[test]
