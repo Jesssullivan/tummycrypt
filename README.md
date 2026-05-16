@@ -46,7 +46,7 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   Both prove clean shadow push, 0 skipped symlinks, honey mounted
   traversal/hydration, 9 mounted symlink target checks, and the Linux lifecycle
   companion. Homebrew `0.12.12` remains stale and skips symlinks; live repo
-  moves still need the larger clean stress canary plus package-backed
+  moves still need large-repo fresh-tree restore and package-backed
   restore/rollback proof.
   `task lazy:git-repo-restore-proof` now records that restore gate; the first
   Nix packet run timed out during `tcfs reconcile` remote-index dry-run and is
@@ -59,20 +59,17 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   rebuilt Nix flake package binary now proves that same fresh-tree restore gate
   in `restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/`
   (`tcfs_sha256=5ee0939f2d1f02cada1c46e429849613b5303fb930e0039a4622d5b712df95a8`).
-  Homebrew restore remains stale/unproven. The next larger clean stress canary
-  against `~/git/linux-xr-fast` is now archived as blocker evidence in
-  `git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/` and
-  `git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`: the clean
-  source is `.git`-heavy, has 2,038 regular files / 0 symlinks, and current
-  package push became dominated by a 387 MB `.git/objects/pack/*.idx` object.
-  Follow-up source-built blocker packets prove the next two raw-Git fixes in
-  isolation: `git-repo-canary-linux-xr-fast-sourcefix-20260516T024122Z/`
-  reduced large pack indexes to tens of chunks, then exposed extensionless
-  `tmp_pack_*` files; `git-repo-canary-linux-xr-fast-sourcefix-tmppack-20260516T024810Z/`
-  reduced those temp packs to 8-51 chunks, then exposed `.git/index` as a
-  1,767-chunk hotspot. Source now covers Git pack indexes, temp packs, and the
-  exact `.git/index` file, but the post-index-fix stress run and
-  package-backed restore/rollback proof are still open.
+  Homebrew restore remains stale/unproven. The larger clean stress canary
+  against `~/git/linux-xr-fast` is now green for source-built shadow push,
+  honey mounted traversal/hydration, and the Linux lifecycle companion in
+  `git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`. The
+  source-built run proves the raw Git pack-index, temp-pack, and exact
+  `.git/index` chunk-profile fixes, but its fresh-tree restore attempt remains
+  a blocker: `restore-proof/` restored 2,036 of 2,038 regular files and all 6
+  empty directories, then missed two multi-GB `.git/objects/pack/*.pack` files
+  after transient chunk read failures. Live repo moves, Homebrew readiness,
+  package-backed restore/rollback, production Finder, broad `~/git`, and
+  home-directory takeover remain unclaimed.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

@@ -1,0 +1,13 @@
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/Documents
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/Documents/fleet-readiness.md
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo/.git
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo/.git/HEAD
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo/.git/config
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo/.git/refs
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo/.git/refs/heads
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo/README.md
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo/src
+/Users/jess/TCFS Pilot/runs/fleet-parity-20260516T053814Z-6130/git/tcfs-pilot-repo/src/main.rs

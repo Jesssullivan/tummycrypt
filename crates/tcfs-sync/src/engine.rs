@@ -30,11 +30,14 @@ use crate::index_entry::{
 use crate::manifest::{SymlinkManifest, SyncManifest};
 use crate::state::{make_sync_state_full, FileSyncStatus, StateCache, SyncState};
 
-/// Maximum number of retry attempts for chunk upload/download operations.
+/// Default number of retry attempts for chunk upload/download operations.
 const CHUNK_MAX_RETRIES: u32 = 3;
 
 /// Base delay between retries (doubles each attempt: 100ms, 200ms, 400ms).
 const CHUNK_RETRY_BASE_MS: u64 = 100;
+
+/// Hard cap for `TCFS_DOWNLOAD_CHUNK_RETRIES`.
+const MAX_DOWNLOAD_CHUNK_RETRIES: u32 = 32;
 
 /// Default bounded fanout for per-file chunk uploads.
 const DEFAULT_UPLOAD_CHUNK_CONCURRENCY: usize = 4;
@@ -83,6 +86,29 @@ fn upload_chunk_concurrency() -> usize {
         std::env::var("TCFS_UPLOAD_CHUNK_CONCURRENCY")
             .ok()
             .as_deref(),
+    )
+}
+
+fn download_chunk_retries_from_env_value(value: Option<&str>) -> u32 {
+    let Some(raw) = value else {
+        return CHUNK_MAX_RETRIES;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return CHUNK_MAX_RETRIES;
+    }
+
+    trimmed
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_DOWNLOAD_CHUNK_RETRIES))
+        .unwrap_or(CHUNK_MAX_RETRIES)
+}
+
+fn download_chunk_retries() -> u32 {
+    download_chunk_retries_from_env_value(
+        std::env::var("TCFS_DOWNLOAD_CHUNK_RETRIES").ok().as_deref(),
     )
 }
 
@@ -375,7 +401,7 @@ where
 
 /// Write a chunk to remote storage with exponential backoff retry.
 ///
-/// Retries up to `CHUNK_MAX_RETRIES` times on transient failures.
+/// Retries up to the default chunk retry count on transient failures.
 async fn write_chunk_with_retry(
     op: &Operator,
     key: &str,
@@ -576,10 +602,36 @@ impl std::fmt::Display for ChunkReadError {
 
 impl std::error::Error for ChunkReadError {}
 
+#[cfg(test)]
 async fn read_chunk_with_retry_inner<Read, ReadFuture, Sleep, SleepFuture>(
     key: &str,
     expected_hash: &str,
     chunk_idx: usize,
+    read: Read,
+    sleep: Sleep,
+) -> Result<Vec<u8>>
+where
+    Read: FnMut() -> ReadFuture,
+    ReadFuture: std::future::Future<Output = Result<Vec<u8>>>,
+    Sleep: FnMut(std::time::Duration) -> SleepFuture,
+    SleepFuture: std::future::Future<Output = ()>,
+{
+    read_chunk_with_retry_inner_with_attempts(
+        key,
+        expected_hash,
+        chunk_idx,
+        CHUNK_MAX_RETRIES,
+        read,
+        sleep,
+    )
+    .await
+}
+
+async fn read_chunk_with_retry_inner_with_attempts<Read, ReadFuture, Sleep, SleepFuture>(
+    key: &str,
+    expected_hash: &str,
+    chunk_idx: usize,
+    max_attempts: u32,
     mut read: Read,
     sleep: Sleep,
 ) -> Result<Vec<u8>>
@@ -590,7 +642,7 @@ where
     SleepFuture: std::future::Future<Output = ()>,
 {
     retry_with_backoff(
-        CHUNK_MAX_RETRIES,
+        max_attempts,
         |_| {
             let read_attempt = read();
             async move {
@@ -611,7 +663,7 @@ where
                 warn!(
                     chunk = chunk_idx,
                     attempt,
-                    max = CHUNK_MAX_RETRIES,
+                    max = max_attempts,
                     delay_ms = delay.as_millis(),
                     error = %source,
                     "chunk download failed, retrying"
@@ -623,6 +675,7 @@ where
                     attempt,
                     expected = expected_hash,
                     actual = %actual,
+                    max = max_attempts,
                     delay_ms = delay.as_millis(),
                     "chunk integrity mismatch, retrying"
                 );
@@ -640,10 +693,11 @@ async fn read_chunk_with_retry(
     expected_hash: &str,
     chunk_idx: usize,
 ) -> Result<Vec<u8>> {
-    read_chunk_with_retry_inner(
+    read_chunk_with_retry_inner_with_attempts(
         key,
         expected_hash,
         chunk_idx,
+        download_chunk_retries(),
         || async {
             op.read(key)
                 .await
@@ -2974,6 +3028,31 @@ mod tests {
         assert_eq!(
             upload_chunk_concurrency_from_env_value(Some("999")),
             MAX_UPLOAD_CHUNK_CONCURRENCY
+        );
+    }
+
+    #[test]
+    fn download_chunk_retries_env_is_bounded() {
+        assert_eq!(
+            download_chunk_retries_from_env_value(None),
+            CHUNK_MAX_RETRIES
+        );
+        assert_eq!(
+            download_chunk_retries_from_env_value(Some("")),
+            CHUNK_MAX_RETRIES
+        );
+        assert_eq!(
+            download_chunk_retries_from_env_value(Some("not-a-number")),
+            CHUNK_MAX_RETRIES
+        );
+        assert_eq!(
+            download_chunk_retries_from_env_value(Some("0")),
+            CHUNK_MAX_RETRIES
+        );
+        assert_eq!(download_chunk_retries_from_env_value(Some("7")), 7);
+        assert_eq!(
+            download_chunk_retries_from_env_value(Some("999")),
+            MAX_DOWNLOAD_CHUNK_RETRIES
         );
     }
 

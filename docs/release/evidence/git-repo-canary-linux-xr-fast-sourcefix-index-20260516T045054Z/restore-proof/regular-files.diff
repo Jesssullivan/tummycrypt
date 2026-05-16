@@ -1,0 +1,18 @@
+--- /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/restore-proof/shadow-regular-sha256.tsv	2026-05-16 02:08:27.256754725 -0400
++++ /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/restore-proof/restored-regular-sha256.tsv	2026-05-16 02:12:39.764766902 -0400
+@@ -141,7 +141,6 @@
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	.git/objects/pack/pack-0a04d45090a53b44d49c5a0f5b8a20ddea27402d.promisor
+ 654ef8048449ee6a2ed8b7be26070d05914ecb19ec6564ddf4a85290005062c7	.git/objects/pack/pack-0a04d45090a53b44d49c5a0f5b8a20ddea27402d.rev
+ b604a8124aa88decf9f5694d5afb9937170157dce10bca8906eacbbb6fc62627	.git/objects/pack/pack-0eef814cc0cff33f75a42f5de61a3fedefea1cbc.idx
+-c704bfcf5321bc2a70b6cf511444462a8ba5f573b6ec86385479b74559d4906b	.git/objects/pack/pack-0eef814cc0cff33f75a42f5de61a3fedefea1cbc.pack
+ aa05a17a6b5885667e9ab7f0ad1f01461a1c65bbcaf623cbae6bd928868b4137	.git/objects/pack/pack-0eef814cc0cff33f75a42f5de61a3fedefea1cbc.rev
+ fea4930e58481661a5cada8a15e43a96eb0ac5c08851301c310a1e6170584dbf	.git/objects/pack/pack-1a97c7f98c0b1d7f6ccfc774e8d81585c092ae19.idx
+ b5c8e024824ffb3b6e0653ec82bc3d1086be23dcce740537524aad3776d026b9	.git/objects/pack/pack-1a97c7f98c0b1d7f6ccfc774e8d81585c092ae19.pack
+@@ -184,7 +183,6 @@
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	.git/objects/pack/pack-ae96a8911b4424bfefdd33f21fd50c3459858885.promisor
+ a7bd17eb1fe2034154e70071df5e24099a4a482ed74faa06f92801d41d4f8c5e	.git/objects/pack/pack-ae96a8911b4424bfefdd33f21fd50c3459858885.rev
+ 6936b0d24064a82bb9c5e6655b95c62e180679e63346916859ef5d5d72bab2e7	.git/objects/pack/pack-c21744675e9a7f27dbe22914f954ed37b6e2f336.idx
+-592608de633edb05a4b1f8ceec76849538e28f5c61d8d5fd774ec9075b222268	.git/objects/pack/pack-c21744675e9a7f27dbe22914f954ed37b6e2f336.pack
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	.git/objects/pack/pack-c21744675e9a7f27dbe22914f954ed37b6e2f336.promisor
+ 1c0d1cc6bf18c73728c8fc49c3ab43b801ebdd7b5c7bbaf6f93f058ec401f6e9	.git/objects/pack/pack-c21744675e9a7f27dbe22914f954ed37b6e2f336.rev
+ cd6a378b95e4d7a1089fca93d54647a69dfbb639a57ca6fb52211c6534db1683	.git/objects/pack/pack-cd89bb5de7e92d5e4721fa720511e68d4fdf9f70.idx

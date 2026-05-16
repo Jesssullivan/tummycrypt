@@ -49,6 +49,7 @@ the repository.
 | `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/` | Green current Nix flake package-backed generic git repo canary against clean `~/git/oauth-mux`: Nix package neo push, Nix package honey mounted traversal/hydration, mounted symlink target verification, and Linux lifecycle companion; restore blocker now archived under `restore-proof/` | repo-archived source/shadow inventory, explicit Nix build/version/SHA files for both binaries, completed fresh-prefix push with 4,601 uploaded file rows / 356,520,343 bytes / zero skipped symlinks / all rows `fresh_prefix_publish=true`, honey smoke with Nix package SHA `dc9b17...`, mounted symlink `readlink` checks for 9 symlinks, Linux lifecycle write/readback/cache-clear/rehydrate/recursive safe-unsync transcripts, and `result.env` with `proof=shadow-push-honey-linux-lifecycle-symlink-targets`; `restore-proof/restore-proof.env` records `proof=fresh-tree-restore-blocked` because `tcfs reconcile` dry-run timed out after 120s while scanning the remote index, before restore execution; this closes the current Nix package-backed small-repo shadow gate only, not restore/rollback, Homebrew readiness, live repo takeover, production Finder, broad home takeover, or production storage posture |
 | `git-repo-canary-linux-xr-fast-sourcefix-20260516T024122Z/` | Source-built `linux-xr-fast` blocker packet after the pack-index chunk-profile fix | live source remained read-only; source/shadow inventories record clean `xr/main` at `dbfcd3938a2f38cd1020716e98aad245452f51e1`, 2,038 regular files, 0 symlinks, and 0 unsupported special files. Push evidence showed the large pack indexes reduced to 75 and 51 chunks, then exposed extensionless `.git/objects/pack/tmp_pack_*` files at 52,372 / 17,057 / 6,395 chunks. No honey/lifecycle/restore proof is claimed |
 | `git-repo-canary-linux-xr-fast-sourcefix-tmppack-20260516T024810Z/` | Source-built `linux-xr-fast` blocker packet after the temp-pack chunk-profile fix | reused the same shadow and fresh prefix, then was intentionally stopped with `status=143`; temp packs reduced to 51 / 18 / 8 chunks, large pack indexes stayed at 75 and 51 chunks, and the 10 MB `.git/index` became the max-chunk path at 1,767 chunks before the current `.git/index` source fix. No green push, honey traversal, Linux lifecycle, restore, live repo move, Finder, broad home, or production storage claim is made |
+| `git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/` | Source-built `linux-xr-fast` green push/mount/lifecycle packet with fresh-tree restore blocker | completed isolated shadow push from `~/git/linux-xr-fast` with 2,038 uploaded regular-file rows / 8,702,124,366 file bytes / 6,740 chunks / zero skipped symlinks, proving Git pack-index, temp-pack, and exact `.git/index` profile fixes in one run; honey mounted traversal/hydration and Linux lifecycle companion passed. `restore-proof/restore-proof.env` is failed: 2,036 of 2,038 regular files restored, all 6 empty dirs matched, and two multi-GB raw Git `.pack` files failed after transient chunk read errors. No live repo move, package-backed restore/rollback, Homebrew, Finder, broad `~/git`, or home takeover claim is made |
 | `macos-fileprovider-neo-preflight-20260516T023852Z/` | Refreshed neo FileProvider divergence inventory and strict preflight blocker | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; PlugInKit pointed at `~/Applications/TCFSProvider.app`, strict preflight failed on missing host/extension Keychain access-group entitlements and embedded provisioning profiles, ambient `tcfs` was workspace `0.12.12`, and ambient `tcfsd` was Nix profile `0.12.2`; no production Finder claim |
 | `macos-fileprovider-neo-pkg-install-20260516T024006Z/` | Helper-based published `.pkg` install attempt after refreshed divergence inventory | package checksum/signature/notarization were verified, stale `~/Applications/TCFSProvider.app` was quarantined under the evidence packet, and install remained blocked because `sudo -n installer` required a password; `/Applications/TCFSProvider.app` was not installed, so strict preflight/Finder lifecycle remain open |
 | `macos-fileprovider-neo-cleanup-20260510T003148Z/` | Non-mutating neo FileProvider divergence inventory before cleanup | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; no `.pkg` install, stale app quarantine, or strict production preflight was run |
@@ -184,16 +185,20 @@ the repository.
   state for 4,610 paths, and all 12 empty directories with
   `--require-empty-dirs`. Rebuild/publish Homebrew if Homebrew is the client
   lane, prove packaged restore, then rerun the larger clean `linux-xr-fast`
-  stress canary and green package-backed restore/rollback proof before moving
-  any live repo into TCFS. The first `linux-xr-fast` package attempts are
-  blocker packets: `git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/`
-  and `git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/` both stop
-  at the same 387 MB `.git/objects/pack/*.idx` upload before honey/lifecycle
-  proof. Follow-up source-built packets prove pack-index and temp-pack
-  reductions, then expose `.git/index` as the next max-chunk path. The current
-  source covers all three Git metadata profiles, but no post-index-fix large
-  canary, package-backed restore/rollback proof, live repo move, broad home, or
-  production storage claim exists yet.
+  stress canary with a selected package/binary and green package-backed
+  restore/rollback proof before moving any live repo into TCFS. The first
+  `linux-xr-fast` package attempts are blocker packets:
+  `git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/` and
+  `git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/` both stop at
+  the same 387 MB `.git/objects/pack/*.idx` upload before honey/lifecycle
+  proof. Follow-up source-built packets prove pack-index, temp-pack, and exact
+  `.git/index` reductions. The current source-built packet,
+  `git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`, is green
+  for large shadow push, honey mounted traversal/hydration, and Linux lifecycle,
+  but its fresh-tree restore failed after restoring 2,036 of 2,038 regular
+  files and all 6 empty dirs; the two missing files are multi-GB raw Git pack
+  files. No package-backed restore/rollback proof, live repo move, broad home,
+  or production storage claim exists yet.
 - The runnable `macos-fileprovider-neo-cleanup-<UTC>/` packet is divergence
   inventory and optional cleanup/install evidence. It is not production Finder
   readiness unless strict production signing preflight passes against the

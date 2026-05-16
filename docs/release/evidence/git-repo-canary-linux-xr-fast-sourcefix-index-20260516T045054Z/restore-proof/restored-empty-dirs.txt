@@ -1,0 +1,6 @@
+.git/refs/heads/jess
+.git/refs/remotes/linus
+.git/refs/remotes/longterm
+.git/refs/remotes/stable
+.git/refs/remotes/upstream
+.git/refs/tmp

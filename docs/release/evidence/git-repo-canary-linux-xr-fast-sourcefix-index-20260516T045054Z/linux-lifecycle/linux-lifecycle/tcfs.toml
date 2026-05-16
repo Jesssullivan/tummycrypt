@@ -1,0 +1,24 @@
+[daemon]
+socket = "/tmp/tcfs-lazy-linux-demo.dTaL4S/no-daemon.sock"
+
+[storage]
+endpoint = "http://100.64.48.53:8333"
+region = "us-east-1"
+bucket = "tcfs"
+remote_prefix = "git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/linux-lifecycle/linux-lifecycle"
+enforce_tls = false
+
+[sync]
+state_db = "/tmp/tcfs-lazy-linux-demo.dTaL4S/state.db"
+sync_root = "/tmp/tcfs-lazy-linux-demo.dTaL4S/source"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_empty_dirs = true
+
+[fuse]
+cache_dir = "/tmp/tcfs-lazy-linux-demo.dTaL4S/cache"
+cache_max_mb = 64
+negative_cache_ttl_secs = 1
+
+[crypto]
+enabled = false

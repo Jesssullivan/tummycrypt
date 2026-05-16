@@ -40,33 +40,29 @@ follow-up, `docs/release/evidence/tcfs-symlink-package-probe-20260515T060330Z/`,
 proves the same tiny mounted parse/target check with current Nix flake packages
 on both neo and honey. This is still not Homebrew proof: installed Homebrew
 continues to skip symlinks. The next gates before moving live repos into TCFS
-are Homebrew rebuild/publish if Homebrew is the client lane and a green
-larger clean stress canary with package-backed fresh-tree restore/rollback
-proof.
+are Homebrew rebuild/publish if Homebrew is the client lane, a green large-repo
+fresh-tree restore, and package-backed restore/rollback proof.
 
-The first `linux-xr-fast` stress attempts are blocker evidence, not parity
-evidence. `git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/` inventories a
-clean `xr/main` shadow at `dbfcd3938a2f38cd1020716e98aad245452f51e1` with 2,038
-regular files, 0 symlinks, 0 unsupported special files, and about 8.2 GB of
-mostly `.git` data. The package-backed push reached a 387 MB
-`.git/objects/pack/*.idx` file and was intentionally stopped. The tuned retry,
-`git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`, reused the same
-shadow with chunk/file concurrency, S3 pool bounds, and upload heartbeat env set
-to the prior storage-posture values, but it was still dominated by the same
-pack index and did not produce a green push. Follow-up source-built blocker
-packets narrowed the raw-Git object-count problem further:
-`git-repo-canary-linux-xr-fast-sourcefix-20260516T024122Z/` proved pack indexes
-under `.git/objects/pack/` use the large sequential profile and reduced the
-largest two pack indexes to 75 and 51 chunks, then exposed extensionless
-`tmp_pack_*` files at 52,372 / 17,057 / 6,395 chunks. The next source-built
-packet, `git-repo-canary-linux-xr-fast-sourcefix-tmppack-20260516T024810Z/`,
-proved those temp packs use the large sequential profile at 51 / 18 / 8
-chunks, then exposed `.git/index` as the new max-chunk path at 1,767 chunks.
-Source now covers Git pack indexes, temp packs, and the exact `.git/index`
-file, but that final index fix has not yet had a green large stress rerun.
+The current `linux-xr-fast` source-built stress packet is green for shadow
+push, honey mounted traversal/hydration, and Linux lifecycle, but it is not yet
+green for fresh-tree restore. Earlier package attempts,
+`git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/` and
+`git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`, established the
+clean `xr/main` shadow shape: 2,038 regular files, 0 symlinks, 0 unsupported
+special files, and about 8.2 GB of mostly `.git` data. They stalled on a 387 MB
+`.git/objects/pack/*.idx` upload. Follow-up source-built packets then proved
+the raw-Git object-count fixes for pack indexes, extensionless `tmp_pack_*`
+files, and the exact `.git/index` file. The latest packet,
+`git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`, completes the
+source-built push with 2,038 uploaded rows / 8,702,124,366 bytes / 6,740 chunks,
+zero skipped symlinks, and a green honey/lifecycle companion. Its
+`restore-proof/` attempt restored 2,036 of 2,038 regular files and all 6 empty
+directories, then missed two multi-GB `.git/objects/pack/*.pack` files after
+transient chunk read failures. Treat this as the current blocker before any
+live repo move.
 
-The fresh-tree restore gate is now green for source-built binaries, including
-empty directories.
+The small-repo fresh-tree restore gate is green for source-built and current
+Nix package binaries, including empty directories.
 `task lazy:git-repo-restore-proof` takes an existing pushed canary packet,
 restores into `~/TCFS Pilot/restore-proofs/`, and archives regular-file hash,
 symlink-target, empty-dir, state, and reconcile logs under a proof directory.
@@ -76,9 +72,11 @@ timed out during `tcfs reconcile` dry-run remote-index scanning after 120s,
 before any restore mutation. The source-built follow-up
 `restore-proof-source-fix-empty-dirs-20260515T183805Z/` restores 4,601 regular
 files, 9 symlinks, synced state for all 4,610 restored paths, and all 12
-archived empty directories with `--require-empty-dirs`. Treat packaged
-Nix/Homebrew restore as the remaining restore/rollback gate before live repo
-moves.
+archived empty directories with `--require-empty-dirs`. The larger
+`linux-xr-fast` restore gate is still blocked by the two failed multi-GB Git
+pack pulls above. Treat packaged Nix/Homebrew restore, Homebrew symlink
+readiness, and a green large-repo restore/rollback proof as remaining gates
+before live repo moves.
 
 Use `task lazy:tcfs-symlink-package-probe` to recheck packaged or candidate
 binaries before repeating the real repo canary. The helper writes a fresh
@@ -101,9 +99,9 @@ signing preflight passes.
 ## Default Canary Order
 
 1. `~/git/oauth-mux` shadow: small, clean, low-risk first proof.
-2. `~/git/linux-xr-fast` shadow: large clean stress proof after the Git pack
-   index, temp-pack, and `.git/index` chunk-profile fixes are in the selected
-   candidate binary/package.
+2. `~/git/linux-xr-fast` shadow: repeat large clean stress proof with a selected
+   candidate binary/package, enough local free space for full restore, and
+   download retry posture suitable for multi-GB Git pack pulls.
 3. One expendable live repo: only after the shadow packet proves restore from
    remote, cross-host rehydrate, and safe-unsync behavior.
 4. Selected `~/git` or `~/Documents` subtrees: only after several repo canaries
@@ -194,6 +192,9 @@ task lazy:git-repo-restore-proof
 ```
 
 Use `RESTORE_RECONCILE_TIMEOUT_SECS=<seconds>` to bound each reconcile command.
+Use `TCFS_DOWNLOAD_CHUNK_RETRIES=<attempts>` when rerunning large restore
+proofs against a noisy storage endpoint; the default is 3 and the code caps the
+value at 32.
 Use `RESTORE_PROOF_DIR=<packet>/restore-proof-<label>` when adding a follow-up
 proof without overwriting an earlier blocker packet.
 Use `REQUIRE_EMPTY_DIRS=1` only when empty-directory parity is part of the gate.

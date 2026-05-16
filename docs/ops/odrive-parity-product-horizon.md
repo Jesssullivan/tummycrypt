@@ -106,9 +106,9 @@ clear/rehydrate, dirty recursive safe-unsync refusal, and clean recursive
 safe-unsync success. It is still not an odrive-parity storage claim because the
 endpoint was plaintext tailnet HTTP, socket highwater exceeded configured
 upload concurrency, generated large source headers still create thousands of
-chunks, and the Git pack-index large-profile fix has not yet been proven by a
-candidate package/binary rerun. Broad `~/git` or home-directory claims remain
-out of scope.
+chunks, and the Git metadata profile fixes plus multi-GB pack restore have not
+yet been proven by a candidate package/binary rerun. Broad `~/git` or
+home-directory claims remain out of scope.
 
 ## Linux <> Finder Parity Evidence
 

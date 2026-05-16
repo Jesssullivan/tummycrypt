@@ -200,12 +200,18 @@ average, 16 MiB maximum. The `20260514` packet proves both raw Git `.pack` and
 package blocker then showed a 387 MB `.git/objects/pack/*.idx` still dominates
 raw `.git` stress, so current source also routes Git pack indexes through the
 large sequential profile while leaving generic `.idx` files on the moderate
-profile. The next object-model proof is a candidate-package rerun, plus a
+profile. Follow-up source-built `linux-xr-fast` proof covers Git pack indexes,
+temp packs, and the exact `.git/index` file in one completed push, but
+fresh-tree restore is still blocked on two multi-GB Git pack downloads. The
+next object-model proof is a candidate-package rerun with full restore, plus a
 decision on whether generated large source/data files need a similar policy or
 whether their measured chunk counts are acceptable. Chunk upload attempts are
 bounded by
 `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS` (default 300, cap 3600, `0` disables) so a
 wedged S3 write slot becomes a retry row instead of an unobservable stall.
+Chunk download attempts are tunable via `TCFS_DOWNLOAD_CHUNK_RETRIES` (default
+3, cap 32) so large restore proofs can increase retry budget without changing
+source.
 Fresh-prefix bulk proof can now opt in to
 `TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1` to skip per-chunk remote existence checks,
 and `TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS=N` records bounded chunk progress for

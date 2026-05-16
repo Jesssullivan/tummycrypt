@@ -1,0 +1,17 @@
+# Optional Linux lifecycle companion. This proves mounted write/readback,
+# cache clear/rehydrate, and recursive safe-unsync under a nested disposable
+# prefix without changing the fleet traversal fixture.
+ssh honey 'mkdir -p /tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle'
+ssh honey 'mkdir -p /tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/scripts'
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-linux-demo.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle/lazy-hydration-linux-demo.sh
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-linux-lifecycle-demo.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle/lazy-hydration-linux-lifecycle-demo.sh
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-mounted-smoke.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/scripts/lazy-hydration-mounted-smoke.sh
+scp /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/linux-lifecycle/honey-linux-lifecycle-run.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle/honey-linux-lifecycle-run.sh
+ssh honey 'chmod +x /tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle/lazy-hydration-linux-demo.sh /tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle/lazy-hydration-linux-lifecycle-demo.sh /tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/scripts/lazy-hydration-mounted-smoke.sh /tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle/honey-linux-lifecycle-run.sh'
+ssh honey 'bash /tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle/honey-linux-lifecycle-run.sh'
+mkdir -p /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/linux-lifecycle/linux-lifecycle
+scp -r honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260516T045055Z/linux-lifecycle/linux-lifecycle/evidence/. /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/linux-lifecycle/linux-lifecycle/
+
+# If honey does not already have AWS credentials, rerun this local helper with
+# --run-linux-lifecycle --forward-aws-env. The generated command file never
+# stores those credentials.
