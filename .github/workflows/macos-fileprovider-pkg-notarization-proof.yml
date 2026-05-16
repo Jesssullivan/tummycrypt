@@ -91,9 +91,7 @@ jobs:
           missing=()
           for required in \
             APPLE_CERTIFICATE_BASE64 \
-            APPLE_CERTIFICATE_PASSWORD \
             APPLE_INSTALLER_CERTIFICATE_BASE64 \
-            APPLE_INSTALLER_CERTIFICATE_PASSWORD \
             APPLE_ID \
             APPLE_TEAM_ID \
             APPLE_NOTARIZE_PASSWORD \

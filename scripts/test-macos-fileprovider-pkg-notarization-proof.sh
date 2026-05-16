@@ -87,9 +87,7 @@ check_required_secret_gate() {
 
   for secret in \
     APPLE_CERTIFICATE_BASE64 \
-    APPLE_CERTIFICATE_PASSWORD \
     APPLE_INSTALLER_CERTIFICATE_BASE64 \
-    APPLE_INSTALLER_CERTIFICATE_PASSWORD \
     APPLE_ID \
     APPLE_TEAM_ID \
     APPLE_NOTARIZE_PASSWORD \
@@ -102,6 +100,13 @@ check_required_secret_gate() {
   assert_contains "$step" "Missing required Apple signing/notarization secrets"
   assert_contains "$step" "This proof must run on macOS"
   assert_contains "$step" "must run on an arm64 macOS runner"
+
+  for optional_password_secret in \
+    APPLE_CERTIFICATE_PASSWORD \
+    APPLE_INSTALLER_CERTIFICATE_PASSWORD
+  do
+    assert_contains "$WORKFLOW" "$optional_password_secret: \${{ secrets.${optional_password_secret} }}"
+  done
 }
 
 check_signing_and_build_steps() {
