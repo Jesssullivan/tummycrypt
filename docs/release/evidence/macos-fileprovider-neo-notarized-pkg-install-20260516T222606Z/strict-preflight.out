@@ -1,0 +1,6 @@
+tcfs binary: /Users/jess/.local/bin/tcfs
+tcfs version: tcfs 0.12.2
+tcfsd binary: /Users/jess/.nix-profile/bin/tcfsd
+tcfsd version: tcfsd 0.12.2
+tcfs config: /Users/jess/.config/tcfs/config.toml
+FileProvider config: /Users/jess/.config/tcfs/fileprovider/config.json

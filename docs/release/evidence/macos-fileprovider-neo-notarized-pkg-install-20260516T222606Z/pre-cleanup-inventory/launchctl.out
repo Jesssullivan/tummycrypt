@@ -1,0 +1,5 @@
+$ sh -c launchctl\ print\ gui/\$\(id\ -u\)\ 2\>/dev/null\ \|\ grep\ -E\ \"io\\\\.tinyland\\\\.tcfs\|tcfsd\|TCFSProvider\"\ \|\|\ true
+		       0      0 	dev.tinyland.tcfsd-health
+		   71988      - 	dev.tinyland.tcfsd
+		"dev.tinyland.tcfsd" => enabled
+		"io.tinyland.tcfsd" => enabled

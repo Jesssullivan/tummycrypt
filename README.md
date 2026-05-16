@@ -87,10 +87,14 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   runner, submitted it to Apple's notary service, received `Accepted`, stapled
   and validated the ticket, passed Gatekeeper install assessment, and passed
   strict package smoke with signature, Gatekeeper, and stapled-ticket gates
-  required. This is a workflow artifact proof, not a published release asset or
-  local install. The package has not been installed under `/Applications`, and
-  no PlugInKit/Finder lifecycle was run. Production Finder remains a `#309`
-  gate, not a current claim.
+  required. The notarized workflow artifact was then downloaded on `neo`
+  (`sha256=c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`)
+  and passed the same local strict package smoke. A real local install attempt
+  still blocked at `sudo -n installer` because admin authentication was not
+  available, so `/Applications/TCFSProvider.app` remains absent and no
+  PlugInKit/Finder lifecycle was run. This is a workflow artifact plus local
+  package-validation proof, not a published release asset or Finder readiness.
+  Production Finder remains a `#309` gate, not a current claim.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

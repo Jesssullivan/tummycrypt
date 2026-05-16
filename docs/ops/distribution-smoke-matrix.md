@@ -36,10 +36,13 @@ an unknown/unknown manifest, with no Linux arm64 image. The release workflow is
 configured to publish both architectures on the next cut, but that still needs
 tagged registry proof before upgrading the current evidence row. Remote run
 `25973109986` proves source-package notarization, stapling, Gatekeeper install
-assessment, and strict package smoke for a workflow artifact. Production macOS
-`.pkg` current-tag release install/Finder proof remains a separate follow-up
-check because that package was not published as a GitHub Release asset or
-installed into `/Applications`.
+assessment, and strict package smoke for a workflow artifact. Neo then
+downloaded the artifact, verified SHA-256
+`c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`, and
+reran the same strict package smoke locally. Production macOS `.pkg`
+current-tag release install/Finder proof remains a separate follow-up check
+because that package was not published as a GitHub Release asset and the local
+install attempt did not install into `/Applications`.
 
 ## Out-Of-Scope Published Helpers
 
@@ -165,6 +168,14 @@ Gatekeeper install assessment, and strict package smoke with
 `--require-signature`, `--require-gatekeeper-install`, and
 `--require-stapled-ticket`. It is not a tagged release asset or host install
 smoke and does not replace the fresh install command above.
+
+The follow-up neo packets
+`docs/release/evidence/macos-fileprovider-neo-notarized-pkg-inventory-20260516T222519Z/`
+and
+`docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/`
+verify the downloaded notarized artifact locally, then record the real local
+install blocker: `sudo -n installer` requires admin authentication, so
+`/Applications/TCFSProvider.app` remains absent.
 
 Upgrade:
 

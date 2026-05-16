@@ -1,0 +1,1 @@
+c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45  /tmp/tcfs-notarized-pkg-25973109986/tcfs-0.12.12-macos-aarch64.pkg

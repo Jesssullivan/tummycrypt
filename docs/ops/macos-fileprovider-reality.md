@@ -379,6 +379,21 @@ Current neo evidence:
   notarization/stapling/Gatekeeper package acceptance is real for the workflow
   artifact. It still does not install into `/Applications`, clean PlugInKit, or
   prove Finder lifecycle.
+- `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-inventory-20260516T222519Z/`
+  downloads the notarized workflow artifact onto `neo` and validates it
+  locally. The SHA-256 is
+  `c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`, and
+  local strict package smoke passes with signature, Gatekeeper install
+  assessment, and stapled-ticket checks required. The same packet records that
+  `/Applications/TCFSProvider.app` is still absent, PlugInKit is still parented
+  by `~/Applications/TCFSProvider.app`, and ambient `tcfs`/`tcfsd` resolve to
+  `0.12.2`.
+- `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/`
+  attempts the real local install from that notarized artifact. The installer
+  command fails before payload installation because `sudo -n installer` reports
+  `sudo: a password is required`; strict preflight then fails on the missing
+  `/Applications/TCFSProvider.app`. This is the current local blocker packet,
+  not a Finder/FileProvider lifecycle claim.
 - `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
   refreshes the divergence inventory. At the start of this packet the visible
   PlugInKit registration still pointed at

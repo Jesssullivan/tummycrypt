@@ -58,6 +58,8 @@ the repository.
 | `macos-fileprovider-candidate-pkg-20260516T190702Z/` | Non-installing candidate `.pkg` structure/signature proof on neo | current source-built `tcfs`/`tcfsd 0.12.12` plus the signed source-built FileProvider app were wrapped into a local `.pkg`; payload structure smoke passed for `/usr/local/bin/tcfs`, `/usr/local/bin/tcfsd`, `/Applications/TCFSProvider.app`, the FileProvider appex, and repo postinstall; package signature verifies as Developer ID Installer with trusted timestamp. This is still not install, PlugInKit cleanup, or Finder lifecycle proof |
 | `macos-fileprovider-candidate-pkg-assessment-20260516T194612Z/` | Non-installing Gatekeeper/notarization assessment of the candidate `.pkg` | `pkgutil --check-signature` still passes and the expanded payload matches the expected app/appex/CLI/postinstall shape, but `spctl --assess --type install` rejects the package as `Unnotarized Developer ID` and `xcrun stapler validate` reports no stapled ticket. This is retained as the historical pre-notarization blocker; the next Finder gate is install/preflight/Finder smoke from a notarized package |
 | `macos-fileprovider-pkg-notarization-proof-20260516T211425Z/` | Remote source-package notarization proof for the FileProvider `.pkg` | GitHub Actions run `25973109986` built `tcfs-0.12.12-macos-aarch64.pkg` from source on `macos-14` arm64, imported Developer ID Application/Installer identities and FileProvider profiles, passed strict signing-only FileProvider preflight, submitted to Apple notary service with `xcrun notarytool submit --wait`, received `Accepted`, stapled and validated the ticket, passed Gatekeeper install assessment as `source=Notarized Developer ID`, and passed strict package smoke with signature, Gatekeeper, and stapled-ticket checks required. This is a workflow artifact proof, not a GitHub Release publication, local `/Applications` install, PlugInKit cleanup, or Finder lifecycle proof |
+| `macos-fileprovider-neo-notarized-pkg-inventory-20260516T222519Z/` | Local neo inventory and strict validation of the downloaded notarized workflow artifact | downloaded artifact SHA-256 is `c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`; local strict package smoke passed with signature, Gatekeeper install assessment, and stapled-ticket checks required. Inventory still shows `/Applications/TCFSProvider.app` absent, PlugInKit parented to `~/Applications/TCFSProvider.app`, and ambient `tcfs`/`tcfsd` at `0.12.2`; no install or Finder lifecycle was run |
+| `macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/` | Local neo install attempt for the downloaded notarized workflow artifact | real install command reached `sudo -n installer -pkg ... -target /` and failed with `sudo: a password is required`; strict preflight then failed because `/Applications/TCFSProvider.app` remained absent. This is blocker evidence only, not Finder readiness |
 | `macos-fileprovider-neo-cleanup-20260510T003148Z/` | Non-mutating neo FileProvider divergence inventory before cleanup | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/` | Non-mutating neo FileProvider divergence inventory with the published `v0.12.12` `.pkg` selected as source | repo-archived inventory plus package checksum pass, `pkgutil --check-signature` Developer ID/notarization output, and non-installing package structure smoke; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-strict-preflight-blocker-20260510T0040Z/` | Non-mutating strict production signing preflight against the existing `~/Applications/TCFSProvider.app` | preflight failed as expected: host and extension keychain access group entitlements/provisioning profiles are missing; ambient `tcfsd` is still `0.12.2` from the Nix profile; this is a blocker record, not Finder readiness |
@@ -250,6 +252,16 @@ the repository.
   `25973109986`, but it remains a workflow artifact proof. It does not publish
   a release asset, install into `/Applications`, clean PlugInKit, or exercise
   Finder/FileProvider lifecycle.
+- `macos-fileprovider-neo-notarized-pkg-inventory-20260516T222519Z/` downloads
+  that artifact onto `neo`, verifies the SHA-256, and reruns strict package
+  smoke locally with signature, Gatekeeper, and stapled-ticket gates required.
+  The local host inventory still shows the stale user-app registration and no
+  canonical `/Applications/TCFSProvider.app`.
+- `macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/` is the next
+  real local install attempt. It is blocked only at non-interactive admin
+  authentication: `sudo -n installer` requires a password. No Finder lifecycle
+  should be claimed until an elevated install, PlugInKit cleanup/inventory, and
+  strict production preflight all pass.
 - `distribution-v01212-20260508T205913Z/` covers Homebrew and Nix only. It does
   not cover current-tag Linux packages, container, or production macOS `.pkg`
   smoke.

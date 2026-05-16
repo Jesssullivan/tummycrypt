@@ -65,6 +65,19 @@ release-grade desktop or iOS product.
   strict package smoke with signature, Gatekeeper, and stapled-ticket checks
   required. This is a workflow artifact proof, not a published release asset or
   an installed Finder lifecycle proof.
+- Local neo packet
+  `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-inventory-20260516T222519Z/`
+  downloads that notarized workflow artifact, verifies SHA-256
+  `c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`, and
+  reruns strict package smoke locally with signature, Gatekeeper, and
+  stapled-ticket checks required. The same inventory still shows no canonical
+  `/Applications/TCFSProvider.app` and a stale user-app PlugInKit registration.
+- Local neo install packet
+  `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/`
+  attempts the real `/` install from that notarized package and records the
+  current blocker: `sudo -n installer` requires a password, so no payload was
+  installed and strict production preflight still fails on the missing
+  `/Applications/TCFSProvider.app`.
 - GitHub Actions links for the current PZM runs are indexed in
   [Release Evidence Index](../release/evidence/README.md).
 
