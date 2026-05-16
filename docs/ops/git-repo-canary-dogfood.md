@@ -58,8 +58,12 @@ source-built push with 2,038 uploaded rows / 8,702,124,366 bytes / 6,740 chunks,
 zero skipped symlinks, and a green honey/lifecycle companion. Its
 `restore-proof/` attempt restored 2,036 of 2,038 regular files and all 6 empty
 directories, then missed two multi-GB `.git/objects/pack/*.pack` files after
-transient chunk read failures. Treat this as the current blocker before any
-live repo move.
+transient chunk read failures. Commit `b1a6285` hardens the restore path by
+streaming chunks directly to a unique temp file, hashing incrementally, and
+removing failed temp files, but this has not yet been re-proven against the
+full `linux-xr-fast` restore because the current neo disk headroom is too low
+for an honest 8.7 GB restore plus overhead. Treat green large restore proof as
+the current blocker before any live repo move.
 
 The small-repo fresh-tree restore gate is green for source-built and current
 Nix package binaries, including empty directories.

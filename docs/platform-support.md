@@ -48,7 +48,12 @@ as a production-proven platform.
 - **Current proof**: CI covers the Rust FileProvider staticlib/header and iOS
   Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts;
   PZM testing-mode lab proof is green beyond read/hydrate; production
-  clean-host Finder proof is still pending
+  clean-host Finder proof is still pending. The latest neo inventory confirms
+  the canonical `/Applications/TCFSProvider.app` install is absent and the
+  existing `~/Applications/TCFSProvider.app` fails strict production signing
+  preflight because Keychain access-group entitlements and embedded
+  provisioning profiles are missing, even though compatible profiles exist
+  locally
 - **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)
   and [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md)
 

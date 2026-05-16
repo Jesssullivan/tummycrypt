@@ -1,0 +1,22 @@
+$ sh -c pluginkit\ -m\ -A\ -D\ -vvv\ 2\>/dev/null\ \|\ grep\ -A8\ -B4\ -E\ \"io\\\\.tinyland\\\\.tcfs\|TCFSProvider\|TCFSFileProvider\"\ \|\|\ true
+	      Short Name = MailCacheDelete
+	     Parent Name = Mail
+	        Platform = macOS
+
++    io.tinyland.tcfs.fileprovider(0.2.0)
+	            Path = /Users/jess/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+	            UUID = 590E2237-5CC9-4E96-BC92-F70C51A63E44
+	       Timestamp = 2026-05-16 05:34:43 +0000
+	             SDK = com.apple.fileprovider-nonui
+	   Parent Bundle = /Users/jess/Applications/TCFSProvider.app
+	    Display Name = TCFSFileProvider
+	      Short Name = TCFSFileProvider
+	     Parent Name = TCFSProvider
+	        Platform = macOS
+
+     com.apple.dt.DVTFeedbackReporting.XCCFeedbackReportingDiagnosticExtension(16.0)
+	            Path = /Applications/Xcode.app/Contents/PlugIns/XCCFeedbackReportingDiagnosticExtension.appex
+	            UUID = 6AD8C6B6-A1D5-42C9-BE68-2C2B20C45DFB
+	       Timestamp = 2026-05-12 19:23:27 +0000
+	             SDK = com.apple.diagnosticextensions-service
+	   Parent Bundle = /Applications/Xcode.app

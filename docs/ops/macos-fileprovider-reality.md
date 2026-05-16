@@ -328,6 +328,21 @@ until the published package is installed and strict preflight passes.
 
 Current neo evidence:
 
+- `docs/release/evidence/macos-fileprovider-neo-cleanup-20260516T073644Z/`
+  is the latest canonical-install preflight packet. It confirms
+  `/Applications/TCFSProvider.app` is absent and therefore strict production
+  preflight fails before signing checks. The same inventory records the only
+  visible app location as `~/Applications/TCFSProvider.app`, PlugInKit parented
+  to that user app, ambient `tcfs` from the workspace at `0.12.12`, and ambient
+  `tcfsd` from the Nix profile at `0.12.2`.
+- `docs/release/evidence/macos-fileprovider-userapp-preflight-20260516T073758Z/`
+  reruns strict preflight against the registered user app. Codesign validation
+  passes and App Group entitlements are present, but strict production
+  preflight fails because both host and extension lack
+  `keychain-access-groups` entitlements and embedded provisioning profiles.
+  `STRICT=1 task lazy:macos-finder-profile-inventory` finds a compatible local
+  Developer ID host/extension profile pair, so the next packaging step is to
+  embed/sign with those profiles and install into `/Applications`.
 - `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
   refreshes the divergence inventory. At the start of this packet the visible
   PlugInKit registration still pointed at

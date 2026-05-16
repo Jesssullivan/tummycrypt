@@ -67,9 +67,20 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   `.git/index` chunk-profile fixes, but its fresh-tree restore attempt remains
   a blocker: `restore-proof/` restored 2,036 of 2,038 regular files and all 6
   empty directories, then missed two multi-GB `.git/objects/pack/*.pack` files
-  after transient chunk read failures. Live repo moves, Homebrew readiness,
-  package-backed restore/rollback, production Finder, broad `~/git`, and
-  home-directory takeover remain unclaimed.
+  after transient chunk read failures. Commit `b1a6285` now streams restore
+  downloads to disk instead of buffering entire files and cleans failed temp
+  files, but a full large-restore rerun is still pending enough local restore
+  headroom. Live repo moves, Homebrew readiness, package-backed
+  restore/rollback, production Finder, broad `~/git`, and home-directory
+  takeover remain unclaimed.
+- Current neo Finder truth: fresh May 16 inventory packets confirm
+  `/Applications/TCFSProvider.app` is absent, the visible PlugInKit
+  registration is still parented by `~/Applications/TCFSProvider.app`, ambient
+  `tcfsd` is still `0.12.2`, and strict production preflight against the user
+  app fails because host and extension lack Keychain access-group entitlements
+  and embedded provisioning profiles. Local profile inventory does find a
+  compatible Developer ID profile pair; it has not been embedded into the
+  installed app. Production Finder remains a `#309` gate, not a current claim.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
