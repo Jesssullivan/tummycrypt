@@ -55,8 +55,9 @@ as a production-proven platform.
   provisioning profiles are missing. A source-built Developer ID app on neo now
   passes strict signing-only preflight with compatible local profiles embedded,
   and a local candidate `.pkg` structure/signature proof wraps it with
-  source-built `tcfs`/`tcfsd`; that package has not been installed or exercised
-  through Finder
+  source-built `tcfs`/`tcfsd`; Gatekeeper rejects that candidate as
+  `Unnotarized Developer ID`, so it still needs notarization/stapling and has
+  not been installed or exercised through Finder
 - **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)
   and [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md)
 

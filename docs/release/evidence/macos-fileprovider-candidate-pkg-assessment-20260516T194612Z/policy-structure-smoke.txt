@@ -1,0 +1,4 @@
+$ scripts/macos-pkg-structure-smoke.sh --pkg build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg --require-signature --require-gatekeeper-install --require-stapled-ticket
+build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg: rejected
+source=Unnotarized Developer ID
+exit_code=3

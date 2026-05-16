@@ -1,0 +1,2 @@
+$ pkgutil --expand-full build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg build/macos-fileprovider-candidate-pkg-assessment-20260516T194612Z-expanded
+exit_code=0

@@ -962,6 +962,12 @@ tasks:
           if [[ "${REQUIRE_SIGNATURE:-0}" == "1" ]]; then
             args+=(--require-signature)
           fi
+          if [[ "${REQUIRE_GATEKEEPER_INSTALL:-0}" == "1" ]]; then
+            args+=(--require-gatekeeper-install)
+          fi
+          if [[ "${REQUIRE_STAPLED_TICKET:-0}" == "1" ]]; then
+            args+=(--require-stapled-ticket)
+          fi
 
           scripts/macos-pkg-structure-smoke.sh "${args[@]}"
           EOF

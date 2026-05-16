@@ -18,6 +18,8 @@ Options:
   --allow-postinstall-mismatch   Warn instead of failing if the package
                                  postinstall differs from --expected-postinstall
   --require-signature            Require pkgutil --check-signature to pass
+  --require-gatekeeper-install   Require spctl install assessment to pass
+  --require-stapled-ticket       Require xcrun stapler validate to pass
   -h, --help                     Show this help
 EOF
 }
@@ -32,7 +34,11 @@ PKG_PATH=""
 EXPECTED_POSTINSTALL="${REPO_ROOT}/scripts/macos-pkg-postinstall.sh"
 ALLOW_POSTINSTALL_MISMATCH=0
 REQUIRE_SIGNATURE=0
+REQUIRE_GATEKEEPER_INSTALL=0
+REQUIRE_STAPLED_TICKET=0
 PKGUTIL_BIN="${TCFS_PKGUTIL:-}"
+SPCTL_BIN="${TCFS_SPCTL:-}"
+XCRUN_BIN="${TCFS_XCRUN:-}"
 UNAME_BIN="${TCFS_UNAME:-uname}"
 
 while [[ $# -gt 0 ]]; do
@@ -53,6 +59,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --require-signature)
       REQUIRE_SIGNATURE=1
+      shift
+      ;;
+    --require-gatekeeper-install)
+      REQUIRE_GATEKEEPER_INSTALL=1
+      shift
+      ;;
+    --require-stapled-ticket)
+      REQUIRE_STAPLED_TICKET=1
       shift
       ;;
     -h|--help)
@@ -134,10 +148,45 @@ if [[ "$REQUIRE_SIGNATURE" == "1" ]]; then
   "$PKGUTIL_BIN" --check-signature "$PKG_PATH" >/dev/null
 fi
 
+if [[ "$REQUIRE_GATEKEEPER_INSTALL" == "1" ]]; then
+  if [[ -z "$SPCTL_BIN" ]]; then
+    if command -v spctl >/dev/null 2>&1; then
+      SPCTL_BIN="$(command -v spctl)"
+    elif [[ -x /usr/sbin/spctl ]]; then
+      SPCTL_BIN="/usr/sbin/spctl"
+    else
+      SPCTL_BIN="spctl"
+    fi
+  fi
+  "$SPCTL_BIN" --assess --type install --verbose=4 "$PKG_PATH" >/dev/null
+fi
+
+if [[ "$REQUIRE_STAPLED_TICKET" == "1" ]]; then
+  if [[ -z "$XCRUN_BIN" ]]; then
+    if command -v xcrun >/dev/null 2>&1; then
+      XCRUN_BIN="$(command -v xcrun)"
+    elif [[ -x /usr/bin/xcrun ]]; then
+      XCRUN_BIN="/usr/bin/xcrun"
+    else
+      XCRUN_BIN="xcrun"
+    fi
+  fi
+  "$XCRUN_BIN" stapler validate -v "$PKG_PATH" >/dev/null
+fi
+
 printf 'package: %s\n' "$PKG_PATH"
 printf 'payload: usr/local/bin/tcfs present\n'
 printf 'payload: usr/local/bin/tcfsd present\n'
 printf 'payload: TCFSProvider.app present\n'
 printf 'payload: TCFSFileProvider.appex present\n'
 printf 'postinstall: %s\n' "$postinstall_status"
+if [[ "$REQUIRE_SIGNATURE" == "1" ]]; then
+  printf 'signature: valid\n'
+fi
+if [[ "$REQUIRE_GATEKEEPER_INSTALL" == "1" ]]; then
+  printf 'gatekeeper: install assessment passed\n'
+fi
+if [[ "$REQUIRE_STAPLED_TICKET" == "1" ]]; then
+  printf 'notarization: stapled ticket valid\n'
+fi
 printf 'macOS package structure smoke passed\n'

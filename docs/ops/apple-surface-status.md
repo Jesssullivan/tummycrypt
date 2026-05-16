@@ -51,6 +51,12 @@ release-grade desktop or iOS product.
   into a Developer ID Installer signed `.pkg` whose payload and postinstall
   structure pass the non-installing smoke. It does not install or register the
   app.
+- Follow-up packet
+  `docs/release/evidence/macos-fileprovider-candidate-pkg-assessment-20260516T194612Z/`
+  confirms the same candidate package has a valid Developer ID Installer
+  signature and expected expanded payload, but Gatekeeper install assessment
+  rejects it as `Unnotarized Developer ID` and `stapler validate` reports no
+  stapled ticket.
 - GitHub Actions links for the current PZM runs are indexed in
   [Release Evidence Index](../release/evidence/README.md).
 

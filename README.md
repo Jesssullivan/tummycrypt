@@ -82,10 +82,12 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   compatible Developer ID profile pair. A source-built
   `TCFSProvider.app` now passes strict signing-only production preflight with
   those profiles embedded, and a local candidate `.pkg` structure/signature
-  proof now wraps that app with current source-built `tcfs`/`tcfsd`. The package
-  has not been installed under `/Applications`, and no PlugInKit/Finder
-  lifecycle was run. Production Finder remains a `#309` gate, not a current
-  claim.
+  proof now wraps that app with current source-built `tcfs`/`tcfsd`. Follow-up
+  assessment shows the local candidate package is Developer ID Installer signed
+  but Gatekeeper rejects it as `Unnotarized Developer ID`, with no stapled
+  ticket. The package has not been installed under `/Applications`, and no
+  PlugInKit/Finder lifecycle was run. Production Finder remains a `#309` gate,
+  not a current claim.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

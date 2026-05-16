@@ -1,0 +1,16 @@
+$ xcrun stapler validate -v build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg
+Processing: /Users/jess/git/tummycrypt/build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg
+Properties are {
+    NSURLIsDirectoryKey = 0;
+    NSURLIsPackageKey = 0;
+    NSURLIsSymbolicLinkKey = 0;
+    NSURLLocalizedTypeDescriptionKey = "Installer flat package";
+    NSURLTypeIdentifierKey = "com.apple.installer-package-archive";
+    "_NSURLIsApplicationKey" = 0;
+}
+Sig Type is RSA. Length is 3
+Sig Type is CMS. Length is 3
+Package tcfs-0.12.12-macos-aarch64.pkg uses a checksum of size 20
+We do not know how to deal with trailer version 3032. Exepected 1
+tcfs-0.12.12-macos-aarch64.pkg does not have a ticket stapled to it.
+exit_code=65

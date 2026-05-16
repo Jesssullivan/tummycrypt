@@ -61,7 +61,11 @@ case "${1:-}" in
     cp "$2.postinstall" "$3/Scripts/postinstall"
     ;;
   --check-signature)
-    exit "${TCFS_FAKE_SIGNATURE_STATUS:-0}"
+    if [[ "${TCFS_FAKE_SIGNATURE_STATUS:-0}" != "0" ]]; then
+      printf 'signature rejected\n' >&2
+      exit "$TCFS_FAKE_SIGNATURE_STATUS"
+    fi
+    exit 0
     ;;
   *)
     printf 'unexpected pkgutil invocation:' >&2
@@ -70,6 +74,34 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+EOF
+cat >"$FAKE_BIN/spctl" <<'EOF'
+#!/usr/bin/env bash
+case "${TCFS_FAKE_SPCTL_STATUS:-0}" in
+  0)
+    printf '%s: accepted\n' "${*: -1}"
+    exit 0
+    ;;
+  *)
+    printf '%s: rejected\nsource=Unnotarized Developer ID\n' "${*: -1}" >&2
+    exit "$TCFS_FAKE_SPCTL_STATUS"
+    ;;
+esac
+EOF
+cat >"$FAKE_BIN/xcrun" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "stapler" && "${2:-}" == "validate" ]]; then
+  if [[ "${TCFS_FAKE_STAPLER_STATUS:-0}" == "0" ]]; then
+    printf 'The validate action worked!\n'
+    exit 0
+  fi
+  printf '%s does not have a ticket stapled to it.\n' "${*: -1}" >&2
+  exit "$TCFS_FAKE_STAPLER_STATUS"
+fi
+printf 'unexpected xcrun invocation:' >&2
+printf ' %q' "$@" >&2
+printf '\n' >&2
+exit 1
 EOF
 chmod +x "$FAKE_BIN"/*
 
@@ -109,7 +141,35 @@ assert_contains "$GOOD_OUT" "macOS package structure smoke passed"
 
 SIGNED_OUT="${TMPDIR}/signed.out"
 PATH="$FAKE_BIN:$PATH" bash "$SCRIPT" --pkg "$GOOD_PKG" --require-signature >"$SIGNED_OUT"
+assert_contains "$SIGNED_OUT" "signature: valid"
 assert_contains "$SIGNED_OUT" "macOS package structure smoke passed"
+
+POLICY_OUT="${TMPDIR}/policy.out"
+PATH="$FAKE_BIN:$PATH" \
+  bash "$SCRIPT" --pkg "$GOOD_PKG" \
+    --require-signature \
+    --require-gatekeeper-install \
+    --require-stapled-ticket \
+  >"$POLICY_OUT"
+assert_contains "$POLICY_OUT" "signature: valid"
+assert_contains "$POLICY_OUT" "gatekeeper: install assessment passed"
+assert_contains "$POLICY_OUT" "notarization: stapled ticket valid"
+assert_contains "$POLICY_OUT" "macOS package structure smoke passed"
+
+assert_fails_contains \
+  "Unnotarized Developer ID" \
+  env TCFS_FAKE_SPCTL_STATUS=3 PATH="$FAKE_BIN:$PATH" \
+    bash "$SCRIPT" --pkg "$GOOD_PKG" --require-gatekeeper-install
+
+assert_fails_contains \
+  "does not have a ticket stapled" \
+  env TCFS_FAKE_STAPLER_STATUS=65 PATH="$FAKE_BIN:$PATH" \
+    bash "$SCRIPT" --pkg "$GOOD_PKG" --require-stapled-ticket
+
+assert_fails_contains \
+  "signature rejected" \
+  env TCFS_FAKE_SIGNATURE_STATUS=1 PATH="$FAKE_BIN:$PATH" \
+    bash "$SCRIPT" --pkg "$GOOD_PKG" --require-signature
 
 MISSING_DAEMON_PAYLOAD='.
 ./usr/local/bin/tcfs

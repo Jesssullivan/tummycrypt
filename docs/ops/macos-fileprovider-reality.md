@@ -360,6 +360,12 @@ Current neo evidence:
   postinstall script. `pkgutil --check-signature` reports Developer ID
   Installer signing with a trusted timestamp. This is package-shape/signature
   proof only; it still does not install, register, launch, or exercise Finder.
+- `docs/release/evidence/macos-fileprovider-candidate-pkg-assessment-20260516T194612Z/`
+  assesses that candidate without installing it. `pkgutil --check-signature`
+  still passes and `pkgutil --expand-full` shows the expected payload, but
+  `spctl --assess --type install` rejects the package as
+  `Unnotarized Developer ID` and `xcrun stapler validate` reports no stapled
+  ticket. The next package gate is notarize/staple before install/preflight.
 - `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
   refreshes the divergence inventory. At the start of this packet the visible
   PlugInKit registration still pointed at
