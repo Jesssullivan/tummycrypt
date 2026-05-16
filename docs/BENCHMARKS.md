@@ -41,7 +41,7 @@ End-to-end latency for push and pull operations against local SeaweedFS:
 | 100 MiB source file | TBD | TBD | TBD | Streaming path |
 | 1 GiB binary/blob | TBD | TBD | TBD | Large-file profile |
 | Raw Git `.pack` | TBD | TBD | TBD | Large-file profile, content-addressed chunk objects |
-| Raw Git `.idx` | TBD | TBD | TBD | Must use the large-file profile; small-profile regressions create excessive S3 object counts |
+| Raw Git `.idx` | TBD | TBD | TBD | Git pack indexes now use the large-file profile in source; package-backed rerun still pending |
 | Full project tree | TBD | TBD | TBD | Record total files, total bytes, chunk objects, manifests, index writes, retries, and endpoint class |
 
 > Push/pull latencies depend on SeaweedFS deployment topology and will be measured in a future sprint with the local dev stack running.
@@ -133,11 +133,14 @@ Release-binary storage observations from
 - The dominant 6,216,046,897-byte raw Git `.pack` stayed at 1,211 chunks. The
   adjacent 45,641,304-byte `.rev` now completed as 8 chunks instead of 8,405
   chunks.
-- The `.idx` row remains 4,599 chunks for 395,849,892 bytes. Outside raw Git
-  pack metadata, generated AMD register headers are now the largest measured
-  object-count hotspots: a 23,949,786-byte `dcn_3_2_0_sh_mask.h` produced
-  2,986 chunks, and a 16,414,003-byte `nbio_7_2_0_sh_mask.h` produced 2,121
-  chunks.
+- The `.idx` row remains 4,599 chunks for 395,849,892 bytes in this packet.
+  The later `linux-xr-fast` blocker confirmed Git pack indexes as the next
+  raw-Git bottleneck, and current source routes `.git/objects/pack/*.idx`
+  through the large sequential profile. A package-backed rerun still needs to
+  prove the new shape. Outside raw Git pack metadata, generated AMD register
+  headers are now the largest measured object-count hotspots: a 23,949,786-byte
+  `dcn_3_2_0_sh_mask.h` produced 2,986 chunks, and a 16,414,003-byte
+  `nbio_7_2_0_sh_mask.h` produced 2,121 chunks.
 - Socket sampling again reached highwater 11 while configured upload
   concurrency was 8. The endpoint was plaintext tailnet HTTP.
 - A follow-up mounted honey smoke reused the same prefix with pinned honey
@@ -170,8 +173,9 @@ Lifecycle companion observations from
   remote pullback, cache clear/rehydrate, dirty recursive safe-unsync refusal,
   and clean recursive safe-unsync success.
 - This closes the scoped lifecycle row for the storage packet, but it remains a
-  lab storage packet: endpoint TLS, socket highwater, `.idx`, and generated
-  large-file policy are still production storage posture follow-ups.
+  lab storage packet: endpoint TLS, socket highwater, candidate-package proof
+  for the Git pack-index large profile, and generated large-file policy are
+  still production storage posture follow-ups.
 
 Pre-fix host observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260510T201809Z/storage-posture-observations.md`:
@@ -185,16 +189,20 @@ Pre-fix host observations from
   and forwarded AWS-style credentials; that is useful lab evidence, not a
   production storage endpoint proof.
 
-The follow-up work routes `.idx` files through the moderate pack-index profile,
-keeps streaming upload snapshots to chunk metadata plus whole-file hash, and
-adds bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default 4,
-cap 64). After the `20260513` packet showed that one 6.2 GB raw Git `.pack`
+The first follow-up routed `.idx` files through the moderate pack-index profile,
+kept streaming upload snapshots to chunk metadata plus whole-file hash, and
+added bounded chunk-upload fanout via `TCFS_UPLOAD_CHUNK_CONCURRENCY` (default
+4, cap 64). After the `20260513` packet showed that one 6.2 GB raw Git `.pack`
 could still require 70,856 chunk writes, `.pack` / `.rev` / `.iso` / `.img`
-files now use the large sequential FastCDC profile: 1 MiB minimum, 4 MiB
+files moved to the large sequential FastCDC profile: 1 MiB minimum, 4 MiB
 average, 16 MiB maximum. The `20260514` packet proves both raw Git `.pack` and
-`.rev` reductions on the full `linux-xr` shadow; the next object-model decision
-is whether `.idx` and generated large source/data files need a similar policy
-or whether their measured chunk counts are acceptable. Chunk upload attempts are
+`.rev` reductions on the full `linux-xr` shadow. The later `linux-xr-fast`
+package blocker then showed a 387 MB `.git/objects/pack/*.idx` still dominates
+raw `.git` stress, so current source also routes Git pack indexes through the
+large sequential profile while leaving generic `.idx` files on the moderate
+profile. The next object-model proof is a candidate-package rerun, plus a
+decision on whether generated large source/data files need a similar policy or
+whether their measured chunk counts are acceptable. Chunk upload attempts are
 bounded by
 `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS` (default 300, cap 3600, `0` disables) so a
 wedged S3 write slot becomes a retry row instead of an unobservable stall.

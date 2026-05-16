@@ -59,8 +59,14 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   rebuilt Nix flake package binary now proves that same fresh-tree restore gate
   in `restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/`
   (`tcfs_sha256=5ee0939f2d1f02cada1c46e429849613b5303fb930e0039a4622d5b712df95a8`).
-  Homebrew restore remains stale/unproven, and live repo moves still need the
-  larger clean stress canary plus package-backed restore/rollback proof.
+  Homebrew restore remains stale/unproven. The next larger clean stress canary
+  against `~/git/linux-xr-fast` is now archived as blocker evidence in
+  `git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/` and
+  `git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`: the clean
+  source is `.git`-heavy, has 2,038 regular files / 0 symlinks, and current
+  package push became dominated by a 387 MB `.git/objects/pack/*.idx` object.
+  Source now moves Git pack indexes to the large sequential chunk profile, but
+  no green rerun or package-backed restore/rollback proof exists yet.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

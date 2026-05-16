@@ -40,9 +40,22 @@ follow-up, `docs/release/evidence/tcfs-symlink-package-probe-20260515T060330Z/`,
 proves the same tiny mounted parse/target check with current Nix flake packages
 on both neo and honey. This is still not Homebrew proof: installed Homebrew
 continues to skip symlinks. The next gates before moving live repos into TCFS
-are Homebrew rebuild/publish if Homebrew is the client lane, `linux-xr-fast` as
-the larger clean stress canary, and package-backed fresh-tree restore/rollback
+are Homebrew rebuild/publish if Homebrew is the client lane and a green
+larger clean stress canary with package-backed fresh-tree restore/rollback
 proof.
+
+The first `linux-xr-fast` stress attempts are blocker evidence, not parity
+evidence. `git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/` inventories a
+clean `xr/main` shadow at `dbfcd3938a2f38cd1020716e98aad245452f51e1` with 2,038
+regular files, 0 symlinks, 0 unsupported special files, and about 8.2 GB of
+mostly `.git` data. The package-backed push reached a 387 MB
+`.git/objects/pack/*.idx` file and was intentionally stopped. The tuned retry,
+`git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`, reused the same
+shadow with chunk/file concurrency, S3 pool bounds, and upload heartbeat env set
+to the prior storage-posture values, but it was still dominated by the same
+pack index and did not produce a green push. Source now treats only Git pack
+indexes under `.git/objects/pack/` as large sequential objects; rerun the large
+stress lane only after that source fix is in the candidate package/binary.
 
 The fresh-tree restore gate is now green for source-built binaries, including
 empty directories.
@@ -80,8 +93,8 @@ signing preflight passes.
 ## Default Canary Order
 
 1. `~/git/oauth-mux` shadow: small, clean, low-risk first proof.
-2. `~/git/linux-xr-fast` shadow: large clean stress proof after the small lane
-   is boring.
+2. `~/git/linux-xr-fast` shadow: large clean stress proof after the `.idx`
+   large-profile fix is in the selected package/binary.
 3. One expendable live repo: only after the shadow packet proves restore from
    remote, cross-host rehydrate, and safe-unsync behavior.
 4. Selected `~/git` or `~/Documents` subtrees: only after several repo canaries
