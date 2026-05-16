@@ -880,19 +880,32 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
         run: |
+          set -euo pipefail
+
           VERSION="${{ needs.plan.outputs.version }}"
           PKG="tcfs-${VERSION}-macos-aarch64.pkg"
+
+          for required in APPLE_ID APPLE_TEAM_ID APPLE_NOTARIZE_PASSWORD; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::${required} is required for signed .pkg notarization"
+              exit 1
+            fi
+          done
+
           echo "Submitting .pkg for notarization..."
-          if xcrun notarytool submit "$PKG" \
+          xcrun notarytool submit "$PKG" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_NOTARIZE_PASSWORD" \
-            --wait; then
-            xcrun stapler staple "$PKG" \
-              || echo "::warning::.pkg stapling failed (non-fatal)"
-          else
-            echo "::warning::.pkg notarization failed (non-fatal)"
-          fi
+            --wait
+
+          xcrun stapler staple "$PKG"
+          xcrun stapler validate -v "$PKG"
+          scripts/macos-pkg-structure-smoke.sh \
+            --pkg "$PKG" \
+            --require-signature \
+            --require-gatekeeper-install \
+            --require-stapled-ticket
 
       - name: Upload .pkg artifact
         uses: actions/upload-artifact@v4
@@ -1029,8 +1042,9 @@ jobs:
 
             ### macOS artifacts
             macOS CLI binaries are Developer ID signed when Apple credentials are configured.
-            FileProvider and `.pkg` notarization is attempted for Apple artifacts, but release
-            publication does not fail if Apple's notarization service or account agreements are unavailable.
+            FileProvider app notarization is attempted for Apple artifacts. Signed `.pkg`
+            release jobs require notarization, stapling, Gatekeeper install assessment, and
+            package policy smoke before the package artifact is uploaded.
 
             ### Binaries included
             | Binary | Purpose |

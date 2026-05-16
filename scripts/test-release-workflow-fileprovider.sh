@@ -575,6 +575,22 @@ assert_contains "$BUILD_PKG_STEP" "--fileprovider-zip \"\$FP_ZIP\""
 assert_contains "$BUILD_PKG_STEP" "--output \"tcfs-\${VERSION}-macos-aarch64.pkg\""
 assert_contains "$BUILD_PKG_STEP" "--sign \"\${PKG_SIGNING_IDENTITY:-}\""
 
+NOTARIZE_PKG_STEP="${TMPDIR}/notarize-pkg.sh"
+extract_step "build-pkg" "Notarize .pkg" "$NOTARIZE_PKG_STEP"
+bash -n "$NOTARIZE_PKG_STEP"
+assert_contains "$NOTARIZE_PKG_STEP" "set -euo pipefail"
+assert_contains "$NOTARIZE_PKG_STEP" "APPLE_ID APPLE_TEAM_ID APPLE_NOTARIZE_PASSWORD"
+assert_contains "$NOTARIZE_PKG_STEP" "::error::\${required} is required for signed .pkg notarization"
+assert_contains "$NOTARIZE_PKG_STEP" "xcrun notarytool submit \"\$PKG\""
+assert_contains "$NOTARIZE_PKG_STEP" "xcrun stapler staple \"\$PKG\""
+assert_contains "$NOTARIZE_PKG_STEP" "xcrun stapler validate -v \"\$PKG\""
+assert_contains "$NOTARIZE_PKG_STEP" "scripts/macos-pkg-structure-smoke.sh"
+assert_contains "$NOTARIZE_PKG_STEP" "--require-signature"
+assert_contains "$NOTARIZE_PKG_STEP" "--require-gatekeeper-install"
+assert_contains "$NOTARIZE_PKG_STEP" "--require-stapled-ticket"
+assert_not_contains "$NOTARIZE_PKG_STEP" "non-fatal"
+assert_not_contains "$NOTARIZE_PKG_STEP" "::warning::.pkg"
+
 VERIFY_RELEASE_PKG_STEP="${TMPDIR}/verify-release-package-structure.sh"
 extract_step_from_workflow \
   "$POSTINSTALL_WORKFLOW" \
