@@ -1,0 +1,11 @@
+{
+  "CFBundleExecutable" => "TCFSProvider"
+  "CFBundleIdentifier" => "io.tinyland.tcfs"
+  "CFBundleInfoDictionaryVersion" => "6.0"
+  "CFBundleName" => "TCFSProvider"
+  "CFBundlePackageType" => "APPL"
+  "CFBundleShortVersionString" => "0.1.0"
+  "CFBundleVersion" => "1"
+  "LSMinimumSystemVersion" => "15.0"
+  "LSUIElement" => true
+}

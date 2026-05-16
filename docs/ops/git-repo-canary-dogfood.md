@@ -95,10 +95,12 @@ the clean `oauth-mux` shadow canary; Homebrew is the remaining package-current
 blocker.
 
 Do not use the current `neo` Finder/CloudStorage root for active repos yet. The
-local Provider registration is still a diagnostic surface until a published
-`.pkg` is installed into `/Applications`, stale user/build registrations are
-cleaned after inventory, backend reachability is fixed, and strict production
-signing preflight passes.
+local Provider registration is still a diagnostic surface. A source-built
+Developer ID app now passes signing-only strict preflight with embedded local
+profiles, but active repos should still wait until a published/candidate `.pkg`
+is installed into `/Applications`, stale user/build registrations are cleaned
+after inventory, backend reachability is fixed, and full production preflight
+plus Finder lifecycle proof passes.
 
 ## Default Canary Order
 

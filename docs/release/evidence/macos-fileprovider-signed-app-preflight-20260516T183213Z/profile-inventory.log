@@ -1,0 +1,50 @@
+task: [lazy:macos-finder-profile-inventory] bash -euo pipefail <<'EOF'
+args=()
+
+if [[ -n "${PROFILES_DIR:-}" ]]; then
+  args+=(--profiles-dir "$PROFILES_DIR")
+fi
+if [[ -n "${HOST_BUNDLE_ID:-}" ]]; then
+  args+=(--host-bundle-id "$HOST_BUNDLE_ID")
+fi
+if [[ -n "${EXTENSION_BUNDLE_ID:-}" ]]; then
+  args+=(--extension-bundle-id "$EXTENSION_BUNDLE_ID")
+fi
+if [[ -n "${APP_GROUP_ID:-}" ]]; then
+  args+=(--app-group "$APP_GROUP_ID")
+fi
+if [[ -n "${KEYCHAIN_GROUP_SUFFIX:-}" ]]; then
+  args+=(--keychain-group-suffix "$KEYCHAIN_GROUP_SUFFIX")
+fi
+if [[ "${STRICT:-0}" == "1" ]]; then
+  args+=(--strict)
+fi
+
+scripts/macos-fileprovider-profile-inventory.sh "${args[@]}"
+EOF
+
+profiles dir: /Users/jess/Library/MobileDevice/Provisioning Profiles
+profiles scanned: 2
+required app group: group.io.tinyland.tcfs
+required keychain suffix: group.io.tinyland.tcfs
+host bundle id: io.tinyland.tcfs
+extension bundle id: io.tinyland.tcfs.fileprovider
+host candidates: 1
+extension candidates: 1
+compatible pair: found
+host profile: /Users/jess/Library/MobileDevice/Provisioning Profiles/8e93c5be-685f-4503-bf0a-d647a2062149.provisionprofile
+  name: tcfs-host-developer-id
+  uuid: 8e93c5be-685f-4503-bf0a-d647a2062149
+  team_prefix: QP994XQKNH
+  application_identifier: QP994XQKNH.io.tinyland.tcfs
+  keychain_group: QP994XQKNH.*
+extension profile: /Users/jess/Library/MobileDevice/Provisioning Profiles/fa455f84-5e7d-4a14-9d4f-68a26c6a9939.provisionprofile
+  name: tcfs-fileprovider-developer-id
+  uuid: fa455f84-5e7d-4a14-9d4f-68a26c6a9939
+  team_prefix: QP994XQKNH
+  application_identifier: QP994XQKNH.io.tinyland.tcfs.fileprovider
+  keychain_group: QP994XQKNH.*
+
+TCFS_HOST_PROVISIONING_PROFILE=/Users/jess/Library/MobileDevice/Provisioning\ Profiles/8e93c5be-685f-4503-bf0a-d647a2062149.provisionprofile
+TCFS_EXTENSION_PROVISIONING_PROFILE=/Users/jess/Library/MobileDevice/Provisioning\ Profiles/fa455f84-5e7d-4a14-9d4f-68a26c6a9939.provisionprofile
+TCFS_REQUIRE_PRODUCTION_SIGNING=1

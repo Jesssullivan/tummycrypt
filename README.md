@@ -79,8 +79,11 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   `tcfsd` is still `0.12.2`, and strict production preflight against the user
   app fails because host and extension lack Keychain access-group entitlements
   and embedded provisioning profiles. Local profile inventory does find a
-  compatible Developer ID profile pair; it has not been embedded into the
-  installed app. Production Finder remains a `#309` gate, not a current claim.
+  compatible Developer ID profile pair. A source-built
+  `TCFSProvider.app` now passes strict signing-only production preflight with
+  those profiles embedded, but it is not installed under `/Applications` and no
+  PlugInKit/Finder lifecycle was run. Production Finder remains a `#309` gate,
+  not a current claim.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

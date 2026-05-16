@@ -343,6 +343,15 @@ Current neo evidence:
   `STRICT=1 task lazy:macos-finder-profile-inventory` finds a compatible local
   Developer ID host/extension profile pair, so the next packaging step is to
   embed/sign with those profiles and install into `/Applications`.
+- `docs/release/evidence/macos-fileprovider-signed-app-preflight-20260516T183213Z/`
+  builds the Rust FileProvider bridge and assembles a source-built
+  `TCFSProvider.app` with the compatible local Developer ID host/extension
+  profiles embedded. Direct strict signing-only preflight passes for host and
+  extension codesign, App Group entitlements, concrete
+  `QP994XQKNH.group.io.tinyland.tcfs` keychain-access-groups entitlements, and
+  embedded profile/signing-certificate checks. This closes the local
+  source-built signing/profile blocker, but it is not an installed `.pkg`,
+  does not touch PlugInKit, and does not prove Finder lifecycle.
 - `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
   refreshes the divergence inventory. At the start of this packet the visible
   PlugInKit registration still pointed at
@@ -376,9 +385,10 @@ Current neo evidence:
   that divergence is removed.
 
 So a local neo Finder smoke can be diagnostic only. Before it becomes
-production-adjacent, install the published `.pkg` into `/Applications` with
-admin authorization, verify no PlugInKit registration points at a stale user or
-build-tree app after cleanup, and require
+production-adjacent, package or install the newly signed app through the
+published/candidate `.pkg` lane into `/Applications` with admin authorization,
+verify no PlugInKit registration points at a stale user or build-tree app after
+cleanup, and require
 `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` to pass.
 
 After the signing/profile gate passes, production Finder evidence must also

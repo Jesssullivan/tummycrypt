@@ -40,6 +40,11 @@ release-grade desktop or iOS product.
   verifies the published `v0.12.12` `.pkg` signature/notarization and
   quarantines the stale `~/Applications/TCFSProvider.app`, but the package did
   not install because non-interactive `sudo` required a password.
+- Local neo source-built signed app packet
+  `docs/release/evidence/macos-fileprovider-signed-app-preflight-20260516T183213Z/`
+  proves the build script can embed the compatible local Developer ID host and
+  extension profiles and pass strict signing-only preflight. It does not prove
+  `.pkg` install, PlugInKit cleanup, or Finder lifecycle.
 - GitHub Actions links for the current PZM runs are indexed in
   [Release Evidence Index](../release/evidence/README.md).
 
@@ -53,9 +58,10 @@ release-grade desktop or iOS product.
   does not mean arbitrary clean production Macs will auto-enable the provider.
 - Packaged macOS artifacts still require explicit post-cut smoke even when CI
   and packaging are green.
-- Neo local dogfood still needs an admin-auth install of the published `.pkg`
-  into `/Applications` plus strict production signing preflight before any
-  Finder smoke becomes production-adjacent.
+- Neo local dogfood still needs an admin-auth install of the published or
+  candidate `.pkg` into `/Applications`, intentional stale-registration cleanup
+  after inventory, and full strict production preflight before any Finder smoke
+  becomes production-adjacent.
 
 ## iOS: Current Posture
 

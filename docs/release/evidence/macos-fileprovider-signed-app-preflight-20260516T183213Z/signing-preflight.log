@@ -1,0 +1,20 @@
+host app: build/fileprovider-signed-app-preflight-20260516T183213Z/TCFSProvider.app
+host app bundle identifier: io.tinyland.tcfs
+host app codesign: valid
+host app app group entitlement: group.io.tinyland.tcfs
+host app keychain access group entitlement: QP994XQKNH.group.io.tinyland.tcfs
+host app provisioning profile: build/fileprovider-signed-app-preflight-20260516T183213Z/TCFSProvider.app/Contents/embedded.provisionprofile
+host app provisioning profile app group: group.io.tinyland.tcfs
+host app provisioning profile keychain group: QP994XQKNH.*
+host app provisioning profile application identifier: QP994XQKNH.io.tinyland.tcfs
+host app provisioning profile contains signing certificate: 61A8E77C4F3D678921FF0A7DC9D7E317F7754F50
+FileProvider extension bundle identifier: io.tinyland.tcfs.fileprovider
+FileProvider extension codesign: valid
+FileProvider extension app group entitlement: group.io.tinyland.tcfs
+FileProvider extension keychain access group entitlement: QP994XQKNH.group.io.tinyland.tcfs
+FileProvider extension provisioning profile: build/fileprovider-signed-app-preflight-20260516T183213Z/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/embedded.provisionprofile
+FileProvider extension provisioning profile app group: group.io.tinyland.tcfs
+FileProvider extension provisioning profile keychain group: QP994XQKNH.*
+FileProvider extension provisioning profile application identifier: QP994XQKNH.io.tinyland.tcfs.fileprovider
+FileProvider extension provisioning profile contains signing certificate: 61A8E77C4F3D678921FF0A7DC9D7E317F7754F50
+macOS FileProvider signing preflight passed

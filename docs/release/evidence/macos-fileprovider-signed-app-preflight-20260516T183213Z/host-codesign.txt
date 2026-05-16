@@ -1,0 +1,21 @@
+Executable=/Users/jess/git/tummycrypt/build/fileprovider-signed-app-preflight-20260516T183213Z/TCFSProvider.app/Contents/MacOS/TCFSProvider
+Identifier=io.tinyland.tcfs
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20500 size=540 flags=0x10000(runtime) hashes=6+7 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha256=fd079ea97fccb01efaccf29fd50e2f7d31e1ee03
+CandidateCDHashFull sha256=fd079ea97fccb01efaccf29fd50e2f7d31e1ee03c8e0b57acad5dbc1441d4a65
+Hash choices=sha256
+CMSDigest=fd079ea97fccb01efaccf29fd50e2f7d31e1ee03c8e0b57acad5dbc1441d4a65
+CMSDigestType=2
+CDHash=fd079ea97fccb01efaccf29fd50e2f7d31e1ee03
+Signature size=8975
+Authority=Developer ID Application: John Sullivan (QP994XQKNH)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=May 16, 2026 at 2:32:22 PM
+Info.plist entries=9
+TeamIdentifier=QP994XQKNH
+Runtime Version=15.0.0
+Sealed Resources version=2 rules=13 files=5
+Internal requirements count=1 size=176

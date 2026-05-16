@@ -61,7 +61,7 @@ multi-machine neo/honey flows.
 | ID | Scenario | Production gate | Current status |
 | --- | --- | --- | --- |
 | F1 | Install published `.pkg` to `/Applications/TCFSProvider.app` | Developer ID package install succeeds on clean host | Local neo install blocked by non-interactive sudo; hosted attempt passed install before storage failure |
-| F2 | Strict signing/profile preflight | `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` green | Existing neo user app fails strict preflight; published package source is signed/notarized but not locally installed |
+| F2 | Strict signing/profile preflight | `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` green | Existing neo user app fails strict preflight; source-built Developer ID app now passes signing-only strict preflight with embedded profiles in `macos-fileprovider-signed-app-preflight-20260516T183213Z/`, but it is not package-installed or registered |
 | F3 | Finder enumerate | CloudStorage root appears and lists placeholders through FileProvider | PZM testing-mode green; production clean-host open |
 | F4 | Finder open/requestDownload exact hydrate | Exact bytes through coordinated read | PZM testing-mode green; production clean-host open |
 | F5 | Finder evict and rehydrate | Evict clears local body, re-open hydrates exact bytes | PZM testing-mode green; production clean-host open |

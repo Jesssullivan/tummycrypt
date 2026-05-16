@@ -1,0 +1,55 @@
+{
+  "CFBundleExecutable" => "TCFSFileProvider"
+  "CFBundleIdentifier" => "io.tinyland.tcfs.fileprovider"
+  "CFBundleInfoDictionaryVersion" => "6.0"
+  "CFBundleName" => "TCFSFileProvider"
+  "CFBundlePackageType" => "XPC!"
+  "CFBundleShortVersionString" => "0.2.0"
+  "CFBundleVersion" => "1"
+  "LSMinimumSystemVersion" => "15.0"
+  "NSExtension" => {
+    "NSExtensionFileProviderActions" => [
+      0 => {
+        "NSExtensionFileProviderActionActivationRule" => "TRUEPREDICATE"
+        "NSExtensionFileProviderActionIdentifier" => "io.tinyland.tcfs.action.unsync"
+        "NSExtensionFileProviderActionName" => "Free Up Space (Unsync)"
+      }
+      1 => {
+        "NSExtensionFileProviderActionActivationRule" => "TRUEPREDICATE"
+        "NSExtensionFileProviderActionIdentifier" => "io.tinyland.tcfs.action.pin"
+        "NSExtensionFileProviderActionName" => "Always Keep on This Device"
+      }
+    ]
+    "NSExtensionFileProviderDocumentGroup" => "group.io.tinyland.tcfs"
+    "NSExtensionFileProviderSupportsDatalessFolders" => true
+    "NSExtensionFileProviderSupportsEnumeration" => true
+    "NSExtensionPointIdentifier" => "com.apple.fileprovider-nonui"
+    "NSExtensionPrincipalClass" => "TCFSFileProvider.TCFSFileProviderExtension"
+    "NSFileProviderDecorations" => [
+      0 => {
+        "BadgeImageType" => "com.apple.fileprovider.decoration.conflict"
+        "Category" => "Badge"
+        "Identifier" => "io.tinyland.tcfs.fileprovider.decoration.conflict"
+        "Label" => "Sync Conflict"
+      }
+      1 => {
+        "BadgeImageType" => "com.apple.fileprovider.decoration.locked"
+        "Category" => "Badge"
+        "Identifier" => "io.tinyland.tcfs.fileprovider.decoration.locked"
+        "Label" => "Locked"
+      }
+      2 => {
+        "BadgeImageType" => "com.apple.fileprovider.decoration.pinned"
+        "Category" => "Badge"
+        "Identifier" => "io.tinyland.tcfs.fileprovider.decoration.pinned"
+        "Label" => "Pinned"
+      }
+      3 => {
+        "BadgeImageType" => "com.apple.fileprovider.decoration.excluded"
+        "Category" => "Badge"
+        "Identifier" => "io.tinyland.tcfs.fileprovider.decoration.excluded"
+        "Label" => "Excluded from Sync"
+      }
+    ]
+  }
+}

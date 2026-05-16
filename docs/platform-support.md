@@ -52,8 +52,9 @@ as a production-proven platform.
   the canonical `/Applications/TCFSProvider.app` install is absent and the
   existing `~/Applications/TCFSProvider.app` fails strict production signing
   preflight because Keychain access-group entitlements and embedded
-  provisioning profiles are missing, even though compatible profiles exist
-  locally
+  provisioning profiles are missing. A source-built Developer ID app on neo now
+  passes strict signing-only preflight with compatible local profiles embedded,
+  but it has not been installed as a `.pkg` or exercised through Finder
 - **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)
   and [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md)
 

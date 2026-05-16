@@ -1,0 +1,3 @@
+Executable=/Users/jess/git/tummycrypt/build/fileprovider-signed-app-preflight-20260516T183213Z/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/MacOS/TCFSFileProvider
+warning: Specifying ':' in the path is deprecated and will not work in a future release
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>com.apple.security.app-sandbox</key><true/><key>com.apple.security.application-groups</key><array><string>group.io.tinyland.tcfs</string></array><key>com.apple.security.network.client</key><true/><key>keychain-access-groups</key><array><string>QP994XQKNH.group.io.tinyland.tcfs</string></array></dict></plist>
