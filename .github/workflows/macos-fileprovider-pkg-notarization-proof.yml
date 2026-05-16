@@ -1,0 +1,518 @@
+name: macOS FileProvider Package Notarization Proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: "macOS runner label for the remote proof"
+        required: true
+        default: "macos-14"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.93.0
+  MACOS_TARGET: aarch64-apple-darwin
+
+jobs:
+  notarized-pkg-proof:
+    name: Build, notarize, staple, and assess .pkg
+    if: github.repository == 'Jesssullivan/tummycrypt'
+    runs-on: ${{ github.event.inputs.runner_label }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Initialize evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LOG_DIR="$RUNNER_TEMP/tcfs-macos-fileprovider-pkg-notarization-proof"
+          mkdir -p "$LOG_DIR"
+          echo "LOG_DIR=$LOG_DIR" >> "$GITHUB_ENV"
+
+          VERSION="$(python3 - <<'PY'
+          import pathlib
+          import re
+
+          data = pathlib.Path("Cargo.toml").read_text()
+          match = re.search(r'(?m)^\[workspace\.package\]\s.*?^version\s*=\s*"([^"]+)"', data, re.S)
+          if not match:
+              raise SystemExit("workspace package version not found")
+          print(match.group(1))
+          PY
+          )"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          {
+            printf 'workflow: %s\n' "$GITHUB_WORKFLOW"
+            printf 'run_id: %s\n' "$GITHUB_RUN_ID"
+            printf 'sha: %s\n' "$GITHUB_SHA"
+            printf 'ref: %s\n' "$GITHUB_REF"
+            printf 'runner: %s\n' "${{ github.event.inputs.runner_label }}"
+            printf 'version: %s\n' "$VERSION"
+            printf 'started_at_utc: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf '\n[sw_vers]\n'
+            sw_vers
+            printf '\n[xcodebuild]\n'
+            xcodebuild -version
+            printf '\n[uname]\n'
+            uname -a
+          } | tee "$LOG_DIR/proof-summary.txt"
+
+      - name: Validate inputs and Apple secrets
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+          TCFS_HOST_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_HOST_PROVISIONING_PROFILE_BASE64 }}
+          TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$RUNNER_OS" != "macOS" ]]; then
+            echo "::error::This proof must run on macOS; got $RUNNER_OS"
+            exit 1
+          fi
+          if [[ "$(uname -m)" != "arm64" ]]; then
+            echo "::error::This proof builds a macos-aarch64 package and must run on an arm64 macOS runner"
+            exit 1
+          fi
+
+          missing=()
+          for required in \
+            APPLE_CERTIFICATE_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_INSTALLER_CERTIFICATE_BASE64 \
+            APPLE_INSTALLER_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_TEAM_ID \
+            APPLE_NOTARIZE_PASSWORD \
+            TCFS_HOST_PROVISIONING_PROFILE_BASE64 \
+            TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64
+          do
+            if [[ -z "${!required:-}" ]]; then
+              missing+=("$required")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required Apple signing/notarization secrets: ${missing[*]}"
+            exit 1
+          fi
+
+          printf 'required Apple signing/notarization secrets: present\n' \
+            | tee -a "$LOG_DIR/proof-summary.txt"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.MACOS_TARGET }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-fileprovider-pkg-notarization-proof-${{ env.MACOS_TARGET }}
+          cache-bin: false
+
+      - name: Install macOS build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install protobuf
+
+      - name: Import Developer ID Application certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID_CA_G2: ${{ secrets.APPLE_DEVELOPER_ID_CA_G2 }}
+        run: |
+          set -euo pipefail
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/tcfs-app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/app-cert.p12"
+          security import "$RUNNER_TEMP/app-cert.p12" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          rm "$RUNNER_TEMP/app-cert.p12"
+
+          if [[ -n "$APPLE_DEVELOPER_ID_CA_G2" ]]; then
+            echo "$APPLE_DEVELOPER_ID_CA_G2" | base64 -d > "$RUNNER_TEMP/developer-id-ca.cer"
+            security import "$RUNNER_TEMP/developer-id-ca.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+            rm "$RUNNER_TEMP/developer-id-ca.cer"
+          fi
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | head -1 \
+            | sed 's/.*"\(.*\)".*/\1/' || true)"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::No Developer ID Application identity found in proof keychain"
+            exit 1
+          fi
+
+          {
+            echo "SIGNING_IDENTITY=$IDENTITY"
+            echo "APP_KEYCHAIN_PATH=$KEYCHAIN_PATH"
+          } >> "$GITHUB_ENV"
+
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | tee "$LOG_DIR/developer-id-application-identity.txt"
+
+      - name: Import FileProvider provisioning profiles
+        shell: bash
+        env:
+          TCFS_HOST_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_HOST_PROVISIONING_PROFILE_BASE64 }}
+          TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64: ${{ secrets.TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          HOST_PROFILE="$RUNNER_TEMP/tcfs-host-developer-id.provisionprofile"
+          EXTENSION_PROFILE="$RUNNER_TEMP/tcfs-fileprovider-developer-id.provisionprofile"
+
+          echo "$TCFS_HOST_PROVISIONING_PROFILE_BASE64" | base64 -d > "$HOST_PROFILE"
+          echo "$TCFS_EXTENSION_PROVISIONING_PROFILE_BASE64" | base64 -d > "$EXTENSION_PROFILE"
+
+          security cms -D -i "$HOST_PROFILE" >/dev/null
+          security cms -D -i "$EXTENSION_PROFILE" >/dev/null
+          scripts/macos-fileprovider-profile-inventory.sh \
+            --profiles-dir "$RUNNER_TEMP" \
+            --strict \
+            | tee "$LOG_DIR/fileprovider-profile-inventory.log"
+
+          {
+            echo "TCFS_HOST_PROVISIONING_PROFILE=$HOST_PROFILE"
+            echo "TCFS_EXTENSION_PROVISIONING_PROFILE=$EXTENSION_PROFILE"
+            echo "TCFS_REQUIRE_PRODUCTION_SIGNING=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo build --release \
+            --target "$MACOS_TARGET" \
+            --no-default-features \
+            -p tcfs-cli \
+            2>&1 | tee "$LOG_DIR/build-tcfs-cli.log"
+
+          cargo build --release \
+            --target "$MACOS_TARGET" \
+            --no-default-features \
+            --features openssl-vendored \
+            -p tcfsd \
+            2>&1 | tee "$LOG_DIR/build-tcfsd.log"
+
+          cargo build --release \
+            --target "$MACOS_TARGET" \
+            -p tcfs-tui \
+            2>&1 | tee "$LOG_DIR/build-tcfs-tui.log"
+
+          cargo build --release \
+            --target "$MACOS_TARGET" \
+            -p tcfs-mcp \
+            2>&1 | tee "$LOG_DIR/build-tcfs-mcp.log"
+
+      - name: Sign and package release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BINDIR="target/$MACOS_TARGET/release"
+          for bin in tcfs tcfsd tcfs-tui tcfs-mcp; do
+            if [[ -f "$BINDIR/$bin" ]]; then
+              /usr/bin/codesign --force --options runtime \
+                --sign "$SIGNING_IDENTITY" \
+                --timestamp \
+                "$BINDIR/$bin"
+              /usr/bin/codesign --verify --strict --verbose=2 "$BINDIR/$bin" \
+                2>&1 | tee "$LOG_DIR/codesign-${bin}.log"
+            fi
+          done
+
+          printf '[tcfsd linkage]\n' | tee "$LOG_DIR/tcfsd-linkage.log"
+          otool -L "$BINDIR/tcfsd" | tee -a "$LOG_DIR/tcfsd-linkage.log"
+          if otool -L "$BINDIR/tcfsd" | grep -E 'libssl\.3\.dylib|libcrypto\.3\.dylib' >/dev/null; then
+            echo "::error::tcfsd links a dynamic OpenSSL dylib"
+            exit 1
+          fi
+
+          DIST="tcfs-${VERSION}-macos-aarch64"
+          rm -rf "$DIST"
+          mkdir -p "$DIST"
+          cp "$BINDIR/tcfs" "$DIST/"
+          cp "$BINDIR/tcfsd" "$DIST/"
+          cp "$BINDIR/tcfs-tui" "$DIST/"
+          cp "$BINDIR/tcfs-mcp" "$DIST/"
+          cp README.md "$DIST/"
+          cp LICENSE* "$DIST/" 2>/dev/null || true
+          tar czf "${DIST}.tar.gz" "$DIST"
+          shasum -a 256 "${DIST}.tar.gz" | tee "$LOG_DIR/cli-tarball-sha256.txt"
+
+      - name: Build FileProvider app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo build -p tcfs-file-provider \
+            --release \
+            --no-default-features \
+            --features grpc \
+            2>&1 | tee "$LOG_DIR/build-tcfs-file-provider.log"
+
+          HEADER="$(find target -name tcfs_file_provider.h -path '*/tcfs-file-provider*/out/*' | head -1)"
+          if [[ -z "$HEADER" ]]; then
+            echo "::error::cbindgen header not found"
+            find target/release/build -name '*.h' 2>/dev/null || true
+            exit 1
+          fi
+
+          swift/fileprovider/build.sh \
+            target/release \
+            "$HEADER" \
+            build/ \
+            "$SIGNING_IDENTITY" \
+            2>&1 | tee "$LOG_DIR/build-fileprovider-app.log"
+
+          scripts/macos-fileprovider-preflight.sh \
+            --signing-only \
+            --require-production-signing \
+            --app-path build/TCFSProvider.app \
+            2>&1 | tee "$LOG_DIR/fileprovider-signing-preflight.log"
+
+          (
+            cd build
+            /usr/bin/ditto -c -k --keepParent TCFSProvider.app \
+              "TCFSProvider-${VERSION}-macos-aarch64.zip"
+          )
+          shasum -a 256 "build/TCFSProvider-${VERSION}-macos-aarch64.zip" \
+            | tee "$LOG_DIR/fileprovider-zip-sha256.txt"
+
+      - name: Import Developer ID Installer certificate
+        shell: bash
+        env:
+          APPLE_INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_BASE64 }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+          APPLE_WWDR_CA_G2: ${{ secrets.APPLE_WWDR_CA_G2 }}
+        run: |
+          set -euo pipefail
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/tcfs-installer-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$APPLE_INSTALLER_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/installer-cert.p12"
+          security import "$RUNNER_TEMP/installer-cert.p12" \
+            -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          rm "$RUNNER_TEMP/installer-cert.p12"
+
+          if [[ -n "$APPLE_WWDR_CA_G2" ]]; then
+            echo "$APPLE_WWDR_CA_G2" | base64 -d > "$RUNNER_TEMP/wwdr.cer"
+            security import "$RUNNER_TEMP/wwdr.cer" -k "$KEYCHAIN_PATH"
+            rm "$RUNNER_TEMP/wwdr.cer"
+          fi
+
+          security set-key-partition-list -S apple-tool:,apple:,productsign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${APP_KEYCHAIN_PATH:-}" login.keychain-db
+
+          IDENTITY="$(security find-identity -v "$KEYCHAIN_PATH" \
+            | grep "Developer ID Installer" | head -1 \
+            | sed 's/.*"\(.*\)".*/\1/' || true)"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::No Developer ID Installer identity found in proof keychain"
+            exit 1
+          fi
+
+          {
+            echo "PKG_SIGNING_IDENTITY=$IDENTITY"
+            echo "PKG_KEYCHAIN_PATH=$KEYCHAIN_PATH"
+          } >> "$GITHUB_ENV"
+
+          security find-identity -v "$KEYCHAIN_PATH" \
+            | tee "$LOG_DIR/developer-id-installer-identity.txt"
+
+      - name: Build signed package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PKG_PATH="tcfs-${VERSION}-macos-aarch64.pkg"
+          scripts/macos-build-pkg.sh \
+            --version "$VERSION" \
+            --cli-tar "tcfs-${VERSION}-macos-aarch64.tar.gz" \
+            --fileprovider-zip "build/TCFSProvider-${VERSION}-macos-aarch64.zip" \
+            --output "$PKG_PATH" \
+            --sign "$PKG_SIGNING_IDENTITY" \
+            2>&1 | tee "$LOG_DIR/build-signed-pkg.log"
+
+          {
+            printf '[pkgutil --check-signature]\n'
+            pkgutil --check-signature "$PKG_PATH"
+          } 2>&1 | tee "$LOG_DIR/pkgutil-check-signature-before-notary.log"
+          shasum -a 256 "$PKG_PATH" | tee "$LOG_DIR/pkg-sha256-before-notary.txt"
+
+      - name: Notarize package
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          PKG_PATH="tcfs-${VERSION}-macos-aarch64.pkg"
+          SUBMIT_JSON="$LOG_DIR/notarytool-submit.json"
+          SUBMIT_STDERR="$LOG_DIR/notarytool-submit.stderr"
+
+          set +e
+          xcrun notarytool submit "$PKG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_NOTARIZE_PASSWORD" \
+            --wait \
+            --output-format json \
+            >"$SUBMIT_JSON" \
+            2>"$SUBMIT_STDERR"
+          submit_status=$?
+          set -e
+
+          if [[ -s "$SUBMIT_JSON" ]]; then
+            cat "$SUBMIT_JSON"
+          fi
+          if [[ -s "$SUBMIT_STDERR" ]]; then
+            cat "$SUBMIT_STDERR" >&2
+          fi
+
+          NOTARY_ID="$(python3 - "$SUBMIT_JSON" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          if not path.exists() or path.stat().st_size == 0:
+              raise SystemExit(0)
+          try:
+              data = json.loads(path.read_text())
+          except json.JSONDecodeError:
+              raise SystemExit(0)
+          value = data.get("id") or data.get("submissionId") or ""
+          print(value)
+          PY
+          )"
+
+          if [[ -n "$NOTARY_ID" ]]; then
+            if xcrun notarytool log "$NOTARY_ID" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_NOTARIZE_PASSWORD" \
+              --output-format json \
+              >"$LOG_DIR/notarytool-log.json" \
+              2>"$LOG_DIR/notarytool-log.stderr"; then
+              cat "$LOG_DIR/notarytool-log.json"
+            else
+              cat "$LOG_DIR/notarytool-log.stderr" >&2
+            fi
+          fi
+
+          if [[ "$submit_status" -ne 0 ]]; then
+            exit "$submit_status"
+          fi
+
+          python3 - "$SUBMIT_JSON" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          status = str(data.get("status", ""))
+          if status.lower() != "accepted":
+              print(f"::error::notarytool status was {status!r}, expected Accepted")
+              raise SystemExit(1)
+          print("notarytool accepted package")
+          PY
+
+      - name: Staple, assess, and strict-smoke package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PKG_PATH="tcfs-${VERSION}-macos-aarch64.pkg"
+
+          xcrun stapler staple "$PKG_PATH" \
+            2>&1 | tee "$LOG_DIR/stapler-staple.log"
+          xcrun stapler validate -v "$PKG_PATH" \
+            2>&1 | tee "$LOG_DIR/stapler-validate.log"
+          /usr/sbin/spctl --assess --type install --verbose=4 "$PKG_PATH" \
+            2>&1 | tee "$LOG_DIR/spctl-install-assessment.log"
+
+          scripts/macos-pkg-structure-smoke.sh \
+            --pkg "$PKG_PATH" \
+            --expected-postinstall scripts/macos-pkg-postinstall.sh \
+            --require-signature \
+            --require-gatekeeper-install \
+            --require-stapled-ticket \
+            2>&1 | tee "$LOG_DIR/strict-package-smoke.log"
+
+          shasum -a 256 "$PKG_PATH" | tee "$LOG_DIR/pkg-sha256-after-staple.txt"
+          {
+            printf '[pkgutil --check-signature]\n'
+            pkgutil --check-signature "$PKG_PATH"
+          } 2>&1 | tee "$LOG_DIR/pkgutil-check-signature-after-staple.log"
+
+      - name: Upload notarized package proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-notarized-pkg-proof
+          path: tcfs-*-macos-aarch64.pkg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload notarization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-fileprovider-pkg-notarization-proof-evidence
+          path: |
+            ${{ runner.temp }}/tcfs-macos-fileprovider-pkg-notarization-proof/
+            tcfs-*-macos-aarch64.tar.gz
+            build/TCFSProvider-*-macos-aarch64.zip
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Cleanup keychains
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for keychain in "${APP_KEYCHAIN_PATH:-}" "${PKG_KEYCHAIN_PATH:-}"; do
+            if [[ -n "$keychain" ]]; then
+              security delete-keychain "$keychain" 2>/dev/null || true
+            fi
+          done
