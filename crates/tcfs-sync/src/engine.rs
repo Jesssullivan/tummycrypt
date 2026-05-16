@@ -17,6 +17,7 @@ use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use unicode_normalization::UnicodeNormalization;
@@ -1922,7 +1923,7 @@ pub async fn download_file_with_device(
     remote_prefix: &str,
     progress: Option<&ProgressFn>,
     _device_id: &str,
-    mut state: Option<&mut StateCache>,
+    state: Option<&mut StateCache>,
     encryption: OptionalEncryption<'_>,
 ) -> Result<DownloadResult> {
     // Read manifest with retry so transient storage failures don't abort pull
@@ -1950,7 +1951,7 @@ pub async fn download_file_with_device(
                 _device_id.to_string(),
                 manifest.symlink_target.len() as u64,
             )?;
-            if let Some(state) = state.as_deref_mut() {
+            if let Some(state) = state {
                 state.set(local_path, sync_state.clone());
             }
             sync_state_for_result = Some(sync_state);
@@ -2018,7 +2019,7 @@ pub async fn download_file_with_device(
                 local_vclock,
                 _device_id.to_string(),
             )?;
-            if let Some(state) = state.as_deref_mut() {
+            if let Some(state) = state {
                 state.set(local_path, sync_state.clone());
             }
             sync_state_for_result = Some(sync_state);
@@ -2067,21 +2068,47 @@ pub async fn download_file_with_device(
         None
     };
 
-    // Fetch and reassemble chunks, verifying each chunk's BLAKE3 hash
-    let mut assembled = Vec::new();
+    // Fetch and reassemble chunks, verifying each chunk's BLAKE3 hash.
+    // Write directly to a unique temp file so multi-GB files do not require a
+    // second full in-memory copy before the atomic rename.
     let total = chunk_hashes.len();
+    if let Some(parent) = local_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating dir: {}", parent.display()))?;
+    }
+
+    let tmp = unique_tmp_path(local_path, "tcfs_tmp");
+    let mut tmp_file = tokio::fs::File::create(&tmp)
+        .await
+        .with_context(|| format!("creating tmp: {}", tmp.display()))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes = 0u64;
 
     for (i, hash) in chunk_hashes.iter().enumerate() {
         let chunk_key = format!("{remote_prefix}/chunks/{hash}");
 
         // Download with retry + integrity verification
-        let chunk_bytes: Vec<u8> = read_chunk_with_retry(op, &chunk_key, hash, i).await?;
+        let chunk_bytes: Vec<u8> = match read_chunk_with_retry(op, &chunk_key, hash, i).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(e);
+            }
+        };
 
         // Decrypt chunk if file key is present
         #[cfg(feature = "crypto")]
         let plaintext = if let (Some(ref fk), Some(ref fid)) = (&file_key, &file_id) {
-            tcfs_crypto::decrypt_chunk(fk, i as u64, fid, &chunk_bytes)
-                .with_context(|| format!("decrypting chunk {i}"))?
+            match tcfs_crypto::decrypt_chunk(fk, i as u64, fid, &chunk_bytes)
+                .with_context(|| format!("decrypting chunk {i}"))
+            {
+                Ok(plaintext) => plaintext,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Err(e);
+                }
+            }
         } else {
             chunk_bytes
         };
@@ -2089,7 +2116,12 @@ pub async fn download_file_with_device(
         #[cfg(not(feature = "crypto"))]
         let plaintext = chunk_bytes;
 
-        assembled.extend_from_slice(&plaintext);
+        if let Err(e) = tmp_file.write_all(&plaintext).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(anyhow::Error::new(e).context(format!("writing tmp: {}", tmp.display())));
+        }
+        hasher.update(&plaintext);
+        bytes += plaintext.len() as u64;
 
         if let Some(cb) = progress {
             cb(
@@ -2100,11 +2132,16 @@ pub async fn download_file_with_device(
         }
     }
 
-    let bytes = assembled.len() as u64;
+    if let Err(e) = tmp_file.flush().await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(anyhow::Error::new(e).context(format!("flushing tmp: {}", tmp.display())));
+    }
+    drop(tmp_file);
 
     // Verify reassembled file hash matches the manifest (plaintext hash)
-    let actual_file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&assembled));
+    let actual_file_hash = tcfs_chunks::hash_to_hex(&hasher.finalize());
     if actual_file_hash != manifest.file_hash {
+        let _ = tokio::fs::remove_file(&tmp).await;
         anyhow::bail!(
             "file integrity check failed for {remote_manifest}: expected {}, got {actual_file_hash}",
             manifest.file_hash
@@ -2112,19 +2149,10 @@ pub async fn download_file_with_device(
     }
 
     // Atomic write to local path
-    if let Some(parent) = local_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating dir: {}", parent.display()))?;
+    if let Err(e) = tokio::fs::rename(&tmp, local_path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(anyhow::Error::new(e).context(format!("renaming to: {}", local_path.display())));
     }
-
-    let tmp = unique_tmp_path(local_path, "tcfs_tmp");
-    tokio::fs::write(&tmp, &assembled)
-        .await
-        .with_context(|| format!("writing tmp: {}", tmp.display()))?;
-    tokio::fs::rename(&tmp, local_path)
-        .await
-        .with_context(|| format!("renaming to: {}", local_path.display()))?;
 
     // Restore Unix file permissions from manifest
     #[cfg(unix)]
@@ -2145,18 +2173,15 @@ pub async fn download_file_with_device(
             .unwrap_or_default();
         local_vclock.merge(&manifest.vclock);
 
-        let file_hash = tcfs_chunks::hash_bytes(&assembled);
-        let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
-
         let sync_state = make_sync_state_full(
             local_path,
-            file_hash_hex,
+            actual_file_hash,
             total,
             remote_manifest.to_string(),
             local_vclock,
             _device_id.to_string(),
         )?;
-        if let Some(state) = state.as_deref_mut() {
+        if let Some(state) = state {
             state.set(local_path, sync_state.clone());
         }
         sync_state_for_result = Some(sync_state);
@@ -3462,6 +3487,62 @@ mod tests {
         // Verify content matches
         let content = std::fs::read_to_string(&dl_path).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn download_file_cleans_streaming_tmp_after_chunk_failure() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let download_dir = dir.path().join("downloads");
+        let dl_path = download_dir.join("large.bin");
+
+        let first = b"first chunk";
+        let missing = b"missing chunk";
+        let first_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(first));
+        let missing_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(missing));
+        let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(
+            &[first.as_slice(), missing.as_slice()].concat(),
+        ));
+
+        op.write(&format!("data/chunks/{first_hash}"), first.to_vec())
+            .await
+            .unwrap();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: file_hash.clone(),
+            file_size: (first.len() + missing.len()) as u64,
+            chunks: vec![first_hash, missing_hash],
+            vclock: VectorClock::new(),
+            written_by: "tester".into(),
+            written_at: 0,
+            rel_path: Some("large.bin".into()),
+            mode: None,
+            encrypted_file_key: None,
+        };
+        let manifest_path = format!("data/manifests/{file_hash}");
+        op.write(&manifest_path, manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+
+        let err = download_file(&op, &manifest_path, &dl_path, "data", None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("downloading chunk"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !dl_path.exists(),
+            "failed download must not leave the target path"
+        );
+        let leftovers = std::fs::read_dir(&download_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "failed download left temp files behind: {leftovers:?}"
+        );
     }
 
     #[tokio::test]
