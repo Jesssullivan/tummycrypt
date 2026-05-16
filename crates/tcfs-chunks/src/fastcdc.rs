@@ -6,9 +6,10 @@
 //!
 //! Chunk size targets:
 //!   - Default (small files): min 2KB, avg 4KB, max 16KB
-//!   - Generic index/binary files (.idx, .bin): min 32KB, avg 64KB, max 256KB
-//!   - Large sequential files (.pack, .rev, .git/objects/pack/*.idx, .iso, .img):
-//!     min 1MB, avg 4MB, max 16MB
+//!   - Generic index/binary files (.idx, .bin, .git/index): min 32KB,
+//!     avg 64KB, max 256KB
+//!   - Large sequential files (.pack, .rev, .git/objects/pack/*.idx,
+//!     .git/objects/pack/tmp_pack_*, .iso, .img): min 1MB, avg 4MB, max 16MB
 //!
 //! Each chunk is content-addressed by its BLAKE3 hash.
 
@@ -53,9 +54,11 @@ impl ChunkSizes {
     /// For large sequential artifacts where remote object count dominates.
     ///
     /// Git `.pack` files are already Git-internal compressed packfiles. The
-    /// adjacent `.rev` and `.idx` files are pack-derived index data. Project-tree
-    /// canaries showed that 64KB average chunks turn raw Git pack/index files
-    /// into thousands of remote objects, which is too many for the S3/SeaweedFS
+    /// adjacent `.rev` and `.idx` files are pack-derived index data. Git also
+    /// leaves extensionless `tmp_pack_*` files in `.git/objects/pack/` during
+    /// some partial/shallow clone workflows. Project-tree canaries showed that
+    /// 64KB average chunks turn raw Git pack/index/temp-pack files into
+    /// thousands of remote objects, which is too many for the S3/SeaweedFS
     /// posture we want to prove. This profile keeps content-defined boundaries
     /// while making large raw-Git trees operationally tractable.
     pub const LARGE_SEQUENTIAL: ChunkSizes = ChunkSizes {
@@ -66,8 +69,16 @@ impl ChunkSizes {
 
     /// Select chunk sizes based on file extension
     pub fn for_path(path: &Path) -> Self {
+        if is_git_index(path) {
+            return Self::PACK;
+        }
+
+        if is_git_temp_pack(path) {
+            return Self::LARGE_SEQUENTIAL;
+        }
+
         match path.extension().and_then(|e| e.to_str()) {
-            Some("idx") if is_git_pack_index(path) => Self::LARGE_SEQUENTIAL,
+            Some("idx") if is_git_pack_dir(path) => Self::LARGE_SEQUENTIAL,
             Some("pack") | Some("rev") | Some("iso") | Some("img") => Self::LARGE_SEQUENTIAL,
             Some("idx") | Some("bin") => Self::PACK,
             _ => Self::SMALL,
@@ -75,7 +86,7 @@ impl ChunkSizes {
     }
 }
 
-fn is_git_pack_index(path: &Path) -> bool {
+fn is_git_pack_dir(path: &Path) -> bool {
     let parts: Vec<_> = path
         .components()
         .filter_map(|component| component.as_os_str().to_str())
@@ -84,6 +95,23 @@ fn is_git_pack_index(path: &Path) -> bool {
     parts
         .windows(3)
         .any(|window| matches!(window, [".git", "objects", "pack"]))
+}
+
+fn is_git_index(path: &Path) -> bool {
+    let parts: Vec<_> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+
+    parts.as_slice().ends_with(&[".git", "index"])
+}
+
+fn is_git_temp_pack(path: &Path) -> bool {
+    is_git_pack_dir(path)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("tmp_pack_"))
 }
 
 /// Split `data` into content-defined chunks using FastCDC.
@@ -361,6 +389,33 @@ mod tests {
     }
 
     #[test]
+    fn git_index_uses_pack_chunk_profile() {
+        let sizes = ChunkSizes::for_path(Path::new(".git/index"));
+
+        assert_eq!(sizes.min_size, ChunkSizes::PACK.min_size);
+        assert_eq!(sizes.avg_size, ChunkSizes::PACK.avg_size);
+        assert_eq!(sizes.max_size, ChunkSizes::PACK.max_size);
+    }
+
+    #[test]
+    fn generic_extensionless_index_uses_small_chunk_profile() {
+        let sizes = ChunkSizes::for_path(Path::new("index"));
+
+        assert_eq!(sizes.min_size, ChunkSizes::SMALL.min_size);
+        assert_eq!(sizes.avg_size, ChunkSizes::SMALL.avg_size);
+        assert_eq!(sizes.max_size, ChunkSizes::SMALL.max_size);
+    }
+
+    #[test]
+    fn git_index_descendant_uses_small_chunk_profile() {
+        let sizes = ChunkSizes::for_path(Path::new(".git/index/not-a-real-index-file"));
+
+        assert_eq!(sizes.min_size, ChunkSizes::SMALL.min_size);
+        assert_eq!(sizes.avg_size, ChunkSizes::SMALL.avg_size);
+        assert_eq!(sizes.max_size, ChunkSizes::SMALL.max_size);
+    }
+
+    #[test]
     fn git_pack_uses_large_sequential_chunk_profile() {
         let sizes = ChunkSizes::for_path(Path::new(".git/objects/pack/pack-example.pack"));
 
@@ -379,6 +434,24 @@ mod tests {
     }
 
     #[test]
+    fn git_temp_pack_uses_large_sequential_chunk_profile() {
+        let sizes = ChunkSizes::for_path(Path::new(".git/objects/pack/tmp_pack_DGh0Fb"));
+
+        assert_eq!(sizes.min_size, ChunkSizes::LARGE_SEQUENTIAL.min_size);
+        assert_eq!(sizes.avg_size, ChunkSizes::LARGE_SEQUENTIAL.avg_size);
+        assert_eq!(sizes.max_size, ChunkSizes::LARGE_SEQUENTIAL.max_size);
+    }
+
+    #[test]
+    fn generic_temp_pack_uses_small_chunk_profile() {
+        let sizes = ChunkSizes::for_path(Path::new("tmp_pack_DGh0Fb"));
+
+        assert_eq!(sizes.min_size, ChunkSizes::SMALL.min_size);
+        assert_eq!(sizes.avg_size, ChunkSizes::SMALL.avg_size);
+        assert_eq!(sizes.max_size, ChunkSizes::SMALL.max_size);
+    }
+
+    #[test]
     fn git_pack_index_large_profile_avoids_remote_object_explosion() {
         let data: Vec<u8> = (0u64..(64 * 1024 * 1024))
             .map(|i| (i.wrapping_mul(31) ^ (i >> 7) ^ (i >> 17)) as u8)
@@ -394,6 +467,41 @@ mod tests {
         assert!(
             idx_chunks * 16 < old_idx_chunks,
             "large git index profile should materially reduce object count: old_idx={old_idx_chunks} idx={idx_chunks}"
+        );
+    }
+
+    #[test]
+    fn git_temp_pack_large_profile_avoids_remote_object_explosion() {
+        let data: Vec<u8> = (0u64..(64 * 1024 * 1024))
+            .map(|i| (i.wrapping_mul(37) ^ i.rotate_left(9) ^ (i >> 13) ^ 0x5A5A5A5A) as u8)
+            .collect();
+
+        let old_temp_pack_chunks = chunk_data(&data, ChunkSizes::SMALL).len();
+        let temp_pack_chunks = chunk_data(
+            &data,
+            ChunkSizes::for_path(Path::new(".git/objects/pack/tmp_pack_DGh0Fb")),
+        )
+        .len();
+
+        assert!(
+            temp_pack_chunks * 32 < old_temp_pack_chunks,
+            "large git temp-pack profile should materially reduce object count: old_temp_pack={old_temp_pack_chunks} temp_pack={temp_pack_chunks}"
+        );
+    }
+
+    #[test]
+    fn git_index_pack_profile_avoids_remote_object_explosion() {
+        let data: Vec<u8> = (0u64..(16 * 1024 * 1024))
+            .map(|i| (i.wrapping_mul(41) ^ i.rotate_left(5) ^ (i >> 11) ^ 0x3C3C3C3C) as u8)
+            .collect();
+
+        let old_git_index_chunks = chunk_data(&data, ChunkSizes::SMALL).len();
+        let git_index_chunks =
+            chunk_data(&data, ChunkSizes::for_path(Path::new(".git/index"))).len();
+
+        assert!(
+            git_index_chunks * 8 < old_git_index_chunks,
+            "git index pack profile should materially reduce object count: old_git_index={old_git_index_chunks} git_index={git_index_chunks}"
         );
     }
 

@@ -1,0 +1,46 @@
+task: [lazy:macos-finder-preflight] bash -euo pipefail <<'EOF'
+args=()
+
+if [[ -n "${EXPECTED_VERSION:-}" ]]; then
+  args+=(--expected-version "$EXPECTED_VERSION")
+fi
+if [[ -n "${CONFIG_PATH:-}" ]]; then
+  args+=(--config "$CONFIG_PATH")
+fi
+if [[ -n "${FILEPROVIDER_CONFIG:-}" ]]; then
+  args+=(--fileprovider-config "$FILEPROVIDER_CONFIG")
+fi
+if [[ -n "${APP_PATH:-}" ]]; then
+  args+=(--app-path "$APP_PATH")
+fi
+if [[ -n "${CLOUD_ROOT:-}" ]]; then
+  args+=(--cloud-root "$CLOUD_ROOT")
+fi
+if [[ -n "${PLUGIN_ID:-}" ]]; then
+  args+=(--plugin-id "$PLUGIN_ID")
+fi
+if [[ -n "${DOMAIN_ID:-}" ]]; then
+  args+=(--domain-id "$DOMAIN_ID")
+fi
+if [[ "${ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}" == "1" ]]; then
+  args+=(--allow-multiple-plugin-registrations)
+fi
+if [[ "${TCFS_REQUIRE_PRODUCTION_SIGNING:-${REQUIRE_PRODUCTION_SIGNING:-0}}" == "1" ]]; then
+  args+=(--require-production-signing)
+fi
+if [[ -n "${TCFS_BIN:-}" ]]; then
+  args+=(--tcfs "$TCFS_BIN")
+fi
+if [[ -n "${TCFSD_BIN:-}" ]]; then
+  args+=(--tcfsd "$TCFSD_BIN")
+fi
+
+scripts/macos-fileprovider-preflight.sh "${args[@]}"
+EOF
+
+host app keychain access group entitlement missing; no-embedded production Keychain path unavailable
+host app provisioning profile missing; restricted entitlements may fail at launch
+FileProvider extension keychain access group entitlement missing; no-embedded production Keychain path unavailable
+FileProvider extension provisioning profile missing; restricted entitlements may fail at launch
+production signing preflight failed with 4 issue(s)
+task: Failed to run task "lazy:macos-finder-preflight": exit status 1

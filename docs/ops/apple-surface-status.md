@@ -35,6 +35,11 @@ release-grade desktop or iOS product.
   into deterministic conflict/status proof: CLI status reported
   `sync state: conflict` and FileProvider readback preserved exact content.
   Finder badges/progress remain observational.
+- Local neo cleanup packet
+  `docs/release/evidence/macos-fileprovider-neo-pkg-install-20260516T024006Z/`
+  verifies the published `v0.12.12` `.pkg` signature/notarization and
+  quarantines the stale `~/Applications/TCFSProvider.app`, but the package did
+  not install because non-interactive `sudo` required a password.
 - GitHub Actions links for the current PZM runs are indexed in
   [Release Evidence Index](../release/evidence/README.md).
 
@@ -48,6 +53,9 @@ release-grade desktop or iOS product.
   does not mean arbitrary clean production Macs will auto-enable the provider.
 - Packaged macOS artifacts still require explicit post-cut smoke even when CI
   and packaging are green.
+- Neo local dogfood still needs an admin-auth install of the published `.pkg`
+  into `/Applications` plus strict production signing preflight before any
+  Finder smoke becomes production-adjacent.
 
 ## iOS: Current Posture
 

@@ -148,6 +148,13 @@ bash scripts/macos-postinstall-smoke.sh \
   --expected-file "path/to/known/remote-backed-file"
 ```
 
+For neo dogfood, the May 16, 2026 packet
+`docs/release/evidence/macos-fileprovider-neo-pkg-install-20260516T024006Z/`
+verifies the published `v0.12.12` package signature/notarization and quarantines
+the stale user app, but it does not count as a fresh install: non-interactive
+`sudo installer` required a password, so `/Applications/TCFSProvider.app` was
+not installed.
+
 Upgrade:
 
 ```bash

@@ -1,0 +1,2 @@
+$ sh -c find\ /Applications\ \"\$HOME/Applications\"\ \"\$HOME/git/tummycrypt/build\"\ -maxdepth\ 4\ -name\ TCFSProvider.app\ -print\ 2\>/dev/null\ \|\ sort
+/Users/jess/Applications/TCFSProvider.app
