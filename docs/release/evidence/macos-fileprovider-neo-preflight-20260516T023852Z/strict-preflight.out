@@ -1,0 +1,13 @@
+tcfs binary: /Users/jess/git/tummycrypt/target/debug/tcfs
+tcfs version: tcfs 0.12.12
+tcfsd binary: /Users/jess/.nix-profile/bin/tcfsd
+tcfsd version: tcfsd 0.12.2
+tcfs config: /Users/jess/.config/tcfs/config.toml
+FileProvider config: /Users/jess/.config/tcfs/fileprovider/config.json
+host app: /Users/jess/Applications/TCFSProvider.app
+host app bundle identifier: io.tinyland.tcfs
+host app codesign: valid
+host app app group entitlement: group.io.tinyland.tcfs
+FileProvider extension bundle identifier: io.tinyland.tcfs.fileprovider
+FileProvider extension codesign: valid
+FileProvider extension app group entitlement: group.io.tinyland.tcfs

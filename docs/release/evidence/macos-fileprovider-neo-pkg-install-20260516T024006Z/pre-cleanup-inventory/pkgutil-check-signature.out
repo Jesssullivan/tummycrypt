@@ -1,0 +1,24 @@
+$ pkgutil --check-signature /tmp/tcfs-pkg-20260516T023932Z/tcfs-0.12.12-macos-aarch64.pkg
+Package "tcfs-0.12.12-macos-aarch64.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Notarization: trusted by the Apple notary service
+   Signed with a trusted timestamp on: 2026-05-06 17:23:16 +0000
+   Certificate Chain:
+    1. Developer ID Installer: John Sullivan (QP994XQKNH)
+       Expires: 2030-11-26 13:53:59 +0000
+       SHA256 Fingerprint:
+           30 24 3F FF 67 09 24 67 3F 4B 08 C9 93 49 22 83 AC BA 3D 15 BC 24 
+           54 06 51 1E 30 7C 71 A4 9B 88
+       ------------------------------------------------------------------------
+    2. Developer ID Certification Authority
+       Expires: 2031-09-17 00:00:00 +0000
+       SHA256 Fingerprint:
+           F1 6C D3 C5 4C 7F 83 CE A4 BF 1A 3E 6A 08 19 C8 AA A8 E4 A1 52 8F 
+           D1 44 71 5F 35 06 43 D2 DF 3A
+       ------------------------------------------------------------------------
+    3. Apple Root CA
+       Expires: 2035-02-09 21:40:36 +0000
+       SHA256 Fingerprint:
+           B0 B1 73 0E CB C7 FF 45 05 14 2C 49 F1 29 5E 6E DA 6B CA ED 7E 2C 
+           68 C5 BE 91 B5 A1 10 01 F0 24
+

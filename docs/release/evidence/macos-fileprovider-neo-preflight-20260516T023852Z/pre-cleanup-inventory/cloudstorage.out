@@ -1,0 +1,2 @@
+$ sh -c find\ \"\$HOME/Library/CloudStorage\"\ -maxdepth\ 2\ -iname\ \"\*TCFS\*\"\ -print\ 2\>/dev/null\ \|\ sort
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS

@@ -53,9 +53,17 @@ mostly `.git` data. The package-backed push reached a 387 MB
 `git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`, reused the same
 shadow with chunk/file concurrency, S3 pool bounds, and upload heartbeat env set
 to the prior storage-posture values, but it was still dominated by the same
-pack index and did not produce a green push. Source now treats only Git pack
-indexes under `.git/objects/pack/` as large sequential objects; rerun the large
-stress lane only after that source fix is in the candidate package/binary.
+pack index and did not produce a green push. Follow-up source-built blocker
+packets narrowed the raw-Git object-count problem further:
+`git-repo-canary-linux-xr-fast-sourcefix-20260516T024122Z/` proved pack indexes
+under `.git/objects/pack/` use the large sequential profile and reduced the
+largest two pack indexes to 75 and 51 chunks, then exposed extensionless
+`tmp_pack_*` files at 52,372 / 17,057 / 6,395 chunks. The next source-built
+packet, `git-repo-canary-linux-xr-fast-sourcefix-tmppack-20260516T024810Z/`,
+proved those temp packs use the large sequential profile at 51 / 18 / 8
+chunks, then exposed `.git/index` as the new max-chunk path at 1,767 chunks.
+Source now covers Git pack indexes, temp packs, and the exact `.git/index`
+file, but that final index fix has not yet had a green large stress rerun.
 
 The fresh-tree restore gate is now green for source-built binaries, including
 empty directories.
@@ -93,8 +101,9 @@ signing preflight passes.
 ## Default Canary Order
 
 1. `~/git/oauth-mux` shadow: small, clean, low-risk first proof.
-2. `~/git/linux-xr-fast` shadow: large clean stress proof after the `.idx`
-   large-profile fix is in the selected package/binary.
+2. `~/git/linux-xr-fast` shadow: large clean stress proof after the Git pack
+   index, temp-pack, and `.git/index` chunk-profile fixes are in the selected
+   candidate binary/package.
 3. One expendable live repo: only after the shadow packet proves restore from
    remote, cross-host rehydrate, and safe-unsync behavior.
 4. Selected `~/git` or `~/Documents` subtrees: only after several repo canaries
@@ -237,8 +246,8 @@ A live repo can become a candidate only after a shadow packet proves all of:
 6. clean recursive `tcfs unsync` succeeds and dirty recursive unsync refuses
 7. exact rehydrate after unsync/cache-clear passes
 8. rollback is demonstrated by recreating a fresh local tree from the remote
-   prefix; current blocker:
-   `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`
-   timed out in reconcile dry-run remote-index scan before restore execution
+   prefix. This gate is green for the current Nix `oauth-mux` shadow packet,
+   but must still be repeated for any larger live-repo candidate before moving
+   that repo into TCFS.
 9. source symlinks are not skipped during push and rehydrate as symlinks with
    exact matching targets

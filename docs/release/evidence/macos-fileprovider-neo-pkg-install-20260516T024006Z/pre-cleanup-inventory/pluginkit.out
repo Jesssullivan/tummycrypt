@@ -1,0 +1,22 @@
+$ sh -c pluginkit\ -m\ -A\ -D\ -vvv\ 2\>/dev/null\ \|\ grep\ -A8\ -B4\ -E\ \"io\\\\.tinyland\\\\.tcfs\|TCFSProvider\|TCFSFileProvider\"\ \|\|\ true
+	    Display Name = DiagnosticExtension
+	      Short Name = DiagnosticExtension
+	        Platform = macOS
+
++    io.tinyland.tcfs.fileprovider(0.2.0)
+	            Path = /Users/jess/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+	            UUID = A837444B-AEF7-4ADA-9075-E6C8D0D59F20
+	       Timestamp = 2026-05-07 00:47:30 +0000
+	             SDK = com.apple.fileprovider-nonui
+	   Parent Bundle = /Users/jess/Applications/TCFSProvider.app
+	    Display Name = TCFSFileProvider
+	      Short Name = TCFSFileProvider
+	     Parent Name = TCFSProvider
+	        Platform = macOS
+
+     com.apple.HydraQLPreviewExtension(1.0)
+	            Path = /System/Library/PrivateFrameworks/Hydra.framework/Plugins/HydraQLPreviewExtension.appex
+	            UUID = E7C6DE29-3D69-55E2-8EA5-62299358C250
+	       Timestamp = 2026-04-30 00:30:35 +0000
+	             SDK = com.apple.quicklook.preview
+	    Display Name = HydraQLPreviewExtension

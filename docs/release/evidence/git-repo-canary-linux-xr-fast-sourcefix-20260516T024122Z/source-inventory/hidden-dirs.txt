@@ -1,0 +1,2 @@
+/Users/jess/git/linux-xr-fast/.git
+/Users/jess/git/linux-xr-fast/.github

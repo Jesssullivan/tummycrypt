@@ -328,6 +328,20 @@ until the published package is installed and strict preflight passes.
 
 Current neo evidence:
 
+- `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
+  refreshes the divergence inventory. At the start of this packet the visible
+  PlugInKit registration still pointed at
+  `~/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex`;
+  the app was ad-hoc from Gatekeeper's perspective, strict production preflight
+  failed on missing host/extension Keychain access-group entitlements and
+  embedded provisioning profiles, ambient `tcfs` was workspace `0.12.12`, and
+  ambient `tcfsd` was still `0.12.2` from the Nix profile.
+- `docs/release/evidence/macos-fileprovider-neo-pkg-install-20260516T024006Z/`
+  verifies the published `v0.12.12` `.pkg` checksum/signature/notarization,
+  quarantines the stale user app under the evidence packet, and records the
+  remaining local blocker: `sudo -n installer` failed because a password is
+  required. `/Applications/TCFSProvider.app` was therefore not installed by
+  this non-interactive run.
 - `docs/release/evidence/macos-fileprovider-neo-cleanup-20260510T003148Z/`
   inventories PATH resolution, app locations, PlugInKit records, CloudStorage
   roots, configs, sockets, launchd labels, and a bounded `~/tcfs` tree before
@@ -347,8 +361,9 @@ Current neo evidence:
   that divergence is removed.
 
 So a local neo Finder smoke can be diagnostic only. Before it becomes
-production-adjacent, install the published `.pkg` into `/Applications`, archive
-or quarantine stale user/build-tree registrations after inventory, and require
+production-adjacent, install the published `.pkg` into `/Applications` with
+admin authorization, verify no PlugInKit registration points at a stale user or
+build-tree app after cleanup, and require
 `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` to pass.
 
 After the signing/profile gate passes, production Finder evidence must also

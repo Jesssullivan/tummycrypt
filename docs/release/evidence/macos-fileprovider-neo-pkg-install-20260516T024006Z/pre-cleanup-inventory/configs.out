@@ -1,0 +1,17 @@
+$ sh -c find\ \"\$HOME/.config\"\ \"\$HOME/Library/Application\ Support\"\ \"\$HOME/Library/Group\ Containers\"\ -maxdepth\ 5\ \\\(\ -iname\ \"\*tcfs\*\"\ -o\ -iname\ \"\*tinyland\*\"\ \\\)\ -print\ 2\>/dev/null\ \|\ grep\ -Evi\ \"token\|secret\|password\|credential\|api\[_-\]\?key\|auth\[_-\]\?key\"\ \|\ sort
+/Users/jess/.config/glab-cli/recover/tinyland
+/Users/jess/.config/google-workspace/tinyland-business-ops-client.json
+/Users/jess/.config/google-workspace/tinyland-business-ops.json
+/Users/jess/.config/tcfs
+/Users/jess/.config/tinyland
+/Users/jess/.config/tinyland-cleanup
+/Users/jess/Library/Application Support/CrashReporter/tcfs_471D2DE3-137F-5DFE-9CAE-12B86D7F525B.plist
+/Users/jess/Library/Application Support/CrashReporter/tcfsd_471D2DE3-137F-5DFE-9CAE-12B86D7F525B.plist
+/Users/jess/Library/Application Support/CrashReporter/tinyland-cleanup_471D2DE3-137F-5DFE-9CAE-12B86D7F525B.plist
+/Users/jess/Library/Application Support/JetBrains/PyCharm2026.1/tasks/tinyland_dev.contexts.zip
+/Users/jess/Library/Application Support/JetBrains/PyCharm2026.1/tasks/tinyland_dev.tasks.zip
+/Users/jess/Library/Application Support/JetBrains/PyCharm2026.2/tasks/tinyland_dev.contexts.zip
+/Users/jess/Library/Application Support/JetBrains/PyCharm2026.2/tasks/tinyland_dev.tasks.zip
+/Users/jess/Library/Group Containers/group.io.tinyland.tcfs
+/Users/jess/Library/Group Containers/group.io.tinyland.tcfs/Library/Application Scripts/group.io.tinyland.tcfs
+/Users/jess/Library/Group Containers/group.io.tinyland.tcfs/tcfsd.sock

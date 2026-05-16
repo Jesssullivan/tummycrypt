@@ -1,0 +1,3 @@
+$ sh -c command\ -v\ tcfs\ \|\|\ true\;\ command\ -v\ tcfsd\ \|\|\ true\;\ command\ -v\ TCFSProvider\ \|\|\ true
+/Users/jess/git/tummycrypt/target/debug/tcfs
+/Users/jess/.nix-profile/bin/tcfsd

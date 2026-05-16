@@ -65,8 +65,14 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   `git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`: the clean
   source is `.git`-heavy, has 2,038 regular files / 0 symlinks, and current
   package push became dominated by a 387 MB `.git/objects/pack/*.idx` object.
-  Source now moves Git pack indexes to the large sequential chunk profile, but
-  no green rerun or package-backed restore/rollback proof exists yet.
+  Follow-up source-built blocker packets prove the next two raw-Git fixes in
+  isolation: `git-repo-canary-linux-xr-fast-sourcefix-20260516T024122Z/`
+  reduced large pack indexes to tens of chunks, then exposed extensionless
+  `tmp_pack_*` files; `git-repo-canary-linux-xr-fast-sourcefix-tmppack-20260516T024810Z/`
+  reduced those temp packs to 8-51 chunks, then exposed `.git/index` as a
+  1,767-chunk hotspot. Source now covers Git pack indexes, temp packs, and the
+  exact `.git/index` file, but the post-index-fix stress run and
+  package-backed restore/rollback proof are still open.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
