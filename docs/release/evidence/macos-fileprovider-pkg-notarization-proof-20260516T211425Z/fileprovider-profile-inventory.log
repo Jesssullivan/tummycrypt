@@ -1,0 +1,25 @@
+profiles dir: /Users/runner/work/_temp
+profiles scanned: 2
+required app group: group.io.tinyland.tcfs
+required keychain suffix: group.io.tinyland.tcfs
+host bundle id: io.tinyland.tcfs
+extension bundle id: io.tinyland.tcfs.fileprovider
+host candidates: 1
+extension candidates: 1
+compatible pair: found
+host profile: /Users/runner/work/_temp/tcfs-host-developer-id.provisionprofile
+  name: tcfs-host-developer-id
+  uuid: 93d4c8c5-5cc0-4c25-832b-40cf29d82e23
+  team_prefix: QP994XQKNH
+  application_identifier: QP994XQKNH.io.tinyland.tcfs
+  keychain_group: QP994XQKNH.*
+extension profile: /Users/runner/work/_temp/tcfs-fileprovider-developer-id.provisionprofile
+  name: tcfs-fileprovider-developer-id
+  uuid: fa455f84-5e7d-4a14-9d4f-68a26c6a9939
+  team_prefix: QP994XQKNH
+  application_identifier: QP994XQKNH.io.tinyland.tcfs.fileprovider
+  keychain_group: QP994XQKNH.*
+
+TCFS_HOST_PROVISIONING_PROFILE=/Users/runner/work/_temp/tcfs-host-developer-id.provisionprofile
+TCFS_EXTENSION_PROVISIONING_PROFILE=/Users/runner/work/_temp/tcfs-fileprovider-developer-id.provisionprofile
+TCFS_REQUIRE_PRODUCTION_SIGNING=1

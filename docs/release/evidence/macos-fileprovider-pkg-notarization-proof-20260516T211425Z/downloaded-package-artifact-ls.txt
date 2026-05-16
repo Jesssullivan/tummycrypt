@@ -1,0 +1,1 @@
+-rw-r--r-- 1 jess wheel 23M May 16 17:28 /tmp/tcfs-notary-proof-25973109986/dist-notarized-pkg-proof/tcfs-0.12.12-macos-aarch64.pkg

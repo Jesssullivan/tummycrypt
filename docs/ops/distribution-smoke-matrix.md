@@ -34,9 +34,12 @@ native `linux/arm64/v8` image manifest. The
 reconfirmed that gap: the `v0.12.12` image index still exposes Linux amd64 plus
 an unknown/unknown manifest, with no Linux arm64 image. The release workflow is
 configured to publish both architectures on the next cut, but that still needs
-tagged registry proof before upgrading the current evidence row. Production
-macOS `.pkg` current-tag proof remains a separate follow-up check even though
-older release and CI evidence exists for parts of that surface.
+tagged registry proof before upgrading the current evidence row. Remote run
+`25973109986` proves source-package notarization, stapling, Gatekeeper install
+assessment, and strict package smoke for a workflow artifact. Production macOS
+`.pkg` current-tag release install/Finder proof remains a separate follow-up
+check because that package was not published as a GitHub Release asset or
+installed into `/Applications`.
 
 ## Out-Of-Scope Published Helpers
 
@@ -154,6 +157,14 @@ verifies the published `v0.12.12` package signature/notarization and quarantines
 the stale user app, but it does not count as a fresh install: non-interactive
 `sudo installer` required a password, so `/Applications/TCFSProvider.app` was
 not installed.
+
+The May 16, 2026 remote packet
+`docs/release/evidence/macos-fileprovider-pkg-notarization-proof-20260516T211425Z/`
+proves the source-built package can pass Apple notarization, stapling,
+Gatekeeper install assessment, and strict package smoke with
+`--require-signature`, `--require-gatekeeper-install`, and
+`--require-stapled-ticket`. It is not a tagged release asset or host install
+smoke and does not replace the fresh install command above.
 
 Upgrade:
 

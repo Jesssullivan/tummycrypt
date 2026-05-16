@@ -1,6 +1,6 @@
 # Apple Surface Status
 
-As of May 9, 2026, Apple support is a buildable and partially proven lane. The
+As of May 16, 2026, Apple support is a buildable and partially proven lane. The
 macOS FileProvider testing-mode lab now has green enumerate, hydrate, evict,
 rehydrate, mutation upload/readback, and deterministic conflict/status content
 preservation proof on PZM, but Apple surfaces are still not a full
@@ -57,6 +57,14 @@ release-grade desktop or iOS product.
   signature and expected expanded payload, but Gatekeeper install assessment
   rejects it as `Unnotarized Developer ID` and `stapler validate` reports no
   stapled ticket.
+- Remote proof packet
+  `docs/release/evidence/macos-fileprovider-pkg-notarization-proof-20260516T211425Z/`
+  records GitHub Actions run `25973109986`: a source-built arm64 macOS package
+  was Developer ID signed, submitted to Apple notary service, accepted,
+  stapled, validated, accepted by Gatekeeper install assessment, and passed
+  strict package smoke with signature, Gatekeeper, and stapled-ticket checks
+  required. This is a workflow artifact proof, not a published release asset or
+  an installed Finder lifecycle proof.
 - GitHub Actions links for the current PZM runs are indexed in
   [Release Evidence Index](../release/evidence/README.md).
 
@@ -68,12 +76,13 @@ release-grade desktop or iOS product.
 - Finder badges, progress UI, and notification behavior are not release gates.
 - The green PZM lane is intentionally non-production testing-mode evidence; it
   does not mean arbitrary clean production Macs will auto-enable the provider.
-- Packaged macOS artifacts still require explicit post-cut smoke even when CI
-  and packaging are green.
+- Published macOS artifacts still require explicit post-cut smoke even when CI
+  and packaging are green; the notarized workflow artifact does not replace
+  current-tag release install evidence.
 - Neo local dogfood still needs an admin-auth install of the published or
-  candidate `.pkg` into `/Applications`, intentional stale-registration cleanup
-  after inventory, and full strict production preflight before any Finder smoke
-  becomes production-adjacent.
+  notarized candidate `.pkg` into `/Applications`, intentional
+  stale-registration cleanup after inventory, and full strict production
+  preflight before any Finder smoke becomes production-adjacent.
 
 ## iOS: Current Posture
 

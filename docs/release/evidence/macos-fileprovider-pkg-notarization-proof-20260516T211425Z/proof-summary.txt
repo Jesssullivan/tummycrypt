@@ -1,0 +1,20 @@
+workflow: macOS FileProvider Package Notarization Proof
+run_id: 25973109986
+sha: 102729927abc2c535aff6b31faa5ee4f9dc7a77a
+ref: refs/heads/main
+runner: macos-14
+version: 0.12.12
+started_at_utc: 2026-05-16T21:14:40Z
+
+[sw_vers]
+ProductName:		macOS
+ProductVersion:		14.8.5
+BuildVersion:		23J423
+
+[xcodebuild]
+Xcode 15.4
+Build version 15F31d
+
+[uname]
+Darwin sjc22-bt149-6d47dd30-3a79-4a80-8bce-bb290b036ab5-1E51CE84E290.local 23.6.0 Darwin Kernel Version 23.6.0: Tue Feb 24 20:51:46 PST 2026; root:xnu-10063.141.1.711.7~1/RELEASE_ARM64_VMAPPLE arm64
+required Apple signing/notarization secrets: present

@@ -1,0 +1,60 @@
+{
+  "logFormatVersion": 1,
+  "jobId": "069f6b06-6d77-4fb4-ac04-cb63ecb08bae",
+  "status": "Accepted",
+  "statusSummary": "Ready for distribution",
+  "statusCode": 0,
+  "archiveFilename": "tcfs-0.12.12-macos-aarch64.pkg",
+  "uploadDate": "2026-05-16T21:26:24.908Z",
+  "sha256": "85d4bf0956fbd93f73833e439a57bf93cad5a7947876e298e984cf6f43da18e1",
+  "ticketContents": [
+    {
+      "path": "tcfs-0.12.12-macos-aarch64.pkg/tcfs-0.12.12-macos-aarch64.pkg Contents/Payload/Applications/TCFSProvider.app",
+      "digestAlgorithm": "SHA-256",
+      "cdhash": "c68bf6ae9c01153cf29c2e831970782bc96e4c1c",
+      "arch": "arm64"
+    },
+    {
+      "path": "tcfs-0.12.12-macos-aarch64.pkg/tcfs-0.12.12-macos-aarch64.pkg Contents/Payload/Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider",
+      "digestAlgorithm": "SHA-256",
+      "cdhash": "c68bf6ae9c01153cf29c2e831970782bc96e4c1c",
+      "arch": "arm64"
+    },
+    {
+      "path": "tcfs-0.12.12-macos-aarch64.pkg/tcfs-0.12.12-macos-aarch64.pkg Contents/Payload/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/MacOS/TCFSFileProvider",
+      "digestAlgorithm": "SHA-256",
+      "cdhash": "eea794b1f821b1192e02fc4b25988faabe8f5004",
+      "arch": "arm64"
+    },
+    {
+      "path": "tcfs-0.12.12-macos-aarch64.pkg",
+      "digestAlgorithm": "SHA-1",
+      "cdhash": "92b48d10fb7734fdb844fe55003187a52583d5cd"
+    },
+    {
+      "path": "tcfs-0.12.12-macos-aarch64.pkg/tcfs-0.12.12-macos-aarch64.pkg Contents/Payload/usr/local/bin/tcfsd",
+      "digestAlgorithm": "SHA-256",
+      "cdhash": "7ce3efd977b2edfba3b122c04a0d410ed3c57e15",
+      "arch": "arm64"
+    },
+    {
+      "path": "tcfs-0.12.12-macos-aarch64.pkg/tcfs-0.12.12-macos-aarch64.pkg Contents/Payload/usr/local/bin/tcfs-tui",
+      "digestAlgorithm": "SHA-256",
+      "cdhash": "bcc225656b078977047838d5e35c5863b3cb4552",
+      "arch": "arm64"
+    },
+    {
+      "path": "tcfs-0.12.12-macos-aarch64.pkg/tcfs-0.12.12-macos-aarch64.pkg Contents/Payload/usr/local/bin/tcfs-mcp",
+      "digestAlgorithm": "SHA-256",
+      "cdhash": "50a11f3b308c6428c0b9bc4406792f277f33220b",
+      "arch": "arm64"
+    },
+    {
+      "path": "tcfs-0.12.12-macos-aarch64.pkg/tcfs-0.12.12-macos-aarch64.pkg Contents/Payload/usr/local/bin/tcfs",
+      "digestAlgorithm": "SHA-256",
+      "cdhash": "6b67a59e24428dfc06ac56511a9213ef301572c5",
+      "arch": "arm64"
+    }
+  ],
+  "issues": null
+}

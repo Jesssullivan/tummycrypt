@@ -43,7 +43,11 @@ as a production-proven platform.
 - **Filesystem surface**: Experimental; Linux remains the better-proven mount/runtime path
 - **Fleet sync**: Core sync engine and NATS path are shared with Linux, but macOS-specific acceptance coverage is not yet at the same bar
 - **Encryption**: Core crypto path is shared and available
-- **Build targets**: aarch64 (.tar.gz, .pkg; notarization attempted but non-blocking), x86_64 (.tar.gz)
+- **Build targets**: aarch64 (.tar.gz, .pkg), x86_64 (.tar.gz). A dedicated
+  GitHub-hosted proof workflow has built a source package, notarized it,
+  stapled it, passed Gatekeeper install assessment, and run strict package
+  smoke; published-release install and Finder lifecycle proof remain separate
+  gates.
 - **Homebrew**: manual tap flow required today because the formula is published on the `homebrew-tap` branch, not the default branch
 - **Current proof**: CI covers the Rust FileProvider staticlib/header and iOS
   Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts;
@@ -55,9 +59,11 @@ as a production-proven platform.
   provisioning profiles are missing. A source-built Developer ID app on neo now
   passes strict signing-only preflight with compatible local profiles embedded,
   and a local candidate `.pkg` structure/signature proof wraps it with
-  source-built `tcfs`/`tcfsd`; Gatekeeper rejects that candidate as
-  `Unnotarized Developer ID`, so it still needs notarization/stapling and has
-  not been installed or exercised through Finder
+  source-built `tcfs`/`tcfsd`. Remote run `25973109986` proves the current
+  source package can be notarized, stapled, accepted by Gatekeeper install
+  assessment, and pass strict package smoke with stapled-ticket enforcement.
+  That proof is a workflow artifact, not a published release install, and it
+  has not been installed or exercised through Finder.
 - **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)
   and [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md)
 

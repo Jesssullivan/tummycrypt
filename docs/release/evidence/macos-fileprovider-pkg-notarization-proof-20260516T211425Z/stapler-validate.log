@@ -1,0 +1,104 @@
+Processing: /Users/runner/work/tummycrypt/tummycrypt/tcfs-0.12.12-macos-aarch64.pkg
+Properties are {
+    NSURLIsDirectoryKey = 0;
+    NSURLIsPackageKey = 0;
+    NSURLIsSymbolicLinkKey = 0;
+    NSURLLocalizedTypeDescriptionKey = "Installer flat package";
+    NSURLTypeIdentifierKey = "com.apple.installer-package-archive";
+    "_NSURLIsApplicationKey" = 0;
+}
+Sig Type is RSA. Length is 3
+Sig Type is CMS. Length is 3
+Package tcfs-0.12.12-macos-aarch64.pkg uses a checksum of size 20
+Terminator Trailer size must be 0, not 1779
+{magic: t8lr, version: 1, type: 2, length: 1779}
+Found expected ticket at 24046646 with length of 1779
+JSON Data is {
+    records =     (
+                {
+            recordName = "2/1/92b48d10fb7734fdb844fe55003187a52583d5cd";
+        }
+    );
+}
+ Headers: {
+    "Content-Type" = "application/json";
+}
+Domain is api.apple-cloudkit.com
+Response is <NSHTTPURLResponse: 0x60000127d060> { URL: https://api.apple-cloudkit.com/database/1/com.apple.gk.ticket-delivery/production/public/records/lookup } { Status Code: 200, Headers {
+    "Alt-Svc" =     (
+        "h3=\":443\"; ma=2592000"
+    );
+    Connection =     (
+        "keep-alive"
+    );
+    "Content-Encoding" =     (
+        gzip
+    );
+    "Content-Type" =     (
+        "application/json; charset=UTF-8"
+    );
+    Date =     (
+        "Sat, 16 May 2026 21:27:02 GMT"
+    );
+    Server =     (
+        "AppleHttpServer/c18eb28e782f"
+    );
+    "Strict-Transport-Security" =     (
+        "max-age=31536000; includeSubDomains;"
+    );
+    "Transfer-Encoding" =     (
+        Identity
+    );
+    Via =     (
+        "xrail:icloud-xrail-group68-ext-6c76ffb4fb-sgfv6:8301:26R189:grp68,631194250daa17e24277dea86cf30319:2f2637d1292dbe78a11b167868e1919b:ussjc1"
+    );
+    "X-Apple-CloudKit-Version" =     (
+        "1.0"
+    );
+    "X-Apple-Edge-Response-Time" =     (
+        71
+    );
+    "X-Apple-Request-UUID" =     (
+        "770e75e8-7a81-49f0-976a-dd6c91ebace5"
+    );
+    "X-Responding-Instance" =     (
+        "ckdatabasews:557272869:prod_p63_ckdatabasews_50percent_64b977cf4c_mkp9k:8080:2616B155:8979e53d9465c0117c939ef31a3df7d8043d98d7"
+    );
+    "access-control-expose-headers" =     (
+        "X-Apple-Request-UUID,X-Responding-Instance,Via"
+    );
+    "x-apple-user-partition" =     (
+        63
+    );
+} }
+Size of data is 2985
+JSON Response is: {
+    records =     (
+                {
+            created =             {
+                deviceID = 2;
+                timestamp = 1778966808615;
+                userRecordName = "_b133e60953755a92966d7ca08d9c731a";
+            };
+            deleted = 0;
+            fields =             {
+                signedTicket =                 {
+                    type = BYTES;
+                    value = "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";
+                };
+            };
+            modified =             {
+                deviceID = 2;
+                timestamp = 1778966808615;
+                userRecordName = "_b133e60953755a92966d7ca08d9c731a";
+            };
+            pluginFields =             {
+            };
+            recordChangeTag = mp8uwmjm;
+            recordName = "2/1/92b48d10fb7734fdb844fe55003187a52583d5cd";
+            recordType = DeveloperIDTicket;
+        }
+    );
+}
+Downloaded ticket has been stored at file:///var/folders/k4/_09nqs851t35bpkk8lr_p43c0000gn/T/770e75e8-7a81-49f0-976a-dd6c91ebace5.ticket.
+The validate action worked!

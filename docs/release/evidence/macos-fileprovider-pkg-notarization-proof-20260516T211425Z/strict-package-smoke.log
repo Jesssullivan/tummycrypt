@@ -1,0 +1,12 @@
+tcfs-0.12.12-macos-aarch64.pkg: accepted
+source=Notarized Developer ID
+package: tcfs-0.12.12-macos-aarch64.pkg
+payload: usr/local/bin/tcfs present
+payload: usr/local/bin/tcfsd present
+payload: TCFSProvider.app present
+payload: TCFSFileProvider.appex present
+postinstall: matches scripts/macos-pkg-postinstall.sh
+signature: valid
+gatekeeper: install assessment passed
+notarization: stapled ticket valid
+macOS package structure smoke passed

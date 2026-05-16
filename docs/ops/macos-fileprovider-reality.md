@@ -365,7 +365,20 @@ Current neo evidence:
   still passes and `pkgutil --expand-full` shows the expected payload, but
   `spctl --assess --type install` rejects the package as
   `Unnotarized Developer ID` and `xcrun stapler validate` reports no stapled
-  ticket. The next package gate is notarize/staple before install/preflight.
+  ticket. This remains useful historical blocker evidence.
+- `docs/release/evidence/macos-fileprovider-pkg-notarization-proof-20260516T211425Z/`
+  is the first remote source-package notarization packet. GitHub Actions run
+  `25973109986` built the arm64 macOS package from source on `macos-14`,
+  imported Developer ID Application and Installer identities plus FileProvider
+  profiles, passed strict signing-only FileProvider preflight, submitted the
+  signed `.pkg` to Apple with `xcrun notarytool submit --wait`, received
+  `Accepted`, stapled and validated the ticket, passed
+  `spctl --assess --type install` with `source=Notarized Developer ID`, and
+  passed `scripts/macos-pkg-structure-smoke.sh --require-signature
+  --require-gatekeeper-install --require-stapled-ticket`. This proves
+  notarization/stapling/Gatekeeper package acceptance is real for the workflow
+  artifact. It still does not install into `/Applications`, clean PlugInKit, or
+  prove Finder lifecycle.
 - `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
   refreshes the divergence inventory. At the start of this packet the visible
   PlugInKit registration still pointed at
@@ -494,12 +507,27 @@ Notes:
   cleanup. It archives binary versions, PATH resolution, app locations,
   PlugInKit records, signing/profile state, CloudStorage roots, configs,
   sockets, launchd labels, and bounded `~/tcfs` inventory. Use the published
-  `.pkg` as the install source, and require
-  `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` before
-  describing any local Finder smoke as production-adjacent.
+  `.pkg` or the archived notarized candidate package as the install source, and
+  require `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight`
+  before describing any local Finder smoke as production-adjacent.
 - the helper assumes `tcfsd` is already runnable with a real config; it does
   not fabricate temp-home state or start a fake backend
 - `#309` still tracks where this harness runs from a known-clean host per tag
+
+### GitHub-Hosted Notarization Proof
+
+The repo also carries a manual source-package proof workflow:
+
+- [`.github/workflows/macos-fileprovider-pkg-notarization-proof.yml`](../../.github/workflows/macos-fileprovider-pkg-notarization-proof.yml)
+
+This lane is intentionally narrower than Finder acceptance. It builds the
+current source package on a GitHub-hosted arm64 macOS runner, imports the
+Developer ID Application and Installer identities plus FileProvider profiles,
+submits the signed `.pkg` to Apple notarization, staples the accepted ticket,
+runs Gatekeeper install assessment, and requires strict package smoke with
+signature, Gatekeeper, and stapled-ticket checks. It uploads the notarized
+package as a workflow artifact and does not publish a GitHub Release, install
+into `/Applications`, mutate PlugInKit, or run Finder lifecycle smoke.
 
 ### GitHub-Hosted Approximation
 
