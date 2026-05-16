@@ -1,0 +1,67 @@
+== local release binary versions ==
+tcfs 0.12.12
+tcfsd 0.12.12
+
+== package prep ==
+f3f9159ee302d7dfec63c06021db460d5f6bf0eb955d8a2f0c0b9f8cd93d7f9d  build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.tar.gz
+cee805bd525f826a97d96af9df13aef7ba56464c6cdcfea2ccb9ecc66ac828b5  build/macos-fileprovider-candidate-pkg-20260516T190702Z/TCFSProvider-0.12.12-macos-aarch64.zip
+
+== macos-build-pkg ==
+pkgbuild: Inferring bundle components from contents of build/macos-fileprovider-candidate-pkg-20260516T190702Z/pkg-work/pkg-root
+pkgbuild: Writing new component property list to build/macos-fileprovider-candidate-pkg-20260516T190702Z/pkg-work/components.plist
+pkgbuild: Reading components from build/macos-fileprovider-candidate-pkg-20260516T190702Z/pkg-work/components.plist
+pkgbuild: Adding component at Applications/TCFSProvider.app
+pkgbuild: Adding component at Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+pkgbuild: Adding top-level postinstall script
+pkgbuild: Wrote package to build/macos-fileprovider-candidate-pkg-20260516T190702Z/pkg-work/tcfs-0.12.12-unsigned.pkg
+Signing .pkg with: Developer ID Installer: John Sullivan (QP994XQKNH)
+productsign: using timestamp authority for signature
+productsign: signing product with identity "Developer ID Installer: John Sullivan (QP994XQKNH)" from keychain /Users/jess/Library/Keychains/login.keychain-db
+productsign: adding certificate "Developer ID Certification Authority"
+productsign: adding certificate "Apple Root CA"
+productsign: Wrote signed product archive to build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg
+package: build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg
+payload: usr/local/bin/tcfs present
+payload: usr/local/bin/tcfsd present
+payload: TCFSProvider.app present
+payload: TCFSFileProvider.appex present
+postinstall: matches /Users/jess/git/tummycrypt/scripts/macos-pkg-postinstall.sh
+macOS package structure smoke passed
+macOS package built: build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg
+
+== explicit signature check ==
+Package "tcfs-0.12.12-macos-aarch64.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Signed with a trusted timestamp on: 2026-05-16 19:07:41 +0000
+   Certificate Chain:
+    1. Developer ID Installer: John Sullivan (QP994XQKNH)
+       Expires: 2030-11-26 13:53:59 +0000
+       SHA256 Fingerprint:
+           30 24 3F FF 67 09 24 67 3F 4B 08 C9 93 49 22 83 AC BA 3D 15 BC 24 
+           54 06 51 1E 30 7C 71 A4 9B 88
+       ------------------------------------------------------------------------
+    2. Developer ID Certification Authority
+       Expires: 2031-09-17 00:00:00 +0000
+       SHA256 Fingerprint:
+           F1 6C D3 C5 4C 7F 83 CE A4 BF 1A 3E 6A 08 19 C8 AA A8 E4 A1 52 8F 
+           D1 44 71 5F 35 06 43 D2 DF 3A
+       ------------------------------------------------------------------------
+    3. Apple Root CA
+       Expires: 2035-02-09 21:40:36 +0000
+       SHA256 Fingerprint:
+           B0 B1 73 0E CB C7 FF 45 05 14 2C 49 F1 29 5E 6E DA 6B CA ED 7E 2C 
+           68 C5 BE 91 B5 A1 10 01 F0 24
+
+
+== explicit structure smoke with signature requirement ==
+package: build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg
+payload: usr/local/bin/tcfs present
+payload: usr/local/bin/tcfsd present
+payload: TCFSProvider.app present
+payload: TCFSFileProvider.appex present
+postinstall: matches scripts/macos-pkg-postinstall.sh
+macOS package structure smoke passed
+
+== package sha ==
+2afa9325931fd0dd244865bc38f1233634385bb0041d35bc83a0b4ea5e4272c5  build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg
+ 19M	build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg

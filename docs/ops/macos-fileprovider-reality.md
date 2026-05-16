@@ -352,6 +352,14 @@ Current neo evidence:
   embedded profile/signing-certificate checks. This closes the local
   source-built signing/profile blocker, but it is not an installed `.pkg`,
   does not touch PlugInKit, and does not prove Finder lifecycle.
+- `docs/release/evidence/macos-fileprovider-candidate-pkg-20260516T190702Z/`
+  wraps that signed source-built app with current source-built
+  `tcfs`/`tcfsd 0.12.12` into a local candidate `.pkg`. Package structure smoke
+  passes for `usr/local/bin/tcfs`, `usr/local/bin/tcfsd`,
+  `/Applications/TCFSProvider.app`, the FileProvider appex, and the repo
+  postinstall script. `pkgutil --check-signature` reports Developer ID
+  Installer signing with a trusted timestamp. This is package-shape/signature
+  proof only; it still does not install, register, launch, or exercise Finder.
 - `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
   refreshes the divergence inventory. At the start of this packet the visible
   PlugInKit registration still pointed at

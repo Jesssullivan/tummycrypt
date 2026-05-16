@@ -45,6 +45,12 @@ release-grade desktop or iOS product.
   proves the build script can embed the compatible local Developer ID host and
   extension profiles and pass strict signing-only preflight. It does not prove
   `.pkg` install, PlugInKit cleanup, or Finder lifecycle.
+- Local neo candidate package packet
+  `docs/release/evidence/macos-fileprovider-candidate-pkg-20260516T190702Z/`
+  proves the signed app can be wrapped with current source-built `tcfs`/`tcfsd`
+  into a Developer ID Installer signed `.pkg` whose payload and postinstall
+  structure pass the non-installing smoke. It does not install or register the
+  app.
 - GitHub Actions links for the current PZM runs are indexed in
   [Release Evidence Index](../release/evidence/README.md).
 

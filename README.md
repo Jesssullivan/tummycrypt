@@ -81,9 +81,11 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   and embedded provisioning profiles. Local profile inventory does find a
   compatible Developer ID profile pair. A source-built
   `TCFSProvider.app` now passes strict signing-only production preflight with
-  those profiles embedded, but it is not installed under `/Applications` and no
-  PlugInKit/Finder lifecycle was run. Production Finder remains a `#309` gate,
-  not a current claim.
+  those profiles embedded, and a local candidate `.pkg` structure/signature
+  proof now wraps that app with current source-built `tcfs`/`tcfsd`. The package
+  has not been installed under `/Applications`, and no PlugInKit/Finder
+  lifecycle was run. Production Finder remains a `#309` gate, not a current
+  claim.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)

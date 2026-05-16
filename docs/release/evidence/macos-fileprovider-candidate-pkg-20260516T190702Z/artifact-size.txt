@@ -1,0 +1,3 @@
+13M	build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.tar.gz
+6.1M	build/macos-fileprovider-candidate-pkg-20260516T190702Z/TCFSProvider-0.12.12-macos-aarch64.zip
+19M	build/macos-fileprovider-candidate-pkg-20260516T190702Z/tcfs-0.12.12-macos-aarch64.pkg
