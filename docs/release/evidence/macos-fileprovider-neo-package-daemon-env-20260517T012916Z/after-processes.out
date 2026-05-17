@@ -1,0 +1,2 @@
+96590     1 jess             /usr/local/bin/tcfsd --config /Users/jess/.config/tcfs/config.toml --mode daemon
+97080 96425 jess             rg [t]cfsd|TCFSDaemon

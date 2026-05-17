@@ -64,6 +64,9 @@ Options:
                               installed host app must carry Apple's
                               com.apple.developer.fileprovider.testing-mode
                               entitlement.
+  --direct-host-launch         Launch the host app executable directly for
+                              domain-add logging instead of relying on
+                              LaunchServices + unified log polling.
   --require-keychain-config   Require extension logs to prove config loaded
                               from shared Keychain, and fail if embedded config
                               was used
@@ -100,6 +103,7 @@ DOMAIN_ID="${TCFS_DOMAIN_ID:-io.tinyland.tcfs}"
 ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS="${TCFS_ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}"
 ELECT_PLUGIN_USE="${TCFS_ELECT_PLUGIN_USE:-0}"
 FILEPROVIDER_TESTING_MODE="${TCFS_FILEPROVIDER_TESTING_MODE:-0}"
+DIRECT_HOST_LAUNCH="${TCFS_FILEPROVIDER_DIRECT_HOST_LAUNCH:-0}"
 REQUIRE_KEYCHAIN_CONFIG="${TCFS_REQUIRE_KEYCHAIN_CONFIG:-0}"
 TCFS_BIN="${TCFS_BIN:-tcfs}"
 TCFSD_BIN="${TCFSD_BIN:-tcfsd}"
@@ -205,6 +209,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --fileprovider-testing-mode)
       FILEPROVIDER_TESTING_MODE=1
+      shift
+      ;;
+    --direct-host-launch)
+      DIRECT_HOST_LAUNCH=1
       shift
       ;;
     --require-keychain-config)
@@ -360,8 +368,10 @@ wait_for_pid_with_timeout() {
     done
     : >"$timeout_marker"
     if kill -0 "$pid" 2>/dev/null; then
+      pkill -TERM -P "$pid" 2>/dev/null || true
       kill "$pid" 2>/dev/null || true
       short_pause
+      pkill -KILL -P "$pid" 2>/dev/null || true
       kill -KILL "$pid" 2>/dev/null || true
     fi
   ) &
@@ -653,15 +663,22 @@ host_app_binary_path() {
 
 launch_host_app_for_domain_add() {
   local app_binary
+  local deadline
   local host_launch_pid=""
 
   app_binary="$(host_app_binary_path)"
-  if [[ "$FILEPROVIDER_TESTING_MODE" == "1" && -x "$app_binary" ]]; then
+  if [[ ("$FILEPROVIDER_TESTING_MODE" == "1" || "$DIRECT_HOST_LAUNCH" == "1") && -x "$app_binary" ]]; then
     echo "launching host app binary for domain add: $app_binary"
-    TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1 \
-    TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
-    TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
-      "$app_binary" >"$LOG_DIR/host-domain-launch.log" 2>&1 &
+    if [[ "$FILEPROVIDER_TESTING_MODE" == "1" ]]; then
+      TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1 \
+      TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
+      TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
+        "$app_binary" >"$LOG_DIR/host-domain-launch.log" 2>&1 &
+    else
+      TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
+      TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
+        "$app_binary" >"$LOG_DIR/host-domain-launch.log" 2>&1 &
+    fi
     host_launch_pid="$!"
   else
     echo "launching host app: $APP_PATH"
@@ -669,10 +686,11 @@ launch_host_app_for_domain_add() {
   fi
 
   HOST_LOG_WAIT=0
+  deadline=$((SECONDS + TIMEOUT_SECS))
   until check_host_log; do
     short_pause
     HOST_LOG_WAIT=$((HOST_LOG_WAIT + 1))
-    if (( HOST_LOG_WAIT >= TIMEOUT_SECS )); then
+    if (( SECONDS >= deadline )); then
       echo "timed out waiting for host app log showing domain add" >&2
       if [[ -f "$LOG_DIR/host-domain-launch.log" ]]; then
         echo "host app domain-launch log: $LOG_DIR/host-domain-launch.log" >&2
@@ -1157,6 +1175,7 @@ request_expected_file_download() {
   local item_identifier="$1"
   local app_binary
   local action_nonce
+  local deadline
   local host_request_pid=""
   local used_launchctl_env=0
   local wait_count=0
@@ -1189,10 +1208,11 @@ request_expected_file_download() {
     open -n "$APP_PATH" || open "$APP_PATH"
   fi
 
+  deadline=$((SECONDS + TIMEOUT_SECS))
   until check_host_download_request_log "$item_identifier" "$action_nonce"; do
     short_pause
     wait_count=$((wait_count + 1))
-    if (( wait_count >= TIMEOUT_SECS )); then
+    if (( SECONDS >= deadline )); then
       clear_fileprovider_request_download
       clear_fileprovider_action_nonce
       echo "timed out waiting for host app download request log: $item_identifier" >&2
@@ -1222,6 +1242,7 @@ request_expected_file_eviction() {
   local item_identifier="$1"
   local app_binary
   local action_nonce
+  local deadline
   local host_request_pid=""
   local used_launchctl_env=0
   local wait_count=0
@@ -1254,10 +1275,11 @@ request_expected_file_eviction() {
     open -n "$APP_PATH" || open "$APP_PATH"
   fi
 
+  deadline=$((SECONDS + TIMEOUT_SECS))
   until check_host_evict_log "$item_identifier" "$action_nonce"; do
     short_pause
     wait_count=$((wait_count + 1))
-    if (( wait_count >= TIMEOUT_SECS )); then
+    if (( SECONDS >= deadline )); then
       clear_fileprovider_evict
       clear_fileprovider_action_nonce
       echo "timed out waiting for host app eviction log: $item_identifier" >&2
@@ -1289,6 +1311,7 @@ hydrate_expected_file() {
   local expected_copy="$LOG_DIR/expected-content"
   local read_error="$LOG_DIR/hydrate-read-error.log"
   local hydrated_bytes
+  local deadline
   local read_status
   local attempt=0
 
@@ -1297,7 +1320,8 @@ hydrate_expected_file() {
     exit 1
   }
 
-  while (( attempt < TIMEOUT_SECS )); do
+  deadline=$((SECONDS + TIMEOUT_SECS))
+  while (( SECONDS < deadline )); do
     if read_fileprovider_file "$path" "$hydrated_copy" 2>"$read_error"; then
       break
     else
@@ -1312,7 +1336,7 @@ hydrate_expected_file() {
     attempt=$((attempt + 1))
   done
 
-  if (( attempt >= TIMEOUT_SECS )); then
+  if (( attempt >= TIMEOUT_SECS || SECONDS >= deadline )); then
     cat "$read_error" >&2 || true
     echo "failed to read expected file for hydration: $path" >&2
     exit 1
@@ -1501,6 +1525,7 @@ exercise_fileprovider_conflict_status() {
   local cloud_path
   local cloud_parent
   local attempt=0
+  local deadline
   local read_status=0
   local enum_output
 
@@ -1543,7 +1568,8 @@ exercise_fileprovider_conflict_status() {
   wait_for_expected_file "$cloud_path"
   request_expected_file_download "$rel"
 
-  while (( attempt < TIMEOUT_SECS )); do
+  deadline=$((SECONDS + TIMEOUT_SECS))
+  while (( SECONDS < deadline )); do
     if read_fileprovider_file "$cloud_path" "$hydrated_copy" 2>"$read_error"; then
       break
     else
@@ -1558,7 +1584,7 @@ exercise_fileprovider_conflict_status() {
     attempt=$((attempt + 1))
   done
 
-  if (( attempt >= TIMEOUT_SECS )); then
+  if (( attempt >= TIMEOUT_SECS || SECONDS >= deadline )); then
     cat "$read_error" >&2 || true
     echo "failed to read conflict fixture through FileProvider: $cloud_path" >&2
     exit 1

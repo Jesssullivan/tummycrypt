@@ -1,0 +1,48 @@
+task: [lazy:macos-finder-preflight] bash -euo pipefail <<'EOF'
+args=()
+
+if [[ -n "${EXPECTED_VERSION:-}" ]]; then
+  args+=(--expected-version "$EXPECTED_VERSION")
+fi
+if [[ -n "${CONFIG_PATH:-}" ]]; then
+  args+=(--config "$CONFIG_PATH")
+fi
+if [[ -n "${FILEPROVIDER_CONFIG:-}" ]]; then
+  args+=(--fileprovider-config "$FILEPROVIDER_CONFIG")
+fi
+if [[ -n "${APP_PATH:-}" ]]; then
+  args+=(--app-path "$APP_PATH")
+fi
+if [[ -n "${CLOUD_ROOT:-}" ]]; then
+  args+=(--cloud-root "$CLOUD_ROOT")
+fi
+if [[ -n "${PLUGIN_ID:-}" ]]; then
+  args+=(--plugin-id "$PLUGIN_ID")
+fi
+if [[ -n "${DOMAIN_ID:-}" ]]; then
+  args+=(--domain-id "$DOMAIN_ID")
+fi
+if [[ "${ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}" == "1" ]]; then
+  args+=(--allow-multiple-plugin-registrations)
+fi
+if [[ "${TCFS_REQUIRE_PRODUCTION_SIGNING:-${REQUIRE_PRODUCTION_SIGNING:-0}}" == "1" ]]; then
+  args+=(--require-production-signing)
+fi
+if [[ -n "${TCFS_BIN:-}" ]]; then
+  args+=(--tcfs "$TCFS_BIN")
+fi
+if [[ -n "${TCFSD_BIN:-}" ]]; then
+  args+=(--tcfsd "$TCFSD_BIN")
+fi
+
+scripts/macos-fileprovider-preflight.sh "${args[@]}"
+EOF
+
+multiple FileProvider registrations found for io.tinyland.tcfs.fileprovider; remove stale app/extension copies or pass --allow-multiple-plugin-registrations for diagnostic runs
+registered FileProvider extension paths:
+  extension: /Users/jess/git/tummycrypt/docs/release/evidence/macos-fileprovider-neo-stale-userapp-quarantine-20260517T010423Z/quarantined-stale-apps/Applications-TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+  parent app: /Users/jess/git/tummycrypt/docs/release/evidence/macos-fileprovider-neo-stale-userapp-quarantine-20260517T010423Z/quarantined-stale-apps/Applications-TCFSProvider.app
+  extension: /Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+  parent app: /Applications/TCFSProvider.app
+cleanup is not performed automatically; remove stale app/extension copies or run pluginkit -r intentionally, then rerun preflight
+task: Failed to run task "lazy:macos-finder-preflight": exit status 1

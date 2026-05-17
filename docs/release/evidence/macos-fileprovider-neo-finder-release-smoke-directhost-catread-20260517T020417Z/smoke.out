@@ -1,0 +1,87 @@
+tcfs binary: /usr/local/bin/tcfs
+tcfs version: tcfs 0.12.12
+tcfsd binary: /usr/local/bin/tcfsd
+tcfsd version: tcfsd 0.12.12
+tcfs config: /Users/jess/.config/tcfs/config.toml
+FileProvider config: /Users/jess/.config/tcfs/fileprovider/config.json
+host app: /Applications/TCFSProvider.app
+host app bundle identifier: io.tinyland.tcfs
+host app codesign: valid
+host app app group entitlement: group.io.tinyland.tcfs
+host app keychain access group entitlement: QP994XQKNH.group.io.tinyland.tcfs
+host app provisioning profile: /Applications/TCFSProvider.app/Contents/embedded.provisionprofile
+host app provisioning profile app group: group.io.tinyland.tcfs
+host app provisioning profile keychain group: QP994XQKNH.*
+host app provisioning profile application identifier: QP994XQKNH.io.tinyland.tcfs
+host app provisioning profile contains signing certificate: 61A8E77C4F3D678921FF0A7DC9D7E317F7754F50
+FileProvider extension bundle identifier: io.tinyland.tcfs.fileprovider
+FileProvider extension codesign: valid
+FileProvider extension app group entitlement: group.io.tinyland.tcfs
+FileProvider extension keychain access group entitlement: QP994XQKNH.group.io.tinyland.tcfs
+FileProvider extension provisioning profile: /Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/embedded.provisionprofile
+FileProvider extension provisioning profile app group: group.io.tinyland.tcfs
+FileProvider extension provisioning profile keychain group: QP994XQKNH.*
+FileProvider extension provisioning profile application identifier: QP994XQKNH.io.tinyland.tcfs.fileprovider
+FileProvider extension provisioning profile contains signing certificate: 61A8E77C4F3D678921FF0A7DC9D7E317F7754F50
+pluginkit registration:
++    io.tinyland.tcfs.fileprovider(0.2.0)
+	            Path = /Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+	            UUID = C3A6449D-7D68-498F-83ED-6B2CD51AA0A5
+	       Timestamp = 2026-05-17 01:33:39 +0000
+	             SDK = com.apple.fileprovider-nonui
+	   Parent Bundle = /Applications/TCFSProvider.app
+	    Display Name = TCFSFileProvider
+	      Short Name = TCFSFileProvider
+	     Parent Name = TCFSProvider
+	        Platform = macOS
+
+ (1 plug-in)
+CloudStorage root: /Users/jess/Library/CloudStorage/TCFSProvider-TCFS
+macOS FileProvider preflight passed
+tcfsd binary: /usr/local/bin/tcfsd
+tcfsd version: tcfsd 0.12.12
+tcfs binary: /usr/local/bin/tcfs
+tcfs version: tcfs 0.12.12
+tcfs status (preflight):
+tcfsd v0.12.12
+  uptime:        33m 32s
+  socket:        /Users/jess/.local/state/tcfsd/tcfsd.sock
+  device:        neo.local (03d8a0bd)
+  conflict mode: auto
+  storage:       http://seaweedfs-tcfs:8333 [ok]
+  nats:          not connected
+  active mounts: 0
+  credentials:   loaded (source: file:TCFS_S3_ACCESS_FILE)
+status logs: /Users/jess/git/tummycrypt/docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/logs
+pluginkit registration:
++    io.tinyland.tcfs.fileprovider(0.2.0)
+	            Path = /Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+	            UUID = C3A6449D-7D68-498F-83ED-6B2CD51AA0A5
+	       Timestamp = 2026-05-17 01:33:39 +0000
+	             SDK = com.apple.fileprovider-nonui
+	   Parent Bundle = /Applications/TCFSProvider.app
+	    Display Name = TCFSFileProvider
+	      Short Name = TCFSFileProvider
+	     Parent Name = TCFSProvider
+	        Platform = macOS
+
+ (1 plug-in)
+launching host app binary for domain add: /Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider
+host app log confirmed domain add
+CloudStorage root: /Users/jess/Library/CloudStorage/TCFSProvider-TCFS
+nudging CloudStorage enumeration
+enumeration sample:
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/sync-root-test.txt
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/test-e2e.txt
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/fp-hydrate-test.txt
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/finder-smoke-20260430T0259Z
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/finder-smoke-20260430T0259Z/finder-smoke.txt
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/e2e-session2-neo.txt
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/macos-local-smoke-20260501T155638Z
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/macos-local-smoke-20260501T155638Z/fixture.txt
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/macos-local-normalized-20260501T162944Z
+/Users/jess/Library/CloudStorage/TCFSProvider-TCFS/macos-local-normalized-20260501T162944Z/fixture.txt
+nudging expected parent enumeration: /Users/jess/Library/CloudStorage/TCFSProvider-TCFS/shared
+requesting FileProvider download for expected file: shared/alpha-test.txt
+launching host app binary for download request: /Applications/TCFSProvider.app/Contents/MacOS/TCFSProvider
+host app requested FileProvider download for expected file

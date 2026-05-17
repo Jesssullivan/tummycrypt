@@ -1,0 +1,9 @@
+71975	0	dev.tinyland.prompt-pulse
+-	1	dev.tinyland.business-ops
+-	0	dev.tinyland.google-calendar-sync
+41442	-6	dev.tinyland.cleanup
+-	0	dev.tinyland.tcfs-mcp-reaper
+-	0	org.tinyland.inject-secrets
+-	0	dev.tinyland.tcfsd-health
+-	0	com.tinyland.ibsf-sync
+96590	0	io.tinyland.tcfsd

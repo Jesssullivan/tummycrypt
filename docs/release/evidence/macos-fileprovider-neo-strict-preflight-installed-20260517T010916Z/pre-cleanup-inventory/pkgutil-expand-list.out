@@ -1,0 +1,7 @@
+$ sh -c tmp=\$\(mktemp\ -d\)\;\ pkgutil\ --expand\ /tmp/tcfs-notarized-pkg-25973109986/tcfs-0.12.12-macos-aarch64.pkg\ \"\$tmp/pkg\"\ \>/dev/null\ \&\&\ find\ \"\$tmp/pkg\"\ -maxdepth\ 4\ -print\ \|\ sort\;\ rm\ -rf\ \"\$tmp\"
+/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T/tmp.5fAxIwUUuI/pkg
+/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T/tmp.5fAxIwUUuI/pkg/Bom
+/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T/tmp.5fAxIwUUuI/pkg/PackageInfo
+/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T/tmp.5fAxIwUUuI/pkg/Payload
+/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T/tmp.5fAxIwUUuI/pkg/Scripts
+/var/folders/z6/7m3zpx6j3x982j_fzwg1lppw0000gn/T/tmp.5fAxIwUUuI/pkg/Scripts/postinstall

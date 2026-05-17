@@ -33,7 +33,7 @@ if [ ! -f "$PLIST_PATH" ]; then
   <array>
     <string>/bin/sh</string>
     <string>-lc</string>
-    <string>exec /usr/local/bin/tcfsd --config "$HOME/.config/tcfs/config.toml" --mode daemon</string>
+    <string>if [ -f "$HOME/.config/tcfs/env" ]; then set -a; . "$HOME/.config/tcfs/env"; set +a; fi; exec /usr/local/bin/tcfsd --config "$HOME/.config/tcfs/config.toml" --mode daemon</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

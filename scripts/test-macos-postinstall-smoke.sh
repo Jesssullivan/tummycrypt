@@ -427,7 +427,7 @@ bash "$SCRIPT" \
   --state "$STATE_PATH" \
   --sync-root "$SYNC_ROOT" \
   --remote-prefix "gha/fake-prefix" \
-  --timeout 2 \
+  --timeout 5 \
   >"$OUT" 2>&1
 
 assert_contains "$OUT" "tcfsd version: tcfsd 0.12.2"
@@ -495,6 +495,28 @@ cmp -s "$CONFLICT_CONTENT_FILE" "$LOG_DIR/conflict-hydrated-file"
   printf 'expected coordinated read to fail once before hydration retry succeeded\n' >&2
   exit 1
 }
+
+DIRECT_OUT="${TMPDIR}/direct-host-launch.out"
+DIRECT_HOST_BINARY_LOG="${TMPDIR}/direct-host-binary.log"
+env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+  TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+  TCFS_FAKE_HOST_BINARY_LOG="$DIRECT_HOST_BINARY_LOG" \
+  TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --expected-file "$EXPECTED_REL" \
+    --expected-content-file "$EXPECTED_CONTENT_FILE" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/direct-host-logs" \
+    --direct-host-launch \
+    --timeout 5 \
+    >"$DIRECT_OUT" 2>&1
+assert_contains "$DIRECT_OUT" "launching host app binary for domain add: $APP_PATH/Contents/MacOS/TCFSProvider"
+assert_contains "$DIRECT_OUT" "host app log confirmed domain add"
+assert_contains "$DIRECT_OUT" "macOS post-install FileProvider smoke passed"
+assert_contains "$DIRECT_HOST_BINARY_LOG" "host-binary"
 
 assert_fails_contains \
   "--require-keychain-config requires --expected-file" \

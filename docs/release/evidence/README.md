@@ -60,6 +60,15 @@ the repository.
 | `macos-fileprovider-pkg-notarization-proof-20260516T211425Z/` | Remote source-package notarization proof for the FileProvider `.pkg` | GitHub Actions run `25973109986` built `tcfs-0.12.12-macos-aarch64.pkg` from source on `macos-14` arm64, imported Developer ID Application/Installer identities and FileProvider profiles, passed strict signing-only FileProvider preflight, submitted to Apple notary service with `xcrun notarytool submit --wait`, received `Accepted`, stapled and validated the ticket, passed Gatekeeper install assessment as `source=Notarized Developer ID`, and passed strict package smoke with signature, Gatekeeper, and stapled-ticket checks required. This is a workflow artifact proof, not a GitHub Release publication, local `/Applications` install, PlugInKit cleanup, or Finder lifecycle proof |
 | `macos-fileprovider-neo-notarized-pkg-inventory-20260516T222519Z/` | Local neo inventory and strict validation of the downloaded notarized workflow artifact | downloaded artifact SHA-256 is `c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`; local strict package smoke passed with signature, Gatekeeper install assessment, and stapled-ticket checks required. Inventory still shows `/Applications/TCFSProvider.app` absent, PlugInKit parented to `~/Applications/TCFSProvider.app`, and ambient `tcfs`/`tcfsd` at `0.12.2`; no install or Finder lifecycle was run |
 | `macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/` | Local neo install attempt for the downloaded notarized workflow artifact | real install command reached `sudo -n installer -pkg ... -target /` and failed with `sudo: a password is required`; strict preflight then failed because `/Applications/TCFSProvider.app` remained absent. This is blocker evidence only, not Finder readiness |
+| `macos-fileprovider-neo-notarized-pkg-install-auth-20260517T005618Z/` | Authenticated local install of the downloaded notarized workflow artifact | `INSTALL_MODE=osascript` installed the notarized package into `/Applications`; strict signing/profile checks passed for the installed host app and extension, but preflight failed because PlugInKit still reported both the canonical app and the stale user app |
+| `macos-fileprovider-neo-stale-userapp-quarantine-20260517T010423Z/` | Intentional stale user-app quarantine after the install packet existed | moved the stale `~/Applications/TCFSProvider.app` under evidence quarantine; preflight still failed because PlugInKit continued to report the quarantined bundle path plus the canonical `/Applications` path |
+| `macos-fileprovider-neo-strict-preflight-installed-20260517T010916Z/` | Green strict preflight for the package-installed app on neo | `/usr/local/bin/tcfs` and `/usr/local/bin/tcfsd` report `0.12.12`; `/Applications/TCFSProvider.app` host and extension pass codesign, App Group, keychain-access-group, embedded profile, signing-certificate, and one-registration checks |
+| `macos-fileprovider-neo-package-daemon-env-20260517T012916Z/` | Package daemon environment remediation on neo | before remediation, stale user `TCFSDaemon.app` and package `/usr/local/bin/tcfsd` were both running and storage was `[UNREACHABLE]`; after launchd file-credential env mapping and stale daemon bootout, only package `tcfsd` remained and `tcfs status` reported storage `[ok]` |
+| `macos-fileprovider-neo-finder-release-smoke-20260517T011342Z/` | Superseded installed Finder release smoke attempt | strict installed preflight passed, but the run did not reach a claimable FileProvider hydration result |
+| `macos-fileprovider-neo-finder-release-smoke-20260517T013241Z/` | Superseded normal host-launch Finder release smoke attempt | strict installed preflight and daemon storage `[ok]` passed; the normal `open` host-launch path stalled before useful FileProvider lifecycle evidence |
+| `macos-fileprovider-neo-finder-release-smoke-directhost-20260517T015411Z/` | Superseded direct-host Finder release smoke attempt | strict installed preflight, daemon storage `[ok]`, host-app domain add, CloudStorage enumeration, and `requestDownload` passed; the run was terminated before read proof |
+| `macos-fileprovider-neo-finder-release-smoke-directhost-20260517T020246Z/` | Direct-host production Finder smoke with coordinated-read helper blocker | strict installed preflight, storage `[ok]`, domain add, enumeration, and `requestDownload` passed; the coordinated Swift read helper failed on mismatched Nix SDK/toolchain (`SwiftShims` missing), and FPCK reported `1/129` reconciliation failures |
+| `macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/` | Current direct-host production Finder read blocker | strict installed preflight, storage `[ok]`, domain add, enumeration, and `requestDownload` passed with the coordinated helper disabled; plain `cat` of `shared/alpha-test.txt` failed with `Operation timed out`, so production Finder hydration is still open |
 | `macos-fileprovider-neo-cleanup-20260510T003148Z/` | Non-mutating neo FileProvider divergence inventory before cleanup | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/` | Non-mutating neo FileProvider divergence inventory with the published `v0.12.12` `.pkg` selected as source | repo-archived inventory plus package checksum pass, `pkgutil --check-signature` Developer ID/notarization output, and non-installing package structure smoke; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-strict-preflight-blocker-20260510T0040Z/` | Non-mutating strict production signing preflight against the existing `~/Applications/TCFSProvider.app` | preflight failed as expected: host and extension keychain access group entitlements/provisioning profiles are missing; ambient `tcfsd` is still `0.12.2` from the Nix profile; this is a blocker record, not Finder readiness |
@@ -257,11 +266,24 @@ the repository.
   smoke locally with signature, Gatekeeper, and stapled-ticket gates required.
   The local host inventory still shows the stale user-app registration and no
   canonical `/Applications/TCFSProvider.app`.
-- `macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/` is the next
-  real local install attempt. It is blocked only at non-interactive admin
-  authentication: `sudo -n installer` requires a password. No Finder lifecycle
-  should be claimed until an elevated install, PlugInKit cleanup/inventory, and
-  strict production preflight all pass.
+- `macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/` is the
+  historical non-interactive local install attempt. It blocked at admin
+  authentication: `sudo -n installer` requires a password.
+- `macos-fileprovider-neo-notarized-pkg-install-auth-20260517T005618Z/`
+  supersedes the non-interactive admin-auth blocker for the workflow artifact:
+  authenticated `osascript` installs the package into `/Applications`.
+- `macos-fileprovider-neo-stale-userapp-quarantine-20260517T010423Z/` and
+  `macos-fileprovider-neo-strict-preflight-installed-20260517T010916Z/` close
+  the local stale user-app and strict installed preflight gates for this
+  installed workflow artifact.
+- `macos-fileprovider-neo-package-daemon-env-20260517T012916Z/` closes the
+  local package-daemon storage gate by removing the stale user daemon and
+  proving package `tcfsd` storage `[ok]` from file-backed credentials.
+- The direct-host Finder smoke packets narrow `#309` to the actual production
+  FileProvider read path. The current blocker is
+  `macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/`:
+  domain add, CloudStorage enumeration, and host-app `requestDownload` pass,
+  but reading `shared/alpha-test.txt` returns `Operation timed out`.
 - `distribution-v01212-20260508T205913Z/` covers Homebrew and Nix only. It does
   not cover current-tag Linux packages, container, or production macOS `.pkg`
   smoke.

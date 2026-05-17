@@ -1,6 +1,6 @@
 # Apple Surface Status
 
-As of May 16, 2026, Apple support is a buildable and partially proven lane. The
+As of May 17, 2026, Apple support is a buildable and partially proven lane. The
 macOS FileProvider testing-mode lab now has green enumerate, hydrate, evict,
 rehydrate, mutation upload/readback, and deterministic conflict/status content
 preservation proof on PZM, but Apple surfaces are still not a full
@@ -75,9 +75,30 @@ release-grade desktop or iOS product.
 - Local neo install packet
   `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/`
   attempts the real `/` install from that notarized package and records the
-  current blocker: `sudo -n installer` requires a password, so no payload was
-  installed and strict production preflight still fails on the missing
+  historical blocker: `sudo -n installer` requires a password, so no payload
+  was installed and strict production preflight still fails on the missing
   `/Applications/TCFSProvider.app`.
+- Local neo install packet
+  `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-auth-20260517T005618Z/`
+  supersedes that admin-auth blocker for the workflow artifact: the notarized
+  package installed into `/Applications` with authenticated `osascript`, but
+  strict preflight still found duplicate PlugInKit registrations.
+- Local neo cleanup and preflight packets
+  `docs/release/evidence/macos-fileprovider-neo-stale-userapp-quarantine-20260517T010423Z/`
+  and
+  `docs/release/evidence/macos-fileprovider-neo-strict-preflight-installed-20260517T010916Z/`
+  intentionally quarantine the stale user app after inventory, then prove
+  strict installed preflight with one PlugInKit registration under
+  `/Applications/TCFSProvider.app`.
+- Local neo daemon packet
+  `docs/release/evidence/macos-fileprovider-neo-package-daemon-env-20260517T012916Z/`
+  removes the stale user daemon from the bounded process set and proves package
+  `tcfsd 0.12.12` reaches storage `[ok]` from file-backed credentials.
+- Local neo Finder packets now reach production-signed domain add,
+  CloudStorage enumeration, and host-app `requestDownload`; the current
+  blocker packet
+  `docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/`
+  still fails the real read with `Operation timed out`.
 - GitHub Actions links for the current PZM runs are indexed in
   [Release Evidence Index](../release/evidence/README.md).
 
@@ -92,10 +113,10 @@ release-grade desktop or iOS product.
 - Published macOS artifacts still require explicit post-cut smoke even when CI
   and packaging are green; the notarized workflow artifact does not replace
   current-tag release install evidence.
-- Neo local dogfood still needs an admin-auth install of the published or
-  notarized candidate `.pkg` into `/Applications`, intentional
-  stale-registration cleanup after inventory, and full strict production
-  preflight before any Finder smoke becomes production-adjacent.
+- Neo local dogfood has an authenticated install, intentional stale-registration
+  cleanup after inventory, full strict production preflight, and package daemon
+  storage proof. It still needs exact-content FileProvider hydration through
+  the installed production app before any Finder readiness claim.
 
 ## iOS: Current Posture
 

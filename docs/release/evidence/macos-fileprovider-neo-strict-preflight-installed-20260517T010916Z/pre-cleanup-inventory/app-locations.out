@@ -1,0 +1,4 @@
+$ sh -c find\ /Applications\ \"\$HOME/Applications\"\ \"\$HOME/git/tummycrypt/build\"\ -maxdepth\ 4\ -name\ TCFSProvider.app\ -print\ 2\>/dev/null\ \|\ sort
+/Applications/TCFSProvider.app
+/Users/jess/git/tummycrypt/build/fileprovider-signed-app-preflight-20260516T183213Z/TCFSProvider.app
+/Users/jess/git/tummycrypt/build/macos-fileprovider-candidate-pkg-assessment-20260516T194612Z-expanded/Payload/Applications/TCFSProvider.app

@@ -97,7 +97,11 @@ Record results using a table like this:
   two different harness families:
   - [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml)
     exercises published packages and production-style install/signing/storage
-    gates, but production Finder enablement is still not continuously green.
+    gates. The latest local `neo` notarized workflow-artifact proof goes
+    further: authenticated install, strict installed preflight, package daemon
+    storage, domain add, CloudStorage enumeration, and host-app
+    `requestDownload` are archived. Production Finder hydration is still not
+    green because the installed app's actual read path times out.
   - [`.github/workflows/macos-fileprovider-testing-mode-pkg.yml`](../../.github/workflows/macos-fileprovider-testing-mode-pkg.yml)
     plus the PZM smoke path exercises a non-production Mac App
     Development/testing-mode package with the lab `SystemPolicyRule` profile.

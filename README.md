@@ -73,28 +73,23 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   headroom. Live repo moves, Homebrew readiness, package-backed
   restore/rollback, production Finder, broad `~/git`, and home-directory
   takeover remain unclaimed.
-- Current neo Finder truth: fresh May 16 inventory packets confirm
-  `/Applications/TCFSProvider.app` is absent, the visible PlugInKit
-  registration is still parented by `~/Applications/TCFSProvider.app`, ambient
-  `tcfsd` is still `0.12.2`, and strict production preflight against the user
-  app fails because host and extension lack Keychain access-group entitlements
-  and embedded provisioning profiles. Local profile inventory does find a
-  compatible Developer ID profile pair. A source-built
-  `TCFSProvider.app` now passes strict signing-only production preflight with
-  those profiles embedded, and a local candidate `.pkg` structure/signature
-  proof now wraps that app with current source-built `tcfs`/`tcfsd`. Remote
-  run `25973109986` then built the package on a GitHub-hosted arm64 macOS
-  runner, submitted it to Apple's notary service, received `Accepted`, stapled
-  and validated the ticket, passed Gatekeeper install assessment, and passed
-  strict package smoke with signature, Gatekeeper, and stapled-ticket gates
-  required. The notarized workflow artifact was then downloaded on `neo`
-  (`sha256=c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`)
-  and passed the same local strict package smoke. A real local install attempt
-  still blocked at `sudo -n installer` because admin authentication was not
-  available, so `/Applications/TCFSProvider.app` remains absent and no
-  PlugInKit/Finder lifecycle was run. This is a workflow artifact plus local
-  package-validation proof, not a published release asset or Finder readiness.
-  Production Finder remains a `#309` gate, not a current claim.
+- Current neo Finder truth: the May 17 packets moved the production lane from
+  package validation to installed local proof. Remote run `25973109986` built
+  the source package on a GitHub-hosted arm64 macOS runner, received Apple
+  notary `Accepted`, stapled and validated the ticket, passed Gatekeeper
+  install assessment, and passed strict package smoke with signature,
+  Gatekeeper, and stapled-ticket gates required. That artifact was installed on
+  `neo` via authenticated `osascript`, the stale user app was quarantined after
+  inventory, and strict production preflight then passed against
+  `/Applications/TCFSProvider.app` with one PlugInKit registration and
+  `/usr/local/bin/tcfs` / `/usr/local/bin/tcfsd` at `0.12.12`. A daemon
+  follow-up removed the stale `~/Applications/TCFSDaemon.app` process and
+  showed package `tcfsd` reaching storage `[ok]` from file-backed credentials.
+  The production Finder smoke now reaches domain add, CloudStorage
+  enumeration, and host-app `requestDownload` for `shared/alpha-test.txt`, but
+  the actual FileProvider read still fails with `Operation timed out`.
+  Production Finder hydration/lifecycle remains a `#309` blocker, not a
+  readiness claim.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
@@ -222,7 +217,7 @@ For the bar after install succeeds, see
 | CLI (push/pull/reconcile) | Proven | Install-smoke proven; storage commands available but not continuous macOS acceptance | Planned | - |
 | Daemon (gRPC + metrics) | Proven | Available, lightly validated | Planned | - |
 | Filesystem mount | x86_64 FUSE lifecycle is host-proven; packaged mount/systemd first-use is still separate; NFS fallback evidence pending | Experimental | Cloud Files API skeleton | - |
-| FileProvider | - | Non-production PZM testing-mode lab-proven experimental; production `.pkg` install/signing partial proof exists but Finder remains open | - | Proof-of-concept; write hooks unproven |
+| FileProvider | - | Non-production PZM testing-mode lab-proven experimental; production `.pkg` install/preflight/domain/requestDownload proof exists, but read/hydration remains blocked | - | Proof-of-concept; write hooks unproven |
 | Finder/Explorer badges | - | Experimental | - | - |
 | D-Bus integration | Interface exists; release UX not proven | - | - | - |
 | Fleet sync (NATS) | Proven core/live lanes | Core path available, not continuously acceptance-tested | Planned | - |

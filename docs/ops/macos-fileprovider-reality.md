@@ -1,6 +1,6 @@
 # macOS Finder and FileProvider Reality
 
-As of May 8, 2026, macOS is a real packaging and integration lane for tcfs.
+As of May 17, 2026, macOS is a real packaging and integration lane for tcfs.
 The non-production PZM testing-mode FileProvider lane is proven end to end on
 `v0.12.12` through enumerate, exact-content hydrate, evict, rehydrate,
 mutation upload/readback, and deterministic CLI conflict/status content
@@ -80,6 +80,20 @@ sync-root stub representation, not the desired primary Finder UX.
   profile is installed. This is a non-production Mac App
   Development/testing-mode proof, not a production Developer ID clean-host
   claim.
+- The production Developer ID source-package lane now has real notarization,
+  stapling, Gatekeeper install assessment, and strict package-smoke evidence
+  from GitHub Actions run `25973109986`.
+- `neo` has installed that notarized workflow artifact into
+  `/Applications/TCFSProvider.app` with authenticated `osascript`, quarantined
+  the stale user app after inventory, and passed strict installed preflight
+  with one PlugInKit registration.
+- `neo` package daemon proof now shows `/usr/local/bin/tcfsd 0.12.12`
+  reaching storage `[ok]` from file-backed credentials after removing the
+  stale user daemon.
+- The production-signed Finder smoke now reaches host-app domain add,
+  CloudStorage enumeration, and host-app `requestDownload` for
+  `shared/alpha-test.txt`. It still does not prove hydration: the current
+  raw-read packet fails with `Operation timed out`.
 
 ## Important Constraints
 
@@ -102,7 +116,7 @@ sync-root stub representation, not the desired primary Finder UX.
   lane from Developer ID package install through user enablement, register,
   enumerate, hydrate, mutate, and conflict handling
 - A production clean-host Finder/FileProvider lifecycle smoke beyond
-  install/signing/storage gates
+  install/signing/storage/domain-add/enumeration/requestDownload gates
 - Finder badge visibility as a release gate
 - Conflict UX, notification behavior, and Finder badge/progress visibility as
   release gates
@@ -319,17 +333,17 @@ TCFS_REQUIRE_PRODUCTION_SIGNING=1 \
 task lazy:macos-finder-signing-preflight
 ```
 
-The May 10, 2026 neo cleanup packet supersedes the older local-app assumption:
-the visible local FileProvider registration is still parented by
-`~/Applications/TCFSProvider.app`, not a published `.pkg` install under
-`/Applications/TCFSProvider.app`. That makes neo's Finder entry useful
-divergence evidence, but out of band for production package-to-Finder claims
-until the published package is installed and strict preflight passes.
+The May 17, 2026 neo packets supersede the older local-app assumption:
+`/Applications/TCFSProvider.app` is now installed from the notarized workflow
+artifact, the stale user app has been quarantined after inventory, and strict
+installed preflight passes. Neo is still not a production Finder success claim
+because exact FileProvider read/hydration is blocked.
 
 Current neo evidence:
 
 - `docs/release/evidence/macos-fileprovider-neo-cleanup-20260516T073644Z/`
-  is the latest canonical-install preflight packet. It confirms
+  is a historical canonical-install preflight packet from before the May 17
+  install. It confirms
   `/Applications/TCFSProvider.app` is absent and therefore strict production
   preflight fails before signing checks. The same inventory records the only
   visible app location as `~/Applications/TCFSProvider.app`, PlugInKit parented
@@ -392,8 +406,46 @@ Current neo evidence:
   attempts the real local install from that notarized artifact. The installer
   command fails before payload installation because `sudo -n installer` reports
   `sudo: a password is required`; strict preflight then fails on the missing
-  `/Applications/TCFSProvider.app`. This is the current local blocker packet,
-  not a Finder/FileProvider lifecycle claim.
+  `/Applications/TCFSProvider.app`. This is retained as the historical
+  non-interactive install blocker, not a Finder/FileProvider lifecycle claim.
+- `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-auth-20260517T005618Z/`
+  supersedes the admin-auth blocker for the workflow artifact. It installs the
+  notarized package into `/Applications` with authenticated `osascript`.
+  Strict preflight verifies the installed app signing/profile material but
+  still fails because PlugInKit reports both the canonical app and the stale
+  user app.
+- `docs/release/evidence/macos-fileprovider-neo-stale-userapp-quarantine-20260517T010423Z/`
+  intentionally moves the stale user app after the install packet exists.
+  PlugInKit still reports the quarantined path, so preflight remains red.
+- `docs/release/evidence/macos-fileprovider-neo-strict-preflight-installed-20260517T010916Z/`
+  is the first green strict installed preflight against
+  `/Applications/TCFSProvider.app`: `/usr/local/bin/tcfs` and
+  `/usr/local/bin/tcfsd` report `0.12.12`, host and extension codesign/profile
+  checks pass, and one PlugInKit registration is parented by the canonical app.
+- `docs/release/evidence/macos-fileprovider-neo-package-daemon-env-20260517T012916Z/`
+  records the package daemon environment fix. Before remediation, the old
+  user-app daemon and package daemon were both present and storage was
+  `[UNREACHABLE]`; after booting out the stale daemon and providing file-backed
+  credentials to launchd, only `/usr/local/bin/tcfsd` remained and storage was
+  `[ok]`.
+- `docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-20260517T013241Z/`
+  shows why the harness needed a deterministic direct-host launch path: normal
+  `open` reached strict preflight and storage `[ok]`, then stalled before a
+  useful FileProvider lifecycle result.
+- `docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-directhost-20260517T015411Z/`
+  proves direct host-app launch can add the domain, enumerate CloudStorage, and
+  request the expected file download, but the run was terminated before read
+  proof.
+- `docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-directhost-20260517T020246Z/`
+  repeats the direct-host lane and blocks before FileProvider read because the
+  Swift coordinated-read helper picked up a mismatched Nix SDK/toolchain
+  (`SwiftShims` missing). `fileproviderctl check` also reports reconciliation
+  failures on `1/129` files.
+- `docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/`
+  disables the coordinated Swift helper and is the current production Finder
+  blocker packet: strict preflight, storage `[ok]`, domain add, CloudStorage
+  enumeration, and host-app `requestDownload` all happen, then plain `cat` of
+  `shared/alpha-test.txt` fails with `Operation timed out`.
 - `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
   refreshes the divergence inventory. At the start of this packet the visible
   PlugInKit registration still pointed at
@@ -423,15 +475,14 @@ Current neo evidence:
   records the non-interactive install blocker: `sudo -n installer` required a
   password, so `/Applications/TCFSProvider.app` remained absent.
 - Ambient `tcfs` resolves to `0.12.12`, but ambient `tcfsd` still resolves to
-  `0.12.2`; package or workspace smoke must pass explicit binary paths until
-  that divergence is removed.
+  `0.12.2` in the older May 16 inventory packets; package or workspace smoke
+  must keep passing explicit binary paths so evidence identifies the actual
+  binaries under test.
 
-So a local neo Finder smoke can be diagnostic only. Before it becomes
-production-adjacent, package or install the newly signed app through the
-published/candidate `.pkg` lane into `/Applications` with admin authorization,
-verify no PlugInKit registration points at a stale user or build-tree app after
-cleanup, and require
-`TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` to pass.
+So a local neo Finder smoke is now production-adjacent but still red. The next
+acceptance step is no longer basic package install or strict preflight; it is
+root-causing the FileProvider read timeout and archiving exact-content
+hydration through the installed `/Applications/TCFSProvider.app` path.
 
 After the signing/profile gate passes, production Finder evidence must also
 prove the runtime config source. The post-install smoke can make this fatal by
@@ -513,6 +564,11 @@ Notes:
   proof to production config-source proof; it requires extension logs showing
   `loadConfig: loaded from shared Keychain` and rejects build-time embedded
   config
+- `TCFS_FILEPROVIDER_DIRECT_HOST_LAUNCH=1` or `--direct-host-launch` runs the
+  host app executable directly so domain-add and requestDownload logs are
+  deterministic. Use this for local proof when LaunchServices/unified-log
+  polling is too weak, while still treating the resulting read as the real
+  FileProvider acceptance gate.
 - the harness fails if `pluginkit` reports multiple registrations for
   `io.tinyland.tcfs.fileprovider`; remove stale app/extension copies before
   claiming clean-host acceptance, or pass

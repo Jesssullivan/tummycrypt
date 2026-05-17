@@ -6,7 +6,9 @@
 //!   3. TCFS-specific env: `TCFS_S3_ACCESS` / `TCFS_S3_SECRET`
 //!   4. AWS env: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (warns)
 //!   5. Legacy env: `SEAWEED_ACCESS_KEY` / `SEAWEED_SECRET_KEY`
-//!   6. File variants: `TCFS_S3_ACCESS_FILE`, `AWS_ACCESS_KEY_ID_FILE`
+//!   6. File variants: `TCFS_S3_ACCESS_FILE`, `TCFS_S3_ACCESS_KEY_FILE`,
+//!      `TCFS_S3_SECRET_FILE`, `TCFS_S3_SECRET_KEY_FILE`,
+//!      `AWS_ACCESS_KEY_ID_FILE`, `AWS_SECRET_ACCESS_KEY_FILE`
 //!   7. AWS shared credentials file: `~/.aws/credentials`
 //!
 //! Age identity discovery chain (in order of precedence):
@@ -214,6 +216,9 @@ impl CredStore {
         } else if let Ok(v) = read_env_file("TCFS_S3_ACCESS_FILE") {
             source = "file:TCFS_S3_ACCESS_FILE";
             Some(v)
+        } else if let Ok(v) = read_env_file("TCFS_S3_ACCESS_KEY_FILE") {
+            source = "file:TCFS_S3_ACCESS_KEY_FILE";
+            Some(v)
         } else if let Ok(v) = read_env_file("AWS_ACCESS_KEY_ID_FILE") {
             source = "file:AWS_ACCESS_KEY_ID_FILE";
             Some(v)
@@ -225,6 +230,7 @@ impl CredStore {
             .or_else(|_| std::env::var("AWS_SECRET_ACCESS_KEY"))
             .or_else(|_| std::env::var("SEAWEED_SECRET_KEY"))
             .or_else(|_| read_env_file("TCFS_S3_SECRET_FILE"))
+            .or_else(|_| read_env_file("TCFS_S3_SECRET_KEY_FILE"))
             .or_else(|_| read_env_file("AWS_SECRET_ACCESS_KEY_FILE"))
             .ok();
 
@@ -357,6 +363,8 @@ mod tests {
             "SEAWEED_SECRET_KEY",
             "TCFS_S3_ACCESS_FILE",
             "TCFS_S3_SECRET_FILE",
+            "TCFS_S3_ACCESS_KEY_FILE",
+            "TCFS_S3_SECRET_KEY_FILE",
             "AWS_ACCESS_KEY_ID_FILE",
             "AWS_SECRET_ACCESS_KEY_FILE",
             "AWS_SHARED_CREDENTIALS_FILE",
@@ -410,6 +418,28 @@ mod tests {
         let s3 = store.s3.unwrap();
         assert_eq!(s3.access_key_id, "file-access-key"); // trimmed
         assert!(store.source.contains("FILE"));
+
+        clear_cred_env();
+    }
+
+    #[test]
+    fn key_file_alias_variant_reads_content() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_cred_env();
+        let dir = tempfile::tempdir().unwrap();
+
+        let ak_path = dir.path().join("access_key");
+        let sk_path = dir.path().join("secret_key");
+        std::fs::write(&ak_path, "  alias-access-key  \n").unwrap();
+        std::fs::write(&sk_path, "alias-secret-key\n").unwrap();
+
+        std::env::set_var("TCFS_S3_ACCESS_KEY_FILE", ak_path.to_str().unwrap());
+        std::env::set_var("TCFS_S3_SECRET_KEY_FILE", sk_path.to_str().unwrap());
+
+        let store = CredStore::load_from_env(&default_storage()).unwrap();
+        let s3 = store.s3.unwrap();
+        assert_eq!(s3.access_key_id, "alias-access-key");
+        assert!(store.source.contains("TCFS_S3_ACCESS_KEY_FILE"));
 
         clear_cred_env();
     }

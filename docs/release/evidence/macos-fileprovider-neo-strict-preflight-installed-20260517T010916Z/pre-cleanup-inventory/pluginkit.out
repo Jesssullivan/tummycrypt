@@ -1,0 +1,22 @@
+$ sh -c pluginkit\ -m\ -A\ -D\ -vvv\ 2\>/dev/null\ \|\ grep\ -A8\ -B4\ -E\ \"io\\\\.tinyland\\\\.tcfs\|TCFSProvider\|TCFSFileProvider\"\ \|\|\ true
+	    Display Name = AKFollowUpServerUIExtension
+	      Short Name = AKFollowUpServerUIExtension
+	        Platform = macOS
+
++    io.tinyland.tcfs.fileprovider(0.2.0)
+	            Path = /Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+	            UUID = BD755ECF-CDA3-4264-831B-6BC83A1C827C
+	       Timestamp = 2026-05-17 01:02:54 +0000
+	             SDK = com.apple.fileprovider-nonui
+	   Parent Bundle = /Applications/TCFSProvider.app
+	    Display Name = TCFSFileProvider
+	      Short Name = TCFSFileProvider
+	     Parent Name = TCFSProvider
+	        Platform = macOS
+
+     com.apple.news.widget(11.5)
+	            Path = /System/Applications/News.app/Contents/PlugIns/NewsToday2.appex
+	            UUID = 1AD4E3E9-0DB3-5FC4-B650-7BCC62CB1665
+	       Timestamp = 2026-04-30 00:30:44 +0000
+	             SDK = com.apple.widgetkit-extension
+	   Parent Bundle = /System/Applications/News.app

@@ -137,6 +137,12 @@ Planning-pass validation:
   package install/signing/installed-CLI/config gates, then failed before daemon
   and Finder because the public Cloudflare quick-tunnel endpoint no longer
   resolved from GitHub-hosted macOS.
+- May 17 neo production package packets now prove authenticated install of the
+  notarized workflow artifact, stale user-app quarantine after inventory,
+  strict installed preflight, package daemon storage `[ok]`, domain add,
+  CloudStorage enumeration, and host-app `requestDownload`. The current
+  production Finder blocker is exact FileProvider read: `cat` of
+  `shared/alpha-test.txt` returns `Operation timed out`.
 - PR `#367` merged on green. The May 13 merge push for `9428513` has Docs
   green in run `25816193832`; CI `25816193953` later failed only in
   `watcher_debounce_coalesces_rapid_writes` after Linux emitted multiple
@@ -154,7 +160,7 @@ ready to manage real `~/Documents` or `~/git` across arbitrary machines.
 | Host/surface | Ready today | Not ready yet |
 | --- | --- | --- |
 | `honey` Linux mounted surface | Strongest lane. The archived lifecycle proof shows clean-name traversal before hydration, exact `cat` hydration, mounted write/readback, cache clear, exact rehydrate, dirty recursive `tcfs unsync` refusal, clean recursive `.tc` conversion, and persisted `sync state: not_synced`. | Treating packaged Linux install, systemd first-use, and every distro/service-manager path as continuously proven. |
-| `neo` Darwin workstation | Useful release-adjacent control host and CLI participant for live backend sync. Local FileProvider smoke has historical source-tree evidence. The `fleet-pilot-extended-20260509T2152Z` packet includes a green live `neo-honey` smoke from this host. | Not a clean production Finder host. Ambient binary/path state can be stale, and local source-tree FileProvider proof does not satisfy `#309`. |
+| `neo` Darwin workstation | Useful release-adjacent control host and CLI participant for live backend sync. The `fleet-pilot-extended-20260509T2152Z` packet includes a green live `neo-honey` smoke from this host, and May 17 packets prove installed Developer ID package preflight plus domain/enumeration/requestDownload. | Not a production Finder success yet. Exact FileProvider read currently times out, so hydration, evict/rehydrate, mutation, and conflict/status remain `#309` gates. |
 | `petting-zoo-mini` FileProvider lab | Strong non-production Apple lane. Testing-mode package/smoke proof covers enumerate, hydrate, evict, rehydrate, mutation, CLI conflict state, and exact content preservation. | Not production Developer ID clean-host Finder acceptance. Badges/progress remain observational until reliable assertions exist. |
 | Live on-prem backend | Usable enough for live smoke via named endpoints, and source-owned migration commands are renderable. | Not source-owned/storage-mobile yet. Do not couple the parity sprint to live OpenTofu mutation unless `#327` has a named downtime window and rollback owner. |
 

@@ -1,0 +1,1 @@
+$ spctl -a -vv /Applications/TCFSProvider.app

@@ -38,11 +38,15 @@ tagged registry proof before upgrading the current evidence row. Remote run
 `25973109986` proves source-package notarization, stapling, Gatekeeper install
 assessment, and strict package smoke for a workflow artifact. Neo then
 downloaded the artifact, verified SHA-256
-`c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`, and
-reran the same strict package smoke locally. Production macOS `.pkg`
-current-tag release install/Finder proof remains a separate follow-up check
-because that package was not published as a GitHub Release asset and the local
-install attempt did not install into `/Applications`.
+`c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`, reran
+the same strict package smoke locally, installed the package with authenticated
+`osascript`, quarantined the stale user app after inventory, and reached a
+green strict installed preflight against `/Applications/TCFSProvider.app`.
+Production macOS `.pkg` current-tag release publication and Finder hydration
+remain separate follow-up checks: the artifact was not published as a GitHub
+Release asset, and the latest installed Finder smoke still times out on the
+actual FileProvider read after domain add, enumeration, and `requestDownload`
+succeed.
 
 ## Out-Of-Scope Published Helpers
 
@@ -169,7 +173,7 @@ Gatekeeper install assessment, and strict package smoke with
 `--require-stapled-ticket`. It is not a tagged release asset or host install
 smoke and does not replace the fresh install command above.
 
-The follow-up neo packets
+The May 16, 2026 follow-up neo packets
 `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-inventory-20260516T222519Z/`
 and
 `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-20260516T222606Z/`
@@ -177,8 +181,27 @@ verify the downloaded notarized artifact locally, then record the real local
 install blocker: `sudo -n installer` requires admin authentication, so
 `/Applications/TCFSProvider.app` remains absent.
 
-When an operator is at `neo`, rerun the same evidence helper with an explicit
-auth mode instead of hand-running `installer` outside the packet:
+The May 17, 2026 neo packets supersede that blocker for the workflow artifact:
+
+- `docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-auth-20260517T005618Z/`
+  installs the notarized artifact into `/Applications` with authenticated
+  `osascript`; strict preflight still fails because PlugInKit reports both the
+  canonical app and the stale user app
+- `docs/release/evidence/macos-fileprovider-neo-stale-userapp-quarantine-20260517T010423Z/`
+  intentionally moves the stale user app under evidence quarantine after the
+  install packet exists; PlugInKit still reports the quarantined path
+- `docs/release/evidence/macos-fileprovider-neo-strict-preflight-installed-20260517T010916Z/`
+  proves strict installed preflight with one PlugInKit registration under
+  `/Applications/TCFSProvider.app`
+- `docs/release/evidence/macos-fileprovider-neo-package-daemon-env-20260517T012916Z/`
+  records the daemon environment fix: the package daemon reaches storage
+  `[ok]` from file-backed credentials and the stale user daemon is gone
+- `docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/`
+  proves production-signed domain add, CloudStorage enumeration, and host-app
+  `requestDownload`, then blocks on `cat` returning `Operation timed out`
+
+When an operator reruns this lane, keep using the evidence helper with an
+explicit auth mode instead of hand-running `installer` outside the packet:
 
 ```bash
 EVIDENCE_DIR="docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-$(date -u +%Y%m%dT%H%M%SZ)" \
@@ -193,7 +216,9 @@ Use `INSTALL_MODE=sudo` instead of `osascript` when running in an interactive
 terminal with sudo authentication. Do not set `QUARANTINE_STALE=1` on the first
 canonical install attempt; quarantine stale user/build-tree apps only after the
 install packet exists and the verbose PlugInKit inventory identifies the stale
-registration target.
+registration target. After strict installed preflight passes, the next
+distribution-facing gap is not package installation; it is exact-content
+FileProvider hydration through the installed production app.
 
 Upgrade:
 

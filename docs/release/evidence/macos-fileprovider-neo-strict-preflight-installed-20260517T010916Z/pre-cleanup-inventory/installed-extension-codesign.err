@@ -1,0 +1,28 @@
+Executable=/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/MacOS/TCFSFileProvider
+Identifier=io.tinyland.tcfs.fileprovider
+Format=bundle with Mach-O thin (arm64)
+CodeDirectory v=20500 size=124425 flags=0x10000(runtime) hashes=3877+7 location=embedded
+VersionPlatform=1
+VersionMin=983040
+VersionSDK=983040
+Hash type=sha256 size=32
+CandidateCDHash sha256=eea794b1f821b1192e02fc4b25988faabe8f5004
+CandidateCDHashFull sha256=eea794b1f821b1192e02fc4b25988faabe8f500411a952118f983746d564ac50
+Hash choices=sha256
+CMSDigest=eea794b1f821b1192e02fc4b25988faabe8f500411a952118f983746d564ac50
+CMSDigestType=2
+Executable Segment base=0
+Executable Segment limit=11124736
+Executable Segment flags=0x1
+Page size=4096
+CDHash=eea794b1f821b1192e02fc4b25988faabe8f5004
+Signature size=8976
+Authority=Developer ID Application: John Sullivan (QP994XQKNH)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=May 16, 2026 at 5:26:15 PM
+Info.plist entries=9
+TeamIdentifier=QP994XQKNH
+Runtime Version=15.0.0
+Sealed Resources version=2 rules=13 files=1
+Internal requirements count=1 size=192

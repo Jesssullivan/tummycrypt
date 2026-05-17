@@ -1,13 +1,15 @@
 # Lazy Hydration Demo Acceptance
 
-As of May 13, 2026, the core lazy traversal and hydration code exists and the
+As of May 17, 2026, the core lazy traversal and hydration code exists and the
 repo has named harnesses for Linux terminal, mounted-view, Desktop-to-honey,
 and macOS Finder/FileProvider proof. Evidence coverage is now split more
 precisely: PZM proves the macOS testing-mode FileProvider enumerate/hydrate
 path through evict/rehydrate/mutation, Linux has archived FUSE-capable host
 evidence for read, mounted write, cache clear/rehydrate, and recursive
-safe-unsync, and production Finder lifecycle proof remains separate from
-non-production testing-mode proof.
+safe-unsync. Production Finder now has installed Developer ID package evidence
+through domain add, enumeration, and `requestDownload`, but exact-content
+hydration is still blocked by a FileProvider read timeout and remains separate
+from non-production testing-mode proof.
 
 This runbook is the acceptance target for the persistent demo goal:
 
@@ -461,8 +463,8 @@ and Finder/FileProvider as the native desktop lane.
 
 | User behavior | Linux mounted surface | macOS Finder/FileProvider | Current proof state |
 | --- | --- | --- | --- |
-| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence `lazy-linux-20260508T170825Z` is green; production Finder evidence is still pending |
-| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.12`; archived Linux FUSE evidence proves exact `cat` hydration |
+| Browse before download | `find` / `ls` show clean names backed by remote index entries | CloudStorage/Finder enumerates FileProvider items/placeholders | PZM testing-mode Finder enumeration is green; archived Linux FUSE evidence `lazy-linux-20260508T170825Z` is green; production installed Finder enumeration is green on `neo` in the May 17 direct-host packets |
+| Hydrate on open | `cat` reads exact bytes and fills the VFS cache | Finder open, coordinated read, or host-app download request hydrates exact bytes | PZM testing-mode smoke proves exact-content FileProvider hydration on `v0.12.12`; archived Linux FUSE evidence proves exact `cat` hydration; production installed Finder currently reaches `requestDownload` then blocks on `Operation timed out` during actual read |
 | Free space / dehydrate | clear VFS cache or run the surface's unsync/dehydrate path, then re-`cat` | evict/dehydrate placeholder and re-open | PZM testing-mode smoke proves FileProvider evict + rehydrate on `v0.12.12`; archived Linux FUSE evidence proves cache clear + rehydrate |
 | Mutate and reconcile | edit through mounted view or sync root, then prove push/pull/conflict state | edit through Finder/FileProvider and prove daemon/FileProvider upload plus conflict/status behavior | Archived Linux FUSE evidence `lazy-linux-20260508T170825Z` proves mounted write/readback and recursive safe-unsync refusal/success. PZM testing-mode smoke run `25565943781` proves CloudStorage mutation upload and exact remote pull; PZM smoke run `25569596910` proves CLI conflict state and exact FileProvider content preservation; production Finder conflict/status remains open |
 | Observe health | CLI status, daemon logs, mounted-smoke transcript | Finder state, FileProvider logs, badges/progress when available | CLI/log evidence exists; PZM run `25569596910` captured that the FileProvider enumerator did not emit a conflict hydration-state log, so Finder badges/progress remain observational only |
@@ -470,9 +472,9 @@ and Finder/FileProvider as the native desktop lane.
 This means the old hosted FileProvider blocker no longer freezes the read-only
 Finder proof, and the Linux lifecycle no longer lacks host evidence for read,
 mounted mutation, cache rehydration, or recursive safe-unsync. The PZM
-testing-mode lane now proves conflict/status content preservation, while
-production Developer ID clean-host evidence and reliable Finder badge/progress
-assertions remain separate.
+testing-mode lane now proves conflict/status content preservation. Production
+Developer ID evidence is narrowed to the actual read timeout plus later
+evict/rehydrate, mutation, conflict/status, and reliable badge/progress gates.
 
 The neo/honey CLI packets now add cross-host conflict detection and manual
 keep-both recovery evidence to the same parity story: detection/preservation is
@@ -619,6 +621,22 @@ FileProvider proof:
 That is a lab/testing-mode proof, not a production Developer ID clean-host
 claim.
 
+Production Developer ID evidence from May 17, 2026 now covers the package path
+up to, but not through, hydration:
+
+- `macos-fileprovider-neo-notarized-pkg-install-auth-20260517T005618Z/`
+  installs the notarized workflow artifact into `/Applications`
+- `macos-fileprovider-neo-strict-preflight-installed-20260517T010916Z/`
+  proves strict installed preflight with one PlugInKit registration
+- `macos-fileprovider-neo-package-daemon-env-20260517T012916Z/` proves package
+  `tcfsd` storage `[ok]`
+- `macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/`
+  proves domain add, CloudStorage enumeration, and host-app `requestDownload`,
+  then fails the actual read with `Operation timed out`
+
+That is production-signed local progress, but it is still not Finder hydration
+readiness.
+
 The current `v0.12.12` PZM lifecycle extension adds evict/rehydrate, mutation,
 and deterministic conflict/status content preservation to that same lane.
 Earlier attempts showed the package, signing, profiles, S3/E2EE, and daemon
@@ -683,7 +701,8 @@ shared Keychain` and fails if the diagnostic embedded-config path was used.
 
 Required proof:
 
-1. Install the released `.pkg` or app bundle on a known-clean macOS host.
+1. Install the released `.pkg` or notarized candidate app bundle on a known-clean
+   macOS host.
 2. Add/update the `io.tinyland.tcfs` FileProvider domain and signal the
    FileProvider working set.
 3. Confirm a `~/Library/CloudStorage/TCFS*` root appears.
@@ -698,6 +717,9 @@ Required proof:
 GitHub-hosted macOS runners need a public reachable S3-compatible endpoint for
 this lane. Tailscale-only, RFC1918, localhost, and CGNAT endpoints are not
 sufficient for the hosted executor.
+
+On local `neo`, steps 1-5 are now archived for the notarized workflow artifact.
+Step 6 is the current blocker.
 
 The `v0.12.7` hosted smoke historically proved that a published production
 `.pkg` could install, pass signing, reach storage, start the daemon, and prove a

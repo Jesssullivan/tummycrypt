@@ -1,0 +1,2 @@
+$ sh -c find\ /tmp\ \"\$HOME/Library\"\ -maxdepth\ 5\ \\\(\ -name\ \"\*tcfs\*.sock\"\ -o\ -name\ \"\*tcfs\*.socket\"\ \\\)\ -print\ 2\>/dev/null\ \|\ sort
+/Users/jess/Library/Group Containers/group.io.tinyland.tcfs/tcfsd.sock

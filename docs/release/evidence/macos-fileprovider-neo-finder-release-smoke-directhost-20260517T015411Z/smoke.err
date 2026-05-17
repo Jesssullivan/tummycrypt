@@ -1,0 +1,136 @@
+task: [lazy:macos-finder-release-smoke] bash -euo pipefail <<'EOF'
+: "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/under/CloudStorage}"
+
+export TCFS_REQUIRE_PRODUCTION_SIGNING=1
+export TCFS_REQUIRE_KEYCHAIN_CONFIG=1
+
+task lazy:macos-finder-preflight
+task lazy:macos-finder-smoke
+EOF
+
+task: [lazy:macos-finder-preflight] bash -euo pipefail <<'EOF'
+args=()
+
+if [[ -n "${EXPECTED_VERSION:-}" ]]; then
+  args+=(--expected-version "$EXPECTED_VERSION")
+fi
+if [[ -n "${CONFIG_PATH:-}" ]]; then
+  args+=(--config "$CONFIG_PATH")
+fi
+if [[ -n "${FILEPROVIDER_CONFIG:-}" ]]; then
+  args+=(--fileprovider-config "$FILEPROVIDER_CONFIG")
+fi
+if [[ -n "${APP_PATH:-}" ]]; then
+  args+=(--app-path "$APP_PATH")
+fi
+if [[ -n "${CLOUD_ROOT:-}" ]]; then
+  args+=(--cloud-root "$CLOUD_ROOT")
+fi
+if [[ -n "${PLUGIN_ID:-}" ]]; then
+  args+=(--plugin-id "$PLUGIN_ID")
+fi
+if [[ -n "${DOMAIN_ID:-}" ]]; then
+  args+=(--domain-id "$DOMAIN_ID")
+fi
+if [[ "${ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}" == "1" ]]; then
+  args+=(--allow-multiple-plugin-registrations)
+fi
+if [[ "${TCFS_REQUIRE_PRODUCTION_SIGNING:-${REQUIRE_PRODUCTION_SIGNING:-0}}" == "1" ]]; then
+  args+=(--require-production-signing)
+fi
+if [[ -n "${TCFS_BIN:-}" ]]; then
+  args+=(--tcfs "$TCFS_BIN")
+fi
+if [[ -n "${TCFSD_BIN:-}" ]]; then
+  args+=(--tcfsd "$TCFSD_BIN")
+fi
+
+scripts/macos-fileprovider-preflight.sh "${args[@]}"
+EOF
+
+warning: fileproviderctl domain list unavailable on this host
+File Provider control utility.
+fileproviderctl <command> <options>
+
+Commands:
+  dump [<domain|provider>]                                       - dump state of fileprovider's daemon
+      -l, --limit-dump-size                                                 limit the number of items dumped
+  diagnose                                                       - dump state of fileprovider's daemon in several files
+      -l, --limit-dump-size                                                 limit the number of items dumped
+      -o, --output                                                          output path for the diagnose
+  evaluate <item>                                                - evaluate finder actions and decorations on item
+  evaluate <action> [<item>] <target item>                       - evaluate finder interactions
+  check | repair                                                 - run FPCK
+      -f                                                                perform a full dump (all items)
+      -a <path>                                                         perform check under path
+      -b <path>                                                         operate on an already created DB backup. If this is set you need to set -a to point to the domain root
+      -o <path>                                                         write output into file at path
+      -P                                                                no-pager output
+      -d                                                                dimisss low-importance invariants
+      -v                                                                print out files with broken invariants
+      -m [<providerDomainID>]                                           perform check on the d2d migration backup
+      -x xpc|daemon                                                     launch in XPC Service vs daemon (default)
+  obfuscate [<filename>/<path>...]                               - return the obfuscated form of the filename
+task: [lazy:macos-finder-smoke] bash -euo pipefail <<'EOF'
+: "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/under/CloudStorage}"
+
+args=(--expected-file "$EXPECTED_FILE")
+
+if [[ -n "${EXPECTED_VERSION:-}" ]]; then
+  args+=(--expected-version "$EXPECTED_VERSION")
+fi
+if [[ -n "${EXPECTED_CONTENT:-}" ]]; then
+  args+=(--expected-content "$EXPECTED_CONTENT")
+fi
+if [[ -n "${EXPECTED_CONTENT_FILE:-}" ]]; then
+  args+=(--expected-content-file "$EXPECTED_CONTENT_FILE")
+fi
+if [[ -n "${CONFIG_PATH:-}" ]]; then
+  args+=(--config "$CONFIG_PATH")
+fi
+if [[ -n "${APP_PATH:-}" ]]; then
+  args+=(--app-path "$APP_PATH")
+fi
+if [[ -n "${CLOUD_ROOT:-}" ]]; then
+  args+=(--cloud-root "$CLOUD_ROOT")
+fi
+if [[ -n "${PLUGIN_ID:-}" ]]; then
+  args+=(--plugin-id "$PLUGIN_ID")
+fi
+if [[ -n "${DOMAIN_ID:-}" ]]; then
+  args+=(--domain-id "$DOMAIN_ID")
+fi
+if [[ "${ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:-0}" == "1" ]]; then
+  args+=(--allow-multiple-plugin-registrations)
+fi
+if [[ "${TCFS_REQUIRE_KEYCHAIN_CONFIG:-${REQUIRE_KEYCHAIN_CONFIG:-0}}" == "1" ]]; then
+  args+=(--require-keychain-config)
+fi
+if [[ -n "${TCFS_BIN:-}" ]]; then
+  args+=(--tcfs "$TCFS_BIN")
+fi
+if [[ -n "${TCFSD_BIN:-}" ]]; then
+  args+=(--tcfsd "$TCFSD_BIN")
+fi
+if [[ -n "${TIMEOUT_SECS:-}" ]]; then
+  args+=(--timeout "$TIMEOUT_SECS")
+fi
+if [[ -n "${LOG_DIR:-}" ]]; then
+  args+=(--log-dir "$LOG_DIR")
+fi
+if [[ "${SKIP_STATUS:-0}" == "1" ]]; then
+  args+=(--skip-status)
+fi
+if [[ "${DIRECT_HOST_LAUNCH:-${TCFS_FILEPROVIDER_DIRECT_HOST_LAUNCH:-0}}" == "1" ]]; then
+  args+=(--direct-host-launch)
+fi
+
+scripts/macos-postinstall-smoke.sh "${args[@]}"
+EOF
+
+log show timed out after 1s
+warning: could not confirm domain via fileproviderctl; relying on host log + CloudStorage root
+log show timed out after 1s
+Terminated: 15             scripts/macos-postinstall-smoke.sh "${args[@]}"
+task: Failed to run task "lazy:macos-finder-smoke": exit status 143
+task: Failed to run task "lazy:macos-finder-release-smoke": exit status 201

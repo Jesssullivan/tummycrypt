@@ -1167,6 +1167,9 @@ tasks:
           if [[ "${SKIP_STATUS:-0}" == "1" ]]; then
             args+=(--skip-status)
           fi
+          if [[ "${DIRECT_HOST_LAUNCH:-${TCFS_FILEPROVIDER_DIRECT_HOST_LAUNCH:-0}}" == "1" ]]; then
+            args+=(--direct-host-launch)
+          fi
 
           scripts/macos-postinstall-smoke.sh "${args[@]}"
           EOF

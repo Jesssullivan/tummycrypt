@@ -1,0 +1,40 @@
+tcfs binary: /usr/local/bin/tcfs
+tcfs version: tcfs 0.12.12
+tcfsd binary: /usr/local/bin/tcfsd
+tcfsd version: tcfsd 0.12.12
+tcfs config: /Users/jess/.config/tcfs/config.toml
+FileProvider config: /Users/jess/.config/tcfs/fileprovider/config.json
+host app: /Applications/TCFSProvider.app
+host app bundle identifier: io.tinyland.tcfs
+host app codesign: valid
+host app app group entitlement: group.io.tinyland.tcfs
+host app keychain access group entitlement: QP994XQKNH.group.io.tinyland.tcfs
+host app provisioning profile: /Applications/TCFSProvider.app/Contents/embedded.provisionprofile
+host app provisioning profile app group: group.io.tinyland.tcfs
+host app provisioning profile keychain group: QP994XQKNH.*
+host app provisioning profile application identifier: QP994XQKNH.io.tinyland.tcfs
+host app provisioning profile contains signing certificate: 61A8E77C4F3D678921FF0A7DC9D7E317F7754F50
+FileProvider extension bundle identifier: io.tinyland.tcfs.fileprovider
+FileProvider extension codesign: valid
+FileProvider extension app group entitlement: group.io.tinyland.tcfs
+FileProvider extension keychain access group entitlement: QP994XQKNH.group.io.tinyland.tcfs
+FileProvider extension provisioning profile: /Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/embedded.provisionprofile
+FileProvider extension provisioning profile app group: group.io.tinyland.tcfs
+FileProvider extension provisioning profile keychain group: QP994XQKNH.*
+FileProvider extension provisioning profile application identifier: QP994XQKNH.io.tinyland.tcfs.fileprovider
+FileProvider extension provisioning profile contains signing certificate: 61A8E77C4F3D678921FF0A7DC9D7E317F7754F50
+pluginkit registration:
++    io.tinyland.tcfs.fileprovider(0.2.0)
+	            Path = /Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex
+	            UUID = BD755ECF-CDA3-4264-831B-6BC83A1C827C
+	       Timestamp = 2026-05-17 01:02:54 +0000
+	             SDK = com.apple.fileprovider-nonui
+	   Parent Bundle = /Applications/TCFSProvider.app
+	    Display Name = TCFSFileProvider
+	      Short Name = TCFSFileProvider
+	     Parent Name = TCFSProvider
+	        Platform = macOS
+
+ (1 plug-in)
+CloudStorage root: /Users/jess/Library/CloudStorage/TCFSProvider-TCFS
+macOS FileProvider preflight passed

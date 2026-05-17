@@ -1,0 +1,9 @@
+tcfsd v0.12.12
+  uptime:        28m 30s
+  socket:        /Users/jess/.local/state/tcfsd/tcfsd.sock
+  device:        neo.local (03d8a0bd)
+  conflict mode: auto
+  storage:       http://seaweedfs-tcfs:8333 [UNREACHABLE]
+  nats:          not connected
+  active mounts: 0
+  credentials:   loaded (source: env)

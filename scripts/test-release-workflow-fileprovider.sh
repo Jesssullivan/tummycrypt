@@ -849,6 +849,7 @@ assert_contains "$PKG_POSTINSTALL" "LSREGISTER_BIN=\"\${TCFS_POSTINSTALL_LSREGIS
 assert_contains "$PKG_POSTINSTALL" "\"\$LAUNCHCTL_BIN\" asuser \"\$CONSOLE_UID\""
 assert_contains "$PKG_POSTINSTALL" "\"\$LSREGISTER_BIN\" -f \"\$APP_PATH\""
 assert_contains "$PKG_POSTINSTALL" "PLIST_DIR=\"\${TCFS_POSTINSTALL_LAUNCHAGENTS_DIR:-/Library/LaunchAgents}\""
+assert_contains "$PKG_POSTINSTALL" ". \"\$HOME/.config/tcfs/env\""
 assert_contains "$PKG_POSTINSTALL" "exec /usr/local/bin/tcfsd --config \"\$HOME/.config/tcfs/config.toml\" --mode daemon"
 
 POSTINSTALL_APP="${TMPDIR}/Applications/TCFSProvider.app"
@@ -873,6 +874,7 @@ PLIST_PATH="${POSTINSTALL_LAUNCHAGENTS}/io.tinyland.tcfsd.plist"
   exit 1
 }
 assert_contains "$PLIST_PATH" "io.tinyland.tcfsd"
+assert_contains "$PLIST_PATH" ". \"\$HOME/.config/tcfs/env\""
 assert_contains "$PLIST_PATH" "exec /usr/local/bin/tcfsd --config \"\$HOME/.config/tcfs/config.toml\" --mode daemon"
 assert_contains "$POSTINSTALL_LOG" "lsregister -f $POSTINSTALL_APP"
 assert_contains "$POSTINSTALL_LOG" "launchctl asuser 501"
