@@ -16,6 +16,7 @@ Options:
   --evidence-dir <path>      Evidence dir. Default: docs/release/evidence/macos-fileprovider-neo-cleanup-<UTC>
   --pkg <path>               Published .pkg to install/verify
   --install-pkg              Run installer -pkg <pkg> -target /
+  --install-mode <mode>      Install auth mode: sudo-n, sudo, or osascript. Default: sudo-n
   --quarantine-stale         Move stale ~/Applications/build-tree TCFSProvider apps after inventory
   --app-path <path>          Installed app path. Default: /Applications/TCFSProvider.app
   --stale-app <path>         Additional stale app path to quarantine
@@ -35,11 +36,25 @@ shell_quote() {
   printf '%q' "$1"
 }
 
+sh_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+applescript_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 evidence_dir="${TCFS_MACOS_CLEANUP_EVIDENCE_DIR:-$REPO_ROOT/docs/release/evidence/macos-fileprovider-neo-cleanup-${timestamp}}"
 pkg_path="${PKG_PATH:-}"
 install_pkg=0
+install_mode="${INSTALL_MODE:-sudo-n}"
 quarantine_stale=0
 app_path="${APP_PATH:-/Applications/TCFSProvider.app}"
 tcfs_bin="${TCFS_BIN:-}"
@@ -64,6 +79,11 @@ while [[ $# -gt 0 ]]; do
     --install-pkg)
       install_pkg=1
       shift
+      ;;
+    --install-mode)
+      [[ $# -ge 2 ]] || fail "--install-mode requires a value"
+      install_mode="$2"
+      shift 2
       ;;
     --quarantine-stale)
       quarantine_stale=1
@@ -105,6 +125,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$install_mode" in
+  sudo-n|sudo|osascript)
+    ;;
+  *)
+    fail "unsupported install mode: $install_mode"
+    ;;
+esac
+
 mkdir -p "$evidence_dir"
 inventory_dir="$evidence_dir/pre-cleanup-inventory"
 mkdir -p "$inventory_dir"
@@ -127,6 +155,7 @@ printf 'archiving FileProvider divergence inventory: %s\n' "$inventory_dir"
   printf 'app_path=%s\n' "$app_path"
   printf 'pkg_path=%s\n' "$pkg_path"
   printf 'install_pkg=%s\n' "$install_pkg"
+  printf 'install_mode=%s\n' "$install_mode"
   printf 'quarantine_stale=%s\n' "$quarantine_stale"
   printf 'strict_preflight=%s\n' "$strict_preflight"
 } >"$evidence_dir/run-metadata.env"
@@ -167,8 +196,25 @@ if [[ "$install_pkg" == "1" ]]; then
   [[ -n "$pkg_path" ]] || fail "--install-pkg requires --pkg"
   command -v installer >/dev/null 2>&1 || fail "installer not found"
   printf 'installing published package: %s\n' "$pkg_path"
-  # shellcheck disable=SC2024
-  sudo -n installer -pkg "$pkg_path" -target / >"$evidence_dir/install-pkg.out" 2>"$evidence_dir/install-pkg.err" || install_pkg_rc=$?
+  printf 'install_mode=%s\n' "$install_mode" >"$evidence_dir/install-pkg-command.env"
+  case "$install_mode" in
+    sudo-n)
+      printf 'command=sudo -n installer -pkg %s -target /\n' "$(sh_quote "$pkg_path")" >>"$evidence_dir/install-pkg-command.env"
+      # shellcheck disable=SC2024
+      sudo -n installer -pkg "$pkg_path" -target / >"$evidence_dir/install-pkg.out" 2>"$evidence_dir/install-pkg.err" || install_pkg_rc=$?
+      ;;
+    sudo)
+      printf 'command=sudo installer -pkg %s -target /\n' "$(sh_quote "$pkg_path")" >>"$evidence_dir/install-pkg-command.env"
+      # shellcheck disable=SC2024
+      sudo installer -pkg "$pkg_path" -target / >"$evidence_dir/install-pkg.out" 2>"$evidence_dir/install-pkg.err" || install_pkg_rc=$?
+      ;;
+    osascript)
+      command -v osascript >/dev/null 2>&1 || fail "osascript not found"
+      install_cmd="/usr/sbin/installer -pkg $(sh_quote "$pkg_path") -target /"
+      printf 'command=osascript do shell script %s with administrator privileges\n' "$(sh_quote "$install_cmd")" >>"$evidence_dir/install-pkg-command.env"
+      osascript -e "do shell script \"$(applescript_string "$install_cmd")\" with administrator privileges" >"$evidence_dir/install-pkg.out" 2>"$evidence_dir/install-pkg.err" || install_pkg_rc=$?
+      ;;
+  esac
   install_status_label="$install_pkg_rc"
   printf 'status=%s\n' "$install_pkg_rc" >"$evidence_dir/install-pkg-status.env"
   if [[ "$install_pkg_rc" -eq 0 ]]; then
@@ -228,6 +274,8 @@ bounded listings by name.
 The package source is the published \`.pkg\` when \`--pkg\` is provided. Stale
 \`~/Applications\` or build-tree apps are moved only when
 \`--quarantine-stale\` is explicitly set, after this inventory exists.
+
+Install mode: \`$install_mode\`.
 
 Install status: \`$install_status_label\`.
 

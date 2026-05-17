@@ -177,6 +177,24 @@ verify the downloaded notarized artifact locally, then record the real local
 install blocker: `sudo -n installer` requires admin authentication, so
 `/Applications/TCFSProvider.app` remains absent.
 
+When an operator is at `neo`, rerun the same evidence helper with an explicit
+auth mode instead of hand-running `installer` outside the packet:
+
+```bash
+EVIDENCE_DIR="docs/release/evidence/macos-fileprovider-neo-notarized-pkg-install-$(date -u +%Y%m%dT%H%M%SZ)" \
+PKG_PATH="/tmp/tcfs-notarized-pkg-25973109986/tcfs-0.12.12-macos-aarch64.pkg" \
+INSTALL_PKG=1 \
+INSTALL_MODE=osascript \
+STRICT_PREFLIGHT=1 \
+task lazy:macos-fileprovider-neo-cleanup-packet
+```
+
+Use `INSTALL_MODE=sudo` instead of `osascript` when running in an interactive
+terminal with sudo authentication. Do not set `QUARANTINE_STALE=1` on the first
+canonical install attempt; quarantine stale user/build-tree apps only after the
+install packet exists and the verbose PlugInKit inventory identifies the stale
+registration target.
+
 Upgrade:
 
 ```bash

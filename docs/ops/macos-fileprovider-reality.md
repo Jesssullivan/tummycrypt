@@ -523,8 +523,13 @@ Notes:
   PlugInKit records, signing/profile state, CloudStorage roots, configs,
   sockets, launchd labels, and bounded `~/tcfs` inventory. Use the published
   `.pkg` or the archived notarized candidate package as the install source, and
-  require `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight`
-  before describing any local Finder smoke as production-adjacent.
+  use `INSTALL_MODE=sudo` from an authenticated terminal or
+  `INSTALL_MODE=osascript` from the logged-in desktop when non-interactive
+  `sudo -n` is not available. Keep `QUARANTINE_STALE=0` for the first
+  canonical install attempt; clean stale user/build registrations only after
+  the install/inventory packet exists. Require
+  `TCFS_REQUIRE_PRODUCTION_SIGNING=1 task lazy:macos-finder-preflight` before
+  describing any local Finder smoke as production-adjacent.
 - the helper assumes `tcfsd` is already runnable with a real config; it does
   not fabricate temp-home state or start a fake backend
 - `#309` still tracks where this harness runs from a known-clean host per tag

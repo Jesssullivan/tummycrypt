@@ -904,6 +904,9 @@ tasks:
           if [[ "${INSTALL_PKG:-0}" == "1" ]]; then
             args+=(--install-pkg)
           fi
+          if [[ -n "${INSTALL_MODE:-}" ]]; then
+            args+=(--install-mode "$INSTALL_MODE")
+          fi
           if [[ "${QUARANTINE_STALE:-0}" == "1" ]]; then
             args+=(--quarantine-stale)
           fi

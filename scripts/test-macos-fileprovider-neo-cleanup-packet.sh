@@ -82,6 +82,28 @@ case "$1" in
     ;;
 esac
 EOF
+cat >"$FAKE_BIN/installer" <<'EOF'
+#!/usr/bin/env bash
+printf 'installer args:'
+printf ' %s' "$@"
+printf '\n'
+EOF
+cat >"$FAKE_BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+printf 'sudo args:'
+printf ' %s' "$@"
+printf '\n'
+if [[ "$1" == "-n" ]]; then
+  shift
+fi
+"$@"
+EOF
+cat >"$FAKE_BIN/osascript" <<'EOF'
+#!/usr/bin/env bash
+printf 'osascript args:'
+printf ' %s' "$@"
+printf '\n'
+EOF
 cat >"$FAKE_BIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'io.tinyland.tcfsd\n'
@@ -101,6 +123,7 @@ assert_contains "$EVIDENCE/README.md" "Strict production-adjacent Finder smoke r
 assert_contains "$EVIDENCE/README.md" "Install status: \`not-run\`."
 assert_contains "$EVIDENCE/README.md" "This run's strict preflight status: \`not-run\`."
 assert_contains "$EVIDENCE/run-metadata.env" "install_pkg=0"
+assert_contains "$EVIDENCE/run-metadata.env" "install_mode=sudo-n"
 assert_contains "$EVIDENCE/run-metadata.env" "quarantine_stale=0"
 assert_contains "$EVIDENCE/run-metadata.env" "strict_preflight=0"
 assert_contains "$EVIDENCE/pre-cleanup-inventory/path-resolution.out" "tcfs"
@@ -111,6 +134,34 @@ assert_contains "$EVIDENCE/pre-cleanup-inventory/pkgutil-check-signature.out" "s
 assert_not_contains "$EVIDENCE/pre-cleanup-inventory/configs.out" "tinyland-business-ops-token.json"
 assert_not_contains "$EVIDENCE/pre-cleanup-inventory/tcfs-home-inventory.out" "github_token.age"
 assert_contains "$EVIDENCE/pre-cleanup-inventory/tcfs-home-inventory.out" "$HOME_OK/tcfs/shared/alpha-test.txt"
+
+PATH="$FAKE_BIN:$PATH" HOME="$HOME_OK" bash "$SCRIPT" \
+  --evidence-dir "$TMPDIR/install-evidence" \
+  --pkg "$PKG" \
+  --app-path "$APP" \
+  --install-pkg \
+  --install-mode sudo-n \
+  >"$TMPDIR/install.out"
+
+assert_contains "$TMPDIR/install-evidence/README.md" "Install mode: \`sudo-n\`."
+assert_contains "$TMPDIR/install-evidence/README.md" "Install status: \`0\`."
+assert_contains "$TMPDIR/install-evidence/run-metadata.env" "install_mode=sudo-n"
+assert_contains "$TMPDIR/install-evidence/install-pkg-command.env" "command=sudo -n installer -pkg"
+assert_contains "$TMPDIR/install-evidence/install-pkg.out" "sudo args: -n installer -pkg $PKG -target /"
+assert_contains "$TMPDIR/install-evidence/install-pkg.out" "installer args: -pkg $PKG -target /"
+
+PATH="$FAKE_BIN:$PATH" HOME="$HOME_OK" bash "$SCRIPT" \
+  --evidence-dir "$TMPDIR/osascript-install-evidence" \
+  --pkg "$PKG" \
+  --app-path "$APP" \
+  --install-pkg \
+  --install-mode osascript \
+  >"$TMPDIR/osascript-install.out"
+
+assert_contains "$TMPDIR/osascript-install-evidence/README.md" "Install mode: \`osascript\`."
+assert_contains "$TMPDIR/osascript-install-evidence/README.md" "Install status: \`0\`."
+assert_contains "$TMPDIR/osascript-install-evidence/install-pkg-command.env" "command=osascript do shell script"
+assert_contains "$TMPDIR/osascript-install-evidence/install-pkg.out" "osascript args: -e do shell script"
 
 STALE="$HOME_OK/Applications/TCFSProvider.app"
 mkdir -p "$STALE"
