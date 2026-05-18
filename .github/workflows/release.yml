@@ -68,8 +68,8 @@ jobs:
           else
             TAG="${{ github.event.inputs.tag }}"
           fi
-          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Release tag must look like vX.Y.Z, got ${TAG}"
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Release tag must look like vX.Y.Z or vX.Y.Z-PRERELEASE (e.g. v0.12.13, v0.12.13-rc1, v1.0.0-beta.2), got ${TAG}"
             exit 1
           fi
           VERSION="${TAG#v}"  # strip leading v
