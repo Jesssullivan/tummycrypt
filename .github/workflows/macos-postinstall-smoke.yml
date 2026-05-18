@@ -523,6 +523,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${TCFS_SMOKE_S3_ENDPOINT}" == https://* ]]; then
+            STORAGE_ENFORCE_TLS=true
+          else
+            STORAGE_ENFORCE_TLS=false
+          fi
           cat > "$CONFIG_PATH" <<EOF
           [daemon]
           socket = "/tmp/tcfsd-gha.sock"
@@ -536,7 +541,7 @@ jobs:
           region = "us-east-1"
           bucket = "${TCFS_SMOKE_S3_BUCKET}"
           remote_prefix = "${REMOTE_PREFIX}"
-          enforce_tls = true
+          enforce_tls = ${STORAGE_ENFORCE_TLS}
 
           [crypto]
           enabled = true
@@ -690,6 +695,11 @@ jobs:
           }
 
           FIXTURE_PATH="${SYNC_ROOT}/${FIXTURE_REL}"
+          if [[ "${TCFS_SMOKE_S3_ENDPOINT}" == https://* ]]; then
+            STORAGE_ENFORCE_TLS=true
+          else
+            STORAGE_ENFORCE_TLS=false
+          fi
           cat > "$NO_CRYPTO_CONFIG_PATH" <<EOF
           [daemon]
           socket = "/tmp/tcfsd-gha-no-crypto.sock"
@@ -701,7 +711,7 @@ jobs:
           region = "us-east-1"
           bucket = "${TCFS_SMOKE_S3_BUCKET}"
           remote_prefix = "${REMOTE_PREFIX}"
-          enforce_tls = true
+          enforce_tls = ${STORAGE_ENFORCE_TLS}
 
           [sync]
           state_db = "${RUNNER_TEMP}/tcfs-no-crypto-state.db"
