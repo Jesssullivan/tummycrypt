@@ -1,0 +1,370 @@
+name: Linux Post-Install Smoke
+
+# TIN-1422 scaffold: this workflow mirrors macos-postinstall-smoke.yml for
+# the Linux .deb/.rpm path. It downloads a package artifact (either a
+# release asset or a workflow-run artifact), installs it, writes a live
+# config keyed on the smoke secrets, mounts FUSE, and runs
+# scripts/linux-postinstall-smoke.sh to gate hydration via
+# `tcfs index inspect`.
+#
+# Several steps are intentionally minimal compared to the macOS workflow:
+# Linux doesn't need FileProvider plumbing (host app, pluginkit, CloudStorage
+# discovery), and the smoke fixture path lives directly under the FUSE
+# mount. See TIN-1422 for follow-up items.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to validate (for example v0.13.0)"
+        required: true
+        type: string
+      package_url:
+        description: "Optional direct .deb/.rpm URL to install instead of the release asset for tag"
+        required: false
+        default: ""
+        type: string
+      package_artifact_run_id:
+        description: "Optional Actions run ID containing a package artifact to install instead of the release asset"
+        required: false
+        default: ""
+        type: string
+      package_artifact_name:
+        description: "Artifact name to download when package_artifact_run_id is set"
+        required: false
+        default: "dist-linux-x86_64"
+        type: string
+      runner_label:
+        description: "Runner label (default: ubuntu-24.04). Use a self-hosted Linux label for private endpoints."
+        required: false
+        default: "ubuntu-24.04"
+        type: string
+      exercise_evict_rehydrate:
+        description: "After initial hydration, exercise unsync + rehydrate"
+        required: false
+        default: false
+        type: boolean
+      exercise_mutation:
+        description: "Write a new file through the FUSE mount and verify by remote pull"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package-postinstall:
+    name: Linux package post-install smoke
+    if: github.repository == 'Jesssullivan/tummycrypt'
+    runs-on: ${{ github.event.inputs.runner_label }}
+    timeout-minutes: 30
+    environment: tcfs-linux-smoke
+    env:
+      TCFS_SMOKE_S3_ENDPOINT: ${{ secrets.TCFS_SMOKE_S3_ENDPOINT }}
+      TCFS_SMOKE_S3_BUCKET: ${{ secrets.TCFS_SMOKE_S3_BUCKET }}
+      TCFS_SMOKE_S3_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      TCFS_SMOKE_S3_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      TCFS_SMOKE_MASTER_KEY_B64: ${{ secrets.TCFS_SMOKE_MASTER_KEY_B64 }}
+      TCFS_S3_ACCESS: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      TCFS_S3_SECRET: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Initialize log directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG_DIR="$RUNNER_TEMP/tcfs-linux-postinstall"
+          mkdir -p "$LOG_DIR"
+          echo "LOG_DIR=$LOG_DIR" >> "$GITHUB_ENV"
+
+      - name: Validate release inputs and storage secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          PACKAGE_URL="${{ github.event.inputs.package_url }}"
+          PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
+          [[ "$TAG" == v* ]] || {
+            echo "::error::tag must start with 'v' (got '$TAG')"
+            exit 1
+          }
+          if [[ -n "$PACKAGE_URL" && -n "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
+            echo "::error::set only one of package_url or package_artifact_run_id"
+            exit 1
+          fi
+
+          missing=()
+          for name in \
+            TCFS_SMOKE_S3_ENDPOINT \
+            TCFS_SMOKE_S3_BUCKET \
+            TCFS_SMOKE_S3_ACCESS_KEY_ID \
+            TCFS_SMOKE_S3_SECRET_ACCESS_KEY \
+            TCFS_SMOKE_MASTER_KEY_B64
+          do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required tcfs-linux-smoke environment secrets: ${missing[*]}"
+            echo "Set the storage and E2EE smoke secrets before using this workflow."
+            exit 1
+          fi
+
+      - name: Derive run paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          VERSION="${TAG#v}"
+          LOG_DIR="${LOG_DIR:-$RUNNER_TEMP/tcfs-linux-postinstall}"
+          SYNC_ROOT="$RUNNER_TEMP/tcfs-sync-root"
+          MOUNT_POINT="$RUNNER_TEMP/tcfs-mount"
+          CONFIG_DIR="$RUNNER_TEMP/tcfs-config"
+          CONFIG_PATH="$CONFIG_DIR/config.toml"
+          MASTER_KEY_PATH="$RUNNER_TEMP/tcfs-master.key"
+          STATE_PATH="$RUNNER_TEMP/tcfs-state.json"
+          EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
+          MUTATION_CONTENT_FILE="$RUNNER_TEMP/mutation-fixture-content"
+          REMOTE_PREFIX="gha/linux-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
+          MUTATION_REL="ci-smoke/${VERSION}/mutation-${GITHUB_RUN_ATTEMPT}.txt"
+
+          mkdir -p "$LOG_DIR" "$SYNC_ROOT" "$MOUNT_POINT" "$CONFIG_DIR"
+
+          {
+            echo "TAG=$TAG"
+            echo "VERSION=$VERSION"
+            echo "LOG_DIR=$LOG_DIR"
+            echo "SYNC_ROOT=$SYNC_ROOT"
+            echo "MOUNT_POINT=$MOUNT_POINT"
+            echo "CONFIG_DIR=$CONFIG_DIR"
+            echo "CONFIG_PATH=$CONFIG_PATH"
+            echo "MASTER_KEY_PATH=$MASTER_KEY_PATH"
+            echo "STATE_PATH=$STATE_PATH"
+            echo "EXPECTED_CONTENT_FILE=$EXPECTED_CONTENT_FILE"
+            echo "MUTATION_CONTENT_FILE=$MUTATION_CONTENT_FILE"
+            echo "REMOTE_PREFIX=$REMOTE_PREFIX"
+            echo "FIXTURE_REL=$FIXTURE_REL"
+            echo "MUTATION_REL=$MUTATION_REL"
+          } >> "$GITHUB_ENV"
+
+      - name: Install FUSE userspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # TIN-1422: cargo-deb may not declare fuse3 as a dependency for the
+          # tcfs-cli package; install the userspace helper explicitly so
+          # `tcfs mount` can attach.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3 libfuse3-3
+
+      - name: Install E2EE master key
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$MASTER_KEY_PATH" <<'PY'
+          import base64
+          import binascii
+          import os
+          import sys
+
+          target = sys.argv[1]
+          encoded = os.environ.get("TCFS_SMOKE_MASTER_KEY_B64", "").strip()
+          try:
+              key = base64.b64decode(encoded, validate=True)
+          except binascii.Error as exc:
+              print(f"::error::TCFS_SMOKE_MASTER_KEY_B64 is not valid base64: {exc}")
+              raise SystemExit(1)
+
+          if len(key) != 32:
+              print(
+                  f"::error::TCFS_SMOKE_MASTER_KEY_B64 decoded to {len(key)} bytes; expected 32"
+              )
+              raise SystemExit(1)
+
+          with open(target, "wb") as fh:
+              fh.write(key)
+          PY
+          chmod 600 "$MASTER_KEY_PATH"
+
+      - name: Download package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PACKAGE_URL="${{ github.event.inputs.package_url }}"
+          PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
+          PACKAGE_ARTIFACT_NAME="${{ github.event.inputs.package_artifact_name }}"
+
+          if [[ -n "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
+            artifact_dir="$RUNNER_TEMP/package-artifact"
+            artifact_json="$RUNNER_TEMP/package-artifacts.json"
+            artifact_zip="$RUNNER_TEMP/package-artifact.zip"
+            mkdir -p "$artifact_dir"
+            curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${PACKAGE_ARTIFACT_RUN_ID}/artifacts?per_page=100" \
+              -o "$artifact_json"
+            artifact_url="$(
+          python3 - "$artifact_json" "$PACKAGE_ARTIFACT_NAME" <<'PY'
+          import json
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          wanted = sys.argv[2]
+          for artifact in payload.get("artifacts", []):
+              if artifact.get("name") == wanted and not artifact.get("expired", False):
+                  print(artifact["archive_download_url"])
+                  raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+            )" || {
+              echo "::error::non-expired artifact $PACKAGE_ARTIFACT_NAME not found on run $PACKAGE_ARTIFACT_RUN_ID"
+              cat "$artifact_json"
+              exit 1
+            }
+            curl -fL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -o "$artifact_zip" \
+              "$artifact_url"
+            python3 -m zipfile -e "$artifact_zip" "$artifact_dir"
+            artifact_pkg="$(find "$artifact_dir" -type f \( -name '*.deb' -o -name '*.rpm' \) -print -quit)"
+            if [[ -z "$artifact_pkg" ]]; then
+              echo "::error::artifact $PACKAGE_ARTIFACT_NAME from run $PACKAGE_ARTIFACT_RUN_ID did not contain a .deb or .rpm"
+              find "$artifact_dir" -type f -print
+              exit 1
+            fi
+            PACKAGE_PATH="$artifact_pkg"
+          elif [[ -n "$PACKAGE_URL" ]]; then
+            # Preserve the source extension; default to .deb for ubuntu runners.
+            case "$PACKAGE_URL" in
+              *.rpm) PACKAGE_PATH="$RUNNER_TEMP/tcfsd-${VERSION}.rpm" ;;
+              *)     PACKAGE_PATH="$RUNNER_TEMP/tcfsd-${VERSION}.deb" ;;
+            esac
+            curl -fL -o "$PACKAGE_PATH" "$PACKAGE_URL"
+          else
+            # Default to the amd64 .deb shipped from the release workflow.
+            PACKAGE_PATH="$RUNNER_TEMP/tcfsd-${VERSION}-amd64.deb"
+            curl -fL \
+              -o "$PACKAGE_PATH" \
+              "https://github.com/${{ github.repository }}/releases/download/${TAG}/tcfsd-${VERSION}-amd64.deb"
+          fi
+
+          echo "PACKAGE_PATH=$PACKAGE_PATH" >> "$GITHUB_ENV"
+
+      - name: Write live config
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${TCFS_SMOKE_S3_ENDPOINT}" == https://* ]]; then
+            STORAGE_ENFORCE_TLS=true
+          else
+            STORAGE_ENFORCE_TLS=false
+          fi
+          cat > "$CONFIG_PATH" <<EOF
+          [daemon]
+          socket = "/tmp/tcfsd-gha.sock"
+          metrics_addr = "127.0.0.1:19100"
+          log_format = "text"
+
+          [storage]
+          endpoint = "${TCFS_SMOKE_S3_ENDPOINT}"
+          region = "us-east-1"
+          bucket = "${TCFS_SMOKE_S3_BUCKET}"
+          remote_prefix = "${REMOTE_PREFIX}"
+          enforce_tls = ${STORAGE_ENFORCE_TLS}
+
+          [crypto]
+          enabled = true
+          master_key_file = "${MASTER_KEY_PATH}"
+
+          [auth]
+          require_session = false
+
+          [sync]
+          state_db = "${RUNNER_TEMP}/tcfs-state.db"
+          sync_root = "${SYNC_ROOT}"
+          device_name = "gha-linux-postinstall"
+          device_id = "gha-linux-postinstall"
+          EOF
+          chmod 600 "$CONFIG_PATH"
+
+      - name: Prepare expected fixture content
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'tcfs Linux post-install smoke %s run %s\n' "$TAG" "$GITHUB_RUN_ID" \
+            > "$EXPECTED_CONTENT_FILE"
+
+      - name: Run Linux post-install harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The harness installs the package, starts tcfsd, seeds the fixture
+          # via `tcfs push` (--seed-expected-file), mounts FUSE, and gates
+          # exact-content hydration on `tcfs index inspect` reporting
+          # status=visible — the same gate as the macOS harness.
+          args=(
+            --package-path "$PACKAGE_PATH"
+            --config "$CONFIG_PATH"
+            --expected-version "${VERSION}"
+            --expected-file "${FIXTURE_REL}"
+            --expected-content-file "$EXPECTED_CONTENT_FILE"
+            --seed-expected-file
+            --remote-prefix "$REMOTE_PREFIX"
+            --remote-spec "s3://${TCFS_SMOKE_S3_BUCKET}/${REMOTE_PREFIX}"
+            --mount-point "$MOUNT_POINT"
+            --log-dir "$LOG_DIR/harness"
+          )
+
+          if [[ "${{ github.event.inputs.exercise_evict_rehydrate }}" == "true" ]]; then
+            args+=(--exercise-evict-rehydrate)
+          fi
+
+          if [[ "${{ github.event.inputs.exercise_mutation }}" == "true" ]]; then
+            printf 'tcfs Linux mutation %s run %s attempt %s\n' \
+              "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$MUTATION_CONTENT_FILE"
+            args+=(
+              --exercise-mutation
+              --mutation-file "$MUTATION_REL"
+              --mutation-content-file "$MUTATION_CONTENT_FILE"
+            )
+          fi
+
+          bash scripts/linux-postinstall-smoke.sh "${args[@]}"
+
+      - name: Capture diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if command -v systemctl >/dev/null 2>&1; then
+            systemctl status tcfsd.service > "$LOG_DIR/systemctl-status.log" 2>&1 || true
+            journalctl -u tcfsd.service --no-pager -n 200 \
+              > "$LOG_DIR/journalctl-tcfsd.log" 2>&1 || true
+          fi
+          dpkg -l | grep -E 'tcfs|tcfsd' > "$LOG_DIR/dpkg-list.log" 2>&1 || true
+          rpm -qa 2>/dev/null | grep -E 'tcfs|tcfsd' > "$LOG_DIR/rpm-list.log" 2>&1 || true
+          cat /proc/self/mountinfo > "$LOG_DIR/mountinfo.log" 2>&1 || true
+          dmesg | tail -200 > "$LOG_DIR/dmesg-tail.log" 2>&1 || true
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-postinstall-smoke-${{ github.event.inputs.tag }}
+          path: ${{ env.LOG_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
