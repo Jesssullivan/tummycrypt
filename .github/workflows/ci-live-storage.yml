@@ -68,10 +68,30 @@ jobs:
           shared-key: ci-live-storage-${{ runner.os }}
           workspaces: ". -> target"
 
+      - name: Write CI compose override
+        # The shared docker-compose.yml passes `--max_payload 8MB` to
+        # nats-server. That flag is rejected on current nats:2.10-alpine
+        # (must be set via config file). Locally `task dev` may still work
+        # against a cached older image; CI pulls fresh and fails. Override
+        # the nats command in CI to drop the unsupported flag and configure
+        # max_payload via -c if needed later.
+        run: |
+          set -euo pipefail
+          mkdir -p .github/compose-overrides
+          cat > .github/compose-overrides/ci.yml <<'EOF'
+          services:
+            nats:
+              command: >
+                --name tcfs-nats
+                --jetstream
+                --store_dir /data
+                --http_port 8222
+          EOF
+
       - name: Bring up compose-managed SeaweedFS + NATS
         run: |
           set -euo pipefail
-          docker compose up -d \
+          docker compose -f docker-compose.yml -f .github/compose-overrides/ci.yml up -d \
             seaweed-master-1 seaweed-master-2 seaweed-master-3 \
             seaweed-volume seaweed-filer \
             nats
