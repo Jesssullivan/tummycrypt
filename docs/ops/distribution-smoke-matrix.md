@@ -155,8 +155,15 @@ the package smoke with the named FileProvider harness:
 bash scripts/macos-postinstall-smoke.sh \
   --expected-version "${VERSION}" \
   --config "$HOME/.config/tcfs/config.toml" \
-  --expected-file "path/to/known/remote-backed-file"
+  --expected-file "path/to/known/remote-backed-file" \
+  --expected-content-file /tmp/tcfs-expected-content.txt
 ```
+
+For a fresh one-off fixture, replace `--expected-file` with
+`--seed-expected-file` or set `SEED_EXPECTED_FILE=1` on
+`task lazy:macos-finder-smoke`. The harness pushes the fixture, archives the
+push transcript, and fails early unless `tcfs index inspect <path> --json`
+reports a `visible` remote index entry before FileProvider hydration starts.
 
 For neo dogfood, the May 16, 2026 packet
 `docs/release/evidence/macos-fileprovider-neo-pkg-install-20260516T024006Z/`

@@ -67,6 +67,15 @@ Options:
   --direct-host-launch         Launch the host app executable directly for
                               domain-add logging instead of relying on
                               LaunchServices + unified log polling.
+  --rebuild-domain            Ask the host app to remove and re-add the
+                              FileProvider domain before smoke. Requires a
+                              direct host-app launch and is intended only for
+                              archived stale-domain diagnostics.
+  --seed-expected-file         Create a timestamped fixture, push it to remote
+                              storage through tcfs, and use it as the expected
+                              FileProvider hydration target. If
+                              --expected-file is omitted, a
+                              finder-smoke-<UTC>/fixture.txt path is generated.
   --require-keychain-config   Require extension logs to prove config loaded
                               from shared Keychain, and fail if embedded config
                               was used
@@ -104,6 +113,8 @@ ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS="${TCFS_ALLOW_MULTIPLE_PLUGIN_REGISTRATIONS:
 ELECT_PLUGIN_USE="${TCFS_ELECT_PLUGIN_USE:-0}"
 FILEPROVIDER_TESTING_MODE="${TCFS_FILEPROVIDER_TESTING_MODE:-0}"
 DIRECT_HOST_LAUNCH="${TCFS_FILEPROVIDER_DIRECT_HOST_LAUNCH:-0}"
+REBUILD_DOMAIN="${TCFS_FILEPROVIDER_REBUILD_DOMAIN:-0}"
+SEED_EXPECTED_FILE="${TCFS_FILEPROVIDER_SEED_EXPECTED_FILE:-0}"
 REQUIRE_KEYCHAIN_CONFIG="${TCFS_REQUIRE_KEYCHAIN_CONFIG:-0}"
 TCFS_BIN="${TCFS_BIN:-tcfs}"
 TCFSD_BIN="${TCFSD_BIN:-tcfsd}"
@@ -215,6 +226,15 @@ while [[ $# -gt 0 ]]; do
       DIRECT_HOST_LAUNCH=1
       shift
       ;;
+    --rebuild-domain)
+      REBUILD_DOMAIN=1
+      DIRECT_HOST_LAUNCH=1
+      shift
+      ;;
+    --seed-expected-file)
+      SEED_EXPECTED_FILE=1
+      shift
+      ;;
     --require-keychain-config)
       REQUIRE_KEYCHAIN_CONFIG=1
       shift
@@ -273,18 +293,18 @@ if [[ -n "$CONFLICT_CONTENT" && -n "$CONFLICT_CONTENT_FILE" ]]; then
   exit 2
 fi
 
-if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" && -z "$EXPECTED_FILE_REL" ]]; then
-  echo "--require-keychain-config requires --expected-file so the extension config path is exercised" >&2
+if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" && -z "$EXPECTED_FILE_REL" && "$SEED_EXPECTED_FILE" != "1" ]]; then
+  echo "--require-keychain-config requires --expected-file or --seed-expected-file so the extension config path is exercised" >&2
   exit 2
 fi
 
-if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" && -z "$EXPECTED_FILE_REL" ]]; then
-  echo "--exercise-evict-rehydrate requires --expected-file" >&2
+if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" && -z "$EXPECTED_FILE_REL" && "$SEED_EXPECTED_FILE" != "1" ]]; then
+  echo "--exercise-evict-rehydrate requires --expected-file or --seed-expected-file" >&2
   exit 2
 fi
 
-if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" && -z "$EXPECTED_CONTENT" && -z "$EXPECTED_CONTENT_FILE" ]]; then
-  echo "--exercise-evict-rehydrate requires --expected-content or --expected-content-file" >&2
+if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" && "$SEED_EXPECTED_FILE" != "1" && -z "$EXPECTED_CONTENT" && -z "$EXPECTED_CONTENT_FILE" ]]; then
+  echo "--exercise-evict-rehydrate requires --expected-content, --expected-content-file, or --seed-expected-file" >&2
   exit 2
 fi
 
@@ -512,6 +532,121 @@ run_status() {
   cat "$log_path"
 }
 
+run_tcfs_index_inspect() {
+  local rel="$1"
+  local out="$2"
+  local err="${out}.err"
+  local -a args
+
+  [[ -n "$TCFS_PATH" ]] || return 2
+
+  args=(--config "$CONFIG_PATH" index inspect "$rel" --json)
+  if [[ -n "$REMOTE_PREFIX" ]]; then
+    args+=(--prefix "$REMOTE_PREFIX")
+  fi
+
+  "$TCFS_PATH" "${args[@]}" >"$out" 2>"$err"
+}
+
+extract_index_status() {
+  local report="$1"
+
+  python3 - "$report" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    report = json.load(fh)
+print(report.get("status", "unknown"))
+PY
+}
+
+archive_expected_remote_index() {
+  local rel="$1"
+  local report="$LOG_DIR/expected-file-index.json"
+
+  if [[ -z "$TCFS_PATH" ]]; then
+    printf 'tcfs CLI unavailable; index inspection skipped\n' >"$report"
+    return
+  fi
+
+  run_tcfs_index_inspect "$rel" "$report" || {
+    echo "tcfs index inspect failed for expected file: $rel" >"$report"
+    cat "${report}.err" >>"$report" 2>/dev/null || true
+  }
+}
+
+require_expected_remote_index() {
+  local rel="$1"
+  local report="$LOG_DIR/expected-file-index.json"
+  local status
+
+  run_tcfs_index_inspect "$rel" "$report" || {
+    echo "tcfs index inspect failed for expected file: $rel" >&2
+    cat "${report}.err" >&2 2>/dev/null || true
+    exit 1
+  }
+
+  status="$(extract_index_status "$report")"
+  echo "remote index status for expected file: $status"
+  if [[ "$status" != "visible" ]]; then
+    echo "expected file is not backed by a visible remote index entry: $rel" >&2
+    cat "$report" >&2 || true
+    exit 1
+  fi
+}
+
+prepare_seed_content_file() {
+  local target="$1"
+
+  if [[ -n "$EXPECTED_CONTENT_FILE" ]]; then
+    cp "$EXPECTED_CONTENT_FILE" "$target"
+  elif [[ -n "$EXPECTED_CONTENT" ]]; then
+    printf '%s' "$EXPECTED_CONTENT" >"$target"
+  else
+    printf 'tcfs FileProvider seeded fixture %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$target"
+  fi
+}
+
+seed_expected_file_if_requested() {
+  [[ "$SEED_EXPECTED_FILE" == "1" ]] || return 0
+
+  local seed_stamp
+  local seed_root="$LOG_DIR/seed-expected-root"
+  local seed_content="$LOG_DIR/seed-expected-content"
+  local push_log="$LOG_DIR/seed-expected-file-push.log"
+  local push_state="$LOG_DIR/seed-expected-state.json"
+  local -a args
+
+  [[ -n "$TCFS_PATH" ]] || {
+    echo "--seed-expected-file requires tcfs CLI status checks; remove --skip-status" >&2
+    exit 2
+  }
+
+  if [[ -z "$EXPECTED_FILE_REL" ]]; then
+    seed_stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+    EXPECTED_FILE_REL="finder-smoke-${seed_stamp}/fixture.txt"
+  fi
+  validate_relative_file_path "$EXPECTED_FILE_REL"
+
+  mkdir -p "$seed_root/$(dirname "$EXPECTED_FILE_REL")"
+  prepare_seed_content_file "$seed_content"
+  cp "$seed_content" "$seed_root/$EXPECTED_FILE_REL"
+  EXPECTED_CONTENT_FILE="$seed_content"
+
+  echo "seeding expected FileProvider fixture: $EXPECTED_FILE_REL"
+  args=(--config "$CONFIG_PATH" push "$seed_root" --state "$push_state")
+  if [[ -n "$REMOTE_PREFIX" ]]; then
+    args+=(--prefix "$REMOTE_PREFIX")
+  fi
+
+  "$TCFS_PATH" "${args[@]}" >"$push_log" 2>&1 || {
+    echo "failed to seed expected FileProvider fixture" >&2
+    cat "$push_log" >&2 || true
+    exit 1
+  }
+}
+
 check_pluginkit() {
   local output
   local record_count
@@ -665,20 +800,27 @@ launch_host_app_for_domain_add() {
   local app_binary
   local deadline
   local host_launch_pid=""
+  local -a host_env
 
   app_binary="$(host_app_binary_path)"
-  if [[ ("$FILEPROVIDER_TESTING_MODE" == "1" || "$DIRECT_HOST_LAUNCH" == "1") && -x "$app_binary" ]]; then
+  if [[ "$REBUILD_DOMAIN" == "1" && ! -x "$app_binary" ]]; then
+    echo "--rebuild-domain requires an executable host app binary: $app_binary" >&2
+    exit 1
+  fi
+
+  if [[ ("$FILEPROVIDER_TESTING_MODE" == "1" || "$DIRECT_HOST_LAUNCH" == "1" || "$REBUILD_DOMAIN" == "1") && -x "$app_binary" ]]; then
     echo "launching host app binary for domain add: $app_binary"
+    host_env=(
+      TCFS_FILEPROVIDER_HOST_STDERR_LOG=1
+      TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}"
+    )
     if [[ "$FILEPROVIDER_TESTING_MODE" == "1" ]]; then
-      TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1 \
-      TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
-      TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
-        "$app_binary" >"$LOG_DIR/host-domain-launch.log" 2>&1 &
-    else
-      TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
-      TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
-        "$app_binary" >"$LOG_DIR/host-domain-launch.log" 2>&1 &
+      host_env+=(TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED=1)
     fi
+    if [[ "$REBUILD_DOMAIN" == "1" ]]; then
+      host_env+=(TCFS_FILEPROVIDER_REBUILD_DOMAIN=1)
+    fi
+    env "${host_env[@]}" "$app_binary" >"$LOG_DIR/host-domain-launch.log" 2>&1 &
     host_launch_pid="$!"
   else
     echo "launching host app: $APP_PATH"
@@ -900,9 +1042,19 @@ fileprovider_system_log_path() {
   printf '%s/fileprovider-system.log\n' "$LOG_DIR"
 }
 
+fileprovider_activity_log_path() {
+  printf '%s/fileprovider-extension-activity.log\n' "$LOG_DIR"
+}
+
 collect_extension_config_log() {
   run_log_show --style compact --last 2m \
     --predicate 'subsystem == "io.tinyland.tcfs.fileprovider" && category == "extension" && eventMessage CONTAINS "loadConfig:"' \
+    || true
+}
+
+collect_fileprovider_activity_log() {
+  run_log_show --style compact --last 5m \
+    --predicate 'subsystem == "io.tinyland.tcfs.fileprovider" && (category == "extension" || category == "enumerator") && (eventMessage CONTAINS[c] "loadConfig" || eventMessage CONTAINS[c] "createProvider" || eventMessage CONTAINS[c] "provider" || eventMessage CONTAINS[c] "fetchContents" || eventMessage CONTAINS[c] "fetch_with_progress" || eventMessage CONTAINS[c] "fetch failed" || eventMessage CONTAINS[c] "enumerateItems" || eventMessage CONTAINS[c] "enumerateProviderItems")' \
     || true
 }
 
@@ -1114,6 +1266,62 @@ nudge_expected_parent_enumeration() {
     if grep -q 'check | repair' <<<"$fileproviderctl_help"; then
       run_bounded_to_log \
         "fileproviderctl-check-expected-parent" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        fileproviderctl check -P -a "$parent" || true
+    fi
+  fi
+}
+
+collect_expected_file_diagnostics() {
+  local path="$1"
+  local rel="$2"
+  local parent
+  local fileproviderctl_help=""
+
+  parent="$(dirname "$path")"
+  echo "collecting FileProvider diagnostics for expected file: $rel" >&2
+
+  archive_expected_remote_index "$rel"
+  collect_extension_config_log >"$(extension_log_path)" || true
+  collect_fileprovider_activity_log >"$(fileprovider_activity_log_path)" || true
+  collect_fileprovider_system_log >"$(fileprovider_system_log_path)" || true
+
+  run_bounded_to_log \
+    "expected-file-ls" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    sh -c 'ls -lO@ "$1" 2>/dev/null || ls -la "$1"' sh "$path" || true
+
+  run_bounded_to_log \
+    "expected-file-stat" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    sh -c 'stat -x "$1" 2>/dev/null || stat "$1"' sh "$path" || true
+
+  if command -v xattr >/dev/null 2>&1; then
+    run_bounded_to_log \
+      "expected-file-xattr" \
+      "$LOG_SHOW_TIMEOUT_SECS" \
+      xattr -l "$path" || true
+  else
+    printf 'xattr unavailable on this host\n' >"$LOG_DIR/expected-file-xattr.log"
+  fi
+
+  if command -v fileproviderctl >/dev/null 2>&1; then
+    fileproviderctl_help="$(fileproviderctl 2>&1 || true)"
+
+    if grep -q 'evaluate' <<<"$fileproviderctl_help"; then
+      run_bounded_to_log \
+        "fileproviderctl-evaluate-expected-file" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        fileproviderctl evaluate "$path" || true
+    fi
+
+    if grep -q 'check | repair' <<<"$fileproviderctl_help"; then
+      run_bounded_to_log \
+        "fileproviderctl-check-expected-file" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        fileproviderctl check -P -a "$path" || true
+      run_bounded_to_log \
+        "fileproviderctl-check-expected-parent-postfailure" \
         "$LOG_SHOW_TIMEOUT_SECS" \
         fileproviderctl check -P -a "$parent" || true
     fi
@@ -1338,6 +1546,7 @@ hydrate_expected_file() {
 
   if (( attempt >= TIMEOUT_SECS || SECONDS >= deadline )); then
     cat "$read_error" >&2 || true
+    collect_expected_file_diagnostics "$path" "$EXPECTED_FILE_REL"
     echo "failed to read expected file for hydration: $path" >&2
     exit 1
   fi
@@ -1349,6 +1558,7 @@ hydrate_expected_file() {
   if [[ -n "$EXPECTED_CONTENT_FILE" ]]; then
     if ! cmp -s "$EXPECTED_CONTENT_FILE" "$hydrated_copy"; then
       echo "hydrated file content mismatch against $EXPECTED_CONTENT_FILE" >&2
+      collect_expected_file_diagnostics "$path" "$EXPECTED_FILE_REL"
       exit 1
     fi
     echo "hydrated file content matched expected content file"
@@ -1356,6 +1566,7 @@ hydrate_expected_file() {
     printf '%s' "$EXPECTED_CONTENT" >"$expected_copy"
     if ! cmp -s "$expected_copy" "$hydrated_copy"; then
       echo "hydrated file content mismatch against --expected-content" >&2
+      collect_expected_file_diagnostics "$path" "$EXPECTED_FILE_REL"
       exit 1
     fi
     echo "hydrated file content matched expected content"
@@ -1623,8 +1834,14 @@ if [[ "$SKIP_STATUS" -eq 0 ]]; then
   assert_version "tcfs" "$TCFS_PATH"
   run_status "preflight"
 else
-  TCFS_PATH=""
+  if [[ -n "$EXPECTED_FILE_REL" || "$SEED_EXPECTED_FILE" == "1" ]]; then
+    TCFS_PATH="$(resolve_bin "$TCFS_BIN")"
+  else
+    TCFS_PATH=""
+  fi
 fi
+
+seed_expected_file_if_requested
 
 require_file "$HOME/.config/tcfs/fileprovider/config.json"
 echo "status logs: $LOG_DIR"
@@ -1650,18 +1867,19 @@ enumerate_root "$CLOUD_ROOT"
 if [[ -n "$EXPECTED_FILE_REL" ]]; then
   EXPECTED_PATH="$CLOUD_ROOT/$EXPECTED_FILE_REL"
   EXPECTED_PARENT="$(dirname "$EXPECTED_PATH")"
+  require_expected_remote_index "$EXPECTED_FILE_REL"
   wait_for_expected_parent_chain "$EXPECTED_PARENT"
   wait_for_expected_file "$EXPECTED_PATH"
   request_expected_file_download "$EXPECTED_FILE_REL"
+  if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" ]]; then
+    check_keychain_config_log
+  fi
   hydrate_expected_file "$EXPECTED_PATH"
   if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" ]]; then
     request_expected_file_eviction "$EXPECTED_FILE_REL"
     request_expected_file_download "$EXPECTED_FILE_REL"
     hydrate_expected_file "$EXPECTED_PATH"
     echo "FileProvider evict/rehydrate cycle passed"
-  fi
-  if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" ]]; then
-    check_keychain_config_log
   fi
 else
   echo "warning: --expected-file not provided; hydration was not exercised" >&2

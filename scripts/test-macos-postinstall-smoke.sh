@@ -105,6 +105,51 @@ case "${1:-}" in
       status)
         printf 'tcfsd v0.12.2\nstorage: [ok]\n'
         ;;
+      index)
+        [[ "${2:-}" == "inspect" ]] || {
+          printf 'expected fake index inspect\n' >&2
+          exit 1
+        }
+        rel="${3:-}"
+        status="${TCFS_FAKE_INDEX_STATUS:-visible}"
+        if [[ "$status" == "visible" ]]; then
+          cat <<JSON
+{
+  "rel_path": "$rel",
+  "remote_prefix": "data",
+  "index_key": "data/index/$rel",
+  "index_exists": true,
+  "status": "visible",
+  "parse_error": null,
+  "entry_state": "committed",
+  "visible_entry": {
+    "manifest_hash": "fakehash",
+    "manifest_key": "data/manifests/fakehash",
+    "manifest_exists": true,
+    "size": 29,
+    "chunks": 1,
+    "kind": "regular_file",
+    "symlink_target": null
+  },
+  "pending_entry": null
+}
+JSON
+        else
+          cat <<JSON
+{
+  "rel_path": "$rel",
+  "remote_prefix": "data",
+  "index_key": "data/index/$rel",
+  "index_exists": false,
+  "status": "$status",
+  "parse_error": null,
+  "entry_state": null,
+  "visible_entry": null,
+  "pending_entry": null
+}
+JSON
+        fi
+        ;;
       pull)
         rel="$2"
         dest="$3"
@@ -119,6 +164,16 @@ case "${1:-}" in
         src="${TCFS_FAKE_REMOTE_ROOT:?}/$rel"
         /bin/cat "$src" >"$dest"
         printf 'Pulling %s -> %s using %s\n' "$rel" "$dest" "$config"
+        ;;
+      push)
+        root="$2"
+        [[ -n "${TCFS_FAKE_REMOTE_ROOT:-}" ]] || {
+          printf 'TCFS_FAKE_REMOTE_ROOT missing for fake push\n' >&2
+          exit 1
+        }
+        mkdir -p "$TCFS_FAKE_REMOTE_ROOT"
+        cp -R "$root"/. "$TCFS_FAKE_REMOTE_ROOT"/
+        printf 'Push complete:\n  uploaded: 1 files\n'
         ;;
       sync-status)
         path="$2"
@@ -448,6 +503,7 @@ assert_contains "$OUT" "launching host app binary for domain add: $APP_PATH/Cont
 assert_contains "$OUT" "requesting FileProvider download for expected file: $EXPECTED_REL"
 assert_contains "$OUT" "launching host app binary for download request: $APP_PATH/Contents/MacOS/TCFSProvider"
 assert_contains "$OUT" "host app requested FileProvider download for expected file"
+assert_contains "$OUT" "remote index status for expected file: visible"
 assert_contains "$OUT" "requesting FileProvider eviction for expected file: $EXPECTED_REL"
 assert_contains "$OUT" "launching host app binary for eviction request: $APP_PATH/Contents/MacOS/TCFSProvider"
 assert_contains "$OUT" "host app requested FileProvider eviction for expected file"
@@ -480,6 +536,7 @@ assert_contains "$LOG_DIR/host-domain-launch.log" "add: OK - domain available"
 assert_contains "$LOG_DIR/host-request-launch.log" "requestDownload: $CONFLICT_REL: OK"
 assert_contains "$LOG_DIR/host-evict-launch.log" "evict: $EXPECTED_REL: OK"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
+assert_contains "$LOG_DIR/expected-file-index.json" '"status": "visible"'
 assert_contains "$LOG_DIR/conflict-sync-status.log" "sync state: conflict"
 test -f "$LOG_DIR/conflict-enumerator.log"
 assert_contains "$LOG_DIR/fileproviderctl-materialize-root.log" "fileproviderctl materialize"
@@ -518,20 +575,43 @@ assert_contains "$DIRECT_OUT" "host app log confirmed domain add"
 assert_contains "$DIRECT_OUT" "macOS post-install FileProvider smoke passed"
 assert_contains "$DIRECT_HOST_BINARY_LOG" "host-binary"
 
+SEED_OUT="${TMPDIR}/seed.out"
+SEED_CLOUD_ROOT="${HOME_DIR}/Library/CloudStorage/TCFSSeeded"
+mkdir -p "$SEED_CLOUD_ROOT"
+env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+  TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+  TCFS_FAKE_HOST_BINARY_LOG="$HOST_BINARY_LOG" \
+  TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
+  TCFS_FAKE_REMOTE_ROOT="$SEED_CLOUD_ROOT" \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --seed-expected-file \
+    --app-path "$APP_PATH" \
+    --cloud-root "$SEED_CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/seed-logs" \
+    --timeout 5 \
+    >"$SEED_OUT" 2>&1
+assert_contains "$SEED_OUT" "seeding expected FileProvider fixture: finder-smoke-"
+assert_contains "$SEED_OUT" "remote index status for expected file: visible"
+assert_contains "$SEED_OUT" "hydrated file content matched expected content file"
+assert_contains "$SEED_OUT" "macOS post-install FileProvider smoke passed"
+assert_contains "${TMPDIR}/seed-logs/seed-expected-file-push.log" "Push complete"
+
 assert_fails_contains \
-  "--require-keychain-config requires --expected-file" \
+  "--require-keychain-config requires --expected-file or --seed-expected-file" \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
     bash "$SCRIPT" \
       --require-keychain-config
 
 assert_fails_contains \
-  "--exercise-evict-rehydrate requires --expected-file" \
+  "--exercise-evict-rehydrate requires --expected-file or --seed-expected-file" \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
     bash "$SCRIPT" \
       --exercise-evict-rehydrate
 
 assert_fails_contains \
-  "--exercise-evict-rehydrate requires --expected-content or --expected-content-file" \
+  "--exercise-evict-rehydrate requires --expected-content, --expected-content-file, or --seed-expected-file" \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
     bash "$SCRIPT" \
       --expected-file "$EXPECTED_REL" \
@@ -599,6 +679,21 @@ assert_fails_contains \
       --log-dir "${TMPDIR}/missing-keychain-log-logs" \
       --require-keychain-config \
       --timeout 2
+
+assert_fails_contains \
+  "expected file is not backed by a visible remote index entry" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_FAKE_INDEX_STATUS="missing_index" \
+    bash "$SCRIPT" \
+      --expected-version 0.12.2 \
+      --config "$CONFIG_PATH" \
+      --expected-file "$EXPECTED_REL" \
+      --expected-content-file "$EXPECTED_CONTENT_FILE" \
+      --app-path "$APP_PATH" \
+      --cloud-root "$CLOUD_ROOT" \
+      --log-dir "${TMPDIR}/missing-index-logs" \
+      --timeout 2
+assert_contains "${TMPDIR}/missing-index-logs/expected-file-index.json" '"status": "missing_index"'
 
 printf 'wrong content\n' >"${TMPDIR}/wrong-content.txt"
 assert_fails_contains \

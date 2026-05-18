@@ -94,6 +94,14 @@ sync-root stub representation, not the desired primary Finder UX.
   CloudStorage enumeration, and host-app `requestDownload` for
   `shared/alpha-test.txt`. It still does not prove hydration: the current
   raw-read packet fails with `Operation timed out`.
+- The smoke harness now gates expected-file hydration on a read-only remote
+  index check before it asks FileProvider to download the item. The diagnostic
+  command is `tcfs index inspect <relative-path> --json`; it reports
+  `visible`, `missing_index`, `missing_manifest`, `preparing_only`,
+  `no_visible_entry`, or `parse_error` without promoting pending remote index
+  records. Future production Finder packets should archive
+  `expected-file-index.json` so a missing remote fixture is separated from a
+  real FileProvider read failure.
 
 ## Important Constraints
 
@@ -522,9 +530,16 @@ bash scripts/macos-postinstall-smoke.sh \
   --expected-content-file /tmp/tcfs-expected-content.txt
 ```
 
+For a fresh diagnostic fixture, use `--seed-expected-file` instead of selecting
+an existing path. The harness creates a timestamped
+`finder-smoke-<UTC>/fixture.txt` path unless `--expected-file` is also supplied,
+pushes it with `tcfs push`, archives the push log, then requires
+`tcfs index inspect` to report `visible` before the FileProvider download/read
+phase.
+
 The same Finder/FileProvider lane is exposed through the task surface. The
-wrapper requires `EXPECTED_FILE` by design, so it cannot pass as package-only
-artifact smoke:
+wrapper requires either `EXPECTED_FILE` or `SEED_EXPECTED_FILE=1`, so it cannot
+pass as package-only artifact smoke:
 
 ```bash
 EXPECTED_VERSION="${VERSION}" \
@@ -533,6 +548,11 @@ EXPECTED_CONTENT_FILE=/tmp/tcfs-expected-content.txt \
 TCFS_REQUIRE_KEYCHAIN_CONFIG=1 \
 task lazy:macos-finder-smoke
 ```
+
+The task wrapper also accepts `SEED_EXPECTED_FILE=1` for the fresh-fixture path
+and `REBUILD_DOMAIN=1` for the direct-host diagnostic domain remove/add path.
+Domain rebuild is intentionally opt-in evidence collection for stale-domain
+investigation, not the default operator flow.
 
 For release evidence, prefer the strict wrapper so signing/profile checks and
 shared-Keychain config-source checks run in one lane:
@@ -560,6 +580,9 @@ Notes:
   the `~/Library/CloudStorage/TCFS*` root for the current domain
 - `--expected-content-file` upgrades the smoke from "readable placeholder" to
   exact-content hydration proof and should be used for release evidence
+- `--seed-expected-file` creates and pushes a fresh fixture, then requires
+  `tcfs index inspect` to prove the expected path is remotely visible before
+  FileProvider hydration starts
 - `TCFS_REQUIRE_KEYCHAIN_CONFIG=1` upgrades the smoke from diagnostic hydration
   proof to production config-source proof; it requires extension logs showing
   `loadConfig: loaded from shared Keychain` and rejects build-time embedded
@@ -569,6 +592,10 @@ Notes:
   deterministic. Use this for local proof when LaunchServices/unified-log
   polling is too weak, while still treating the resulting read as the real
   FileProvider acceptance gate.
+- `TCFS_FILEPROVIDER_REBUILD_DOMAIN=1` or `--rebuild-domain` launches the host
+  executable directly and asks it to remove and re-add the TCFS FileProvider
+  domain before the smoke. Use this only for stale-domain diagnostics and
+  archive the packet; it is not the default clean-host acceptance behavior.
 - the harness fails if `pluginkit` reports multiple registrations for
   `io.tinyland.tcfs.fileprovider`; remove stale app/extension copies before
   claiming clean-host acceptance, or pass

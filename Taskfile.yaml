@@ -1118,9 +1118,15 @@ tasks:
     cmds:
       - cmd: |
           bash -euo pipefail <<'EOF'
-          : "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/under/CloudStorage}"
+          if [[ -z "${EXPECTED_FILE:-}" && "${SEED_EXPECTED_FILE:-${TCFS_FILEPROVIDER_SEED_EXPECTED_FILE:-0}}" != "1" ]]; then
+            echo "set EXPECTED_FILE=relative/path/under/CloudStorage or SEED_EXPECTED_FILE=1" >&2
+            exit 2
+          fi
 
-          args=(--expected-file "$EXPECTED_FILE")
+          args=()
+          if [[ -n "${EXPECTED_FILE:-}" ]]; then
+            args+=(--expected-file "$EXPECTED_FILE")
+          fi
 
           if [[ -n "${EXPECTED_VERSION:-}" ]]; then
             args+=(--expected-version "$EXPECTED_VERSION")
@@ -1170,6 +1176,12 @@ tasks:
           if [[ "${DIRECT_HOST_LAUNCH:-${TCFS_FILEPROVIDER_DIRECT_HOST_LAUNCH:-0}}" == "1" ]]; then
             args+=(--direct-host-launch)
           fi
+          if [[ "${REBUILD_DOMAIN:-${TCFS_FILEPROVIDER_REBUILD_DOMAIN:-0}}" == "1" ]]; then
+            args+=(--rebuild-domain)
+          fi
+          if [[ "${SEED_EXPECTED_FILE:-${TCFS_FILEPROVIDER_SEED_EXPECTED_FILE:-0}}" == "1" ]]; then
+            args+=(--seed-expected-file)
+          fi
 
           scripts/macos-postinstall-smoke.sh "${args[@]}"
           EOF
@@ -1180,7 +1192,10 @@ tasks:
       - cargo build -p tcfs-cli -p tcfsd
       - cmd: |
           bash -euo pipefail <<'EOF'
-          : "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/under/CloudStorage}"
+          if [[ -z "${EXPECTED_FILE:-}" && "${SEED_EXPECTED_FILE:-${TCFS_FILEPROVIDER_SEED_EXPECTED_FILE:-0}}" != "1" ]]; then
+            echo "set EXPECTED_FILE=relative/path/under/CloudStorage or SEED_EXPECTED_FILE=1" >&2
+            exit 2
+          fi
 
           if [[ -z "${EXPECTED_VERSION:-}" ]]; then
             EXPECTED_VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
@@ -1198,7 +1213,10 @@ tasks:
     cmds:
       - cmd: |
           bash -euo pipefail <<'EOF'
-          : "${EXPECTED_FILE:?set EXPECTED_FILE=relative/path/under/CloudStorage}"
+          if [[ -z "${EXPECTED_FILE:-}" && "${SEED_EXPECTED_FILE:-${TCFS_FILEPROVIDER_SEED_EXPECTED_FILE:-0}}" != "1" ]]; then
+            echo "set EXPECTED_FILE=relative/path/under/CloudStorage or SEED_EXPECTED_FILE=1" >&2
+            exit 2
+          fi
 
           export TCFS_REQUIRE_PRODUCTION_SIGNING=1
           export TCFS_REQUIRE_KEYCHAIN_CONFIG=1
