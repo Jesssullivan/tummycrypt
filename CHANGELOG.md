@@ -9,6 +9,66 @@ Current release-proof posture is tracked in `docs/release/evidence/` and
 `docs/ops/product-reality-and-priority.md`; older entries below may describe
 historical release intent rather than the current supported/proven surface.
 
+## [0.12.13] - 2026-05-18
+
+### Added
+
+- **`tcfs index inspect <path>`** (`crates/tcfs-cli`): read-only CLI
+  subcommand that reports a single remote-index entry's state in human
+  or JSON form. Statuses: `visible`, `missing_index`, `missing_manifest`,
+  `preparing_only`, `no_visible_entry`, `parse_error`. Lets operators
+  and the smoke harness distinguish "missing remote fixture" from
+  "real FileProvider/FUSE read failure" — the diagnostic primitive that
+  unblocked the production Dev ID FileProvider proof packet.
+- **Production Dev ID FileProvider acceptance** (M10): first green
+  end-to-end macOS post-install smoke against a Developer ID
+  notarized `.pkg` on the canonical PZM self-hosted runner, covering
+  hydrate, evict/rehydrate, mutation, and conflict-status. Run
+  `26062554542`. Archived under `docs/release/evidence/macos-postinstall-prod-devid-hydration-...`.
+- **`AGENTS.md`**: canonical agent context at the repo root for Claude
+  Code, Codex CLI, and other agent tooling. `.claude/CLAUDE.md` remains
+  as a secondary machine-local overlay.
+- **Linux post-install smoke scaffold** (TIN-1422):
+  `scripts/linux-postinstall-smoke.sh` + `scripts/test-linux-postinstall-smoke.sh`
+  + `.github/workflows/linux-postinstall-smoke.yml`. Structural analog
+  of the macOS harness gated on the same `tcfs index inspect`
+  `status=visible` check. Lands the shape; FUSE evict/rehydrate
+  semantics, mutation write-back, conflict-status analog, and Fedora
+  RPM matrix entry are tracked as TIN-1422 follow-ups.
+- **macOS pkg authenticated install mode** + remote pkg notarization
+  proof workflow + required-notarized-release gate.
+
+### Changed
+
+- **`scripts/macos-postinstall-smoke.sh`**: new `--seed-expected-file`
+  and `--rebuild-domain` flags. Hydration check now gates on
+  `tcfs index inspect` reporting `status=visible` before treating a
+  FileProvider read timeout as a desktop bug.
+- **`.github/workflows/macos-postinstall-smoke.yml`**: derives
+  `storage.enforce_tls` from the endpoint scheme (HTTPS→true, HTTP→false)
+  so tailnet-internal smoke endpoints work without sacrificing public
+  endpoint hardening. New `exercise_dev_id_layered_proof` input runs
+  evict/rehydrate + mutation against production Developer ID without
+  requiring `fileprovider_testing_mode=true` (whose entitlement only
+  ships on Mac App Development profiles). `exercise_conflict_status`
+  validation loosened to allow Dev ID layered proof.
+- **macOS FileProvider host app**: respects
+  `TCFS_FILEPROVIDER_REBUILD_DOMAIN=1` to remove and re-add the
+  FileProvider domain before smoke runs (stale-domain diagnostics).
+- **`docs/ops/macos-fileprovider-reality.md`**: lede now records the
+  2026-05-18 production Dev ID hydration milestone. Historical context
+  preserved with dated inline annotations.
+
+### Fixed
+
+- **Git repo canary chunking**: treat git pack indexes as large
+  sequential chunks to avoid pathological FastCDC chunk explosion on
+  `.pack`/`.idx` files.
+- **Restore semantics**: empty directory markers preserved across
+  push/pull roundtrips and reconciliation.
+- **macOS pkg signing**: p12 passwords accept blank strings during
+  signing proofs (matches some operator key-management flows).
+
 ## [0.12.3 - 0.12.12] - 2026-04-17 to 2026-05-08
 
 ### Added
