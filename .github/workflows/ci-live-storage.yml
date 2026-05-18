@@ -81,11 +81,18 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
-            if curl -sf -o /dev/null -w "%{http_code}\n" "${TCFS_S3_ENDPOINT}/" | grep -qE "^(200|403|404)$"; then
-              echo "SeaweedFS S3 ready"
-              exit 0
-            fi
-            echo "waiting for SeaweedFS S3 ($i/60)..."
+            # -s silent, -o discard body, -w just the http code. NO -f, since -f
+            # suppresses --write-out on HTTP error responses (SeaweedFS S3 returns
+            # 403 from `/` without credentials, which is the correct "service up"
+            # signal but would silence the code under -f).
+            CODE="$(curl -s -m 5 -o /dev/null -w "%{http_code}" "${TCFS_S3_ENDPOINT}/" || echo "000")"
+            case "$CODE" in
+              200|301|302|307|403|404)
+                echo "SeaweedFS S3 ready (HTTP $CODE)"
+                exit 0
+                ;;
+            esac
+            echo "waiting for SeaweedFS S3 (attempt $i/60, last code: $CODE)..."
             sleep 2
           done
           echo "::error::SeaweedFS S3 did not become reachable at ${TCFS_S3_ENDPOINT}" >&2
