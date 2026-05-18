@@ -159,6 +159,7 @@ For the supported post-release proof contract across Homebrew, `.pkg`, `.deb`,
 tcfs status                    # Daemon status, device identity, NATS connection
 tcfs push <path>               # Upload with encryption + vector clock tick
 tcfs pull <manifest> <local>   # Download with conflict detection + decryption
+tcfs index inspect <path>      # Read-only remote index/manifest diagnostic
 tcfs mount <remote> <target>   # Linux FUSE mount with clean-name on-demand hydration
 tcfs unsync <path>             # Convert clean tracked files/directories back to .tc stubs
 tcfs device enroll             # Register device with age keypair

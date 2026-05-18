@@ -107,6 +107,7 @@ flowchart TD
 | `tcfs push <path>` | Upload files with chunking, encryption, vector clock tick |
 | `tcfs pull <manifest> [local]` | Download files from a manifest path with conflict detection |
 | `tcfs sync-status <path>` | Check sync state of a file |
+| `tcfs index inspect <path>` | Read-only remote index and manifest diagnostic for one logical path |
 | `tcfs mount <source> <target>` | Linux FUSE mount with clean-name on-demand hydration |
 | `tcfs unmount <path>` | Unmount FUSE directory |
 | `tcfs unsync <path>` | Convert clean tracked files/directories back to physical `.tc` stubs |

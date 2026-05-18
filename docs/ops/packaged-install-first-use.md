@@ -101,7 +101,11 @@ Record results using a table like this:
     further: authenticated install, strict installed preflight, package daemon
     storage, domain add, CloudStorage enumeration, and host-app
     `requestDownload` are archived. Production Finder hydration is still not
-    green because the installed app's actual read path times out.
+    green because the installed app's actual read path times out. Current
+    harness reruns should archive `expected-file-index.json`; the harness now
+    uses `tcfs index inspect <path> --json` as a read-only remote fixture gate
+    before treating a FileProvider read timeout as a desktop integration
+    blocker.
   - [`.github/workflows/macos-fileprovider-testing-mode-pkg.yml`](../../.github/workflows/macos-fileprovider-testing-mode-pkg.yml)
     plus the PZM smoke path exercises a non-production Mac App
     Development/testing-mode package with the lab `SystemPolicyRule` profile.

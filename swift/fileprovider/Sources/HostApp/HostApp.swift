@@ -32,6 +32,8 @@ struct TCFSProviderApp {
         provisionConfig()
 
         DispatchQueue.global(qos: .userInitiated).async {
+            removeDomainIfRequested(domain)
+
             // Add/update is idempotent and avoids racing fileproviderd while
             // macOS is also reloading this extension after app registration.
             let addSem = DispatchSemaphore(value: 0)
@@ -76,6 +78,28 @@ struct TCFSProviderApp {
         }
 
         RunLoop.current.run()
+    }
+
+    private static func removeDomainIfRequested(_ domain: NSFileProviderDomain) {
+        guard ProcessInfo.processInfo.environment["TCFS_FILEPROVIDER_REBUILD_DOMAIN"] == "1" else {
+            return
+        }
+
+        let removeSem = DispatchSemaphore(value: 0)
+        NSFileProviderManager.remove(domain) { error in
+            if let error = error {
+                hostEvent("remove: \(error.localizedDescription)")
+            } else {
+                hostEvent("remove: OK - domain removed")
+            }
+            removeSem.signal()
+        }
+
+        let timeoutSeconds = hostActionTimeoutSeconds()
+        if removeSem.wait(timeout: .now() + .seconds(timeoutSeconds)) == .timedOut {
+            hostEvent("remove: timed out after \(timeoutSeconds)s")
+            exit(2)
+        }
     }
 
     private static func requestDownloadIfRequested(_ manager: NSFileProviderManager) {

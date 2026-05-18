@@ -9,12 +9,14 @@
 //!   push <local> [<prefix>]      - upload file or directory tree to SeaweedFS
 //!   pull <manifest> [<local>]    - download file from manifest path
 //!   sync-status [<path>]         - show local sync state for a file/dir
+//!   index inspect <path>         - inspect one remote index entry read-only
 
 use anyhow::{Context, Result};
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use secrecy::ExposeSecret;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -106,6 +108,12 @@ enum Commands {
         /// Path to the sync state cache JSON file (overrides config)
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
+    },
+
+    /// Inspect remote index entries without changing storage
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
     },
 
     // ── Phase 3: mount + stub management ──────────────────────────────────────
@@ -289,6 +297,21 @@ enum PolicyAction {
     Pin { path: PathBuf },
     /// Unpin a path
     Unpin { path: PathBuf },
+}
+
+#[derive(Subcommand, Debug)]
+enum IndexAction {
+    /// Inspect one logical path in the remote index
+    Inspect {
+        /// Logical relative path under the remote prefix
+        rel_path: String,
+        /// Remote prefix override
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -503,6 +526,7 @@ async fn main() -> Result<()> {
         Commands::SyncStatus { path, state } => {
             cmd_sync_status(&config, path.as_deref(), state.as_deref())
         }
+        Commands::Index { action } => cmd_index(&config, action).await,
         Commands::Cache { action } => match action {
             CacheAction::Stats => cmd_cache_stats(&config).await,
             CacheAction::Clear => cmd_cache_clear(&config).await,
@@ -1280,6 +1304,249 @@ fn cmd_sync_status(
     }
 
     Ok(())
+}
+
+// ── `tcfs index` ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct IndexInspectReport {
+    rel_path: String,
+    remote_prefix: String,
+    index_key: String,
+    index_exists: bool,
+    status: String,
+    parse_error: Option<String>,
+    entry_state: Option<String>,
+    visible_entry: Option<IndexInspectVisibleEntry>,
+    pending_entry: Option<IndexInspectPendingEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct IndexInspectVisibleEntry {
+    manifest_hash: String,
+    manifest_key: String,
+    manifest_exists: bool,
+    size: u64,
+    chunks: usize,
+    kind: tcfs_sync::index_entry::RemoteEntryKind,
+    symlink_target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct IndexInspectPendingEntry {
+    manifest_hash: String,
+    manifest_key: String,
+    manifest_exists: bool,
+    staged_manifest_key: String,
+    staged_manifest_exists: bool,
+    size: u64,
+    chunks: usize,
+    kind: tcfs_sync::index_entry::RemoteEntryKind,
+    symlink_target: Option<String>,
+}
+
+fn normalize_index_rel_path(path: &str) -> Result<String> {
+    let trimmed = path.trim().trim_start_matches('/');
+    anyhow::ensure!(!trimmed.is_empty(), "index path must not be empty");
+    anyhow::ensure!(
+        !trimmed.ends_with('/'),
+        "index inspect expects a file or marker path, not a directory"
+    );
+
+    let mut parts = Vec::new();
+    for component in trimmed.split('/') {
+        anyhow::ensure!(
+            !component.is_empty() && component != "." && component != "..",
+            "index path must be normalized: {path}"
+        );
+        parts.push(component);
+    }
+
+    Ok(parts.join("/"))
+}
+
+async fn inspect_index_entry_with_operator(
+    op: &opendal::Operator,
+    rel_path: &str,
+    remote_prefix: &str,
+) -> Result<IndexInspectReport> {
+    let rel_path = normalize_index_rel_path(rel_path)?;
+    let remote_prefix = remote_prefix.trim_end_matches('/').to_string();
+    anyhow::ensure!(!remote_prefix.is_empty(), "remote prefix must not be empty");
+
+    let index_key = format!("{remote_prefix}/index/{rel_path}");
+    let manifest_prefix = format!("{remote_prefix}/manifests");
+
+    let raw = match op.read(&index_key).await {
+        Ok(bytes) => bytes.to_vec(),
+        Err(e) if e.kind() == opendal::ErrorKind::NotFound => {
+            return Ok(IndexInspectReport {
+                rel_path,
+                remote_prefix,
+                index_key,
+                index_exists: false,
+                status: "missing_index".to_string(),
+                parse_error: None,
+                entry_state: None,
+                visible_entry: None,
+                pending_entry: None,
+            });
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(e))
+                .with_context(|| format!("reading index entry: {index_key}"));
+        }
+    };
+
+    let parsed = match tcfs_sync::index_entry::parse_index_entry_record(&raw) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            return Ok(IndexInspectReport {
+                rel_path,
+                remote_prefix,
+                index_key,
+                index_exists: true,
+                status: "parse_error".to_string(),
+                parse_error: Some(format!("{e:#}")),
+                entry_state: None,
+                visible_entry: None,
+                pending_entry: None,
+            });
+        }
+    };
+
+    let entry_state = Some(format!("{:?}", parsed.state()).to_lowercase());
+
+    let visible_entry = if let Some(entry) = parsed.visible_entry() {
+        let manifest_key =
+            tcfs_sync::index_entry::manifest_key(&manifest_prefix, &entry.manifest_hash);
+        let manifest_exists = op.exists(&manifest_key).await.unwrap_or(false);
+        Some(IndexInspectVisibleEntry {
+            manifest_hash: entry.manifest_hash.clone(),
+            manifest_key,
+            manifest_exists,
+            size: entry.size,
+            chunks: entry.chunks,
+            kind: entry.kind,
+            symlink_target: entry.symlink_target.clone(),
+        })
+    } else {
+        None
+    };
+
+    let pending_entry = if let Some(entry) = parsed.pending_entry() {
+        let manifest_key =
+            tcfs_sync::index_entry::manifest_key(&manifest_prefix, &entry.manifest_hash);
+        let manifest_exists = op.exists(&manifest_key).await.unwrap_or(false);
+        let staged_manifest_exists = op.exists(&entry.staged_manifest_key).await.unwrap_or(false);
+        Some(IndexInspectPendingEntry {
+            manifest_hash: entry.manifest_hash.clone(),
+            manifest_key,
+            manifest_exists,
+            staged_manifest_key: entry.staged_manifest_key.clone(),
+            staged_manifest_exists,
+            size: entry.size,
+            chunks: entry.chunks,
+            kind: entry.kind,
+            symlink_target: entry.symlink_target.clone(),
+        })
+    } else {
+        None
+    };
+
+    let status = match &visible_entry {
+        Some(entry) if entry.manifest_exists => "visible",
+        Some(_) => "missing_manifest",
+        None if pending_entry.is_some() => "preparing_only",
+        None => "no_visible_entry",
+    }
+    .to_string();
+
+    Ok(IndexInspectReport {
+        rel_path,
+        remote_prefix,
+        index_key,
+        index_exists: true,
+        status,
+        parse_error: None,
+        entry_state,
+        visible_entry,
+        pending_entry,
+    })
+}
+
+async fn cmd_index(config: &tcfs_core::config::TcfsConfig, action: IndexAction) -> Result<()> {
+    match action {
+        IndexAction::Inspect {
+            rel_path,
+            prefix,
+            json,
+        } => {
+            let op = build_operator(config).await?;
+            let remote_prefix = prefix
+                .as_deref()
+                .unwrap_or_else(|| config.storage.resolved_prefix());
+            let report = inspect_index_entry_with_operator(&op, &rel_path, remote_prefix).await?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).context("serializing index report")?
+                );
+            } else {
+                print_index_inspect_report(&report);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_index_inspect_report(report: &IndexInspectReport) {
+    println!("Remote prefix: {}", report.remote_prefix);
+    println!("Relative path: {}", report.rel_path);
+    println!("Index key:     {}", report.index_key);
+    println!("Status:        {}", report.status);
+    if let Some(error) = &report.parse_error {
+        println!("Parse error:   {error}");
+    }
+    if let Some(entry) = &report.visible_entry {
+        println!("Manifest key:  {}", entry.manifest_key);
+        println!(
+            "Manifest:      {}",
+            if entry.manifest_exists {
+                "ok"
+            } else {
+                "missing"
+            }
+        );
+        println!("Size:          {}", fmt_bytes(entry.size));
+        println!("Chunks:        {}", entry.chunks);
+        println!("Kind:          {:?}", entry.kind);
+        if let Some(target) = &entry.symlink_target {
+            println!("Symlink:       {target}");
+        }
+    }
+    if let Some(entry) = &report.pending_entry {
+        println!("Pending key:   {}", entry.manifest_key);
+        println!(
+            "Pending:       {}",
+            if entry.manifest_exists {
+                "ok"
+            } else {
+                "missing"
+            }
+        );
+        println!("Staged key:    {}", entry.staged_manifest_key);
+        println!(
+            "Staged:        {}",
+            if entry.staged_manifest_exists {
+                "ok"
+            } else {
+                "missing"
+            }
+        );
+    }
 }
 
 // ── `tcfs migrate-prefix` ────────────────────────────────────────────────────
@@ -4369,6 +4636,65 @@ enabled = false
         .unwrap();
 
         assert_eq!(std::fs::read(&pulled).unwrap(), b"hello from tcfs");
+    }
+
+    #[tokio::test]
+    async fn index_inspect_reports_missing_index_without_error() {
+        let op = memory_op();
+
+        let report = inspect_index_entry_with_operator(&op, "shared/alpha-test.txt", "data")
+            .await
+            .unwrap();
+
+        assert_eq!(report.status, "missing_index");
+        assert_eq!(report.index_key, "data/index/shared/alpha-test.txt");
+        assert!(!report.index_exists);
+        assert!(report.visible_entry.is_none());
+    }
+
+    #[tokio::test]
+    async fn index_inspect_reports_visible_manifest() {
+        let op = memory_op();
+        op.write("data/manifests/hash123", b"{}".to_vec())
+            .await
+            .unwrap();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            &op,
+            "data/index/shared/alpha-test.txt",
+            &tcfs_sync::index_entry::RemoteIndexEntry::new("hash123", 46, 1),
+        )
+        .await
+        .unwrap();
+
+        let report = inspect_index_entry_with_operator(&op, "shared/alpha-test.txt", "data")
+            .await
+            .unwrap();
+
+        assert_eq!(report.status, "visible");
+        let visible = report.visible_entry.unwrap();
+        assert_eq!(visible.manifest_hash, "hash123");
+        assert_eq!(visible.manifest_key, "data/manifests/hash123");
+        assert!(visible.manifest_exists);
+        assert_eq!(visible.size, 46);
+    }
+
+    #[tokio::test]
+    async fn index_inspect_reports_missing_manifest() {
+        let op = memory_op();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            &op,
+            "data/index/shared/alpha-test.txt",
+            &tcfs_sync::index_entry::RemoteIndexEntry::new("missing", 46, 1),
+        )
+        .await
+        .unwrap();
+
+        let report = inspect_index_entry_with_operator(&op, "shared/alpha-test.txt", "data")
+            .await
+            .unwrap();
+
+        assert_eq!(report.status, "missing_manifest");
+        assert!(!report.visible_entry.unwrap().manifest_exists);
     }
 
     #[cfg(unix)]

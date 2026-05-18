@@ -51,6 +51,10 @@ enum Commands {
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
+    },
     Mount {
         remote: String,
         mountpoint: PathBuf,
@@ -82,6 +86,17 @@ enum Commands {
 #[derive(clap::Subcommand, Debug)]
 enum ConfigAction {
     Show,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum IndexAction {
+    Inspect {
+        rel_path: String,
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -177,6 +192,36 @@ fn parse_sync_status_with_path() {
         assert_eq!(path, Some(PathBuf::from("/home/user/docs")));
     } else {
         panic!("expected SyncStatus");
+    }
+}
+
+#[test]
+fn parse_index_inspect() {
+    let cli = Cli::try_parse_from([
+        "tcfs",
+        "index",
+        "inspect",
+        "Projects/tcfs-odrive-parity/honey-readme.txt",
+        "--prefix",
+        "data",
+        "--json",
+    ])
+    .expect("index inspect should parse");
+
+    if let Commands::Index {
+        action:
+            IndexAction::Inspect {
+                rel_path,
+                prefix,
+                json,
+            },
+    } = cli.command
+    {
+        assert_eq!(rel_path, "Projects/tcfs-odrive-parity/honey-readme.txt");
+        assert_eq!(prefix, Some("data".to_string()));
+        assert!(json);
+    } else {
+        panic!("expected Index Inspect");
     }
 }
 
