@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      exercise_dev_id_layered_proof:
+        description: "Production Dev ID lane: layer --exercise-evict-rehydrate + --exercise-mutation on top of base hydration proof (mirrors testing-mode coverage without requiring the testing-mode entitlement)"
+        required: false
+        default: false
+        type: boolean
       lab_gatekeeper_override:
         description: "PZM-only non-production lab: require a SystemPolicyRule profile for the installed testing-mode app"
         required: false
@@ -810,6 +815,25 @@ jobs:
             printf 'tcfs macOS FileProvider mutation %s run %s attempt %s\n' \
               "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$MUTATION_CONTENT_FILE"
             args+=(--fileprovider-testing-mode)
+            args+=(--exercise-evict-rehydrate)
+            args+=(
+              --exercise-mutation \
+              --mutation-file "$MUTATION_REL" \
+              --mutation-content-file "$MUTATION_CONTENT_FILE" \
+              --remote-prefix "$REMOTE_PREFIX"
+            )
+            if [[ "${{ github.event.inputs.exercise_conflict_status }}" == "true" ]]; then
+              args+=(
+                --exercise-conflict-status \
+                --conflict-file "$CONFLICT_REL" \
+                --conflict-content-file "$CONFLICT_CONTENT_FILE" \
+                --state "$STATE_PATH" \
+                --sync-root "$SYNC_ROOT"
+              )
+            fi
+          elif [[ "${{ github.event.inputs.exercise_dev_id_layered_proof }}" == "true" ]]; then
+            printf 'tcfs macOS FileProvider mutation %s run %s attempt %s\n' \
+              "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$MUTATION_CONTENT_FILE"
             args+=(--exercise-evict-rehydrate)
             args+=(
               --exercise-mutation \
