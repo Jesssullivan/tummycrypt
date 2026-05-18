@@ -1,0 +1,153 @@
+name: CI Live Storage
+
+# TIN-1421: real-storage CI lane.
+#
+# Brings up SeaweedFS + NATS via the project's existing docker-compose stack
+# inside the job container, then runs `cargo test -p tcfs-e2e --test fleet_live`
+# with TCFS_E2E_LIVE=1. This is the single highest-leverage QA investment from
+# the 2026-05-18 audit: today PRs can land broken sync paths and ci.yml stays
+# green because the live-fleet tests are operator-only on neo/honey/yoga.
+#
+# The compose stack is a subset of `task dev` (masters + volume + filer + nats —
+# no prometheus/grafana since those aren't on the test path). Same images, same
+# config, so a green CI run carries the same authority as a green local run.
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docker-compose.yml"
+      - "config/**"
+      - ".github/workflows/ci-live-storage.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docker-compose.yml"
+      - "config/**"
+      - ".github/workflows/ci-live-storage.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.93.0"
+  # Override defaults baked into fleet_live.rs (which point at tailnet MagicDNS)
+  TCFS_E2E_LIVE: "1"
+  TCFS_S3_ENDPOINT: "http://127.0.0.1:8333"
+  TCFS_S3_BUCKET: "tcfs"
+  TCFS_NATS_URL: "nats://127.0.0.1:4222"
+  AWS_ACCESS_KEY_ID: "admin"
+  AWS_SECRET_ACCESS_KEY: "admin"
+
+jobs:
+  fleet-live:
+    name: fleet_live tests against compose-managed SeaweedFS + NATS
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-live-storage-${{ runner.os }}
+          workspaces: ". -> target"
+
+      - name: Bring up compose-managed SeaweedFS + NATS
+        run: |
+          set -euo pipefail
+          docker compose up -d \
+            seaweed-master-1 seaweed-master-2 seaweed-master-3 \
+            seaweed-volume seaweed-filer \
+            nats
+
+      - name: Wait for SeaweedFS S3 endpoint
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null -w "%{http_code}\n" "${TCFS_S3_ENDPOINT}/" | grep -qE "^(200|403|404)$"; then
+              echo "SeaweedFS S3 ready"
+              exit 0
+            fi
+            echo "waiting for SeaweedFS S3 ($i/60)..."
+            sleep 2
+          done
+          echo "::error::SeaweedFS S3 did not become reachable at ${TCFS_S3_ENDPOINT}" >&2
+          docker compose logs seaweed-filer | tail -80 || true
+          exit 1
+
+      - name: Wait for NATS
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:8222/healthz" >/dev/null; then
+              echo "NATS ready"
+              exit 0
+            fi
+            echo "waiting for NATS ($i/30)..."
+            sleep 1
+          done
+          echo "::error::NATS did not become healthy" >&2
+          docker compose logs nats | tail -80 || true
+          exit 1
+
+      - name: Create S3 bucket (if not auto-created)
+        run: |
+          set -euo pipefail
+          # SeaweedFS S3 auto-creates buckets on PUT for admin identities, but
+          # do an explicit create with awscli to surface auth/config issues
+          # before the cargo test step.
+          aws --endpoint-url "${TCFS_S3_ENDPOINT}" \
+              s3api create-bucket --bucket "${TCFS_S3_BUCKET}" \
+              --region us-east-1 2>&1 \
+            | tee /tmp/bucket-create.log || true
+          aws --endpoint-url "${TCFS_S3_ENDPOINT}" \
+              s3api head-bucket --bucket "${TCFS_S3_BUCKET}"
+          echo "S3 bucket '${TCFS_S3_BUCKET}' reachable"
+
+      - name: Run fleet_live tests
+        run: |
+          set -euo pipefail
+          cargo test -p tcfs-e2e --test fleet_live -- --nocapture
+        env:
+          # Re-export so the test process sees env from `env:` above
+          # (cargo test inherits the workflow env; this is belt-and-suspenders).
+          TCFS_E2E_LIVE: "1"
+
+      - name: Collect compose logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/compose-logs
+          for svc in seaweed-master-1 seaweed-master-2 seaweed-master-3 seaweed-volume seaweed-filer nats; do
+            docker compose logs "$svc" > "/tmp/compose-logs/${svc}.log" 2>&1 || true
+          done
+
+      - name: Upload compose logs artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-logs-${{ github.run_id }}
+          path: /tmp/compose-logs/
+          retention-days: 7
+
+      - name: Tear down compose stack
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans || true
