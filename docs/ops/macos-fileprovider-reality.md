@@ -1,18 +1,85 @@
 # macOS Finder and FileProvider Reality
 
-As of May 17, 2026, macOS is a real packaging and integration lane for tcfs.
-The non-production PZM testing-mode FileProvider lane is proven end to end on
+As of May 18, 2026, the production Developer ID FileProvider hydration path
+is proven on a clean install of the notarized `.pkg`. GitHub Actions run
+`26061402177` on the registered `petting-zoo-mini-tcfs` self-hosted runner
+passed the full post-install smoke with `fileprovider_testing_mode=false`:
+installed strict preflight, storage `[ok]`, host-app domain add, CloudStorage
+enumeration, host-app `requestDownload`, and exact-content hydration of a
+55-byte seeded fixture through the installed `/Applications/TCFSProvider.app`.
+That replaces the previous "production Dev ID Finder hydration is the open
+blocker" status that this document has carried since the May 17 packets.
+
+The non-production PZM testing-mode FileProvider lane remains proven on
 `v0.12.12` through enumerate, exact-content hydrate, evict, rehydrate,
 mutation upload/readback, and deterministic CLI conflict/status content
-preservation when the lab `SystemPolicyRule` profile is installed. Production
-Developer ID clean-host Finder lifecycle behavior is still not a continuously
-proven release-grade desktop surface.
+preservation when the lab `SystemPolicyRule` profile is installed. The
+production Dev ID lane has now proven the same enumerate plus exact-content
+hydrate path, but evict/rehydrate, mutation upload/readback, conflict/status
+content preservation, badge visibility, and continuously exercised release-day
+viability are still open on the Dev ID lane (TIN-133 follow-ups this week).
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
 smoke path for the Finder/FileProvider surface.
 For the current PZM GitHub Actions run links, see the
 [Release Evidence Index](../release/evidence/README.md).
+
+## 2026-05-18 — Production Dev ID FileProvider hydration PROVEN
+
+Run `26061402177` of `macos-postinstall-smoke.yml` on the registered
+`petting-zoo-mini-tcfs` self-hosted runner installed the notarized arm64
+`.pkg` built by run `26057944325` from main commit `c08a0a4` (PR #370,
+which added `tcfs index inspect` + `--seed-expected-file` and the
+`require_expected_remote_index` gate) and passed the full strict harness
+with `fileprovider_testing_mode=false` — the production Developer ID lane,
+not Mac App Development testing-mode.
+
+Concrete evidence from `/tmp/tcfs-smoke-26061402177/macos-postinstall-smoke-v0.12.12/`:
+
+- `harness/expected-file-index.json` reports `status: "visible"`,
+  `entry_state: "committed"`, `manifest_exists: true`, `size: 55`, `chunks: 1`
+  for `ci-smoke/0.12.12/postinstall-1.txt` under remote prefix
+  `gha/macos-postinstall/v0.12.12/26061402177-1`, so the seeded remote index
+  gate fired before FileProvider was asked to download anything.
+- `harness/hydrated-expected-file` contains exactly the 55 expected bytes:
+  `tcfs macOS post-install smoke v0.12.12 run 26061402177`.
+- `harness/hydrate-read-error.log` is empty (no `Operation timed out`,
+  no coordinated-read failure).
+
+Four stacked unblocks were required to get the production Dev ID lane to
+green; none of them are loadbearing on a single commit, and all of them are
+worth recording because the same classes will recur:
+
+1. Backend endpoint moved from the temporary Cloudflare quick tunnel to the
+   tailnet hostname `http://seaweedfs-tcfs:8333` so the self-hosted runner
+   could actually reach SeaweedFS without a public ingress.
+2. The `gh secret set` invocation syntax was corrected so the new endpoint
+   actually landed on the `tcfs-macos-smoke` environment.
+3. The post-install smoke workflow learned to derive `enforce_tls` from the
+   endpoint scheme (commit `0b1dc0c`) so a tailnet `http://` endpoint is not
+   rejected as plaintext while public `https://` endpoints remain strict.
+4. The stale per-user `~/Applications/TCFSProvider.app` installed on
+   `petting-zoo-mini-tcfs` on May 9 was removed so PlugInKit reported a single
+   registration parented by `/Applications/TCFSProvider.app`.
+
+Honest scope for this milestone:
+
+- **Proven now on Dev ID:** installed strict preflight, storage health,
+  PlugInKit single-registration, domain add, CloudStorage enumeration,
+  host-app `requestDownload`, exact-content hydration through the installed
+  app, shared-Keychain config-source extension log, and the remote-index
+  visibility gate from PR #370.
+- **Not yet proven on Dev ID:** evict + rehydrate, CloudStorage mutation
+  upload/readback, deterministic CLI conflict/status content preservation,
+  badge/progress assertions as a release gate, recovery UX, and continuous
+  release-day viability of every published macOS artifact without explicit
+  post-cut smoke. These layered proofs exist today only in the PZM Mac App
+  Development testing-mode lane and are TIN-133 work this week.
+
+A sibling evidence packet under `docs/release/evidence/` archives the full
+artifact tree for this run; see the Release Evidence Index for the link once
+that packet lands.
 
 ## Supported Workflow In The Repo Today
 
@@ -92,8 +159,10 @@ sync-root stub representation, not the desired primary Finder UX.
   stale user daemon.
 - The production-signed Finder smoke now reaches host-app domain add,
   CloudStorage enumeration, and host-app `requestDownload` for
-  `shared/alpha-test.txt`. It still does not prove hydration: the current
-  raw-read packet fails with `Operation timed out`.
+  `shared/alpha-test.txt`. (Updated 2026-05-18: the May 17 raw-read
+  `Operation timed out` blocker is closed on the hosted self-hosted lane; run
+  `26061402177` hydrated the seeded fixture through the installed Dev ID
+  package. See the milestone section above.)
 - The smoke harness now gates expected-file hydration on a read-only remote
   index check before it asks FileProvider to download the item. The diagnostic
   command is `tcfs index inspect <relative-path> --json`; it reports
@@ -120,11 +189,17 @@ sync-root stub representation, not the desired primary Finder UX.
 
 ## Not Yet Proven
 
-- A continuously exercised production clean-host Finder/FileProvider acceptance
-  lane from Developer ID package install through user enablement, register,
-  enumerate, hydrate, mutate, and conflict handling
+- A **continuously** exercised production clean-host Finder/FileProvider
+  acceptance lane from Developer ID package install through user enablement,
+  register, enumerate, hydrate, mutate, and conflict handling (updated
+  2026-05-18: single-run install + enumerate + hydrate is now proven on the
+  Dev ID lane by run `26061402177`; continuous coverage and the mutate/conflict
+  legs are still open)
 - A production clean-host Finder/FileProvider lifecycle smoke beyond
-  install/signing/storage/domain-add/enumeration/requestDownload gates
+  install/signing/storage/domain-add/enumeration/requestDownload/hydrate gates
+  (updated 2026-05-18: hydrate is now inside the proven set on Dev ID; what
+  remains is evict/rehydrate, mutation upload/readback, and conflict-status
+  preservation)
 - Finder badge visibility as a release gate
 - Conflict UX, notification behavior, and Finder badge/progress visibility as
   release gates
@@ -344,8 +419,12 @@ task lazy:macos-finder-signing-preflight
 The May 17, 2026 neo packets supersede the older local-app assumption:
 `/Applications/TCFSProvider.app` is now installed from the notarized workflow
 artifact, the stale user app has been quarantined after inventory, and strict
-installed preflight passes. Neo is still not a production Finder success claim
-because exact FileProvider read/hydration is blocked.
+installed preflight passes. (Updated 2026-05-18: on the hosted
+`petting-zoo-mini-tcfs` self-hosted runner — which uses the same notarized
+Dev ID `.pkg` artifact path — run `26061402177` now proves exact FileProvider
+read/hydration end to end. See the milestone section at the top of this doc.
+A neo-local replay of that hydrated path is still useful workstation
+acceptance evidence, but it is no longer the gating proof.)
 
 Current neo evidence:
 
@@ -450,10 +529,14 @@ Current neo evidence:
   (`SwiftShims` missing). `fileproviderctl check` also reports reconciliation
   failures on `1/129` files.
 - `docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/`
-  disables the coordinated Swift helper and is the current production Finder
-  blocker packet: strict preflight, storage `[ok]`, domain add, CloudStorage
-  enumeration, and host-app `requestDownload` all happen, then plain `cat` of
-  `shared/alpha-test.txt` fails with `Operation timed out`.
+  disables the coordinated Swift helper and was the production Finder blocker
+  packet through 2026-05-17: strict preflight, storage `[ok]`, domain add,
+  CloudStorage enumeration, and host-app `requestDownload` all happen, then
+  plain `cat` of `shared/alpha-test.txt` fails with `Operation timed out`.
+  (Updated 2026-05-18: superseded by hosted self-hosted run `26061402177`,
+  which hydrates a seeded fixture end to end through the installed Dev ID
+  package; this neo-local packet is now retained as historical context for the
+  read-timeout class, not as the live blocker.)
 - `docs/release/evidence/macos-fileprovider-neo-preflight-20260516T023852Z/`
   refreshes the divergence inventory. At the start of this packet the visible
   PlugInKit registration still pointed at
@@ -491,6 +574,13 @@ So a local neo Finder smoke is now production-adjacent but still red. The next
 acceptance step is no longer basic package install or strict preflight; it is
 root-causing the FileProvider read timeout and archiving exact-content
 hydration through the installed `/Applications/TCFSProvider.app` path.
+(Updated 2026-05-18: the read-timeout root cause is closed on the hosted
+self-hosted runner — run `26061402177` proves exact-content hydration through
+the installed Dev ID app. A local neo replay is still a useful workstation
+proof but no longer the gating blocker. See the milestone section at the top
+of this doc. The remaining Dev ID acceptance step is the layered
+evict/rehydrate, mutation, and conflict-status proofs that the PZM
+testing-mode lane already carries.)
 
 After the signing/profile gate passes, production Finder evidence must also
 prove the runtime config source. The post-install smoke can make this fatal by
@@ -894,7 +984,10 @@ So the testing-mode read/hydrate plus evict/rehydrate lane is proven on the
 non-production PZM Mac Development lab. The remaining macOS product work is
 production Developer ID clean-host enablement plus production mutation,
 conflict/status visibility, reliable badges/progress assertions, and recovery
-UX.
+UX. (Updated 2026-05-18: production Developer ID clean-host enablement +
+enumerate + exact-content hydrate is now proven by run `26061402177`. The
+production Dev ID lane still owes the layered evict/rehydrate, mutation, and
+conflict/status proofs that the PZM testing-mode lane already carries.)
 
 May 8, 2026 update: mutation harness support is now green in the PZM lab. The
 first attempt, package run `25564780049`, failed before app build because the
