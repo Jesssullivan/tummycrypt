@@ -100,6 +100,7 @@ jobs:
           PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
           FILEPROVIDER_TESTING_MODE="${{ github.event.inputs.fileprovider_testing_mode }}"
           EXERCISE_CONFLICT_STATUS="${{ github.event.inputs.exercise_conflict_status }}"
+          EXERCISE_DEV_ID_LAYERED_PROOF="${{ github.event.inputs.exercise_dev_id_layered_proof }}"
           LAB_GATEKEEPER_OVERRIDE="${{ github.event.inputs.lab_gatekeeper_override }}"
           RUNNER_LABEL="${{ github.event.inputs.runner_label }}"
           [[ "$TAG" == v* ]] || {
@@ -122,8 +123,10 @@ jobs:
             exit 1
           fi
 
-          if [[ "$EXERCISE_CONFLICT_STATUS" == "true" && "$FILEPROVIDER_TESTING_MODE" != "true" ]]; then
-            echo "::error::exercise_conflict_status=true requires fileprovider_testing_mode=true"
+          if [[ "$EXERCISE_CONFLICT_STATUS" == "true" \
+                && "$FILEPROVIDER_TESTING_MODE" != "true" \
+                && "$EXERCISE_DEV_ID_LAYERED_PROOF" != "true" ]]; then
+            echo "::error::exercise_conflict_status=true requires fileprovider_testing_mode=true or exercise_dev_id_layered_proof=true"
             exit 1
           fi
 
