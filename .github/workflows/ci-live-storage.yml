@@ -45,6 +45,8 @@ env:
   TCFS_S3_ENDPOINT: "http://127.0.0.1:8333"
   TCFS_S3_BUCKET: "tcfs"
   TCFS_NATS_URL: "nats://127.0.0.1:4222"
+  # Keep infra failures cheap in CI; the production default is 300s.
+  TCFS_UPLOAD_CHUNK_TIMEOUT_SECS: "30"
   AWS_ACCESS_KEY_ID: "admin"
   AWS_SECRET_ACCESS_KEY: "admin"
 
@@ -69,17 +71,32 @@ jobs:
           workspaces: ". -> target"
 
       - name: Write CI compose override
-        # The shared docker-compose.yml passes `--max_payload 8MB` to
-        # nats-server. That flag is rejected on current nats:2.10-alpine
-        # (must be set via config file). Locally `task dev` may still work
-        # against a cached older image; CI pulls fresh and fails. Override
-        # the nats command in CI to drop the unsupported flag and configure
-        # max_payload via -c if needed later.
+        # Keep CI on the repo-managed dev stack, with narrow overrides for
+        # image-version realities that currently make a fresh runner fail
+        # before tcfs is under test:
+        #
+        # - SeaweedFS: the shared stack uses `-max=0` for the volume server.
+        #   Current SeaweedFS can then report "No writable volumes" for the
+        #   S3 bucket collection. Give the CI volume server room to create
+        #   collection volumes.
+        # - NATS: the shared stack passes `--max_payload 8MB`; current
+        #   nats:2.10-alpine rejects that CLI flag.
         run: |
           set -euo pipefail
           mkdir -p .github/compose-overrides
           cat > .github/compose-overrides/ci.yml <<'EOF'
           services:
+            seaweed-volume:
+              command: >
+                volume
+                -mserver=seaweed-master-1:9333,seaweed-master-2:9333,seaweed-master-3:9333
+                -port=8080
+                -dir=/data
+                -dataCenter=dc1
+                -rack=dc1-rack1
+                -max=32
+                -ip=seaweed-volume
+                -ip.bind=0.0.0.0
             nats:
               command: >
                 --name tcfs-nats
