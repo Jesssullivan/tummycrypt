@@ -340,9 +340,34 @@ fi
 EOF
 cat >"$FAKE_BIN/open" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${TCFS_FAKE_OPEN_HANG_TARGET:-}" && "${1:-}" == "$TCFS_FAKE_OPEN_HANG_TARGET" ]]; then
+  exec perl -e 'select undef, undef, undef, 60'
+fi
 printf 'open' >>"$TCFS_FAKE_OPEN_LOG"
 printf ' %q' "$@" >>"$TCFS_FAKE_OPEN_LOG"
 printf '\n' >>"$TCFS_FAKE_OPEN_LOG"
+EOF
+cat >"$FAKE_BIN/ls" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${TCFS_FAKE_LS_HANG_TARGET:-}" ]]; then
+  for arg in "$@"; do
+    if [[ "$arg" == "$TCFS_FAKE_LS_HANG_TARGET" ]]; then
+      exec perl -e 'select undef, undef, undef, 60'
+    fi
+  done
+fi
+exec /bin/ls "$@"
+EOF
+cat >"$FAKE_BIN/find" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${TCFS_FAKE_FIND_HANG_TARGET:-}" ]]; then
+  for arg in "$@"; do
+    if [[ "$arg" == "$TCFS_FAKE_FIND_HANG_TARGET" ]]; then
+      exec perl -e 'select undef, undef, undef, 60'
+    fi
+  done
+fi
+exec /usr/bin/find "$@"
 EOF
 cat >"$APP_PATH/Contents/MacOS/TCFSProvider" <<'EOF'
 #!/usr/bin/env bash
@@ -544,6 +569,10 @@ assert_contains "$LOG_DIR/fileproviderctl-evaluate-root.log" "fileproviderctl ev
 assert_contains "$LOG_DIR/fileproviderctl-check-root.log" "fileproviderctl check -P -a"
 assert_contains "$LOG_DIR/fileproviderctl-evaluate-expected-parent.log" "fileproviderctl evaluate"
 assert_contains "$LOG_DIR/fileproviderctl-check-expected-parent.log" "fileproviderctl check -P -a"
+test -f "$LOG_DIR/cloud-root-ls.log"
+test -f "$LOG_DIR/cloud-root-open.log"
+test -f "$LOG_DIR/cloud-root-find.log"
+test -f "$LOG_DIR/expected-parent-open.log"
 cmp -s "$EXPECTED_CONTENT_FILE" "$LOG_DIR/hydrated-expected-file"
 cmp -s "$MUTATION_CONTENT_FILE" "$CLOUD_ROOT/$MUTATION_REL"
 cmp -s "$MUTATION_CONTENT_FILE" "$LOG_DIR/mutation-remote-pull"
@@ -723,6 +752,43 @@ assert_fails_contains \
       --cloud-root "$CLOUD_ROOT" \
       --log-dir "${TMPDIR}/hung-read-logs" \
       --timeout 2
+
+BOUNDED_LS_OUT="${TMPDIR}/bounded-cloud-root-ls.out"
+env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+  TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+  TCFS_FAKE_HOST_BINARY_LOG="$HOST_BINARY_LOG" \
+  TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
+  TCFS_FAKE_REMOTE_ROOT="$CLOUD_ROOT" \
+  TCFS_FAKE_LS_HANG_TARGET="$CLOUD_ROOT" \
+  LOG_SHOW_TIMEOUT_SECS=1 \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --expected-file "$EXPECTED_REL" \
+    --expected-content-file "$EXPECTED_CONTENT_FILE" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/bounded-cloud-root-ls-logs" \
+    --timeout 3 \
+    >"$BOUNDED_LS_OUT" 2>&1
+assert_contains "$BOUNDED_LS_OUT" "cloud-root-ls timed out after 1s"
+assert_contains "$BOUNDED_LS_OUT" "macOS post-install FileProvider smoke passed"
+test -f "${TMPDIR}/bounded-cloud-root-ls-logs/cloud-root-ls.log"
+
+assert_fails_contains \
+  "cloud-root-find timed out after 1s" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_FAKE_FIND_HANG_TARGET="$CLOUD_ROOT" \
+    LOG_SHOW_TIMEOUT_SECS=1 \
+    bash "$SCRIPT" \
+      --expected-version 0.12.2 \
+      --config "$CONFIG_PATH" \
+      --app-path "$APP_PATH" \
+      --cloud-root "$CLOUD_ROOT" \
+      --log-dir "${TMPDIR}/bounded-cloud-root-find-logs" \
+      --timeout 2
+test -f "${TMPDIR}/bounded-cloud-root-find-logs/cloud-root-find.log"
 
 SAME_PATH_DUPES_OUT="${TMPDIR}/same-path-dupes.out"
 SAME_PATH_DUPES_ERR="${TMPDIR}/same-path-dupes.err"

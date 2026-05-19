@@ -372,6 +372,28 @@ run_bounded_to_log() {
   return "$status"
 }
 
+run_bounded_append_to_log() {
+  local label="$1"
+  local timeout_secs="$2"
+  shift 2
+
+  local out
+  local tmp
+  local pid
+  local status=0
+
+  out="$LOG_DIR/${label}.log"
+  tmp="$(mktemp "$LOG_DIR/${label}.XXXXXX")"
+
+  "$@" >"$tmp" 2>&1 &
+  pid="$!"
+
+  wait_for_pid_with_timeout "$pid" "$timeout_secs" "$label" || status="$?"
+  cat "$tmp" >>"$out" 2>/dev/null || true
+  rm -f "$tmp"
+  return "$status"
+}
+
 wait_for_pid_with_timeout() {
   local pid="$1"
   local timeout_secs="$2"
@@ -1201,13 +1223,19 @@ nudge_cloud_root_enumeration() {
 
   echo "nudging CloudStorage enumeration"
 
-  ls -la "$root" >"$LOG_DIR/cloud-root-ls.log" 2>&1 || true
+  run_bounded_to_log \
+    "cloud-root-ls" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    ls -la "$root" || true
 
   # A headed workstation usually triggers FileProvider enumeration through
   # Finder naturally. GitHub-hosted macOS runners can create the CloudStorage
   # root without launching the extension until something explicitly opens or
   # materializes it, so use bounded best-effort nudges before the hard wait.
-  open "$root" >/dev/null 2>&1 || true
+  run_bounded_to_log \
+    "cloud-root-open" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    open "$root" || true
 
   if command -v fileproviderctl >/dev/null 2>&1; then
     fileproviderctl_help="$(fileproviderctl 2>&1 || true)"
@@ -1251,7 +1279,10 @@ nudge_expected_parent_enumeration() {
     "$LOG_SHOW_TIMEOUT_SECS" \
     ls -la "$parent" || true
 
-  open "$parent" >/dev/null 2>&1 || true
+  run_bounded_to_log \
+    "expected-parent-open" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    open "$parent" || true
 
   if command -v fileproviderctl >/dev/null 2>&1; then
     fileproviderctl_help="$(fileproviderctl 2>&1 || true)"
@@ -1336,9 +1367,16 @@ enumerate_root() {
 
   while (( attempt < TIMEOUT_SECS )); do
     if (( attempt % 5 == 0 )); then
-      ls -la "$root" >>"$LOG_DIR/cloud-root-ls.log" 2>&1 || true
+      run_bounded_append_to_log \
+        "cloud-root-ls" \
+        "$LOG_SHOW_TIMEOUT_SECS" \
+        ls -la "$root" || true
     fi
-    listing="$(find "$root" -mindepth 1 -maxdepth 4 | head -n 10 || true)"
+    run_bounded_to_log \
+      "cloud-root-find" \
+      "$LOG_SHOW_TIMEOUT_SECS" \
+      sh -c 'find "$1" -mindepth 1 -maxdepth 4 | head -n 10' sh "$root" || true
+    listing="$(cat "$LOG_DIR/cloud-root-find.log" 2>/dev/null || true)"
     if [[ -n "$listing" ]]; then
       echo "enumeration sample:"
       echo "$listing"
