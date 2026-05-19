@@ -11,6 +11,8 @@ env:
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: 1.93.0
   GITLEAKS_VERSION: 8.30.1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   check:
@@ -28,6 +30,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+
+      - name: Free hosted runner disk
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
 
       - name: Install system dependencies
         run: |
@@ -58,6 +67,14 @@ jobs:
         run: |
           cargo test -p tcfs-e2e --test blacklist_wireup -- --nocapture
           cargo test -p tcfs-e2e --test reconcile_wireup -- --nocapture
+
+      - name: Trim incremental artifacts before final builds
+        run: |
+          set -euo pipefail
+          du -sh target || true
+          find target -type d -name incremental -prune -exec rm -rf {} +
+          du -sh target || true
+          df -h .
 
       - name: Build workspace (default features)
         run: cargo build --workspace
