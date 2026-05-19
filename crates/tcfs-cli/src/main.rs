@@ -119,7 +119,7 @@ enum Commands {
     // ── Phase 3: mount + stub management ──────────────────────────────────────
     /// Mount a remote as a local directory
     Mount {
-        /// Remote spec (e.g. seaweedfs://host/bucket[/prefix])
+        /// Remote spec (e.g. seaweedfs://host/bucket[/prefix] or seaweedfs+https://host/bucket[/prefix])
         remote: String,
         /// Local mountpoint
         mountpoint: PathBuf,

@@ -70,7 +70,7 @@ cat >"$CONFIG_PATH" <<EOF
 socket = "${DAEMON_SOCKET}"
 
 [storage]
-endpoint = "http://example.invalid:8333"
+endpoint = "https://example.invalid:8333"
 bucket = "tcfs"
 
 [sync]
@@ -365,7 +365,7 @@ assert_contains "$POSITIVE_OUT" "tcfsd version: tcfsd 0.13.0"
 assert_contains "$POSITIVE_OUT" "tcfs version: tcfs 0.13.0"
 assert_contains "$POSITIVE_OUT" "daemon socket ready: $DAEMON_SOCKET"
 assert_contains "$POSITIVE_OUT" "remote index status for expected file: visible"
-assert_contains "$POSITIVE_OUT" "derived --remote-spec: seaweedfs://example.invalid:8333/tcfs/fake/prefix"
+assert_contains "$POSITIVE_OUT" "derived --remote-spec: seaweedfs+https://example.invalid:8333/tcfs/fake/prefix"
 assert_contains "$POSITIVE_OUT" "FUSE mount ready"
 assert_contains "$POSITIVE_OUT" "hydrated file content matched expected content file"
 assert_contains "$POSITIVE_OUT" "Linux evict/rehydrate cycle passed"

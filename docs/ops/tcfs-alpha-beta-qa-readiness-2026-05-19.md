@@ -95,7 +95,8 @@ has shipped and been proven end to end.
 1. Merge the production-readiness sweep PR so the docs, evidence packet, and
    Linux smoke remote-spec fix are on main.
 2. Clear `TIN-1540`, then rerun `TIN-1422` against a reachable backend using
-   the corrected `seaweedfs://host:port/bucket/prefix` remote spec.
+   the corrected `seaweedfs://host:port/bucket/prefix` remote spec, with
+   `seaweedfs+https://` preserved for production-like HTTPS smoke endpoints.
 3. Complete the `TIN-131` first-use matrix for the rc artifact set:
    macOS `.pkg`, Homebrew, Linux `.deb`, container runtime, and Nix external
    profile.

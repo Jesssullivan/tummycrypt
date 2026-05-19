@@ -55,7 +55,8 @@ Options:
   --remote-prefix <prefix>    Remote prefix used for index inspect + push/pull
   --mount-point <path>        FUSE mount point (default: temp dir under LOG_DIR)
   --remote-spec <spec>        Remote spec for `tcfs mount` (default:
-                              seaweedfs://<host>:<port>/<bucket>/<prefix>;
+                              seaweedfs://<host>:<port>/<bucket>/<prefix> for HTTP
+                              or seaweedfs+https://<host>/<bucket>/<prefix> for HTTPS;
                               required for direct mount)
   --tcfs <path-or-name>       CLI binary (default: tcfs)
   --tcfsd <path-or-name>      Daemon binary (default: tcfsd)
@@ -662,14 +663,14 @@ resolve_remote_spec() {
   if [[ -n "$REMOTE_SPEC" ]]; then
     return 0
   fi
-  # Derive a default seaweedfs://<host>:<port>/<bucket>/<prefix> spec from the
-  # config when the caller did not pass one explicitly. `tcfs mount` uses the
-  # shared remote-spec parser, which intentionally does not accept s3://.
+  # Derive a default SeaweedFS mount spec from the config when the caller did
+  # not pass one explicitly. Preserve HTTPS endpoints as seaweedfs+https:// so
+  # the direct mount path cannot silently downgrade a production-like smoke.
   if [[ -z "$REMOTE_PREFIX" ]]; then
     echo "--remote-spec is required when --remote-prefix is not provided" >&2
     exit 2
   fi
-  local authority bucket
+  local remote_scheme authority bucket
   local -a remote_parts
   mapfile -t remote_parts < <(python3 - "$CONFIG_PATH" <<'PY' 2>/dev/null || true
 import sys
@@ -684,12 +685,14 @@ storage = cfg.get("storage", {})
 endpoint = str(storage.get("endpoint", "")).strip()
 bucket = str(storage.get("bucket", "")).strip()
 parsed = urllib.parse.urlparse(endpoint)
+print("seaweedfs+https" if parsed.scheme == "https" else "seaweedfs")
 print(parsed.netloc)
 print(bucket)
 PY
 )
-  authority="${remote_parts[0]:-}"
-  bucket="${remote_parts[1]:-}"
+  remote_scheme="${remote_parts[0]:-}"
+  authority="${remote_parts[1]:-}"
+  bucket="${remote_parts[2]:-}"
   if [[ -z "$authority" ]]; then
     echo "could not derive endpoint authority from $CONFIG_PATH; pass --remote-spec" >&2
     exit 2
@@ -698,7 +701,7 @@ PY
     echo "could not derive bucket from $CONFIG_PATH; pass --remote-spec" >&2
     exit 2
   fi
-  REMOTE_SPEC="seaweedfs://${authority}/${bucket}/${REMOTE_PREFIX}"
+  REMOTE_SPEC="${remote_scheme}://${authority}/${bucket}/${REMOTE_PREFIX}"
   echo "derived --remote-spec: $REMOTE_SPEC"
 }
 
