@@ -158,7 +158,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          KEYCHAIN_PATH="$RUNNER_TEMP/tcfs-app-signing.keychain-db"
+          KEYCHAIN_PATH="$RUNNER_TEMP/tcfs-app-signing-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -174,7 +174,16 @@ jobs:
 
           if [[ -n "$APPLE_DEVELOPER_ID_CA_G2" ]]; then
             echo "$APPLE_DEVELOPER_ID_CA_G2" | base64 -d > "$RUNNER_TEMP/developer-id-ca.cer"
-            security import "$RUNNER_TEMP/developer-id-ca.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+            if ! security import "$RUNNER_TEMP/developer-id-ca.cer" \
+              -k "$KEYCHAIN_PATH" \
+              -T /usr/bin/codesign \
+              2>"$LOG_DIR/developer-id-ca-import.stderr"; then
+              cat "$LOG_DIR/developer-id-ca-import.stderr" >&2
+              if ! grep -qi "already exists" "$LOG_DIR/developer-id-ca-import.stderr"; then
+                exit 1
+              fi
+              echo "Developer ID CA already present in proof keychain"
+            fi
             rm "$RUNNER_TEMP/developer-id-ca.cer"
           fi
 
@@ -337,7 +346,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          KEYCHAIN_PATH="$RUNNER_TEMP/tcfs-installer-signing.keychain-db"
+          KEYCHAIN_PATH="$RUNNER_TEMP/tcfs-installer-signing-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -353,7 +362,15 @@ jobs:
 
           if [[ -n "$APPLE_WWDR_CA_G2" ]]; then
             echo "$APPLE_WWDR_CA_G2" | base64 -d > "$RUNNER_TEMP/wwdr.cer"
-            security import "$RUNNER_TEMP/wwdr.cer" -k "$KEYCHAIN_PATH"
+            if ! security import "$RUNNER_TEMP/wwdr.cer" \
+              -k "$KEYCHAIN_PATH" \
+              2>"$LOG_DIR/wwdr-ca-import.stderr"; then
+              cat "$LOG_DIR/wwdr-ca-import.stderr" >&2
+              if ! grep -qi "already exists" "$LOG_DIR/wwdr-ca-import.stderr"; then
+                exit 1
+              fi
+              echo "WWDR CA already present in proof keychain"
+            fi
             rm "$RUNNER_TEMP/wwdr.cer"
           fi
 
