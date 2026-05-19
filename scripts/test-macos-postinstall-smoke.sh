@@ -21,6 +21,18 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local file="$1"
+  local unexpected="$2"
+
+  if grep -Fq -- "$unexpected" "$file"; then
+    printf 'expected not to find %s in %s\n' "$unexpected" "$file" >&2
+    printf '%s\n' '--- output ---' >&2
+    cat "$file" >&2
+    exit 1
+  fi
+}
+
 assert_fails_contains() {
   local expected="$1"
   shift
@@ -360,6 +372,14 @@ exec /bin/ls "$@"
 EOF
 cat >"$FAKE_BIN/find" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${TCFS_FAKE_FIND_PERMISSION_TARGET:-}" ]]; then
+  for arg in "$@"; do
+    if [[ "$arg" == "$TCFS_FAKE_FIND_PERMISSION_TARGET" ]]; then
+      printf 'find: %s: Operation not permitted\n' "$arg" >&2
+      exit 1
+    fi
+  done
+fi
 if [[ -n "${TCFS_FAKE_FIND_HANG_TARGET:-}" ]]; then
   for arg in "$@"; do
     if [[ "$arg" == "$TCFS_FAKE_FIND_HANG_TARGET" ]]; then
@@ -811,6 +831,31 @@ assert_fails_contains \
       --log-dir "${TMPDIR}/bounded-cloud-root-find-logs" \
       --timeout 2
 test -f "${TMPDIR}/bounded-cloud-root-find-logs/cloud-root-find.log"
+
+FIND_PERMISSION_OUT="${TMPDIR}/find-permission.out"
+FIND_PERMISSION_ERR="${TMPDIR}/find-permission.err"
+if env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+  TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+  TCFS_FAKE_FIND_PERMISSION_TARGET="$CLOUD_ROOT" \
+  LOG_SHOW_TIMEOUT_SECS=1 \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/find-permission-logs" \
+    --timeout 2 \
+    >"$FIND_PERMISSION_OUT" \
+    2>"$FIND_PERMISSION_ERR"; then
+  printf 'expected CloudStorage find permission denial to fail enumeration\n' >&2
+  exit 1
+fi
+cat "$FIND_PERMISSION_OUT" "$FIND_PERMISSION_ERR" >"${TMPDIR}/find-permission.combined"
+assert_contains "${TMPDIR}/find-permission.combined" "enumeration found no entries under $CLOUD_ROOT"
+assert_not_contains "${TMPDIR}/find-permission.combined" "macOS post-install FileProvider smoke passed"
+assert_not_contains "${TMPDIR}/find-permission.combined" "enumeration sample:"
+assert_contains "${TMPDIR}/find-permission-logs/cloud-root-find.err" "Operation not permitted"
+test -f "${TMPDIR}/find-permission-logs/cloud-root-find.log"
 
 SAME_PATH_DUPES_OUT="${TMPDIR}/same-path-dupes.out"
 SAME_PATH_DUPES_ERR="${TMPDIR}/same-path-dupes.err"
