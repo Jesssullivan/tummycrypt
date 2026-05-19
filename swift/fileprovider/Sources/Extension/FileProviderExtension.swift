@@ -347,6 +347,96 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
+            if changedFields.contains(.filename) {
+                let oldPath = item.itemIdentifier.rawValue
+                let parentPath = Self.logicalParentPath(item.parentItemIdentifier)
+                let newRemotePath = parentPath.isEmpty ? item.filename : "\(parentPath)/\(item.filename)"
+
+                if oldPath == newRemotePath {
+                    progress.completedUnitCount = 100
+                    completionHandler(item, [], false, nil)
+                    return
+                }
+
+                if item.contentType == .folder {
+                    logger.error("rename unsupported for directory \(oldPath, privacy: .public)")
+                    progress.completedUnitCount = 100
+                    completionHandler(nil, [], false, NSFileProviderError(.serverUnreachable))
+                    return
+                }
+
+                var sourceURL: URL
+                var tempURL: URL?
+                var accessedSecurityScope = false
+
+                if changedFields.contains(.contents), let contentsURL = newContents {
+                    sourceURL = contentsURL
+                    accessedSecurityScope = contentsURL.startAccessingSecurityScopedResource()
+                } else {
+                    let fetchedURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString)
+                    let fetchResult = oldPath.withCString { oldPtr in
+                        fetchedURL.path.withCString { destPtr in
+                            tcfs_provider_fetch(prov, oldPtr, destPtr)
+                        }
+                    }
+                    if fetchResult != TCFS_ERROR_TCFS_ERROR_NONE {
+                        progress.completedUnitCount = 100
+                        completionHandler(nil, [], false, Self.mapError(fetchResult))
+                        return
+                    }
+                    sourceURL = fetchedURL
+                    tempURL = fetchedURL
+                }
+
+                defer {
+                    if accessedSecurityScope {
+                        sourceURL.stopAccessingSecurityScopedResource()
+                    }
+                    if let tempURL {
+                        try? FileManager.default.removeItem(at: tempURL)
+                    }
+                }
+
+                let uploadResult = sourceURL.path.withCString { localPtr in
+                    newRemotePath.withCString { remotePtr in
+                        tcfs_provider_upload(prov, localPtr, remotePtr)
+                    }
+                }
+                if uploadResult != TCFS_ERROR_TCFS_ERROR_NONE {
+                    progress.completedUnitCount = 100
+                    completionHandler(nil, [], false, Self.mapError(uploadResult))
+                    return
+                }
+
+                let deleteResult = oldPath.withCString { oldPtr in
+                    tcfs_provider_delete(prov, oldPtr)
+                }
+                if deleteResult != TCFS_ERROR_TCFS_ERROR_NONE {
+                    logger.error(
+                        "rename copied \(oldPath, privacy: .public) to \(newRemotePath, privacy: .public), but old path delete failed: \(deleteResult.rawValue)"
+                    )
+                    progress.completedUnitCount = 100
+                    completionHandler(nil, [], false, Self.mapError(deleteResult))
+                    return
+                }
+
+                let fileSize = (try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? UInt64) ?? 0
+                let renamedItem = TCFSFileProviderItem(
+                    identifier: NSFileProviderItemIdentifier(newRemotePath),
+                    parentIdentifier: item.parentItemIdentifier,
+                    filename: item.filename,
+                    isDirectory: false,
+                    fileSize: fileSize,
+                    downloaded: true,
+                    uploaded: true
+                )
+                progress.completedUnitCount = 100
+                self.signalEnumeratorUpdate(for: item.parentItemIdentifier)
+                completionHandler(renamedItem, [], false, nil)
+                return
+            }
+
             // Handle content modification (re-upload)
             if changedFields.contains(.contents), let contentsURL = newContents {
                 let accessed = contentsURL.startAccessingSecurityScopedResource()
@@ -377,32 +467,6 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     progress.completedUnitCount = 100
                     completionHandler(nil, [], false, Self.mapError(result))
                 }
-            } else if changedFields.contains(.filename) {
-                // Rename: delete old index entry, re-upload to new path
-                let oldPath = item.itemIdentifier.rawValue
-                let parentPath = Self.logicalParentPath(item.parentItemIdentifier)
-                let newRemotePath = parentPath.isEmpty ? item.filename : "\(parentPath)/\(item.filename)"
-
-                // Delete old entry
-                let deleteResult = oldPath.withCString { idPtr in
-                    tcfs_provider_delete(prov, idPtr)
-                }
-                if deleteResult != TCFS_ERROR_TCFS_ERROR_NONE {
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(deleteResult))
-                    return
-                }
-
-                let renamedItem = TCFSFileProviderItem(
-                    identifier: NSFileProviderItemIdentifier(newRemotePath),
-                    parentIdentifier: item.parentItemIdentifier,
-                    filename: item.filename,
-                    isDirectory: item.contentType == .folder,
-                    fileSize: (item.documentSize as? UInt64) ?? 0
-                )
-                progress.completedUnitCount = 100
-                self.signalEnumeratorUpdate(for: item.parentItemIdentifier)
-                completionHandler(renamedItem, [], false, nil)
             } else {
                 // No content or filename change — return item as-is
                 progress.completedUnitCount = 100
@@ -661,10 +725,10 @@ extension TCFSFileProviderExtension: NSFileProviderCustomAction {
 
                 switch actionIdentifier.rawValue {
                 case "io.tinyland.tcfs.action.unsync":
-                    // Dehydrate: call daemon's Unsync/Delete RPC to free disk space
+                    // Dehydrate without deleting remote storage.
                     logger.info("action.unsync: \(itemPath)")
                     let result = itemPath.withCString { pathPtr in
-                        tcfs_provider_delete(prov, pathPtr)
+                        tcfs_provider_unsync(prov, pathPtr)
                     }
                     if result != TCFS_ERROR_TCFS_ERROR_NONE {
                         logger.error("action.unsync failed for \(itemPath): \(result.rawValue)")

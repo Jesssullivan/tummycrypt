@@ -249,6 +249,31 @@ async fn fetch_direct_to_file(
     .map(|_| ())
 }
 
+async fn delete_remote_entry(
+    operator: &opendal::Operator,
+    remote_prefix: &str,
+    item_id: &str,
+) -> anyhow::Result<()> {
+    let index_key = format!(
+        "{}/index/{}",
+        remote_prefix.trim_end_matches('/'),
+        item_id.trim_start_matches('/')
+    );
+    let index_data = operator.read(&index_key).await;
+    if let Ok(data) = index_data {
+        let bytes = data.to_bytes();
+        let manifest_prefix = format!("{}/manifests", remote_prefix.trim_end_matches('/'));
+        if let Ok(entry) = tcfs_sync::index_entry::parse_index_entry_record(&bytes) {
+            for manifest_path in entry.referenced_object_keys(&manifest_prefix) {
+                let _ = operator.delete(&manifest_path).await;
+            }
+        }
+    }
+
+    operator.delete(&index_key).await?;
+    Ok(())
+}
+
 /// Create a new provider from a JSON configuration string.
 ///
 /// The JSON should contain:
@@ -866,7 +891,7 @@ pub unsafe extern "C" fn tcfs_provider_upload(
     result.unwrap_or(TcfsError::TcfsErrorInternal)
 }
 
-/// Delete a file via the daemon (unsync then delete remote).
+/// Delete a file from remote storage.
 ///
 /// # Safety
 ///
@@ -888,8 +913,66 @@ pub unsafe extern "C" fn tcfs_provider_delete(
             Ok(s) => s,
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
+        prov.clear_last_error();
 
         let delete_result = prov.runtime.block_on(async {
+            let operator = prov.direct_operator.clone().ok_or_else(|| {
+                anyhow::anyhow!("remote delete requires direct storage credentials")
+            })?;
+            delete_remote_entry(&operator, &prov.remote_prefix, item_str).await?;
+
+            // Best-effort local eviction after the authoritative remote delete.
+            let _ = prov
+                .client
+                .unsync(tonic::Request::new(tcfs_core::proto::UnsyncRequest {
+                    path: item_str.to_string(),
+                    force: true,
+                }))
+                .await;
+
+            Ok::<(), anyhow::Error>(())
+        });
+
+        match delete_result {
+            Ok(()) => TcfsError::TcfsErrorNone,
+            Err(e) => {
+                let message = format!("{e:#}");
+                tracing::error!("delete failed: {message}");
+                prov.set_last_error(message);
+                prov.try_reconnect();
+                TcfsError::TcfsErrorStorage
+            }
+        }
+    }));
+
+    result.unwrap_or(TcfsError::TcfsErrorInternal)
+}
+
+/// Evict local materialization without deleting remote storage.
+///
+/// # Safety
+///
+/// - `provider` must be a valid pointer from `tcfs_provider_new`.
+/// - `item_id` must be a valid null-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_unsync(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+) -> TcfsError {
+    if provider.is_null() || item_id.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let prov = unsafe { &mut *provider };
+        let c_item = unsafe { CStr::from_ptr(item_id) };
+        let item_str = match c_item.to_str() {
+            Ok(s) => s,
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
+        prov.clear_last_error();
+
+        let unsync_result = prov.runtime.block_on(async {
             let resp = prov
                 .client
                 .unsync(tonic::Request::new(tcfs_core::proto::UnsyncRequest {
@@ -906,10 +989,12 @@ pub unsafe extern "C" fn tcfs_provider_delete(
             Ok::<(), tonic::Status>(())
         });
 
-        match delete_result {
+        match unsync_result {
             Ok(()) => TcfsError::TcfsErrorNone,
             Err(e) => {
-                tracing::error!("delete failed: {}, attempting reconnect", e);
+                let message = format!("{e:#}");
+                tracing::error!("unsync failed: {message}");
+                prov.set_last_error(message);
                 prov.try_reconnect();
                 TcfsError::TcfsErrorStorage
             }
