@@ -116,7 +116,9 @@ has shipped and been proven end to end.
    notes.
 5. Continue the `TIN-1546` storage mini-gate: production-like TLS/CA endpoint
    proof, scoped credential posture, transient-error classification, and
-   latency/object-count evidence for the large Git-pack restore path.
+   latency/object-count evidence for the large Git-pack restore path. The
+   operator handoff for the first HTTPS/scoped-credential packet is
+   [`storage-posture-production-gate.md`](storage-posture-production-gate.md).
 6. Refresh `TIN-132` with a current two-host transcript so live fleet evidence
    is not inferred from CI.
 
