@@ -1407,6 +1407,62 @@ classify_expected_file_read_failure() {
   return 1
 }
 
+classify_cloud_root_enumeration_failure() {
+  local root="$1"
+  local classification_path="$LOG_DIR/failure-classification.txt"
+  local evidence_path="$LOG_DIR/failure-classification-input.log"
+  local file
+
+  : >"$evidence_path"
+  for file in \
+    "$LOG_DIR/cloud-root-ls.log" \
+    "$LOG_DIR/cloud-root-open.log" \
+    "$LOG_DIR/cloud-root-find.log" \
+    "$LOG_DIR/cloud-root-find.err" \
+    "$LOG_DIR/fileproviderctl-materialize-root.log" \
+    "$LOG_DIR/fileproviderctl-evaluate-root.log" \
+    "$LOG_DIR/fileproviderctl-check-root.log" \
+    "$(fileprovider_system_log_path)"
+  do
+    [[ -f "$file" ]] || continue
+    {
+      printf -- '--- %s ---\n' "$file"
+      cat "$file"
+      printf '\n'
+    } >>"$evidence_path" || true
+  done
+
+  if grep -Eiq \
+    'Operation not permitted|NSPOSIXErrorDomain\(1\)|NSCocoaErrorDomain code=257|permission to view|Permission denied|EPERM' \
+    "$evidence_path"; then
+    {
+      printf 'classification=cloudstorage_root_permission_denied\n'
+      printf 'path=%s\n' "$root"
+      printf 'reason=CloudStorage/FileProvider root enumeration returned EPERM before expected-file requestDownload\n'
+      printf 'evidence=%s\n' "$evidence_path"
+    } >"$classification_path"
+    echo "FileProvider CloudStorage root permission denied: $root" >&2
+    echo "classification: cloudstorage_root_permission_denied" >&2
+    echo "classification log: $classification_path" >&2
+    return 0
+  fi
+
+  if grep -Eiq 'failed to start FPFS for domain' "$evidence_path"; then
+    {
+      printf 'classification=fileprovider_fpfs_start_failed\n'
+      printf 'path=%s\n' "$root"
+      printf 'reason=fileproviderd reported FPFS startup failure before CloudStorage enumeration produced entries\n'
+      printf 'evidence=%s\n' "$evidence_path"
+    } >"$classification_path"
+    echo "FileProvider FPFS startup failed before CloudStorage enumeration: $root" >&2
+    echo "classification: fileprovider_fpfs_start_failed" >&2
+    echo "classification log: $classification_path" >&2
+    return 0
+  fi
+
+  return 1
+}
+
 enumerate_root() {
   local root="$1"
   local listing
@@ -1444,6 +1500,7 @@ enumerate_root() {
     exit 1
   fi
 
+  classify_cloud_root_enumeration_failure "$root" || true
   echo "enumeration found no entries under $root" >&2
   exit 1
 }

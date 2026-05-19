@@ -17,6 +17,11 @@ on:
         required: false
         default: true
         type: boolean
+      rebuild_domain:
+        description: "Remove and re-add the FileProvider domain before the smoke harness; useful for stale-domain/FPFS diagnostics"
+        required: false
+        default: false
+        type: boolean
       fileprovider_testing_mode:
         description: "Request FileProvider testing-mode alwaysEnabled; package must carry Apple's testing entitlement"
         required: false
@@ -817,6 +822,10 @@ jobs:
 
           if [[ "${{ github.event.inputs.elect_plugin_use }}" == "true" ]]; then
             args+=(--elect-plugin-use)
+          fi
+
+          if [[ "${{ github.event.inputs.rebuild_domain }}" == "true" ]]; then
+            args+=(--rebuild-domain)
           fi
 
           if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" == "true" ]]; then
