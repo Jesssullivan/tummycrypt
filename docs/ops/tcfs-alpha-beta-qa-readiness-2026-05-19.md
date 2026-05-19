@@ -29,6 +29,9 @@ use.
   PR #390 landed bounded remote manifest/index/chunk read attempts, but
   production-like TLS/CA proof, scoped credential posture, transient-error
   classification in live packets, and large-pack restore evidence remain open.
+  Use `tcfs storage canary --json` as the scoped read/write/delete/delete-verify
+  probe in future packets; it is supporting evidence, not a full posture claim
+  by itself.
 - iOS remains proof-of-concept until `TIN-1548` proves a real Files.app lane
   with safe enrollment posture.
 
@@ -118,6 +121,8 @@ Every alpha/beta evidence packet should include:
 - exact artifact tag, commit, package name, and checksum when available
 - host, OS version, architecture, and install path
 - remote endpoint type, bucket/prefix, and whether TLS/custom CA was used
+- `tcfs storage canary --json` output when the run claims scoped storage
+  read/write/delete behavior
 - command transcript or workflow run ID
 - first-byte hydrate, full hydrate, cache-hit read, and rehydrate timings
 - object counts, byte counts, retry counts, and notable storage errors
