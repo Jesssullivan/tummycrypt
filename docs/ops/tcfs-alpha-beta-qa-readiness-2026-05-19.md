@@ -16,9 +16,12 @@ use.
   PR #389 branch run `26079830341` also proves the exact published
   `v0.12.13-rc1` `.pkg`. Later main-ref repeatability exposed a
   CloudStorage root authority split, and diagnostic package run `26117175542`
-  proves the signed HostApp user-visible root path at `66ae92f`. `v0.12.13-rc2`
-  is the next exact published-asset proof target; product hardening remains open
-  in `TIN-1547`.
+  proves the signed HostApp user-visible root path at `66ae92f`. Run
+  `26122478486` then proved the exact public `v0.12.13-rc2` GitHub Release
+  `.pkg` through user-visible root enumeration, exact hydrate,
+  evict/rehydrate, mutation, and conflict/status. Product hardening remains
+  open in `TIN-1547`, but PR #412 is now landed on `main` for
+  rename/unsync-vs-delete safety.
 - Linux remains the strongest runtime for CLI/daemon/FUSE work, but package
   first-use is not fully proven. `TIN-1422` is blocked on `TIN-1540` until the
   Linux smoke backend is reachable from CI or a private runner.
@@ -48,8 +51,8 @@ Alpha may exercise:
 
 - release artifacts and source builds on disposable or shadow sync roots
 - scoped project trees, repo canaries, and small daily-use folders
-- macOS FileProvider lifecycle after the `TIN-1547` rc2 release-asset smoke,
-  with main-ref and diagnostic-artifact reruns used as release-day regression
+- macOS FileProvider lifecycle on the `v0.12.13-rc2` release asset, with
+  main-ref and diagnostic-artifact reruns used as release-day regression
   evidence
 - Linux FUSE clean-name traversal and hydrate-on-open after `TIN-1422`
 - live fleet sync against named hosts after `TIN-132`
@@ -90,7 +93,7 @@ has shipped and been proven end to end.
 | Lane | Alpha gate | Beta gate | Tracker |
 |---|---|---|---|
 | Release and first-use | Exact release artifacts install, configure, `status [ok]`, and perform one real action on macOS, Homebrew, Linux `.deb`, container, and Nix surfaces | Repeatable install and upgrade matrix with no hand-authored config for the common path | `TIN-131`, `#280`, `TIN-1425` |
-| macOS FileProvider | Post-cut `.pkg` exact hydrate plus evict/rehydrate, mutation, conflict/status on Developer ID surface; main-ref continuous rerun preferred for release-day viability | Rename, unsync-vs-delete, badges/progress, recovery UX, and longer desktop soak | `TIN-1547`, `TIN-133` |
+| macOS FileProvider | Published rc2 `.pkg` exact hydrate plus evict/rehydrate, mutation, conflict/status on Developer ID surface; rename/unsync-vs-delete safety cut landed in PR #412; main-ref continuous rerun preferred for release-day viability | Badges/progress, recovery UX, and longer desktop soak | `TIN-1547`, `TIN-133` |
 | Linux package smoke | `.deb`/`.rpm` install against reachable SeaweedFS+NATS backend, hydrate fixture, evict, rehydrate | Scheduled package smoke on a stable runner with archived transcripts | `TIN-1422`, `TIN-1540` |
 | Live fleet | Neo/honey acceptance is current, repeatable, and archived | Scheduled fleet acceptance with failure classification and dashboard history | `TIN-132`, `TIN-1421` |
 | S3/storage posture | TLS/CA posture documented, health/read paths bounded, transient errors separated from missing objects, large-pack restore evidence captured | Production-like S3 endpoint, scoped credentials, latency/object-count budgets, rollback/restore evidence | `TIN-1546`, `TIN-720`, `#327` |
@@ -102,18 +105,17 @@ has shipped and been proven end to end.
 
 ## This Week's Alpha Runway
 
-1. Let the `v0.12.13-rc2` release run finish, then smoke the exact published
-   `.pkg` on PZM with rebuild-domain, production Dev ID mode, layered proof, and
-   conflict/status enabled.
+1. Archive the `v0.12.13-rc2` exact public `.pkg` smoke packet from run
+   `26122478486`, and keep a main-ref/package rerun ready for the next rc or
+   FileProvider change.
 2. Clear `TIN-1540`, then rerun `TIN-1422` against a reachable backend using
    the corrected `seaweedfs://host:port/bucket/prefix` remote spec, with
    `seaweedfs+https://` preserved for production-like HTTPS smoke endpoints.
 3. Complete the `TIN-131` first-use matrix for the rc artifact set:
    Linux `.deb`, Nix external profile, and any upgrade rows not covered by the
    current Homebrew/container smokes.
-4. Continue the alpha slice of `TIN-1547`: main-ref release-day viability,
-   rename/unsync risk classification, and minimum visible status/recovery
-   notes.
+4. Continue the alpha slice of `TIN-1547`: badge/progress/recovery assertions
+   and longer desktop soak after the landed PR #412 rename/unsync safety cut.
 5. Continue the `TIN-1546` storage mini-gate: production-like TLS/CA endpoint
    proof, scoped credential posture, transient-error classification, and
    latency/object-count evidence for the large Git-pack restore path. The
