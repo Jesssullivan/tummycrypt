@@ -14,7 +14,11 @@ use.
   petting-zoo-mini by run `26062554542`: install, domain rebuild, enumerate,
   exact hydrate, host evict/rehydrate, remote mutation, and conflict/status.
   PR #389 branch run `26079830341` also proves the exact published
-  `v0.12.13-rc1` `.pkg`; product hardening remains open in `TIN-1547`.
+  `v0.12.13-rc1` `.pkg`. Later main-ref repeatability exposed a
+  CloudStorage root authority split, and diagnostic package run `26117175542`
+  proves the signed HostApp user-visible root path at `66ae92f`. `v0.12.13-rc2`
+  is the next exact published-asset proof target; product hardening remains open
+  in `TIN-1547`.
 - Linux remains the strongest runtime for CLI/daemon/FUSE work, but package
   first-use is not fully proven. `TIN-1422` is blocked on `TIN-1540` until the
   Linux smoke backend is reachable from CI or a private runner.
@@ -44,8 +48,9 @@ Alpha may exercise:
 
 - release artifacts and source builds on disposable or shadow sync roots
 - scoped project trees, repo canaries, and small daily-use folders
-- macOS FileProvider lifecycle after the `TIN-1547` release-asset smoke, with
-  main-ref reruns used as release-day regression evidence
+- macOS FileProvider lifecycle after the `TIN-1547` rc2 release-asset smoke,
+  with main-ref and diagnostic-artifact reruns used as release-day regression
+  evidence
 - Linux FUSE clean-name traversal and hydrate-on-open after `TIN-1422`
 - live fleet sync against named hosts after `TIN-132`
 - storage latency, object-count, retry, and failure-classification evidence
@@ -97,14 +102,15 @@ has shipped and been proven end to end.
 
 ## This Week's Alpha Runway
 
-1. Merge the production-readiness sweep PR so the docs, evidence packet, and
-   Linux smoke remote-spec fix are on main.
+1. Let the `v0.12.13-rc2` release run finish, then smoke the exact published
+   `.pkg` on PZM with rebuild-domain, production Dev ID mode, layered proof, and
+   conflict/status enabled.
 2. Clear `TIN-1540`, then rerun `TIN-1422` against a reachable backend using
    the corrected `seaweedfs://host:port/bucket/prefix` remote spec, with
    `seaweedfs+https://` preserved for production-like HTTPS smoke endpoints.
 3. Complete the `TIN-131` first-use matrix for the rc artifact set:
-   macOS `.pkg`, Homebrew, Linux `.deb`, container runtime, and Nix external
-   profile.
+   Linux `.deb`, Nix external profile, and any upgrade rows not covered by the
+   current Homebrew/container smokes.
 4. Continue the alpha slice of `TIN-1547`: main-ref release-day viability,
    rename/unsync risk classification, and minimum visible status/recovery
    notes.

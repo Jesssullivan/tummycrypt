@@ -1,7 +1,7 @@
 # macOS Finder and FileProvider Reality
 
-As of May 18, 2026, the production Developer ID FileProvider lifecycle is
-proven on a clean install of the notarized `.pkg`. GitHub Actions run
+As of May 19, 2026, the production Developer ID FileProvider lifecycle is
+proven on PZM, with one important release-asset caveat. GitHub Actions run
 `26061402177` first proved installed strict preflight, storage `[ok]`,
 host-app domain add, CloudStorage enumeration, host-app `requestDownload`, and
 exact-content hydration of a 55-byte seeded fixture through the installed
@@ -22,8 +22,14 @@ badge/progress UI and long-running recovery UX. The remaining production gaps
 are first-run setup from installer to valid config/status, badge/progress
 assertions, recovery UX, and continuously exercised release-day viability.
 PR #389 branch run `26079830341` proves the exact published `v0.12.13-rc1`
-release `.pkg`; merged-workflow reruns still matter as an ongoing release-day
-regression signal.
+release `.pkg` as a historical release-freeze row. Later main-ref reruns exposed
+a CloudStorage root authority split: shell/raw-path enumeration can get EPERM
+while FileProvider control APIs still see a healthy root. PR #405 added a signed
+HostApp root/user-visible-URL probe, and diagnostic package run `26117175542`
+at `66ae92f` proved that the installed signed HostApp can enumerate the
+FileProvider user-visible root and complete exact hydrate, evict/rehydrate,
+mutation, and conflict/status. The next public-package closure step is the
+`v0.12.13-rc2` exact release asset smoke after release run `26117684515`.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
