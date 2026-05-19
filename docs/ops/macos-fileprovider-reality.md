@@ -1,7 +1,8 @@
 # macOS Finder and FileProvider Reality
 
 As of May 19, 2026, the production Developer ID FileProvider lifecycle is
-proven on PZM, with one important release-asset caveat. GitHub Actions run
+proven on PZM, including the exact public `v0.12.13-rc2` GitHub Release
+`.pkg`. GitHub Actions run
 `26061402177` first proved installed strict preflight, storage `[ok]`,
 host-app domain add, CloudStorage enumeration, host-app `requestDownload`, and
 exact-content hydration of a 55-byte seeded fixture through the installed
@@ -28,8 +29,9 @@ while FileProvider control APIs still see a healthy root. PR #405 added a signed
 HostApp root/user-visible-URL probe, and diagnostic package run `26117175542`
 at `66ae92f` proved that the installed signed HostApp can enumerate the
 FileProvider user-visible root and complete exact hydrate, evict/rehydrate,
-mutation, and conflict/status. The next public-package closure step is the
-`v0.12.13-rc2` exact release asset smoke after release run `26117684515`.
+mutation, and conflict/status. Run `26122478486` then proved the same path
+against the exact public `v0.12.13-rc2` release asset:
+`tcfs-0.12.13-rc2-macos-aarch64.pkg`.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
@@ -1212,3 +1214,45 @@ following succeed on the same machine:
   posture.
 - Use this document for the macOS Finder/FileProvider desktop acceptance path
   itself.
+
+## 2026-05-19 — Exact public rc2 package proof and post-M10 safety cut
+
+Run [`26122478486`](https://github.com/Jesssullivan/tummycrypt/actions/runs/26122478486)
+of `macos-postinstall-smoke.yml` installed the exact public GitHub Release
+asset `tcfs-0.12.13-rc2-macos-aarch64.pkg` from
+[`v0.12.13-rc2`](https://github.com/Jesssullivan/tummycrypt/releases/tag/v0.12.13-rc2)
+and passed the production Dev ID postinstall harness on `petting-zoo-mini-tcfs`.
+
+Evidence artifact `macos-postinstall-smoke-v0.12.13-rc2` / artifact id
+`7094298063` records:
+
+- `expected-file-index.json`: `status: visible`, committed entry, manifest
+  present, size 59, chunks 1, remote prefix
+  `gha/macos-postinstall/v0.12.13-rc2/26122478486-1`.
+- `host-root-probe.log`: direct CloudStorage root listing still hits
+  `NSCocoaErrorDomain code=257` / `NSPOSIXErrorDomain(1)`, but the signed
+  HostApp's `getUserVisibleURL(.rootContainer)` path lists `.Trash` and
+  `ci-smoke`.
+- `hydrated-expected-file`: exact 59-byte expected content captured after
+  signed-host `requestDownload`.
+- Evict plus re-requestDownload passed.
+- FileProvider mutation write passed and remote pull matched the expected
+  72-byte content.
+- Conflict/status proof recorded `sync state: conflict`, and signed-host
+  `requestDownload` hydrated the 80-byte conflict fixture content.
+
+PR #412 then landed as
+[`aca6c9053db49f7cad00766b47a03502514d826a`](https://github.com/Jesssullivan/tummycrypt/commit/aca6c9053db49f7cad00766b47a03502514d826a)
+with the first post-M10 safety cut:
+
+- FileProvider file rename is copy/upload-before-delete.
+- Directory rename fails explicitly instead of returning a synthetic success.
+- Finder/Files "Free Up Space" uses `tcfs_provider_unsync` instead of
+  destructive remote delete.
+- gRPC direct-backend delete removes remote index/manifest when direct storage
+  credentials are configured, then best-effort evicts locally.
+
+This clears the original production `.pkg` exact-file hydration blocker for the
+published rc2 macOS arm64 asset. It does not close production storage posture:
+the run still uses the private/plaintext PZM smoke backend, so TIN-1546 remains
+open until an HTTPS/scoped-credential storage packet passes.
