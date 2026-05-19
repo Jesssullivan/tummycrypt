@@ -123,6 +123,7 @@ LOG_SHOW_TIMEOUT_SECS="${LOG_SHOW_TIMEOUT_SECS:-5}"
 LOG_DIR_OVERRIDE=""
 SKIP_STATUS=0
 LOG_DIR=""
+HOST_APP_ROOT_ENUMERATION=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -1494,6 +1495,7 @@ classify_cloud_root_enumeration_failure() {
     "$LOG_DIR/cloud-root-find.err" \
     "$LOG_DIR/cloud-root-coordinated-list.log" \
     "$LOG_DIR/cloud-root-coordinated-list-nudge.log" \
+    "$LOG_DIR/host-root-probe.log" \
     "$LOG_DIR/cloud-root-stat.log" \
     "$LOG_DIR/cloud-root-access.log" \
     "$LOG_DIR/cloud-root-xattr.log" \
@@ -1563,10 +1565,47 @@ run_coordinated_root_listing() {
   printf '%s\n' "$listing"
 }
 
+run_host_root_probe() {
+  local root="$1"
+  local app_binary
+  local action_nonce
+  local host_probe_pid
+  local status=0
+  local log_file="$LOG_DIR/host-root-probe.log"
+
+  app_binary="$(host_app_binary_path)"
+  [[ -x "$app_binary" ]] || return 2
+
+  echo "launching host app binary for root probe: $app_binary" >&2
+  action_nonce="$(new_fileprovider_action_nonce)"
+  TCFS_FILEPROVIDER_ACTION_NONCE="$action_nonce" \
+  TCFS_FILEPROVIDER_ROOT_PROBE=1 \
+  TCFS_FILEPROVIDER_ROOT_PROBE_PATH="$root" \
+  TCFS_FILEPROVIDER_HOST_STDERR_LOG=1 \
+  TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS="${TCFS_FILEPROVIDER_HOST_ACTION_TIMEOUT_SECS:-30}" \
+    "$app_binary" >"$log_file" 2>&1 &
+  host_probe_pid="$!"
+
+  wait_for_pid_with_timeout "$host_probe_pid" 20 "host app root probe helper" || status="$?"
+  [[ "$status" == "0" ]] || return "$status"
+
+  awk -v nonce="nonce=$action_nonce" '
+    index($0, "rootProbe:") && index($0, " entry: ") && index($0, nonce) {
+      line = $0
+      sub(/^.* entry: /, "", line)
+      sub(/[[:space:]]+nonce=.*$/, "", line)
+      print line
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$log_file"
+}
+
 enumerate_root() {
   local root="$1"
   local listing
   local coordinated_listing
+  local host_probe_listing
   local attempt=0
   local system_log
 
@@ -1595,6 +1634,13 @@ enumerate_root() {
     short_pause
     attempt=$((attempt + 1))
   done
+
+  if host_probe_listing="$(run_host_root_probe "$root")"; then
+    echo "host app root probe sample:"
+    echo "$host_probe_listing"
+    HOST_APP_ROOT_ENUMERATION=1
+    return
+  fi
 
   system_log="$(collect_fileprovider_system_log)"
   printf '%s\n' "$system_log" >"$(fileprovider_system_log_path)"
@@ -2119,9 +2165,14 @@ if [[ -n "$EXPECTED_FILE_REL" ]]; then
   EXPECTED_PATH="$CLOUD_ROOT/$EXPECTED_FILE_REL"
   EXPECTED_PARENT="$(dirname "$EXPECTED_PATH")"
   require_expected_remote_index "$EXPECTED_FILE_REL"
+  if [[ "$HOST_APP_ROOT_ENUMERATION" == "1" ]]; then
+    request_expected_file_download "$EXPECTED_FILE_REL"
+  fi
   wait_for_expected_parent_chain "$EXPECTED_PARENT"
   wait_for_expected_file "$EXPECTED_PATH"
-  request_expected_file_download "$EXPECTED_FILE_REL"
+  if [[ "$HOST_APP_ROOT_ENUMERATION" != "1" ]]; then
+    request_expected_file_download "$EXPECTED_FILE_REL"
+  fi
   if [[ "$REQUIRE_KEYCHAIN_CONFIG" == "1" ]]; then
     check_keychain_config_log
   fi
