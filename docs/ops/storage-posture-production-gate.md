@@ -89,6 +89,19 @@ allowed policy, for example:
 
 ## Dispatch
 
+Preferred helper:
+
+```bash
+scripts/storage-posture-canary-dispatch.sh \
+  --environment tcfs-storage-prod-smoke \
+  --runner-label ubuntu-24.04
+```
+
+The helper checks that the GitHub environment exposes the required secret
+names before dispatch. It also requires a non-empty denial prefix by default,
+because production closure needs a machine-checkable scoped-credential denial
+probe.
+
 Hosted Linux runner against a public HTTPS endpoint:
 
 ```bash
