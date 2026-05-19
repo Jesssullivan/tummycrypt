@@ -95,7 +95,10 @@ Record results using a table like this:
   release-proof surface. See [Distribution Smoke Matrix](distribution-smoke-matrix.md).
 - The macOS production clean-host hydration/lifecycle lane is no longer blocked
   on `#309`; the remaining package-first-use gap is setup UX and post-cut
-  release-asset repeatability. The repo has two different harness families:
+  release-asset repeatability. PR #389 branch run `26079830341` proves the
+  exact published `v0.12.13-rc1` `.pkg`; main-ref reruns should keep that proof
+  fresh as a release-day regression signal. The repo has two different harness
+  families:
   - [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml)
     exercises published packages and production-style install/signing/storage
     gates. PZM production Dev ID run `26062554542` proves installed strict
@@ -105,8 +108,8 @@ Record results using a table like this:
     reruns should archive `expected-file-index.json`; the harness now uses
     `tcfs index inspect <path> --json` as a read-only remote fixture gate
     before treating a FileProvider read timeout as a desktop integration
-    blocker. The next package-first-use bar is post-cut smoke against the exact
-    GitHub Release `.pkg`, followed by first-run config/status UX.
+    blocker. The next package-first-use bar is first-run config/status UX plus
+    continuous main-ref reruns of the exact GitHub Release `.pkg` smoke.
   - [`.github/workflows/macos-fileprovider-testing-mode-pkg.yml`](../../.github/workflows/macos-fileprovider-testing-mode-pkg.yml)
     plus the PZM smoke path exercises a non-production Mac App
     Development/testing-mode package with the lab `SystemPolicyRule` profile.

@@ -19,9 +19,11 @@ mutation upload/readback, and deterministic CLI conflict/status content
 preservation when the lab `SystemPolicyRule` profile is installed. The
 production Dev ID lane has now proven the same lifecycle assertions except for
 badge/progress UI and long-running recovery UX. The remaining production gaps
-are first-run setup from installer to valid config/status, post-cut smoke
-against the exact published release asset, badge/progress assertions, recovery
-UX, and continuously exercised release-day viability.
+are first-run setup from installer to valid config/status, badge/progress
+assertions, recovery UX, and continuously exercised release-day viability.
+PR #389 branch run `26079830341` proves the exact published `v0.12.13-rc1`
+release `.pkg`; merged-workflow reruns still matter as an ongoing release-day
+regression signal.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
