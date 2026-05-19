@@ -34,6 +34,10 @@ jobs:
           LOG_DIR="$RUNNER_TEMP/tcfs-macos-fileprovider-pkg-notarization-proof"
           mkdir -p "$LOG_DIR"
           echo "LOG_DIR=$LOG_DIR" >> "$GITHUB_ENV"
+          for system_dir in /usr/bin /bin /usr/sbin /sbin; do
+            echo "$system_dir" >> "$GITHUB_PATH"
+          done
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
           VERSION="$(python3 - <<'PY'
           import pathlib
@@ -410,7 +414,7 @@ jobs:
 
           {
             printf '[pkgutil --check-signature]\n'
-            pkgutil --check-signature "$PKG_PATH"
+            /usr/sbin/pkgutil --check-signature "$PKG_PATH"
           } 2>&1 | tee "$LOG_DIR/pkgutil-check-signature-before-notary.log"
           shasum -a 256 "$PKG_PATH" | tee "$LOG_DIR/pkg-sha256-before-notary.txt"
 
@@ -519,7 +523,7 @@ jobs:
           shasum -a 256 "$PKG_PATH" | tee "$LOG_DIR/pkg-sha256-after-staple.txt"
           {
             printf '[pkgutil --check-signature]\n'
-            pkgutil --check-signature "$PKG_PATH"
+            /usr/sbin/pkgutil --check-signature "$PKG_PATH"
           } 2>&1 | tee "$LOG_DIR/pkgutil-check-signature-after-staple.log"
 
       - name: Upload notarized package proof artifact
