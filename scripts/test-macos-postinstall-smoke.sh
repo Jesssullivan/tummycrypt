@@ -851,9 +851,12 @@ if env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
   exit 1
 fi
 cat "$FIND_PERMISSION_OUT" "$FIND_PERMISSION_ERR" >"${TMPDIR}/find-permission.combined"
+assert_contains "${TMPDIR}/find-permission.combined" "classification: cloudstorage_root_permission_denied"
 assert_contains "${TMPDIR}/find-permission.combined" "enumeration found no entries under $CLOUD_ROOT"
 assert_not_contains "${TMPDIR}/find-permission.combined" "macOS post-install FileProvider smoke passed"
 assert_not_contains "${TMPDIR}/find-permission.combined" "enumeration sample:"
+assert_contains "${TMPDIR}/find-permission-logs/failure-classification.txt" "classification=cloudstorage_root_permission_denied"
+assert_contains "${TMPDIR}/find-permission-logs/failure-classification-input.log" "Operation not permitted"
 assert_contains "${TMPDIR}/find-permission-logs/cloud-root-find.err" "Operation not permitted"
 test -f "${TMPDIR}/find-permission-logs/cloud-root-find.log"
 
