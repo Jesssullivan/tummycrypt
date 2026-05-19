@@ -5,7 +5,10 @@ name: Linux Post-Install Smoke
 # release asset or a workflow-run artifact), installs it, writes a live
 # config keyed on the smoke secrets, mounts FUSE, and runs
 # scripts/linux-postinstall-smoke.sh to gate hydration via
-# `tcfs index inspect`.
+# `tcfs index inspect`. By default it reuses the already-populated
+# `tcfs-macos-smoke` environment because both smoke lanes need the same
+# TCFS_SMOKE_* storage secrets; callers can override the environment when a
+# dedicated Linux secret set exists.
 #
 # Several steps are intentionally minimal compared to the macOS workflow:
 # Linux doesn't need FileProvider plumbing (host app, pluginkit, CloudStorage
@@ -39,6 +42,11 @@ on:
         required: false
         default: "ubuntu-24.04"
         type: string
+      smoke_environment:
+        description: "GitHub environment containing TCFS_SMOKE_* secrets"
+        required: false
+        default: "tcfs-macos-smoke"
+        type: string
       exercise_evict_rehydrate:
         description: "After initial hydration, exercise unsync + rehydrate"
         required: false
@@ -60,7 +68,7 @@ jobs:
     if: github.repository == 'Jesssullivan/tummycrypt'
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 30
-    environment: tcfs-linux-smoke
+    environment: ${{ github.event.inputs.smoke_environment }}
     env:
       TCFS_SMOKE_S3_ENDPOINT: ${{ secrets.TCFS_SMOKE_S3_ENDPOINT }}
       TCFS_SMOKE_S3_BUCKET: ${{ secrets.TCFS_SMOKE_S3_BUCKET }}
