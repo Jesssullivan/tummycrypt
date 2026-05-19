@@ -1,0 +1,251 @@
+name: Storage Posture Canary
+
+# TIN-1546: dispatchable scoped storage posture packet.
+#
+# This workflow turns `tcfs storage canary --json` into an archived evidence
+# lane. It intentionally does not claim broad production S3 readiness by itself:
+# the run proves one scoped write/read/delete/delete-verify operation plus
+# endpoint TLS posture for the selected environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: "Runner label. Hosted runners require public HTTPS storage."
+        required: false
+        default: "ubuntu-24.04"
+        type: string
+      smoke_environment:
+        description: "GitHub environment containing TCFS_SMOKE_* storage secrets"
+        required: false
+        default: "tcfs-macos-smoke"
+        type: string
+      remote_prefix:
+        description: "Remote prefix for the canary object; default is gha/storage-posture/<run>"
+        required: false
+        default: ""
+        type: string
+      timeout_secs:
+        description: "Per-operation canary timeout in seconds"
+        required: false
+        default: "10"
+        type: string
+      require_https:
+        description: "Require HTTPS/enforce_tls even on private runners"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  storage-canary:
+    name: Scoped storage canary
+    if: github.repository == 'Jesssullivan/tummycrypt'
+    runs-on: ${{ github.event.inputs.runner_label }}
+    timeout-minutes: 20
+    environment: ${{ github.event.inputs.smoke_environment }}
+    env:
+      TCFS_SMOKE_S3_ENDPOINT: ${{ secrets.TCFS_SMOKE_S3_ENDPOINT }}
+      TCFS_SMOKE_S3_BUCKET: ${{ secrets.TCFS_SMOKE_S3_BUCKET }}
+      TCFS_SMOKE_S3_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      TCFS_SMOKE_S3_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      TCFS_SMOKE_S3_REGION: ${{ secrets.TCFS_SMOKE_S3_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Initialize evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG_DIR="$RUNNER_TEMP/tcfs-storage-posture-canary"
+          mkdir -p "$LOG_DIR"
+          echo "LOG_DIR=$LOG_DIR" >> "$GITHUB_ENV"
+
+      - name: Validate storage inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            TCFS_SMOKE_S3_ENDPOINT \
+            TCFS_SMOKE_S3_BUCKET \
+            TCFS_SMOKE_S3_ACCESS_KEY_ID \
+            TCFS_SMOKE_S3_SECRET_ACCESS_KEY
+          do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required storage canary secrets: ${missing[*]}"
+            exit 1
+          fi
+
+          case "${{ github.event.inputs.timeout_secs }}" in
+            ''|*[!0-9]*)
+              echo "::error::timeout_secs must be a positive integer"
+              exit 1
+              ;;
+            0)
+              echo "::error::timeout_secs must be greater than zero"
+              exit 1
+              ;;
+          esac
+
+      - name: Validate endpoint posture
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLATFORM="linux"
+          if [[ "${RUNNER_OS:-}" == "macOS" ]]; then
+            PLATFORM="macOS"
+          elif [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+            PLATFORM="windows"
+          fi
+          python3 scripts/tcfs-smoke-endpoint-preflight.py \
+            --endpoint "$TCFS_SMOKE_S3_ENDPOINT" \
+            --runner-label "${{ github.event.inputs.runner_label }}" \
+            --platform "$PLATFORM"
+
+          if [[ "${{ github.event.inputs.require_https }}" == "true" \
+                && "$TCFS_SMOKE_S3_ENDPOINT" != https://* ]]; then
+            echo "::error::require_https=true requires TCFS_SMOKE_S3_ENDPOINT to use https://"
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            pkg-config \
+            libssl-dev
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v protoc >/dev/null 2>&1; then
+            protoc --version
+            exit 0
+          fi
+          BREW="$(command -v brew || true)"
+          if [[ -z "$BREW" && -x /opt/homebrew/bin/brew ]]; then
+            BREW=/opt/homebrew/bin/brew
+          elif [[ -z "$BREW" && -x /usr/local/bin/brew ]]; then
+            BREW=/usr/local/bin/brew
+          fi
+          if [[ -z "$BREW" ]]; then
+            echo "::error::protobuf compiler missing and Homebrew was not found"
+            exit 1
+          fi
+          "$BREW" install protobuf
+          echo "$(dirname "$BREW")" >> "$GITHUB_PATH"
+
+      - name: Write canary config
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION="${TCFS_SMOKE_S3_REGION:-us-east-1}"
+          REMOTE_PREFIX="${{ github.event.inputs.remote_prefix }}"
+          if [[ -z "$REMOTE_PREFIX" ]]; then
+            REMOTE_PREFIX="gha/storage-posture/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          REMOTE_PREFIX="${REMOTE_PREFIX#/}"
+          REMOTE_PREFIX="${REMOTE_PREFIX%/}"
+          ENFORCE_TLS=false
+          if [[ "${{ github.event.inputs.require_https }}" == "true" \
+                || "$TCFS_SMOKE_S3_ENDPOINT" == https://* ]]; then
+            ENFORCE_TLS=true
+          fi
+
+          CONFIG_PATH="$RUNNER_TEMP/tcfs-storage-canary.toml"
+          cat > "$CONFIG_PATH" <<EOF
+          [storage]
+          endpoint = "$TCFS_SMOKE_S3_ENDPOINT"
+          region = "$REGION"
+          bucket = "$TCFS_SMOKE_S3_BUCKET"
+          remote_prefix = "$REMOTE_PREFIX"
+          enforce_tls = $ENFORCE_TLS
+          s3_connect_timeout_secs = 5
+          s3_pool_idle_timeout_secs = 30
+          s3_pool_max_idle_per_host = 8
+          max_concurrent_ops = 4
+          EOF
+
+          {
+            echo "CONFIG_PATH=$CONFIG_PATH"
+            echo "REMOTE_PREFIX=$REMOTE_PREFIX"
+            echo "STORAGE_ENFORCE_TLS=$ENFORCE_TLS"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "runner_label=${{ github.event.inputs.runner_label }}"
+            echo "smoke_environment=${{ github.event.inputs.smoke_environment }}"
+            echo "endpoint=$TCFS_SMOKE_S3_ENDPOINT"
+            echo "bucket=$TCFS_SMOKE_S3_BUCKET"
+            echo "remote_prefix=$REMOTE_PREFIX"
+            echo "enforce_tls=$ENFORCE_TLS"
+            echo "require_https=${{ github.event.inputs.require_https }}"
+            echo "ca_cert_path_supported=false"
+          } > "$LOG_DIR/storage-posture.env"
+
+      - name: Run scoped storage canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p tcfs-cli --no-default-features -- \
+            --config "$CONFIG_PATH" \
+            storage canary \
+            --prefix "$REMOTE_PREFIX" \
+            --timeout-secs "${{ github.event.inputs.timeout_secs }}" \
+            --json \
+            | tee "$LOG_DIR/storage-canary.json"
+
+      - name: Validate canary report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$LOG_DIR/storage-canary.json" "${{ github.event.inputs.require_https }}" <<'PY'
+          import json
+          import sys
+
+          path, require_https = sys.argv[1], sys.argv[2] == "true"
+          with open(path, "r", encoding="utf-8") as fh:
+              report = json.load(fh)
+
+          assert report["deleted"] is True, "delete verification must pass"
+          assert report["bytes"] > 0, "canary payload must be non-empty"
+          if require_https:
+              assert report["endpoint_tls"] is True, "endpoint_tls must be true"
+              assert report["enforce_tls"] is True, "enforce_tls must be true"
+          print("storage canary report validated")
+          PY
+
+      - name: Upload storage posture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-posture-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.LOG_DIR }}/
+          retention-days: 14
