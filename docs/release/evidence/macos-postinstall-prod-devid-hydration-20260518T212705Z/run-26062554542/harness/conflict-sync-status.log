@@ -1,0 +1,11 @@
+State cache: /Users/jsullivan2/github-actions-runners/tummycrypt-tcfs/_work/_temp/tcfs-state.json
+Tracked files: 4
+
+File: /Users/jsullivan2/github-actions-runners/tummycrypt-tcfs/_work/_temp/tcfs-sync-root/ci-smoke/0.12.12/conflict-status-1.txt
+  hash:       3e3abc8db62e6d4f
+  size:       76 B
+  chunks:     1
+  remote:     gha/macos-postinstall/v0.12.12/26062554542-1/manifests/3e3abc8db62e6d4f9f0dff0323b6e0526888697d099f3328232d847eb77f7d9b
+  last sync:  24 seconds ago
+  sync state: conflict
+  sync check: up to date

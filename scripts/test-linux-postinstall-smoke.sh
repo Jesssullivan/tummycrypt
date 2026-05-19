@@ -343,7 +343,6 @@ env PATH="$FAKE_BIN:$PATH" \
     --expected-file "$EXPECTED_REL" \
     --expected-content-file "$EXPECTED_CONTENT_FILE" \
     --remote-prefix "fake/prefix" \
-    --remote-spec "s3://tcfs/fake/prefix" \
     --mount-point "$MOUNT_POINT" \
     --exercise-evict-rehydrate \
     --exercise-mutation \
@@ -366,6 +365,7 @@ assert_contains "$POSITIVE_OUT" "tcfsd version: tcfsd 0.13.0"
 assert_contains "$POSITIVE_OUT" "tcfs version: tcfs 0.13.0"
 assert_contains "$POSITIVE_OUT" "daemon socket ready: $DAEMON_SOCKET"
 assert_contains "$POSITIVE_OUT" "remote index status for expected file: visible"
+assert_contains "$POSITIVE_OUT" "derived --remote-spec: seaweedfs://example.invalid:8333/tcfs/fake/prefix"
 assert_contains "$POSITIVE_OUT" "FUSE mount ready"
 assert_contains "$POSITIVE_OUT" "hydrated file content matched expected content file"
 assert_contains "$POSITIVE_OUT" "Linux evict/rehydrate cycle passed"
@@ -393,7 +393,7 @@ env PATH="$FAKE_BIN:$PATH" \
     --expected-file "$EXPECTED_REL" \
     --expected-content-file "$EXPECTED_CONTENT_FILE" \
     --remote-prefix "fake/prefix" \
-    --remote-spec "s3://tcfs/fake/prefix" \
+    --remote-spec "seaweedfs://example.invalid:8333/tcfs/fake/prefix" \
     --mount-point "$NEG_MOUNT_POINT" \
     --skip-package-install \
     --no-systemd \

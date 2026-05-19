@@ -73,23 +73,15 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   headroom. Live repo moves, Homebrew readiness, package-backed
   restore/rollback, production Finder, broad `~/git`, and home-directory
   takeover remain unclaimed.
-- Current neo Finder truth: the May 17 packets moved the production lane from
-  package validation to installed local proof. Remote run `25973109986` built
-  the source package on a GitHub-hosted arm64 macOS runner, received Apple
-  notary `Accepted`, stapled and validated the ticket, passed Gatekeeper
-  install assessment, and passed strict package smoke with signature,
-  Gatekeeper, and stapled-ticket gates required. That artifact was installed on
-  `neo` via authenticated `osascript`, the stale user app was quarantined after
-  inventory, and strict production preflight then passed against
-  `/Applications/TCFSProvider.app` with one PlugInKit registration and
-  `/usr/local/bin/tcfs` / `/usr/local/bin/tcfsd` at `0.12.12`. A daemon
-  follow-up removed the stale `~/Applications/TCFSDaemon.app` process and
-  showed package `tcfsd` reaching storage `[ok]` from file-backed credentials.
-  The production Finder smoke now reaches domain add, CloudStorage
-  enumeration, and host-app `requestDownload` for `shared/alpha-test.txt`, but
-  the actual FileProvider read still fails with `Operation timed out`.
-  Production Finder hydration/lifecycle remains a `#309` blocker, not a
-  readiness claim.
+- Current production Finder truth: the May 18 PZM self-hosted Developer ID
+  lane closed the old read-timeout blocker. Run `26062554542` proved installed
+  strict preflight, storage `[ok]`, domain add, CloudStorage enumeration,
+  exact-content hydrate, evict/rehydrate, mutation upload/readback, and
+  conflict-status preservation through a notarized production `.pkg` without
+  `fileprovider_testing_mode=true`. The remaining macOS gaps are first-run
+  UX from installer to valid config/status, continuous per-tag release smoke,
+  and badge/progress/recovery assertions rather than basic FileProvider
+  hydration.
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
@@ -135,11 +127,12 @@ sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 # RPM (Fedora 42 x86_64 proven; RHEL/Rocky pending, daemon-only today)
 sudo rpm -i tcfsd-*.rpm
 
-# Container (K8s worker mode; amd64 image is the current proven lane)
-podman pull --arch amd64 ghcr.io/jesssullivan/tcfsd:v0.12.12
+# Container (K8s worker mode; rc1 image build/signature proven,
+# runtime smoke pending)
+podman pull ghcr.io/jesssullivan/tcfsd:v0.12.13-rc1
 
 # Nix tagged profile install
-TAG=v0.12.12
+TAG=v0.12.13-rc1
 nix profile install \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfsd" \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfs-cli"
@@ -218,7 +211,7 @@ For the bar after install succeeds, see
 | CLI (push/pull/reconcile) | Proven | Install-smoke proven; storage commands available but not continuous macOS acceptance | Planned | - |
 | Daemon (gRPC + metrics) | Proven | Available, lightly validated | Planned | - |
 | Filesystem mount | x86_64 FUSE lifecycle is host-proven; packaged mount/systemd first-use is still separate; NFS fallback evidence pending | Experimental | Cloud Files API skeleton | - |
-| FileProvider | - | Non-production PZM testing-mode lab-proven experimental; production `.pkg` install/preflight/domain/requestDownload proof exists, but read/hydration remains blocked | - | Proof-of-concept; write hooks unproven |
+| FileProvider | - | Production Developer ID `.pkg` lifecycle proven on PZM for hydrate, evict/rehydrate, mutation, and conflict-status; first-run UX and continuous release proof still pending | - | Proof-of-concept; write hooks unproven |
 | Finder/Explorer badges | - | Experimental | - | - |
 | D-Bus integration | Interface exists; release UX not proven | - | - | - |
 | Fleet sync (NATS) | Proven core/live lanes | Core path available, not continuously acceptance-tested | Planned | - |

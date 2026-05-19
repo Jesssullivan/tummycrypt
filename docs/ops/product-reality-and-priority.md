@@ -1,12 +1,12 @@
 # Product Reality And Priority
 
-As of May 17, 2026, `tummycrypt` is in a much better state operationally than
+As of May 19, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
-The latest release is `v0.12.12`, and most release-facing surfaces now have
-explicit proof paths. The important distinction is that `buildable`,
-`packaged`, and `actually proven in user-facing flows` are still different
-things.
+The latest release candidate is `v0.12.13-rc1`, and most release-facing
+surfaces now have explicit proof paths. The important distinction is that
+`buildable`, `packaged`, `product-surface proven`, and `actually ready for
+daily-driver use` are still different things.
 
 Use this document as the short answer to:
 
@@ -20,9 +20,9 @@ Use this document as the short answer to:
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
 | Fleet sync / backend path | materially exercised on real hosts; current live transcripts are archived in the fleet pilot packets | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` |
-| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; the extended fleet packet carries that lifecycle proof as a honey companion next to isolated `Documents`/`git` traversal and live backend smoke; PZM proves macOS FileProvider enumerate, exact-content hydrate, evict, rehydrate, and mutation-through-CloudStorage under testing mode with the installed lab `SystemPolicyRule` profile; production Finder lifecycle evidence is still pending | `tcfs-vfs`/FUSE implementation, archived Linux and fleet evidence, PZM testing-mode smoke, and the lazy hydration demo runbook |
+| Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; the extended fleet packet carries that lifecycle proof as a honey companion next to isolated `Documents`/`git` traversal and live backend smoke; PZM now proves production Developer ID FileProvider enumerate, exact-content hydrate, evict/rehydrate, mutation upload/readback, and conflict-status preservation without `fileprovider_testing_mode=true` | `tcfs-vfs`/FUSE implementation, archived Linux and fleet evidence, PZM production Dev ID smoke, and the lazy hydration demo runbook |
 | Real project-tree canary / storage posture | scoped isolated `linux-xr` shadow parity is green, including symlink target preservation through honey-mounted traversal. The current release-binary storage-posture packet completed the 7.7 GB shadow, then reused that prefix for honey mounted `find -maxdepth 8`, exact `.clang-format` hydration, and all 85 mounted symlink target checks. The mounted warning follow-up is closed: the exact `.tc` filename fix rerun dropped S3 `NoSuchKey` warnings from 274 to 0 while preserving real ftrace `.tc` filenames. The lifecycle companion now reuses that same prefix and reports `scoped-project-tree-parity-evidence-complete`, including mounted write/readback, cache clear/rehydrate, dirty recursive safe-unsync refusal, and clean recursive safe-unsync success. The small real-repo dogfood surface is green for both source-built and explicit current Nix flake package binaries: `git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/` and `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/` both prove clean `oauth-mux` shadow push, 0 skipped symlinks, honey mounted traversal/hydration, 9 mounted symlink target checks, and Linux lifecycle. The original Nix restore timeout remains archived at `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`; source-built `restore-proof-source-fix-empty-dirs-20260515T183805Z/` and rebuilt Nix package `restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/` now prove fresh-tree restore for 4,601 regular files, 9 symlinks, synced state for all 4,610 restored paths, and all 12 empty directories with `--require-empty-dirs`. The larger `linux-xr-fast` source-built packet is green for shadow push, honey mounted traversal/hydration, and Linux lifecycle in `git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`: the clean shadow has 2,038 regular files, 0 symlinks, about 8.7 GB of file bytes, and the Git pack-index, temp-pack, and exact `.git/index` chunk-profile fixes are proven in one run. Fresh-tree restore remains blocked because 2 of 2,038 regular files did not restore; both are multi-GB raw Git pack files that failed after transient chunk read errors, while all 6 empty directories restored exactly. Homebrew remains the package-current blocker: `tcfs-symlink-package-probe-20260515T041947Z/` shows current-checkout Nix and source-built `tcfs 0.12.12` preserve symlinks, while installed Homebrew `tcfs 0.12.12` skips them; `tcfs-symlink-package-probe-20260515T051126Z/` proves neo current-checkout Nix can publish a symlink index that honey current source-built Linux can mount, read, and verify as `link.txt -> target.txt`; `tcfs-symlink-package-probe-20260515T060330Z/` proves current Nix flake packages on neo and honey pass the same tiny mounted parse/target check. Homebrew rebuild/publish, candidate package proof for the large repo, enough local free space for full restore, and package-backed fresh-tree restore/rollback proof remain open before live repo moves. Production storage posture remains open because the endpoint is plaintext tailnet HTTP, local restore disk margin was tight, socket highwater exceeded configured upload concurrency in prior storage proof, generated large source headers still create thousands of chunks, and the Git metadata fixes have not yet been proven from a selected package/binary | `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-tmppack-20260516T024810Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-20260516T024122Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-empty-dirs-20260515T183805Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-symlink-state-20260515T171712Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T060330Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T041947Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`, `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`, `docs/release/evidence/tcfs-symlink-config-probe-20260515T005858Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-20260515T000411Z/`, `docs/ops/git-repo-canary-dogfood.md`, `docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`, PR `#367`, and blocker packet `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/` |
-| macOS | experimental but real; current packages prove package/signing/install paths, earlier hosted lanes proved storage/daemon gates, and PZM proves non-production lab FileProvider enumeration/hydration/evict/rehydrate plus mutation upload/readback and CLI conflict/exact-content preservation under Apple's testing-mode entitlement plus a managed SystemPolicyRule profile. Remote run `25973109986` proves source-package notarization, stapling, Gatekeeper install assessment, and strict package smoke with signature/Gatekeeper/stapled-ticket checks required. Neo downloaded that artifact, verified SHA-256 `c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`, installed it with authenticated `osascript`, quarantined the stale user app after inventory, and passed strict installed preflight against `/Applications/TCFSProvider.app` with one PlugInKit registration and `/usr/local/bin/tcfs` / `/usr/local/bin/tcfsd` at `0.12.12`. The package daemon was then corrected to run without the stale user daemon and reached storage `[ok]` from file-backed credentials. Production Finder smoke now reaches host-app domain add, CloudStorage enumeration, and `requestDownload`; actual FileProvider read/hydration still blocks with `Operation timed out`, so production Finder enablement/hydration/conflict/status UX are still not release-grade | build + packaging + PZM smoke + local desktop evidence + remote/local notarized package proof + installed neo blocker packets |
+| macOS | experimental but real; `v0.12.13-rc1` ships a notarized production Developer ID `.pkg`, and PZM run `26062554542` proves installed strict preflight, storage `[ok]`, domain add, CloudStorage enumeration, exact hydrate, evict/rehydrate, mutation upload/readback, and conflict-status preservation without `fileprovider_testing_mode=true`. Remaining macOS production gaps are first-run setup from installer to valid config/status, post-cut smoke against the exact published release asset, badge/progress assertions, recovery UX, and continuous release-day viability | build + packaging + PZM production Dev ID smoke + v0.12.13 evidence matrix + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | planned / skeleton | code exists, but there is no release-grade CLI, daemon, or Explorer flow |
 
@@ -34,20 +34,20 @@ This is the narrowest and most important truth for public release claims.
 
 | Surface | Status | Current reality |
 | --- | --- | --- |
-| Homebrew | current-tag pass | fresh install and upgrade proved on `v0.12.12`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
-| macOS `.pkg` | partial pass | package install/signing/provisioning, daemon startup, and E2EE fixture gates have been proven across release/PZM lanes; hosted production `.pkg` attempt `25613963424` adds current `v0.12.12` package install/signing/installed-CLI proof but failed before daemon/Finder because the public quick-tunnel storage endpoint no longer resolved; local source-built packet `macos-fileprovider-signed-app-preflight-20260516T183213Z/` proves Developer ID app signing/profile preflight with embedded profiles, `macos-fileprovider-candidate-pkg-20260516T190702Z/` proves a non-installing Developer ID Installer signed candidate package with the expected payload and postinstall shape, and `macos-fileprovider-candidate-pkg-assessment-20260516T194612Z/` preserves the prior unnotarized candidate blocker; `macos-fileprovider-pkg-notarization-proof-20260516T211425Z/` and run `25973109986` prove source-package notarization, stapling, Gatekeeper install assessment, and strict package smoke with signature/Gatekeeper/stapled-ticket gates required. The May 17 neo packets prove authenticated install of that artifact, stale user-app quarantine after inventory, strict installed preflight, and package daemon storage `[ok]`; `macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/` proves domain add, enumeration, and `requestDownload`, then blocks on FileProvider read timeout. This is not a GitHub Release asset or successful Finder hydration proof; production Developer ID clean-host Finder acceptance remains open. The PZM non-production testing-mode package proves FileProvider enumerate, hydrate, evict, rehydrate, mutation, and conflict/status content preservation on runs `25562087555`, `25565943781`, and `25569596910` |
-| `.deb` | current-tag pass | support floor is Ubuntu 24.04+ / Debian 13+; Debian 12 is excluded unless a separate bookworm-targeted package is produced; `v0.12.12` repo-archived evidence proves Ubuntu 24.04 fresh/upgrade on arm64 and amd64 plus Debian 13 fresh install on arm64 and amd64 |
-| `.rpm` | current-tag pass | RPM is daemon-only today; `v0.12.12` repo-archived evidence proves Fedora 42 x86_64 fresh install and sampled `0.12.2 -> 0.12.12` upgrade with CLI smoke skipped |
-| container image | current-tag partial pass | `v0.12.12` evidence proves explicit amd64 pull, version, and worker process/metrics initialization before the no-config smoke exits on missing local NATS; the 2026-05-14 registry metadata refresh reconfirms that the tag still lacks a native `linux/arm64/v8` image manifest. The release workflow is configured for amd64 + arm64 publication on the next cut, but current-tag arm64 proof remains open until a future tag publishes and proves the native arm64 image |
-| Nix install | current-tag pass | `v0.12.12` fresh install proved from the tagged flake into a temporary Darwin profile on `neo`; current evidence is `docs/release/evidence/distribution-v01212-20260508T205913Z/` |
+| Homebrew | rc1 formula/artifact pass | `v0.12.13-rc1` formula update passed in the release workflow; fresh install/upgrade smoke is still pending |
+| macOS `.pkg` | FileProvider product-surface pass; first-run UX gap | `v0.12.13-rc1` publishes a notarized production Developer ID `.pkg`; PZM run `26062554542` proves hydrate, evict/rehydrate, mutation upload/readback, and conflict-status. Post-cut smoke against the exact GitHub Release asset and first-run config UX remain pending |
+| `.deb` | rc1 artifact pass | Ubuntu 24.04+ / Debian 13+ are the truthful targets; packages are published, but install/upgrade smoke is still pending. Debian 12 remains excluded unless a bookworm-targeted package exists |
+| `.rpm` | rc1 daemon-only artifact pass | Fedora/RHEL daemon package is published; install smoke remains pending and the CLI `.rpm` surface is still absent |
+| container image | rc1 artifact/signature pass | multi-arch `ghcr.io/jesssullivan/tcfsd:v0.12.13-rc1` built and signed; runtime smoke remains pending |
+| Nix install | rc1 build/cache pass | release Nix build and Attic push passed; an external profile install from a non-tinyland host remains pending |
 
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
 Install-to-first-use bridge:
 [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md).
 Historical per-release evidence freeze for `v0.12.2`:
 [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md).
-Current Homebrew/Nix distribution evidence for `v0.12.12`:
-[distribution-v01212-20260508T205913Z](../release/evidence/distribution-v01212-20260508T205913Z/).
+Current release-surface evidence for `v0.12.13-rc1`:
+[v0.12.13 Evidence Matrix](../release/v0.12.13-evidence-matrix.md).
 Current evidence index with GitHub Actions run links:
 [Release Evidence Index](../release/evidence/README.md).
 
@@ -64,7 +64,8 @@ Current CI proves:
 
 Current CI does **not** prove:
 
-- production Finder/FileProvider install-to-enable-to-conflict/status UX
+- production Finder/FileProvider first-run setup, badge/progress UX, and
+  continuous release-day acceptance
 - real iOS Files.app behavior on simulator or device
 - macOS FileProvider Swift bundle build in the regular CI workflow
 - Helm/Kubernetes rollout, OpenTofu apply, live NATS/SeaweedFS health, or
@@ -88,7 +89,8 @@ Real operator flows and real-host sync flows are being exercised.
 What this still does **not** mean:
 
 - full desktop UX is release-proven
-- production Finder/FileProvider mutation/conflict UX is continuously tested
+- production Finder/FileProvider badge, progress, recovery, and long-running
+  daily-use UX are continuously tested
 - iOS is a truthful active release target
 - every host/platform combination is equally mature
 
@@ -99,7 +101,7 @@ What this still does **not** mean:
 macOS is no longer “missing” as a code path, but it is still not a release-grade
 desktop surface in the same sense Linux is.
 
-Now proven in the non-production PZM lab:
+Still useful as non-production PZM lab evidence:
 
 - a `v0.12.11` testing-mode package on `petting-zoo-mini`
 - package install, signing/profile checks, shared-Keychain config, live S3/E2EE
@@ -111,42 +113,29 @@ Now proven in the non-production PZM lab:
   E2EE, daemon startup, FileProvider registration, CloudStorage enumeration,
   `requestDownload`, `evict`, re-`requestDownload`, and exact 55-byte hydration
 
-Resolved lab runtime-policy blocker:
+Now proven on the production Dev ID PZM lane:
 
-- `v0.12.12` package/signing/storage/daemon stages pass on PZM
-- the current Mac App Development certificate/profile pair is valid: codesign
-  verification passes for the host and extension, embedded profiles decode, and
-  `taskgated-helper` allows both host and extension entitlements
-- package run `25456290021` proves the build-output host app reaches Swift
-  `main()` in policy-probe mode and exits 0 after logging `main entered`,
-  `domain created`, and `policyProbe: OK`, despite Gatekeeper assessment
-  rejection
-- `spctl` rejects both bundles, and `syspolicy_check` reports the installed app
-  is not distribution-ready because it has no notarization ticket
-- `syspolicy_check notary-submission` also reports a fatal Gatekeeper rejection
-  for `TCFSProvider.app/Contents/MacOS/TCFSProvider`
-- postinstall smoke run `25456341985` shows the installed host-app policy probe
-  times out after 15s with no instrumented stderr and a sample stuck at
-  `_dyld_start`; the later harness host launch also emits no instrumented
-  stderr, then
-  AppleSystemPolicy denies the host process
-- `fileproviderd` launches the extension process, then AppleSystemPolicy also
-  terminates the extension before the evict/rehydrate lifecycle can complete
-- smoke run `25458526158` showed macOS 15 rejects `spctl --add` rule mutation
-  with exit 4, so the repo moved to a managed `SystemPolicyRule` profile
-- smoke run `25562087555` verifies that profile and passes the FileProvider
-  evict/rehydrate harness. This proves only the non-production lab path;
-  production Finder still needs separate Developer ID clean-host evidence.
+- `v0.12.13-rc1` release publication includes a notarized production
+  Developer ID macOS `.pkg`.
+- production Dev ID smoke run `26061402177` first proved installed strict
+  preflight, storage `[ok]`, domain add, CloudStorage enumeration,
+  `requestDownload`, and exact-content hydration.
+- production Dev ID smoke run `26062554542` then proved the layered M10
+  lifecycle on PZM: hydrate, evict/rehydrate, mutation upload/readback, and
+  conflict-status preservation without `fileprovider_testing_mode=true`.
+- key artifacts from that follow-up are archived under
+  `docs/release/evidence/macos-postinstall-prod-devid-hydration-20260518T212705Z/run-26062554542/`.
+- the older PZM testing-mode lane remains useful as a lab signal, but it is no
+  longer the strongest FileProvider lifecycle evidence.
 
 Still manual or weakly proven:
 
-- production Finder/FileProvider enablement on arbitrary clean machines
-- badges, progress, notifications, and conflict UX
-- production mutation, conflict, and realistic desktop usage beyond the PZM
-  testing-mode lab. PZM smoke run `25565943781` proves CloudStorage mutation
-  upload and exact 68-byte remote pull; PZM smoke run `25569596910` proves
-  CLI `sync state: conflict` and exact FileProvider content preservation under
-  testing mode, not production Developer ID Finder behavior.
+- first-run setup from installer to a valid user config, unlocked credentials,
+  and `tcfs status [ok]`
+- post-cut smoke against the exact published GitHub Release `.pkg`
+- badges, progress, notifications, recovery UX, and user-facing conflict
+  resolution
+- long-running daily use across arbitrary clean machines
 
 Canonical docs:
 
@@ -299,24 +288,19 @@ work should be ordered like this:
    - remaining Linux work is product polish around conflict/status surfacing,
      not the lifecycle proof packet itself
 2. **Apple desktop acceptance**
-   - stop retrying hosted production packages until FileProvider can be enabled
-   - treat PZM testing-mode read/hydrate/evict/rehydrate as green under the
-     installed lab `SystemPolicyRule` profile
-   - treat PZM testing-mode mutation as green under smoke run `25565943781`
-   - treat PZM testing-mode conflict/status content preservation as green under
-     smoke run `25569596910`
-   - keep the installed-host policy probe and profile verification in the PZM
+   - treat production Dev ID FileProvider lifecycle as green on PZM run
+     `26062554542`: hydrate, evict/rehydrate, mutation upload/readback, and
+     conflict-status preservation without `fileprovider_testing_mode=true`
+   - keep the installed-host signing/profile/preflight gates in the PZM
      postinstall workflow so install/provenance failures stay classified before
      deeper Finder assertions
+   - run a post-cut smoke against the exact published GitHub Release `.pkg`
+     before making per-tag release claims
    - keep Finder badges/progress as observational evidence until there is a
      reliable assertion for those UI signals
-   - keep production Developer ID clean-host Finder acceptance separate from
-     non-production testing-mode evidence
-   - latest neo local truth: `/Applications/TCFSProvider.app` is installed from
-     the notarized workflow artifact; strict installed preflight passes after
-     stale user-app quarantine; package `tcfsd` reaches storage `[ok]`; Finder
-     smoke reaches domain add, enumeration, and `requestDownload`, then blocks
-     on FileProvider read timeout
+   - move the active Apple work from "can FileProvider hydrate?" to first-run
+     setup, badge/progress/recovery UX, release-day repeatability, and longer
+     daily-use soak
 3. **odrive-style lifecycle productionization**
    - surface `FileSyncStatus`, progress, and conflict state in CLI/TUI/Finder
    - prove `PathLocks`, dirty-child unsync, auto-unsync, and blacklist behavior
@@ -345,31 +329,21 @@ work should be ordered like this:
 
 ## Open Issue Map
 
-As of May 17, 2026, the narrow GitHub backlog snapshot is below. Verify live
+As of May 19, 2026, the narrow GitHub backlog snapshot is below. Verify live
 GitHub state before acting on exact issue or milestone status.
 
 - M10 release-proof tranche
-  - `#280`: distribution install and upgrade proof umbrella. Homebrew/Nix
-    current-tag proof is archived for `v0.12.12`; Linux `.deb`/`.rpm` package
-    proof is archived; container amd64 pull/version/startup proof is archived,
-    and release workflow readiness for native arm64 is merged, but current-tag
-    native arm64 registry proof remains open; source-package
-    notarization/stapling/Gatekeeper/strict-smoke proof is archived in
-    `macos-fileprovider-pkg-notarization-proof-20260516T211425Z/`; local neo
-    install/preflight/daemon proof is archived in the May 17 packets, but
-    production macOS `.pkg` release publication and exact Finder hydration
-    proof remain named follow-ups.
-  - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. The
-    extended fleet packet is archived and linked from `#309`/`TIN-133`; PZM
-    testing-mode enumerate/hydrate/evict/rehydrate/mutation/conflict-status is
-    green under the installed lab `SystemPolicyRule` profile; hosted production
-    `.pkg` attempt `25613963424` passed install/signing/installed-CLI/config
-    provisioning and failed before daemon/Finder on an expired public storage
-    endpoint; remote run `25973109986` proves notarized/stapled/Gatekeeper
-    package acceptance for a workflow artifact; May 17 neo packets prove
-    authenticated install, strict preflight, package daemon storage, domain
-    add, enumeration, and `requestDownload`; production Finder hydration still
-    blocks on `Operation timed out`.
+  - `#280`: distribution install and upgrade proof umbrella. `v0.12.13-rc1`
+    release artifacts and formula updates are published, but first-use smokes
+    remain pending for Homebrew, Linux packages, container runtime, and Nix
+    external profile install. Debian 12 remains excluded by the libc/OpenSSL
+    floor unless a separate bookworm package is produced.
+  - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
+    production Dev ID smoke run `26062554542` proves hydrate,
+    evict/rehydrate, mutation upload/readback, and conflict-status. Remaining
+    Apple follow-ups are exact published-release-asset post-cut smoke,
+    first-run setup UX, badge/progress/recovery assertions, and long-running
+    daily-use proof.
 - Adjacent non-M10 lanes
   - `#298`: residual Civo TCFS PVC retirement after on-prem recovery
   - `#327`: TCFS on-prem OpenTofu migration and cutover
@@ -415,18 +389,29 @@ The current parity summary and Desktop/honey demo contract live in
 
 ## Linear Mirror State
 
-As of May 9, 2026, Linear is a useful management mirror but is not the
+As of May 19, 2026, Linear is a useful management mirror but is not the
 freshest truth source for `tummycrypt`.
 
-- `TIN-133` is `In Progress`, is titled `Prove lazy traversal and
-  Finder/FileProvider hydration reality`, and points at GitHub `#309` plus the
-  current repo docs. The latest comments mirror the `v0.12.12` PZM
-  testing-mode lifecycle success and the remaining production Finder lifecycle
-  gaps.
-- `TIN-131` and `TIN-132` remain in Backlog under `Tummycrypt M10: Usage
-  Reality & Product Parity`; their descriptions were refreshed on April 29,
-  2026 to separate current repo truth from the older GitHub issue framing they
-  originally mirrored.
+- `TIN-133`, `TIN-1414`, and `TIN-1415` are Done for the M10 production
+  FileProvider hydration/lifecycle proof.
+- `TIN-131` and `TIN-132` are In Progress under `Tummycrypt M10: Usage
+  Reality & Product Parity`; they remain the distribution and live-fleet
+  acceptance lanes.
+- `TIN-1421` is Done for the real-storage CI lane.
+- `TIN-1422` is In Progress for Linux postinstall parity and is blocked by
+  `TIN-1540`, which must provide either a reachable hosted Linux smoke backend
+  or a private Linux runner that can resolve the tailnet endpoint.
+- `TIN-1417`, `TIN-1424`, and `TIN-1418` are the enrollment/security and
+  multitenancy chain: per-device identity must land before self-enrollment or
+  multitenant trust-boundary claims are product-real.
+- `TIN-1546` is the production S3/storage posture gate: TLS/CA posture,
+  bounded health, request/read timeouts, transient-error classification,
+  large-pack restore, and storage latency/object-count evidence.
+- `TIN-1547` is the post-M10 FileProvider product-hardening gate: exact release
+  asset smoke, rename/unsync semantics, badges/progress, recovery UX, and
+  longer desktop soak.
+- `TIN-1548` keeps iOS as a proof-of-concept until there is a real-device or
+  simulator Files.app acceptance lane with safe enrollment posture.
 - `TIN-134` and `TIN-135` were moved to Done on April 29, 2026 as
   completed/superseded mirrors.
 - Infrastructure Linear items such as `TIN-615` and `TIN-720` are relevant to

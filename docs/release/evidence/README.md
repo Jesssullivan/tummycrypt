@@ -4,7 +4,14 @@ This directory stores repo-archived evidence packets and links to external CI
 run logs when the evidence lives in GitHub Actions artifacts instead of files in
 the repository.
 
-## Current `v0.12.12` Packets
+## Current `v0.12.13-rc1` Packets
+
+| Packet | Scope | Evidence |
+| --- | --- | --- |
+| [`../v0.12.13-evidence-matrix.md`](../v0.12.13-evidence-matrix.md) | rc1 release-surface freeze | release workflow `26063349561` succeeded; macOS `.pkg`, Linux packages, container, Nix/cache, Homebrew formula update, checksums, and Sigstore files recorded |
+| `macos-postinstall-prod-devid-hydration-20260518T212705Z/` | Production Developer ID FileProvider lifecycle on PZM | run `26061402177` proves exact hydrate; archived follow-up run `26062554542` proves evict/rehydrate, mutation upload/readback, and conflict-status preservation without `fileprovider_testing_mode=true` |
+
+## Previous `v0.12.12` Packets
 
 | Packet | Scope | Evidence |
 | --- | --- | --- |
@@ -68,7 +75,7 @@ the repository.
 | `macos-fileprovider-neo-finder-release-smoke-20260517T013241Z/` | Superseded normal host-launch Finder release smoke attempt | strict installed preflight and daemon storage `[ok]` passed; the normal `open` host-launch path stalled before useful FileProvider lifecycle evidence |
 | `macos-fileprovider-neo-finder-release-smoke-directhost-20260517T015411Z/` | Superseded direct-host Finder release smoke attempt | strict installed preflight, daemon storage `[ok]`, host-app domain add, CloudStorage enumeration, and `requestDownload` passed; the run was terminated before read proof |
 | `macos-fileprovider-neo-finder-release-smoke-directhost-20260517T020246Z/` | Direct-host production Finder smoke with coordinated-read helper blocker | strict installed preflight, storage `[ok]`, domain add, enumeration, and `requestDownload` passed; the coordinated Swift read helper failed on mismatched Nix SDK/toolchain (`SwiftShims` missing), and FPCK reported `1/129` reconciliation failures |
-| `macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/` | Current direct-host production Finder read blocker | strict installed preflight, storage `[ok]`, domain add, enumeration, and `requestDownload` passed with the coordinated helper disabled; plain `cat` of `shared/alpha-test.txt` failed with `Operation timed out`, so production Finder hydration is still open |
+| `macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/` | Historical direct-host production Finder read blocker | strict installed preflight, storage `[ok]`, domain add, enumeration, and `requestDownload` passed with the coordinated helper disabled; plain `cat` of `shared/alpha-test.txt` failed with `Operation timed out`. Superseded by PZM production Dev ID runs `26061402177` and `26062554542` above |
 | `macos-fileprovider-neo-cleanup-20260510T003148Z/` | Non-mutating neo FileProvider divergence inventory before cleanup | repo-archived PATH/version/app-location/PlugInKit/CloudStorage/config/socket/launchd/bounded-`~/tcfs` inventory; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-neo-cleanup-pkg-20260510T0036Z/` | Non-mutating neo FileProvider divergence inventory with the published `v0.12.12` `.pkg` selected as source | repo-archived inventory plus package checksum pass, `pkgutil --check-signature` Developer ID/notarization output, and non-installing package structure smoke; no `.pkg` install, stale app quarantine, or strict production preflight was run |
 | `macos-fileprovider-strict-preflight-blocker-20260510T0040Z/` | Non-mutating strict production signing preflight against the existing `~/Applications/TCFSProvider.app` | preflight failed as expected: host and extension keychain access group entitlements/provisioning profiles are missing; ambient `tcfsd` is still `0.12.2` from the Nix profile; this is a blocker record, not Finder readiness |
@@ -279,11 +286,11 @@ the repository.
 - `macos-fileprovider-neo-package-daemon-env-20260517T012916Z/` closes the
   local package-daemon storage gate by removing the stale user daemon and
   proving package `tcfsd` storage `[ok]` from file-backed credentials.
-- The direct-host Finder smoke packets narrow `#309` to the actual production
-  FileProvider read path. The current blocker is
-  `macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/`:
-  domain add, CloudStorage enumeration, and host-app `requestDownload` pass,
-  but reading `shared/alpha-test.txt` returns `Operation timed out`.
+- The direct-host Finder smoke packets narrowed `#309` to the actual
+  production FileProvider read path. The May 17 local neo blocker packet is now
+  historical: PZM production Dev ID runs `26061402177` and `26062554542` close
+  exact hydration and the layered lifecycle. Local workstation replay remains
+  useful, but it is not the live gating blocker.
 - `distribution-v01212-20260508T205913Z/` covers Homebrew and Nix only. It does
   not cover current-tag Linux packages, container, or production macOS `.pkg`
   smoke.

@@ -1,0 +1,19 @@
+{
+  "rel_path": "ci-smoke/0.12.12/postinstall-1.txt",
+  "remote_prefix": "gha/macos-postinstall/v0.12.12/26062554542-1",
+  "index_key": "gha/macos-postinstall/v0.12.12/26062554542-1/index/ci-smoke/0.12.12/postinstall-1.txt",
+  "index_exists": true,
+  "status": "visible",
+  "parse_error": null,
+  "entry_state": "committed",
+  "visible_entry": {
+    "manifest_hash": "e5b3e3b0aaa6420161017b739ac1754f184516516ba15ef8f08a6538c086aed1",
+    "manifest_key": "gha/macos-postinstall/v0.12.12/26062554542-1/manifests/e5b3e3b0aaa6420161017b739ac1754f184516516ba15ef8f08a6538c086aed1",
+    "manifest_exists": true,
+    "size": 55,
+    "chunks": 1,
+    "kind": "regular_file",
+    "symlink_target": null
+  },
+  "pending_entry": null
+}

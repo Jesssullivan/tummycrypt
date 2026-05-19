@@ -93,19 +93,20 @@ Record results using a table like this:
 
 - `install.sh` is published convenience tooling, not part of the canonical
   release-proof surface. See [Distribution Smoke Matrix](distribution-smoke-matrix.md).
-- The macOS production clean-host lane remains tracked in `#309`. The repo has
-  two different harness families:
+- The macOS production clean-host hydration/lifecycle lane is no longer blocked
+  on `#309`; the remaining package-first-use gap is setup UX and post-cut
+  release-asset repeatability. The repo has two different harness families:
   - [`.github/workflows/macos-postinstall-smoke.yml`](../../.github/workflows/macos-postinstall-smoke.yml)
     exercises published packages and production-style install/signing/storage
-    gates. The latest local `neo` notarized workflow-artifact proof goes
-    further: authenticated install, strict installed preflight, package daemon
-    storage, domain add, CloudStorage enumeration, and host-app
-    `requestDownload` are archived. Production Finder hydration is still not
-    green because the installed app's actual read path times out. Current
-    harness reruns should archive `expected-file-index.json`; the harness now
-    uses `tcfs index inspect <path> --json` as a read-only remote fixture gate
+    gates. PZM production Dev ID run `26062554542` proves installed strict
+    preflight, storage `[ok]`, domain add, CloudStorage enumeration, exact
+    hydrate, evict/rehydrate, mutation upload/readback, and conflict-status
+    preservation without `fileprovider_testing_mode=true`. Current harness
+    reruns should archive `expected-file-index.json`; the harness now uses
+    `tcfs index inspect <path> --json` as a read-only remote fixture gate
     before treating a FileProvider read timeout as a desktop integration
-    blocker.
+    blocker. The next package-first-use bar is post-cut smoke against the exact
+    GitHub Release `.pkg`, followed by first-run config/status UX.
   - [`.github/workflows/macos-fileprovider-testing-mode-pkg.yml`](../../.github/workflows/macos-fileprovider-testing-mode-pkg.yml)
     plus the PZM smoke path exercises a non-production Mac App
     Development/testing-mode package with the lab `SystemPolicyRule` profile.

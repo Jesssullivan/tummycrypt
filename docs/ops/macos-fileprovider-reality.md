@@ -1,12 +1,15 @@
 # macOS Finder and FileProvider Reality
 
-As of May 18, 2026, the production Developer ID FileProvider hydration path
-is proven on a clean install of the notarized `.pkg`. GitHub Actions run
-`26061402177` on the registered `petting-zoo-mini-tcfs` self-hosted runner
-passed the full post-install smoke with `fileprovider_testing_mode=false`:
-installed strict preflight, storage `[ok]`, host-app domain add, CloudStorage
-enumeration, host-app `requestDownload`, and exact-content hydration of a
-55-byte seeded fixture through the installed `/Applications/TCFSProvider.app`.
+As of May 18, 2026, the production Developer ID FileProvider lifecycle is
+proven on a clean install of the notarized `.pkg`. GitHub Actions run
+`26061402177` first proved installed strict preflight, storage `[ok]`,
+host-app domain add, CloudStorage enumeration, host-app `requestDownload`, and
+exact-content hydration of a 55-byte seeded fixture through the installed
+`/Applications/TCFSProvider.app`. Follow-up run `26062554542` then proved the
+layered M10 bar on the same production Dev ID lane: hydrate,
+evict/rehydrate, mutation upload/readback, and conflict-status preservation
+without `fileprovider_testing_mode=true`.
+
 That replaces the previous "production Dev ID Finder hydration is the open
 blocker" status that this document has carried since the May 17 packets.
 
@@ -14,10 +17,11 @@ The non-production PZM testing-mode FileProvider lane remains proven on
 `v0.12.12` through enumerate, exact-content hydrate, evict, rehydrate,
 mutation upload/readback, and deterministic CLI conflict/status content
 preservation when the lab `SystemPolicyRule` profile is installed. The
-production Dev ID lane has now proven the same enumerate plus exact-content
-hydrate path, but evict/rehydrate, mutation upload/readback, conflict/status
-content preservation, badge visibility, and continuously exercised release-day
-viability are still open on the Dev ID lane (TIN-133 follow-ups this week).
+production Dev ID lane has now proven the same lifecycle assertions except for
+badge/progress UI and long-running recovery UX. The remaining production gaps
+are first-run setup from installer to valid config/status, post-cut smoke
+against the exact published release asset, badge/progress assertions, recovery
+UX, and continuously exercised release-day viability.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
@@ -25,7 +29,7 @@ smoke path for the Finder/FileProvider surface.
 For the current PZM GitHub Actions run links, see the
 [Release Evidence Index](../release/evidence/README.md).
 
-## 2026-05-18 — Production Dev ID FileProvider hydration PROVEN
+## 2026-05-18 — Production Dev ID FileProvider lifecycle PROVEN
 
 Run `26061402177` of `macos-postinstall-smoke.yml` on the registered
 `petting-zoo-mini-tcfs` self-hosted runner installed the notarized arm64
@@ -63,19 +67,24 @@ worth recording because the same classes will recur:
    `petting-zoo-mini-tcfs` on May 9 was removed so PlugInKit reported a single
    registration parented by `/Applications/TCFSProvider.app`.
 
+Run `26062554542` of the same workflow then passed the layered production
+Dev ID lifecycle gate with `fileprovider_testing_mode=false`: exact hydrate,
+evict/rehydrate, mutation upload/readback, and conflict-status preservation.
+Key artifacts from that follow-up are now archived under
+`docs/release/evidence/macos-postinstall-prod-devid-hydration-20260518T212705Z/run-26062554542/`.
+
 Honest scope for this milestone:
 
 - **Proven now on Dev ID:** installed strict preflight, storage health,
   PlugInKit single-registration, domain add, CloudStorage enumeration,
   host-app `requestDownload`, exact-content hydration through the installed
-  app, shared-Keychain config-source extension log, and the remote-index
-  visibility gate from PR #370.
-- **Not yet proven on Dev ID:** evict + rehydrate, CloudStorage mutation
-  upload/readback, deterministic CLI conflict/status content preservation,
-  badge/progress assertions as a release gate, recovery UX, and continuous
-  release-day viability of every published macOS artifact without explicit
-  post-cut smoke. These layered proofs exist today only in the PZM Mac App
-  Development testing-mode lane and are TIN-133 work this week.
+  app, evict/rehydrate, mutation upload/readback, deterministic
+  conflict/status content preservation, shared-Keychain config-source
+  extension log, and the remote-index visibility gate from PR #370.
+- **Not yet proven on Dev ID:** badge/progress assertions as a release gate,
+  recovery UX, first-run setup from package install to valid config/status,
+  and continuous release-day viability of every published macOS artifact
+  without explicit post-cut smoke.
 
 A sibling evidence packet under `docs/release/evidence/` archives the full
 artifact tree for this run; see the Release Evidence Index for the link once
@@ -570,17 +579,12 @@ Current neo evidence:
   must keep passing explicit binary paths so evidence identifies the actual
   binaries under test.
 
-So a local neo Finder smoke is now production-adjacent but still red. The next
-acceptance step is no longer basic package install or strict preflight; it is
-root-causing the FileProvider read timeout and archiving exact-content
-hydration through the installed `/Applications/TCFSProvider.app` path.
-(Updated 2026-05-18: the read-timeout root cause is closed on the hosted
-self-hosted runner — run `26061402177` proves exact-content hydration through
-the installed Dev ID app. A local neo replay is still a useful workstation
-proof but no longer the gating blocker. See the milestone section at the top
-of this doc. The remaining Dev ID acceptance step is the layered
-evict/rehydrate, mutation, and conflict-status proofs that the PZM
-testing-mode lane already carries.)
+So the older local neo Finder smoke is now historical blocker evidence. The
+read-timeout root cause is closed on the hosted self-hosted runner: run
+`26061402177` proves exact-content hydration through the installed Dev ID app,
+and run `26062554542` proves the layered evict/rehydrate, mutation, and
+conflict-status Dev ID lifecycle. A local neo replay is still a useful
+workstation proof but no longer the gating blocker.
 
 After the signing/profile gate passes, production Finder evidence must also
 prove the runtime config source. The post-install smoke can make this fatal by
