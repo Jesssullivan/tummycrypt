@@ -65,6 +65,7 @@ struct TCFSProviderApp {
                     hostEvent("signal workingSet: timed out")
                 }
 
+                probeRootIfRequested(manager)
                 requestDownloadIfRequested(manager)
                 evictIfRequested(manager)
             } else {
@@ -151,6 +152,110 @@ struct TCFSProviderApp {
         if evictSem.wait(timeout: .now() + 15.0) == .timedOut {
             hostEvent("evict: \(rawIdentifier): timed out\(nonceSuffix)")
         }
+    }
+
+    private static func probeRootIfRequested(_ manager: NSFileProviderManager) {
+        guard ProcessInfo.processInfo.environment["TCFS_FILEPROVIDER_ROOT_PROBE"] == "1" else {
+            return
+        }
+
+        let nonceSuffix = fileProviderActionNonceLogSuffix()
+        if let rawPath = ProcessInfo.processInfo.environment[
+            "TCFS_FILEPROVIDER_ROOT_PROBE_PATH"
+        ], !rawPath.isEmpty {
+            let rootURL = URL(fileURLWithPath: rawPath)
+            hostEvent("rootProbe: direct path: \(rootURL.path)\(nonceSuffix)")
+            probeDirectoryEntries(at: rootURL, label: "direct path", nonceSuffix: nonceSuffix)
+        }
+
+        let visibleSem = DispatchSemaphore(value: 0)
+        var visibleURL: URL?
+        var visibleError: Error?
+        manager.getUserVisibleURL(for: .rootContainer) { url, error in
+            visibleURL = url
+            visibleError = error
+            visibleSem.signal()
+        }
+
+        let timeoutSeconds = hostActionTimeoutSeconds()
+        if visibleSem.wait(timeout: .now() + .seconds(timeoutSeconds)) == .timedOut {
+            hostEvent("rootProbe: user-visible URL timed out after \(timeoutSeconds)s\(nonceSuffix)")
+            return
+        }
+        if let visibleError {
+            hostEvent("rootProbe: user-visible URL failed: \(describe(visibleError))\(nonceSuffix)")
+            return
+        }
+        guard let visibleURL else {
+            hostEvent("rootProbe: user-visible URL missing\(nonceSuffix)")
+            return
+        }
+
+        hostEvent("rootProbe: user-visible URL: \(visibleURL.path)\(nonceSuffix)")
+        probeDirectoryEntries(at: visibleURL, label: "user-visible", nonceSuffix: nonceSuffix)
+    }
+
+    private static func probeDirectoryEntries(at url: URL, label: String, nonceSuffix: String) {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var operationError: Error?
+        var entries: [String] = []
+
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+            do {
+                let accessed = coordinatedURL.startAccessingSecurityScopedResource()
+                defer {
+                    if accessed {
+                        coordinatedURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+
+                entries = try FileManager.default.contentsOfDirectory(
+                    at: coordinatedURL,
+                    includingPropertiesForKeys: nil,
+                    options: []
+                )
+                .map { $0.path }
+                .sorted()
+            } catch {
+                operationError = error
+            }
+        }
+
+        if let coordinationError {
+            hostEvent("rootProbe: \(label) coordination failed: \(describe(coordinationError))\(nonceSuffix)")
+            return
+        }
+        if let operationError {
+            hostEvent("rootProbe: \(label) list failed: \(describe(operationError))\(nonceSuffix)")
+            return
+        }
+        if entries.isEmpty {
+            hostEvent("rootProbe: \(label) entries: <empty>\(nonceSuffix)")
+            return
+        }
+
+        hostEvent("rootProbe: \(label) entries: \(entries.count)\(nonceSuffix)")
+        for entry in entries.prefix(20) {
+            hostEvent("rootProbe: \(label) entry: \(entry)\(nonceSuffix)")
+        }
+    }
+
+    private static func describe(_ error: Error) -> String {
+        let nsError = error as NSError
+        var details = "\(nsError.localizedDescription) [domain=\(nsError.domain) code=\(nsError.code)]"
+
+        if let path = nsError.userInfo[NSFilePathErrorKey] as? String {
+            details += " path=\(path)"
+        }
+        if let url = nsError.userInfo[NSURLErrorKey] as? URL {
+            details += " url=\(url.path)"
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            details += " underlying=\(underlying.domain)(\(underlying.code)): \(underlying.localizedDescription)"
+        }
+
+        return details
     }
 
     private static func hostEvent(_ message: String) {

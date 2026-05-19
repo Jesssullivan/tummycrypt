@@ -399,6 +399,9 @@ if [[ -n "${TCFS_FAKE_HOST_BINARY_LOG:-}" ]]; then
   if [[ -n "${TCFS_FILEPROVIDER_EVICT_IDENTIFIER:-}" ]]; then
     printf ' evict=%s' "$TCFS_FILEPROVIDER_EVICT_IDENTIFIER" >>"$TCFS_FAKE_HOST_BINARY_LOG"
   fi
+  if [[ "${TCFS_FILEPROVIDER_ROOT_PROBE:-0}" == "1" ]]; then
+    printf ' rootProbe=%s' "${TCFS_FILEPROVIDER_ROOT_PROBE_PATH:-}" >>"$TCFS_FAKE_HOST_BINARY_LOG"
+  fi
   if [[ -n "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]]; then
     printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE" >>"$TCFS_FAKE_HOST_BINARY_LOG"
   fi
@@ -413,6 +416,27 @@ if [[ "${TCFS_FILEPROVIDER_HOST_STDERR_LOG:-0}" == "1" ]]; then
     printf 'evict: %s: OK' "$TCFS_FILEPROVIDER_EVICT_IDENTIFIER"
     [[ -z "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]] || printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE"
     printf '\n'
+  elif [[ "${TCFS_FILEPROVIDER_ROOT_PROBE:-0}" == "1" ]]; then
+    entries="${TCFS_FAKE_HOST_ROOT_PROBE_ENTRIES:-}"
+    if [[ -n "$entries" ]]; then
+      count="$(printf '%s\n' "$entries" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+      printf 'rootProbe: direct path: %s' "${TCFS_FILEPROVIDER_ROOT_PROBE_PATH:-}"
+      [[ -z "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]] || printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE"
+      printf '\n'
+      printf 'rootProbe: direct path entries: %s' "$count"
+      [[ -z "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]] || printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE"
+      printf '\n'
+      while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        printf 'rootProbe: direct path entry: %s' "$entry"
+        [[ -z "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]] || printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE"
+        printf '\n'
+      done <<<"$entries"
+    else
+      printf 'rootProbe: direct path list failed: fixture disabled'
+      [[ -z "${TCFS_FILEPROVIDER_ACTION_NONCE:-}" ]] || printf ' nonce=%s' "$TCFS_FILEPROVIDER_ACTION_NONCE"
+      printf '\n'
+    fi
   else
     [[ "${TCFS_FILEPROVIDER_TESTING_MODE_ALWAYS_ENABLED:-0}" != "1" ]] || printf 'testingMode: requested alwaysEnabled for FileProvider domain\n'
     printf 'add: OK - domain available\n'
@@ -918,6 +942,28 @@ assert_not_contains "$COORDINATED_LIST_OUT" "classification: cloudstorage_root_p
 assert_contains "${TMPDIR}/coordinated-list-logs/cloud-root-find.err" "Operation not permitted"
 assert_contains "${TMPDIR}/coordinated-list-logs/cloud-root-coordinated-list.log" "$CLOUD_ROOT/Projects"
 assert_contains "${TMPDIR}/coordinated-list-logs/cloud-root-coordinated-list-nudge.log" "$CLOUD_ROOT/Projects"
+
+HOST_ROOT_PROBE_OUT="${TMPDIR}/host-root-probe.out"
+env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+  TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+  TCFS_FAKE_FIND_PERMISSION_TARGET="$CLOUD_ROOT" \
+  TCFS_FAKE_HOST_ROOT_PROBE_ENTRIES="$CLOUD_ROOT/Projects" \
+  LOG_SHOW_TIMEOUT_SECS=1 \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/host-root-probe-logs" \
+    --timeout 2 \
+    >"$HOST_ROOT_PROBE_OUT" 2>&1
+assert_contains "$HOST_ROOT_PROBE_OUT" "host app root probe sample:"
+assert_contains "$HOST_ROOT_PROBE_OUT" "$CLOUD_ROOT/Projects"
+assert_contains "$HOST_ROOT_PROBE_OUT" "macOS post-install FileProvider smoke passed"
+assert_not_contains "$HOST_ROOT_PROBE_OUT" "classification: cloudstorage_root_permission_denied"
+assert_contains "${TMPDIR}/host-root-probe-logs/cloud-root-find.err" "Operation not permitted"
+assert_contains "${TMPDIR}/host-root-probe-logs/host-root-probe.log" "rootProbe: direct path entry: $CLOUD_ROOT/Projects"
+assert_contains "$HOST_BINARY_LOG" "rootProbe=$CLOUD_ROOT"
 
 SAME_PATH_DUPES_OUT="${TMPDIR}/same-path-dupes.out"
 SAME_PATH_DUPES_ERR="${TMPDIR}/same-path-dupes.err"
