@@ -322,9 +322,18 @@ async fn live_storage_outage_leaves_no_remote_index_and_recovers() {
     let state_path = tmp.path().join("state.db.json");
     let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
 
-    let outage = tcfs_sync::engine::upload_file(&bad_op, &src, &prefix, &mut state, None)
-        .await
-        .expect_err("broken endpoint should fail upload");
+    let outage = tcfs_sync::engine::upload_file_with_device(
+        &bad_op,
+        &src,
+        &prefix,
+        &mut state,
+        None,
+        NEO_DEVICE,
+        Some(rel_path),
+        None,
+    )
+    .await
+    .expect_err("broken endpoint should fail upload");
     eprintln!("expected storage outage failure: {outage:#}");
 
     let remote_index = tcfs_sync::reconcile::list_remote_index(&good_op, &prefix)
@@ -344,9 +353,18 @@ async fn live_storage_outage_leaves_no_remote_index_and_recovers() {
         "failed upload should not leave live objects under the test prefix"
     );
 
-    let recovered = tcfs_sync::engine::upload_file(&good_op, &src, &prefix, &mut state, None)
-        .await
-        .expect("retry after storage recovery");
+    let recovered = tcfs_sync::engine::upload_file_with_device(
+        &good_op,
+        &src,
+        &prefix,
+        &mut state,
+        None,
+        NEO_DEVICE,
+        Some(rel_path),
+        None,
+    )
+    .await
+    .expect("retry after storage recovery");
     assert!(!recovered.skipped, "recovery retry should upload content");
 
     let remote_index = tcfs_sync::reconcile::list_remote_index(&good_op, &prefix)
