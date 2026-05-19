@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use opendal::raw::HttpClient;
 use opendal::Operator;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Minimal config needed to build an operator
@@ -18,6 +19,7 @@ pub struct StorageConfig {
     pub s3_pool_idle_timeout_secs: u64,
     pub s3_pool_max_idle_per_host: usize,
     pub s3_http1_only: bool,
+    pub ca_cert_path: Option<PathBuf>,
 }
 
 impl Default for StorageConfig {
@@ -32,6 +34,7 @@ impl Default for StorageConfig {
             s3_pool_idle_timeout_secs: 0,
             s3_pool_max_idle_per_host: 0,
             s3_http1_only: false,
+            ca_cert_path: None,
         }
     }
 }
@@ -95,13 +98,21 @@ fn build_s3_http_client(cfg: &StorageConfig) -> Result<Option<HttpClient>> {
     let custom_client_requested = cfg.s3_connect_timeout_secs > 0
         || cfg.s3_pool_idle_timeout_secs > 0
         || cfg.s3_pool_max_idle_per_host > 0
-        || cfg.s3_http1_only;
+        || cfg.s3_http1_only
+        || cfg.ca_cert_path.is_some();
 
     if !custom_client_requested {
         return Ok(None);
     }
 
     let mut builder = reqwest::Client::builder();
+    if let Some(path) = &cfg.ca_cert_path {
+        let pem = std::fs::read(path)
+            .with_context(|| format!("reading S3 CA certificate {}", path.display()))?;
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .with_context(|| format!("parsing S3 CA certificate {}", path.display()))?;
+        builder = builder.add_root_certificate(cert);
+    }
     if cfg.s3_connect_timeout_secs > 0 {
         builder = builder.connect_timeout(Duration::from_secs(cfg.s3_connect_timeout_secs));
     }
@@ -121,6 +132,10 @@ fn build_s3_http_client(cfg: &StorageConfig) -> Result<Option<HttpClient>> {
         s3_pool_idle_timeout_secs = cfg.s3_pool_idle_timeout_secs,
         s3_pool_max_idle_per_host = cfg.s3_pool_max_idle_per_host,
         s3_http1_only = cfg.s3_http1_only,
+        ca_cert_path = cfg
+            .ca_cert_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
         "S3 HTTP client controls enabled"
     );
     Ok(Some(HttpClient::with(client)))
@@ -161,6 +176,7 @@ pub fn build_from_core_config(
             s3_pool_idle_timeout_secs: storage.s3_pool_idle_timeout_secs,
             s3_pool_max_idle_per_host: storage.s3_pool_max_idle_per_host,
             s3_http1_only: storage.s3_http1_only,
+            ca_cert_path: storage.ca_cert_path.clone(),
         },
         storage.max_concurrent_ops,
     )
@@ -196,6 +212,7 @@ mod tests {
             s3_pool_idle_timeout_secs: 15,
             s3_pool_max_idle_per_host: 4,
             s3_http1_only: true,
+            ca_cert_path: None,
         };
 
         assert!(
@@ -205,6 +222,28 @@ mod tests {
         assert!(
             build_operator_with_limits(&cfg, 4).is_ok(),
             "operator construction should succeed with S3 HTTP controls and concurrency limits"
+        );
+    }
+
+    #[test]
+    fn test_build_s3_http_client_reads_configured_ca_cert_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("missing-ca.pem");
+
+        let cfg = StorageConfig {
+            endpoint: "https://s3.example.com".to_string(),
+            region: "us-east-1".to_string(),
+            bucket: "test-bucket".to_string(),
+            access_key_id: "test-key".to_string(),
+            secret_access_key: "test-secret".to_string(),
+            ca_cert_path: Some(ca_path.clone()),
+            ..Default::default()
+        };
+
+        let err = build_s3_http_client(&cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("reading S3 CA certificate"),
+            "missing CA error should name the CA read failure: {err}"
         );
     }
 
@@ -246,5 +285,23 @@ mod tests {
         };
         let result = build_from_core_config(&storage, "key", "secret");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_from_core_config_uses_ca_cert_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("missing-ca.pem");
+        let storage = tcfs_core::config::StorageConfig {
+            endpoint: "https://s3.example.com:8333".into(),
+            enforce_tls: true,
+            ca_cert_path: Some(ca_path),
+            ..Default::default()
+        };
+
+        let err = build_from_core_config(&storage, "key", "secret").unwrap_err();
+        assert!(
+            err.to_string().contains("reading S3 CA certificate"),
+            "core config CA path should be passed to the operator: {err}"
+        );
     }
 }

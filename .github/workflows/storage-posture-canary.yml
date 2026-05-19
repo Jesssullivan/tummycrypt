@@ -52,6 +52,7 @@ jobs:
       TCFS_SMOKE_S3_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
       TCFS_SMOKE_S3_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
       TCFS_SMOKE_S3_REGION: ${{ secrets.TCFS_SMOKE_S3_REGION }}
+      TCFS_SMOKE_S3_CA_CERT_PEM: ${{ secrets.TCFS_SMOKE_S3_CA_CERT_PEM }}
       AWS_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
     steps:
@@ -178,6 +179,13 @@ jobs:
           fi
 
           CONFIG_PATH="$RUNNER_TEMP/tcfs-storage-canary.toml"
+          CA_CERT_PATH=""
+          if [[ -n "${TCFS_SMOKE_S3_CA_CERT_PEM:-}" ]]; then
+            CA_CERT_PATH="$RUNNER_TEMP/tcfs-storage-ca.pem"
+            printf '%s\n' "$TCFS_SMOKE_S3_CA_CERT_PEM" > "$CA_CERT_PATH"
+            chmod 600 "$CA_CERT_PATH"
+          fi
+
           cat > "$CONFIG_PATH" <<EOF
           [storage]
           endpoint = "$TCFS_SMOKE_S3_ENDPOINT"
@@ -190,11 +198,15 @@ jobs:
           s3_pool_max_idle_per_host = 8
           max_concurrent_ops = 4
           EOF
+          if [[ -n "$CA_CERT_PATH" ]]; then
+            printf 'ca_cert_path = "%s"\n' "$CA_CERT_PATH" >> "$CONFIG_PATH"
+          fi
 
           {
             echo "CONFIG_PATH=$CONFIG_PATH"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
             echo "STORAGE_ENFORCE_TLS=$ENFORCE_TLS"
+            echo "CA_CERT_PATH=$CA_CERT_PATH"
           } >> "$GITHUB_ENV"
 
           {
@@ -207,7 +219,8 @@ jobs:
             echo "remote_prefix=$REMOTE_PREFIX"
             echo "enforce_tls=$ENFORCE_TLS"
             echo "require_https=${{ github.event.inputs.require_https }}"
-            echo "ca_cert_path_supported=false"
+            echo "ca_cert_path_supported=true"
+            echo "ca_cert_path_configured=$([[ -n "$CA_CERT_PATH" ]] && echo true || echo false)"
           } > "$LOG_DIR/storage-posture.env"
 
       - name: Run scoped storage canary
