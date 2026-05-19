@@ -1359,6 +1359,53 @@ collect_expected_file_diagnostics() {
   fi
 }
 
+classify_expected_file_read_failure() {
+  local path="$1"
+  local read_error="$2"
+  local classification_path="$LOG_DIR/failure-classification.txt"
+  local evidence_path="$LOG_DIR/failure-classification-input.log"
+  local file
+
+  : >"$evidence_path"
+  for file in \
+    "$read_error" \
+    "$LOG_DIR/cloud-root-ls.log" \
+    "$LOG_DIR/cloud-root-open.log" \
+    "$LOG_DIR/cloud-root-find.log" \
+    "$LOG_DIR/expected-parent-ls.log" \
+    "$LOG_DIR/expected-parent-open.log" \
+    "$LOG_DIR/expected-file-ls.log" \
+    "$LOG_DIR/expected-file-stat.log" \
+    "$LOG_DIR/expected-file-xattr.log" \
+    "$LOG_DIR/fileproviderctl-evaluate-expected-file.log" \
+    "$LOG_DIR/fileproviderctl-check-expected-file.log"
+  do
+    [[ -f "$file" ]] || continue
+    {
+      printf -- '--- %s ---\n' "$file"
+      cat "$file"
+      printf '\n'
+    } >>"$evidence_path" || true
+  done
+
+  if grep -Eiq \
+    'Operation not permitted|NSPOSIXErrorDomain\(1\)|NSCocoaErrorDomain code=257|permission to view|Permission denied|EPERM' \
+    "$evidence_path"; then
+    {
+      printf 'classification=cloudstorage_permission_denied\n'
+      printf 'path=%s\n' "$path"
+      printf 'reason=CloudStorage/FileProvider access returned EPERM or NSCocoaErrorDomain 257 after requestDownload\n'
+      printf 'evidence=%s\n' "$evidence_path"
+    } >"$classification_path"
+    echo "FileProvider CloudStorage permission denied for expected file: $path" >&2
+    echo "classification: cloudstorage_permission_denied" >&2
+    echo "classification log: $classification_path" >&2
+    return 0
+  fi
+
+  return 1
+}
+
 enumerate_root() {
   local root="$1"
   local listing
@@ -1585,6 +1632,7 @@ hydrate_expected_file() {
   if (( attempt >= TIMEOUT_SECS || SECONDS >= deadline )); then
     cat "$read_error" >&2 || true
     collect_expected_file_diagnostics "$path" "$EXPECTED_FILE_REL"
+    classify_expected_file_read_failure "$path" "$read_error" || true
     echo "failed to read expected file for hydration: $path" >&2
     exit 1
   fi
