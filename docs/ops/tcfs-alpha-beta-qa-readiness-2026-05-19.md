@@ -26,6 +26,8 @@ use.
 - Production S3/storage posture is not proven until `TIN-1546` covers TLS/CA
   posture, bounded health checks, request/read timeouts, transient error
   classification, and large-object restore evidence.
+  PR #387 starts that lane by bounding the shared storage health probe, but
+  request/read timeout wiring and transient-error classification remain open.
 - iOS remains proof-of-concept until `TIN-1548` proves a real Files.app lane
   with safe enrollment posture.
 
