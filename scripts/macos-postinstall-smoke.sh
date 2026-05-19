@@ -1372,6 +1372,7 @@ classify_expected_file_read_failure() {
     "$LOG_DIR/cloud-root-ls.log" \
     "$LOG_DIR/cloud-root-open.log" \
     "$LOG_DIR/cloud-root-find.log" \
+    "$LOG_DIR/cloud-root-find.err" \
     "$LOG_DIR/expected-parent-ls.log" \
     "$LOG_DIR/expected-parent-open.log" \
     "$LOG_DIR/expected-file-ls.log" \
@@ -1422,7 +1423,7 @@ enumerate_root() {
     run_bounded_to_log \
       "cloud-root-find" \
       "$LOG_SHOW_TIMEOUT_SECS" \
-      sh -c 'find "$1" -mindepth 1 -maxdepth 4 | head -n 10' sh "$root" || true
+      sh -c 'find "$1" -mindepth 1 -maxdepth 4 2>"$2" | head -n 10' sh "$root" "$LOG_DIR/cloud-root-find.err" || true
     listing="$(cat "$LOG_DIR/cloud-root-find.log" 2>/dev/null || true)"
     if [[ -n "$listing" ]]; then
       echo "enumeration sample:"
