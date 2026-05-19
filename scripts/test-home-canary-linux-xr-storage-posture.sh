@@ -108,6 +108,8 @@ assert_contains "$OUT" "home canary evidence:"
 assert_contains "$EVIDENCE/storage-posture.env" "posture_claim=not-production-storage-posture"
 assert_contains "$EVIDENCE/storage-posture.env" "helper_status=0"
 assert_contains "$EVIDENCE/storage-posture.env" "remote_prefix=home-canary-linux-xr-storage-posture-test"
+assert_contains "$EVIDENCE/storage-posture.env" "endpoint=http://example.invalid"
+assert_contains "$EVIDENCE/storage-posture.env" "transport_tls=false"
 assert_contains "$EVIDENCE/storage-posture.env" "credential_source=unset_or_helper_default"
 assert_contains "$EVIDENCE/storage-posture.env" "credential_aws_secret_access_key_present=0"
 assert_contains "$EVIDENCE/storage-posture.env" "state_dir=$STATE"
@@ -139,6 +141,8 @@ assert_contains "$EVIDENCE/run-metadata.env" "push=0"
 assert_contains "$EVIDENCE/run-metadata.env" "storage_max_concurrent_ops=7"
 assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "sync_symlinks = true"
 assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "max_concurrent_ops = 7"
+assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "endpoint = \"http://example.invalid\""
+assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "enforce_tls = false"
 assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "s3_connect_timeout_secs = 5"
 assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "s3_pool_idle_timeout_secs = 13"
 assert_contains "$EVIDENCE/tcfs-linux-xr-shadow.toml" "s3_pool_max_idle_per_host = 7"
@@ -174,6 +178,20 @@ assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "max_upload_elapsed_ms
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "max_upload_bytes_per_sec=8192"
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "fresh_prefix_publish_true_rows=1"
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "remote_conflict_check_false_rows=1"
+
+HTTPS_EVIDENCE="$TMPDIR/https-evidence"
+"${RUN_ENV[@]}" bash "$SCRIPT" \
+  --source "$SOURCE" \
+  --shadow-root "$TMPDIR/https-shadow" \
+  --evidence-dir "$HTTPS_EVIDENCE" \
+  --state-dir "$TMPDIR/https-state" \
+  --remote seaweedfs+https://storage.example.invalid/tcfs/home-canary-linux-xr-storage-posture-https \
+  --tcfs-bin "$BIN_DIR/tcfs" \
+  >"$TMPDIR/https.out"
+assert_contains "$HTTPS_EVIDENCE/storage-posture.env" "endpoint=https://storage.example.invalid"
+assert_contains "$HTTPS_EVIDENCE/storage-posture.env" "transport_tls=true"
+assert_contains "$HTTPS_EVIDENCE/tcfs-linux-xr-shadow.toml" "endpoint = \"https://storage.example.invalid\""
+assert_contains "$HTTPS_EVIDENCE/tcfs-linux-xr-shadow.toml" "enforce_tls = true"
 
 gzip -f "$PUSH_EVIDENCE/push.log"
 rm -f "$PUSH_EVIDENCE/push-storage-summary.env" "$PUSH_EVIDENCE/push-storage-summary.md"

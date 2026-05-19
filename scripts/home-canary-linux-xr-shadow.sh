@@ -16,7 +16,9 @@ Options:
   --source <path>        Source project. Default: /Users/jess/git/linux-xr
   --shadow-root <path>   Shadow copy path. Default: ~/TCFS Pilot/real-canaries/linux-xr-shadow-<UTC>
   --evidence-dir <path>  Evidence dir. Default: docs/release/evidence/home-canary-linux-xr-shadow-<UTC>
-  --remote <url>         seaweedfs://host:port/bucket/prefix disposable remote
+  --remote <url>         Disposable remote. Use seaweedfs://host:port/bucket/prefix
+                          for historical HTTP, seaweedfs+http://... for
+                          explicit HTTP, or seaweedfs+https://... for TLS.
   --state-dir <path>     Local TCFS state/config dir. Default: <evidence-dir>/state
   --tcfs-bin <path>      tcfs binary. Default: TCFS_BIN, target/debug/tcfs, or cargo run
   --push                 Push the shadow to the disposable prefix
@@ -272,7 +274,6 @@ done
 if [[ "$push_remote" == "1" && "$resume_after_push" == "1" ]]; then
   fail "--push and --resume-after-push are mutually exclusive"
 fi
-[[ "$remote" == seaweedfs://* ]] || fail "remote must start with seaweedfs://"
 [[ "$honey_smoke_max_depth" =~ ^[0-9]+$ ]] || fail "--honey-smoke-max-depth must be an integer"
 [[ "$honey_smoke_timeout_secs" =~ ^[0-9]+$ ]] || fail "--honey-smoke-timeout-secs must be an integer"
 [[ "$storage_max_concurrent_ops" =~ ^[0-9]+$ ]] || fail "TCFS_STORAGE_MAX_CONCURRENT_OPS must be an integer"
@@ -308,7 +309,20 @@ esac
 [[ "$source_canon" != "$home_canon" ]] || fail "refusing to canary full HOME"
 [[ "$source_canon" != "$git_canon" ]] || fail "refusing to canary full ~/git"
 
-remote_rest="${remote#seaweedfs://}"
+remote_transport_tls=false
+if [[ "$remote" == seaweedfs+https://* ]]; then
+  remote_rest="${remote#seaweedfs+https://}"
+  remote_endpoint_scheme=https
+  remote_transport_tls=true
+elif [[ "$remote" == seaweedfs+http://* ]]; then
+  remote_rest="${remote#seaweedfs+http://}"
+  remote_endpoint_scheme=http
+elif [[ "$remote" == seaweedfs://* ]]; then
+  remote_rest="${remote#seaweedfs://}"
+  remote_endpoint_scheme=http
+else
+  fail "remote must start with seaweedfs://, seaweedfs+http://, or seaweedfs+https://"
+fi
 remote_host="${remote_rest%%/*}"
 [[ "$remote_rest" != "$remote_host" ]] || fail "remote must include /bucket/prefix: $remote"
 remote_path="${remote_rest#*/}"
@@ -321,7 +335,7 @@ else
   prefix="${prefix%/}"
 fi
 [[ -n "$prefix" ]] || fail "remote must include a dedicated non-root prefix: $remote"
-endpoint="http://${remote_host}"
+endpoint="${remote_endpoint_scheme}://${remote_host}"
 region="${TCFS_S3_REGION:-us-east-1}"
 
 tcfs_cmd=()
@@ -469,7 +483,7 @@ endpoint = "$endpoint"
 region = "$region"
 bucket = "$bucket"
 remote_prefix = "$prefix"
-enforce_tls = false
+enforce_tls = $remote_transport_tls
 max_concurrent_ops = $storage_max_concurrent_ops
 s3_connect_timeout_secs = $storage_s3_connect_timeout_secs
 s3_pool_idle_timeout_secs = $storage_s3_pool_idle_timeout_secs
