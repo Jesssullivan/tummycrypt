@@ -82,6 +82,39 @@ the rendering differs.
 8. **Hand-off.** Print/show "Open TCFS in Finder" (macOS) or
    `systemctl --user start tcfsd` (Linux) plus a link to the recovery doc.
 
+## 3.1 2026-05-19 Decision Log
+
+These calls resolve the open questions for the first implementation slice:
+
+1. **Split fresh setup from fleet join.** `tcfs init` owns new-local identity
+   and config creation. `tcfs enroll <invite>` owns joining an existing fleet.
+   The GUI may present both choices, but the command surface should stay
+   explicit so users do not paste an invite into a flow that generates a new
+   root.
+2. **Do not fall back to placeholder device keys.** Fresh `tcfs init` can ship
+   for single-operator setup, but invite/join verification must stay blocked
+   until TIN-1417/TIN-1424 provide real per-device public keys, full invite
+   payload signatures, and no raw long-lived storage secrets in invites.
+3. **Use an inline macOS sheet, backed by Rust-owned state.** Do not shell out
+   to Terminal for the primary Mac path. The Swift host app should render the
+   form, but validators, config rendering, and final verification stay in the
+   Rust CLI/library path via a machine-readable contract.
+4. **Require mnemonic confirmation.** GUI/TUI flows should retype four random
+   words before writing `master.key`. CLI can keep a typed confirmation for
+   interactive use and reserve non-interactive bypasses for explicit flags.
+5. **Hide passphrase mode from the default wizard.** Keep the existing
+   Argon2id/password path as a power-user CLI flag until recovery, support, and
+   lost-password UX are documented.
+6. **Do not offer "skip storage" in the default GUI path.** A half-configured
+   install looks too much like success. Keep an explicit advanced
+   `tcfs init --skip-storage` escape hatch only if it writes a disabled config,
+   exits the daemon cleanly, and makes `tcfs status` say storage is not
+   configured rather than failing mysteriously.
+
+Implementation order follows from those calls: extend the CLI state machine
+first, wire the macOS sheet second, and treat TUI as a follow-up unless it
+falls out cheaply from the shared Rust state machine.
+
 ## 4. Three surfaces
 
 | Surface | Renderer | Trigger | Shared logic |
