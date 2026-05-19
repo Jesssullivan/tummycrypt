@@ -84,6 +84,7 @@ has shipped and been proven end to end.
 | S3/storage posture | TLS/CA posture documented, health/read paths bounded, transient errors separated from missing objects, large-pack restore evidence captured | Production-like S3 endpoint, scoped credentials, latency/object-count budgets, rollback/restore evidence | `TIN-1546`, `TIN-720`, `#327` |
 | Enrollment/security | Admin/operator-provisioned only; self-enrollment disabled for untrusted users | Real per-device identity, complete invite signature/MAC coverage, admin/session gating, safe bootstrap persistence, revocation evidence | `TIN-1417`, `TIN-1424` |
 | Daily-driver primitives | Scoped roots only; no broad home ownership claim | Pin-as-hydrated, subscription selective sync, streaming large-file IO, xattrs, conflict UX, home-dir blacklist | `TIN-1416`, `TIN-1419`, `TIN-1420`, `TIN-1423` |
+| Desktop status and recovery | CLI/log-based inspection is acceptable for trusted operators | Cross-surface sync-state vocabulary, visible progress/errors/conflicts, and clean user-driven recovery | `TIN-1549` |
 | Multitenancy | Out of scope | Tenant/vault identity, namespaced storage/NATS/authz/audit/metrics, migration story | `TIN-1418` |
 | iOS | Proof-of-concept only | Files.app real-device/simulator acceptance, safe enrollment posture, TestFlight/provisioning decision | `TIN-1548`, `TIN-134` |
 
@@ -130,4 +131,3 @@ occur:
 - iOS or desktop bootstrap persists raw production storage credentials
 - a revoked device can continue receiving new-content keys without rotation or
   rewrap
-

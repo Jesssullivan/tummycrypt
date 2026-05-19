@@ -415,6 +415,8 @@ freshest truth source for `tummycrypt`.
   longer desktop soak.
 - `TIN-1548` keeps iOS as a proof-of-concept until there is a real-device or
   simulator Files.app acceptance lane with safe enrollment posture.
+- `TIN-1549` is the beta desktop status/progress/conflict recovery UX gate
+  across FileProvider, Linux FUSE, CLI, and TUI surfaces.
 - `TIN-134` and `TIN-135` were moved to Done on April 29, 2026 as
   completed/superseded mirrors.
 - Infrastructure Linear items such as `TIN-615` and `TIN-720` are relevant to
