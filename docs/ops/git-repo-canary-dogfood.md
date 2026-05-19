@@ -201,6 +201,9 @@ Use `RESTORE_RECONCILE_TIMEOUT_SECS=<seconds>` to bound each reconcile command.
 Use `TCFS_DOWNLOAD_CHUNK_RETRIES=<attempts>` when rerunning large restore
 proofs against a noisy storage endpoint; the default is 3 and the code caps the
 value at 32.
+Use `TCFS_DOWNLOAD_READ_TIMEOUT_SECS=<seconds>` to bound each manifest/chunk
+read attempt during restore; the default is 300 seconds, the cap is 3600
+seconds, and `0` disables the per-attempt timeout.
 Use `RESTORE_PROOF_DIR=<packet>/restore-proof-<label>` when adding a follow-up
 proof without overwriting an earlier blocker packet.
 Use `REQUIRE_EMPTY_DIRS=1` only when empty-directory parity is part of the gate.

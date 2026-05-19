@@ -58,6 +58,12 @@ const DEFAULT_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 300;
 /// Hard cap for `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS`.
 const MAX_UPLOAD_CHUNK_TIMEOUT_SECS: u64 = 3600;
 
+/// Default per-attempt timeout for remote reads.
+const DEFAULT_DOWNLOAD_READ_TIMEOUT_SECS: u64 = 300;
+
+/// Hard cap for `TCFS_DOWNLOAD_READ_TIMEOUT_SECS`.
+const MAX_DOWNLOAD_READ_TIMEOUT_SECS: u64 = 3600;
+
 /// Hard cap for `TCFS_UPLOAD_PROGRESS_HEARTBEAT_SECS`.
 const MAX_UPLOAD_PROGRESS_HEARTBEAT_SECS: u64 = 3600;
 
@@ -231,6 +237,30 @@ fn upload_chunk_timeout_from_env_value(value: Option<&str>) -> Option<Duration> 
 fn upload_chunk_timeout() -> Option<Duration> {
     upload_chunk_timeout_from_env_value(
         std::env::var("TCFS_UPLOAD_CHUNK_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn download_read_timeout_from_env_value(value: Option<&str>) -> Option<Duration> {
+    let seconds = match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => DEFAULT_DOWNLOAD_READ_TIMEOUT_SECS,
+        Some("0") => return None,
+        Some(raw) => raw
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or(DEFAULT_DOWNLOAD_READ_TIMEOUT_SECS),
+    };
+
+    Some(Duration::from_secs(
+        seconds.min(MAX_DOWNLOAD_READ_TIMEOUT_SECS),
+    ))
+}
+
+fn download_read_timeout() -> Option<Duration> {
+    download_read_timeout_from_env_value(
+        std::env::var("TCFS_DOWNLOAD_READ_TIMEOUT_SECS")
             .ok()
             .as_deref(),
     )
@@ -535,6 +565,7 @@ fn record_chunk_upload_progress(
 /// chunk downloads instead of aborting the whole pull on the first failure.
 async fn read_with_retry_inner<Read, ReadFuture, Sleep, SleepFuture>(
     key: &str,
+    read_timeout: Option<Duration>,
     mut read: Read,
     sleep: Sleep,
 ) -> Result<Vec<u8>>
@@ -546,7 +577,20 @@ where
 {
     retry_with_backoff(
         CHUNK_MAX_RETRIES,
-        |_| read(),
+        |_| {
+            let fut = read();
+            async move {
+                match read_timeout {
+                    Some(limit) => match tokio::time::timeout(limit, fut).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            anyhow::bail!("read timed out after {} ms", limit.as_millis())
+                        }
+                    },
+                    None => fut.await,
+                }
+            }
+        },
         |attempt, delay, err: &anyhow::Error| {
             warn!(
                 key = key,
@@ -566,6 +610,7 @@ where
 async fn read_with_retry(op: &Operator, key: &str) -> Result<Vec<u8>> {
     read_with_retry_inner(
         key,
+        download_read_timeout(),
         || async {
             op.read(key)
                 .await
@@ -583,14 +628,31 @@ async fn read_with_retry(op: &Operator, key: &str) -> Result<Vec<u8>> {
 /// After successful read, verifies the BLAKE3 hash matches the expected value.
 #[derive(Debug)]
 enum ChunkReadError {
-    Transport(anyhow::Error),
-    Integrity { expected: String, actual: String },
+    Transport {
+        source: anyhow::Error,
+        elapsed: Duration,
+    },
+    Timeout {
+        timeout: Duration,
+        elapsed: Duration,
+    },
+    Integrity {
+        expected: String,
+        actual: String,
+    },
 }
 
 impl std::fmt::Display for ChunkReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Transport(err) => write!(f, "{err}"),
+            Self::Transport { source, .. } => write!(f, "{source}"),
+            Self::Timeout { timeout, .. } => {
+                write!(
+                    f,
+                    "chunk download timed out after {} ms",
+                    timeout.as_millis()
+                )
+            }
             Self::Integrity { expected, actual } => {
                 write!(
                     f,
@@ -622,6 +684,7 @@ where
         expected_hash,
         chunk_idx,
         CHUNK_MAX_RETRIES,
+        None,
         read,
         sleep,
     )
@@ -633,6 +696,7 @@ async fn read_chunk_with_retry_inner_with_attempts<Read, ReadFuture, Sleep, Slee
     expected_hash: &str,
     chunk_idx: usize,
     max_attempts: u32,
+    read_timeout: Option<Duration>,
     mut read: Read,
     sleep: Sleep,
 ) -> Result<Vec<u8>>
@@ -647,7 +711,27 @@ where
         |_| {
             let read_attempt = read();
             async move {
-                let chunk_bytes = read_attempt.await.map_err(ChunkReadError::Transport)?;
+                let started = Instant::now();
+                let chunk_bytes = match read_timeout {
+                    Some(limit) => match tokio::time::timeout(limit, read_attempt).await {
+                        Ok(result) => result.map_err(|source| ChunkReadError::Transport {
+                            source,
+                            elapsed: started.elapsed(),
+                        })?,
+                        Err(_) => {
+                            return Err(ChunkReadError::Timeout {
+                                timeout: limit,
+                                elapsed: started.elapsed(),
+                            })
+                        }
+                    },
+                    None => read_attempt
+                        .await
+                        .map_err(|source| ChunkReadError::Transport {
+                            source,
+                            elapsed: started.elapsed(),
+                        })?,
+                };
                 let actual_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&chunk_bytes));
                 if actual_hash == expected_hash {
                     Ok(chunk_bytes)
@@ -660,14 +744,26 @@ where
             }
         },
         |attempt, delay, err| match err {
-            ChunkReadError::Transport(source) => {
+            ChunkReadError::Transport { source, elapsed } => {
                 warn!(
                     chunk = chunk_idx,
                     attempt,
                     max = max_attempts,
                     delay_ms = delay.as_millis(),
+                    elapsed_ms = elapsed.as_millis(),
                     error = %source,
                     "chunk download failed, retrying"
+                );
+            }
+            ChunkReadError::Timeout { timeout, elapsed } => {
+                warn!(
+                    chunk = chunk_idx,
+                    attempt,
+                    max = max_attempts,
+                    timeout_ms = timeout.as_millis(),
+                    elapsed_ms = elapsed.as_millis(),
+                    delay_ms = delay.as_millis(),
+                    "chunk download timed out, retrying"
                 );
             }
             ChunkReadError::Integrity { actual, .. } => {
@@ -699,6 +795,7 @@ async fn read_chunk_with_retry(
         expected_hash,
         chunk_idx,
         download_chunk_retries(),
+        download_read_timeout(),
         || async {
             op.read(key)
                 .await
@@ -3673,6 +3770,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn download_read_timeout_env_is_bounded() {
+        assert_eq!(
+            download_read_timeout_from_env_value(None),
+            Some(Duration::from_secs(DEFAULT_DOWNLOAD_READ_TIMEOUT_SECS))
+        );
+        assert_eq!(download_read_timeout_from_env_value(Some("0")), None);
+        assert_eq!(
+            download_read_timeout_from_env_value(Some("15")),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            download_read_timeout_from_env_value(Some("not-a-number")),
+            Some(Duration::from_secs(DEFAULT_DOWNLOAD_READ_TIMEOUT_SECS))
+        );
+        assert_eq!(
+            download_read_timeout_from_env_value(Some("999999")),
+            Some(Duration::from_secs(MAX_DOWNLOAD_READ_TIMEOUT_SECS))
+        );
+    }
+
     #[tokio::test]
     async fn chunk_upload_retry_succeeds_after_transient_failure() {
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -3871,6 +3989,7 @@ mod tests {
 
         let bytes = read_with_retry_inner(
             "data/manifests/doc.json",
+            None,
             {
                 let attempts = attempts.clone();
                 move || {
@@ -3910,6 +4029,7 @@ mod tests {
 
         let err = read_with_retry_inner(
             "data/manifests/doc.json",
+            None,
             {
                 let attempts = attempts.clone();
                 move || {
@@ -3932,6 +4052,48 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("reading: data/manifests/doc.json"));
+        assert_eq!(attempts.load(Ordering::SeqCst), CHUNK_MAX_RETRIES as usize);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(200),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_read_timeout_exhausts_after_expected_attempts() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+
+        let err = read_with_retry_inner(
+            "data/manifests/never-finishes.json",
+            Some(Duration::from_millis(1)),
+            {
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        std::future::pending::<Result<Vec<u8>>>().await
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("reading: data/manifests/never-finishes.json"));
+        assert!(message.contains("read timed out"));
         assert_eq!(attempts.load(Ordering::SeqCst), CHUNK_MAX_RETRIES as usize);
         assert_eq!(
             *delays.lock().unwrap(),
@@ -3984,6 +4146,52 @@ mod tests {
         assert_eq!(
             *delays.lock().unwrap(),
             vec![std::time::Duration::from_millis(100)]
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_download_timeout_exhausts_with_context() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delays = Arc::new(Mutex::new(Vec::new()));
+        let expected_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(b"never"));
+
+        let err = read_chunk_with_retry_inner_with_attempts(
+            "data/chunks/never-finishes",
+            &expected_hash,
+            7,
+            CHUNK_MAX_RETRIES,
+            Some(Duration::from_millis(1)),
+            {
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        std::future::pending::<Result<Vec<u8>>>().await
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move |delay| {
+                    delays.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("downloading chunk 7: data/chunks/never-finishes"));
+        assert!(message.contains("chunk download timed out"));
+        assert_eq!(attempts.load(Ordering::SeqCst), CHUNK_MAX_RETRIES as usize);
+        assert_eq!(
+            *delays.lock().unwrap(),
+            vec![
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(200),
+            ]
         );
     }
 
