@@ -66,6 +66,44 @@ secret-service / file-fallback, Windows DPAPI). Never in the JSON registry.
 TIN-1417 implementation work owns the keychain abstraction; today
 `tcfs-secrets` only handles SOPS/age decryption and the JSON registry.
 
+## 2026-05-19 Decision Log
+
+The M11 implementation should use these calls unless a later design review
+finds a concrete blocker:
+
+1. **Use age/X25519 for M11.** Do not pause Phase 0 for an HPKE/Noise bake-off.
+   The project already ships `age`, and `tcfs-secrets` already has a real age
+   enrollment helper. Revisit HPKE only if age's file/container shape becomes
+   awkward for per-recipient FileKey stanzas.
+2. **Keep the keychain trait in `tcfs-secrets` initially.** A separate
+   `tcfs-keychain` crate is premature; start with a small trait plus platform
+   implementations. File fallback is acceptable only for tests/dev with an
+   explicit insecure-mode marker.
+3. **Make S3 registry the canonical revocation authority; use NATS only as an
+   advisory invalidation path.** NATS may speed up local cache refresh, but a
+   broadcast event must never be the durable source of revocation truth.
+4. **Do not auto-rotate on revoke by default.** `tcfs device revoke` must print
+   the forward-secrecy gap and offer `--rotate-keys <prefix>` / a follow-up
+   command, but surprise multi-GB rewrites are not acceptable as the default.
+5. **Scope recipient sets per prefix for the first cut.** Per-file recipient
+   sets are more flexible but make selective sync, audit, and UI explanation
+   harder. Per-prefix maps cleanly to the expected subscription model.
+6. **Treat plaintext-secret invites as a user-visible security correction.**
+   The rollout needs a CHANGELOG/security note and migration guidance; do not
+   silently paper over the old invite shape.
+7. **Keep v2 single-wrap manifest reads indefinitely, but stop writing v2 after
+   the cutover gate.** Historical data should remain readable without forcing a
+   fleet-wide rewrite on day one.
+
+Two hard gates fall out of those calls:
+
+- Invite signatures must cover the complete canonical invite payload, including
+  storage scope reference, nonce, expiry, creator, intended recipient pubkey,
+  tenant/prefix, and bootstrap policy. Signing only metadata is not sufficient.
+- Production self-enrollment stays disabled until invites no longer carry raw
+  long-lived storage credentials and the new device brings its own real public
+  key for approval/wrap.
+
 New APIs in `tcfs-crypto`:
 
 - `wrap_for_recipients(file_key, recipients: &[AgeRecipient]) -> Vec<WrappedKey>`
