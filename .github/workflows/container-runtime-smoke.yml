@@ -1,0 +1,113 @@
+name: Container Runtime Smoke
+
+# TIN-131 / #280: verify a published tcfsd worker image is not only present in
+# GHCR, but pullable and able to start its worker-mode process.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Container image repository"
+        required: true
+        default: "ghcr.io/jesssullivan/tcfsd"
+      tag:
+        description: "Image tag to smoke, for example v0.12.13-rc1"
+        required: true
+        default: "v0.12.13-rc1"
+      binary_expected_version:
+        description: "Version printed by tcfsd --version, without rc suffix"
+        required: true
+        default: "0.12.13"
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: container-runtime-smoke-${{ github.event.inputs.image }}-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  runtime-smoke:
+    name: Runtime smoke (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            artifact_suffix: amd64
+          - platform: linux/arm64/v8
+            artifact_suffix: arm64
+
+    env:
+      IMAGE_REF: ${{ github.event.inputs.image }}:${{ github.event.inputs.tag }}
+      BINARY_EXPECTED_VERSION: ${{ github.event.inputs.binary_expected_version }}
+      LOG_DIR: /tmp/tcfs-container-smoke
+
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: amd64,arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Initialize logs
+        run: mkdir -p "$LOG_DIR"
+
+      - name: Inspect published image manifest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE_REF" | tee "$LOG_DIR/manifest-${{ matrix.artifact_suffix }}.log"
+
+      - name: Pull image for platform
+        run: |
+          set -euo pipefail
+          docker pull --platform "${{ matrix.platform }}" "$IMAGE_REF" 2>&1 | tee "$LOG_DIR/pull-${{ matrix.artifact_suffix }}.log"
+
+      - name: Verify tcfsd version
+        run: |
+          set -euo pipefail
+          docker run --rm --platform "${{ matrix.platform }}" "$IMAGE_REF" --version \
+            2>&1 | tee "$LOG_DIR/version-${{ matrix.artifact_suffix }}.log"
+          grep -Fx "tcfsd ${BINARY_EXPECTED_VERSION}" "$LOG_DIR/version-${{ matrix.artifact_suffix }}.log"
+
+      - name: Verify worker-mode startup
+        run: |
+          set -euo pipefail
+          set +e
+          timeout 20s docker run --rm --platform "${{ matrix.platform }}" \
+            -e AWS_ACCESS_KEY_ID=dummy \
+            -e AWS_SECRET_ACCESS_KEY=dummy \
+            "$IMAGE_REF" \
+            --mode=worker \
+            --config /tmp/tcfs-container-smoke-missing.toml \
+            --log-format text \
+            >"$LOG_DIR/worker-startup-${{ matrix.artifact_suffix }}.log" 2>&1
+          status="$?"
+          set -e
+
+          cat "$LOG_DIR/worker-startup-${{ matrix.artifact_suffix }}.log"
+          grep -F "tcfsd starting" "$LOG_DIR/worker-startup-${{ matrix.artifact_suffix }}.log"
+          grep -F "tcfsd starting in worker mode (NATS consumer)" "$LOG_DIR/worker-startup-${{ matrix.artifact_suffix }}.log"
+
+          if [[ "$status" -eq 0 ]]; then
+            echo "worker-mode smoke exited cleanly"
+          elif [[ "$status" -eq 124 ]]; then
+            echo "worker-mode smoke reached startup and stayed alive until timeout"
+          else
+            echo "worker-mode smoke reached startup and exited with status ${status}; expected without a live NATS endpoint"
+            grep -E "connecting to NATS|Connection refused|No such file|config file not found" \
+              "$LOG_DIR/worker-startup-${{ matrix.artifact_suffix }}.log"
+          fi
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-runtime-smoke-${{ github.event.inputs.tag }}-${{ matrix.artifact_suffix }}
+          path: ${{ env.LOG_DIR }}
+          if-no-files-found: error
