@@ -247,6 +247,10 @@ jobs:
           set -euo pipefail
           TAG="${{ github.event.inputs.tag }}"
           VERSION="${TAG#v}"
+          # Release-candidate asset names keep the prerelease suffix
+          # (`0.12.13-rc1`), but the Rust binaries report the Cargo package
+          # version (`0.12.13`).
+          BINARY_EXPECTED_VERSION="${VERSION%%-*}"
           LOG_DIR="${LOG_DIR:-$RUNNER_TEMP/tcfs-macos-postinstall}"
           SYNC_ROOT="$RUNNER_TEMP/tcfs-sync-root"
           CONFIG_DIR="$RUNNER_TEMP/tcfs-config"
@@ -270,6 +274,7 @@ jobs:
           {
             echo "TAG=$TAG"
             echo "VERSION=$VERSION"
+            echo "BINARY_EXPECTED_VERSION=$BINARY_EXPECTED_VERSION"
             echo "LOG_DIR=$LOG_DIR"
             echo "SYNC_ROOT=$SYNC_ROOT"
             echo "CONFIG_DIR=$CONFIG_DIR"
@@ -450,7 +455,7 @@ jobs:
             -u TCFS_S3_SECRET \
             -u AWS_ACCESS_KEY_ID \
             -u AWS_SECRET_ACCESS_KEY \
-            bash scripts/install-smoke.sh --expected-version "${VERSION}"
+            bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 
       - name: Verify PZM lab Gatekeeper profile
         if: ${{ github.event.inputs.lab_gatekeeper_override == 'true' }}
@@ -802,7 +807,7 @@ jobs:
         run: |
           set -euo pipefail
           args=(
-            --expected-version "${VERSION}" \
+            --expected-version "${BINARY_EXPECTED_VERSION}" \
             --config "$CONFIG_PATH" \
             --expected-file "${FIXTURE_REL}" \
             --expected-content-file "$EXPECTED_CONTENT_FILE" \
