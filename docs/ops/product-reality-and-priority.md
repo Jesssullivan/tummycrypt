@@ -374,6 +374,9 @@ chosen deliberately.
 The broader product backlog still lives mostly in the parity and acceptance
 docs rather than in a large live GitHub issue set.
 
+The current alpha/beta daily-driver claim boundary lives in
+[TCFS Alpha/Beta QA Readiness](tcfs-alpha-beta-qa-readiness-2026-05-19.md).
+
 ## odrive Parity Horizon
 
 Public odrive parity should be treated as a user-behavior target: visible
