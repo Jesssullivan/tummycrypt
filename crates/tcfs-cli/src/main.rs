@@ -327,6 +327,9 @@ enum StorageAction {
         /// Remote prefix override (default: storage.remote_prefix or bucket)
         #[arg(long, short = 'p')]
         prefix: Option<String>,
+        /// Prefix that must reject canary writes with PermissionDenied
+        #[arg(long, value_name = "PREFIX")]
+        expect_deny_prefix: Option<String>,
         /// Per-operation timeout in seconds
         #[arg(long, default_value = "5")]
         timeout_secs: u64,
@@ -342,6 +345,8 @@ struct StorageCanaryReport {
     bucket: String,
     prefix: String,
     key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope_deny: Option<StorageCanaryScopeDenyReport>,
     bytes: usize,
     write_ms: u128,
     read_ms: u128,
@@ -350,6 +355,15 @@ struct StorageCanaryReport {
     deleted: bool,
     endpoint_tls: bool,
     enforce_tls: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct StorageCanaryScopeDenyReport {
+    prefix: String,
+    key: String,
+    write_ms: u128,
+    error_kind: String,
+    denied: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1594,6 +1608,7 @@ async fn cmd_storage(config: &tcfs_core::config::TcfsConfig, action: StorageActi
     match action {
         StorageAction::Canary {
             prefix,
+            expect_deny_prefix,
             timeout_secs,
             json,
         } => {
@@ -1607,11 +1622,20 @@ async fn cmd_storage(config: &tcfs_core::config::TcfsConfig, action: StorageActi
                         .trim_matches('/')
                         .to_string()
                 });
+            let expect_deny_prefix = expect_deny_prefix
+                .map(|s| s.trim_matches('/').to_string())
+                .filter(|s| !s.is_empty());
             let timeout = Duration::from_secs(timeout_secs.max(1));
             let nonce = new_storage_canary_nonce();
-            let report =
-                run_storage_canary_with_operator(config, &op, &remote_prefix, &nonce, timeout)
-                    .await?;
+            let report = run_storage_canary_with_operator(
+                config,
+                &op,
+                &remote_prefix,
+                expect_deny_prefix.as_deref(),
+                &nonce,
+                timeout,
+            )
+            .await?;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1626,6 +1650,12 @@ async fn cmd_storage(config: &tcfs_core::config::TcfsConfig, action: StorageActi
                 println!("  read:     {} ms", report.read_ms);
                 println!("  delete:   {} ms", report.delete_ms);
                 println!("  verify:   {} ms", report.verify_delete_ms);
+                if let Some(scope_deny) = &report.scope_deny {
+                    println!(
+                        "  scope:    deny write to {} ({}, {} ms)",
+                        scope_deny.key, scope_deny.error_kind, scope_deny.write_ms
+                    );
+                }
                 println!(
                     "  tls:      endpoint={}, enforce_tls={}",
                     report.endpoint_tls, report.enforce_tls
@@ -1657,6 +1687,7 @@ async fn run_storage_canary_with_operator(
     config: &tcfs_core::config::TcfsConfig,
     op: &opendal::Operator,
     prefix: &str,
+    expect_deny_prefix: Option<&str>,
     nonce: &str,
     timeout: Duration,
 ) -> Result<StorageCanaryReport> {
@@ -1708,11 +1739,18 @@ async fn run_storage_canary_with_operator(
         "storage canary delete verification failed; object still exists: {key}"
     );
 
+    let scope_deny = if let Some(deny_prefix) = expect_deny_prefix {
+        Some(run_storage_canary_scope_deny_probe(op, prefix, deny_prefix, nonce, timeout).await?)
+    } else {
+        None
+    };
+
     Ok(StorageCanaryReport {
         endpoint: config.storage.endpoint.clone(),
         bucket: config.storage.bucket.clone(),
         prefix: prefix.to_string(),
         key,
+        scope_deny,
         bytes: payload.len(),
         write_ms,
         read_ms,
@@ -1722,6 +1760,54 @@ async fn run_storage_canary_with_operator(
         endpoint_tls: config.storage.endpoint.starts_with("https://"),
         enforce_tls: config.storage.enforce_tls,
     })
+}
+
+async fn run_storage_canary_scope_deny_probe(
+    op: &opendal::Operator,
+    allowed_prefix: &str,
+    deny_prefix: &str,
+    nonce: &str,
+    timeout: Duration,
+) -> Result<StorageCanaryScopeDenyReport> {
+    let key = storage_canary_key(deny_prefix, nonce);
+    anyhow::ensure!(
+        key != storage_canary_key(allowed_prefix, nonce),
+        "--expect-deny-prefix resolves to the same canary key as --prefix: {key}"
+    );
+
+    let payload = format!(
+        "tcfs storage canary forbidden-scope probe\nallowed_prefix={allowed_prefix}\ndeny_prefix={deny_prefix}\nkey={key}\nnonce={nonce}\n",
+    )
+    .into_bytes();
+
+    let write_start = std::time::Instant::now();
+    let write_result = tokio::time::timeout(timeout, op.write(&key, payload)).await;
+    let write_ms = write_start.elapsed().as_millis();
+
+    match write_result {
+        Err(_) => {
+            anyhow::bail!("storage canary deny-scope write timed out after {timeout:?}: {key}")
+        }
+        Ok(Err(err)) if err.kind() == opendal::ErrorKind::PermissionDenied => {
+            Ok(StorageCanaryScopeDenyReport {
+                prefix: deny_prefix.to_string(),
+                key,
+                write_ms,
+                error_kind: err.kind().to_string(),
+                denied: true,
+            })
+        }
+        Ok(Err(err)) => anyhow::bail!(
+            "storage canary deny-scope write failed with {}, expected PermissionDenied: {key}",
+            err.kind()
+        ),
+        Ok(Ok(_)) => {
+            let _ = tokio::time::timeout(timeout, op.delete(&key)).await;
+            anyhow::bail!(
+                "storage canary deny-scope write unexpectedly succeeded; credentials are not scoped away from {key}"
+            )
+        }
+    }
 }
 
 // ── `tcfs migrate-prefix` ────────────────────────────────────────────────────
@@ -4877,6 +4963,7 @@ enabled = false
             &config,
             &op,
             "data",
+            None,
             "test-nonce",
             Duration::from_secs(1),
         )
@@ -4885,7 +4972,57 @@ enabled = false
 
         assert_eq!(report.key, "data/.tcfs-canary/test-nonce.txt");
         assert!(report.deleted);
+        assert!(report.scope_deny.is_none());
         assert!(!op.exists(&report.key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn storage_canary_rejects_same_scope_deny_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let op = memory_op();
+
+        let err = run_storage_canary_with_operator(
+            &config,
+            &op,
+            "data",
+            Some("/data/"),
+            "test-nonce",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("same canary key"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn storage_canary_fails_when_deny_prefix_is_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let op = memory_op();
+
+        let err = run_storage_canary_with_operator(
+            &config,
+            &op,
+            "data",
+            Some("outside"),
+            "test-nonce",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("unexpectedly succeeded"),
+            "unexpected error: {err}"
+        );
+        assert!(!op
+            .exists("outside/.tcfs-canary/test-nonce.txt")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

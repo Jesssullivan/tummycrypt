@@ -5,7 +5,9 @@ name: Storage Posture Canary
 # This workflow turns `tcfs storage canary --json` into an archived evidence
 # lane. It intentionally does not claim broad production S3 readiness by itself:
 # the run proves one scoped write/read/delete/delete-verify operation plus
-# endpoint TLS posture for the selected environment.
+# endpoint TLS posture for the selected environment. When scope_deny_prefix is
+# provided, it also proves the selected credentials cannot write outside the
+# intended prefix.
 
 on:
   workflow_dispatch:
@@ -22,6 +24,11 @@ on:
         type: string
       remote_prefix:
         description: "Remote prefix for the canary object; default is gha/storage-posture/<run>"
+        required: false
+        default: ""
+        type: string
+      scope_deny_prefix:
+        description: "Optional prefix that must reject canary writes, proving credential scope"
         required: false
         default: ""
         type: string
@@ -172,6 +179,9 @@ jobs:
           fi
           REMOTE_PREFIX="${REMOTE_PREFIX#/}"
           REMOTE_PREFIX="${REMOTE_PREFIX%/}"
+          SCOPE_DENY_PREFIX="${{ github.event.inputs.scope_deny_prefix }}"
+          SCOPE_DENY_PREFIX="${SCOPE_DENY_PREFIX#/}"
+          SCOPE_DENY_PREFIX="${SCOPE_DENY_PREFIX%/}"
           ENFORCE_TLS=false
           if [[ "${{ github.event.inputs.require_https }}" == "true" \
                 || "$TCFS_SMOKE_S3_ENDPOINT" == https://* ]]; then
@@ -205,6 +215,7 @@ jobs:
           {
             echo "CONFIG_PATH=$CONFIG_PATH"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
+            echo "SCOPE_DENY_PREFIX=$SCOPE_DENY_PREFIX"
             echo "STORAGE_ENFORCE_TLS=$ENFORCE_TLS"
             echo "CA_CERT_PATH=$CA_CERT_PATH"
           } >> "$GITHUB_ENV"
@@ -217,6 +228,7 @@ jobs:
             echo "endpoint=$TCFS_SMOKE_S3_ENDPOINT"
             echo "bucket=$TCFS_SMOKE_S3_BUCKET"
             echo "remote_prefix=$REMOTE_PREFIX"
+            echo "scope_deny_prefix=$SCOPE_DENY_PREFIX"
             echo "enforce_tls=$ENFORCE_TLS"
             echo "require_https=${{ github.event.inputs.require_https }}"
             echo "ca_cert_path_supported=true"
@@ -227,12 +239,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo run -p tcfs-cli --no-default-features -- \
+          args=(
             --config "$CONFIG_PATH" \
             storage canary \
             --prefix "$REMOTE_PREFIX" \
             --timeout-secs "${{ github.event.inputs.timeout_secs }}" \
-            --json \
+            --json
+          )
+          if [[ -n "${SCOPE_DENY_PREFIX:-}" ]]; then
+            args+=(--expect-deny-prefix "$SCOPE_DENY_PREFIX")
+          fi
+          cargo run -p tcfs-cli --no-default-features -- "${args[@]}" \
             | tee "$LOG_DIR/storage-canary.json"
 
       - name: Validate canary report
@@ -249,6 +266,11 @@ jobs:
 
           assert report["deleted"] is True, "delete verification must pass"
           assert report["bytes"] > 0, "canary payload must be non-empty"
+          if scope_deny := report.get("scope_deny"):
+              assert scope_deny["denied"] is True, "scope-deny probe must be denied"
+              assert scope_deny["error_kind"] == "PermissionDenied", (
+                  "scope-deny probe must fail with PermissionDenied"
+              )
           if require_https:
               assert report["endpoint_tls"] is True, "endpoint_tls must be true"
               assert report["enforce_tls"] is True, "enforce_tls must be true"
