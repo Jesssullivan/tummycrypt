@@ -227,6 +227,17 @@ fn delete_null_provider_returns_invalid_arg() {
     }
 }
 
+// ── tcfs_provider_unsync null safety ─────────────────────────────────────
+
+#[test]
+fn unsync_null_provider_returns_invalid_arg() {
+    let item = CString::new("test").unwrap();
+    unsafe {
+        let err = tcfs_provider_unsync(ptr::null_mut(), item.as_ptr());
+        assert!(matches!(err, TcfsError::TcfsErrorInvalidArg));
+    }
+}
+
 // ── tcfs_provider_create_dir null safety ─────────────────────────────────
 
 #[test]

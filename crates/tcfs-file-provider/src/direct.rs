@@ -807,6 +807,29 @@ pub unsafe extern "C" fn tcfs_provider_delete(
     result.unwrap_or(TcfsError::TcfsErrorInternal)
 }
 
+/// Mark an item as unsynced without deleting remote storage.
+///
+/// The direct backend has no daemon-local materialization state to evict, so
+/// this is intentionally a no-op. Swift uses this separate entry point for the
+/// FileProvider "Free Up Space" action so the action cannot accidentally share
+/// the destructive remote-delete path.
+///
+/// # Safety
+///
+/// - `provider` must be a valid pointer from `tcfs_provider_new`.
+/// - `item_id` must be a valid null-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_unsync(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+) -> TcfsError {
+    if provider.is_null() || item_id.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    TcfsError::TcfsErrorNone
+}
+
 /// Create a directory under the given parent path.
 ///
 /// # Safety
