@@ -126,6 +126,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if command -v protoc >/dev/null 2>&1; then
+            protoc --version
+            exit 0
+          fi
+
+          if ! command -v brew >/dev/null 2>&1; then
+            for brew_bin in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+              if [[ -x "$brew_bin" ]]; then
+                brew_dir="$(dirname "$brew_bin")"
+                echo "$brew_dir" >> "$GITHUB_PATH"
+                export PATH="$brew_dir:$PATH"
+                break
+              fi
+            done
+          fi
+
+          if ! command -v brew >/dev/null 2>&1; then
+            echo "::error::Homebrew is required to install protobuf, and protoc is not already available"
+            exit 1
+          fi
+
           brew install protobuf
 
       - name: Import Developer ID Application certificate
