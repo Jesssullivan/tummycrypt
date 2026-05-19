@@ -1,0 +1,78 @@
+name: Homebrew Install Smoke
+
+# TIN-131 / #280: prove the generated homebrew-tap formula installs runnable
+# tcfs binaries from the published release artifacts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tap_branch:
+        description: "Tap branch containing Formula/tcfs.rb"
+        required: true
+        default: "homebrew-tap"
+      binary_expected_version:
+        description: "Version printed by installed binaries, without rc suffix"
+        required: true
+        default: "0.12.13"
+      runner_label:
+        description: "Runner label"
+        required: true
+        default: "macos-14"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-install-smoke-${{ github.event.inputs.tap_branch }}-${{ github.event.inputs.binary_expected_version }}
+  cancel-in-progress: false
+
+jobs:
+  install-smoke:
+    name: Homebrew fresh install smoke
+    runs-on: ${{ github.event.inputs.runner_label }}
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install tcfs from generated tap
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          brew untap Jesssullivan/tummycrypt 2>/dev/null || true
+          brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt.git
+          git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin "${{ github.event.inputs.tap_branch }}"
+          git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout "${{ github.event.inputs.tap_branch }}"
+          brew install Jesssullivan/tummycrypt/tcfs
+
+      - name: Run installed-binary smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/install-smoke.sh --expected-version "${{ github.event.inputs.binary_expected_version }}"
+
+      - name: Capture Homebrew diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/homebrew-install-smoke"
+          {
+            brew --version
+            brew info Jesssullivan/tummycrypt/tcfs
+            brew list --versions tcfs
+            command -v tcfs
+            command -v tcfsd
+            tcfs --version
+            tcfsd --version
+          } >"$RUNNER_TEMP/homebrew-install-smoke/homebrew-diagnostics.log" 2>&1
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-install-smoke-${{ github.event.inputs.binary_expected_version }}
+          path: ${{ runner.temp }}/homebrew-install-smoke
+          if-no-files-found: warn
