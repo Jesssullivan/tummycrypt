@@ -131,6 +131,10 @@ jobs:
           set -euo pipefail
           TAG="${{ github.event.inputs.tag }}"
           VERSION="${TAG#v}"
+          # Release-candidate asset names keep the prerelease suffix
+          # (`0.12.13-rc1`), but the Rust binaries report the Cargo package
+          # version (`0.12.13`).
+          BINARY_EXPECTED_VERSION="${VERSION%%-*}"
           LOG_DIR="${LOG_DIR:-$RUNNER_TEMP/tcfs-linux-postinstall}"
           SYNC_ROOT="$RUNNER_TEMP/tcfs-sync-root"
           MOUNT_POINT="$RUNNER_TEMP/tcfs-mount"
@@ -150,6 +154,7 @@ jobs:
           {
             echo "TAG=$TAG"
             echo "VERSION=$VERSION"
+            echo "BINARY_EXPECTED_VERSION=$BINARY_EXPECTED_VERSION"
             echo "LOG_DIR=$LOG_DIR"
             echo "SYNC_ROOT=$SYNC_ROOT"
             echo "MOUNT_POINT=$MOUNT_POINT"
@@ -338,7 +343,7 @@ jobs:
           # status=visible — the same gate as the macOS harness.
           args=(
             --config "$CONFIG_PATH"
-            --expected-version "${VERSION}"
+            --expected-version "${BINARY_EXPECTED_VERSION}"
             --expected-file "${FIXTURE_REL}"
             --expected-content-file "$EXPECTED_CONTENT_FILE"
             --seed-expected-file
