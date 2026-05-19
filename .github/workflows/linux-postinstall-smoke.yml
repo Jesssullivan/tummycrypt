@@ -201,7 +201,7 @@ jobs:
           MUTATION_CONTENT_FILE="$RUNNER_TEMP/mutation-fixture-content"
           PACKAGE_PATHS_FILE="$RUNNER_TEMP/tcfs-package-paths.txt"
           REMOTE_PREFIX="gha/linux-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          REMOTE_AUTHORITY="$(python3 - <<'PY'
+          readarray -t REMOTE_SPEC_PARTS < <(python3 - <<'PY'
           import os
           import urllib.parse
 
@@ -209,10 +209,13 @@ jobs:
           parsed = urllib.parse.urlparse(endpoint)
           if not parsed.netloc:
               raise SystemExit(f"storage endpoint has no authority: {endpoint}")
+          print("seaweedfs+https" if parsed.scheme == "https" else "seaweedfs")
           print(parsed.netloc)
           PY
-          )"
-          REMOTE_SPEC="seaweedfs://${REMOTE_AUTHORITY}/${TCFS_SMOKE_S3_BUCKET}/${REMOTE_PREFIX}"
+          )
+          REMOTE_SCHEME="${REMOTE_SPEC_PARTS[0]}"
+          REMOTE_AUTHORITY="${REMOTE_SPEC_PARTS[1]}"
+          REMOTE_SPEC="${REMOTE_SCHEME}://${REMOTE_AUTHORITY}/${TCFS_SMOKE_S3_BUCKET}/${REMOTE_PREFIX}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
           MUTATION_REL="ci-smoke/${VERSION}/mutation-${GITHUB_RUN_ATTEMPT}.txt"
 

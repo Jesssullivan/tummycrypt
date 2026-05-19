@@ -8,16 +8,28 @@ pub mod seaweedfs;
 pub use health::check_health;
 pub use operator::{build_operator, StorageConfig};
 
-/// Parse a remote spec like `seaweedfs://host:port/bucket[/prefix]`
+/// Parse a remote spec like `seaweedfs://host:port/bucket[/prefix]`.
+///
+/// `seaweedfs://` is retained as the historical HTTP form for local/dev
+/// endpoints. Use `seaweedfs+https://` for production-like TLS endpoints.
 ///
 /// Returns `(endpoint, bucket, prefix)` where:
-/// - endpoint: `http://host:port`
+/// - endpoint: `http://host:port` or `https://host:port`
 /// - bucket: first path component
 /// - prefix: remaining path (may be empty)
 pub fn parse_remote_spec(spec: &str) -> anyhow::Result<(String, String, String)> {
-    let rest = spec.strip_prefix("seaweedfs://").ok_or_else(|| {
-        anyhow::anyhow!("remote spec must start with seaweedfs:// — got: {}", spec)
-    })?;
+    let (endpoint_scheme, rest) = if let Some(rest) = spec.strip_prefix("seaweedfs+https://") {
+        ("https", rest)
+    } else if let Some(rest) = spec.strip_prefix("seaweedfs+http://") {
+        ("http", rest)
+    } else if let Some(rest) = spec.strip_prefix("seaweedfs://") {
+        ("http", rest)
+    } else {
+        anyhow::bail!(
+            "remote spec must start with seaweedfs://, seaweedfs+http://, or seaweedfs+https:// — got: {}",
+            spec
+        );
+    };
 
     // Split host:port from /bucket[/prefix]
     let slash = rest
@@ -29,9 +41,12 @@ pub fn parse_remote_spec(spec: &str) -> anyhow::Result<(String, String, String)>
 
     // First path component = bucket, remainder = prefix
     let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
+    if bucket.is_empty() {
+        anyhow::bail!("remote spec must include a bucket — got: {}", spec);
+    }
 
     Ok((
-        format!("http://{}", host),
+        format!("{}://{}", endpoint_scheme, host),
         bucket.to_string(),
         prefix.trim_end_matches('/').to_string(),
     ))
@@ -47,6 +62,24 @@ mod tests {
         assert_eq!(ep, "http://host:8333");
         assert_eq!(bucket, "mybucket");
         assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_parse_remote_spec_explicit_http() {
+        let (ep, bucket, prefix) =
+            parse_remote_spec("seaweedfs+http://host:8333/mybucket/data").unwrap();
+        assert_eq!(ep, "http://host:8333");
+        assert_eq!(bucket, "mybucket");
+        assert_eq!(prefix, "data");
+    }
+
+    #[test]
+    fn test_parse_remote_spec_https() {
+        let (ep, bucket, prefix) =
+            parse_remote_spec("seaweedfs+https://storage.example.com/mybucket/data").unwrap();
+        assert_eq!(ep, "https://storage.example.com");
+        assert_eq!(bucket, "mybucket");
+        assert_eq!(prefix, "data");
     }
 
     #[test]
@@ -78,5 +111,10 @@ mod tests {
     #[test]
     fn test_parse_remote_spec_no_bucket() {
         assert!(parse_remote_spec("seaweedfs://host").is_err());
+    }
+
+    #[test]
+    fn test_parse_remote_spec_empty_bucket() {
+        assert!(parse_remote_spec("seaweedfs://host:8333/").is_err());
     }
 }
