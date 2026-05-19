@@ -10,6 +10,12 @@ one scoped write/read/delete/delete-verify path, endpoint TLS posture, and the
 credential scope used for the run. It does not prove broad directory ownership,
 multitenancy, lost-device recovery, or long soak behavior.
 
+For the production posture packet, the canary should also include a negative
+scope probe by setting `scope_deny_prefix` to a prefix outside the credential
+policy. The workflow passes that to `tcfs storage canary
+--expect-deny-prefix`; the run fails unless the write is rejected with
+`PermissionDenied`.
+
 ## Current State
 
 `main` has a dispatchable workflow:
@@ -74,6 +80,13 @@ release prefixes. If the backing S3 provider cannot express that exact policy,
 record the closest available policy in the evidence packet and keep `TIN-1546`
 open.
 
+To make that scope claim machine-checkable, choose a denial prefix outside the
+allowed policy, for example:
+
+- allowed parent prefix: `gha/storage-posture/`
+- canary write prefix: `gha/storage-posture/<run_id>-<attempt>`
+- denial prefix: `gha/storage-posture-denied/<run_id>-<attempt>`
+
 ## Dispatch
 
 Hosted Linux runner against a public HTTPS endpoint:
@@ -84,6 +97,7 @@ gh workflow run storage-posture-canary.yml \
   -f runner_label=ubuntu-24.04 \
   -f smoke_environment=tcfs-storage-prod-smoke \
   -f require_https=true \
+  -f scope_deny_prefix=gha/storage-posture-denied/$(date -u +%Y%m%dT%H%M%SZ) \
   -f timeout_secs=10
 ```
 
@@ -95,6 +109,7 @@ gh workflow run storage-posture-canary.yml \
   -f runner_label=<private-runner-label> \
   -f smoke_environment=tcfs-storage-prod-smoke \
   -f require_https=true \
+  -f scope_deny_prefix=gha/storage-posture-denied/$(date -u +%Y%m%dT%H%M%SZ) \
   -f timeout_secs=10
 ```
 
@@ -111,6 +126,8 @@ The workflow run must complete successfully and upload its evidence artifact.
 - `bytes > 0`
 - `endpoint_tls: true`
 - `enforce_tls: true`
+- if `scope_deny_prefix` was set: `scope_deny.denied: true` and
+  `scope_deny.error_kind: PermissionDenied`
 - non-empty `endpoint`, `bucket`, `prefix`, `key`, and operation timings
 
 `storage-posture.env` must record:
@@ -120,6 +137,7 @@ The workflow run must complete successfully and upload its evidence artifact.
 - endpoint
 - bucket
 - remote prefix
+- scope-deny prefix, if configured
 - `require_https=true`
 - `enforce_tls=true`
 - `ca_cert_path_supported=true`
