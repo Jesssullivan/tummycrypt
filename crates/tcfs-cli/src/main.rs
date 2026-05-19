@@ -116,6 +116,12 @@ enum Commands {
         action: IndexAction,
     },
 
+    /// Storage posture checks
+    Storage {
+        #[command(subcommand)]
+        action: StorageAction,
+    },
+
     // ── Phase 3: mount + stub management ──────────────────────────────────────
     /// Mount a remote as a local directory
     Mount {
@@ -312,6 +318,38 @@ enum IndexAction {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum StorageAction {
+    /// Write, read, delete, and verify one scoped canary object
+    Canary {
+        /// Remote prefix override (default: storage.remote_prefix or bucket)
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
+        /// Per-operation timeout in seconds
+        #[arg(long, default_value = "5")]
+        timeout_secs: u64,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct StorageCanaryReport {
+    endpoint: String,
+    bucket: String,
+    prefix: String,
+    key: String,
+    bytes: usize,
+    write_ms: u128,
+    read_ms: u128,
+    delete_ms: u128,
+    verify_delete_ms: u128,
+    deleted: bool,
+    endpoint_tls: bool,
+    enforce_tls: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -527,6 +565,7 @@ async fn main() -> Result<()> {
             cmd_sync_status(&config, path.as_deref(), state.as_deref())
         }
         Commands::Index { action } => cmd_index(&config, action).await,
+        Commands::Storage { action } => cmd_storage(&config, action).await,
         Commands::Cache { action } => match action {
             CacheAction::Stats => cmd_cache_stats(&config).await,
             CacheAction::Clear => cmd_cache_clear(&config).await,
@@ -1547,6 +1586,142 @@ fn print_index_inspect_report(report: &IndexInspectReport) {
             }
         );
     }
+}
+
+// ── `tcfs storage` ───────────────────────────────────────────────────────────
+
+async fn cmd_storage(config: &tcfs_core::config::TcfsConfig, action: StorageAction) -> Result<()> {
+    match action {
+        StorageAction::Canary {
+            prefix,
+            timeout_secs,
+            json,
+        } => {
+            let op = build_operator(config).await?;
+            let remote_prefix = prefix
+                .map(|s| s.trim_matches('/').to_string())
+                .unwrap_or_else(|| {
+                    config
+                        .storage
+                        .resolved_prefix()
+                        .trim_matches('/')
+                        .to_string()
+                });
+            let timeout = Duration::from_secs(timeout_secs.max(1));
+            let nonce = new_storage_canary_nonce();
+            let report =
+                run_storage_canary_with_operator(config, &op, &remote_prefix, &nonce, timeout)
+                    .await?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Storage canary passed:");
+                println!("  endpoint: {}", report.endpoint);
+                println!("  bucket:   {}", report.bucket);
+                println!("  prefix:   {}", report.prefix);
+                println!("  key:      {}", report.key);
+                println!("  bytes:    {}", report.bytes);
+                println!("  write:    {} ms", report.write_ms);
+                println!("  read:     {} ms", report.read_ms);
+                println!("  delete:   {} ms", report.delete_ms);
+                println!("  verify:   {} ms", report.verify_delete_ms);
+                println!(
+                    "  tls:      endpoint={}, enforce_tls={}",
+                    report.endpoint_tls, report.enforce_tls
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn new_storage_canary_nonce() -> String {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}-{}", now.as_secs(), std::process::id())
+}
+
+fn storage_canary_key(prefix: &str, nonce: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty() {
+        format!(".tcfs-canary/{nonce}.txt")
+    } else {
+        format!("{prefix}/.tcfs-canary/{nonce}.txt")
+    }
+}
+
+async fn run_storage_canary_with_operator(
+    config: &tcfs_core::config::TcfsConfig,
+    op: &opendal::Operator,
+    prefix: &str,
+    nonce: &str,
+    timeout: Duration,
+) -> Result<StorageCanaryReport> {
+    let key = storage_canary_key(prefix, nonce);
+    let payload = format!(
+        "tcfs storage canary\nendpoint={}\nbucket={}\nprefix={}\nkey={}\nnonce={}\n",
+        config.storage.endpoint, config.storage.bucket, prefix, key, nonce
+    )
+    .into_bytes();
+
+    let write_start = std::time::Instant::now();
+    tokio::time::timeout(timeout, op.write(&key, payload.clone()))
+        .await
+        .map_err(|_| anyhow::anyhow!("storage canary write timed out after {timeout:?}: {key}"))?
+        .with_context(|| format!("storage canary write failed: {key}"))?;
+    let write_ms = write_start.elapsed().as_millis();
+
+    let read_start = std::time::Instant::now();
+    let read_back = tokio::time::timeout(timeout, op.read(&key))
+        .await
+        .map_err(|_| anyhow::anyhow!("storage canary read timed out after {timeout:?}: {key}"))?
+        .with_context(|| format!("storage canary read failed: {key}"))?
+        .to_bytes();
+    let read_ms = read_start.elapsed().as_millis();
+
+    anyhow::ensure!(
+        read_back == payload.as_slice(),
+        "storage canary readback mismatch: {key}"
+    );
+
+    let delete_start = std::time::Instant::now();
+    tokio::time::timeout(timeout, op.delete(&key))
+        .await
+        .map_err(|_| anyhow::anyhow!("storage canary delete timed out after {timeout:?}: {key}"))?
+        .with_context(|| format!("storage canary delete failed: {key}"))?;
+    let delete_ms = delete_start.elapsed().as_millis();
+
+    let verify_start = std::time::Instant::now();
+    let exists_after_delete = tokio::time::timeout(timeout, op.exists(&key))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("storage canary delete verification timed out after {timeout:?}: {key}")
+        })?
+        .with_context(|| format!("storage canary delete verification failed: {key}"))?;
+    let verify_delete_ms = verify_start.elapsed().as_millis();
+
+    anyhow::ensure!(
+        !exists_after_delete,
+        "storage canary delete verification failed; object still exists: {key}"
+    );
+
+    Ok(StorageCanaryReport {
+        endpoint: config.storage.endpoint.clone(),
+        bucket: config.storage.bucket.clone(),
+        prefix: prefix.to_string(),
+        key,
+        bytes: payload.len(),
+        write_ms,
+        read_ms,
+        delete_ms,
+        verify_delete_ms,
+        deleted: !exists_after_delete,
+        endpoint_tls: config.storage.endpoint.starts_with("https://"),
+        enforce_tls: config.storage.enforce_tls,
+    })
 }
 
 // ── `tcfs migrate-prefix` ────────────────────────────────────────────────────
@@ -4676,6 +4851,40 @@ enabled = false
         assert_eq!(visible.manifest_key, "data/manifests/hash123");
         assert!(visible.manifest_exists);
         assert_eq!(visible.size, 46);
+    }
+
+    #[test]
+    fn storage_canary_key_is_scoped_under_prefix() {
+        assert_eq!(
+            storage_canary_key("data", "nonce"),
+            "data/.tcfs-canary/nonce.txt"
+        );
+        assert_eq!(
+            storage_canary_key("/tenant/a/", "nonce"),
+            "tenant/a/.tcfs-canary/nonce.txt"
+        );
+        assert_eq!(storage_canary_key("", "nonce"), ".tcfs-canary/nonce.txt");
+    }
+
+    #[tokio::test]
+    async fn storage_canary_writes_reads_deletes_and_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let op = memory_op();
+
+        let report = run_storage_canary_with_operator(
+            &config,
+            &op,
+            "data",
+            "test-nonce",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.key, "data/.tcfs-canary/test-nonce.txt");
+        assert!(report.deleted);
+        assert!(!op.exists(&report.key).await.unwrap());
     }
 
     #[tokio::test]
