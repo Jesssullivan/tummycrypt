@@ -438,6 +438,7 @@ destination="${3:-}"
 marker="${TCFS_FAKE_SWIFT_MARKER:-}"
 target="${TCFS_FAKE_SWIFT_TARGET:-}"
 hang_target="${TCFS_FAKE_SWIFT_HANG_TARGET:-}"
+permission_target="${TCFS_FAKE_SWIFT_PERMISSION_TARGET:-}"
 
 if [[ "$helper" != *"macos-fileprovider-coordinated-read.swift" || -z "$source" || -z "$destination" ]]; then
   printf 'unexpected swift invocation:'
@@ -448,6 +449,11 @@ fi
 
 if [[ -n "$hang_target" && "$source" == "$hang_target" ]]; then
   exec perl -e 'select undef, undef, undef, 60'
+fi
+
+if [[ -n "$permission_target" && "$source" == "$permission_target" ]]; then
+  printf 'coordinated read operation failed: The file “postinstall-1” couldn'\''t be opened because you don'\''t have permission to view it. [domain=NSCocoaErrorDomain code=257] path=%s underlying=NSPOSIXErrorDomain(1): Operation not permitted\n' "$source" >&2
+  exit 1
 fi
 
 if [[ -n "$marker" && -n "$target" && "$source" == "$target" && ! -e "$marker" ]]; then
@@ -752,6 +758,22 @@ assert_fails_contains \
       --cloud-root "$CLOUD_ROOT" \
       --log-dir "${TMPDIR}/hung-read-logs" \
       --timeout 2
+
+assert_fails_contains \
+  "classification: cloudstorage_permission_denied" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_FAKE_SWIFT_PERMISSION_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
+    bash "$SCRIPT" \
+      --expected-version 0.12.2 \
+      --config "$CONFIG_PATH" \
+      --expected-file "$EXPECTED_REL" \
+      --expected-content-file "$EXPECTED_CONTENT_FILE" \
+      --app-path "$APP_PATH" \
+      --cloud-root "$CLOUD_ROOT" \
+      --log-dir "${TMPDIR}/permission-denied-logs" \
+      --timeout 2
+assert_contains "${TMPDIR}/permission-denied-logs/failure-classification.txt" "classification=cloudstorage_permission_denied"
+assert_contains "${TMPDIR}/permission-denied-logs/failure-classification-input.log" "NSCocoaErrorDomain code=257"
 
 BOUNDED_LS_OUT="${TMPDIR}/bounded-cloud-root-ls.out"
 env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
