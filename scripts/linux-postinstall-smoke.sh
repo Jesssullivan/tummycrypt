@@ -336,7 +336,11 @@ install_package() {
               cat "$install_log" >&2 || true
               exit 1
             }
-            sudo -n apt-get install -y -f >>"$install_log" 2>&1 || true
+            sudo -n apt-get install -y -f >>"$install_log" 2>&1 || {
+              echo "apt dependency repair failed after dpkg install; see $install_log" >&2
+              cat "$install_log" >&2 || true
+              exit 1
+            }
           }
       else
         dpkg -i "$PACKAGE_PATH" >"$install_log" 2>&1 || {
