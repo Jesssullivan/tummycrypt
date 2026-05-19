@@ -268,6 +268,42 @@ cat >"$FAKE_BIN/systemctl" <<'EOF'
 exit 1
 EOF
 
+cat >"$FAKE_BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-n" ]]; then
+  shift
+fi
+exec "$@"
+EOF
+
+cat >"$FAKE_BIN/apt-get" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "install" && "${*: -1}" == *.deb ]]; then
+  printf 'fake apt direct install failure\n' >&2
+  exit 1
+fi
+
+if [[ "${1:-}" == "install" && "${*: -1}" == "-f" ]]; then
+  if [[ "${TCFS_FAKE_APT_FIX_FAIL:-0}" == "1" ]]; then
+    printf 'fake apt dependency repair failure\n' >&2
+    exit 23
+  fi
+  printf 'fake apt dependency repair success\n'
+  exit 0
+fi
+
+printf 'unexpected fake apt-get invocation:'
+printf ' %q' "$@"
+printf '\n' >&2
+exit 1
+EOF
+
+cat >"$FAKE_BIN/dpkg" <<'EOF'
+#!/usr/bin/env bash
+printf 'fake dpkg install success\n'
+exit 0
+EOF
+
 cat >"$FAKE_BIN/mountpoint" <<'EOF'
 #!/usr/bin/env bash
 # Treat the marker file as proof of mount.
@@ -378,5 +414,19 @@ assert_fails_contains "mutually exclusive" \
 # ── Negative: --exercise-evict-rehydrate without expected file ──────────────
 assert_fails_contains "--exercise-evict-rehydrate requires" \
   run_with_fakes --exercise-evict-rehydrate
+
+# ── Negative: .deb fallback must not mask apt dependency repair failure ─────
+FAKE_DEB="${TMPDIR_BASE}/fake-tcfsd.deb"
+: >"$FAKE_DEB"
+assert_fails_contains "apt dependency repair failed after dpkg install" \
+  env PATH="$FAKE_BIN:$PATH" \
+    HOME="$HOME_DIR" \
+    TCFS_FAKE_APT_FIX_FAIL=1 \
+    bash "$SCRIPT" \
+      --package-path "$FAKE_DEB" \
+      --config "$CONFIG_PATH" \
+      --no-systemd \
+      --timeout 1 \
+      --log-dir "${TMPDIR_BASE}/deb-failure-logs"
 
 echo "linux-postinstall-smoke tests passed"
