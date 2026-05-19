@@ -1,0 +1,8 @@
+[2m2026-05-18T21:51:26.027158Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:TCFS_S3_ACCESS
+[2m2026-05-18T21:51:26.027285Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://seaweedfs-tcfs:8333
+Pulling ci-smoke/0.12.12/mutation-1.txt → /Users/jsullivan2/github-actions-runners/tummycrypt-tcfs/_work/_temp/tcfs-macos-postinstall/harness/mutation-remote-pull
+[2m2026-05-18T21:51:26.045994Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m downloaded [3mremote[0m[2m=[0mgha/macos-postinstall/v0.12.12/26062554542-1/manifests/cbf555eef31edbb602ff5a7562b34d6fd1aaacde6e87d4b7f5263ac4ad7bace5 [3mlocal[0m[2m=[0m/Users/jsullivan2/github-actions-runners/tummycrypt-tcfs/_work/_temp/tcfs-macos-postinstall/harness/mutation-remote-pull [3mbytes[0m[2m=[0m68
+
+Downloaded:
+  local:  /Users/jsullivan2/github-actions-runners/tummycrypt-tcfs/_work/_temp/tcfs-macos-postinstall/harness/mutation-remote-pull
+  bytes:  68 B

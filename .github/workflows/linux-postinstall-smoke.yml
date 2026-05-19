@@ -201,6 +201,18 @@ jobs:
           MUTATION_CONTENT_FILE="$RUNNER_TEMP/mutation-fixture-content"
           PACKAGE_PATHS_FILE="$RUNNER_TEMP/tcfs-package-paths.txt"
           REMOTE_PREFIX="gha/linux-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          REMOTE_AUTHORITY="$(python3 - <<'PY'
+          import os
+          import urllib.parse
+
+          endpoint = os.environ["TCFS_SMOKE_S3_ENDPOINT"].strip()
+          parsed = urllib.parse.urlparse(endpoint)
+          if not parsed.netloc:
+              raise SystemExit(f"storage endpoint has no authority: {endpoint}")
+          print(parsed.netloc)
+          PY
+          )"
+          REMOTE_SPEC="seaweedfs://${REMOTE_AUTHORITY}/${TCFS_SMOKE_S3_BUCKET}/${REMOTE_PREFIX}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
           MUTATION_REL="ci-smoke/${VERSION}/mutation-${GITHUB_RUN_ATTEMPT}.txt"
 
@@ -221,6 +233,7 @@ jobs:
             echo "MUTATION_CONTENT_FILE=$MUTATION_CONTENT_FILE"
             echo "PACKAGE_PATHS_FILE=$PACKAGE_PATHS_FILE"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
+            echo "REMOTE_SPEC=$REMOTE_SPEC"
             echo "FIXTURE_REL=$FIXTURE_REL"
             echo "MUTATION_REL=$MUTATION_REL"
           } >> "$GITHUB_ENV"
@@ -403,7 +416,7 @@ jobs:
             --expected-content-file "$EXPECTED_CONTENT_FILE"
             --seed-expected-file
             --remote-prefix "$REMOTE_PREFIX"
-            --remote-spec "s3://${TCFS_SMOKE_S3_BUCKET}/${REMOTE_PREFIX}"
+            --remote-spec "$REMOTE_SPEC"
             --mount-point "$MOUNT_POINT"
             --log-dir "$LOG_DIR/harness"
           )

@@ -136,6 +136,7 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 
 ### Ops Runbooks
 - [Product Reality and Priority](ops/product-reality-and-priority.md) — current proof surface, honest product posture, and prioritized backlog
+- [TCFS Alpha/Beta QA Readiness](ops/tcfs-alpha-beta-qa-readiness-2026-05-19.md) — current alpha/beta claim boundary, Linear gate map, and daily-driver stop rules
 - [TCFS Feature and Objective Matrix](ops/feature-objective-matrix-2026-05-09.md) — cross-linked feature readiness, GitHub/Linear tracker map, and next-workstream todo list
 - [TCFS Next Workstream Queue](ops/next-workstream-queue-2026-05-09.md) — execution order for production Finder, distribution, fleet, on-prem, Civo, and tinyland gates
 - [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md) — canonical post-release install proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container, and Nix

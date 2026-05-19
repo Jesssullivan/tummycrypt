@@ -2,14 +2,16 @@
 
 Created: 2026-05-18T21:27:05Z
 
-This packet archives the first green end-to-end run of the
-`macos-postinstall-smoke.yml` workflow against the petting-zoo-mini-tcfs
-self-hosted runner with the production Dev ID lane enabled. The notarized
+This packet archives the first green production Dev ID FileProvider hydration
+run and the follow-up layered lifecycle run of the `macos-postinstall-smoke.yml`
+workflow against the `petting-zoo-mini-tcfs` self-hosted runner. The notarized
 `.pkg` was installed, the FileProvider extension registered, an index was
 seeded over the tailnet, and the harness hydrated the expected file through
-the installed package path with exact-content match.
+the installed package path with exact-content match. The follow-up run then
+proved evict/rehydrate, mutation upload/readback, and conflict-status
+preservation on the same production Dev ID lane.
 
-## Result
+## First Hydration Result
 
 - Workflow: `macos-postinstall-smoke.yml`
 - Run: `26061402177`
@@ -21,6 +23,23 @@ the installed package path with exact-content match.
 - Workflow source commit on smoke run: `0b1dc0c`
   (`macos-postinstall-smoke: derive enforce_tls from endpoint scheme`)
 - Outcome: success
+
+## Layered Lifecycle Result
+
+- Workflow: `macos-postinstall-smoke.yml`
+- Run: `26062554542`
+- URL: `https://github.com/Jesssullivan/tummycrypt/actions/runs/26062554542`
+- Runner label: `petting-zoo-mini`
+- `fileprovider_testing_mode`: `false` (production Dev ID lane)
+- Package source: notarization-proof run `26057944325`
+  (artifact `dist-notarized-pkg-proof`), built from main commit `c08a0a4`
+- Workflow source commit on smoke run: `99ff57d`
+- Outcome: success
+
+This follow-up is the M10 acceptance run referenced by
+`docs/release/v0.12.13-evidence-matrix.md`. Its GitHub Actions artifact was
+downloaded and the key harness files are archived under
+`run-26062554542/`.
 
 ## What Was Proved
 
@@ -87,6 +106,30 @@ the installed package path with exact-content match.
 
 - `harness/hydrate-read-error.log` is empty, i.e. the read returned cleanly.
 
+The follow-up run `26062554542` proved the layered lifecycle assertions:
+
+- `run-26062554542/harness/expected-file-index.json` reports `status:
+  "visible"`, `entry_state: "committed"`, `manifest_exists: true`, `size: 55`,
+  and `chunks: 1` for `ci-smoke/0.12.12/postinstall-1.txt` under remote prefix
+  `gha/macos-postinstall/v0.12.12/26062554542-1`.
+- `run-26062554542/harness/hydrated-expected-file` contains exactly:
+
+  ```
+  tcfs macOS post-install smoke v0.12.12 run 26062554542
+  ```
+
+- `run-26062554542/harness/hydrate-read-error.log` is empty.
+- `run-26062554542/harness/host-evict-launch.log` records
+  `evict: ci-smoke/0.12.12/postinstall-1.txt: OK`.
+- `run-26062554542/harness/mutation-remote-pull.log` records a 68-byte
+  remote pullback of `ci-smoke/0.12.12/mutation-1.txt`, and
+  `run-26062554542/harness/mutation-remote-pull` matches the expected
+  mutation payload.
+- `run-26062554542/harness/conflict-hydrated-file` matches
+  `run-26062554542/harness/conflict-expected-content`.
+- `run-26062554542/harness/conflict-sync-status.log` reports
+  `sync state: conflict` and `sync check: up to date` for the conflict fixture.
+
 ## Chain of Fixes That Unblocked This Run
 
 This was the first green run because four stacked production-only blockers
@@ -115,12 +158,14 @@ landed in order:
 ## Status
 
 - run_id: `26061402177`
+- layered_run_id: `26062554542`
 - runner_label: `petting-zoo-mini`
 - fileprovider_testing_mode: `false`
 - notarized_pkg_source_run: `26057944325`
 - notarized_pkg_source_commit: `c08a0a4`
 - workflow_smoke_commit: `0b1dc0c`
 - hydration_outcome: `exact-bytes-match`
+- layered_lifecycle_outcome: `hydrate-evict-rehydrate-mutation-conflict-status`
 - linear_issue: `TIN-133`
 - github_issue: `#309`
 
@@ -139,24 +184,28 @@ landed in order:
 - `tcfsd.log`, `tcfs-push.log` — daemon and seeding push.
 - `pluginkit.txt` — PlugInKit registration for
   `io.tinyland.tcfs.fileprovider(0.2.0)`.
+- `run-26062554542/harness/*` — key layered lifecycle artifacts from the
+  follow-up production Dev ID smoke run.
+- `run-26062554542/tcfs-conflict-push.log` — conflict fixture seed/upload log
+  from the follow-up run.
 - Codesign / spctl / syspolicy / entitlements dumps for both the host app
   and the extension are archived under the run artifact root.
 
 ## Claim Boundary
 
-This packet proves one thing on the production Dev ID lane: a freshly
-installed notarized package can hydrate a seeded file end-to-end and return
-exact bytes through the installed FileProvider path on the
-petting-zoo-mini-tcfs runner.
+This packet proves the M10 production Dev ID FileProvider lifecycle on the
+`petting-zoo-mini-tcfs` runner: a freshly installed notarized package can
+hydrate a seeded file end-to-end and return exact bytes through the installed
+FileProvider path, then pass evict/rehydrate, mutation upload/readback, and
+conflict-status preservation checks without `fileprovider_testing_mode=true`.
 
 It does NOT prove:
 
-- evict-and-rehydrate (round-trip materialize / dematerialize)
-- in-place mutation reflected back through CAS
-- conflict resolution from the Dev ID lane
+- the exact GitHub Release `v0.12.13-rc1` `.pkg` asset post-cut; the follow-up
+  run used the notarization-proof workflow artifact built before the rc1 cut
 - multi-file Finder lifecycle beyond the seeded entry
+- badges, progress UI, recovery UX, or user-visible conflict-resolution UI
 - long-running stability beyond one CI invocation
 
-Those layered proofs remain open and are tracked separately under TIN-133
-and the `next-workstream-queue` ops doc. Do not extend this packet's claim
-beyond hydration without a follow-up archival run.
+Keep first-run setup UX, release-asset post-cut smoke, and continuous
+release-day viability tracked separately from this lifecycle proof.

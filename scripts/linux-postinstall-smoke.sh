@@ -55,7 +55,8 @@ Options:
   --remote-prefix <prefix>    Remote prefix used for index inspect + push/pull
   --mount-point <path>        FUSE mount point (default: temp dir under LOG_DIR)
   --remote-spec <spec>        Remote spec for `tcfs mount` (default:
-                              s3://<bucket>/<prefix>; required for direct mount)
+                              seaweedfs://<host>:<port>/<bucket>/<prefix>;
+                              required for direct mount)
   --tcfs <path-or-name>       CLI binary (default: tcfs)
   --tcfsd <path-or-name>      Daemon binary (default: tcfsd)
   --timeout <seconds>         Wait timeout for async steps (default: 45)
@@ -661,29 +662,43 @@ resolve_remote_spec() {
   if [[ -n "$REMOTE_SPEC" ]]; then
     return 0
   fi
-  # Derive a default s3://<bucket>/<prefix> spec from the config when the
-  # caller did not pass one explicitly.
+  # Derive a default seaweedfs://<host>:<port>/<bucket>/<prefix> spec from the
+  # config when the caller did not pass one explicitly. `tcfs mount` uses the
+  # shared remote-spec parser, which intentionally does not accept s3://.
   if [[ -z "$REMOTE_PREFIX" ]]; then
     echo "--remote-spec is required when --remote-prefix is not provided" >&2
     exit 2
   fi
-  local bucket
-  bucket="$(python3 - "$CONFIG_PATH" <<'PY' 2>/dev/null || true
+  local authority bucket
+  local -a remote_parts
+  mapfile -t remote_parts < <(python3 - "$CONFIG_PATH" <<'PY' 2>/dev/null || true
 import sys
+import urllib.parse
 try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
 with open(sys.argv[1], "rb") as fh:
     cfg = tomllib.load(fh)
-print(cfg.get("storage", {}).get("bucket", ""))
+storage = cfg.get("storage", {})
+endpoint = str(storage.get("endpoint", "")).strip()
+bucket = str(storage.get("bucket", "")).strip()
+parsed = urllib.parse.urlparse(endpoint)
+print(parsed.netloc)
+print(bucket)
 PY
-)"
+)
+  authority="${remote_parts[0]:-}"
+  bucket="${remote_parts[1]:-}"
+  if [[ -z "$authority" ]]; then
+    echo "could not derive endpoint authority from $CONFIG_PATH; pass --remote-spec" >&2
+    exit 2
+  fi
   if [[ -z "$bucket" ]]; then
     echo "could not derive bucket from $CONFIG_PATH; pass --remote-spec" >&2
     exit 2
   fi
-  REMOTE_SPEC="s3://${bucket}/${REMOTE_PREFIX}"
+  REMOTE_SPEC="seaweedfs://${authority}/${bucket}/${REMOTE_PREFIX}"
   echo "derived --remote-spec: $REMOTE_SPEC"
 }
 

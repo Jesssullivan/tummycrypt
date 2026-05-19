@@ -24,29 +24,24 @@ surfaces below have passed their required smoke checks.
   - container upgrades are normally orchestrator rollouts rather than a host-local installer flow
   - Nix installs are immutable and ref-pinned, so the per-tag fresh install gate is the most meaningful baseline
 
-Current evidence note for `v0.12.12`: the archived current-tag packet in this
-repo proves Homebrew fresh/upgrade, Darwin Nix profile install, Ubuntu 24.04
-`.deb` fresh/upgrade on arm64 and amd64, Debian 13 `.deb` fresh install on
-arm64 and amd64, and Fedora 42 x86_64 daemon-only RPM fresh/upgrade. Container
-evidence proves explicit amd64 pull/version/startup logs but records a missing
-native `linux/arm64/v8` image manifest. The
-`container-v01212-manifest-refresh-20260514T224746Z/` registry metadata refresh
-reconfirmed that gap: the `v0.12.12` image index still exposes Linux amd64 plus
-an unknown/unknown manifest, with no Linux arm64 image. The release workflow is
-configured to publish both architectures on the next cut, but that still needs
-tagged registry proof before upgrading the current evidence row. Remote run
-`25973109986` proves source-package notarization, stapling, Gatekeeper install
-assessment, and strict package smoke for a workflow artifact. Neo then
-downloaded the artifact, verified SHA-256
-`c6fd1a6fd18638c53f0d0b88bc79249e65d08766d99853bef6896ee69bcd6d45`, reran
-the same strict package smoke locally, installed the package with authenticated
-`osascript`, quarantined the stale user app after inventory, and reached a
-green strict installed preflight against `/Applications/TCFSProvider.app`.
-Production macOS `.pkg` current-tag release publication and Finder hydration
-remain separate follow-up checks: the artifact was not published as a GitHub
-Release asset, and the latest installed Finder smoke still times out on the
-actual FileProvider read after domain add, enumeration, and `requestDownload`
-succeed.
+Current evidence note for `v0.12.13-rc1`: the release workflow published the
+macOS `.pkg`, Linux tarballs, `.deb` packages, daemon-only `.rpm`, multi-arch
+container image, Nix build/cache outputs, checksums, and Sigstore files. The
+strongest product-surface proof is macOS: PZM production Dev ID run
+`26062554542` proves installed strict preflight, storage `[ok]`, domain add,
+CloudStorage enumeration, exact hydrate, evict/rehydrate, mutation
+upload/readback, and conflict-status preservation without
+`fileprovider_testing_mode=true`. That proof used the notarization-proof
+workflow artifact built before the rc1 cut; a post-cut smoke against the exact
+published GitHub Release `.pkg` is still a separate release-surface gate.
+
+Remaining rc1 distribution proof is first-use heavy: Homebrew install/upgrade,
+Ubuntu 24.04+/Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm`
+install, container runtime smoke, and external Nix profile install are still
+pending. Debian 12 remains blocked by the libc/OpenSSL floor unless a separate
+bookworm-targeted package exists. See
+[`docs/release/v0.12.13-evidence-matrix.md`](../release/v0.12.13-evidence-matrix.md)
+for the frozen rc1 evidence table.
 
 ## Out-Of-Scope Published Helpers
 
@@ -206,6 +201,10 @@ The May 17, 2026 neo packets supersede that blocker for the workflow artifact:
 - `docs/release/evidence/macos-fileprovider-neo-finder-release-smoke-directhost-catread-20260517T020417Z/`
   proves production-signed domain add, CloudStorage enumeration, and host-app
   `requestDownload`, then blocks on `cat` returning `Operation timed out`
+- `docs/release/evidence/macos-postinstall-prod-devid-hydration-20260518T212705Z/`
+  supersedes the May 17 read blocker. Run `26061402177` proves production Dev
+  ID exact hydration, and run `26062554542` adds evict/rehydrate, mutation
+  upload/readback, and conflict-status preservation.
 
 When an operator reruns this lane, keep using the evidence helper with an
 explicit auth mode instead of hand-running `installer` outside the packet:
