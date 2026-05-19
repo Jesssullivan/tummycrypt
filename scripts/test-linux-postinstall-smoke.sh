@@ -151,6 +151,10 @@ JSON
         rel="$2"
         dest="$3"
         src="${TCFS_FAKE_REMOTE_ROOT:?}/$rel"
+        if [[ ! -f "$src" && -n "${TCFS_FAKE_MOUNT_ROOT:-}" && -f "$TCFS_FAKE_MOUNT_ROOT/$rel" ]]; then
+          mkdir -p "$(dirname "$src")"
+          cp "$TCFS_FAKE_MOUNT_ROOT/$rel" "$src"
+        fi
         if [[ ! -f "$src" ]]; then
           printf 'fake pull: missing %s\n' "$src" >&2
           exit 1
@@ -289,6 +293,7 @@ MOUNT_MARKER="${TMPDIR_BASE}/mount-marker"
 env PATH="$FAKE_BIN:$PATH" \
   HOME="$HOME_DIR" \
   TCFS_FAKE_REMOTE_ROOT="$REMOTE_ROOT" \
+  TCFS_FAKE_MOUNT_ROOT="$MOUNT_POINT" \
   TCFS_FAKE_MOUNT_MARKER="$MOUNT_MARKER" \
   bash "$SCRIPT" \
     --expected-version 0.13.0 \
@@ -298,6 +303,10 @@ env PATH="$FAKE_BIN:$PATH" \
     --remote-prefix "fake/prefix" \
     --remote-spec "s3://tcfs/fake/prefix" \
     --mount-point "$MOUNT_POINT" \
+    --exercise-evict-rehydrate \
+    --exercise-mutation \
+    --mutation-file "$MUTATION_REL" \
+    --mutation-content-file "$MUTATION_CONTENT_FILE" \
     --skip-package-install \
     --no-systemd \
     --timeout 10 \
@@ -314,6 +323,10 @@ assert_contains "$POSITIVE_OUT" "daemon socket ready: $DAEMON_SOCKET"
 assert_contains "$POSITIVE_OUT" "remote index status for expected file: visible"
 assert_contains "$POSITIVE_OUT" "FUSE mount ready"
 assert_contains "$POSITIVE_OUT" "hydrated file content matched expected content file"
+assert_contains "$POSITIVE_OUT" "Linux evict/rehydrate cycle passed"
+assert_contains "$POSITIVE_OUT" "Linux mutation local content matched"
+assert_contains "$POSITIVE_OUT" "remote mutation pull matched expected content"
+assert_contains "$POSITIVE_OUT" "tcfs status (post-mutation):"
 assert_contains "$POSITIVE_OUT" "Linux post-install smoke passed"
 assert_contains "$LOG_DIR/expected-file-index.json" '"status": "visible"'
 
