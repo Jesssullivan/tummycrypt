@@ -407,17 +407,57 @@ start_daemon_foreground() {
   DAEMON_PID="$!"
   echo "tcfsd pid: $DAEMON_PID (log: $log)"
 
-  # TODO(TIN-1422): poll for the daemon socket path. Today the unit socket
-  # lives at /run/tcfsd/tcfsd.sock for systemd; foreground mode follows the
-  # CLI's default XDG_STATE_HOME-derived path. The macOS harness relies on
-  # `tcfs status` to prove the daemon is reachable, so we lean on the same
-  # gate below in run_status.
-  short_pause
-  if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-    echo "tcfsd exited immediately; see $log" >&2
-    cat "$log" >&2 || true
-    exit 1
+  wait_for_foreground_daemon_socket "$log"
+}
+
+config_daemon_socket() {
+  python3 - "$CONFIG_PATH" <<'PY' 2>/dev/null || true
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+with open(sys.argv[1], "rb") as fh:
+    cfg = tomllib.load(fh)
+print(cfg.get("daemon", {}).get("socket", ""))
+PY
+}
+
+wait_for_foreground_daemon_socket() {
+  local log="$1"
+  local socket_path
+  local deadline
+
+  socket_path="$(config_daemon_socket)"
+  if [[ -z "$socket_path" ]]; then
+    echo "daemon socket not configured; falling back to process liveness check"
+    short_pause
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+      echo "tcfsd exited immediately; see $log" >&2
+      cat "$log" >&2 || true
+      exit 1
+    fi
+    return
   fi
+
+  deadline=$((SECONDS + TIMEOUT_SECS))
+  while (( SECONDS < deadline )); do
+    if [[ -S "$socket_path" ]]; then
+      echo "daemon socket ready: $socket_path"
+      return
+    fi
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+      echo "tcfsd exited before socket appeared: $socket_path; see $log" >&2
+      cat "$log" >&2 || true
+      exit 1
+    fi
+    short_pause
+  done
+
+  echo "timed out waiting for daemon socket: $socket_path" >&2
+  cat "$log" >&2 || true
+  exit 1
 }
 
 start_daemon() {

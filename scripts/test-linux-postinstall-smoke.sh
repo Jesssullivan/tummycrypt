@@ -56,6 +56,7 @@ MUTATION_REL="canary/mutation.txt"
 EXPECTED_CONTENT_FILE="${TMPDIR_BASE}/expected.txt"
 MUTATION_CONTENT_FILE="${TMPDIR_BASE}/mutation.txt"
 REMOTE_ROOT="${TMPDIR_BASE}/remote"
+DAEMON_SOCKET="${TMPDIR_BASE}/tcfsd.sock"
 
 mkdir -p \
   "$FAKE_BIN" \
@@ -65,6 +66,9 @@ mkdir -p \
   "$LOG_DIR"
 
 cat >"$CONFIG_PATH" <<EOF
+[daemon]
+socket = "${DAEMON_SOCKET}"
+
 [storage]
 endpoint = "http://example.invalid:8333"
 bucket = "tcfs"
@@ -189,9 +193,68 @@ cat >"$FAKE_BIN/tcfsd" <<'EOF'
 if [[ "${1:-}" == "--version" ]]; then
   printf 'tcfsd 0.13.0\n'
 else
-  # The harness foreground-mode call runs the daemon detached; just sleep so
-  # `kill -0 $pid` succeeds.
-  exec sleep 60
+  config=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --config)
+        config="$2"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  socket_path=""
+  if [[ -n "$config" ]]; then
+    socket_path="$(python3 - "$config" <<'PY' 2>/dev/null || true
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+with open(sys.argv[1], "rb") as fh:
+    cfg = tomllib.load(fh)
+print(cfg.get("daemon", {}).get("socket", ""))
+PY
+)"
+  fi
+
+  if [[ -z "$socket_path" ]]; then
+    exec sleep 60
+  fi
+
+  mkdir -p "$(dirname "$socket_path")"
+  exec python3 - "$socket_path" <<'PY'
+import os
+import signal
+import socket
+import sys
+import time
+
+path = sys.argv[1]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+server.listen(1)
+
+def stop(_signum, _frame):
+    server.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+while True:
+    time.sleep(60)
+PY
 fi
 EOF
 
@@ -247,6 +310,7 @@ env PATH="$FAKE_BIN:$PATH" \
 
 assert_contains "$POSITIVE_OUT" "tcfsd version: tcfsd 0.13.0"
 assert_contains "$POSITIVE_OUT" "tcfs version: tcfs 0.13.0"
+assert_contains "$POSITIVE_OUT" "daemon socket ready: $DAEMON_SOCKET"
 assert_contains "$POSITIVE_OUT" "remote index status for expected file: visible"
 assert_contains "$POSITIVE_OUT" "FUSE mount ready"
 assert_contains "$POSITIVE_OUT" "hydrated file content matched expected content file"
