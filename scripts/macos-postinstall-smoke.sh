@@ -1303,6 +1303,71 @@ nudge_expected_parent_enumeration() {
   fi
 }
 
+collect_cloud_root_permission_inventory() {
+  local root="$1"
+  local parent
+
+  parent="$(dirname "$root")"
+  echo "collecting CloudStorage root permission inventory: $root" >&2
+
+  run_bounded_to_log \
+    "cloud-root-stat" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    sh -c '
+      for path in "$1" "$2"; do
+        printf -- "--- %s ---\n" "$path"
+        if command -v stat >/dev/null 2>&1; then
+          stat -x "$path" 2>/dev/null || stat "$path" 2>/dev/null || true
+        else
+          printf "stat unavailable\n"
+        fi
+        ls -ldeO@ "$path" 2>/dev/null || ls -la "$path" 2>/dev/null || true
+      done
+    ' sh "$root" "$parent" || true
+
+  run_bounded_to_log \
+    "cloud-root-access" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    sh -c '
+      id || true
+      printf "pwd=%s\n" "$(pwd)"
+      for path in "$1" "$2"; do
+        printf -- "--- access %s ---\n" "$path"
+        if [ -e "$path" ]; then printf "exists=yes\n"; else printf "exists=no\n"; fi
+        if [ -r "$path" ]; then printf "readable=yes\n"; else printf "readable=no\n"; fi
+        if [ -x "$path" ]; then printf "searchable=yes\n"; else printf "searchable=no\n"; fi
+      done
+    ' sh "$root" "$parent" || true
+
+  if command -v xattr >/dev/null 2>&1; then
+    run_bounded_to_log \
+      "cloud-root-xattr" \
+      "$LOG_SHOW_TIMEOUT_SECS" \
+      sh -c '
+        for path in "$1" "$2"; do
+          printf -- "--- %s ---\n" "$path"
+          xattr -l "$path" 2>/dev/null || true
+        done
+      ' sh "$root" "$parent" || true
+  else
+    printf 'xattr unavailable on this host\n' >"$LOG_DIR/cloud-root-xattr.log"
+  fi
+
+  if command -v fileproviderctl >/dev/null 2>&1; then
+    run_bounded_to_log \
+      "fileproviderctl-domain-list" \
+      "$LOG_SHOW_TIMEOUT_SECS" \
+      fileproviderctl domain list || true
+  fi
+
+  if command -v launchctl >/dev/null 2>&1; then
+    run_bounded_to_log \
+      "launchctl-fileprovider-state" \
+      "$LOG_SHOW_TIMEOUT_SECS" \
+      sh -c 'launchctl print "gui/$(id -u)" 2>/dev/null | grep -E "io\\.tinyland\\.tcfs|TCFSProvider|fileprovider" || true' || true
+  fi
+}
+
 collect_expected_file_diagnostics() {
   local path="$1"
   local rel="$2"
@@ -1316,6 +1381,7 @@ collect_expected_file_diagnostics() {
   collect_extension_config_log >"$(extension_log_path)" || true
   collect_fileprovider_activity_log >"$(fileprovider_activity_log_path)" || true
   collect_fileprovider_system_log >"$(fileprovider_system_log_path)" || true
+  collect_cloud_root_permission_inventory "$CLOUD_ROOT" || true
 
   run_bounded_to_log \
     "expected-file-ls" \
@@ -1373,6 +1439,11 @@ classify_expected_file_read_failure() {
     "$LOG_DIR/cloud-root-open.log" \
     "$LOG_DIR/cloud-root-find.log" \
     "$LOG_DIR/cloud-root-find.err" \
+    "$LOG_DIR/cloud-root-stat.log" \
+    "$LOG_DIR/cloud-root-access.log" \
+    "$LOG_DIR/cloud-root-xattr.log" \
+    "$LOG_DIR/fileproviderctl-domain-list.log" \
+    "$LOG_DIR/launchctl-fileprovider-state.log" \
     "$LOG_DIR/expected-parent-ls.log" \
     "$LOG_DIR/expected-parent-open.log" \
     "$LOG_DIR/expected-file-ls.log" \
@@ -1419,9 +1490,14 @@ classify_cloud_root_enumeration_failure() {
     "$LOG_DIR/cloud-root-open.log" \
     "$LOG_DIR/cloud-root-find.log" \
     "$LOG_DIR/cloud-root-find.err" \
+    "$LOG_DIR/cloud-root-stat.log" \
+    "$LOG_DIR/cloud-root-access.log" \
+    "$LOG_DIR/cloud-root-xattr.log" \
     "$LOG_DIR/fileproviderctl-materialize-root.log" \
     "$LOG_DIR/fileproviderctl-evaluate-root.log" \
     "$LOG_DIR/fileproviderctl-check-root.log" \
+    "$LOG_DIR/fileproviderctl-domain-list.log" \
+    "$LOG_DIR/launchctl-fileprovider-state.log" \
     "$(fileprovider_system_log_path)"
   do
     [[ -f "$file" ]] || continue
@@ -1492,6 +1568,7 @@ enumerate_root() {
 
   system_log="$(collect_fileprovider_system_log)"
   printf '%s\n' "$system_log" >"$(fileprovider_system_log_path)"
+  collect_cloud_root_permission_inventory "$root" || true
   if grep -Eqi 'Sync is not enabled|FP -2011|NSFileProviderErrorDomain Code=-2011|NSFileProviderErrorDomainDisabled|DomainDisabled' <<<"$system_log"; then
     echo "FileProvider domain is disabled by macOS (NSFileProviderErrorDomain -2011)" >&2
     echo "The package installed and registered, but macOS has not user-enabled the provider for this account." >&2
