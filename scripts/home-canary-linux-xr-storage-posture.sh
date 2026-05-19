@@ -16,7 +16,9 @@ Options:
   --source <path>        Source project. Default: /Users/jess/git/linux-xr
   --shadow-root <path>   Shadow copy path. Default: ~/TCFS Pilot/real-canaries/linux-xr-storage-posture-<UTC>
   --evidence-dir <path>  Evidence dir. Default: docs/release/evidence/home-canary-linux-xr-storage-posture-<UTC>
-  --remote <url>         seaweedfs://host:port/bucket/prefix disposable remote
+  --remote <url>         Disposable remote. Use seaweedfs://host:port/bucket/prefix
+                          for historical HTTP, seaweedfs+http://... for
+                          explicit HTTP, or seaweedfs+https://... for TLS.
   --state-dir <path>     Local TCFS state/config dir. Default: <evidence-dir>/state
   --tcfs-bin <path>      Release tcfs binary. Default: target/release/tcfs
   --push                 Push the shadow to the disposable prefix
@@ -385,8 +387,20 @@ if [[ "$allow_debug_binary" != "1" && "$tcfs_profile" == "debug" ]]; then
   fail "storage posture proof requires a release binary; pass --allow-debug-binary only for tests"
 fi
 
-remote_no_scheme="${remote#seaweedfs://}"
-[[ "$remote_no_scheme" != "$remote" ]] || fail "remote must use seaweedfs://"
+remote_transport_tls=false
+if [[ "$remote" == seaweedfs+https://* ]]; then
+  remote_no_scheme="${remote#seaweedfs+https://}"
+  remote_endpoint_scheme=https
+  remote_transport_tls=true
+elif [[ "$remote" == seaweedfs+http://* ]]; then
+  remote_no_scheme="${remote#seaweedfs+http://}"
+  remote_endpoint_scheme=http
+elif [[ "$remote" == seaweedfs://* ]]; then
+  remote_no_scheme="${remote#seaweedfs://}"
+  remote_endpoint_scheme=http
+else
+  fail "remote must use seaweedfs://, seaweedfs+http://, or seaweedfs+https://"
+fi
 remote_host="${remote_no_scheme%%/*}"
 [[ -n "$remote_host" ]] || fail "remote host is empty: $remote"
 remote_path="${remote_no_scheme#*/}"
@@ -447,8 +461,8 @@ shadow=$shadow_root
 remote=$remote
 bucket=$bucket
 remote_prefix=$prefix
-endpoint=http://$remote_host
-transport_tls=false
+endpoint=$remote_endpoint_scheme://$remote_host
+transport_tls=$remote_transport_tls
 credential_aws_access_key_id_present=$aws_access_key_id_present
 credential_aws_secret_access_key_present=$aws_secret_access_key_present
 credential_aws_session_token_present=$aws_session_token_present
