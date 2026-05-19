@@ -31,9 +31,12 @@ strongest product-surface proof is macOS: PZM production Dev ID run
 `26062554542` proves installed strict preflight, storage `[ok]`, domain add,
 CloudStorage enumeration, exact hydrate, evict/rehydrate, mutation
 upload/readback, and conflict-status preservation without
-`fileprovider_testing_mode=true`. That proof used the notarization-proof
-workflow artifact built before the rc1 cut; a post-cut smoke against the exact
-published GitHub Release `.pkg` is still a separate release-surface gate.
+`fileprovider_testing_mode=true`. Post-cut PR #389 branch run `26079830341`
+then proves the exact published GitHub Release `.pkg` through install,
+installed-binary smoke, storage `[ok]`, exact hydrate, evict/rehydrate,
+mutation, and conflict/status. A merged-workflow main-ref rerun is still useful
+for continuous release-day viability, but the release asset itself is no longer
+only an inferred proof.
 
 Remaining rc1 distribution proof is first-use heavy: Homebrew install/upgrade,
 Ubuntu 24.04+/Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm`
@@ -63,14 +66,19 @@ These are **not** canonical release-proof surfaces today.
 For any release surface that places `tcfsd` on `PATH`, run:
 
 ```bash
-bash scripts/install-smoke.sh --expected-version "${VERSION}"
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
 If the surface is daemon-only and does not ship `tcfs` today, run:
 
 ```bash
-bash scripts/install-smoke.sh --expected-version "${VERSION}" --skip-cli
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}" --skip-cli
 ```
+
+Set `BINARY_EXPECTED_VERSION` from the release variables in the surface
+procedures below. This intentionally drops prerelease suffixes because the
+published asset can be `0.12.13-rc1` while the compiled Cargo binary reports
+`tcfsd 0.12.13`.
 
 What this helper proves:
 
@@ -109,7 +117,13 @@ Set the release variables first:
 ```bash
 export TAG=v0.12.12
 export VERSION="${TAG#v}"
+export BINARY_EXPECTED_VERSION="${VERSION%%-*}"
 ```
+
+`VERSION` is the artifact version and may include a prerelease suffix such as
+`0.12.13-rc1`. `BINARY_EXPECTED_VERSION` is the Cargo package version reported
+by installed binaries, so prerelease package smokes should still expect
+`tcfsd 0.12.13`.
 
 ### Homebrew
 
@@ -121,7 +135,7 @@ brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan
 git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin homebrew-tap
 git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
 brew install Jesssullivan/tummycrypt/tcfs
-bash scripts/install-smoke.sh --expected-version "${VERSION}"
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
 Upgrade:
@@ -130,7 +144,7 @@ Upgrade:
 git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin homebrew-tap
 git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
 brew upgrade Jesssullivan/tummycrypt/tcfs
-bash scripts/install-smoke.sh --expected-version "${VERSION}"
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
 ### macOS `.pkg`
@@ -140,7 +154,7 @@ Fresh install:
 ```bash
 curl -LO "https://github.com/Jesssullivan/tummycrypt/releases/download/${TAG}/tcfs-${VERSION}-macos-aarch64.pkg"
 sudo installer -pkg "tcfs-${VERSION}-macos-aarch64.pkg" -target /
-bash scripts/install-smoke.sh --expected-version "${VERSION}"
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
 If this tag also needs packaged-install to first-real-use proof on macOS, follow
@@ -148,7 +162,7 @@ the package smoke with the named FileProvider harness:
 
 ```bash
 bash scripts/macos-postinstall-smoke.sh \
-  --expected-version "${VERSION}" \
+  --expected-version "${BINARY_EXPECTED_VERSION}" \
   --config "$HOME/.config/tcfs/config.toml" \
   --expected-file "path/to/known/remote-backed-file" \
   --expected-content-file /tmp/tcfs-expected-content.txt
@@ -230,7 +244,7 @@ Upgrade:
 
 ```bash
 sudo installer -pkg "tcfs-${VERSION}-macos-aarch64.pkg" -target /
-bash scripts/install-smoke.sh --expected-version "${VERSION}"
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
 ### Ubuntu 24.04+ / Debian 13+ `.deb`
@@ -251,14 +265,14 @@ Fresh install:
 curl -LO "https://github.com/Jesssullivan/tummycrypt/releases/download/${TAG}/tcfsd-${VERSION}-amd64.deb"
 curl -LO "https://github.com/Jesssullivan/tummycrypt/releases/download/${TAG}/tcfs-${VERSION}-amd64.deb"
 sudo dpkg -i "tcfsd-${VERSION}-amd64.deb" "tcfs-${VERSION}-amd64.deb"
-bash scripts/install-smoke.sh --expected-version "${VERSION}"
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
 Upgrade:
 
 ```bash
 sudo dpkg -i "tcfsd-${VERSION}-amd64.deb" "tcfs-${VERSION}-amd64.deb"
-bash scripts/install-smoke.sh --expected-version "${VERSION}"
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
 ### Fedora `.rpm`
@@ -271,14 +285,14 @@ Fresh install:
 ```bash
 curl -LO "https://github.com/Jesssullivan/tummycrypt/releases/download/${TAG}/tcfsd-${VERSION}-x86_64.rpm"
 sudo rpm -i "tcfsd-${VERSION}-x86_64.rpm"
-bash scripts/install-smoke.sh --expected-version "${VERSION}" --skip-cli
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}" --skip-cli
 ```
 
 Upgrade is sampled unless the RPM packaging path changes materially:
 
 ```bash
 sudo rpm -Uvh "tcfsd-${VERSION}-x86_64.rpm"
-bash scripts/install-smoke.sh --expected-version "${VERSION}" --skip-cli
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}" --skip-cli
 ```
 
 ### Container Image
@@ -346,7 +360,7 @@ Fresh install:
 nix profile install \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfsd" \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfs-cli"
-bash scripts/install-smoke.sh --expected-version "${VERSION}"
+bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
 Record the host platform in evidence. The current `v0.12.12` packet proves a

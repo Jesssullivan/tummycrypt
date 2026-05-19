@@ -13,8 +13,8 @@ use.
 - The macOS production Developer ID FileProvider lifecycle is proven on
   petting-zoo-mini by run `26062554542`: install, domain rebuild, enumerate,
   exact hydrate, host evict/rehydrate, remote mutation, and conflict/status.
-  Exact post-cut release-asset smoke and product hardening remain open in
-  `TIN-1547`.
+  PR #389 branch run `26079830341` also proves the exact published
+  `v0.12.13-rc1` `.pkg`; product hardening remains open in `TIN-1547`.
 - Linux remains the strongest runtime for CLI/daemon/FUSE work, but package
   first-use is not fully proven. `TIN-1422` is blocked on `TIN-1540` until the
   Linux smoke backend is reachable from CI or a private runner.
@@ -26,8 +26,9 @@ use.
 - Production S3/storage posture is not proven until `TIN-1546` covers TLS/CA
   posture, bounded health checks, request/read timeouts, transient error
   classification, and large-object restore evidence.
-  PR #387 starts that lane by bounding the shared storage health probe, but
-  request/read timeout wiring and transient-error classification remain open.
+  PR #390 landed bounded remote manifest/index/chunk read attempts, but
+  production-like TLS/CA proof, scoped credential posture, transient-error
+  classification in live packets, and large-pack restore evidence remain open.
 - iOS remains proof-of-concept until `TIN-1548` proves a real Files.app lane
   with safe enrollment posture.
 
@@ -40,7 +41,8 @@ Alpha may exercise:
 
 - release artifacts and source builds on disposable or shadow sync roots
 - scoped project trees, repo canaries, and small daily-use folders
-- macOS FileProvider lifecycle after `TIN-1547` release-asset smoke
+- macOS FileProvider lifecycle after the `TIN-1547` release-asset smoke, with
+  main-ref reruns used as release-day regression evidence
 - Linux FUSE clean-name traversal and hydrate-on-open after `TIN-1422`
 - live fleet sync against named hosts after `TIN-132`
 - storage latency, object-count, retry, and failure-classification evidence
@@ -80,7 +82,7 @@ has shipped and been proven end to end.
 | Lane | Alpha gate | Beta gate | Tracker |
 |---|---|---|---|
 | Release and first-use | Exact release artifacts install, configure, `status [ok]`, and perform one real action on macOS, Homebrew, Linux `.deb`, container, and Nix surfaces | Repeatable install and upgrade matrix with no hand-authored config for the common path | `TIN-131`, `#280`, `TIN-1425` |
-| macOS FileProvider | Post-cut `.pkg` exact hydrate plus evict/rehydrate, mutation, conflict/status on Developer ID surface | Rename, unsync-vs-delete, badges/progress, recovery UX, and longer desktop soak | `TIN-1547`, `TIN-133` |
+| macOS FileProvider | Post-cut `.pkg` exact hydrate plus evict/rehydrate, mutation, conflict/status on Developer ID surface; main-ref continuous rerun preferred for release-day viability | Rename, unsync-vs-delete, badges/progress, recovery UX, and longer desktop soak | `TIN-1547`, `TIN-133` |
 | Linux package smoke | `.deb`/`.rpm` install against reachable SeaweedFS+NATS backend, hydrate fixture, evict, rehydrate | Scheduled package smoke on a stable runner with archived transcripts | `TIN-1422`, `TIN-1540` |
 | Live fleet | Neo/honey acceptance is current, repeatable, and archived | Scheduled fleet acceptance with failure classification and dashboard history | `TIN-132`, `TIN-1421` |
 | S3/storage posture | TLS/CA posture documented, health/read paths bounded, transient errors separated from missing objects, large-pack restore evidence captured | Production-like S3 endpoint, scoped credentials, latency/object-count budgets, rollback/restore evidence | `TIN-1546`, `TIN-720`, `#327` |
@@ -100,12 +102,12 @@ has shipped and been proven end to end.
 3. Complete the `TIN-131` first-use matrix for the rc artifact set:
    macOS `.pkg`, Homebrew, Linux `.deb`, container runtime, and Nix external
    profile.
-4. Burn down the alpha slice of `TIN-1547`: exact release `.pkg` smoke,
+4. Continue the alpha slice of `TIN-1547`: main-ref release-day viability,
    rename/unsync risk classification, and minimum visible status/recovery
    notes.
-5. Start the `TIN-1546` storage mini-gate: bounded health/read timeouts,
-   transient-error classification, and latency/object-count evidence for the
-   large Git-pack restore path.
+5. Continue the `TIN-1546` storage mini-gate: production-like TLS/CA endpoint
+   proof, scoped credential posture, transient-error classification, and
+   latency/object-count evidence for the large Git-pack restore path.
 6. Refresh `TIN-132` with a current two-host transcript so live fleet evidence
    is not inferred from CI.
 
