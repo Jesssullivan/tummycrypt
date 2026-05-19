@@ -31,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (for example v0.12.12; must be vX.Y.Z)"
+        description: "Release tag (for example v0.12.13-rc1; must be vX.Y.Z or vX.Y.Z-PRERELEASE)"
         required: true
 
 env:
@@ -55,6 +55,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       image_repo: ${{ steps.version.outputs.image_repo }}
+      image_tags: ${{ steps.version.outputs.image_tags }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      make_latest: ${{ steps.version.outputs.make_latest }}
     steps:
       - name: Determine version
         id: version
@@ -74,10 +77,31 @@ jobs:
           fi
           VERSION="${TAG#v}"  # strip leading v
           OWNER_LOWER="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE_REPO="${{ env.REGISTRY }}/${OWNER_LOWER}/${{ env.IMAGE_NAME }}"
+          IS_PRERELEASE=false
+          MAKE_LATEST=true
+          if [[ "${VERSION}" == *-* ]]; then
+            IS_PRERELEASE=true
+            MAKE_LATEST=false
+          fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "image_repo=${{ env.REGISTRY }}/${OWNER_LOWER}/${{ env.IMAGE_NAME }}" >> "$GITHUB_OUTPUT"
+          echo "image_repo=${IMAGE_REPO}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "make_latest=${MAKE_LATEST}" >> "$GITHUB_OUTPUT"
+          {
+            echo "image_tags<<EOF"
+            echo "${IMAGE_REPO}:${TAG}"
+            echo "${IMAGE_REPO}:${VERSION}"
+            if [[ "${IS_PRERELEASE}" != "true" ]]; then
+              echo "${IMAGE_REPO}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
           echo "Building release: ${TAG} (version ${VERSION})"
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            echo "Prerelease tag detected: release will not be marked Latest and container :latest will not move."
+          fi
 
   # ── Build client binaries ─────────────────────────────────────────────────
 
@@ -471,10 +495,7 @@ jobs:
           file: ./Containerfile
           platforms: linux/amd64,linux/arm64/v8
           push: true
-          tags: |
-            ${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.tag }}
-            ${{ needs.plan.outputs.image_repo }}:${{ needs.plan.outputs.version }}
-            ${{ needs.plan.outputs.image_repo }}:latest
+          tags: ${{ needs.plan.outputs.image_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
@@ -976,6 +997,8 @@ jobs:
           tag_name: ${{ needs.plan.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: tcfs ${{ needs.plan.outputs.tag }}
+          prerelease: ${{ needs.plan.outputs.is_prerelease }}
+          make_latest: ${{ needs.plan.outputs.make_latest }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: release/*
