@@ -3611,11 +3611,10 @@ async fn cmd_device_invite(
         }
         *blake3::hash(&key_bytes).as_bytes()
     } else {
-        eprintln!(
-            "Warning: master key not found at {}, using placeholder signing key",
-            key_path.display()
+        anyhow::bail!(
+            "cannot create a device invite without a master key at {}; run tcfs init or configure crypto.master_key_file",
+            key_path.display(),
         );
-        *blake3::hash(b"tcfs-fleet-invite-key").as_bytes()
     };
 
     let mut invite = EnrollmentInvite::new(
@@ -3652,6 +3651,8 @@ async fn cmd_device_invite(
             invite.encryption_passphrase = Some(passphrase);
         }
     }
+
+    invite.refresh_signature(&signing_key);
 
     // Use compact encoding (short keys + zstd) for QR-friendly payloads
     let compact = invite
