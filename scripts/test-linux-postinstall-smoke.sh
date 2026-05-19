@@ -325,6 +325,10 @@ chmod +x "$FAKE_BIN"/*
 
 POSITIVE_OUT="${TMPDIR_BASE}/positive.out"
 MOUNT_MARKER="${TMPDIR_BASE}/mount-marker"
+FAKE_CLI_DEB="${TMPDIR_BASE}/tcfs-0.13.0-amd64.deb"
+FAKE_DAEMON_DEB="${TMPDIR_BASE}/tcfsd-0.13.0-amd64.deb"
+: >"$FAKE_CLI_DEB"
+: >"$FAKE_DAEMON_DEB"
 
 env PATH="$FAKE_BIN:$PATH" \
   HOME="$HOME_DIR" \
@@ -332,6 +336,8 @@ env PATH="$FAKE_BIN:$PATH" \
   TCFS_FAKE_MOUNT_ROOT="$MOUNT_POINT" \
   TCFS_FAKE_MOUNT_MARKER="$MOUNT_MARKER" \
   bash "$SCRIPT" \
+    --package-path "$FAKE_CLI_DEB" \
+    --package-path "$FAKE_DAEMON_DEB" \
     --expected-version 0.13.0 \
     --config "$CONFIG_PATH" \
     --expected-file "$EXPECTED_REL" \
@@ -343,7 +349,6 @@ env PATH="$FAKE_BIN:$PATH" \
     --exercise-mutation \
     --mutation-file "$MUTATION_REL" \
     --mutation-content-file "$MUTATION_CONTENT_FILE" \
-    --skip-package-install \
     --no-systemd \
     --timeout 10 \
     --log-dir "$LOG_DIR" \
@@ -353,6 +358,10 @@ env PATH="$FAKE_BIN:$PATH" \
   exit 1
 }
 
+assert_contains "$POSITIVE_OUT" "installing .deb: $FAKE_CLI_DEB"
+assert_contains "$POSITIVE_OUT" "installing .deb: $FAKE_DAEMON_DEB"
+assert_contains "$POSITIVE_OUT" "package-install-1.log"
+assert_contains "$POSITIVE_OUT" "package-install-2.log"
 assert_contains "$POSITIVE_OUT" "tcfsd version: tcfsd 0.13.0"
 assert_contains "$POSITIVE_OUT" "tcfs version: tcfs 0.13.0"
 assert_contains "$POSITIVE_OUT" "daemon socket ready: $DAEMON_SOCKET"

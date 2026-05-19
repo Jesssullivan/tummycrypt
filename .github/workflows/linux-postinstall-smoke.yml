@@ -132,6 +132,7 @@ jobs:
           STATE_PATH="$RUNNER_TEMP/tcfs-state.json"
           EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
           MUTATION_CONTENT_FILE="$RUNNER_TEMP/mutation-fixture-content"
+          PACKAGE_PATHS_FILE="$RUNNER_TEMP/tcfs-package-paths.txt"
           REMOTE_PREFIX="gha/linux-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
           MUTATION_REL="ci-smoke/${VERSION}/mutation-${GITHUB_RUN_ATTEMPT}.txt"
@@ -150,6 +151,7 @@ jobs:
             echo "STATE_PATH=$STATE_PATH"
             echo "EXPECTED_CONTENT_FILE=$EXPECTED_CONTENT_FILE"
             echo "MUTATION_CONTENT_FILE=$MUTATION_CONTENT_FILE"
+            echo "PACKAGE_PATHS_FILE=$PACKAGE_PATHS_FILE"
             echo "REMOTE_PREFIX=$REMOTE_PREFIX"
             echo "FIXTURE_REL=$FIXTURE_REL"
             echo "MUTATION_REL=$MUTATION_REL"
@@ -203,6 +205,7 @@ jobs:
           PACKAGE_URL="${{ github.event.inputs.package_url }}"
           PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
           PACKAGE_ARTIFACT_NAME="${{ github.event.inputs.package_artifact_name }}"
+          : > "$PACKAGE_PATHS_FILE"
 
           if [[ -n "$PACKAGE_ARTIFACT_RUN_ID" ]]; then
             artifact_dir="$RUNNER_TEMP/package-artifact"
@@ -240,13 +243,13 @@ jobs:
               -o "$artifact_zip" \
               "$artifact_url"
             python3 -m zipfile -e "$artifact_zip" "$artifact_dir"
-            artifact_pkg="$(find "$artifact_dir" -type f \( -name '*.deb' -o -name '*.rpm' \) -print -quit)"
-            if [[ -z "$artifact_pkg" ]]; then
+            mapfile -t artifact_pkgs < <(find "$artifact_dir" -type f \( -name '*.deb' -o -name '*.rpm' \) -print | sort)
+            if (( ${#artifact_pkgs[@]} == 0 )); then
               echo "::error::artifact $PACKAGE_ARTIFACT_NAME from run $PACKAGE_ARTIFACT_RUN_ID did not contain a .deb or .rpm"
               find "$artifact_dir" -type f -print
               exit 1
             fi
-            PACKAGE_PATH="$artifact_pkg"
+            printf '%s\n' "${artifact_pkgs[@]}" > "$PACKAGE_PATHS_FILE"
           elif [[ -n "$PACKAGE_URL" ]]; then
             # Preserve the source extension; default to .deb for ubuntu runners.
             case "$PACKAGE_URL" in
@@ -254,15 +257,24 @@ jobs:
               *)     PACKAGE_PATH="$RUNNER_TEMP/tcfsd-${VERSION}.deb" ;;
             esac
             curl -fL -o "$PACKAGE_PATH" "$PACKAGE_URL"
+            printf '%s\n' "$PACKAGE_PATH" > "$PACKAGE_PATHS_FILE"
           else
-            # Default to the amd64 .deb shipped from the release workflow.
-            PACKAGE_PATH="$RUNNER_TEMP/tcfsd-${VERSION}-amd64.deb"
+            # Default to both amd64 .debs shipped from the release workflow:
+            # tcfs-cli owns /usr/bin/tcfs, tcfsd owns /usr/bin/tcfsd and the
+            # systemd unit. The smoke exercises both installed surfaces.
+            CLI_PACKAGE_PATH="$RUNNER_TEMP/tcfs-${VERSION}-amd64.deb"
+            DAEMON_PACKAGE_PATH="$RUNNER_TEMP/tcfsd-${VERSION}-amd64.deb"
             curl -fL \
-              -o "$PACKAGE_PATH" \
+              -o "$CLI_PACKAGE_PATH" \
+              "https://github.com/${{ github.repository }}/releases/download/${TAG}/tcfs-${VERSION}-amd64.deb"
+            curl -fL \
+              -o "$DAEMON_PACKAGE_PATH" \
               "https://github.com/${{ github.repository }}/releases/download/${TAG}/tcfsd-${VERSION}-amd64.deb"
+            printf '%s\n' "$CLI_PACKAGE_PATH" "$DAEMON_PACKAGE_PATH" > "$PACKAGE_PATHS_FILE"
           fi
 
-          echo "PACKAGE_PATH=$PACKAGE_PATH" >> "$GITHUB_ENV"
+          echo "package paths:"
+          sed 's/^/  - /' "$PACKAGE_PATHS_FILE"
 
       - name: Write live config
         shell: bash
@@ -317,7 +329,6 @@ jobs:
           # exact-content hydration on `tcfs index inspect` reporting
           # status=visible — the same gate as the macOS harness.
           args=(
-            --package-path "$PACKAGE_PATH"
             --config "$CONFIG_PATH"
             --expected-version "${VERSION}"
             --expected-file "${FIXTURE_REL}"
@@ -328,6 +339,15 @@ jobs:
             --mount-point "$MOUNT_POINT"
             --log-dir "$LOG_DIR/harness"
           )
+
+          if [[ ! -s "$PACKAGE_PATHS_FILE" ]]; then
+            echo "::error::package download did not record any package paths"
+            exit 1
+          fi
+          while IFS= read -r package_path; do
+            [[ -n "$package_path" ]] || continue
+            args+=(--package-path "$package_path")
+          done < "$PACKAGE_PATHS_FILE"
 
           if [[ "${{ github.event.inputs.exercise_evict_rehydrate }}" == "true" ]]; then
             args+=(--exercise-evict-rehydrate)

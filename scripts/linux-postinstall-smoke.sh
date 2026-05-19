@@ -30,10 +30,12 @@ This harness assumes a real operator config and a routable backend.
 It does not fabricate storage credentials.
 
 Options:
-  --package-path <path>       .deb or .rpm artifact to install. If omitted
-                              the harness assumes tcfsd/tcfs are already on
-                              PATH (useful when packages were installed by
-                              the workflow before this script runs).
+  --package-path <path>       .deb or .rpm artifact to install. May be
+                              repeated for split CLI/daemon packages. If
+                              omitted, the harness assumes tcfsd/tcfs are
+                              already on PATH (useful when packages were
+                              installed by the workflow before this script
+                              runs).
   --config <path>             tcfs config (default: ~/.config/tcfs/config.toml)
   --expected-version <ver>    Require tcfs/tcfsd --version output to include this
   --expected-file <relpath>   Relative path under the mount to enumerate + hydrate
@@ -80,7 +82,7 @@ MUTATION_CONTENT_FILE="${TCFS_MUTATION_CONTENT_FILE:-}"
 REMOTE_PREFIX="${TCFS_REMOTE_PREFIX:-}"
 REMOTE_SPEC="${TCFS_REMOTE_SPEC:-}"
 MOUNT_POINT="${TCFS_MOUNT_POINT:-}"
-PACKAGE_PATH=""
+PACKAGE_PATHS=()
 SKIP_PACKAGE_INSTALL="${TCFS_SKIP_PACKAGE_INSTALL:-0}"
 SYSTEMD_UNIT="${TCFS_SYSTEMD_UNIT:-tcfsd.service}"
 USE_SYSTEMD="${TCFS_USE_SYSTEMD:-1}"
@@ -94,7 +96,7 @@ LOG_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --package-path)
-      PACKAGE_PATH="$2"
+      PACKAGE_PATHS+=("$2")
       shift 2
       ;;
     --config)
@@ -312,26 +314,21 @@ validate_relative_file_path() {
 }
 
 # ── Package install ──────────────────────────────────────────────────────────
-install_package() {
-  [[ "$SKIP_PACKAGE_INSTALL" == "1" ]] && {
-    echo "package install skipped (--skip-package-install)"
-    return 0
-  }
-  [[ -n "$PACKAGE_PATH" ]] || {
-    echo "no --package-path provided and --skip-package-install not set" >&2
-    exit 2
-  }
-  require_file "$PACKAGE_PATH"
+install_package_path() {
+  local package_path="$1"
+  local package_index="$2"
+  local install_log="$LOG_DIR/package-install-${package_index}.log"
 
-  local install_log="$LOG_DIR/package-install.log"
-  case "$PACKAGE_PATH" in
+  require_file "$package_path"
+
+  case "$package_path" in
     *.deb)
-      echo "installing .deb: $PACKAGE_PATH"
+      echo "installing .deb: $package_path"
       if command -v sudo >/dev/null 2>&1; then
-        sudo -n apt-get install -y --no-install-recommends "$PACKAGE_PATH" \
+        sudo -n apt-get install -y --no-install-recommends "$package_path" \
           >"$install_log" 2>&1 || {
             # apt-get install on a path needs ./prefix or absolute; fall back to dpkg
-            sudo -n dpkg -i "$PACKAGE_PATH" >>"$install_log" 2>&1 || {
+            sudo -n dpkg -i "$package_path" >>"$install_log" 2>&1 || {
               echo "dpkg install failed; see $install_log" >&2
               cat "$install_log" >&2 || true
               exit 1
@@ -343,7 +340,7 @@ install_package() {
             }
           }
       else
-        dpkg -i "$PACKAGE_PATH" >"$install_log" 2>&1 || {
+        dpkg -i "$package_path" >"$install_log" 2>&1 || {
           echo "dpkg install failed (no sudo); see $install_log" >&2
           cat "$install_log" >&2 || true
           exit 1
@@ -351,15 +348,15 @@ install_package() {
       fi
       ;;
     *.rpm)
-      echo "installing .rpm: $PACKAGE_PATH"
+      echo "installing .rpm: $package_path"
       if command -v sudo >/dev/null 2>&1; then
-        sudo -n rpm -i --replacepkgs "$PACKAGE_PATH" >"$install_log" 2>&1 || {
+        sudo -n rpm -i --replacepkgs "$package_path" >"$install_log" 2>&1 || {
           echo "rpm install failed; see $install_log" >&2
           cat "$install_log" >&2 || true
           exit 1
         }
       else
-        rpm -i --replacepkgs "$PACKAGE_PATH" >"$install_log" 2>&1 || {
+        rpm -i --replacepkgs "$package_path" >"$install_log" 2>&1 || {
           echo "rpm install failed (no sudo); see $install_log" >&2
           cat "$install_log" >&2 || true
           exit 1
@@ -367,11 +364,29 @@ install_package() {
       fi
       ;;
     *)
-      echo "unsupported package extension (expected .deb or .rpm): $PACKAGE_PATH" >&2
+      echo "unsupported package extension (expected .deb or .rpm): $package_path" >&2
       exit 2
       ;;
   esac
   echo "package install log: $install_log"
+}
+
+install_packages() {
+  [[ "$SKIP_PACKAGE_INSTALL" == "1" ]] && {
+    echo "package install skipped (--skip-package-install)"
+    return 0
+  }
+  (( ${#PACKAGE_PATHS[@]} > 0 )) || {
+    echo "no --package-path provided and --skip-package-install not set" >&2
+    exit 2
+  }
+
+  local package_index=1
+  local package_path
+  for package_path in "${PACKAGE_PATHS[@]}"; do
+    install_package_path "$package_path" "$package_index"
+    package_index=$((package_index + 1))
+  done
 }
 
 # ── Daemon control ───────────────────────────────────────────────────────────
@@ -888,7 +903,7 @@ cleanup() {
 }
 trap 'cleanup; [[ -n "$LOG_DIR_OVERRIDE" ]] || rm -rf "$LOG_DIR"' EXIT
 
-install_package
+install_packages
 
 TCFSD_PATH="$(resolve_bin "$TCFSD_BIN")"
 assert_version "tcfsd" "$TCFSD_PATH"
