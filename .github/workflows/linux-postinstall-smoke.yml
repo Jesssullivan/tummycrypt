@@ -125,6 +125,61 @@ jobs:
             exit 1
           fi
 
+      - name: Validate storage endpoint reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os
+          import socket
+          import sys
+          import urllib.parse
+
+          endpoint = os.environ.get("TCFS_SMOKE_S3_ENDPOINT", "").strip()
+          parsed = urllib.parse.urlparse(endpoint)
+          if parsed.scheme not in ("http", "https") or not parsed.hostname:
+              print(
+                  "::error::TCFS_SMOKE_S3_ENDPOINT must be an http(s) URL with a hostname"
+              )
+              raise SystemExit(1)
+
+          port = parsed.port or (443 if parsed.scheme == "https" else 80)
+          try:
+              addrs = socket.getaddrinfo(
+                  parsed.hostname,
+                  port,
+                  type=socket.SOCK_STREAM,
+              )
+          except socket.gaierror as exc:
+              print(
+                  "::error::TCFS_SMOKE_S3_ENDPOINT hostname does not resolve from this Linux runner; "
+                  "use a runner_label with private DNS access or a smoke environment with a public endpoint."
+              )
+              print(f"DNS error: {exc}")
+              raise SystemExit(1)
+
+          last_error = None
+          for family, socktype, proto, _canonname, sockaddr in addrs:
+              sock = socket.socket(family, socktype, proto)
+              sock.settimeout(5)
+              try:
+                  sock.connect(sockaddr)
+                  print("storage endpoint TCP preflight passed")
+                  raise SystemExit(0)
+              except OSError as exc:
+                  last_error = exc
+              finally:
+                  sock.close()
+
+          print(
+              "::error::TCFS_SMOKE_S3_ENDPOINT did not accept a TCP connection from this Linux runner; "
+              "use a private runner or a reachable endpoint."
+          )
+          if last_error is not None:
+              print(f"TCP error: {last_error}")
+          raise SystemExit(1)
+          PY
+
       - name: Derive run paths
         shell: bash
         run: |
