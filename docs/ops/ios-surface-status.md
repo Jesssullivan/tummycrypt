@@ -32,6 +32,8 @@ It does not prove:
 - Maintain browsing, enumeration, and hydration as the documented intent
 - Do not advertise upload, modify, delete, background sync, or conflict UX as
   supported iOS features, even though experimental hooks exist in code
+- FileProvider item capabilities should expose only read/enumerate affordances
+  until write/delete acceptance exists.
 
 ## Why Read-Only Remains The Posture
 
@@ -46,9 +48,9 @@ It does not prove:
 - The current entitlement files declare the App Group, but shared Keychain
   behavior still needs real-device proof before claiming credentials work
   across the host app and extension.
-- The FileProvider item capabilities can expose write affordances in Files.app;
-  those affordances are unsupported until create/modify/delete flows have
-  device-backed acceptance.
+- The FileProvider item capabilities now expose read/enumerate affordances by
+  default; create/modify/delete hooks remain experimental implementation
+  scaffolding until device-backed acceptance proves them.
 
 ## Maintenance Expectation
 
