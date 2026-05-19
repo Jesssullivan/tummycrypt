@@ -1264,6 +1264,8 @@ nudge_cloud_root_enumeration() {
         fileproviderctl check -P -a "$root" || true
     fi
   fi
+
+  run_coordinated_root_listing "$root" "cloud-root-coordinated-list-nudge" >/dev/null || true
 }
 
 nudge_expected_parent_enumeration() {
@@ -1490,6 +1492,8 @@ classify_cloud_root_enumeration_failure() {
     "$LOG_DIR/cloud-root-open.log" \
     "$LOG_DIR/cloud-root-find.log" \
     "$LOG_DIR/cloud-root-find.err" \
+    "$LOG_DIR/cloud-root-coordinated-list.log" \
+    "$LOG_DIR/cloud-root-coordinated-list-nudge.log" \
     "$LOG_DIR/cloud-root-stat.log" \
     "$LOG_DIR/cloud-root-access.log" \
     "$LOG_DIR/cloud-root-xattr.log" \
@@ -1539,9 +1543,30 @@ classify_cloud_root_enumeration_failure() {
   return 1
 }
 
+run_coordinated_root_listing() {
+  local root="$1"
+  local label="$2"
+  local helper="$REPO_ROOT/scripts/macos-fileprovider-coordinated-list.swift"
+  local listing
+
+  [[ "$COORDINATED_READ" != "0" ]] || return 2
+  [[ -f "$helper" ]] || return 2
+  command -v swift >/dev/null 2>&1 || return 2
+
+  run_bounded_to_log \
+    "$label" \
+    "$LOG_SHOW_TIMEOUT_SECS" \
+    swift "$helper" "$root" || return "$?"
+
+  listing="$(cat "$LOG_DIR/${label}.log" 2>/dev/null || true)"
+  [[ -n "$listing" ]] || return 1
+  printf '%s\n' "$listing"
+}
+
 enumerate_root() {
   local root="$1"
   local listing
+  local coordinated_listing
   local attempt=0
   local system_log
 
@@ -1560,6 +1585,11 @@ enumerate_root() {
     if [[ -n "$listing" ]]; then
       echo "enumeration sample:"
       echo "$listing"
+      return
+    fi
+    if coordinated_listing="$(run_coordinated_root_listing "$root" "cloud-root-coordinated-list")"; then
+      echo "coordinated enumeration sample:"
+      echo "$coordinated_listing"
       return
     fi
     short_pause

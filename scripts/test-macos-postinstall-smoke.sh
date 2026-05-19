@@ -459,6 +459,35 @@ marker="${TCFS_FAKE_SWIFT_MARKER:-}"
 target="${TCFS_FAKE_SWIFT_TARGET:-}"
 hang_target="${TCFS_FAKE_SWIFT_HANG_TARGET:-}"
 permission_target="${TCFS_FAKE_SWIFT_PERMISSION_TARGET:-}"
+list_target="${TCFS_FAKE_SWIFT_LIST_TARGET:-}"
+list_permission_target="${TCFS_FAKE_SWIFT_LIST_PERMISSION_TARGET:-}"
+list_output="${TCFS_FAKE_SWIFT_LIST_OUTPUT:-}"
+
+if [[ "$helper" == *"macos-fileprovider-coordinated-list.swift" ]]; then
+  if [[ -z "$source" || -n "$destination" ]]; then
+    printf 'unexpected coordinated list invocation:'
+    printf ' %q' "$@"
+    printf '\n'
+    exit 1
+  fi
+
+  if [[ -n "$list_permission_target" && "$source" == "$list_permission_target" ]]; then
+    printf 'coordinated list operation failed: The folder “TCFS” couldn'\''t be opened because you don'\''t have permission to view it. [domain=NSCocoaErrorDomain code=257] path=%s underlying=NSPOSIXErrorDomain(1): Operation not permitted\n' "$source" >&2
+    exit 1
+  fi
+
+  if [[ -n "$list_target" && "$source" == "$list_target" ]]; then
+    if [[ -n "$list_output" ]]; then
+      printf '%s\n' "$list_output"
+    else
+      printf '%s\n' "$source/Projects"
+    fi
+    exit 0
+  fi
+
+  printf 'coordinated list fixture disabled for %s\n' "$source" >&2
+  exit 1
+fi
 
 if [[ "$helper" != *"macos-fileprovider-coordinated-read.swift" || -z "$source" || -z "$destination" ]]; then
   printf 'unexpected swift invocation:'
@@ -866,6 +895,29 @@ test -f "${TMPDIR}/find-permission-logs/cloud-root-stat.log"
 test -f "${TMPDIR}/find-permission-logs/cloud-root-access.log"
 test -f "${TMPDIR}/find-permission-logs/cloud-root-xattr.log"
 test -f "${TMPDIR}/find-permission-logs/fileproviderctl-domain-list.log"
+
+COORDINATED_LIST_OUT="${TMPDIR}/coordinated-list.out"
+env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+  TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+  TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
+  TCFS_FAKE_FIND_PERMISSION_TARGET="$CLOUD_ROOT" \
+  TCFS_FAKE_SWIFT_LIST_TARGET="$CLOUD_ROOT" \
+  LOG_SHOW_TIMEOUT_SECS=1 \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/coordinated-list-logs" \
+    --timeout 2 \
+    >"$COORDINATED_LIST_OUT" 2>&1
+assert_contains "$COORDINATED_LIST_OUT" "coordinated enumeration sample:"
+assert_contains "$COORDINATED_LIST_OUT" "$CLOUD_ROOT/Projects"
+assert_contains "$COORDINATED_LIST_OUT" "macOS post-install FileProvider smoke passed"
+assert_not_contains "$COORDINATED_LIST_OUT" "classification: cloudstorage_root_permission_denied"
+assert_contains "${TMPDIR}/coordinated-list-logs/cloud-root-find.err" "Operation not permitted"
+assert_contains "${TMPDIR}/coordinated-list-logs/cloud-root-coordinated-list.log" "$CLOUD_ROOT/Projects"
+assert_contains "${TMPDIR}/coordinated-list-logs/cloud-root-coordinated-list-nudge.log" "$CLOUD_ROOT/Projects"
 
 SAME_PATH_DUPES_OUT="${TMPDIR}/same-path-dupes.out"
 SAME_PATH_DUPES_ERR="${TMPDIR}/same-path-dupes.err"
