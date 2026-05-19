@@ -41,11 +41,15 @@ Required secrets:
 Optional secret:
 
 - `TCFS_SMOKE_S3_REGION`
+- `TCFS_SMOKE_S3_CA_CERT_PEM` — PEM-encoded custom root CA for private HTTPS
+  endpoints that are not signed by a public trust root
 
 The endpoint must be reachable from the selected runner. For GitHub-hosted
 Linux, it must be public HTTPS. For a private self-hosted runner, it may be
 private, but `require_https=true` still requires the endpoint URL to start with
-`https://`.
+`https://`. If the endpoint uses a private CA, set `TCFS_SMOKE_S3_CA_CERT_PEM`;
+the workflow writes it to a run-scoped file and passes it as
+`storage.ca_cert_path`.
 
 ## Credential Bar
 
@@ -118,7 +122,8 @@ The workflow run must complete successfully and upload its evidence artifact.
 - remote prefix
 - `require_https=true`
 - `enforce_tls=true`
-- whether custom CA support was required
+- `ca_cert_path_supported=true`
+- whether a custom CA was configured for the run
 
 The Linear/GitHub closeout comment should also include the credential scope in
 plain language. Do not paste secrets.

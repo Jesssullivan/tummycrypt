@@ -2395,6 +2395,7 @@ async fn cmd_mount(
         s3_pool_idle_timeout_secs: config.storage.s3_pool_idle_timeout_secs,
         s3_pool_max_idle_per_host: config.storage.s3_pool_max_idle_per_host,
         s3_http1_only: config.storage.s3_http1_only,
+        ca_cert_path: config.storage.ca_cert_path.clone(),
     };
     let op = tcfs_storage::operator::build_operator_with_limits(
         &storage_cfg,
