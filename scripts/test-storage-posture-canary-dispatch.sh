@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/storage-posture-canary-dispatch.sh"
+WORKFLOW="$REPO_ROOT/.github/workflows/storage-posture-canary.yml"
 TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/tcfs-storage-dispatch-test.XXXXXX")"
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -81,6 +82,10 @@ export GH_FAKE_LOG="$TMPDIR/gh.log"
 : >"$GH_FAKE_LOG"
 
 bash -n "$SCRIPT"
+assert_contains "$WORKFLOW" "require_https=true requires scope_deny_prefix"
+assert_contains "$WORKFLOW" "production posture packet proves scoped-credential denial"
+assert_contains "$WORKFLOW" "require_https production posture runs must include scope-deny proof"
+assert_contains "$WORKFLOW" "scope-deny probe must fail with PermissionDenied"
 
 DRY_RUN="$TMPDIR/dry-run.out"
 bash "$SCRIPT" \
