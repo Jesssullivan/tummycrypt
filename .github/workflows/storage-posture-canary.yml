@@ -93,6 +93,12 @@ jobs:
             exit 1
           fi
 
+          if [[ "${{ github.event.inputs.require_https }}" == "true" \
+                && -z "${{ github.event.inputs.scope_deny_prefix }}" ]]; then
+            echo "::error::require_https=true requires scope_deny_prefix so the production posture packet proves scoped-credential denial"
+            exit 1
+          fi
+
           case "${{ github.event.inputs.timeout_secs }}" in
             ''|*[!0-9]*)
               echo "::error::timeout_secs must be a positive integer"
@@ -266,14 +272,17 @@ jobs:
 
           assert report["deleted"] is True, "delete verification must pass"
           assert report["bytes"] > 0, "canary payload must be non-empty"
+          if require_https:
+              assert report["endpoint_tls"] is True, "endpoint_tls must be true"
+              assert report["enforce_tls"] is True, "enforce_tls must be true"
+              assert report.get("scope_deny") is not None, (
+                  "require_https production posture runs must include scope-deny proof"
+              )
           if scope_deny := report.get("scope_deny"):
               assert scope_deny["denied"] is True, "scope-deny probe must be denied"
               assert scope_deny["error_kind"] == "PermissionDenied", (
                   "scope-deny probe must fail with PermissionDenied"
               )
-          if require_https:
-              assert report["endpoint_tls"] is True, "endpoint_tls must be true"
-              assert report["enforce_tls"] is True, "enforce_tls must be true"
           print("storage canary report validated")
           PY
 
