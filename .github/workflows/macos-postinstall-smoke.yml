@@ -37,6 +37,11 @@ on:
         required: false
         default: false
         type: boolean
+      host_root_probe:
+        description: "Require the signed HostApp root/user-visible URL probe even when raw CloudStorage enumeration succeeds"
+        required: false
+        default: false
+        type: boolean
       lab_gatekeeper_override:
         description: "PZM-only non-production lab: require a SystemPolicyRule profile for the installed testing-mode app"
         required: false
@@ -826,6 +831,10 @@ jobs:
 
           if [[ "${{ github.event.inputs.rebuild_domain }}" == "true" ]]; then
             args+=(--rebuild-domain)
+          fi
+
+          if [[ "${{ github.event.inputs.host_root_probe }}" == "true" ]]; then
+            args+=(--host-root-probe)
           fi
 
           if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" == "true" ]]; then
