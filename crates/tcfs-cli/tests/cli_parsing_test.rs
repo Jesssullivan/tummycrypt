@@ -68,6 +68,10 @@ enum Commands {
     Unmount {
         mountpoint: PathBuf,
     },
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
     Unsync {
         path: PathBuf,
         #[arg(long)]
@@ -91,6 +95,19 @@ enum ConfigAction {
 #[derive(clap::Subcommand, Debug)]
 enum IndexAction {
     Inspect {
+        rel_path: String,
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum CacheAction {
+    Stats,
+    Clear,
+    Evict {
         rel_path: String,
         #[arg(long, short = 'p')]
         prefix: Option<String>,
@@ -280,6 +297,36 @@ fn parse_unmount() {
         assert_eq!(mountpoint, PathBuf::from("/mnt/tcfs"));
     } else {
         panic!("expected Unmount");
+    }
+}
+
+#[test]
+fn parse_cache_evict() {
+    let cli = Cli::try_parse_from([
+        "tcfs",
+        "cache",
+        "evict",
+        "Projects/tcfs-odrive-parity/honey-readme.txt",
+        "--prefix",
+        "data",
+        "--json",
+    ])
+    .expect("cache evict should parse");
+
+    if let Commands::Cache {
+        action:
+            CacheAction::Evict {
+                rel_path,
+                prefix,
+                json,
+            },
+    } = cli.command
+    {
+        assert_eq!(rel_path, "Projects/tcfs-odrive-parity/honey-readme.txt");
+        assert_eq!(prefix, Some("data".to_string()));
+        assert!(json);
+    } else {
+        panic!("expected Cache Evict");
     }
 }
 

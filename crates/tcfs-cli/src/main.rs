@@ -483,6 +483,17 @@ enum CacheAction {
     Stats,
     /// Clear all cached content
     Clear,
+    /// Evict one remote-backed file from the local hydrated-content cache
+    Evict {
+        /// Logical relative path under the remote prefix
+        rel_path: String,
+        /// Remote prefix override
+        #[arg(long, short = 'p')]
+        prefix: Option<String>,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -583,6 +594,11 @@ async fn main() -> Result<()> {
         Commands::Cache { action } => match action {
             CacheAction::Stats => cmd_cache_stats(&config).await,
             CacheAction::Clear => cmd_cache_clear(&config).await,
+            CacheAction::Evict {
+                rel_path,
+                prefix,
+                json,
+            } => cmd_cache_evict(&config, &rel_path, prefix.as_deref(), json).await,
         },
         Commands::Mount {
             remote,
@@ -2370,6 +2386,15 @@ fn format_uptime(secs: i64) -> String {
 
 // ── `tcfs cache stats` / `tcfs cache clear` ──────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CacheEvictReport {
+    rel_path: String,
+    remote_prefix: String,
+    manifest_hash: String,
+    bytes_freed: u64,
+    was_cached: bool,
+}
+
 async fn cmd_cache_stats(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     let cache_dir = expand_tilde(&config.fuse.cache_dir);
     let cache_max = config.fuse.cache_max_mb * 1024 * 1024;
@@ -2413,6 +2438,74 @@ async fn cmd_cache_clear(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     } else {
         println!("Cache directory does not exist: {}", cache_dir.display());
     }
+    Ok(())
+}
+
+async fn evict_cache_entry_with_operator(
+    config: &tcfs_core::config::TcfsConfig,
+    op: &opendal::Operator,
+    rel_path: &str,
+    remote_prefix: &str,
+) -> Result<CacheEvictReport> {
+    let report = inspect_index_entry_with_operator(op, rel_path, remote_prefix).await?;
+    let status = report.status.clone();
+    let visible = report.visible_entry.with_context(|| {
+        format!(
+            "cannot evict cache for {}: remote index status is {status}",
+            report.rel_path
+        )
+    })?;
+    anyhow::ensure!(
+        visible.manifest_exists,
+        "cannot evict cache for {}: manifest {} is missing",
+        report.rel_path,
+        visible.manifest_key
+    );
+
+    let cache_dir = expand_tilde(&config.fuse.cache_dir);
+    let cache_max = config.fuse.cache_max_mb * 1024 * 1024;
+    let cache = tcfs_vfs::DiskCache::new(cache_dir, cache_max);
+    let bytes_freed = cache.evict(&visible.manifest_hash).await?;
+
+    Ok(CacheEvictReport {
+        rel_path: report.rel_path,
+        remote_prefix: report.remote_prefix,
+        manifest_hash: visible.manifest_hash,
+        bytes_freed,
+        was_cached: bytes_freed > 0,
+    })
+}
+
+async fn cmd_cache_evict(
+    config: &tcfs_core::config::TcfsConfig,
+    rel_path: &str,
+    prefix: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let op = build_operator(config).await?;
+    let remote_prefix = prefix.unwrap_or_else(|| config.storage.resolved_prefix());
+    let report = evict_cache_entry_with_operator(config, &op, rel_path, remote_prefix).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).context("serializing cache evict report")?
+        );
+    } else {
+        println!("Evicted cache entry: {}", report.rel_path);
+        println!("  remote prefix: {}", report.remote_prefix);
+        println!("  manifest:      {}", report.manifest_hash);
+        println!("  freed:         {}", fmt_bytes(report.bytes_freed));
+        println!(
+            "  result:        {}",
+            if report.was_cached {
+                "evicted"
+            } else {
+                "not cached"
+            }
+        );
+    }
+
     Ok(())
 }
 
@@ -4939,6 +5032,58 @@ enabled = false
         assert_eq!(visible.manifest_key, "data/manifests/hash123");
         assert!(visible.manifest_exists);
         assert_eq!(visible.size, 46);
+    }
+
+    #[tokio::test]
+    async fn cache_evict_uses_remote_index_manifest_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let mut config = test_config(dir.path());
+        config.fuse.cache_dir = cache_dir.clone();
+
+        let op = memory_op();
+        op.write("data/manifests/hash123", b"{}".to_vec())
+            .await
+            .unwrap();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            &op,
+            "data/index/shared/alpha-test.txt",
+            &tcfs_sync::index_entry::RemoteIndexEntry::new("hash123", 46, 1),
+        )
+        .await
+        .unwrap();
+
+        let cache = tcfs_vfs::DiskCache::new(cache_dir, 1024 * 1024);
+        cache.put("hash123", b"hydrated bytes").await.unwrap();
+        assert!(cache.contains("hash123").await);
+
+        let report = evict_cache_entry_with_operator(&config, &op, "shared/alpha-test.txt", "data")
+            .await
+            .unwrap();
+
+        assert_eq!(report.rel_path, "shared/alpha-test.txt");
+        assert_eq!(report.manifest_hash, "hash123");
+        assert_eq!(report.bytes_freed, b"hydrated bytes".len() as u64);
+        assert!(report.was_cached);
+        assert!(!cache.contains("hash123").await);
+    }
+
+    #[tokio::test]
+    async fn cache_evict_rejects_missing_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.fuse.cache_dir = dir.path().join("cache");
+        let op = memory_op();
+
+        let err = evict_cache_entry_with_operator(&config, &op, "missing.txt", "data")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("remote index status is missing_index"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

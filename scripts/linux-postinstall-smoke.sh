@@ -4,7 +4,7 @@
 # Verify the installed Linux package path after .deb/.rpm install:
 # package install, tcfsd reachable (systemd unit or fallback foreground),
 # FUSE mount, remote index gate via `tcfs index inspect`, exact-content
-# hydration through the mount, and optional evict/rehydrate and mutation
+# hydration through the mount, and optional cache-evict/rehydrate and mutation
 # exercises.
 #
 # This is the structural analog of scripts/macos-postinstall-smoke.sh.
@@ -24,7 +24,7 @@ Usage: scripts/linux-postinstall-smoke.sh [options]
 
 Verify the installed Linux package path after .deb/.rpm install:
 package layout, tcfsd reachable, FUSE mount, exact-content hydration,
-optional evict/rehydrate and mutation exercises.
+optional cache-evict/rehydrate and mutation exercises.
 
 This harness assumes a real operator config and a routable backend.
 It does not fabricate storage credentials.
@@ -44,8 +44,8 @@ Options:
                               File containing exact expected content
   --seed-expected-file        Create a timestamped fixture, push to remote, and
                               use it as the expected hydration target
-  --exercise-evict-rehydrate  After hydration, run `tcfs unsync` and re-read to
-                              verify rehydrate
+  --exercise-evict-rehydrate  After hydration, evict the hydrated cache entry
+                              and re-read to verify rehydrate
   --exercise-mutation         Write a new file through the mount and verify via
                               remote pull
   --mutation-file <relpath>   Relative mutation file path under the mount
@@ -671,8 +671,10 @@ resolve_remote_spec() {
     exit 2
   fi
   local remote_scheme authority bucket
-  local -a remote_parts
-  mapfile -t remote_parts < <(python3 - "$CONFIG_PATH" <<'PY' 2>/dev/null || true
+  local -a remote_parts=()
+  while IFS= read -r remote_part; do
+    remote_parts+=("$remote_part")
+  done < <(python3 - "$CONFIG_PATH" <<'PY' 2>/dev/null || true
 import sys
 import urllib.parse
 try:
@@ -800,27 +802,25 @@ hydrate_expected_file() {
   fi
 }
 
-# ── Evict / rehydrate via `tcfs unsync` ──────────────────────────────────────
+# ── Evict / rehydrate via mounted-content cache eviction ─────────────────────
 exercise_evict_rehydrate_cycle() {
   local rel="$1"
   local mount_path="$MOUNT_POINT/$rel"
-  local unsync_log="$LOG_DIR/unsync.log"
+  local evict_log="$LOG_DIR/cache-evict.log"
+  local -a args
 
-  # TODO(TIN-1422): on Linux the canonical "evict" path for the FUSE mount
-  # is `tcfs unsync <hydrated-copy>` applied to the sync_root copy (the
-  # FUSE mount itself is a read-through cache, not the eviction target).
-  # For the scaffold we drive `tcfs unsync` against the mounted path and
-  # rely on the CLI to convert it to a stub on disk — followup work needs
-  # to confirm the right semantics for FUSE-backed flows and may need to
-  # operate on a sync_root path instead.
-  echo "requesting unsync (evict): $mount_path"
-  "$TCFS_PATH" --config "$CONFIG_PATH" unsync "$mount_path" \
-    >"$unsync_log" 2>&1 || {
-    echo "tcfs unsync failed" >&2
-    cat "$unsync_log" >&2 || true
+  args=(--config "$CONFIG_PATH" cache evict "$rel")
+  if [[ -n "$REMOTE_PREFIX" ]]; then
+    args+=(--prefix "$REMOTE_PREFIX")
+  fi
+
+  echo "evicting hydrated cache entry: $rel"
+  "$TCFS_PATH" "${args[@]}" >"$evict_log" 2>&1 || {
+    echo "tcfs cache evict failed" >&2
+    cat "$evict_log" >&2 || true
     exit 1
   }
-  cat "$unsync_log"
+  cat "$evict_log"
 
   # Read again — should rehydrate.
   hydrate_expected_file "$mount_path"

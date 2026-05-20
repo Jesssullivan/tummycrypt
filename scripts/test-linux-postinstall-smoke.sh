@@ -94,7 +94,7 @@ fi
 EOF
 
 # ── Fake tcfs CLI that supports status, index inspect, push, pull, mount,
-#    unsync ──────────────────────────────────────────────────────────────────
+#    and cache evict ─────────────────────────────────────────────────────────
 cat >"$FAKE_BIN/tcfs" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -171,9 +171,21 @@ JSON
         : >"${TCFS_FAKE_MOUNT_MARKER:-/dev/null}"
         exec sleep 60
         ;;
+      cache)
+        [[ "${2:-}" == "evict" ]] || {
+          printf 'expected fake cache evict\n' >&2
+          exit 1
+        }
+        rel="${3:-}"
+        printf 'Evicted cache entry: %s\n' "$rel"
+        printf '  remote prefix: fake/prefix\n'
+        printf '  manifest:      fakehash\n'
+        printf '  freed:         27 B\n'
+        printf '  result:        evicted\n'
+        ;;
       unsync)
-        path="$2"
-        printf 'Unsynced: %s -> stub\n' "$path"
+        printf 'fake tcfs unsync should not be used for mounted cache eviction\n' >&2
+        exit 64
         ;;
       *)
         printf 'unexpected tcfs --config invocation:'
@@ -368,6 +380,8 @@ assert_contains "$POSITIVE_OUT" "remote index status for expected file: visible"
 assert_contains "$POSITIVE_OUT" "derived --remote-spec: seaweedfs+https://example.invalid:8333/tcfs/fake/prefix"
 assert_contains "$POSITIVE_OUT" "FUSE mount ready"
 assert_contains "$POSITIVE_OUT" "hydrated file content matched expected content file"
+assert_contains "$POSITIVE_OUT" "evicting hydrated cache entry: $EXPECTED_REL"
+assert_contains "$POSITIVE_OUT" "Evicted cache entry: $EXPECTED_REL"
 assert_contains "$POSITIVE_OUT" "Linux evict/rehydrate cycle passed"
 assert_contains "$POSITIVE_OUT" "Linux mutation local content matched"
 assert_contains "$POSITIVE_OUT" "remote mutation pull matched expected content"
