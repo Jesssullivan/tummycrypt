@@ -76,6 +76,9 @@ Options:
                               FileProvider hydration target. If
                               --expected-file is omitted, a
                               finder-smoke-<UTC>/fixture.txt path is generated.
+  --host-root-probe            Always launch the signed HostApp root/user-visible
+                              URL probe and require an entry sample, even when
+                              shell/coordinated CloudStorage enumeration works.
   --require-keychain-config   Require extension logs to prove config loaded
                               from shared Keychain, and fail if embedded config
                               was used
@@ -115,6 +118,7 @@ FILEPROVIDER_TESTING_MODE="${TCFS_FILEPROVIDER_TESTING_MODE:-0}"
 DIRECT_HOST_LAUNCH="${TCFS_FILEPROVIDER_DIRECT_HOST_LAUNCH:-0}"
 REBUILD_DOMAIN="${TCFS_FILEPROVIDER_REBUILD_DOMAIN:-0}"
 SEED_EXPECTED_FILE="${TCFS_FILEPROVIDER_SEED_EXPECTED_FILE:-0}"
+HOST_ROOT_PROBE="${TCFS_FILEPROVIDER_HOST_ROOT_PROBE:-0}"
 REQUIRE_KEYCHAIN_CONFIG="${TCFS_REQUIRE_KEYCHAIN_CONFIG:-0}"
 TCFS_BIN="${TCFS_BIN:-tcfs}"
 TCFSD_BIN="${TCFSD_BIN:-tcfsd}"
@@ -234,6 +238,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --seed-expected-file)
       SEED_EXPECTED_FILE=1
+      shift
+      ;;
+    --host-root-probe)
+      HOST_ROOT_PROBE=1
       shift
       ;;
     --require-keychain-config)
@@ -1601,6 +1609,25 @@ run_host_root_probe() {
   ' "$log_file"
 }
 
+require_host_root_probe() {
+  local root="$1"
+  local host_probe_listing
+  local status=0
+
+  host_probe_listing="$(run_host_root_probe "$root")" || status="$?"
+  if [[ "$status" != "0" ]]; then
+    echo "host app root probe failed for $root (status $status)" >&2
+    if [[ -f "$LOG_DIR/host-root-probe.log" ]]; then
+      echo "host app root probe log: $LOG_DIR/host-root-probe.log" >&2
+      cat "$LOG_DIR/host-root-probe.log" >&2 || true
+    fi
+    exit 1
+  fi
+
+  echo "host app root probe sample:"
+  echo "$host_probe_listing"
+}
+
 enumerate_root() {
   local root="$1"
   local listing
@@ -2157,6 +2184,10 @@ fi
 
 CLOUD_ROOT="$(wait_for_cloud_root)"
 echo "CloudStorage root: $CLOUD_ROOT"
+
+if [[ "$HOST_ROOT_PROBE" == "1" ]]; then
+  require_host_root_probe "$CLOUD_ROOT"
+fi
 
 nudge_cloud_root_enumeration "$CLOUD_ROOT"
 enumerate_root "$CLOUD_ROOT"

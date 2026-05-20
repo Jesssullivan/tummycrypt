@@ -563,6 +563,7 @@ TCFS_FAKE_TESTING_MODE_ENTITLEMENT=1 \
 TCFS_FAKE_COMPACT_ENTITLEMENTS=1 \
 TCFS_FAKE_SKIP_ENUM_CONFLICT_LOG=1 \
 TCFS_FAKE_REMOTE_ROOT="$CLOUD_ROOT" \
+TCFS_FAKE_HOST_ROOT_PROBE_ENTRIES="$CLOUD_ROOT/Projects" \
 TCFS_FAKE_SWIFT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
 TCFS_FAKE_SWIFT_MARKER="$READ_RETRY_MARKER" \
 bash "$SCRIPT" \
@@ -573,6 +574,7 @@ bash "$SCRIPT" \
   --app-path "$APP_PATH" \
   --cloud-root "$CLOUD_ROOT" \
   --log-dir "$LOG_DIR" \
+  --host-root-probe \
   --elect-plugin-use \
   --fileprovider-testing-mode \
   --require-keychain-config \
@@ -597,6 +599,8 @@ assert_contains "$OUT" "pluginkit registration:"
 assert_contains "$OUT" "host app log confirmed domain add"
 assert_contains "$OUT" "fileproviderctl domain listing includes io.tinyland.tcfs"
 assert_contains "$OUT" "CloudStorage root: $CLOUD_ROOT"
+assert_contains "$OUT" "host app root probe sample:"
+assert_contains "$OUT" "$CLOUD_ROOT/Projects"
 assert_contains "$OUT" "nudging CloudStorage enumeration"
 assert_contains "$OUT" "nudging expected parent enumeration: $CLOUD_ROOT/Projects"
 assert_contains "$OUT" "nudging expected parent enumeration: $(dirname "$CLOUD_ROOT/$EXPECTED_REL")"
@@ -633,10 +637,12 @@ assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_EVICT_IDE
 assert_contains "$LAUNCHCTL_LOG" "launchctl unsetenv TCFS_FILEPROVIDER_ACTION_NONCE"
 assert_contains "$SWIFT_LOG" "macos-fileprovider-coordinated-read.swift"
 assert_contains "$HOST_BINARY_LOG" "host-binary"
+assert_contains "$HOST_BINARY_LOG" "host-binary rootProbe=$CLOUD_ROOT"
 assert_contains "$HOST_BINARY_LOG" "host-binary requestDownload=$EXPECTED_REL"
 assert_contains "$HOST_BINARY_LOG" "host-binary evict=$EXPECTED_REL"
 assert_contains "$HOST_BINARY_LOG" "nonce=tcfs-smoke-"
 assert_contains "$LOG_DIR/host-domain-launch.log" "add: OK - domain available"
+assert_contains "$LOG_DIR/host-root-probe.log" "rootProbe: direct path entry: $CLOUD_ROOT/Projects"
 assert_contains "$LOG_DIR/host-request-launch.log" "requestDownload: $CONFLICT_REL: OK"
 assert_contains "$LOG_DIR/host-evict-launch.log" "evict: $EXPECTED_REL: OK"
 assert_contains "$LOG_DIR/extension-config.log" "loadConfig: loaded from shared Keychain"
