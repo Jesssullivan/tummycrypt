@@ -130,6 +130,14 @@ fleet-check:
 neo-honey-smoke:
     bash scripts/neo-honey-smoke.sh
 
+# Read-only alpha productionization gate classifier
+alpha-gate-preflight *ARGS:
+    @bash scripts/tcfs-alpha-gate-preflight.sh {{ARGS}}
+
+# Regression test the alpha productionization gate classifier
+alpha-gate-preflight-test:
+    @bash scripts/test-tcfs-alpha-gate-preflight.sh
+
 # Installed-binary smoke for release surfaces that ship tcfsd (and optionally tcfs)
 install-smoke *ARGS:
     bash scripts/install-smoke.sh {{ARGS}}

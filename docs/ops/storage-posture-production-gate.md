@@ -89,6 +89,12 @@ allowed policy, for example:
 
 ## Dispatch
 
+Before dispatching, classify the full alpha gate state:
+
+```bash
+scripts/tcfs-alpha-gate-preflight.sh
+```
+
 Preferred helper:
 
 ```bash

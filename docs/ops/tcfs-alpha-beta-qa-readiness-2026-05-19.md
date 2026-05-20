@@ -5,6 +5,9 @@ It is deliberately stricter than "the code path works": alpha and beta need
 repeatable evidence, bounded failure modes, and clear limits on what testers are
 allowed to trust.
 
+Current execution board:
+[TCFS Alpha Productionization Sprint - May 20, 2026](tcfs-alpha-productionization-sprint-2026-05-20.md).
+
 ## Current Posture
 
 TCFS is ready for focused productionization QA, not for broad primary-filesystem
@@ -104,6 +107,12 @@ has shipped and been proven end to end.
 | iOS | Proof-of-concept only | Files.app real-device/simulator acceptance, safe enrollment posture, TestFlight/provisioning decision | `TIN-1548`, `TIN-134` |
 
 ## This Week's Alpha Runway
+
+Start each pass with the read-only gate classifier:
+
+```bash
+scripts/tcfs-alpha-gate-preflight.sh
+```
 
 1. Archive the `v0.12.13-rc2` exact public `.pkg` smoke packet from run
    `26122478486`, and keep a main-ref/package rerun ready for the next rc or
