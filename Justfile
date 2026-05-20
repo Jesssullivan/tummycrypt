@@ -138,6 +138,10 @@ alpha-gate-preflight *ARGS:
 alpha-gate-preflight-test:
     @bash scripts/test-tcfs-alpha-gate-preflight.sh
 
+# Static regression test for the Linux package post-install smoke workflow
+linux-postinstall-workflow-test:
+    @bash scripts/test-linux-postinstall-workflow.sh
+
 # Installed-binary smoke for release surfaces that ship tcfsd (and optionally tcfs)
 install-smoke *ARGS:
     bash scripts/install-smoke.sh {{ARGS}}

@@ -74,6 +74,8 @@ jobs:
       TCFS_SMOKE_S3_BUCKET: ${{ secrets.TCFS_SMOKE_S3_BUCKET }}
       TCFS_SMOKE_S3_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
       TCFS_SMOKE_S3_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      TCFS_SMOKE_S3_REGION: ${{ secrets.TCFS_SMOKE_S3_REGION }}
+      TCFS_SMOKE_S3_CA_CERT_PEM: ${{ secrets.TCFS_SMOKE_S3_CA_CERT_PEM }}
       TCFS_SMOKE_MASTER_KEY_B64: ${{ secrets.TCFS_SMOKE_MASTER_KEY_B64 }}
       TCFS_S3_ACCESS: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
       TCFS_S3_SECRET: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
@@ -318,10 +320,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          REGION="${TCFS_SMOKE_S3_REGION:-us-east-1}"
           if [[ "${TCFS_SMOKE_S3_ENDPOINT}" == https://* ]]; then
             STORAGE_ENFORCE_TLS=true
           else
             STORAGE_ENFORCE_TLS=false
+          fi
+          CA_CERT_PATH=""
+          CA_CERT_CONFIG_LINE=""
+          if [[ -n "${TCFS_SMOKE_S3_CA_CERT_PEM:-}" ]]; then
+            CA_CERT_PATH="$RUNNER_TEMP/tcfs-linux-storage-ca.pem"
+            printf '%s\n' "$TCFS_SMOKE_S3_CA_CERT_PEM" > "$CA_CERT_PATH"
+            chmod 600 "$CA_CERT_PATH"
+            CA_CERT_CONFIG_LINE="ca_cert_path = \"${CA_CERT_PATH}\""
           fi
           cat > "$CONFIG_PATH" <<EOF
           [daemon]
@@ -331,10 +342,11 @@ jobs:
 
           [storage]
           endpoint = "${TCFS_SMOKE_S3_ENDPOINT}"
-          region = "us-east-1"
+          region = "${REGION}"
           bucket = "${TCFS_SMOKE_S3_BUCKET}"
           remote_prefix = "${REMOTE_PREFIX}"
           enforce_tls = ${STORAGE_ENFORCE_TLS}
+          ${CA_CERT_CONFIG_LINE}
 
           [crypto]
           enabled = true
@@ -350,6 +362,15 @@ jobs:
           device_id = "gha-linux-postinstall"
           EOF
           chmod 600 "$CONFIG_PATH"
+          {
+            echo "endpoint=$TCFS_SMOKE_S3_ENDPOINT"
+            echo "bucket=$TCFS_SMOKE_S3_BUCKET"
+            echo "region=$REGION"
+            echo "remote_prefix=$REMOTE_PREFIX"
+            echo "enforce_tls=$STORAGE_ENFORCE_TLS"
+            echo "ca_cert_path_supported=true"
+            echo "ca_cert_path_configured=$([[ -n "$CA_CERT_PATH" ]] && echo true || echo false)"
+          } > "$LOG_DIR/linux-storage.env"
 
       - name: Prepare expected fixture content
         shell: bash
