@@ -41,6 +41,12 @@ Known evidence:
   can operate under `gha/storage-posture/...` and is denied under
   `gha/storage-posture-denied/...`. It does not prove broad restore throughput,
   long soak behavior, or beta-grade transient-error recovery.
+- run `26212261838` refreshed the packet on `main` at `f89096a` after PR `#434`
+  merged. It passed against the same public HTTPS endpoint with public CA trust
+  (`ca_cert_path_configured=false`), allowed-prefix list/write/read/delete/delete
+  verification, and denied-prefix `PermissionDenied` evidence under
+  `gha/storage-posture-denied/...`. Treat this as the current-main storage
+  posture packet for alpha QA, not as large-restore or soak proof.
 
 ## Required GitHub Environment
 
@@ -183,6 +189,24 @@ The workflow run must complete successfully and upload its evidence artifact.
 
 The Linear/GitHub closeout comment should also include the credential scope in
 plain language. Do not paste secrets.
+
+## Large-Restore Companion
+
+The scoped canary proves endpoint posture and credential scope, but it is too
+small to prove beta-grade restore behavior. Candidate packages that claim
+large-object readiness should also run `task lazy:git-repo-restore-proof` against
+a completed large canary packet and archive:
+
+- dry-run and execute elapsed seconds
+- shadow and restored regular-file byte totals
+- restore throughput in bytes per second
+- partial restored regular-file count and bytes if restore execution fails
+- the usual hash, symlink, empty-directory, unsupported-special-file, state, and
+  reconcile logs
+
+Use this companion for the next `linux-xr-fast` candidate-package restore so
+multi-GB Git pack recovery can be compared across release candidates without
+claiming broad home-directory ownership.
 
 ## Failure Classification
 
