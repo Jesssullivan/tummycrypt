@@ -34,12 +34,12 @@ This is the narrowest and most important truth for public release claims.
 
 | Surface | Status | Current reality |
 | --- | --- | --- |
-| Homebrew | current tap fresh-install pass; upgrade gap | `homebrew-tap@b5877df` points at `v0.12.13-rc4`, and run `26221252765` proves fresh install plus installed `tcfs 0.12.13` / `tcfsd 0.12.13` smoke. Upgrade proof remains pending under TIN-131/#280 |
+| Homebrew | current tap fresh-install and upgrade pass | `homebrew-tap@b5877df` points at `v0.12.13-rc4`; run `26221252765` proves fresh install and run `26221711601` proves upgrade from the prior `v0.12.12` tap ref to rc4 with installed `tcfs 0.12.13` / `tcfsd 0.12.13` smoke |
 | macOS `.pkg` | FileProvider release-asset pass; first-run UX gap | `v0.12.13-rc4` publishes a notarized production Developer ID `.pkg`; PZM run `26218940950` proves the exact public GitHub Release `.pkg` through hydrate, evict/rehydrate, mutation upload/readback, rename, and conflict/status. First-run config UX remains pending |
-| `.deb` | rc4 public-asset first-use pass | Ubuntu 24.04+ is proven by run `26218940925` through install, storage `[ok]`, FUSE mount, exact hydrate, `tcfs cache evict` + rehydrate, and mutation remote pull. Debian 13 and upgrade smoke remain pending |
-| `.rpm` | rc1 daemon-only artifact pass | Fedora/RHEL daemon package is published; install smoke remains pending and the CLI `.rpm` surface is still absent |
+| `.deb` | rc4 public-asset first-use pass plus Debian/Ubuntu install-upgrade smoke | Ubuntu 24.04+ is proven by run `26218940925` through install, storage `[ok]`, FUSE mount, exact hydrate, `tcfs cache evict` + rehydrate, and mutation remote pull. PR #442 run `26243913292` proves public `v0.12.12` to public `v0.12.13-rc4` package upgrade smoke on Debian 13 and Ubuntu 24.04, plus Debian 13 fresh install smoke |
+| `.rpm` | rc4 Fedora 42 daemon-only install and sampled upgrade smoke pass | Fedora 42 x86_64 daemon-only installed-binary smoke and public `v0.12.12` to public `v0.12.13-rc4` RPM upgrade smoke passed in run `26243913292`; the CLI `.rpm` surface is still absent |
 | container image | rc4 runtime smoke pass | `v0.12.13-rc4` container runtime smoke run `26218940985` proves manifest inspect, platform pull, version check, and worker startup |
-| Nix install | rc1 build/cache pass | release Nix build and Attic push passed; an external profile install from a non-tinyland host remains pending |
+| Nix install | rc4 external profile install pass | run `26242122899` installed `tcfs-cli` and `tcfsd` from `github:Jesssullivan/tummycrypt/v0.12.13-rc4` into a temporary Nix profile on hosted Ubuntu 24.04; binaries reported `tcfs 0.12.13` / `tcfsd 0.12.13` and installed-binary smoke passed |
 
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
 Install-to-first-use bridge:
@@ -342,11 +342,12 @@ GitHub state before acting on exact issue or milestone status.
 
 - M10 release-proof tranche
   - `#280`: distribution install and upgrade proof umbrella. `v0.12.13-rc4`
-    public Linux `.deb`, macOS `.pkg`, and container runtime smokes are green,
-    but Homebrew upgrade, Debian 13, Fedora/RPM, Nix external
-    profile/NixOS, and package-upgrade semantics remain pending. Debian 12
-    remains excluded by the libc/OpenSSL floor unless a separate bookworm
-    package is produced.
+    public Linux `.deb`, macOS `.pkg`, Homebrew, Debian 13 install/upgrade,
+    Ubuntu 24.04 package upgrade, Fedora 42 daemon-only RPM install/upgrade,
+    Nix external profile install, and container runtime smokes are green.
+    NixOS host proof and rc package version semantics remain pending.
+    Debian 12 remains excluded by the libc/OpenSSL floor unless a separate
+    bookworm package is produced.
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
     production Dev ID smoke run `26062554542` proves hydrate,
     evict/rehydrate, mutation upload/readback, and conflict-status. Remaining

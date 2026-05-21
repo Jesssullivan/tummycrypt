@@ -1,0 +1,295 @@
+name: Linux Package Container Smoke
+
+# TIN-131 / #280: prove distro package breadth without requiring a privileged
+# FUSE runner. This workflow pulls exact public release assets, verifies them
+# against SHA256SUMS.txt, installs them in clean Debian/Fedora containers, and
+# runs scripts/install-smoke.sh. It intentionally does not claim live storage,
+# systemd, FUSE mount, or first-real-use behavior.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/linux-package-container-smoke.yml"
+      - "scripts/install-smoke.sh"
+      - "scripts/test-linux-package-container-smoke-workflow.sh"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to validate, for example v0.12.13-rc4"
+        required: true
+        default: "v0.12.13-rc4"
+        type: string
+      binary_expected_version:
+        description: "Version printed by installed binaries, without rc suffix"
+        required: true
+        default: "0.12.13"
+        type: string
+      previous_tag:
+        description: "Prior release tag for upgrade smoke"
+        required: true
+        default: "v0.12.12"
+        type: string
+      previous_binary_expected_version:
+        description: "Version printed by prior binaries in upgrade smoke"
+        required: true
+        default: "0.12.12"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-package-container-smoke-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package-container-smoke:
+    name: ${{ matrix.surface }}
+    if: github.repository == 'Jesssullivan/tummycrypt'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - surface: Debian 13 amd64 .deb install smoke
+            artifact_suffix: debian13-amd64
+            image: debian:13
+            platform: linux/amd64
+            package_family: deb
+            smoke_mode: fresh-install
+            skip_cli: "false"
+          - surface: Debian 13 amd64 .deb upgrade smoke
+            artifact_suffix: debian13-amd64-upgrade
+            image: debian:13
+            platform: linux/amd64
+            package_family: deb
+            smoke_mode: upgrade
+            skip_cli: "false"
+          - surface: Ubuntu 24.04 amd64 .deb upgrade smoke
+            artifact_suffix: ubuntu2404-amd64-upgrade
+            image: ubuntu:24.04
+            platform: linux/amd64
+            package_family: deb
+            smoke_mode: upgrade
+            skip_cli: "false"
+          - surface: Fedora 42 x86_64 daemon-only .rpm install smoke
+            artifact_suffix: fedora42-x86_64
+            image: fedora:42
+            platform: linux/amd64
+            package_family: rpm
+            smoke_mode: fresh-install
+            skip_cli: "true"
+          - surface: Fedora 42 x86_64 daemon-only .rpm upgrade smoke
+            artifact_suffix: fedora42-x86_64-upgrade
+            image: fedora:42
+            platform: linux/amd64
+            package_family: rpm
+            smoke_mode: upgrade
+            skip_cli: "true"
+
+    env:
+      TAG: ${{ github.event.inputs.tag || 'v0.12.13-rc4' }}
+      BINARY_EXPECTED_VERSION: ${{ github.event.inputs.binary_expected_version || '0.12.13' }}
+      PREVIOUS_TAG: ${{ github.event.inputs.previous_tag || 'v0.12.12' }}
+      PREVIOUS_BINARY_EXPECTED_VERSION: ${{ github.event.inputs.previous_binary_expected_version || '0.12.12' }}
+      PACKAGE_FAMILY: ${{ matrix.package_family }}
+      SMOKE_MODE: ${{ matrix.smoke_mode }}
+      SKIP_CLI: ${{ matrix.skip_cli }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Download and verify public package assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" == v* ]] || {
+            echo "::error::tag must start with 'v' (got '$TAG')"
+            exit 1
+          }
+          [[ "$PREVIOUS_TAG" == v* ]] || {
+            echo "::error::previous_tag must start with 'v' (got '$PREVIOUS_TAG')"
+            exit 1
+          }
+
+          VERSION="${TAG#v}"
+          PREVIOUS_VERSION="${PREVIOUS_TAG#v}"
+          PACKAGE_DIR="$RUNNER_TEMP/tcfs-linux-package-container/${{ matrix.artifact_suffix }}/packages"
+          LOG_DIR="$RUNNER_TEMP/tcfs-linux-package-container/${{ matrix.artifact_suffix }}/logs"
+          mkdir -p "$PACKAGE_DIR" "$LOG_DIR"
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "PREVIOUS_VERSION=$PREVIOUS_VERSION" >> "$GITHUB_ENV"
+          echo "PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
+          echo "LOG_DIR=$LOG_DIR" >> "$GITHUB_ENV"
+
+          release_assets() {
+            local version="$1"
+            case "$PACKAGE_FAMILY" in
+              deb)
+                printf '%s\n' \
+                  "tcfs-${version}-amd64.deb" \
+                  "tcfsd-${version}-amd64.deb"
+                ;;
+              rpm)
+                printf '%s\n' "tcfsd-${version}-x86_64.rpm"
+                ;;
+              *)
+                echo "::error::unknown package family: $PACKAGE_FAMILY" >&2
+                return 2
+                ;;
+            esac
+          }
+
+          download_release_assets() {
+            local tag="$1"
+            local version="$2"
+            local label="$3"
+            local target_dir="$PACKAGE_DIR/$label"
+            local base_url="https://github.com/${{ github.repository }}/releases/download/${tag}"
+            local assets=()
+            local asset
+            mkdir -p "$target_dir"
+            mapfile -t assets < <(release_assets "$version")
+            curl -fsSLo "$target_dir/SHA256SUMS.txt" "$base_url/SHA256SUMS.txt"
+            : > "$target_dir/SHA256SUMS-selected.txt"
+
+            for asset in "${assets[@]}"; do
+              curl -fsSLo "$target_dir/$asset" "$base_url/$asset"
+              grep -F "  $asset" "$target_dir/SHA256SUMS.txt" \
+                >> "$target_dir/SHA256SUMS-selected.txt"
+            done
+
+            (
+              cd "$target_dir"
+              sha256sum -c SHA256SUMS-selected.txt
+            ) | tee "$LOG_DIR/sha256-check-${label}.log"
+          }
+
+          download_release_assets "$TAG" "$VERSION" current
+          if [[ "$SMOKE_MODE" == "upgrade" ]]; then
+            download_release_assets "$PREVIOUS_TAG" "$PREVIOUS_VERSION" previous
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "binary_expected_version=$BINARY_EXPECTED_VERSION"
+            echo "previous_tag=$PREVIOUS_TAG"
+            echo "previous_version=$PREVIOUS_VERSION"
+            echo "previous_binary_expected_version=$PREVIOUS_BINARY_EXPECTED_VERSION"
+            echo "image=${{ matrix.image }}"
+            echo "platform=${{ matrix.platform }}"
+            echo "package_family=$PACKAGE_FAMILY"
+            echo "smoke_mode=$SMOKE_MODE"
+            echo "skip_cli=$SKIP_CLI"
+          } > "$LOG_DIR/run-metadata.env"
+
+      - name: Run package install smoke in container
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_script="$RUNNER_TEMP/tcfs-container-install-smoke-${{ matrix.artifact_suffix }}.sh"
+          cat > "$container_script" <<'EOF'
+          set -euo pipefail
+
+          install_packages_from() {
+            local package_dir="$1"
+            local mode="${2:-install}"
+            case "$PACKAGE_FAMILY" in
+              deb)
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get install -y --no-install-recommends "$package_dir"/tcfs-*.deb "$package_dir"/tcfsd-*.deb
+                dpkg -l | grep -E 'tcfs|tcfsd' | tee "/logs/package-list-${mode}.log"
+                ;;
+              rpm)
+                if [[ "$mode" == "upgrade" ]]; then
+                  dnf upgrade -y "$package_dir"/tcfsd-*.rpm
+                else
+                  dnf install -y "$package_dir"/tcfsd-*.rpm
+                fi
+                rpm -qa | grep -E 'tcfs|tcfsd' | tee "/logs/package-list-${mode}.log"
+                ;;
+              *)
+                echo "unknown package family: $PACKAGE_FAMILY" >&2
+                exit 2
+                ;;
+            esac
+          }
+
+          run_install_smoke() {
+            local expected_version="$1"
+            local log_path="$2"
+            command -v tcfsd | tee /logs/tcfsd-path.log
+            tcfsd --version | tee /logs/tcfsd-version.log
+
+            if [[ "$SKIP_CLI" == "true" ]]; then
+              bash /work/scripts/install-smoke.sh \
+                --expected-version "$expected_version" \
+                --skip-cli \
+                2>&1 | tee "$log_path"
+            else
+              command -v tcfs | tee /logs/tcfs-path.log
+              tcfs --version | tee /logs/tcfs-version.log
+              bash /work/scripts/install-smoke.sh \
+                --expected-version "$expected_version" \
+                2>&1 | tee "$log_path"
+            fi
+          }
+
+          case "$PACKAGE_FAMILY" in
+            deb)
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends ca-certificates
+              ;;
+            rpm)
+              dnf install -y ca-certificates
+              ;;
+            *)
+              echo "unknown package family: $PACKAGE_FAMILY" >&2
+              exit 2
+              ;;
+          esac
+
+          if [[ "$SMOKE_MODE" == "upgrade" ]]; then
+            install_packages_from /packages/previous install
+            run_install_smoke "$PREVIOUS_BINARY_EXPECTED_VERSION" /logs/install-smoke-before-upgrade.log
+            install_packages_from /packages/current upgrade
+            run_install_smoke "$BINARY_EXPECTED_VERSION" /logs/install-smoke.log
+          else
+            install_packages_from /packages/current install
+            run_install_smoke "$BINARY_EXPECTED_VERSION" /logs/install-smoke.log
+          fi
+          EOF
+
+          set +e
+          docker run --rm -i \
+            --platform "${{ matrix.platform }}" \
+            -e BINARY_EXPECTED_VERSION="$BINARY_EXPECTED_VERSION" \
+            -e PREVIOUS_BINARY_EXPECTED_VERSION="$PREVIOUS_BINARY_EXPECTED_VERSION" \
+            -e PACKAGE_FAMILY="$PACKAGE_FAMILY" \
+            -e SMOKE_MODE="$SMOKE_MODE" \
+            -e SKIP_CLI="$SKIP_CLI" \
+            -v "$PWD:/work:ro" \
+            -v "$PACKAGE_DIR:/packages:ro" \
+            -v "$LOG_DIR:/logs" \
+            "${{ matrix.image }}" \
+            bash -s < "$container_script" \
+            2>&1 | tee "$LOG_DIR/container-smoke.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+
+          exit "$status"
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-package-container-smoke-${{ github.event.inputs.tag || 'v0.12.13-rc4' }}-${{ matrix.artifact_suffix }}
+          path: ${{ env.LOG_DIR }}
+          if-no-files-found: error
+          retention-days: 14

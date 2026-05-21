@@ -100,7 +100,7 @@ jobs:
           mkdir -p "$LOG_DIR"
           {
             nix --version
-            nix config show substituters trusted-public-keys
+            nix config show | grep -E '^(substituters|trusted-public-keys) = ' || true
             if [[ -n "${TCFS_NIX_PROFILE:-}" ]]; then
               find "$TCFS_NIX_PROFILE" -maxdepth 3 -type f -o -type l
             fi
