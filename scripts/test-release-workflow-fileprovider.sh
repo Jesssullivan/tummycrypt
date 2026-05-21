@@ -119,7 +119,7 @@ check_postinstall_workflow_environment_and_secrets() {
     actual_runner = job.fetch("runs-on")
     raise "postinstall runner mismatch: #{actual_runner.inspect}" unless actual_runner == expected_runner
 
-    expected_env = "tcfs-macos-smoke"
+    expected_env = "${{ github.event.inputs.smoke_environment }}"
     actual_env = job.fetch("environment")
     raise "postinstall environment mismatch: #{actual_env.inspect}" unless actual_env == expected_env
 
@@ -748,6 +748,13 @@ assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_DIR=\"\$RUNNER_TEMP/tcfs-config
 assert_contains "$DERIVE_RUN_PATHS_STEP" "CONFIG_PATH=\"\$CONFIG_DIR/config.toml\""
 assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_LISTEN_ADDR=\"127.0.0.1:19101\""
 assert_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_ENDPOINT=\"http://\${FILEPROVIDER_LISTEN_ADDR}\""
+assert_contains "$POSTINSTALL_WORKFLOW" "smoke_environment:"
+assert_contains "$POSTINSTALL_WORKFLOW" "remote_prefix:"
+assert_contains "$DERIVE_RUN_PATHS_STEP" 'REMOTE_PREFIX="${{ github.event.inputs.remote_prefix }}"'
+assert_contains "$DERIVE_RUN_PATHS_STEP" 'REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+assert_contains "$DERIVE_RUN_PATHS_STEP" 'REMOTE_PREFIX="${REMOTE_PREFIX#/}"'
+assert_contains "$DERIVE_RUN_PATHS_STEP" 'REMOTE_PREFIX="${REMOTE_PREFIX%/}"'
+assert_contains "$DERIVE_RUN_PATHS_STEP" "remote_prefix resolved to an empty prefix"
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\$HOME/Library/Application Support/io.tinyland.tcfs/tcfsd.sock\""
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"\${APP_GROUP_DIR}/tcfsd-gha.sock\""
 assert_not_contains "$DERIVE_RUN_PATHS_STEP" "FILEPROVIDER_SOCKET=\"/tmp/tcfsd-fileprovider-gha.sock\""

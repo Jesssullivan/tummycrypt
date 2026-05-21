@@ -72,6 +72,16 @@ on:
         required: false
         default: "macos-15"
         type: string
+      smoke_environment:
+        description: "GitHub environment containing TCFS_SMOKE_* secrets"
+        required: false
+        default: "tcfs-macos-smoke"
+        type: string
+      remote_prefix:
+        description: "Optional storage prefix override; use an allowed production prefix such as gha/storage-posture/macos-postinstall/<tag>/<run>"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -83,7 +93,7 @@ jobs:
     if: github.repository == 'Jesssullivan/tummycrypt'
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 40
-    environment: tcfs-macos-smoke
+    environment: ${{ github.event.inputs.smoke_environment }}
     env:
       TCFS_SMOKE_S3_ENDPOINT: ${{ secrets.TCFS_SMOKE_S3_ENDPOINT }}
       TCFS_SMOKE_S3_BUCKET: ${{ secrets.TCFS_SMOKE_S3_BUCKET }}
@@ -287,7 +297,16 @@ jobs:
           APP_GROUP_DIR="$HOME/Library/Group Containers/group.io.tinyland.tcfs"
           FILEPROVIDER_LISTEN_ADDR="127.0.0.1:19101"
           FILEPROVIDER_ENDPOINT="http://${FILEPROVIDER_LISTEN_ADDR}"
-          REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          REMOTE_PREFIX="${{ github.event.inputs.remote_prefix }}"
+          if [[ -z "$REMOTE_PREFIX" ]]; then
+            REMOTE_PREFIX="gha/macos-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          REMOTE_PREFIX="${REMOTE_PREFIX#/}"
+          REMOTE_PREFIX="${REMOTE_PREFIX%/}"
+          if [[ -z "$REMOTE_PREFIX" ]]; then
+            echo "::error::remote_prefix resolved to an empty prefix"
+            exit 1
+          fi
           FIXTURE_REL="ci-smoke/${VERSION}/postinstall-${GITHUB_RUN_ATTEMPT}.txt"
           MUTATION_REL="ci-smoke/${VERSION}/mutation-${GITHUB_RUN_ATTEMPT}.txt"
           CONFLICT_REL="ci-smoke/${VERSION}/conflict-status-${GITHUB_RUN_ATTEMPT}.txt"

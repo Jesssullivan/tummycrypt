@@ -89,8 +89,22 @@ check_artifact_package_selection() {
   assert_not_contains "$step" 'printf '\''%s\n'\'' "${artifact_pkgs[@]}" > "$PACKAGE_PATHS_FILE"'
 }
 
+check_remote_prefix_override() {
+  local step="$TMPDIR/derive-run-paths.sh"
+  extract_step_from_workflow "Derive run paths" "$step"
+
+  assert_contains "$WORKFLOW" "remote_prefix:"
+  assert_contains "$WORKFLOW" "Optional storage prefix override"
+  assert_contains "$step" 'REMOTE_PREFIX="${{ github.event.inputs.remote_prefix }}"'
+  assert_contains "$step" 'REMOTE_PREFIX="gha/linux-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+  assert_contains "$step" 'REMOTE_PREFIX="${REMOTE_PREFIX#/}"'
+  assert_contains "$step" 'REMOTE_PREFIX="${REMOTE_PREFIX%/}"'
+  assert_contains "$step" "remote_prefix resolved to an empty prefix"
+}
+
 check_secret_surface
 check_live_config_ca_cert_shape
 check_artifact_package_selection
+check_remote_prefix_override
 
 printf 'Linux post-install smoke workflow tests passed\n'
