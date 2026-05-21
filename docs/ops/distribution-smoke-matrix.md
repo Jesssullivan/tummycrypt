@@ -46,13 +46,34 @@ hydrate, evict/rehydrate, and mutation remote pull. This upgrades the Ubuntu
 `.deb` path from artifact publication to package-backed first-use proof for the
 tested hosted-Ubuntu lane.
 
+Later 2026-05-21 update: `v0.12.13-rc4` public release assets are published and
+the package-facing public-asset smokes are green from `main@e9b9f82`:
+
+- Linux `.deb` run
+  [`26218940925`](https://github.com/Jesssullivan/tummycrypt/actions/runs/26218940925)
+  installed `tcfs-0.12.13-rc4-amd64.deb` and proved daemon start, HTTPS storage
+  `[ok]`, FUSE mount, seeded index `visible`, exact hydrate, `tcfs cache evict`
+  plus rehydrate, and mutation remote pull against
+  `https://tcfs-smoke-s3.tinyland.dev`.
+- macOS `.pkg` run
+  [`26218940950`](https://github.com/Jesssullivan/tummycrypt/actions/runs/26218940950)
+  installed `tcfs-0.12.13-rc4-macos-aarch64.pkg` and proved signed HostApp
+  root authority, exact signed-host hydrate, evict/rehydrate, FileProvider
+  mutation, rename, and conflict/status.
+- Container runtime run
+  [`26218940985`](https://github.com/Jesssullivan/tummycrypt/actions/runs/26218940985)
+  proved `ghcr.io/jesssullivan/tcfsd:v0.12.13-rc4` on `linux/amd64` and
+  `linux/arm64/v8` with manifest digest
+  `sha256:4b1f235be8a20715b8eb1bb2de38a81b3628a6f56675420cdc2320cce19c20b3`.
+
 Remaining distribution proof is now breadth and upgrade heavy: Homebrew
-install/upgrade, public release asset rerun for Ubuntu `.deb` if required,
-Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm` install, container
-runtime smoke, and external Nix profile install. Debian 12 remains blocked by
-the libc/OpenSSL floor unless a separate bookworm-targeted package exists. See
+install/upgrade, Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm`
+install, external Nix profile install, and release-candidate package version
+semantics (`0.12.13-1` installed from rc4-named `.deb` assets). Debian 12
+remains blocked by the libc/OpenSSL floor unless a separate bookworm-targeted
+package exists. See
 [`docs/release/v0.12.13-evidence-matrix.md`](../release/v0.12.13-evidence-matrix.md)
-for the frozen rc1 evidence table.
+for the frozen rc-series evidence table.
 
 ## Out-Of-Scope Published Helpers
 

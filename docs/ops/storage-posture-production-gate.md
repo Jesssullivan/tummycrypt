@@ -1,6 +1,7 @@
 # TCFS Production Storage Posture Gate
 
 Date: 2026-05-19
+Updated: 2026-05-21
 
 This is the operator handoff for `TIN-1546`. It defines the minimum storage
 packet required before TCFS can claim production-like S3 readiness for alpha QA.
@@ -47,6 +48,20 @@ Known evidence:
   verification, and denied-prefix `PermissionDenied` evidence under
   `gha/storage-posture-denied/...`. Treat this as the current-main storage
   posture packet for alpha QA, not as large-restore or soak proof.
+- downstream public-asset smokes on `main@e9b9f82` then used the same
+  production-smoke prefix family successfully:
+  - Linux `.deb` run `26218940925` used
+    `gha/storage-posture/linux-postinstall/v0.12.13-rc4/20260521T095553Z`
+    against `https://tcfs-smoke-s3.tinyland.dev` and proved package install,
+    storage `[ok]`, FUSE mount, exact hydrate, `tcfs cache evict` + rehydrate,
+    and mutation remote pull.
+  - macOS `.pkg` run `26218940950` used
+    `gha/storage-posture/macos-postinstall/v0.12.13-rc4/20260521T095553Z` and
+    proved exact signed-host hydrate, evict/rehydrate, mutation, rename, and
+    conflict/status through the public release package.
+  These runs prove the production-smoke storage posture is usable by package
+  first-use lanes; they still do not prove large-pack restore throughput,
+  socket/highwater behavior, long soak, or transient recovery classification.
 
 ## Required GitHub Environment
 
