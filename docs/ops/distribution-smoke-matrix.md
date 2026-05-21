@@ -38,11 +38,19 @@ mutation, and conflict/status. A merged-workflow main-ref rerun is still useful
 for continuous release-day viability, but the release asset itself is no longer
 only an inferred proof.
 
-Remaining rc1 distribution proof is first-use heavy: Homebrew install/upgrade,
-Ubuntu 24.04+/Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm`
-install, container runtime smoke, and external Nix profile install are still
-pending. Debian 12 remains blocked by the libc/OpenSSL floor unless a separate
-bookworm-targeted package exists. See
+2026-05-21 update: PR #429 fixed mixed `.deb`/`.rpm` artifact selection in the
+Linux postinstall workflow, and post-merge run `26204699596` proved the rc3
+`dist-linux-x86_64` release-workflow artifact on hosted Ubuntu: `.deb` install,
+daemon startup, HTTPS storage `[ok]`, FUSE mount, seeded index `visible`, exact
+hydrate, evict/rehydrate, and mutation remote pull. This upgrades the Ubuntu
+`.deb` path from artifact publication to package-backed first-use proof for the
+tested hosted-Ubuntu lane.
+
+Remaining distribution proof is now breadth and upgrade heavy: Homebrew
+install/upgrade, public release asset rerun for Ubuntu `.deb` if required,
+Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm` install, container
+runtime smoke, and external Nix profile install. Debian 12 remains blocked by
+the libc/OpenSSL floor unless a separate bookworm-targeted package exists. See
 [`docs/release/v0.12.13-evidence-matrix.md`](../release/v0.12.13-evidence-matrix.md)
 for the frozen rc1 evidence table.
 
