@@ -10,6 +10,22 @@ on:
         description: "Tap branch containing Formula/tcfs.rb"
         required: true
         default: "homebrew-tap"
+      smoke_mode:
+        description: "Smoke mode"
+        required: true
+        default: "fresh-install"
+        type: choice
+        options:
+          - fresh-install
+          - upgrade
+      previous_tap_ref:
+        description: "Prior homebrew-tap ref to install before upgrade mode"
+        required: false
+        default: "07dc9949f57921366c60a36728924f560a6d819a"
+      previous_binary_expected_version:
+        description: "Version printed by prior binaries in upgrade mode, without rc suffix"
+        required: false
+        default: "0.12.12"
       binary_expected_version:
         description: "Version printed by installed binaries, without rc suffix"
         required: true
@@ -23,12 +39,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: homebrew-install-smoke-${{ github.event.inputs.tap_branch }}-${{ github.event.inputs.binary_expected_version }}
+  group: homebrew-install-smoke-${{ github.event.inputs.smoke_mode }}-${{ github.event.inputs.tap_branch }}-${{ github.event.inputs.binary_expected_version }}
   cancel-in-progress: false
 
 jobs:
   install-smoke:
-    name: Homebrew fresh install smoke
+    name: Homebrew ${{ github.event.inputs.smoke_mode }} smoke
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 25
 
@@ -40,12 +56,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1
+
+          mode="${{ github.event.inputs.smoke_mode }}"
+          tap_branch="${{ github.event.inputs.tap_branch }}"
+          previous_ref="${{ github.event.inputs.previous_tap_ref }}"
+
+          checkout_tap_ref() {
+            local ref="$1"
+            git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin "$tap_branch" --depth 200
+            git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout "$ref"
+          }
 
           brew untap Jesssullivan/tummycrypt 2>/dev/null || true
           brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt.git
-          git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin "${{ github.event.inputs.tap_branch }}"
-          git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout "${{ github.event.inputs.tap_branch }}"
-          brew install Jesssullivan/tummycrypt/tcfs
+          brew uninstall --force tcfs 2>/dev/null || true
+
+          case "$mode" in
+            fresh-install)
+              checkout_tap_ref "$tap_branch"
+              brew install Jesssullivan/tummycrypt/tcfs
+              ;;
+            upgrade)
+              checkout_tap_ref "$previous_ref"
+              brew install Jesssullivan/tummycrypt/tcfs
+              bash scripts/install-smoke.sh --expected-version "${{ github.event.inputs.previous_binary_expected_version }}"
+              brew list --versions tcfs >"$RUNNER_TEMP/homebrew-install-smoke-before-upgrade.txt"
+
+              checkout_tap_ref "$tap_branch"
+              brew upgrade Jesssullivan/tummycrypt/tcfs
+              brew list --versions tcfs >"$RUNNER_TEMP/homebrew-install-smoke-after-upgrade.txt"
+              ;;
+            *)
+              echo "::error::unknown smoke_mode: $mode" >&2
+              exit 2
+              ;;
+          esac
 
       - name: Run installed-binary smoke
         shell: bash
@@ -59,7 +105,11 @@ jobs:
         run: |
           set +e
           mkdir -p "$RUNNER_TEMP/homebrew-install-smoke"
+          cp "$RUNNER_TEMP"/homebrew-install-smoke-*.txt "$RUNNER_TEMP/homebrew-install-smoke/" 2>/dev/null || true
           {
+            echo "mode=${{ github.event.inputs.smoke_mode }}"
+            echo "tap_branch=${{ github.event.inputs.tap_branch }}"
+            echo "previous_tap_ref=${{ github.event.inputs.previous_tap_ref }}"
             brew --version
             brew info Jesssullivan/tummycrypt/tcfs
             brew list --versions tcfs
