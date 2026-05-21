@@ -40,6 +40,7 @@ PKGUTIL_BIN="${TCFS_PKGUTIL:-}"
 SPCTL_BIN="${TCFS_SPCTL:-}"
 XCRUN_BIN="${TCFS_XCRUN:-}"
 UNAME_BIN="${TCFS_UNAME:-uname}"
+PYTHON_BIN="${TCFS_PYTHON:-python3}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -105,6 +106,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 payload_files="${tmp_dir}/payload-files.txt"
 normalized_payload="${tmp_dir}/payload-files-normalized.txt"
 expanded_dir="${tmp_dir}/expanded"
+expanded_full_dir="${tmp_dir}/expanded-full"
 
 "$PKGUTIL_BIN" --payload-files "$PKG_PATH" >"$payload_files"
 sed -E 's#^\./##' "$payload_files" >"$normalized_payload"
@@ -144,6 +146,77 @@ if ! cmp -s "$EXPECTED_POSTINSTALL" "$postinstall"; then
   fi
 fi
 
+"$PKGUTIL_BIN" --expand-full "$PKG_PATH" "$expanded_full_dir"
+fileprovider_info_plist="$(
+  find "$expanded_full_dir" \
+    -path '*/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/Info.plist' \
+    -type f \
+    | head -1
+)"
+[[ -n "$fileprovider_info_plist" ]] ||
+  fail "package full expansion did not contain TCFSFileProvider.appex/Contents/Info.plist"
+
+"$PYTHON_BIN" - "$fileprovider_info_plist" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as handle:
+    plist = plistlib.load(handle)
+
+extension = plist.get("NSExtension")
+if not isinstance(extension, dict):
+    raise SystemExit("FileProvider Info.plist missing NSExtension dictionary")
+
+point = extension.get("NSExtensionPointIdentifier")
+if point != "com.apple.fileprovider-nonui":
+    raise SystemExit(f"unexpected FileProvider extension point: {point!r}")
+
+if extension.get("NSExtensionFileProviderSupportsEnumeration") is not True:
+    raise SystemExit("FileProvider extension does not declare enumeration support")
+
+if extension.get("NSExtensionFileProviderSupportsDatalessFolders") is not True:
+    raise SystemExit("FileProvider extension does not declare dataless-folder support")
+
+decorations = extension.get("NSFileProviderDecorations")
+if not isinstance(decorations, list):
+    raise SystemExit("FileProvider extension missing NSFileProviderDecorations")
+
+decoration_ids = {
+    item.get("Identifier")
+    for item in decorations
+    if isinstance(item, dict)
+}
+required_decoration_ids = {
+    "io.tinyland.tcfs.fileprovider.decoration.conflict",
+    "io.tinyland.tcfs.fileprovider.decoration.locked",
+    "io.tinyland.tcfs.fileprovider.decoration.pinned",
+    "io.tinyland.tcfs.fileprovider.decoration.excluded",
+}
+missing_decorations = sorted(required_decoration_ids - decoration_ids)
+if missing_decorations:
+    raise SystemExit(
+        "missing FileProvider decorations: " + ", ".join(missing_decorations)
+    )
+
+actions = extension.get("NSExtensionFileProviderActions")
+if not isinstance(actions, list):
+    raise SystemExit("FileProvider extension missing NSExtensionFileProviderActions")
+
+action_ids = {
+    item.get("NSExtensionFileProviderActionIdentifier")
+    for item in actions
+    if isinstance(item, dict)
+}
+required_action_ids = {
+    "io.tinyland.tcfs.action.unsync",
+    "io.tinyland.tcfs.action.pin",
+}
+missing_actions = sorted(required_action_ids - action_ids)
+if missing_actions:
+    raise SystemExit("missing FileProvider actions: " + ", ".join(missing_actions))
+PY
+
 if [[ "$REQUIRE_SIGNATURE" == "1" ]]; then
   "$PKGUTIL_BIN" --check-signature "$PKG_PATH" >/dev/null
 fi
@@ -179,6 +252,7 @@ printf 'payload: usr/local/bin/tcfs present\n'
 printf 'payload: usr/local/bin/tcfsd present\n'
 printf 'payload: TCFSProvider.app present\n'
 printf 'payload: TCFSFileProvider.appex present\n'
+printf 'payload: FileProvider status decorations/actions present\n'
 printf 'postinstall: %s\n' "$postinstall_status"
 if [[ "$REQUIRE_SIGNATURE" == "1" ]]; then
   printf 'signature: valid\n'

@@ -60,6 +60,10 @@ case "${1:-}" in
     mkdir -p "$3/Scripts"
     cp "$2.postinstall" "$3/Scripts/postinstall"
     ;;
+  --expand-full)
+    mkdir -p "$3/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents"
+    cp "$2.info.plist" "$3/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex/Contents/Info.plist"
+    ;;
   --check-signature)
     if [[ "${TCFS_FAKE_SIGNATURE_STATUS:-0}" != "0" ]]; then
       printf 'signature rejected\n' >&2
@@ -109,10 +113,12 @@ write_pkg_fixture() {
   local pkg="$1"
   local payload="$2"
   local postinstall="$3"
+  local info_plist="${4:-$GOOD_INFO_PLIST}"
 
   : >"$pkg"
   printf '%s\n' "$payload" >"$pkg.payload"
   cp "$postinstall" "$pkg.postinstall"
+  cp "$info_plist" "$pkg.info.plist"
 }
 
 GOOD_PAYLOAD='.
@@ -127,6 +133,56 @@ GOOD_PAYLOAD='.
 ./Applications/TCFSProvider.app/Contents/Extensions
 ./Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex'
 
+GOOD_INFO_PLIST="${TMPDIR}/Extension-Info.plist"
+cat >"$GOOD_INFO_PLIST" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSExtension</key>
+  <dict>
+    <key>NSExtensionPointIdentifier</key>
+    <string>com.apple.fileprovider-nonui</string>
+    <key>NSExtensionFileProviderSupportsEnumeration</key>
+    <true/>
+    <key>NSExtensionFileProviderSupportsDatalessFolders</key>
+    <true/>
+    <key>NSFileProviderDecorations</key>
+    <array>
+      <dict>
+        <key>Identifier</key>
+        <string>io.tinyland.tcfs.fileprovider.decoration.conflict</string>
+      </dict>
+      <dict>
+        <key>Identifier</key>
+        <string>io.tinyland.tcfs.fileprovider.decoration.locked</string>
+      </dict>
+      <dict>
+        <key>Identifier</key>
+        <string>io.tinyland.tcfs.fileprovider.decoration.pinned</string>
+      </dict>
+      <dict>
+        <key>Identifier</key>
+        <string>io.tinyland.tcfs.fileprovider.decoration.excluded</string>
+      </dict>
+    </array>
+    <key>NSExtensionFileProviderActions</key>
+    <array>
+      <dict>
+        <key>NSExtensionFileProviderActionIdentifier</key>
+        <string>io.tinyland.tcfs.action.unsync</string>
+      </dict>
+      <dict>
+        <key>NSExtensionFileProviderActionIdentifier</key>
+        <string>io.tinyland.tcfs.action.pin</string>
+      </dict>
+    </array>
+  </dict>
+</dict>
+</plist>
+EOF
+
 GOOD_PKG="${TMPDIR}/tcfs-good.pkg"
 write_pkg_fixture "$GOOD_PKG" "$GOOD_PAYLOAD" "$POSTINSTALL"
 
@@ -136,6 +192,7 @@ assert_contains "$GOOD_OUT" "payload: usr/local/bin/tcfs present"
 assert_contains "$GOOD_OUT" "payload: usr/local/bin/tcfsd present"
 assert_contains "$GOOD_OUT" "payload: TCFSProvider.app present"
 assert_contains "$GOOD_OUT" "payload: TCFSFileProvider.appex present"
+assert_contains "$GOOD_OUT" "payload: FileProvider status decorations/actions present"
 assert_contains "$GOOD_OUT" "postinstall: matches $POSTINSTALL"
 assert_contains "$GOOD_OUT" "macOS package structure smoke passed"
 
@@ -180,6 +237,29 @@ write_pkg_fixture "$MISSING_DAEMON_PKG" "$MISSING_DAEMON_PAYLOAD" "$POSTINSTALL"
 assert_fails_contains \
   "package payload missing usr/local/bin/tcfsd" \
   env PATH="$FAKE_BIN:$PATH" bash "$SCRIPT" --pkg "$MISSING_DAEMON_PKG"
+
+MISSING_ACTION_INFO_PLIST="${TMPDIR}/missing-action-Extension-Info.plist"
+python3 - "$GOOD_INFO_PLIST" "$MISSING_ACTION_INFO_PLIST" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    plist = plistlib.load(handle)
+
+actions = plist["NSExtension"]["NSExtensionFileProviderActions"]
+plist["NSExtension"]["NSExtensionFileProviderActions"] = [
+    action for action in actions
+    if action.get("NSExtensionFileProviderActionIdentifier") != "io.tinyland.tcfs.action.pin"
+]
+
+with open(sys.argv[2], "wb") as handle:
+    plistlib.dump(plist, handle)
+PY
+MISSING_ACTION_PKG="${TMPDIR}/missing-action.pkg"
+write_pkg_fixture "$MISSING_ACTION_PKG" "$GOOD_PAYLOAD" "$POSTINSTALL" "$MISSING_ACTION_INFO_PLIST"
+assert_fails_contains \
+  "missing FileProvider actions: io.tinyland.tcfs.action.pin" \
+  env PATH="$FAKE_BIN:$PATH" bash "$SCRIPT" --pkg "$MISSING_ACTION_PKG"
 
 BAD_POSTINSTALL="${TMPDIR}/bad-postinstall.sh"
 printf '#!/bin/sh\nexit 0\n' >"$BAD_POSTINSTALL"
