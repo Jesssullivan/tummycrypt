@@ -359,10 +359,39 @@ impl TcfsDaemon for TcfsDaemonImpl {
     ) -> Result<tonic::Response<StatusResponse>, tonic::Status> {
         let uptime = self.start_time.elapsed().as_secs() as i64;
         let mount_count = self.active_mounts.lock().await.len() as i32;
+        let storage_prefix = self.config.storage.resolved_prefix().to_string();
+        let operator = self.operator.lock().await.as_ref().cloned();
+        let storage_ok = match operator {
+            Some(op) => {
+                match tcfs_storage::check_health_for_prefix_detailed(&op, &storage_prefix).await {
+                    Ok(report) => {
+                        tracing::debug!(
+                            health_path = %report.path,
+                            elapsed_ms = report.elapsed_ms,
+                            entry_count = report.entry_count,
+                            "status storage health probe passed"
+                        );
+                        true
+                    }
+                    Err(err) => {
+                        warn!(
+                            health_kind = %err.kind(),
+                            health_path = %err.path(),
+                            elapsed_ms = err.elapsed_ms(),
+                            backend_kind = err.backend_kind().unwrap_or("none"),
+                            "status storage health probe failed: {err}"
+                        );
+                        false
+                    }
+                }
+            }
+            None => false,
+        };
+
         Ok(tonic::Response::new(StatusResponse {
             version: env!("CARGO_PKG_VERSION").into(),
             storage_endpoint: self.storage_endpoint.clone(),
-            storage_ok: self.storage_ok,
+            storage_ok,
             nats_ok: self.nats_ok.load(std::sync::atomic::Ordering::Relaxed),
             active_mounts: mount_count,
             uptime_secs: uptime,
@@ -2603,6 +2632,18 @@ mod tests {
         assert!(!resp.nats_ok);
         assert_eq!(resp.active_mounts, 0);
         assert!(resp.uptime_secs >= 0);
+    }
+
+    #[tokio::test]
+    async fn status_rechecks_live_storage_health() {
+        let daemon = test_daemon_with_operator(Some(memory_operator()));
+        let resp = daemon
+            .status(tonic::Request::new(StatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.storage_ok);
     }
 
     #[tokio::test]

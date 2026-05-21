@@ -65,6 +65,20 @@ The raw-Git project-tree canary is intentionally allowed to expose these
 storage bottlenecks, but those observations are performance evidence, not a
 production storage posture claim.
 
+Current production-like S3 posture snapshot from `main@6990ffb`, run
+`26209080328`, artifact `storage-posture-canary-26209080328-1`:
+
+| Endpoint class | Security/scope | Payload | List | Write | Read | Delete | Verify delete | Scope denial |
+|----------------|----------------|---------|------|-------|------|--------|---------------|--------------|
+| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | `enforce_tls=true`; public CA chain; scoped `tcfs-storage-prod-smoke` identity under `gha/storage-posture/...` | 216 B | 37 ms, 1 entry | 139 ms | 34 ms | 35 ms | 36 ms | `PermissionDenied` in 33 ms for `gha/storage-posture-denied/...` |
+
+This packet proves TLS transport, allowed-prefix list permission, scoped
+write/read/delete/delete-verify behavior, and negative credential-scope denial
+for the selected production-smoke identity. It is not a large-object throughput
+or restore benchmark; keep the large-pack rows below open until a
+candidate-package restore packet records object counts, retry/timeout counts,
+socket highwater, and end-to-end restore latency.
+
 Functional follow-up observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`:
 
