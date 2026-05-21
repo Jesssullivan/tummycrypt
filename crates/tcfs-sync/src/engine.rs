@@ -2964,11 +2964,131 @@ pub async fn resolve_manifest_path(
     )
 }
 
-/// Delete a file from remote storage (index entry + manifest + chunks).
+async fn manifest_hash_referenced_by_index(
+    op: &Operator,
+    index_key: &str,
+    manifest_hash: &str,
+) -> Result<bool> {
+    let Some(parsed) = read_index_entry_record_from_store(op, index_key).await? else {
+        return Ok(false);
+    };
+
+    Ok(parsed
+        .visible_entry()
+        .map(|entry| entry.manifest_hash == manifest_hash)
+        .unwrap_or(false)
+        || parsed
+            .pending_entry()
+            .map(|entry| entry.manifest_hash == manifest_hash)
+            .unwrap_or(false))
+}
+
+async fn manifest_hash_referenced_elsewhere(
+    op: &Operator,
+    index_prefix: &str,
+    deleted_index_key: &str,
+    manifest_hash: &str,
+) -> Result<bool> {
+    let entries = op
+        .list(index_prefix)
+        .await
+        .with_context(|| format!("listing index prefix: {index_prefix}"))?;
+
+    for entry in entries {
+        let candidate = entry.path();
+        if candidate == deleted_index_key {
+            continue;
+        }
+        if manifest_hash_referenced_by_index(op, candidate, manifest_hash).await? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Delete a remote index entry and any now-unreferenced manifest objects.
 ///
-/// Looks up the index entry for `rel_path`, reads the manifest to find chunk
-/// hashes, then deletes the index entry and manifest. Chunks are left for GC
-/// (they may be shared with other files via content-addressed dedup).
+/// Manifests are addressed by content hash, so multiple visible paths can
+/// legitimately point at the same manifest. Delete removes the path's index
+/// entry and preserves committed manifests still referenced by another index
+/// entry. Chunks are left for GC.
+pub async fn delete_remote_index_entry(
+    op: &Operator,
+    rel_path: &str,
+    remote_prefix: &str,
+) -> Result<()> {
+    let rel_path = normalize_rel_path_text(rel_path.trim_start_matches('/'));
+    let prefix = remote_prefix.trim_end_matches('/');
+    let index_key = format!("{prefix}/index/{rel_path}");
+    let index_prefix = format!("{prefix}/index/");
+    let manifest_prefix = manifest_path_prefix(prefix);
+    let parsed = read_index_entry_record_from_store(op, &index_key)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing index entry: {index_key}"))?;
+
+    let mut manifest_hashes = Vec::new();
+    if let Some(entry) = parsed.visible_entry() {
+        manifest_hashes.push(entry.manifest_hash.clone());
+    }
+    if let Some(entry) = parsed.pending_entry() {
+        manifest_hashes.push(entry.manifest_hash.clone());
+    }
+    manifest_hashes.sort();
+    manifest_hashes.dedup();
+
+    let staged_manifest_keys: Vec<String> = parsed
+        .pending_entry()
+        .map(|entry| entry.staged_manifest_key.clone())
+        .into_iter()
+        .collect();
+
+    op.delete(&index_key)
+        .await
+        .with_context(|| format!("deleting index entry: {index_key}"))?;
+
+    for object_key in staged_manifest_keys {
+        if let Err(e) = op.delete(&object_key).await {
+            debug!(rel_path = %rel_path, object = %object_key, "best-effort staged manifest delete failed: {e}");
+        }
+    }
+
+    for manifest_hash in manifest_hashes {
+        let object_key = manifest_key(&manifest_prefix, &manifest_hash);
+        match manifest_hash_referenced_elsewhere(op, &index_prefix, &index_key, &manifest_hash)
+            .await
+        {
+            Ok(true) => {
+                debug!(
+                    rel_path = %rel_path,
+                    object = %object_key,
+                    "preserving manifest still referenced by another index entry"
+                );
+            }
+            Ok(false) => {
+                op.delete(&object_key)
+                    .await
+                    .with_context(|| format!("deleting manifest: {object_key}"))?;
+            }
+            Err(e) => {
+                debug!(
+                    rel_path = %rel_path,
+                    object = %object_key,
+                    "preserving manifest because reference scan failed: {e}"
+                );
+            }
+        }
+    }
+
+    info!(rel_path = %rel_path, "deleted remote index entry");
+    Ok(())
+}
+
+/// Delete a file from remote storage (index entry + unreferenced manifests).
+///
+/// Looks up the index entry for `rel_path`, deletes that visible path, and
+/// removes manifest objects only when no other index entry still references
+/// them. Chunks are left for GC.
 ///
 /// Also removes the file from the local state cache if present.
 pub async fn delete_remote_file(
@@ -2979,32 +3099,7 @@ pub async fn delete_remote_file(
     sync_root: Option<&Path>,
 ) -> Result<()> {
     let rel_path = normalize_rel_path_text(rel_path.trim_start_matches('/'));
-    let prefix = remote_prefix.trim_end_matches('/');
-    let index_key = format!("{prefix}/index/{rel_path}");
-    let manifest_prefix = manifest_path_prefix(prefix);
-    let parsed = read_index_entry_record_from_store(op, &index_key)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("missing index entry: {index_key}"))?;
-    let current_manifest = parsed
-        .visible_entry()
-        .map(|entry| manifest_key(&manifest_prefix, &entry.manifest_hash));
-    let referenced_keys = parsed.referenced_object_keys(&manifest_prefix);
-
-    // Delete index entry and manifest
-    op.delete(&index_key)
-        .await
-        .with_context(|| format!("deleting index entry: {index_key}"))?;
-    for object_key in referenced_keys {
-        if Some(object_key.as_str()) == current_manifest.as_deref() {
-            op.delete(&object_key)
-                .await
-                .with_context(|| format!("deleting manifest: {object_key}"))?;
-        } else if let Err(e) = op.delete(&object_key).await {
-            debug!(rel_path = %rel_path, object = %object_key, "best-effort delete failed: {e}");
-        }
-    }
-
-    info!(rel_path = %rel_path, "deleted remote file");
+    delete_remote_index_entry(op, &rel_path, remote_prefix).await?;
 
     // Remove from state cache
     let local_path = sync_root
@@ -3551,6 +3646,41 @@ mod tests {
         // Both should be gone
         assert!(op.read("data/index/file.txt").await.is_err());
         assert!(op.read("data/manifests/abc123").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_remote_file_preserves_manifest_shared_by_another_index() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        op.write(
+            "data/index/a.txt",
+            RemoteIndexEntry::new("abc123", 100, 1).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/index/b.txt",
+            RemoteIndexEntry::new("abc123", 100, 1).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/manifests/abc123",
+            br#"{"version":2,"file_hash":"abc123","file_size":100,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        delete_remote_file(&op, "a.txt", "data", &mut state, None)
+            .await
+            .unwrap();
+
+        assert!(op.read("data/index/a.txt").await.is_err());
+        assert!(op.read("data/index/b.txt").await.is_ok());
+        assert!(op.read("data/manifests/abc123").await.is_ok());
     }
 
     // ── upload + download roundtrip (memory operator) ────────────────────
