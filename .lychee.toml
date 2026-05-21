@@ -6,6 +6,9 @@ exclude = [
   "^https://developer.apple.com/documentation/fskit$",
   "^https://developer.apple.com/documentation/fileprovider$",
   "^https://developer.apple.com/documentation/fileprovider/nsfileproviderreplicatedextension$",
+  # GitHub Actions job subpages intermittently return 502 to hosted link checks;
+  # keep run-level links checked, but do not fail docs CI on job-page flakiness.
+  "^https://github.com/Jesssullivan/tummycrypt/actions/runs/.*/job/",
   # Debian package pages intermittently return 503 to GitHub-hosted link checks.
   "^https://packages.debian.org/",
   "your-org",
