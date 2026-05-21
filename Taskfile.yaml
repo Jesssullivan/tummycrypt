@@ -137,6 +137,7 @@ tasks:
       - task: lazy:test-fileprovider-provision
       - task: lazy:test-release-workflow-fileprovider
       - task: lazy:test-release-workflow-container
+      - task: lazy:test-linux-package-container-workflow
       - task: lazy:test-smoke-endpoint-preflight
       - cargo test -p tcfs-cli cli_unsync
       - cargo test -p tcfs-cli cli_pull_after_unsync_hydrates_latest_remote_and_removes_stub
@@ -1058,6 +1059,11 @@ tasks:
     desc: Regression-test release workflow container platform publication
     cmds:
       - bash scripts/test-release-workflow-container.sh
+
+  lazy:test-linux-package-container-workflow:
+    desc: Regression-test Linux package container smoke workflow
+    cmds:
+      - bash scripts/test-linux-package-container-smoke-workflow.sh
 
   lazy:test-smoke-endpoint-preflight:
     desc: Regression-test CI smoke endpoint posture preflight

@@ -69,13 +69,31 @@ the package-facing public-asset smokes are green from `main@e9b9f82`:
 Homebrew current-tap fresh install also passed after the rc4 release job updated
 `homebrew-tap@b5877df`: run `26221252765` installed
 `/opt/homebrew/Cellar/tcfs/0.12.13-rc4` and the binaries reported
+`tcfs 0.12.13` / `tcfsd 0.12.13`. Upgrade mode then passed in run
+`26221711601`, upgrading from tap ref `07dc9949f57921366c60a36728924f560a6d819a`
+(`v0.12.12`) to `homebrew-tap` (`v0.12.13-rc4`) and ending with
 `tcfs 0.12.13` / `tcfsd 0.12.13`.
 
-Remaining distribution proof is now breadth and upgrade heavy: Homebrew
-upgrade, Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm` install,
-external Nix profile install, and release-candidate package version semantics
-(`0.12.13-1` installed from rc4-named `.deb` assets). Debian 12 remains blocked
-by the libc/OpenSSL floor unless a separate bookworm-targeted package exists.
+PR #442 added the hosted containerized breadth lane, and run `26243913292`
+proved the exact rc4 public Linux packages on Debian 13 amd64, Ubuntu 24.04
+amd64, and Fedora 42 x86_64. The lane verifies checksums, package install,
+binary versions, daemon socket readiness, and CLI status where the CLI package
+exists. It also proves sampled upgrade semantics: Debian 13 and Ubuntu 24.04
+upgrade from public `v0.12.12` `.deb` packages to public `v0.12.13-rc4` `.deb`
+packages, while Fedora 42 upgrades daemon-only `tcfsd` from the public
+`v0.12.12` RPM to the public `v0.12.13-rc4` RPM. It does not claim FUSE,
+systemd, live storage, or first-real-use behavior.
+
+Nix profile install smoke also passed in run `26242122899` on hosted
+Ubuntu 24.04: `nix profile install` from `github:Jesssullivan/tummycrypt/v0.12.13-rc4`
+installed `packages.x86_64-linux.tcfs-cli` and `packages.x86_64-linux.tcfsd`,
+the profile binaries reported `tcfs 0.12.13` / `tcfsd 0.12.13`, and
+`scripts/install-smoke.sh` ended with `install smoke passed`.
+
+Remaining distribution proof is now narrower: NixOS host proof and
+release-candidate package version semantics (`0.12.13-1` installed from
+rc4-named `.deb` / `.rpm` assets). Debian 12 remains blocked by the
+libc/OpenSSL floor unless a separate bookworm-targeted package exists.
 See
 [`docs/release/v0.12.13-evidence-matrix.md`](../release/v0.12.13-evidence-matrix.md)
 for the frozen rc-series evidence table.
@@ -142,7 +160,7 @@ installed-binary smoke to the first truthful user action, use
 | Ubuntu 24.04+ / Debian 13+ `.deb` | Yes | Yes | `scripts/install-smoke.sh` | Install both `tcfsd` and `tcfs` packages |
 | Fedora/RHEL `.rpm` | Yes | Sampled | `scripts/install-smoke.sh --skip-cli` | Fedora 42 x86_64 is currently proven; RHEL/Rocky remain target surfaces pending smoke |
 | Container image | Yes | Sampled | worker-image startup check | prove amd64 and arm64 pulls + entrypoint/startup, not CLI status or cluster rollout |
-| Nix | Yes | Sampled | `scripts/install-smoke.sh` | Current `v0.12.12` proof is Darwin profile install; Linux/NixOS host proof is separate |
+| Nix | Yes | Sampled | `scripts/install-smoke.sh` | rc4 Linux profile install is proven; NixOS host proof is separate |
 
 ## Surface Procedures
 
@@ -311,8 +329,8 @@ bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 
 ### Fedora `.rpm`
 
-The current `v0.12.12` proof covers Fedora 42 x86_64 daemon-only. RHEL/Rocky
-remain target surfaces pending smoke.
+Current `v0.12.13-rc4` proof covers Fedora 42 x86_64 daemon-only install
+smoke. RHEL/Rocky remain target surfaces pending smoke.
 
 Fresh install:
 
@@ -397,9 +415,9 @@ nix profile install \
 bash scripts/install-smoke.sh --expected-version "${BINARY_EXPECTED_VERSION}"
 ```
 
-Record the host platform in evidence. The current `v0.12.12` packet proves a
-Darwin temporary profile install; Linux Nix profile and NixOS module host proof
-remain separate acceptance lanes.
+Record the host platform in evidence. The current rc4 packet proves Linux
+temporary profile install on hosted Ubuntu 24.04; NixOS module host proof
+remains a separate acceptance lane.
 
 Upgrade is sampled unless the flake packaging path or install story changes
 materially between releases.
