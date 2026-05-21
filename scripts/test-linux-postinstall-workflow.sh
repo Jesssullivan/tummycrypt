@@ -76,7 +76,21 @@ if not (storage < ca_line < crypto < sync):
 PY
 }
 
+check_artifact_package_selection() {
+  local step="$TMPDIR/download-package.sh"
+  extract_step_from_workflow "Download package" "$step"
+
+  assert_contains "$step" 'select_compatible_packages()'
+  assert_contains "$step" 'command -v dpkg'
+  assert_contains "$step" 'package_ext=".deb"'
+  assert_contains "$step" 'command -v rpm'
+  assert_contains "$step" 'package_ext=".rpm"'
+  assert_contains "$step" 'select_compatible_packages "${artifact_pkgs[@]}" > "$PACKAGE_PATHS_FILE"'
+  assert_not_contains "$step" 'printf '\''%s\n'\'' "${artifact_pkgs[@]}" > "$PACKAGE_PATHS_FILE"'
+}
+
 check_secret_surface
 check_live_config_ca_cert_shape
+check_artifact_package_selection
 
 printf 'Linux post-install smoke workflow tests passed\n'

@@ -252,6 +252,35 @@ jobs:
             artifact_json="$RUNNER_TEMP/package-artifacts.json"
             artifact_zip="$RUNNER_TEMP/package-artifact.zip"
             mkdir -p "$artifact_dir"
+            select_compatible_packages() {
+              local package_ext=""
+              if command -v dpkg >/dev/null 2>&1 || command -v apt-get >/dev/null 2>&1; then
+                package_ext=".deb"
+              elif command -v rpm >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+                package_ext=".rpm"
+              else
+                echo "::error::could not determine Linux package manager for artifact package selection"
+                return 1
+              fi
+
+              local selected=()
+              local package_path
+              for package_path in "$@"; do
+                case "$package_path" in
+                  *"$package_ext") selected+=("$package_path") ;;
+                esac
+              done
+
+              if (( ${#selected[@]} == 0 )); then
+                echo "::error::artifact $PACKAGE_ARTIFACT_NAME did not contain any $package_ext packages for this runner"
+                printf 'available packages:\n'
+                printf '  - %s\n' "$@"
+                return 1
+              fi
+
+              printf '%s\n' "${selected[@]}"
+            }
+
             curl -fsSL \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
@@ -289,7 +318,7 @@ jobs:
               find "$artifact_dir" -type f -print
               exit 1
             fi
-            printf '%s\n' "${artifact_pkgs[@]}" > "$PACKAGE_PATHS_FILE"
+            select_compatible_packages "${artifact_pkgs[@]}" > "$PACKAGE_PATHS_FILE"
           elif [[ -n "$PACKAGE_URL" ]]; then
             # Preserve the source extension; default to .deb for ubuntu runners.
             case "$PACKAGE_URL" in
