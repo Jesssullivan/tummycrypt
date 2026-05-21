@@ -34,6 +34,18 @@ Options:
   --mutation-content <text>   Exact content to write for --exercise-mutation
   --mutation-content-file <path>
                               File containing exact mutation content
+  --exercise-rename-safety    Rename a file through the CloudStorage root and
+                              verify the new remote path is readable while
+                              the old remote path is no longer visible
+  --rename-source-file <relpath>
+                              Relative source path for --exercise-rename-safety
+                              (default: generated root-level file name)
+  --rename-dest-file <relpath>
+                              Relative destination path for --exercise-rename-safety
+                              (default: source path with .renamed before suffix)
+  --rename-content <text>     Exact content to write for rename proof
+  --rename-content-file <path>
+                              File containing exact rename proof content
   --exercise-conflict-status  Verify a pre-seeded conflict/status fixture
                               through CLI state, FileProvider enumeration,
                               requestDownload, and exact-content hydration
@@ -101,6 +113,11 @@ EXERCISE_MUTATION="${TCFS_EXERCISE_MUTATION:-0}"
 MUTATION_FILE_REL="${TCFS_FILEPROVIDER_MUTATION_FILE_REL:-}"
 MUTATION_CONTENT="${TCFS_FILEPROVIDER_MUTATION_CONTENT:-}"
 MUTATION_CONTENT_FILE="${TCFS_FILEPROVIDER_MUTATION_CONTENT_FILE:-}"
+EXERCISE_RENAME_SAFETY="${TCFS_EXERCISE_RENAME_SAFETY:-0}"
+RENAME_SOURCE_FILE_REL="${TCFS_FILEPROVIDER_RENAME_SOURCE_FILE_REL:-}"
+RENAME_DEST_FILE_REL="${TCFS_FILEPROVIDER_RENAME_DEST_FILE_REL:-}"
+RENAME_CONTENT="${TCFS_FILEPROVIDER_RENAME_CONTENT:-}"
+RENAME_CONTENT_FILE="${TCFS_FILEPROVIDER_RENAME_CONTENT_FILE:-}"
 EXERCISE_CONFLICT_STATUS="${TCFS_EXERCISE_CONFLICT_STATUS:-0}"
 CONFLICT_FILE_REL="${TCFS_FILEPROVIDER_CONFLICT_FILE_REL:-}"
 CONFLICT_CONTENT="${TCFS_FILEPROVIDER_CONFLICT_CONTENT:-}"
@@ -169,6 +186,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --mutation-content-file)
       MUTATION_CONTENT_FILE="$2"
+      shift 2
+      ;;
+    --exercise-rename-safety)
+      EXERCISE_RENAME_SAFETY=1
+      shift
+      ;;
+    --rename-source-file)
+      RENAME_SOURCE_FILE_REL="$2"
+      shift 2
+      ;;
+    --rename-dest-file)
+      RENAME_DEST_FILE_REL="$2"
+      shift 2
+      ;;
+    --rename-content)
+      RENAME_CONTENT="$2"
+      shift 2
+      ;;
+    --rename-content-file)
+      RENAME_CONTENT_FILE="$2"
       shift 2
       ;;
     --exercise-conflict-status)
@@ -297,6 +334,11 @@ if [[ -n "$MUTATION_CONTENT" && -n "$MUTATION_CONTENT_FILE" ]]; then
   exit 2
 fi
 
+if [[ -n "$RENAME_CONTENT" && -n "$RENAME_CONTENT_FILE" ]]; then
+  echo "--rename-content and --rename-content-file are mutually exclusive" >&2
+  exit 2
+fi
+
 if [[ -n "$CONFLICT_CONTENT" && -n "$CONFLICT_CONTENT_FILE" ]]; then
   echo "--conflict-content and --conflict-content-file are mutually exclusive" >&2
   exit 2
@@ -319,6 +361,11 @@ fi
 
 if [[ "$EXERCISE_MUTATION" == "1" && -z "$REMOTE_PREFIX" ]]; then
   echo "--exercise-mutation requires --remote-prefix" >&2
+  exit 2
+fi
+
+if [[ "$EXERCISE_RENAME_SAFETY" == "1" && -z "$REMOTE_PREFIX" ]]; then
+  echo "--exercise-rename-safety requires --remote-prefix" >&2
   exit 2
 fi
 
@@ -625,6 +672,40 @@ require_expected_remote_index() {
     cat "$report" >&2 || true
     exit 1
   fi
+}
+
+wait_for_remote_index_status() {
+  local rel="$1"
+  local label="$2"
+  shift 2
+  local -a allowed_statuses=("$@")
+  local report="$LOG_DIR/${label}-index.json"
+  local status
+  local attempt=0
+  local allowed
+
+  while (( attempt < TIMEOUT_SECS )); do
+    run_tcfs_index_inspect "$rel" "$report" || {
+      echo "tcfs index inspect failed for $label: $rel" >&2
+      cat "${report}.err" >&2 2>/dev/null || true
+      exit 1
+    }
+
+    status="$(extract_index_status "$report")"
+    for allowed in "${allowed_statuses[@]}"; do
+      if [[ "$status" == "$allowed" ]]; then
+        echo "remote index status for $label: $status"
+        return
+      fi
+    done
+
+    short_pause
+    attempt=$((attempt + 1))
+  done
+
+  echo "timed out waiting for $label remote index status; last status: ${status:-unknown}" >&2
+  cat "$report" >&2 || true
+  exit 1
 }
 
 prepare_seed_content_file() {
@@ -1909,6 +1990,18 @@ prepare_mutation_content_file() {
   fi
 }
 
+prepare_rename_content_file() {
+  local target="$1"
+
+  if [[ -n "$RENAME_CONTENT_FILE" ]]; then
+    cp "$RENAME_CONTENT_FILE" "$target"
+  elif [[ -n "$RENAME_CONTENT" ]]; then
+    printf '%s' "$RENAME_CONTENT" >"$target"
+  else
+    printf 'tcfs FileProvider rename smoke %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$target"
+  fi
+}
+
 prepare_conflict_content_file() {
   local target="$1"
 
@@ -1973,6 +2066,16 @@ pull_mutation_from_remote() {
   local rel="$1"
   local expected_file="$2"
   local pulled_copy="$LOG_DIR/mutation-remote-pull"
+
+  pull_remote_file_matches "$rel" "$expected_file" "$pulled_copy" "mutation-remote-pull"
+  echo "remote mutation pull matched expected content"
+}
+
+pull_remote_file_matches() {
+  local rel="$1"
+  local expected_file="$2"
+  local pulled_copy="$3"
+  local log_label="$4"
   local attempt=0
   local status=0
 
@@ -1980,31 +2083,57 @@ pull_mutation_from_remote() {
   while (( attempt < TIMEOUT_SECS )); do
     status=0
     if run_bounded_to_log \
-      "mutation-remote-pull" \
+      "$log_label" \
       "$READ_TIMEOUT_SECS" \
       "$TCFS_PATH" --config "$CONFIG_PATH" pull "$rel" "$pulled_copy" --prefix "$REMOTE_PREFIX"; then
       if cmp -s "$expected_file" "$pulled_copy"; then
-        echo "remote mutation pull matched expected content"
         return
       fi
-      echo "remote mutation content mismatch for $rel" >&2
+      echo "remote content mismatch for $rel" >&2
       exit 1
     else
       status="$?"
     fi
 
     if [[ "$status" == "124" ]]; then
-      echo "remote mutation pull timed out for $rel" >&2
-      cat "$LOG_DIR/mutation-remote-pull.log" >&2 || true
+      echo "remote pull timed out for $rel" >&2
+      cat "$LOG_DIR/${log_label}.log" >&2 || true
       exit 1
     fi
     short_pause
     attempt=$((attempt + 1))
   done
 
-  echo "timed out waiting for mutation to appear in remote index: $rel" >&2
-  cat "$LOG_DIR/mutation-remote-pull.log" >&2 || true
+  echo "timed out waiting for remote content to appear: $rel" >&2
+  cat "$LOG_DIR/${log_label}.log" >&2 || true
   exit 1
+}
+
+default_rename_dest_rel() {
+  local rel="$1"
+  local dir=""
+  local base="$rel"
+  local stem
+  local ext
+
+  if [[ "$rel" == */* ]]; then
+    dir="${rel%/*}"
+    base="${rel##*/}"
+  fi
+
+  if [[ "$base" == *.* && "$base" != .* ]]; then
+    stem="${base%.*}"
+    ext="${base##*.}"
+    base="${stem}.renamed.${ext}"
+  else
+    base="${base}.renamed"
+  fi
+
+  if [[ -n "$dir" ]]; then
+    printf '%s/%s\n' "$dir" "$base"
+  else
+    printf '%s\n' "$base"
+  fi
 }
 
 exercise_fileprovider_mutation() {
@@ -2039,6 +2168,76 @@ exercise_fileprovider_mutation() {
 
   pull_mutation_from_remote "$rel" "$expected_file"
   run_status "post-mutation"
+}
+
+exercise_fileprovider_rename_safety() {
+  local source_rel="$RENAME_SOURCE_FILE_REL"
+  local dest_rel="$RENAME_DEST_FILE_REL"
+  local expected_file="$LOG_DIR/rename-expected-content"
+  local pulled_copy="$LOG_DIR/rename-remote-pull"
+  local source_path
+  local dest_path
+  local source_parent
+  local dest_parent
+
+  if [[ -z "$source_rel" ]]; then
+    source_rel="tcfs-fileprovider-rename-${USER:-user}-$$-${RANDOM:-0}.txt"
+  fi
+  if [[ -z "$dest_rel" ]]; then
+    dest_rel="$(default_rename_dest_rel "$source_rel")"
+  fi
+  validate_relative_file_path "$source_rel"
+  validate_relative_file_path "$dest_rel"
+  if [[ "$source_rel" == "$dest_rel" ]]; then
+    echo "--rename-source-file and --rename-dest-file must differ" >&2
+    exit 2
+  fi
+
+  source_path="$CLOUD_ROOT/$source_rel"
+  dest_path="$CLOUD_ROOT/$dest_rel"
+  source_parent="$(dirname "$source_path")"
+  dest_parent="$(dirname "$dest_path")"
+  wait_for_expected_parent_chain "$source_parent"
+  wait_for_expected_parent_chain "$dest_parent"
+  prepare_rename_content_file "$expected_file"
+
+  echo "writing FileProvider rename source fixture: $source_rel"
+  run_bounded_to_log "rename-source-write" "$TIMEOUT_SECS" cp "$expected_file" "$source_path" || {
+    echo "FileProvider rename source write failed: $source_path" >&2
+    cat "$LOG_DIR/rename-source-write.log" >&2 || true
+    exit 1
+  }
+  wait_for_expected_file "$source_path"
+  if ! cmp -s "$expected_file" "$source_path"; then
+    echo "FileProvider rename source local content mismatch: $source_path" >&2
+    exit 1
+  fi
+
+  wait_for_remote_index_status "$source_rel" "rename-source-before" visible
+  pull_remote_file_matches "$source_rel" "$expected_file" "$pulled_copy" "rename-source-remote-pull"
+
+  echo "renaming FileProvider fixture: $source_rel -> $dest_rel"
+  run_bounded_to_log "rename-mv" "$TIMEOUT_SECS" mv "$source_path" "$dest_path" || {
+    echo "FileProvider rename failed: $source_path -> $dest_path" >&2
+    cat "$LOG_DIR/rename-mv.log" >&2 || true
+    exit 1
+  }
+
+  wait_for_expected_file "$dest_path"
+  if [[ -e "$source_path" ]]; then
+    echo "FileProvider rename left source path present: $source_path" >&2
+    exit 1
+  fi
+  if ! cmp -s "$expected_file" "$dest_path"; then
+    echo "FileProvider rename destination local content mismatch: $dest_path" >&2
+    exit 1
+  fi
+
+  wait_for_remote_index_status "$dest_rel" "rename-dest-after" visible
+  pull_remote_file_matches "$dest_rel" "$expected_file" "$pulled_copy" "rename-dest-remote-pull"
+  wait_for_remote_index_status "$source_rel" "rename-source-after" missing_index no_visible_entry
+  run_status "post-rename"
+  echo "FileProvider rename safety passed"
 }
 
 collect_conflict_enumerator_log() {
@@ -2220,6 +2419,10 @@ fi
 
 if [[ "$EXERCISE_MUTATION" == "1" ]]; then
   exercise_fileprovider_mutation
+fi
+
+if [[ "$EXERCISE_RENAME_SAFETY" == "1" ]]; then
+  exercise_fileprovider_rename_safety
 fi
 
 if [[ "$EXERCISE_CONFLICT_STATUS" == "1" ]]; then

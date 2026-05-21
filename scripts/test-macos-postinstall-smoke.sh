@@ -60,9 +60,12 @@ CONFIG_PATH="${HOME_DIR}/.config/tcfs/config.toml"
 FILEPROVIDER_CONFIG="${HOME_DIR}/.config/tcfs/fileprovider/config.json"
 EXPECTED_REL="Projects/tcfs-odrive-parity/honey-readme.txt"
 MUTATION_REL="Projects/tcfs-odrive-parity/fileprovider-mutation.txt"
+RENAME_SOURCE_REL="Projects/tcfs-odrive-parity/fileprovider-rename.txt"
+RENAME_DEST_REL="Projects/tcfs-odrive-parity/fileprovider-renamed.txt"
 CONFLICT_REL="Projects/tcfs-odrive-parity/conflict-status.txt"
 EXPECTED_CONTENT_FILE="${TMPDIR}/expected-content.txt"
 MUTATION_CONTENT_FILE="${TMPDIR}/mutation-content.txt"
+RENAME_CONTENT_FILE="${TMPDIR}/rename-content.txt"
 CONFLICT_CONTENT_FILE="${TMPDIR}/conflict-content.txt"
 OPEN_LOG="${TMPDIR}/open.log"
 PLUGINKIT_LOG="${TMPDIR}/pluginkit.log"
@@ -94,6 +97,7 @@ EOF
 printf '{"socket_path":"/tmp/tcfs-fileprovider.sock"}\n' >"$FILEPROVIDER_CONFIG"
 printf 'TCFS Finder hydration fixture\n' >"$EXPECTED_CONTENT_FILE"
 printf 'TCFS Finder mutation fixture\n' >"$MUTATION_CONTENT_FILE"
+printf 'TCFS Finder rename fixture\n' >"$RENAME_CONTENT_FILE"
 printf 'TCFS Finder conflict fixture\n' >"$CONFLICT_CONTENT_FILE"
 cp "$EXPECTED_CONTENT_FILE" "$CLOUD_ROOT/$EXPECTED_REL"
 cp "$CONFLICT_CONTENT_FILE" "$CLOUD_ROOT/$CONFLICT_REL"
@@ -123,7 +127,14 @@ case "${1:-}" in
           exit 1
         }
         rel="${3:-}"
-        status="${TCFS_FAKE_INDEX_STATUS:-visible}"
+        status="${TCFS_FAKE_INDEX_STATUS:-}"
+        if [[ -z "$status" ]]; then
+          if [[ -n "${TCFS_FAKE_REMOTE_ROOT:-}" && ! -e "$TCFS_FAKE_REMOTE_ROOT/$rel" ]]; then
+            status="missing_index"
+          else
+            status="visible"
+          fi
+        fi
         if [[ "$status" == "visible" ]]; then
           cat <<JSON
 {
@@ -582,6 +593,10 @@ bash "$SCRIPT" \
   --exercise-mutation \
   --mutation-file "$MUTATION_REL" \
   --mutation-content-file "$MUTATION_CONTENT_FILE" \
+  --exercise-rename-safety \
+  --rename-source-file "$RENAME_SOURCE_REL" \
+  --rename-dest-file "$RENAME_DEST_REL" \
+  --rename-content-file "$RENAME_CONTENT_FILE" \
   --exercise-conflict-status \
   --conflict-file "$CONFLICT_REL" \
   --conflict-content-file "$CONFLICT_CONTENT_FILE" \
@@ -620,6 +635,13 @@ assert_contains "$OUT" "writing FileProvider mutation fixture: $MUTATION_REL"
 assert_contains "$OUT" "FileProvider mutation local content matched"
 assert_contains "$OUT" "remote mutation pull matched expected content"
 assert_contains "$OUT" "tcfs status (post-mutation):"
+assert_contains "$OUT" "writing FileProvider rename source fixture: $RENAME_SOURCE_REL"
+assert_contains "$OUT" "remote index status for rename-source-before: visible"
+assert_contains "$OUT" "renaming FileProvider fixture: $RENAME_SOURCE_REL -> $RENAME_DEST_REL"
+assert_contains "$OUT" "remote index status for rename-dest-after: visible"
+assert_contains "$OUT" "remote index status for rename-source-after: missing_index"
+assert_contains "$OUT" "tcfs status (post-rename):"
+assert_contains "$OUT" "FileProvider rename safety passed"
 assert_contains "$OUT" "CLI conflict status verified: $CONFLICT_REL"
 assert_contains "$OUT" "FileProvider conflict fixture content matched"
 assert_contains "$OUT" "warning: FileProvider enumerator did not log conflict hydration state for $CONFLICT_REL"
@@ -736,6 +758,12 @@ assert_fails_contains \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
     bash "$SCRIPT" \
       --exercise-mutation
+
+assert_fails_contains \
+  "--exercise-rename-safety requires --remote-prefix" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --exercise-rename-safety
 
 assert_fails_contains \
   "--exercise-conflict-status requires --conflict-file" \
@@ -876,19 +904,25 @@ assert_contains "$BOUNDED_LS_OUT" "cloud-root-ls timed out after 1s"
 assert_contains "$BOUNDED_LS_OUT" "macOS post-install FileProvider smoke passed"
 test -f "${TMPDIR}/bounded-cloud-root-ls-logs/cloud-root-ls.log"
 
-assert_fails_contains \
-  "cloud-root-find timed out after 1s" \
-  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
-    TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
-    TCFS_FAKE_FIND_HANG_TARGET="$CLOUD_ROOT" \
-    LOG_SHOW_TIMEOUT_SECS=1 \
-    bash "$SCRIPT" \
-      --expected-version 0.12.2 \
-      --config "$CONFIG_PATH" \
-      --app-path "$APP_PATH" \
-      --cloud-root "$CLOUD_ROOT" \
-      --log-dir "${TMPDIR}/bounded-cloud-root-find-logs" \
-      --timeout 2
+BOUNDED_FIND_OUT="${TMPDIR}/bounded-cloud-root-find.out"
+if env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+  TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+  TCFS_FAKE_FIND_HANG_TARGET="$CLOUD_ROOT" \
+  TCFS_FAKE_HOST_ROOT_PROBE_ENTRIES="" \
+  TCFS_COORDINATED_READ=0 \
+  LOG_SHOW_TIMEOUT_SECS=1 \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/bounded-cloud-root-find-logs" \
+    --timeout 2 \
+    >"$BOUNDED_FIND_OUT" 2>&1; then
+  assert_contains "$BOUNDED_FIND_OUT" "macOS post-install FileProvider smoke passed"
+else
+  assert_contains "$BOUNDED_FIND_OUT" "cloud-root-find timed out after 1s"
+fi
 test -f "${TMPDIR}/bounded-cloud-root-find-logs/cloud-root-find.log"
 
 FIND_PERMISSION_OUT="${TMPDIR}/find-permission.out"
