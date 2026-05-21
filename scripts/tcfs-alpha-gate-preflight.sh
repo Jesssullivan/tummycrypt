@@ -7,7 +7,7 @@ STORAGE_ENVIRONMENT="tcfs-storage-prod-smoke"
 LINUX_ENVIRONMENT="tcfs-linux-smoke"
 STORAGE_RUNNER_LABEL="ubuntu-24.04"
 LINUX_RUNNER_LABEL="ubuntu-24.04"
-TAG="v0.12.13-rc2"
+TAG=""
 SCOPE_DENY_PREFIX="gha/storage-posture-denied/$(date -u +%Y%m%dT%H%M%SZ)"
 REMOTE_PREFIX=""
 LINUX_REMOTE_PREFIX=""
@@ -33,7 +33,7 @@ Options:
   --linux-runner-label LABEL        Runner label for Linux postinstall smoke
                                     (default: ubuntu-24.04)
   --tag TAG                         Release tag for Linux package smoke
-                                    (default: v0.12.13-rc2)
+                                    (default: newest GitHub Release tag)
   --scope-deny-prefix PREFIX        Outside-policy prefix that storage canary
                                     must reject
   --remote-prefix PREFIX            Optional positive storage canary prefix
@@ -124,6 +124,10 @@ self_hosted_runner_match() {
       '
 }
 
+latest_release_tag() {
+  gh api "repos/$REPO/releases?per_page=1" --jq '.[0].tag_name // empty'
+}
+
 runner_status_line() {
   local label="$1"
   if is_hosted_runner_label "$label"; then
@@ -204,12 +208,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$TAG" == v* ]] || die "--tag must start with v"
 [[ -n "$SCOPE_DENY_PREFIX" ]] || die "--scope-deny-prefix must not be empty"
 
 if ! command -v gh >/dev/null 2>&1; then
   die "gh CLI is required"
 fi
+
+if [[ -z "$TAG" ]]; then
+  TAG="$(latest_release_tag || true)"
+  [[ -n "$TAG" ]] || die "could not resolve the newest GitHub Release tag for $REPO; pass --tag explicitly"
+fi
+[[ "$TAG" == v* ]] || die "--tag must start with v"
 
 storage_required=(
   TCFS_SMOKE_S3_ENDPOINT

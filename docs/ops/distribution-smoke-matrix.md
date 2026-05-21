@@ -66,12 +66,17 @@ the package-facing public-asset smokes are green from `main@e9b9f82`:
   `linux/arm64/v8` with manifest digest
   `sha256:4b1f235be8a20715b8eb1bb2de38a81b3628a6f56675420cdc2320cce19c20b3`.
 
+Homebrew current-tap fresh install also passed after the rc4 release job updated
+`homebrew-tap@b5877df`: run `26221252765` installed
+`/opt/homebrew/Cellar/tcfs/0.12.13-rc4` and the binaries reported
+`tcfs 0.12.13` / `tcfsd 0.12.13`.
+
 Remaining distribution proof is now breadth and upgrade heavy: Homebrew
-install/upgrade, Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm`
-install, external Nix profile install, and release-candidate package version
-semantics (`0.12.13-1` installed from rc4-named `.deb` assets). Debian 12
-remains blocked by the libc/OpenSSL floor unless a separate bookworm-targeted
-package exists. See
+upgrade, Debian 13 `.deb` install/upgrade, Fedora daemon-only `.rpm` install,
+external Nix profile install, and release-candidate package version semantics
+(`0.12.13-1` installed from rc4-named `.deb` assets). Debian 12 remains blocked
+by the libc/OpenSSL floor unless a separate bookworm-targeted package exists.
+See
 [`docs/release/v0.12.13-evidence-matrix.md`](../release/v0.12.13-evidence-matrix.md)
 for the frozen rc-series evidence table.
 

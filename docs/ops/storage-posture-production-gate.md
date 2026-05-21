@@ -48,6 +48,16 @@ Known evidence:
   verification, and denied-prefix `PermissionDenied` evidence under
   `gha/storage-posture-denied/...`. Treat this as the current-main storage
   posture packet for alpha QA, not as large-restore or soak proof.
+- run `26220824445` refreshed the packet on `main` at `84c7389` after PRs `#437`
+  and `#438` merged. It used
+  `gha/storage-posture/current-main/20260521T103646Z`, public HTTPS endpoint
+  `https://tcfs-smoke-s3.tinyland.dev`, `require_https=true`,
+  `endpoint_tls=true`, `enforce_tls=true`, public CA trust
+  (`ca_cert_path_configured=false`), 242-byte write/read/delete/delete-verify,
+  allowed-prefix listing, and denied-prefix `PermissionDenied` under
+  `gha/storage-posture-denied/current-main/20260521T103646Z`. Treat this as the
+  current-main storage posture packet for alpha QA, not as large-restore,
+  socket/highwater, transient-recovery, or soak proof.
 - downstream public-asset smokes on `main@e9b9f82` then used the same
   production-smoke prefix family successfully:
   - Linux `.deb` run `26218940925` used

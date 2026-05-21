@@ -2,18 +2,20 @@
 
 This is the execution board for the current alpha push. It turns the
 productionization plan into runnable gates and keeps the claim boundary strict:
-macOS production FileProvider exact hydration is green, while storage posture,
-Linux first-use, and fresh neo/honey evidence remain open until their packets
-exist.
+macOS production FileProvider exact hydration, Linux package first-use, and
+scoped HTTPS storage posture are green for the rc4/public-asset path. The
+remaining alpha-to-beta work is large-restore throughput/recovery evidence,
+package breadth/upgrade proof, FileProvider UX hardening, and keeping the named
+neo/honey transcript current.
 
 ## Current Truth
 
 | Lane | Tracker | Current state | Next action |
 | --- | --- | --- | --- |
-| Production S3/storage posture | `TIN-1546` | Workflow, custom CA support, scoped denial proof, and dispatch helper are on `main`; `tcfs-storage-prod-smoke` has no secrets yet | Populate scoped HTTPS S3-compatible secrets, then run the storage canary dispatch helper |
-| Linux package first-use | `TIN-1540`, `TIN-1422`, `TIN-131`, `#280` | Linux workflow and harness are present; hosted Linux rejects the current private/plaintext endpoint by design; `tcfs-linux-smoke` has no secrets yet | Reuse the hosted-reachable HTTPS storage backend, then run Linux smoke with evict/rehydrate and mutation enabled |
-| Named fleet acceptance | `TIN-132` | CI Live Storage is green regression coverage, but no fresh named `neo`/`honey` transcript is archived for this sprint | Run `just neo-honey-smoke` from the operator environment and archive the transcript |
-| FileProvider post-M10 hardening | `TIN-1547` | Public `v0.12.13-rc2` `.pkg` passed signed HostApp root enumeration, exact hydrate, evict/rehydrate, mutation, and conflict/status; PR #412 landed rename/unsync safety | Add signed-package hardening proof for rename/unsync behavior, badge/progress/recovery capture, and a longer desktop soak |
+| Production S3/storage posture | `TIN-1546` | Current `main@84c7389` run `26220824445` proves public HTTPS, `enforce_tls=true`, public CA trust, allowed-prefix list/write/read/delete/delete-verify, and denied-prefix `PermissionDenied` for `tcfs-storage-prod-smoke` | Run the large-restore companion on a host with the archived shadow root and disk headroom; record socket/highwater, transient recovery, and soak evidence |
+| Linux package first-use | `TIN-1540`, `TIN-1422`, `TIN-131`, `#280` | Public rc4 `.deb` smoke run `26218940925` passed install, storage `[ok]`, FUSE mount, exact hydrate, `tcfs cache evict` + rehydrate, and mutation remote pull against the hosted-reachable HTTPS backend. Homebrew current tap fresh-install smoke run `26221252765` passed against `homebrew-tap@b5877df` (`v0.12.13-rc4`) | Finish package breadth: Homebrew upgrade, Debian 13, Fedora/RPM, Nix external profile/NixOS, and upgrade semantics |
+| Named fleet acceptance | `TIN-132` | Fresh named transcript is archived at `docs/release/evidence/neo-honey-smoke-20260521T032725Z/`; CI Live Storage remains regression coverage, not a replacement for the named operator lane | Keep the transcript current for release-day acceptance or explicitly supersede the named-lane requirement in Linear |
+| FileProvider post-M10 hardening | `TIN-1547` | Public `v0.12.13-rc4` `.pkg` run `26218940950` passed signed HostApp root enumeration, exact hydrate, evict/rehydrate, mutation, rename, and conflict/status | Add badge/progress/recovery capture, first-run setup proof, and a longer desktop soak |
 | Enrollment and beta security | `TIN-1424`, `TIN-1417` | Full invite payload signature coverage landed; self-enrollment remains unsafe as a production trust boundary | Implement single-use redemption and admin/session gating before exposing enrollment UX |
 
 ## One-Command Preflight
@@ -26,12 +28,9 @@ scripts/tcfs-alpha-gate-preflight.sh
 just alpha-gate-preflight
 ```
 
-The expected blocked output today is:
-
-- `TIN-1546`: missing required secrets in `tcfs-storage-prod-smoke`
-- `TIN-1540/TIN-1422`: missing required secrets in `tcfs-linux-smoke`
-- `TIN-132`: operator-run-required because named neo/honey evidence cannot be
-  inferred from CI Live Storage
+The expected output today should show TIN-1546 and the Linux package smoke as
+`runnable`. The printed Linux package tag defaults to the newest GitHub Release
+tag unless `--tag` is provided explicitly.
 
 Use strict mode when a release checklist should fail on blocked gates:
 
@@ -57,7 +56,7 @@ Linux package smoke:
 gh workflow run linux-postinstall-smoke.yml \
   -R Jesssullivan/tummycrypt \
   --ref main \
-  -f tag=v0.12.13-rc2 \
+  -f tag=<current-release-tag> \
   -f runner_label=ubuntu-24.04 \
   -f smoke_environment=tcfs-linux-smoke \
   -f exercise_evict_rehydrate=true \
@@ -75,21 +74,17 @@ just neo-honey-smoke
 - `TIN-1546`: attach the `storage-posture-canary-<run_id>-<attempt>` artifact;
   `storage-canary.json` must show `endpoint_tls=true`,
   `enforce_tls=true`, delete verification, and denial-prefix
-  `PermissionDenied`.
-- `TIN-1540`: close only after the selected route is real: hosted-reachable
-  HTTPS secrets in `tcfs-linux-smoke`, or an online Linux self-hosted runner.
-- `TIN-1422`: close only after package install, config, FUSE mount,
-  seeded-index visibility, exact hydrate, evict/rehydrate, and mutation are
-  green from the Linux workflow.
-- `TIN-131/#280`: keep open until the distribution matrix records Linux
-  first-use and production storage posture, not just macOS/Homebrew/container
-  rows.
-- `TIN-132`: close only from a fresh named neo/honey transcript or an explicit
-  tracker decision to supersede that gate. The current decision is to keep the
-  fresh transcript as required.
-- `TIN-1547`: close the current hardening slice only after rename/unsync safety
-  is proven through a signed package and badge/progress/recovery or soak
-  evidence is archived.
+  `PermissionDenied`. Keep the larger TIN-1546 lane open for restore,
+  socket/highwater, transient-recovery, and soak evidence.
+- `TIN-1540` / `TIN-1422`: the hosted HTTPS backend and Linux first-use route
+  are closed. Re-run them on release-day if the release candidate changes.
+- `TIN-131/#280`: keep open for Homebrew upgrade, Debian 13,
+  Fedora/RPM, Nix external profile/NixOS, package-upgrade semantics, and rc
+  package version semantics.
+- `TIN-132`: fresh named neo/honey transcript exists; keep it current for
+  release-day acceptance or record an explicit supersede decision.
+- `TIN-1547`: keep open until badge/progress/recovery, first-run setup, and a
+  longer desktop soak are archived.
 
 ## Claim Boundary
 

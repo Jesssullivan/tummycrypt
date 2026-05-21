@@ -65,12 +65,12 @@ The raw-Git project-tree canary is intentionally allowed to expose these
 storage bottlenecks, but those observations are performance evidence, not a
 production storage posture claim.
 
-Current production-like S3 posture snapshot from `main@6990ffb`, run
-`26209080328`, artifact `storage-posture-canary-26209080328-1`:
+Current production-like S3 posture snapshot from `main@84c7389`, run
+`26220824445`, artifact `storage-posture-canary-26220824445-1`:
 
 | Endpoint class | Security/scope | Payload | List | Write | Read | Delete | Verify delete | Scope denial |
 |----------------|----------------|---------|------|-------|------|--------|---------------|--------------|
-| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | `enforce_tls=true`; public CA chain; scoped `tcfs-storage-prod-smoke` identity under `gha/storage-posture/...` | 216 B | 37 ms, 1 entry | 139 ms | 34 ms | 35 ms | 36 ms | `PermissionDenied` in 33 ms for `gha/storage-posture-denied/...` |
+| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | `enforce_tls=true`; public CA chain; scoped `tcfs-storage-prod-smoke` identity under `gha/storage-posture/...` | 242 B | 99 ms, 1 entry | 328 ms | 99 ms | 101 ms | 99 ms | `PermissionDenied` in 96 ms for `gha/storage-posture-denied/...` |
 
 This packet proves TLS transport, allowed-prefix list permission, scoped
 write/read/delete/delete-verify behavior, and negative credential-scope denial
