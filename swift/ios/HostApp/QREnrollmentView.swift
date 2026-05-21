@@ -145,10 +145,10 @@ struct QREnrollmentView: View {
                     Spacer()
 
                     VStack(spacing: 8) {
-                        Text("Scan enrollment QR code")
+                        Text("Scan bootstrap QR code")
                             .foregroundColor(.white)
                             .font(.headline)
-                        Text("Generate one with: tcfs device invite --qr")
+                        Text("Use a trusted operator bootstrap payload")
                             .foregroundColor(.white.opacity(0.7))
                             .font(.caption)
                     }

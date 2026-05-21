@@ -744,7 +744,10 @@ impl TcfsProviderHandle {
 
     /// Process a device enrollment invite (from QR code or deep link).
     ///
-    /// Returns credentials extracted from the invite for auto-configuration.
+    /// Direct iOS enrollment cannot verify admin-signed invites today because
+    /// the new device does not yet have the fleet signing key. Until the
+    /// pairing flow supplies a verifiable trust path, fail closed instead of
+    /// extracting brokered credentials from an attacker-controlled payload.
     #[cfg(feature = "uniffi")]
     pub fn process_enrollment_invite(
         &self,
@@ -773,24 +776,18 @@ impl TcfsProviderHandle {
             });
         }
 
-        // Create a session from the enrollment
-        let session =
-            tcfs_auth::Session::new(&self.device_id, &self.device_id, "enrollment").with_expiry(24);
-        let token = session.token.clone();
-        self.runtime.block_on(self.session_store.insert(session));
-
         Ok(EnrollmentResult {
-            success: true,
-            error_message: String::new(),
-            device_id: invite.created_by.clone(),
-            storage_endpoint: invite.storage_endpoint.unwrap_or_default(),
-            storage_bucket: invite.storage_bucket.unwrap_or_default(),
-            access_key: invite.storage_access_key.unwrap_or_default(),
-            s3_secret: invite.storage_secret_key.unwrap_or_default(),
-            remote_prefix: invite.remote_prefix.unwrap_or_else(|| "default".into()),
-            encryption_passphrase: invite.encryption_passphrase.unwrap_or_default(),
-            encryption_salt: invite.encryption_salt.unwrap_or_default(),
-            session_token: token,
+            success: false,
+            error_message: "enrollment invite signature cannot be verified on this device yet; use daemon-mediated enrollment or a trusted operator bootstrap config".into(),
+            device_id: String::new(),
+            storage_endpoint: String::new(),
+            storage_bucket: String::new(),
+            access_key: String::new(),
+            s3_secret: String::new(),
+            remote_prefix: String::new(),
+            encryption_passphrase: String::new(),
+            encryption_salt: String::new(),
+            session_token: String::new(),
         })
     }
 
@@ -861,6 +858,57 @@ fn verify_bootstrap_signature(
         diff |= a ^ b;
     }
     Ok(diff == 0)
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod tests {
+    use super::*;
+
+    fn test_provider() -> Arc<TcfsProviderHandle> {
+        TcfsProviderHandle::new(ProviderConfig {
+            s3_endpoint: "http://127.0.0.1:8333".into(),
+            s3_bucket: "tcfs-test".into(),
+            access_key: "test-access".into(),
+            s3_secret: "test-secret".into(),
+            remote_prefix: "default".into(),
+            device_id: "ios-test".into(),
+            encryption_passphrase: String::new(),
+            encryption_salt: String::new(),
+        })
+        .expect("provider config should be valid")
+    }
+
+    #[test]
+    fn process_enrollment_invite_rejects_unverifiable_brokered_credentials() {
+        let signing_key = [42u8; 32];
+        let mut invite = tcfs_auth::EnrollmentInvite::new(
+            "admin-device",
+            &signing_key,
+            24,
+            tcfs_auth::session::DevicePermissions::default(),
+        );
+        invite.storage_endpoint = Some("https://s3.example.invalid".into());
+        invite.storage_bucket = Some("tcfs".into());
+        invite.storage_access_key = Some("access-key".into());
+        invite.storage_secret_key = Some("secret-key".into());
+        invite.remote_prefix = Some("tenant-a".into());
+        invite.encryption_passphrase = Some("phrase".into());
+        invite.encryption_salt = Some("salt".into());
+        invite.refresh_signature(&signing_key);
+
+        let provider = test_provider();
+        let result = provider
+            .process_enrollment_invite(&invite.encode_compact().expect("invite encodes"))
+            .expect("well-formed invite should return a denial result");
+
+        assert!(!result.success);
+        assert!(result.error_message.contains("cannot be verified"));
+        assert_eq!(result.storage_endpoint, "");
+        assert_eq!(result.storage_bucket, "");
+        assert_eq!(result.access_key, "");
+        assert_eq!(result.s3_secret, "");
+        assert_eq!(result.encryption_passphrase, "");
+    }
 }
 
 impl TcfsProviderHandle {
