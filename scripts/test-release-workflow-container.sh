@@ -32,7 +32,9 @@ ruby -ryaml -e '
   raise "release plan must emit version image" unless plan_run.include?("${IMAGE_REPO}:${VERSION}")
   raise "release plan must only emit latest image for stable tags" unless plan_run.include?("if [[ \"${IS_PRERELEASE}\" != \"true\" ]]")
 
-  steps = workflow.fetch("jobs").fetch("build-image").fetch("steps")
+  image_job = workflow.fetch("jobs").fetch("build-image")
+  raise "build-image job must have an explicit timeout" unless image_job.fetch("timeout-minutes") <= 120
+  steps = image_job.fetch("steps")
 
   qemu_index = steps.index { |step| step["uses"] == "docker/setup-qemu-action@v3" }
   buildx_index = steps.index { |step| step["uses"] == "docker/setup-buildx-action@v3" }
@@ -62,12 +64,17 @@ ruby -ryaml -e '
   raise "container signing must use the immutable build digest" unless run.include?("@${IMAGE_DIGEST}")
 
   release_steps = workflow.fetch("jobs").fetch("create-release").fetch("steps")
+  release_needs = workflow.fetch("jobs").fetch("create-release").fetch("needs")
+  raise "GitHub release assets must not wait for container image publication" if release_needs.include?("build-image")
+  raise "GitHub release must still wait for build-binaries" unless release_needs.include?("build-binaries")
+  raise "GitHub release must still wait for build-pkg" unless release_needs.include?("build-pkg")
   release = release_steps.find { |step| step["name"] == "Create release" }
   raise "create-release step not found" unless release
   release_with = release.fetch("with")
   raise "GitHub release must use planned prerelease state" unless release_with.fetch("prerelease") == "${{ needs.plan.outputs.is_prerelease }}"
   raise "GitHub release must use planned Latest state" unless release_with.fetch("make_latest") == "${{ needs.plan.outputs.make_latest }}"
   body = release_with.fetch("body")
+  raise "release body must label container publication as a parallel-job gate" unless body.include?("do not claim container support until that job is green")
   raise "release body must ask operators to verify amd64 image pulls explicitly" unless body.include?("podman pull --arch amd64")
   raise "release body must ask operators to verify arm64 image pulls explicitly" unless body.include?("podman pull --arch arm64")
   raise "release body must state the current Debian floor" unless body.include?("Ubuntu 24.04+ / Debian 13+")
