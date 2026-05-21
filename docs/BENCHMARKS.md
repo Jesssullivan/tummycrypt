@@ -229,6 +229,13 @@ source. Remote read attempts for manifests and chunks are bounded by
 `TCFS_DOWNLOAD_READ_TIMEOUT_SECS` (default 300, cap 3600, `0` disables), so a
 wedged S3 read is classified as a timeout and retried instead of hanging the
 restore indefinitely.
+Large fresh-tree restore packets can require restore-host headroom before any
+reconcile action by setting `RESTORE_REQUIRE_HEADROOM=1` and an optional
+`RESTORE_HEADROOM_MARGIN_BYTES` value. The helper records free bytes, required
+bytes, shadow regular-file bytes, and the margin in `restore-proof.env`; if the
+preflight fails, it writes a blocked packet before any dry-run or execute log is
+created. Use this for the next `linux-xr-fast` candidate-package restore so host
+capacity is not misclassified as storage correctness or transient recovery.
 Fresh-prefix bulk proof can now opt in to
 `TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1` to skip per-chunk remote existence checks,
 and `TCFS_UPLOAD_PROGRESS_EVERY_CHUNKS=N` records bounded chunk progress for

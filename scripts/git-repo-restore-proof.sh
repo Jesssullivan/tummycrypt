@@ -22,6 +22,12 @@ Options:
   --reconcile-timeout-secs <n>
                          Bound each reconcile command. Default: 900; 0 disables timeout
   --require-empty-dirs   Fail if empty directories are not restored exactly
+  --require-restore-headroom
+                         Fail before reconcile unless the restore filesystem has
+                         enough free bytes for the shadow regular-file bytes plus margin
+  --restore-headroom-margin-bytes <n>
+                         Extra free-byte margin for --require-restore-headroom.
+                         Default: RESTORE_HEADROOM_MARGIN_BYTES or 0
   -h, --help             Show this help
 
 Environment mirrors:
@@ -33,6 +39,8 @@ Environment mirrors:
   TCFS_STATE_PATH
   RESTORE_RECONCILE_TIMEOUT_SECS
   REQUIRE_EMPTY_DIRS=1
+  RESTORE_REQUIRE_HEADROOM=1
+  RESTORE_HEADROOM_MARGIN_BYTES
 EOF
 }
 
@@ -49,6 +57,16 @@ bool_env() {
     1|true|yes|on) printf '1\n' ;;
     0|false|no|off|"") printf '0\n' ;;
     *) fail "$label must be 0/1, got: $value" ;;
+  esac
+}
+
+uint_env() {
+  local label="$1"
+  local value="$2"
+
+  case "$value" in
+    ""|*[!0-9]*) fail "$label must be a non-negative integer, got: $value" ;;
+    *) printf '%s\n' "$value" ;;
   esac
 }
 
@@ -176,6 +194,12 @@ sum_regular_file_bytes() {
   printf '%s\n' "$total"
 }
 
+free_space_bytes() {
+  local path="$1"
+
+  df -Pk "$path" | awk 'NR == 2 { printf "%.0f\n", $4 * 1024; found=1 } END { exit found ? 0 : 1 }'
+}
+
 write_state_manifest() {
   local state_file="$1"
   local root="$2"
@@ -220,6 +244,8 @@ tcfs_bin="${TCFS_BIN:-}"
 state_path="${TCFS_STATE_PATH:-}"
 reconcile_timeout_secs="${RESTORE_RECONCILE_TIMEOUT_SECS:-900}"
 require_empty_dirs="$(bool_env REQUIRE_EMPTY_DIRS "${REQUIRE_EMPTY_DIRS:-0}")"
+require_restore_headroom="$(bool_env RESTORE_REQUIRE_HEADROOM "${RESTORE_REQUIRE_HEADROOM:-0}")"
+restore_headroom_margin_bytes="$(uint_env RESTORE_HEADROOM_MARGIN_BYTES "${RESTORE_HEADROOM_MARGIN_BYTES:-0}")"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -261,6 +287,15 @@ while [[ $# -gt 0 ]]; do
     --require-empty-dirs)
       require_empty_dirs=1
       shift
+      ;;
+    --require-restore-headroom)
+      require_restore_headroom=1
+      shift
+      ;;
+    --restore-headroom-margin-bytes)
+      [[ $# -ge 2 ]] || fail "--restore-headroom-margin-bytes requires a value"
+      restore_headroom_margin_bytes="$(uint_env --restore-headroom-margin-bytes "$2")"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -365,6 +400,9 @@ execute_completed_at_utc=
 execute_elapsed_secs=
 partial_restored_regular_file_count=0
 partial_restored_regular_file_bytes=0
+restore_free_bytes=unmeasured
+restore_required_free_bytes=unmeasured
+shadow_regular_file_bytes_preflight=unmeasured
 
 write_blocked_result() {
   local phase="$1"
@@ -386,6 +424,11 @@ blocked_rc=$rc
 evidence_dir=$evidence_dir
 shadow_root=$shadow_root
 restore_root=$restore_root
+restore_require_headroom=$require_restore_headroom
+restore_free_bytes=$restore_free_bytes
+restore_required_free_bytes=$restore_required_free_bytes
+restore_headroom_margin_bytes=$restore_headroom_margin_bytes
+shadow_regular_file_bytes_preflight=$shadow_regular_file_bytes_preflight
 config_path=$config_path
 remote_prefix=$remote_prefix
 state_path=$state_path
@@ -423,6 +466,8 @@ Reason: $reason
 - Packet: \`$evidence_dir\`
 - Shadow: \`$shadow_root\`
 - Restore root: \`$restore_root\`
+- Restore free bytes: \`$restore_free_bytes\`
+- Restore required free bytes: \`$restore_required_free_bytes\`
 - Config: \`$config_path\`
 - Remote prefix: \`$remote_prefix\`
 - tcfs: \`$tcfs_bin\`
@@ -431,6 +476,21 @@ Reason: $reason
 Inspect \`reconcile-dry-run.log\` and \`reconcile-execute.log\` when present.
 EOF
 }
+
+if [[ "$require_restore_headroom" == "1" ]]; then
+  shadow_regular_file_bytes_preflight="$(sum_regular_file_bytes "$shadow_root")"
+  restore_free_bytes="$(free_space_bytes "$restore_root")" || fail "could not determine free space for restore root: $restore_root"
+  restore_required_free_bytes=$((shadow_regular_file_bytes_preflight + restore_headroom_margin_bytes))
+
+  if [[ "$restore_free_bytes" -lt "$restore_required_free_bytes" ]]; then
+    headroom_reason="insufficient restore filesystem headroom: free=${restore_free_bytes} required=${restore_required_free_bytes} shadow_regular_file_bytes=${shadow_regular_file_bytes_preflight} margin=${restore_headroom_margin_bytes}"
+    write_blocked_result headroom 73 "$headroom_reason"
+    printf 'restore proof evidence: %s\n' "$restore_dir"
+    printf 'restore proof status: failed\n'
+    printf 'restore proof reason: %s\n' "$headroom_reason"
+    exit 73
+  fi
+fi
 
 dry_run_rc=0
 run_with_timeout "$restore_dir/reconcile-dry-run.log" \
@@ -573,6 +633,11 @@ tcfs_version=$tcfs_version
 tcfs_sha256_status=$tcfs_sha256_status
 tcfs_sha256=$tcfs_sha256
 reconcile_timeout_secs=$reconcile_timeout_secs
+restore_require_headroom=$require_restore_headroom
+restore_free_bytes=$restore_free_bytes
+restore_required_free_bytes=$restore_required_free_bytes
+restore_headroom_margin_bytes=$restore_headroom_margin_bytes
+shadow_regular_file_bytes_preflight=$shadow_regular_file_bytes_preflight
 dry_run_started_at_utc=$dry_run_started_at_utc
 dry_run_completed_at_utc=$dry_run_completed_at_utc
 dry_run_elapsed_secs=$dry_run_elapsed_secs
@@ -612,6 +677,8 @@ SHA-256 hashes and symlink targets against the archived shadow tree.
 - Packet: \`$evidence_dir\`
 - Shadow: \`$shadow_root\`
 - Restore root: \`$restore_root\`
+- Restore free bytes: \`$restore_free_bytes\`
+- Restore required free bytes: \`$restore_required_free_bytes\`
 - Config: \`$config_path\`
 - Remote prefix: \`$remote_prefix\`
 - tcfs: \`$tcfs_bin\`

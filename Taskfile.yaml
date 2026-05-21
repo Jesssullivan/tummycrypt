@@ -646,6 +646,12 @@ tasks:
           if [[ "${REQUIRE_EMPTY_DIRS:-0}" == "1" ]]; then
             args+=(--require-empty-dirs)
           fi
+          if [[ "${RESTORE_REQUIRE_HEADROOM:-0}" == "1" ]]; then
+            args+=(--require-restore-headroom)
+          fi
+          if [[ -n "${RESTORE_HEADROOM_MARGIN_BYTES:-}" ]]; then
+            args+=(--restore-headroom-margin-bytes "$RESTORE_HEADROOM_MARGIN_BYTES")
+          fi
 
           scripts/git-repo-restore-proof.sh "${args[@]}"
           EOF

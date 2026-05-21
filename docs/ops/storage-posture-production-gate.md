@@ -223,6 +223,21 @@ Use this companion for the next `linux-xr-fast` candidate-package restore so
 multi-GB Git pack recovery can be compared across release candidates without
 claiming broad home-directory ownership.
 
+Before running a large restore, require local disk headroom explicitly:
+
+```bash
+RESTORE_REQUIRE_HEADROOM=1 \
+RESTORE_HEADROOM_MARGIN_BYTES=$((2 * 1024 * 1024 * 1024)) \
+task lazy:git-repo-restore-proof
+```
+
+The guard compares free bytes on the restore root filesystem against the
+archived shadow regular-file byte total plus the requested margin and writes a
+blocked restore packet before any reconcile dry-run or execute step if the host
+cannot hold the restore. This matters for `linux-xr-fast`: the current neo
+workspace has only single-digit GiB free, below the honest restore size plus
+overhead.
+
 ## Failure Classification
 
 - Missing secrets: environment configuration blocker.
@@ -232,6 +247,8 @@ claiming broad home-directory ownership.
   index enumeration need the same permission.
 - Write/read/delete timeout: storage reliability blocker.
 - Delete verification failed: storage consistency blocker.
+- Restore headroom preflight failed: host-capacity blocker, not a storage
+  correctness failure.
 - S3 auth/access denied: credential-scope blocker unless the policy was
   intentionally read-only.
 
