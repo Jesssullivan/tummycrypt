@@ -1,0 +1,115 @@
+name: Nix Profile Install Smoke
+
+# TIN-131 / #280: prove a user-facing `nix profile install` path from an
+# external GitHub ref, not just repo-local `nix build` and Attic push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to install, such as v0.12.13-rc4 or main"
+        required: true
+        default: "v0.12.13-rc4"
+        type: string
+      binary_expected_version:
+        description: "Version printed by installed binaries, without rc suffix"
+        required: true
+        default: "0.12.13"
+        type: string
+      runner_label:
+        description: "Runner label"
+        required: true
+        default: "ubuntu-24.04"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-profile-install-smoke-${{ github.event.inputs.ref }}-${{ github.event.inputs.runner_label }}
+  cancel-in-progress: false
+
+jobs:
+  profile-install-smoke:
+    name: Nix profile install smoke
+    runs-on: ${{ github.event.inputs.runner_label }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Install tcfs packages into temporary profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${{ github.event.inputs.ref }}"
+          PROFILE="$RUNNER_TEMP/tcfs-nix-profile"
+          LOG_DIR="$RUNNER_TEMP/nix-profile-install-smoke"
+          mkdir -p "$LOG_DIR"
+
+          nix profile install \
+            --profile "$PROFILE" \
+            --accept-flake-config \
+            "github:Jesssullivan/tummycrypt?ref=${REF}#tcfsd" \
+            "github:Jesssullivan/tummycrypt?ref=${REF}#tcfs-cli" \
+            2>&1 | tee "$LOG_DIR/nix-profile-install.log"
+
+          {
+            echo "ref=$REF"
+            echo "runner_label=${{ github.event.inputs.runner_label }}"
+            echo "profile=$PROFILE"
+            echo "system=$(nix eval --impure --raw --expr builtins.currentSystem)"
+          } > "$LOG_DIR/nix-profile-smoke.env"
+
+          nix profile list --profile "$PROFILE" \
+            > "$LOG_DIR/nix-profile-list.log" 2>&1
+
+          {
+            "$PROFILE/bin/tcfs" --version
+            "$PROFILE/bin/tcfsd" --version
+            nix path-info -Sh "$PROFILE" || true
+          } > "$LOG_DIR/nix-profile-diagnostics.log" 2>&1
+
+          echo "TCFS_NIX_PROFILE=$PROFILE" >> "$GITHUB_ENV"
+          echo "TCFS_NIX_SMOKE_LOG_DIR=$LOG_DIR" >> "$GITHUB_ENV"
+
+      - name: Run installed-binary smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          env PATH="$TCFS_NIX_PROFILE/bin:$PATH" \
+            bash scripts/install-smoke.sh \
+              --expected-version "${{ github.event.inputs.binary_expected_version }}" \
+              --tcfs "$TCFS_NIX_PROFILE/bin/tcfs" \
+              --tcfsd "$TCFS_NIX_PROFILE/bin/tcfsd" \
+            2>&1 | tee "$TCFS_NIX_SMOKE_LOG_DIR/install-smoke.log"
+
+      - name: Capture diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          LOG_DIR="${TCFS_NIX_SMOKE_LOG_DIR:-$RUNNER_TEMP/nix-profile-install-smoke}"
+          mkdir -p "$LOG_DIR"
+          {
+            nix --version
+            nix config show substituters trusted-public-keys
+            if [[ -n "${TCFS_NIX_PROFILE:-}" ]]; then
+              find "$TCFS_NIX_PROFILE" -maxdepth 3 -type f -o -type l
+            fi
+          } > "$LOG_DIR/runner-diagnostics.log" 2>&1
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nix-profile-install-smoke-${{ github.event.inputs.ref }}-${{ github.event.inputs.runner_label }}
+          path: ${{ runner.temp }}/nix-profile-install-smoke
+          if-no-files-found: warn
