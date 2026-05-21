@@ -1,7 +1,7 @@
 # macOS Finder and FileProvider Reality
 
-As of May 19, 2026, the production Developer ID FileProvider lifecycle is
-proven on PZM, including the exact public `v0.12.13-rc2` GitHub Release
+As of May 21, 2026, the production Developer ID FileProvider lifecycle is
+proven on PZM, including the exact public `v0.12.13-rc4` GitHub Release
 `.pkg`. GitHub Actions run
 `26061402177` first proved installed strict preflight, storage `[ok]`,
 host-app domain add, CloudStorage enumeration, host-app `requestDownload`, and
@@ -30,8 +30,9 @@ HostApp root/user-visible-URL probe, and diagnostic package run `26117175542`
 at `66ae92f` proved that the installed signed HostApp can enumerate the
 FileProvider user-visible root and complete exact hydrate, evict/rehydrate,
 mutation, and conflict/status. Run `26122478486` then proved the same path
-against the exact public `v0.12.13-rc2` release asset:
-`tcfs-0.12.13-rc2-macos-aarch64.pkg`.
+against the exact public `v0.12.13-rc2` release asset, and run `26218940950`
+repeated that public-asset proof for `v0.12.13-rc4` with mutation, rename, and
+conflict/status enabled: `tcfs-0.12.13-rc4-macos-aarch64.pkg`.
 
 This document defines the actual workflow the repo supports today, separates
 what is proven from what remains experimental, and records the highest-value
@@ -1256,3 +1257,30 @@ This clears the original production `.pkg` exact-file hydration blocker for the
 published rc2 macOS arm64 asset. It does not close production storage posture:
 the run still uses the private/plaintext PZM smoke backend, so TIN-1546 remains
 open until an HTTPS/scoped-credential storage packet passes.
+
+## 2026-05-21 — Exact public rc4 package proof
+
+Run [`26218940950`](https://github.com/Jesssullivan/tummycrypt/actions/runs/26218940950)
+of `macos-postinstall-smoke.yml` installed the exact public GitHub Release
+asset `tcfs-0.12.13-rc4-macos-aarch64.pkg` from
+[`v0.12.13-rc4`](https://github.com/Jesssullivan/tummycrypt/releases/tag/v0.12.13-rc4)
+and passed the production Dev ID postinstall harness from
+`main@e9b9f827724e88b451804f570a6ed0fe0b124a2e`.
+
+Evidence artifact `macos-postinstall-smoke-v0.12.13-rc4` records:
+
+- `expected-file-index.json`: `status: visible`, committed entry, manifest
+  present, size 59, chunks 1, remote prefix
+  `gha/storage-posture/macos-postinstall/v0.12.13-rc4/20260521T095553Z`.
+- `host-root-probe.log`: direct raw CloudStorage root traversal is still denied
+  by macOS sandbox permissions, but the signed HostApp
+  `getUserVisibleURL(.rootContainer)` path lists `.Trash` and `ci-smoke`.
+- `hydrated-expected-file`: exact 59-byte expected content captured after
+  signed-host `requestDownload`.
+- FileProvider mutation remote pull matched the expected rc4 mutation content.
+- FileProvider rename remote pull matched the expected rc4 rename content.
+- Conflict/status proof recorded `sync state: conflict`.
+
+This updates the current public package proof from rc2 to rc4. The remaining
+FileProvider hardening lane is now badge/progress assertions, recovery UX,
+longer desktop soak, and first-run setup from installer to valid config/status.
