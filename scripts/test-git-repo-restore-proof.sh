@@ -154,6 +154,7 @@ assert_contains "$PACKET/restore-proof/restore-proof.env" "proof=fresh-tree-rest
 assert_contains "$PACKET/restore-proof/restore-proof.env" "regular_files_match=1"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "dry_run_elapsed_secs="
 assert_contains "$PACKET/restore-proof/restore-proof.env" "execute_elapsed_secs="
+assert_contains "$PACKET/restore-proof/restore-proof.env" "restore_require_headroom=0"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "shadow_regular_file_bytes=31"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "restored_regular_file_bytes=31"
 assert_contains "$PACKET/restore-proof/restore-proof.env" "restored_regular_file_bytes_per_sec="
@@ -168,6 +169,23 @@ test -f "$PACKET/restore-proof/reconcile-dry-run.log"
 test -f "$PACKET/restore-proof/reconcile-execute.log"
 test -L "$RESTORE/readme-link"
 test -d "$RESTORE/empty-dir"
+
+HEADROOM_RESTORE="$TMPDIR/restored tree headroom"
+HEADROOM_RESTORE_DIR="$PACKET/restore-proof-headroom"
+assert_fails_contains \
+  "insufficient restore filesystem headroom" \
+  env FAKE_RESTORE_SOURCE="$SHADOW" RESTORE_REQUIRE_HEADROOM=1 RESTORE_HEADROOM_MARGIN_BYTES=999999999999999 bash "$SCRIPT" \
+    --evidence-dir "$PACKET" \
+    --restore-root "$HEADROOM_RESTORE" \
+    --restore-dir "$HEADROOM_RESTORE_DIR" \
+    --config "$CONFIG" \
+    --state "$TMPDIR/restore-state-headroom.json"
+assert_contains "$HEADROOM_RESTORE_DIR/restore-proof.env" "status=failed"
+assert_contains "$HEADROOM_RESTORE_DIR/restore-proof.env" "blocked_phase=headroom"
+assert_contains "$HEADROOM_RESTORE_DIR/restore-proof.env" "restore_require_headroom=1"
+assert_contains "$HEADROOM_RESTORE_DIR/restore-proof.env" "restore_required_free_bytes="
+test ! -f "$HEADROOM_RESTORE_DIR/reconcile-dry-run.log"
+test ! -f "$HEADROOM_RESTORE_DIR/reconcile-execute.log"
 
 CUSTOM_RESTORE="$TMPDIR/restored tree custom"
 CUSTOM_RESTORE_DIR="$PACKET/restore-proof-custom"
