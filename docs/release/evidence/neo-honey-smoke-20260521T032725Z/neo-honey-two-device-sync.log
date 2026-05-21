@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/fleet_live.rs (target/debug/deps/fleet_live-f6a9e7f54f51e4c9)
+
+running 1 test
+neo-honey smoke verified: neo pushed 15 bytes, honey pulled 15 bytes via NATS
+test neo_honey_two_device_sync_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.18s
+
