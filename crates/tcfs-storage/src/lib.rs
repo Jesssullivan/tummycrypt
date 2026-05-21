@@ -5,7 +5,7 @@ pub mod multipart;
 pub mod operator;
 pub mod seaweedfs;
 
-pub use health::check_health;
+pub use health::{check_health, check_health_for_prefix};
 pub use operator::{build_operator, StorageConfig};
 
 /// Parse a remote spec like `seaweedfs://host:port/bucket[/prefix]`.

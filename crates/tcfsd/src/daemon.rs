@@ -257,14 +257,23 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             &s3.access_key_id,
             s3.secret_access_key.expose_secret(),
         )?;
-        match tcfs_storage::check_health(&op).await {
+        let storage_prefix = config.storage.resolved_prefix();
+        match tcfs_storage::check_health_for_prefix(&op, storage_prefix).await {
             Ok(()) => {
-                info!(endpoint = %config.storage.endpoint, "SeaweedFS: connected");
+                info!(
+                    endpoint = %config.storage.endpoint,
+                    prefix = %storage_prefix,
+                    "SeaweedFS: connected"
+                );
                 operator = Some(op);
                 true
             }
             Err(e) => {
-                warn!(endpoint = %config.storage.endpoint, "SeaweedFS: {e}");
+                warn!(
+                    endpoint = %config.storage.endpoint,
+                    prefix = %storage_prefix,
+                    "SeaweedFS: {e}"
+                );
                 // Still keep the operator for retry
                 operator = Some(op);
                 false
@@ -375,6 +384,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         let health_state = crate::metrics::HealthState {
             registry: metrics_registry.clone(),
             operator: operator.clone(),
+            storage_prefix: config.storage.resolved_prefix().to_string(),
             sync_root: config.sync.sync_root.clone(),
         };
         tokio::spawn(async move {

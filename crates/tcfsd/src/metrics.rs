@@ -91,6 +91,8 @@ impl DaemonMetrics {
 pub struct HealthState {
     pub registry: Arc<Registry>,
     pub operator: Arc<TokioMutex<Option<opendal::Operator>>>,
+    /// Remote storage prefix used for permission-aware readiness probing.
+    pub storage_prefix: String,
     /// Sync root path for FUSE mount liveness probing
     pub sync_root: Option<PathBuf>,
 }
@@ -143,7 +145,7 @@ async fn healthz_handler() -> impl IntoResponse {
 async fn readyz_handler(State(state): State<HealthState>) -> impl IntoResponse {
     let op = state.operator.lock().await;
     match op.as_ref() {
-        Some(op) => match tcfs_storage::check_health(op).await {
+        Some(op) => match tcfs_storage::check_health_for_prefix(op, &state.storage_prefix).await {
             Ok(()) => (StatusCode::OK, "ready"),
             Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "storage unreachable"),
         },
