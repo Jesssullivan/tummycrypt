@@ -258,11 +258,14 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             s3.secret_access_key.expose_secret(),
         )?;
         let storage_prefix = config.storage.resolved_prefix();
-        match tcfs_storage::check_health_for_prefix(&op, storage_prefix).await {
-            Ok(()) => {
+        match tcfs_storage::check_health_for_prefix_detailed(&op, storage_prefix).await {
+            Ok(report) => {
                 info!(
                     endpoint = %config.storage.endpoint,
                     prefix = %storage_prefix,
+                    health_path = %report.path,
+                    elapsed_ms = report.elapsed_ms,
+                    entry_count = report.entry_count,
                     "SeaweedFS: connected"
                 );
                 operator = Some(op);
@@ -272,7 +275,11 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 warn!(
                     endpoint = %config.storage.endpoint,
                     prefix = %storage_prefix,
-                    "SeaweedFS: {e}"
+                    health_kind = %e.kind(),
+                    health_path = %e.path(),
+                    elapsed_ms = e.elapsed_ms(),
+                    backend_kind = e.backend_kind().unwrap_or("none"),
+                    "SeaweedFS health check failed: {e}"
                 );
                 // Still keep the operator for retry
                 operator = Some(op);

@@ -32,6 +32,15 @@ Known evidence:
 - that run used `http://seaweedfs-tcfs:8333` with `require_https=false`.
 - it is not a production posture packet because the endpoint was plaintext and
   private, and the credentials were the existing smoke credentials.
+- run `26209080328` on `main` at `6990ffb` passed against
+  `tcfs-storage-prod-smoke` using `https://tcfs-smoke-s3.tinyland.dev`,
+  `require_https=true`, `endpoint_tls=true`, `enforce_tls=true`, allowed-prefix
+  listing, write/read/delete/delete-verify, and a denied-prefix
+  `PermissionDenied` probe.
+- the green `26209080328` packet proves the selected production-smoke identity
+  can operate under `gha/storage-posture/...` and is denied under
+  `gha/storage-posture-denied/...`. It does not prove broad restore throughput,
+  long soak behavior, or beta-grade transient-error recovery.
 
 ## Required GitHub Environment
 
@@ -186,6 +195,13 @@ plain language. Do not paste secrets.
 - Delete verification failed: storage consistency blocker.
 - S3 auth/access denied: credential-scope blocker unless the policy was
   intentionally read-only.
+
+Daemon health and readiness probes must keep these classes machine-readable.
+`tcfs-storage` reports scoped health failures as `timeout`,
+`permission_denied`, `not_found`, `rate_limited`, or `backend_error`,
+including the probed path and elapsed time. Startup logs, `/readyz`, and
+`tcfs status` should use the scoped prefix health probe rather than bucket-root
+listing or a stale startup boolean.
 
 If the failure is endpoint posture or credential scope, do not rerun the package
 or FileProvider smokes. Fix the storage gate first so downstream failures are

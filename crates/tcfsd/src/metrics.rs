@@ -145,11 +145,34 @@ async fn healthz_handler() -> impl IntoResponse {
 async fn readyz_handler(State(state): State<HealthState>) -> impl IntoResponse {
     let op = state.operator.lock().await;
     match op.as_ref() {
-        Some(op) => match tcfs_storage::check_health_for_prefix(op, &state.storage_prefix).await {
-            Ok(()) => (StatusCode::OK, "ready"),
-            Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "storage unreachable"),
-        },
-        None => (StatusCode::SERVICE_UNAVAILABLE, "no storage operator"),
+        Some(op) => {
+            match tcfs_storage::check_health_for_prefix_detailed(op, &state.storage_prefix).await {
+                Ok(report) => (
+                    StatusCode::OK,
+                    format!(
+                        "ready (storage path {}, {} entries, {} ms)",
+                        report.path, report.entry_count, report.elapsed_ms
+                    ),
+                ),
+                Err(err) => {
+                    tracing::warn!(
+                        health_kind = %err.kind(),
+                        health_path = %err.path(),
+                        elapsed_ms = err.elapsed_ms(),
+                        backend_kind = err.backend_kind().unwrap_or("none"),
+                        "storage readiness probe failed: {err}"
+                    );
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("storage unreachable ({}) at {}", err.kind(), err.path()),
+                    )
+                }
+            }
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no storage operator".to_string(),
+        ),
     }
 }
 
