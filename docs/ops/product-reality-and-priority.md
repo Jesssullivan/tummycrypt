@@ -3,7 +3,7 @@
 As of May 19, 2026, `tummycrypt` is in a much better state operationally than
 its remaining gaps might suggest.
 
-The latest release candidate is `v0.12.13-rc1`, and most release-facing
+The latest release candidate is `v0.12.13-rc4`, and most release-facing
 surfaces now have explicit proof paths. The important distinction is that
 `buildable`, `packaged`, `product-surface proven`, and `actually ready for
 daily-driver use` are still different things.
@@ -21,8 +21,8 @@ Use this document as the short answer to:
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |
 | Fleet sync / backend path | materially exercised on real hosts; current live transcripts are archived in the fleet pilot packets | `neo-honey` live acceptance plus lab host matrix and `docs/release/evidence/fleet-pilot-extended-20260509T2152Z/` |
 | Lazy traversal / hydration | core code and harnesses exist; Linux FUSE proves browse-before-download, exact `cat` hydration, mounted write/readback, cache clear/rehydrate, and recursive safe-unsync refusal/success on real host evidence; the extended fleet packet carries that lifecycle proof as a honey companion next to isolated `Documents`/`git` traversal and live backend smoke; PZM now proves production Developer ID FileProvider enumerate, exact-content hydrate, evict/rehydrate, mutation upload/readback, and conflict-status preservation without `fileprovider_testing_mode=true` | `tcfs-vfs`/FUSE implementation, archived Linux and fleet evidence, PZM production Dev ID smoke, and the lazy hydration demo runbook |
-| Real project-tree canary / storage posture | scoped isolated `linux-xr` shadow parity is green, including symlink target preservation through honey-mounted traversal. The current release-binary storage-posture packet completed the 7.7 GB shadow, then reused that prefix for honey mounted `find -maxdepth 8`, exact `.clang-format` hydration, and all 85 mounted symlink target checks. The mounted warning follow-up is closed: the exact `.tc` filename fix rerun dropped S3 `NoSuchKey` warnings from 274 to 0 while preserving real ftrace `.tc` filenames. The lifecycle companion now reuses that same prefix and reports `scoped-project-tree-parity-evidence-complete`, including mounted write/readback, cache clear/rehydrate, dirty recursive safe-unsync refusal, and clean recursive safe-unsync success. The small real-repo dogfood surface is green for both source-built and explicit current Nix flake package binaries: `git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/` and `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/` both prove clean `oauth-mux` shadow push, 0 skipped symlinks, honey mounted traversal/hydration, 9 mounted symlink target checks, and Linux lifecycle. The original Nix restore timeout remains archived at `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`; source-built `restore-proof-source-fix-empty-dirs-20260515T183805Z/` and rebuilt Nix package `restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/` now prove fresh-tree restore for 4,601 regular files, 9 symlinks, synced state for all 4,610 restored paths, and all 12 empty directories with `--require-empty-dirs`. The larger `linux-xr-fast` source-built packet is green for shadow push, honey mounted traversal/hydration, and Linux lifecycle in `git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`: the clean shadow has 2,038 regular files, 0 symlinks, about 8.7 GB of file bytes, and the Git pack-index, temp-pack, and exact `.git/index` chunk-profile fixes are proven in one run. Fresh-tree restore remains blocked because 2 of 2,038 regular files did not restore; both are multi-GB raw Git pack files that failed after transient chunk read errors, while all 6 empty directories restored exactly. Homebrew remains the package-current blocker: `tcfs-symlink-package-probe-20260515T041947Z/` shows current-checkout Nix and source-built `tcfs 0.12.12` preserve symlinks, while installed Homebrew `tcfs 0.12.12` skips them; `tcfs-symlink-package-probe-20260515T051126Z/` proves neo current-checkout Nix can publish a symlink index that honey current source-built Linux can mount, read, and verify as `link.txt -> target.txt`; `tcfs-symlink-package-probe-20260515T060330Z/` proves current Nix flake packages on neo and honey pass the same tiny mounted parse/target check. Homebrew rebuild/publish, candidate package proof for the large repo, enough local free space for full restore, and package-backed fresh-tree restore/rollback proof remain open before live repo moves. Production storage posture remains open because the endpoint is plaintext tailnet HTTP, local restore disk margin was tight, socket highwater exceeded configured upload concurrency in prior storage proof, generated large source headers still create thousands of chunks, and the Git metadata fixes have not yet been proven from a selected package/binary | `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-tmppack-20260516T024810Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-20260516T024122Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-empty-dirs-20260515T183805Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-symlink-state-20260515T171712Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T060330Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T041947Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`, `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`, `docs/release/evidence/tcfs-symlink-config-probe-20260515T005858Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-20260515T000411Z/`, `docs/ops/git-repo-canary-dogfood.md`, `docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`, PR `#367`, and blocker packet `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/` |
-| macOS | experimental but real; `v0.12.13-rc2` ships a notarized production Developer ID `.pkg`, PZM run `26122478486` proves the exact public release asset through installed strict preflight, storage `[ok]`, domain rebuild, signed HostApp user-visible root enumeration, exact hydrate, evict/rehydrate, mutation upload/readback, and conflict-status preservation without `fileprovider_testing_mode=true`; PR #412 also landed copy-before-delete rename and unsync-vs-delete safety. Remaining macOS production gaps are first-run setup from installer to valid config/status, badge/progress assertions, recovery UX, longer desktop soak, and continuous release-day viability | build + packaging + PZM production Dev ID smoke + v0.12.13 evidence matrix + local desktop evidence |
+| Real project-tree canary / storage posture | scoped isolated `linux-xr` shadow parity is green, including symlink target preservation through honey-mounted traversal. The current release-binary storage-posture packet completed the 7.7 GB shadow, then reused that prefix for honey mounted `find -maxdepth 8`, exact `.clang-format` hydration, and all 85 mounted symlink target checks. The mounted warning follow-up is closed: the exact `.tc` filename fix rerun dropped S3 `NoSuchKey` warnings from 274 to 0 while preserving real ftrace `.tc` filenames. The lifecycle companion now reuses that same prefix and reports `scoped-project-tree-parity-evidence-complete`, including mounted write/readback, cache clear/rehydrate, dirty recursive safe-unsync refusal, and clean recursive safe-unsync success. The small real-repo dogfood surface is green for both source-built and explicit current Nix flake package binaries: `git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/` and `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/` both prove clean `oauth-mux` shadow push, 0 skipped symlinks, honey mounted traversal/hydration, 9 mounted symlink target checks, and Linux lifecycle. The original Nix restore timeout remains archived at `git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`; source-built `restore-proof-source-fix-empty-dirs-20260515T183805Z/` and rebuilt Nix package `restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/` now prove fresh-tree restore for 4,601 regular files, 9 symlinks, synced state for all 4,610 restored paths, and all 12 empty directories with `--require-empty-dirs`. The larger `linux-xr-fast` source-built packet is green for shadow push, honey mounted traversal/hydration, and Linux lifecycle in `git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`: the clean shadow has 2,038 regular files, 0 symlinks, about 8.7 GB of file bytes, and the Git pack-index, temp-pack, and exact `.git/index` chunk-profile fixes are proven in one run. Fresh-tree restore remains blocked because 2 of 2,038 regular files did not restore; both are multi-GB raw Git pack files that failed after transient chunk read errors, while all 6 empty directories restored exactly. Homebrew current-tap install is now green for rc4, but Homebrew remains a package-backed real-repo blocker until the symlink/large-canary path is repeated with the current formula: `tcfs-symlink-package-probe-20260515T041947Z/` showed current-checkout Nix and source-built `tcfs 0.12.12` preserving symlinks while installed Homebrew `tcfs 0.12.12` skipped them; `tcfs-symlink-package-probe-20260515T051126Z/` proves neo current-checkout Nix can publish a symlink index that honey current source-built Linux can mount, read, and verify as `link.txt -> target.txt`; `tcfs-symlink-package-probe-20260515T060330Z/` proves current Nix flake packages on neo and honey pass the same tiny mounted parse/target check. The production storage posture gate now has a current scoped HTTPS canary: run `26220824445` on `main@84c7389` proved public HTTPS, `enforce_tls=true`, public CA trust, allowed-prefix list/write/read/delete/delete-verify, and denied-prefix `PermissionDenied`. Large-restore throughput, socket/highwater behavior, transient recovery classification, enough local free space for full restore, and package-backed fresh-tree restore/rollback proof remain open before live repo moves. | `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-tmppack-20260516T024810Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-sourcefix-20260516T024122Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-nixpkg-tuned-20260516T010911Z/`, `docs/release/evidence/git-repo-canary-linux-xr-fast-nixpkg-20260516T005236Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-empty-dirs-20260515T183805Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof-source-fix-symlink-state-20260515T171712Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/restore-proof/`, `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T060330Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T051126Z/`, `docs/release/evidence/tcfs-symlink-package-probe-20260515T041947Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`, `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`, `docs/release/evidence/tcfs-symlink-config-probe-20260515T005858Z/`, `docs/release/evidence/git-repo-canary-oauth-mux-20260515T000411Z/`, `docs/ops/git-repo-canary-dogfood.md`, `docs/release/evidence/home-canary-linux-xr-storage-posture-tc-extfix-20260514T202343Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`, `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T220442Z/`, PR `#367`, and blocker packet `docs/release/evidence/home-canary-linux-xr-storage-posture-20260513T174944Z/` |
+| macOS | experimental but real; `v0.12.13-rc4` ships a notarized production Developer ID `.pkg`, PZM run `26218940950` proves the exact public release asset through installed strict preflight, storage `[ok]`, domain rebuild, signed HostApp user-visible root enumeration, exact hydrate, evict/rehydrate, mutation upload/readback, rename, and conflict-status preservation without `fileprovider_testing_mode=true`. Remaining macOS production gaps are first-run setup from installer to valid config/status, badge/progress assertions, recovery UX, longer desktop soak, and continuous release-day viability | build + packaging + PZM production Dev ID smoke + v0.12.13 evidence matrix + local desktop evidence |
 | iOS | proof-of-concept | Swift type-check and scaffold only |
 | Windows | planned / skeleton | code exists, but there is no release-grade CLI, daemon, or Explorer flow |
 
@@ -34,11 +34,11 @@ This is the narrowest and most important truth for public release claims.
 
 | Surface | Status | Current reality |
 | --- | --- | --- |
-| Homebrew | rc1 install smoke pass | `v0.12.13-rc1` formula update passed in the release workflow, and main run `26082967508` proves fresh install plus installed-binary smoke. Upgrade smoke remains pending |
-| macOS `.pkg` | FileProvider release-asset pass; first-run UX gap | `v0.12.13-rc2` publishes a notarized production Developer ID `.pkg`; PZM run `26122478486` proves the exact public GitHub Release `.pkg` through hydrate, evict/rehydrate, mutation upload/readback, and conflict-status. First-run config UX remains pending |
-| `.deb` | rc1 artifact pass | Ubuntu 24.04+ / Debian 13+ are the truthful targets; packages are published, but install/upgrade smoke is still pending. Debian 12 remains excluded unless a bookworm-targeted package exists |
+| Homebrew | current tap fresh-install pass; upgrade gap | `homebrew-tap@b5877df` points at `v0.12.13-rc4`, and run `26221252765` proves fresh install plus installed `tcfs 0.12.13` / `tcfsd 0.12.13` smoke. Upgrade proof remains pending under TIN-131/#280 |
+| macOS `.pkg` | FileProvider release-asset pass; first-run UX gap | `v0.12.13-rc4` publishes a notarized production Developer ID `.pkg`; PZM run `26218940950` proves the exact public GitHub Release `.pkg` through hydrate, evict/rehydrate, mutation upload/readback, rename, and conflict/status. First-run config UX remains pending |
+| `.deb` | rc4 public-asset first-use pass | Ubuntu 24.04+ is proven by run `26218940925` through install, storage `[ok]`, FUSE mount, exact hydrate, `tcfs cache evict` + rehydrate, and mutation remote pull. Debian 13 and upgrade smoke remain pending |
 | `.rpm` | rc1 daemon-only artifact pass | Fedora/RHEL daemon package is published; install smoke remains pending and the CLI `.rpm` surface is still absent |
-| container image | rc1 runtime smoke pass | multi-arch `ghcr.io/jesssullivan/tcfsd:v0.12.13-rc1` built and signed; main run `26083222949` proves manifest inspect, platform pull, version check, and worker startup for amd64 and arm64/v8 |
+| container image | rc4 runtime smoke pass | `v0.12.13-rc4` container runtime smoke run `26218940985` proves manifest inspect, platform pull, version check, and worker startup |
 | Nix install | rc1 build/cache pass | release Nix build and Attic push passed; an external profile install from a non-tinyland host remains pending |
 
 Canonical runbook: [Distribution Smoke Matrix](distribution-smoke-matrix.md).
@@ -46,7 +46,7 @@ Install-to-first-use bridge:
 [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md).
 Historical per-release evidence freeze for `v0.12.2`:
 [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md).
-Current release-surface evidence for `v0.12.13-rc1`:
+Current release-surface evidence for `v0.12.13-rc4`:
 [v0.12.13 Evidence Matrix](../release/v0.12.13-evidence-matrix.md).
 Current evidence index with GitHub Actions run links:
 [Release Evidence Index](../release/evidence/README.md).
@@ -115,7 +115,7 @@ Still useful as non-production PZM lab evidence:
 
 Now proven on the production Dev ID PZM lane:
 
-- `v0.12.13-rc1` release publication includes a notarized production
+- `v0.12.13-rc4` release publication includes a notarized production
   Developer ID macOS `.pkg`.
 - production Dev ID smoke run `26061402177` first proved installed strict
   preflight, storage `[ok]`, domain add, CloudStorage enumeration,
@@ -125,6 +125,9 @@ Now proven on the production Dev ID PZM lane:
   conflict-status preservation without `fileprovider_testing_mode=true`.
 - key artifacts from that follow-up are archived under
   `docs/release/evidence/macos-postinstall-prod-devid-hydration-20260518T212705Z/run-26062554542/`.
+- public asset smoke run `26218940950` repeated the signed HostApp path against
+  `tcfs-0.12.13-rc4-macos-aarch64.pkg` with exact hydrate, evict/rehydrate,
+  mutation, rename, and conflict/status enabled.
 - the older PZM testing-mode lane remains useful as a lab signal, but it is no
   longer the strongest FileProvider lifecycle evidence.
 
@@ -169,8 +172,11 @@ Functional isolated project-tree behavior is green in
 `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`: the
 shadowed `linux-xr` tree could be pushed, traversed from honey, hydrate selected
 content, preserve all 85 symlink targets through the mounted view, and pass the
-Linux lifecycle companion. Production storage posture is not green, but the
-storage lane has narrowed: `20260513T220442Z` reduced the dominant
+Linux lifecycle companion. Scoped HTTPS storage posture is now green for the
+small canary gate: run `26220824445` at `main@84c7389` proved public HTTPS,
+`enforce_tls=true`, public CA trust, allowed-prefix list/write/read/delete,
+delete verification, and denied-prefix `PermissionDenied`. The larger storage
+lane remains open for throughput and recovery: `20260513T220442Z` reduced the dominant
 6.2 GB raw Git `.pack` from 70,856 chunks to 1,211 chunks, and
 `docs/release/evidence/home-canary-linux-xr-storage-posture-20260514T021513Z/`
 reduced the adjacent 45.6 MB `.rev` from 8,405 chunks to 8 chunks while
@@ -179,10 +185,11 @@ that same prefix also passed honey mounted `find -maxdepth 8`, all 85 mounted
 symlink target checks, and exact `.clang-format` hydration. The lifecycle
 companion `home-canary-linux-xr-storage-posture-lifecycle-20260514T213826Z/`
 closes the same-prefix mounted write/readback, cache clear/rehydrate, and
-recursive safe-unsync row. Do not claim production S3 posture or broad
-home-directory readiness until endpoint/TLS posture, socket accounting,
+recursive safe-unsync row. Do not claim broad home-directory readiness or
+large-object production storage maturity until socket accounting,
 candidate-package proof of the Git metadata profile fixes, large-pack restore
-reliability, and generated-large-file policy are closed.
+reliability, transient-recovery classification, and generated-large-file policy
+are closed.
 
 The next generic git-repo dogfood lane is narrower and currently blocked at
 Homebrew package truth plus larger/restore proof, not source or current Nix
@@ -334,17 +341,17 @@ As of May 19, 2026, the narrow GitHub backlog snapshot is below. Verify live
 GitHub state before acting on exact issue or milestone status.
 
 - M10 release-proof tranche
-  - `#280`: distribution install and upgrade proof umbrella. `v0.12.13-rc1`
-    release artifacts and formula updates are published, but first-use smokes
-    remain pending for Homebrew, Linux packages, container runtime, and Nix
-    external profile install. Debian 12 remains excluded by the libc/OpenSSL
-    floor unless a separate bookworm package is produced.
+  - `#280`: distribution install and upgrade proof umbrella. `v0.12.13-rc4`
+    public Linux `.deb`, macOS `.pkg`, and container runtime smokes are green,
+    but Homebrew upgrade, Debian 13, Fedora/RPM, Nix external
+    profile/NixOS, and package-upgrade semantics remain pending. Debian 12
+    remains excluded by the libc/OpenSSL floor unless a separate bookworm
+    package is produced.
   - `#309`: macOS `.pkg` clean-host and FileProvider acceptance lane. PZM
     production Dev ID smoke run `26062554542` proves hydrate,
     evict/rehydrate, mutation upload/readback, and conflict-status. Remaining
-    Apple follow-ups are exact published-release-asset post-cut smoke,
-    first-run setup UX, badge/progress/recovery assertions, and long-running
-    daily-use proof.
+    Apple follow-ups are first-run setup UX, badge/progress/recovery
+    assertions, and long-running daily-use proof.
 - Adjacent non-M10 lanes
   - `#298`: residual Civo TCFS PVC retirement after on-prem recovery
   - `#327`: TCFS on-prem OpenTofu migration and cutover
@@ -398,24 +405,24 @@ freshest truth source for `tummycrypt`.
 
 - `TIN-133`, `TIN-1414`, and `TIN-1415` are Done for the M10 production
   FileProvider hydration/lifecycle proof.
-- `TIN-131` and `TIN-132` are In Progress under `Tummycrypt M10: Usage
-  Reality & Product Parity`; they remain the distribution and live-fleet
-  acceptance lanes.
+- `TIN-131` is In Progress under `Tummycrypt M10: Usage Reality & Product
+  Parity` for the remaining distribution breadth and upgrade lanes. `TIN-132`
+  is Done with a fresh named neo/honey packet, but release-day acceptance should
+  keep that transcript current or explicitly supersede the named-lane
+  requirement.
 - `TIN-1421` is Done for the real-storage CI lane.
-- `TIN-1422` is In Progress for Linux postinstall parity and is blocked by
-  `TIN-1540`, which must provide either a reachable hosted Linux smoke backend
-  or a private Linux runner that can resolve the tailnet endpoint.
+- `TIN-1422` and `TIN-1540` are Done for the reachable Linux package-smoke
+  backend and hosted Linux first-use lane.
 - `TIN-1417`, `TIN-1424`, and `TIN-1418` are the enrollment/security and
   multitenancy chain: per-device identity must land before self-enrollment or
   multitenant trust-boundary claims are product-real.
-- `TIN-1546` is the production S3/storage posture gate: TLS/CA posture,
-  bounded health/read attempts, transient-error classification, large-pack
-  restore, and storage latency/object-count evidence. PR #390 landed bounded
-  remote manifest/index/chunk read attempts; production-like TLS/CA and live
+- `TIN-1546` is the production S3/storage posture gate: scoped HTTPS canary
+  evidence is green on current `main`, while transient-error classification,
+  large-pack restore, socket/highwater evidence, and storage latency/object-count
   evidence remain open.
 - `TIN-1547` is the post-M10 FileProvider product-hardening gate: exact release
-  asset smoke, rename/unsync semantics, badges/progress, recovery UX, and
-  longer desktop soak.
+  asset smoke and rename/conflict paths are green; badges/progress, recovery UX,
+  first-run setup, and longer desktop soak remain open.
 - `TIN-1548` keeps iOS as a proof-of-concept until there is a real-device or
   simulator Files.app acceptance lane with safe enrollment posture.
 - `TIN-1549` is the beta desktop status/progress/conflict recovery UX gate

@@ -72,6 +72,11 @@ SECRETS
   exit 0
 fi
 
+if [[ "${1:-}" == "api" && "${2:-}" == "repos/owner/repo/releases?per_page=1" ]]; then
+  printf 'v9.9.9\n'
+  exit 0
+fi
+
 if [[ "${1:-}" == "api" ]]; then
   printf 'linux-1\tonline\tself-hosted,linux-private\n'
   exit 0
@@ -138,6 +143,15 @@ bash "$SCRIPT" \
   --linux-runner-label linux-private \
   >"$SELF_HOSTED"
 assert_contains "$SELF_HOSTED" "runner: \`linux-private\` (online:linux-1)"
+
+DEFAULT_TAG="$TMPDIR/default-tag.out"
+bash "$SCRIPT" \
+  --repo owner/repo \
+  --storage-environment storage-good \
+  --linux-environment linux-good \
+  >"$DEFAULT_TAG"
+assert_contains "$DEFAULT_TAG" "- tag: \`v9.9.9\`"
+assert_contains "$DEFAULT_TAG" "-f tag=v9.9.9"
 
 assert_fails_contains \
   "missing_secrets" \
