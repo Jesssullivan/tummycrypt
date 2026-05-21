@@ -10,6 +10,7 @@ LINUX_RUNNER_LABEL="ubuntu-24.04"
 TAG="v0.12.13-rc2"
 SCOPE_DENY_PREFIX="gha/storage-posture-denied/$(date -u +%Y%m%dT%H%M%SZ)"
 REMOTE_PREFIX=""
+LINUX_REMOTE_PREFIX=""
 STRICT=0
 
 usage() {
@@ -36,6 +37,7 @@ Options:
   --scope-deny-prefix PREFIX        Outside-policy prefix that storage canary
                                     must reject
   --remote-prefix PREFIX            Optional positive storage canary prefix
+  --linux-remote-prefix PREFIX      Optional Linux smoke prefix override
   --strict                          Exit non-zero when any alpha gate is blocked
   -h, --help                        Show this help
 
@@ -182,6 +184,12 @@ while [[ $# -gt 0 ]]; do
       REMOTE_PREFIX="${REMOTE_PREFIX%/}"
       shift 2
       ;;
+    --linux-remote-prefix)
+      require_value "$1" "${2:-}"
+      LINUX_REMOTE_PREFIX="${2#/}"
+      LINUX_REMOTE_PREFIX="${LINUX_REMOTE_PREFIX%/}"
+      shift 2
+      ;;
     --strict)
       STRICT=1
       shift
@@ -217,8 +225,14 @@ linux_required=(
   TCFS_SMOKE_MASTER_KEY_B64
 )
 
-mapfile -t storage_missing < <(missing_secret_names "$STORAGE_ENVIRONMENT" "${storage_required[@]}")
-mapfile -t linux_missing < <(missing_secret_names "$LINUX_ENVIRONMENT" "${linux_required[@]}")
+storage_missing=()
+linux_missing=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && storage_missing+=("$line")
+done < <(missing_secret_names "$STORAGE_ENVIRONMENT" "${storage_required[@]}")
+while IFS= read -r line; do
+  [[ -n "$line" ]] && linux_missing+=("$line")
+done < <(missing_secret_names "$LINUX_ENVIRONMENT" "${linux_required[@]}")
 storage_runner_status="$(runner_status_line "$STORAGE_RUNNER_LABEL")"
 linux_runner_status="$(runner_status_line "$LINUX_RUNNER_LABEL")"
 
@@ -270,6 +284,10 @@ elif (( ${#linux_missing[@]} > 0 )); then
   blocked=1
 else
   printf -- '- status: `runnable`\n'
+  linux_remote_prefix="$LINUX_REMOTE_PREFIX"
+  if [[ -z "$linux_remote_prefix" && "$LINUX_ENVIRONMENT" == "$STORAGE_ENVIRONMENT" ]]; then
+    linux_remote_prefix="gha/storage-posture/linux-postinstall/${TAG}/$(date -u +%Y%m%dT%H%M%SZ)"
+  fi
   linux_cmd=(
     gh workflow run linux-postinstall-smoke.yml
     -R "$REPO"
@@ -280,6 +298,9 @@ else
     -f "exercise_evict_rehydrate=true"
     -f "exercise_mutation=true"
   )
+  if [[ -n "$linux_remote_prefix" ]]; then
+    linux_cmd+=(-f "remote_prefix=$linux_remote_prefix")
+  fi
   printf -- '- dispatch:\n\n'
   printf '```bash\n%s\n```\n' "$(quote_cmd "${linux_cmd[@]}")"
 fi

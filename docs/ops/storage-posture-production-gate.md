@@ -6,9 +6,10 @@ This is the operator handoff for `TIN-1546`. It defines the minimum storage
 packet required before TCFS can claim production-like S3 readiness for alpha QA.
 
 The gate is intentionally narrower than "storage works." A passing run proves
-one scoped write/read/delete/delete-verify path, endpoint TLS posture, and the
-credential scope used for the run. It does not prove broad directory ownership,
-multitenancy, lost-device recovery, or long soak behavior.
+allowed-prefix listing, one scoped write/read/delete/delete-verify path,
+endpoint TLS posture, and the credential scope used for the run. It does not
+prove broad directory ownership, multitenancy, lost-device recovery, or long
+soak behavior.
 
 For the production posture packet, the canary should also include a negative
 scope probe by setting `scope_deny_prefix` to a prefix outside the credential
@@ -70,6 +71,7 @@ The canary identity should be scoped to:
 
 The credential must be able to:
 
+- list the allowed parent prefix,
 - write the canary object,
 - read the same object,
 - delete the same object, and
@@ -86,6 +88,11 @@ allowed policy, for example:
 - allowed parent prefix: `gha/storage-posture/`
 - canary write prefix: `gha/storage-posture/<run_id>-<attempt>`
 - denial prefix: `gha/storage-posture-denied/<run_id>-<attempt>`
+
+Downstream package smokes that reuse this production-like environment must also
+use a prefix under the allowed parent. For example, dispatch Linux package
+smoke with `remote_prefix=gha/storage-posture/linux-postinstall/<tag>/<run>`
+instead of the workflow's private-smoke default `gha/linux-postinstall/...`.
 
 ## Dispatch
 
@@ -141,6 +148,9 @@ The workflow run must complete successfully and upload its evidence artifact.
 
 `storage-canary.json` must show:
 
+- `listed: true`
+- non-empty `list_prefix`
+- integer `list_count`
 - `deleted: true`
 - `bytes > 0`
 - `endpoint_tls: true`
@@ -170,6 +180,8 @@ plain language. Do not paste secrets.
 - Missing secrets: environment configuration blocker.
 - Endpoint preflight failure: runner/backend reachability blocker.
 - `require_https=true` with plaintext URL: posture blocker.
+- Allowed-prefix list failure: credential-scope blocker; `tcfsd status` and
+  index enumeration need the same permission.
 - Write/read/delete timeout: storage reliability blocker.
 - Delete verification failed: storage consistency blocker.
 - S3 auth/access denied: credential-scope blocker unless the policy was

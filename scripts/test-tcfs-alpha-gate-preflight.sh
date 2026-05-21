@@ -102,6 +102,25 @@ assert_contains "$READY" "gh workflow run linux-postinstall-smoke.yml"
 assert_contains "$READY" "-f tag=v1.2.3"
 assert_contains "$READY" "just neo-honey-smoke"
 
+SHARED_ENV="$TMPDIR/shared-env.out"
+bash "$SCRIPT" \
+  --repo owner/repo \
+  --storage-environment linux-good \
+  --linux-environment linux-good \
+  --tag v1.2.3 \
+  >"$SHARED_ENV"
+assert_contains "$SHARED_ENV" "-f remote_prefix=gha/storage-posture/linux-postinstall/v1.2.3/"
+
+LINUX_PREFIX="$TMPDIR/linux-prefix.out"
+bash "$SCRIPT" \
+  --repo owner/repo \
+  --storage-environment storage-good \
+  --linux-environment linux-good \
+  --linux-remote-prefix /custom/linux-prefix/ \
+  --tag v1.2.3 \
+  >"$LINUX_PREFIX"
+assert_contains "$LINUX_PREFIX" "-f remote_prefix=custom/linux-prefix"
+
 BLOCKED="$TMPDIR/blocked.out"
 bash "$SCRIPT" \
   --repo owner/repo \

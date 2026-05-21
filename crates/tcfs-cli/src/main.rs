@@ -345,13 +345,17 @@ struct StorageCanaryReport {
     bucket: String,
     prefix: String,
     key: String,
+    list_prefix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope_deny: Option<StorageCanaryScopeDenyReport>,
     bytes: usize,
     write_ms: u128,
+    list_ms: u128,
+    list_count: usize,
     read_ms: u128,
     delete_ms: u128,
     verify_delete_ms: u128,
+    listed: bool,
     deleted: bool,
     endpoint_tls: bool,
     enforce_tls: bool,
@@ -1663,6 +1667,10 @@ async fn cmd_storage(config: &tcfs_core::config::TcfsConfig, action: StorageActi
                 println!("  key:      {}", report.key);
                 println!("  bytes:    {}", report.bytes);
                 println!("  write:    {} ms", report.write_ms);
+                println!(
+                    "  list:     {} ms ({} entries at {})",
+                    report.list_ms, report.list_count, report.list_prefix
+                );
                 println!("  read:     {} ms", report.read_ms);
                 println!("  delete:   {} ms", report.delete_ms);
                 println!("  verify:   {} ms", report.verify_delete_ms);
@@ -1699,6 +1707,15 @@ fn storage_canary_key(prefix: &str, nonce: &str) -> String {
     }
 }
 
+fn storage_canary_list_prefix(prefix: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{prefix}/")
+    }
+}
+
 async fn run_storage_canary_with_operator(
     config: &tcfs_core::config::TcfsConfig,
     op: &opendal::Operator,
@@ -1708,6 +1725,7 @@ async fn run_storage_canary_with_operator(
     timeout: Duration,
 ) -> Result<StorageCanaryReport> {
     let key = storage_canary_key(prefix, nonce);
+    let list_prefix = storage_canary_list_prefix(prefix);
     let payload = format!(
         "tcfs storage canary\nendpoint={}\nbucket={}\nprefix={}\nkey={}\nnonce={}\n",
         config.storage.endpoint, config.storage.bucket, prefix, key, nonce
@@ -1720,6 +1738,16 @@ async fn run_storage_canary_with_operator(
         .map_err(|_| anyhow::anyhow!("storage canary write timed out after {timeout:?}: {key}"))?
         .with_context(|| format!("storage canary write failed: {key}"))?;
     let write_ms = write_start.elapsed().as_millis();
+
+    let list_start = std::time::Instant::now();
+    let list_entries = tokio::time::timeout(timeout, op.list(&list_prefix))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("storage canary list timed out after {timeout:?}: {list_prefix}")
+        })?
+        .with_context(|| format!("storage canary list failed: {list_prefix}"))?;
+    let list_ms = list_start.elapsed().as_millis();
+    let list_count = list_entries.len();
 
     let read_start = std::time::Instant::now();
     let read_back = tokio::time::timeout(timeout, op.read(&key))
@@ -1766,12 +1794,16 @@ async fn run_storage_canary_with_operator(
         bucket: config.storage.bucket.clone(),
         prefix: prefix.to_string(),
         key,
+        list_prefix,
         scope_deny,
         bytes: payload.len(),
         write_ms,
+        list_ms,
+        list_count,
         read_ms,
         delete_ms,
         verify_delete_ms,
+        listed: true,
         deleted: !exists_after_delete,
         endpoint_tls: config.storage.endpoint.starts_with("https://"),
         enforce_tls: config.storage.enforce_tls,
@@ -5099,6 +5131,13 @@ enabled = false
         assert_eq!(storage_canary_key("", "nonce"), ".tcfs-canary/nonce.txt");
     }
 
+    #[test]
+    fn storage_canary_list_prefix_matches_daemon_health_scope() {
+        assert_eq!(storage_canary_list_prefix("data"), "data/");
+        assert_eq!(storage_canary_list_prefix("/tenant/a/"), "tenant/a/");
+        assert_eq!(storage_canary_list_prefix(""), "/");
+    }
+
     #[tokio::test]
     async fn storage_canary_writes_reads_deletes_and_verifies() {
         let dir = tempfile::tempdir().unwrap();
@@ -5117,6 +5156,9 @@ enabled = false
         .unwrap();
 
         assert_eq!(report.key, "data/.tcfs-canary/test-nonce.txt");
+        assert_eq!(report.list_prefix, "data/");
+        assert!(report.listed);
+        assert!(report.list_count >= 1);
         assert!(report.deleted);
         assert!(report.scope_deny.is_none());
         assert!(!op.exists(&report.key).await.unwrap());

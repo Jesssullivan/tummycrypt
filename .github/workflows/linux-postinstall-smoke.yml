@@ -47,6 +47,11 @@ on:
         required: false
         default: "tcfs-macos-smoke"
         type: string
+      remote_prefix:
+        description: "Optional storage prefix override; use an allowed production prefix such as gha/storage-posture/linux-postinstall/<tag>/<run>"
+        required: false
+        default: ""
+        type: string
       exercise_evict_rehydrate:
         description: "After initial hydration, exercise unsync + rehydrate"
         required: false
@@ -156,7 +161,16 @@ jobs:
           EXPECTED_CONTENT_FILE="$RUNNER_TEMP/expected-fixture-content"
           MUTATION_CONTENT_FILE="$RUNNER_TEMP/mutation-fixture-content"
           PACKAGE_PATHS_FILE="$RUNNER_TEMP/tcfs-package-paths.txt"
-          REMOTE_PREFIX="gha/linux-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          REMOTE_PREFIX="${{ github.event.inputs.remote_prefix }}"
+          if [[ -z "$REMOTE_PREFIX" ]]; then
+            REMOTE_PREFIX="gha/linux-postinstall/${TAG}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          REMOTE_PREFIX="${REMOTE_PREFIX#/}"
+          REMOTE_PREFIX="${REMOTE_PREFIX%/}"
+          if [[ -z "$REMOTE_PREFIX" ]]; then
+            echo "::error::remote_prefix resolved to an empty prefix"
+            exit 1
+          fi
           readarray -t REMOTE_SPEC_PARTS < <(python3 - <<'PY'
           import os
           import urllib.parse

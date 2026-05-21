@@ -4,10 +4,10 @@ name: Storage Posture Canary
 #
 # This workflow turns `tcfs storage canary --json` into an archived evidence
 # lane. It intentionally does not claim broad production S3 readiness by itself:
-# the run proves one scoped write/read/delete/delete-verify operation plus
-# endpoint TLS posture for the selected environment. When scope_deny_prefix is
-# provided, it also proves the selected credentials cannot write outside the
-# intended prefix.
+# the run proves allowed-prefix list plus one scoped write/read/delete/delete-
+# verify operation and endpoint TLS posture for the selected environment. When
+# scope_deny_prefix is provided, it also proves the selected credentials cannot
+# write outside the intended prefix.
 
 on:
   workflow_dispatch:
@@ -271,10 +271,15 @@ jobs:
               report = json.load(fh)
 
           assert report["deleted"] is True, "delete verification must pass"
+          assert report["listed"] is True, "allowed-prefix list proof must pass"
           assert report["bytes"] > 0, "canary payload must be non-empty"
+          assert report["list_prefix"], "allowed-prefix list path must be recorded"
           if require_https:
               assert report["endpoint_tls"] is True, "endpoint_tls must be true"
               assert report["enforce_tls"] is True, "enforce_tls must be true"
+              assert isinstance(report["list_count"], int), (
+                  "require_https production posture runs must record list_count"
+              )
               assert report.get("scope_deny") is not None, (
                   "require_https production posture runs must include scope-deny proof"
               )
