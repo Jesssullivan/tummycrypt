@@ -37,6 +37,11 @@ on:
         required: false
         default: false
         type: boolean
+      exercise_rename_safety:
+        description: "Post-M10 hardening lane: rename a FileProvider file and prove the new remote path is readable while the old path is no longer visible"
+        required: false
+        default: false
+        type: boolean
       host_root_probe:
         description: "Require the signed HostApp root/user-visible URL probe even when raw CloudStorage enumeration succeeds"
         required: false
@@ -111,6 +116,7 @@ jobs:
           FILEPROVIDER_TESTING_MODE="${{ github.event.inputs.fileprovider_testing_mode }}"
           EXERCISE_CONFLICT_STATUS="${{ github.event.inputs.exercise_conflict_status }}"
           EXERCISE_DEV_ID_LAYERED_PROOF="${{ github.event.inputs.exercise_dev_id_layered_proof }}"
+          EXERCISE_RENAME_SAFETY="${{ github.event.inputs.exercise_rename_safety }}"
           LAB_GATEKEEPER_OVERRIDE="${{ github.event.inputs.lab_gatekeeper_override }}"
           RUNNER_LABEL="${{ github.event.inputs.runner_label }}"
           [[ "$TAG" == v* ]] || {
@@ -137,6 +143,13 @@ jobs:
                 && "$FILEPROVIDER_TESTING_MODE" != "true" \
                 && "$EXERCISE_DEV_ID_LAYERED_PROOF" != "true" ]]; then
             echo "::error::exercise_conflict_status=true requires fileprovider_testing_mode=true or exercise_dev_id_layered_proof=true"
+            exit 1
+          fi
+
+          if [[ "$EXERCISE_RENAME_SAFETY" == "true" \
+                && "$FILEPROVIDER_TESTING_MODE" != "true" \
+                && "$EXERCISE_DEV_ID_LAYERED_PROOF" != "true" ]]; then
+            echo "::error::exercise_rename_safety=true requires fileprovider_testing_mode=true or exercise_dev_id_layered_proof=true"
             exit 1
           fi
 
@@ -848,6 +861,19 @@ jobs:
               --mutation-content-file "$MUTATION_CONTENT_FILE" \
               --remote-prefix "$REMOTE_PREFIX"
             )
+            if [[ "${{ github.event.inputs.exercise_rename_safety }}" == "true" ]]; then
+              RENAME_REL="ci-smoke/${VERSION}/rename-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+              RENAME_DEST_REL="ci-smoke/${VERSION}/rename-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-renamed.txt"
+              RENAME_CONTENT_FILE="$RUNNER_TEMP/fileprovider-rename-content.txt"
+              printf 'tcfs macOS FileProvider rename %s run %s attempt %s\n' \
+                "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$RENAME_CONTENT_FILE"
+              args+=(
+                --exercise-rename-safety \
+                --rename-source-file "$RENAME_REL" \
+                --rename-dest-file "$RENAME_DEST_REL" \
+                --rename-content-file "$RENAME_CONTENT_FILE"
+              )
+            fi
             if [[ "${{ github.event.inputs.exercise_conflict_status }}" == "true" ]]; then
               args+=(
                 --exercise-conflict-status \
@@ -867,6 +893,19 @@ jobs:
               --mutation-content-file "$MUTATION_CONTENT_FILE" \
               --remote-prefix "$REMOTE_PREFIX"
             )
+            if [[ "${{ github.event.inputs.exercise_rename_safety }}" == "true" ]]; then
+              RENAME_REL="ci-smoke/${VERSION}/rename-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+              RENAME_DEST_REL="ci-smoke/${VERSION}/rename-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-renamed.txt"
+              RENAME_CONTENT_FILE="$RUNNER_TEMP/fileprovider-rename-content.txt"
+              printf 'tcfs macOS FileProvider rename %s run %s attempt %s\n' \
+                "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$RENAME_CONTENT_FILE"
+              args+=(
+                --exercise-rename-safety \
+                --rename-source-file "$RENAME_REL" \
+                --rename-dest-file "$RENAME_DEST_REL" \
+                --rename-content-file "$RENAME_CONTENT_FILE"
+              )
+            fi
             if [[ "${{ github.event.inputs.exercise_conflict_status }}" == "true" ]]; then
               args+=(
                 --exercise-conflict-status \

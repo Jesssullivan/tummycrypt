@@ -254,24 +254,7 @@ async fn delete_remote_entry(
     remote_prefix: &str,
     item_id: &str,
 ) -> anyhow::Result<()> {
-    let index_key = format!(
-        "{}/index/{}",
-        remote_prefix.trim_end_matches('/'),
-        item_id.trim_start_matches('/')
-    );
-    let index_data = operator.read(&index_key).await;
-    if let Ok(data) = index_data {
-        let bytes = data.to_bytes();
-        let manifest_prefix = format!("{}/manifests", remote_prefix.trim_end_matches('/'));
-        if let Ok(entry) = tcfs_sync::index_entry::parse_index_entry_record(&bytes) {
-            for manifest_path in entry.referenced_object_keys(&manifest_prefix) {
-                let _ = operator.delete(&manifest_path).await;
-            }
-        }
-    }
-
-    operator.delete(&index_key).await?;
-    Ok(())
+    tcfs_sync::engine::delete_remote_index_entry(operator, item_id, remote_prefix).await
 }
 
 /// Create a new provider from a JSON configuration string.

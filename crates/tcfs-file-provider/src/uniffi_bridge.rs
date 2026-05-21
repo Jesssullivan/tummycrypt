@@ -607,19 +607,13 @@ impl TcfsProviderHandle {
     /// Delete a file or directory by its item ID.
     pub fn delete_item(&self, item_id: &str) -> Result<(), ProviderError> {
         self.runtime.block_on(async {
-            if let Ok(data) = self.operator.read(item_id).await {
-                let bytes = data.to_bytes();
-                let manifest_prefix =
-                    format!("{}/manifests", self.remote_prefix.trim_end_matches('/'));
-                if let Ok(entry) = tcfs_sync::index_entry::parse_index_entry_record(&bytes) {
-                    for manifest_path in entry.referenced_object_keys(&manifest_prefix) {
-                        let _ = self.operator.delete(&manifest_path).await;
-                    }
-                }
-            }
-
-            self.operator.delete(item_id).await?;
-            Ok(())
+            tcfs_sync::engine::delete_remote_index_entry(
+                &self.operator,
+                item_id,
+                &self.remote_prefix,
+            )
+            .await
+            .map_err(ProviderError::from)
         })
     }
 

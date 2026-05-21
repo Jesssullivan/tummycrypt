@@ -776,25 +776,12 @@ pub unsafe extern "C" fn tcfs_provider_delete(
         };
 
         let delete_result = prov.runtime.block_on(async {
-            // Reconstruct full S3 key from relative item_id
-            let index_key = format!(
-                "{}/index/{}",
-                prov.remote_prefix.trim_end_matches('/'),
-                item_str.trim_start_matches('/')
-            );
-            let index_data = prov.operator.read(&index_key).await;
-            if let Ok(data) = index_data {
-                let bytes = data.to_bytes();
-                let manifest_prefix =
-                    format!("{}/manifests", prov.remote_prefix.trim_end_matches('/'));
-                if let Ok(entry) = tcfs_sync::index_entry::parse_index_entry_record(&bytes) {
-                    for manifest_path in entry.referenced_object_keys(&manifest_prefix) {
-                        let _ = prov.operator.delete(&manifest_path).await;
-                    }
-                }
-            }
-
-            prov.operator.delete(&index_key).await?;
+            tcfs_sync::engine::delete_remote_index_entry(
+                &prov.operator,
+                item_str,
+                &prov.remote_prefix,
+            )
+            .await?;
             Ok::<(), anyhow::Error>(())
         });
 
@@ -1125,6 +1112,41 @@ mod tests {
             let (_, items, count) = enumerate(prov, "");
             assert_eq!(count, 0);
             crate::tcfs_file_items_free(items, count);
+
+            tcfs_provider_free(prov);
+        }
+    }
+
+    #[test]
+    fn delete_one_duplicate_content_path_preserves_other_path() {
+        let prov = memory_provider("dedup-delete");
+        let dir = tempfile::tempdir().unwrap();
+
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let data = b"same content for both remote paths";
+        std::fs::write(&a, data).unwrap();
+        std::fs::write(&b, data).unwrap();
+
+        unsafe {
+            let c_a_local = CString::new(a.to_str().unwrap()).unwrap();
+            let c_a_remote = CString::new("a.txt").unwrap();
+            let err = tcfs_provider_upload(prov, c_a_local.as_ptr(), c_a_remote.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            let c_b_local = CString::new(b.to_str().unwrap()).unwrap();
+            let c_b_remote = CString::new("b.txt").unwrap();
+            let err = tcfs_provider_upload(prov, c_b_local.as_ptr(), c_b_remote.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            let err = tcfs_provider_delete(prov, c_a_remote.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+
+            let fetched = dir.path().join("b-fetched.txt");
+            let c_fetched = CString::new(fetched.to_str().unwrap()).unwrap();
+            let err = tcfs_provider_fetch(prov, c_b_remote.as_ptr(), c_fetched.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(std::fs::read(fetched).unwrap(), data);
 
             tcfs_provider_free(prov);
         }
