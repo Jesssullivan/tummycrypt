@@ -148,6 +148,34 @@ count_lines() {
   wc -l <"$file" | tr -d ' '
 }
 
+count_regular_files() {
+  local root="$1"
+  (
+    cd "$root"
+    LC_ALL=C find . -type f -print | wc -l | tr -d ' '
+  )
+}
+
+file_size_bytes() {
+  local path="$1"
+
+  stat -c '%s' "$path" 2>/dev/null || stat -f '%z' "$path"
+}
+
+sum_regular_file_bytes() {
+  local root="$1"
+  local total=0
+  local path
+  local size
+
+  while IFS= read -r -d '' path; do
+    size="$(file_size_bytes "$path")" || size=0
+    total=$((total + size))
+  done < <(find "$root" -type f -print0)
+
+  printf '%s\n' "$total"
+}
+
 write_state_manifest() {
   local state_file="$1"
   local root="$2"
@@ -311,6 +339,10 @@ run_with_timeout() {
   shift
 
   local rc=0
+  local started_epoch
+  local completed_epoch
+  RUN_WITH_TIMEOUT_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  started_epoch="$(date -u +%s)"
   if [[ "$reconcile_timeout_secs" == "0" ]]; then
     "$@" >"$log_path" 2>&1 || rc=$?
   else
@@ -319,13 +351,30 @@ run_with_timeout() {
     [[ -n "$timeout_bin" ]] || fail "timeout command unavailable; rerun with --reconcile-timeout-secs 0 to disable"
     "$timeout_bin" "${reconcile_timeout_secs}s" "$@" >"$log_path" 2>&1 || rc=$?
   fi
+  completed_epoch="$(date -u +%s)"
+  RUN_WITH_TIMEOUT_COMPLETED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  RUN_WITH_TIMEOUT_ELAPSED_SECS=$((completed_epoch - started_epoch))
   return "$rc"
 }
+
+dry_run_started_at_utc=
+dry_run_completed_at_utc=
+dry_run_elapsed_secs=
+execute_started_at_utc=
+execute_completed_at_utc=
+execute_elapsed_secs=
+partial_restored_regular_file_count=0
+partial_restored_regular_file_bytes=0
 
 write_blocked_result() {
   local phase="$1"
   local rc="$2"
   local reason="$3"
+
+  if [[ -d "$restore_root" ]]; then
+    partial_restored_regular_file_count="$(count_regular_files "$restore_root")"
+    partial_restored_regular_file_bytes="$(sum_regular_file_bytes "$restore_root")"
+  fi
 
   cat >"$restore_dir/restore-proof.env" <<EOF
 created_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -346,6 +395,14 @@ tcfs_version=$tcfs_version
 tcfs_sha256_status=$tcfs_sha256_status
 tcfs_sha256=$tcfs_sha256
 reconcile_timeout_secs=$reconcile_timeout_secs
+dry_run_started_at_utc=$dry_run_started_at_utc
+dry_run_completed_at_utc=$dry_run_completed_at_utc
+dry_run_elapsed_secs=$dry_run_elapsed_secs
+execute_started_at_utc=$execute_started_at_utc
+execute_completed_at_utc=$execute_completed_at_utc
+execute_elapsed_secs=$execute_elapsed_secs
+partial_restored_regular_file_count=$partial_restored_regular_file_count
+partial_restored_regular_file_bytes=$partial_restored_regular_file_bytes
 regular_files_match=0
 symlink_targets_match=0
 empty_dirs_match=0
@@ -381,6 +438,9 @@ run_with_timeout "$restore_dir/reconcile-dry-run.log" \
   --path "$restore_root" \
   --prefix "$remote_prefix" \
   --state "$state_path" || dry_run_rc=$?
+dry_run_started_at_utc="$RUN_WITH_TIMEOUT_STARTED_AT_UTC"
+dry_run_completed_at_utc="$RUN_WITH_TIMEOUT_COMPLETED_AT_UTC"
+dry_run_elapsed_secs="$RUN_WITH_TIMEOUT_ELAPSED_SECS"
 
 if [[ "$dry_run_rc" -ne 0 ]]; then
   dry_reason="reconcile dry-run failed with rc=$dry_run_rc"
@@ -401,6 +461,9 @@ run_with_timeout "$restore_dir/reconcile-execute.log" \
   --prefix "$remote_prefix" \
   --state "$state_path" \
   --execute || execute_rc=$?
+execute_started_at_utc="$RUN_WITH_TIMEOUT_STARTED_AT_UTC"
+execute_completed_at_utc="$RUN_WITH_TIMEOUT_COMPLETED_AT_UTC"
+execute_elapsed_secs="$RUN_WITH_TIMEOUT_ELAPSED_SECS"
 
 if [[ "$execute_rc" -ne 0 ]]; then
   execute_reason="reconcile execute failed with rc=$execute_rc"
@@ -450,6 +513,12 @@ diff -u "$restore_dir/shadow-unsupported-special-files.txt" "$restore_dir/restor
 
 shadow_regular_count="$(count_lines "$restore_dir/shadow-regular-sha256.tsv")"
 restored_regular_count="$(count_lines "$restore_dir/restored-regular-sha256.tsv")"
+shadow_regular_bytes="$(sum_regular_file_bytes "$shadow_root")"
+restored_regular_bytes="$(sum_regular_file_bytes "$restore_root")"
+restored_regular_bytes_per_sec=0
+if [[ "$execute_elapsed_secs" =~ ^[0-9]+$ && "$execute_elapsed_secs" -gt 0 ]]; then
+  restored_regular_bytes_per_sec=$((restored_regular_bytes / execute_elapsed_secs))
+fi
 shadow_symlink_count="$(count_lines "$restore_dir/shadow-symlink-targets.tsv")"
 restored_symlink_count="$(count_lines "$restore_dir/restored-symlink-targets.tsv")"
 shadow_empty_dir_count="$(count_lines "$restore_dir/shadow-empty-dirs.txt")"
@@ -503,9 +572,19 @@ tcfs_version_status=$tcfs_version_status
 tcfs_version=$tcfs_version
 tcfs_sha256_status=$tcfs_sha256_status
 tcfs_sha256=$tcfs_sha256
+reconcile_timeout_secs=$reconcile_timeout_secs
+dry_run_started_at_utc=$dry_run_started_at_utc
+dry_run_completed_at_utc=$dry_run_completed_at_utc
+dry_run_elapsed_secs=$dry_run_elapsed_secs
+execute_started_at_utc=$execute_started_at_utc
+execute_completed_at_utc=$execute_completed_at_utc
+execute_elapsed_secs=$execute_elapsed_secs
 regular_files_match=$regular_files_match
 shadow_regular_file_count=$shadow_regular_count
 restored_regular_file_count=$restored_regular_count
+shadow_regular_file_bytes=$shadow_regular_bytes
+restored_regular_file_bytes=$restored_regular_bytes
+restored_regular_file_bytes_per_sec=$restored_regular_bytes_per_sec
 symlink_targets_match=$symlink_targets_match
 shadow_symlink_count=$shadow_symlink_count
 restored_symlink_count=$restored_symlink_count
@@ -539,6 +618,11 @@ SHA-256 hashes and symlink targets against the archived shadow tree.
 - Status: \`$status\`
 - Proof: \`$proof\`
 - Reason: \`$reason\`
+- Reconcile timeout: \`${reconcile_timeout_secs}s\`
+- Dry-run elapsed: \`${dry_run_elapsed_secs}s\`
+- Execute elapsed: \`${execute_elapsed_secs}s\`
+- Restored regular-file bytes: \`$restored_regular_bytes\`
+- Restore throughput: \`${restored_regular_bytes_per_sec} bytes/s\`
 
 Files:
 
