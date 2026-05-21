@@ -130,6 +130,10 @@ fleet-check:
 neo-honey-smoke:
     bash scripts/neo-honey-smoke.sh
 
+# Regression test the neo/honey evidence-packet wrapper without live services
+neo-honey-smoke-test:
+    bash scripts/test-neo-honey-smoke.sh
+
 # Read-only alpha productionization gate classifier
 alpha-gate-preflight *ARGS:
     @bash scripts/tcfs-alpha-gate-preflight.sh {{ARGS}}
