@@ -32,7 +32,9 @@ ruby -ryaml -e '
   raise "release plan must emit version image" unless plan_run.include?("${IMAGE_REPO}:${VERSION}")
   raise "release plan must only emit latest image for stable tags" unless plan_run.include?("if [[ \"${IS_PRERELEASE}\" != \"true\" ]]")
 
-  steps = workflow.fetch("jobs").fetch("build-image").fetch("steps")
+  image_job = workflow.fetch("jobs").fetch("build-image")
+  raise "build-image job must have an explicit timeout" unless image_job.fetch("timeout-minutes") <= 120
+  steps = image_job.fetch("steps")
 
   qemu_index = steps.index { |step| step["uses"] == "docker/setup-qemu-action@v3" }
   buildx_index = steps.index { |step| step["uses"] == "docker/setup-buildx-action@v3" }

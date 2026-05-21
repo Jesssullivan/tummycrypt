@@ -469,6 +469,7 @@ jobs:
     name: Build container image
     runs-on: ubuntu-latest
     needs: plan
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
 
