@@ -167,6 +167,18 @@ enum Commands {
         /// Device name (default: hostname)
         #[arg(long)]
         device_name: Option<String>,
+        /// Check whether first-run identity and user config are present
+        #[arg(long)]
+        check: bool,
+        /// Do not write ~/.config/tcfs/config.toml
+        #[arg(long)]
+        skip_config: bool,
+        /// Overwrite an existing init config file
+        #[arg(long)]
+        force_config: bool,
+        /// Config path to write/check (default: ~/.config/tcfs/config.toml)
+        #[arg(long)]
+        config_out: Option<PathBuf>,
         /// Non-interactive mode (use with --password)
         #[arg(long)]
         non_interactive: bool,
@@ -615,9 +627,25 @@ async fn main() -> Result<()> {
         Commands::Unsync { path, force } => cmd_unsync(&config, &path, force).await,
         Commands::Init {
             device_name,
+            check,
+            skip_config,
+            force_config,
+            config_out,
             non_interactive,
             password,
-        } => cmd_init(&config, device_name, non_interactive, password).await,
+        } => {
+            cmd_init(
+                &config,
+                device_name,
+                check,
+                skip_config,
+                force_config,
+                config_out.as_deref(),
+                non_interactive,
+                password,
+            )
+            .await
+        }
         Commands::Device { action } => match action {
             DeviceAction::Enroll { name } => cmd_device_enroll(name),
             DeviceAction::List => cmd_device_list(),
@@ -3160,27 +3188,36 @@ fn print_dirty_unsync_paths(root: &std::path::Path, dirty: &[DirtyUnsyncPath]) {
 // ── `tcfs init` ──────────────────────────────────────────────────────────────
 
 async fn cmd_init(
-    _config: &tcfs_core::config::TcfsConfig,
+    config: &tcfs_core::config::TcfsConfig,
     device_name: Option<String>,
+    check: bool,
+    skip_config: bool,
+    force_config: bool,
+    config_out: Option<&Path>,
     non_interactive: bool,
     password: Option<String>,
 ) -> Result<()> {
     let device_name = device_name.unwrap_or_else(tcfs_secrets::device::default_device_name);
+    let init_paths = InitPaths::resolve(config_out);
+    let config_path = init_paths.config_path.clone();
+    let master_key_path = init_paths.master_key_path.clone();
+    let registry_path = init_paths.registry_path.clone();
+
+    if check {
+        return cmd_init_check(&init_paths);
+    }
 
     // Step 1: Check if already initialized (master key file exists)
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".config")
-        })
-        .join("tcfs");
-    let master_key_path = config_dir.join("master.key");
-
     if master_key_path.exists() {
         anyhow::bail!(
             "Already initialized: {} exists. Remove it to re-initialize.",
             master_key_path.display()
+        );
+    }
+    if !skip_config && config_path.exists() && !force_config {
+        anyhow::bail!(
+            "Config already exists: {}. Pass --force-config to overwrite it or --skip-config to leave it unchanged.",
+            config_path.display()
         );
     }
 
@@ -3240,8 +3277,8 @@ async fn cmd_init(
     };
 
     // Step 5: Write master key to ~/.config/tcfs/master.key (raw 32 bytes)
-    std::fs::create_dir_all(&config_dir)
-        .with_context(|| format!("creating config dir: {}", config_dir.display()))?;
+    std::fs::create_dir_all(&init_paths.config_dir)
+        .with_context(|| format!("creating config dir: {}", init_paths.config_dir.display()))?;
     std::fs::write(&master_key_path, master_key.as_bytes())
         .with_context(|| format!("writing master key: {}", master_key_path.display()))?;
 
@@ -3254,11 +3291,15 @@ async fn cmd_init(
     }
 
     // Step 6: Create device registry and enroll this device
-    let registry_path = tcfs_secrets::device::default_registry_path();
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
     let public_key = format!("age1-device-{}", &blake3_short(&device_name));
     let device_id = registry.enroll(&device_name, &public_key, None);
     registry.save(&registry_path)?;
+
+    if !skip_config {
+        let init_config = build_init_config(config, &master_key_path, &registry_path, &device_name);
+        write_init_config(&config_path, &init_config, force_config)?;
+    }
 
     // Step 7: Print success message
     println!();
@@ -3268,11 +3309,145 @@ async fn cmd_init(
     println!("  Device ID:    {}", device_id);
     println!("  Master key:   {}", master_key_path.display());
     println!("  Registry:     {}", registry_path.display());
+    if !skip_config {
+        println!("  Config:       {}", config_path.display());
+    }
     println!();
     println!("Next steps:");
-    println!("  1. Configure storage: tcfs config show");
-    println!("  2. Push files: tcfs push /path/to/files");
+    if skip_config {
+        println!("  1. Write a config.toml or re-run tcfs init without --skip-config");
+        println!("  2. Start tcfsd with that config, then run tcfs status");
+    } else {
+        println!(
+            "  1. Review configuration: tcfs --config {} config show",
+            config_path.display()
+        );
+        println!(
+            "  2. Start tcfsd with that config, then run: tcfs --config {} status",
+            config_path.display()
+        );
+        println!(
+            "  3. Push files: tcfs --config {} push /path/to/files",
+            config_path.display()
+        );
+    }
 
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InitPaths {
+    config_dir: PathBuf,
+    config_path: PathBuf,
+    master_key_path: PathBuf,
+    registry_path: PathBuf,
+}
+
+impl InitPaths {
+    fn resolve(config_out: Option<&Path>) -> Self {
+        let config_path = config_out.map(Path::to_path_buf).unwrap_or_else(|| {
+            let config_dir = default_user_config_dir();
+            config_dir.join("config.toml")
+        });
+        let config_dir = config_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let master_key_path = config_dir.join("master.key");
+        let registry_path = config_dir.join("devices.json");
+        Self {
+            config_dir,
+            config_path,
+            master_key_path,
+            registry_path,
+        }
+    }
+}
+
+fn default_user_config_dir() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".config")
+        })
+        .join("tcfs")
+}
+
+fn cmd_init_check(paths: &InitPaths) -> Result<()> {
+    let mut missing = Vec::new();
+    if !paths.config_path.exists() {
+        missing.push(format!("config {}", paths.config_path.display()));
+    }
+    if !paths.master_key_path.exists() {
+        missing.push(format!("master key {}", paths.master_key_path.display()));
+    }
+    if !paths.registry_path.exists() {
+        missing.push(format!("device registry {}", paths.registry_path.display()));
+    }
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "tcfs is not initialized; missing {}. Run 'tcfs init'.",
+            missing.join(", ")
+        );
+    }
+    let registry = tcfs_secrets::device::DeviceRegistry::load(&paths.registry_path)?;
+    if registry.devices.is_empty() {
+        anyhow::bail!(
+            "tcfs is not initialized; device registry {} has no enrolled devices. Run 'tcfs init'.",
+            paths.registry_path.display()
+        );
+    }
+
+    println!("tcfs init check [ok]");
+    println!("  Config:     {}", paths.config_path.display());
+    println!("  Master key: {}", paths.master_key_path.display());
+    println!("  Registry:   {}", paths.registry_path.display());
+    Ok(())
+}
+
+fn build_init_config(
+    base: &tcfs_core::config::TcfsConfig,
+    master_key_path: &Path,
+    registry_path: &Path,
+    device_name: &str,
+) -> tcfs_core::config::TcfsConfig {
+    let mut config = base.clone();
+    config.crypto.enabled = true;
+    config.crypto.master_key_file = Some(master_key_path.to_path_buf());
+    config.sync.device_identity = Some(registry_path.to_path_buf());
+    config.sync.device_name = Some(device_name.to_string());
+    config
+}
+
+fn write_init_config(
+    config_path: &Path,
+    config: &tcfs_core::config::TcfsConfig,
+    force: bool,
+) -> Result<()> {
+    if config_path.exists() && !force {
+        anyhow::bail!(
+            "Config already exists: {}. Pass --force-config to overwrite it.",
+            config_path.display()
+        );
+    }
+    if let Some(parent) = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating config dir: {}", parent.display()))?;
+    }
+    let rendered = toml::to_string_pretty(config).context("serializing init config to TOML")?;
+    std::fs::write(config_path, rendered)
+        .with_context(|| format!("writing config: {}", config_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(config_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on: {}", config_path.display()))?;
+    }
     Ok(())
 }
 
@@ -4836,6 +5011,89 @@ mod tests {
         config.sync.sync_root = Some(sync_root.to_path_buf());
         config.sync.state_db = sync_root.join("state.db");
         config
+    }
+
+    #[test]
+    fn init_paths_use_config_out_parent_for_master_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nested/config.toml");
+        let paths = InitPaths::resolve(Some(&config_path));
+
+        assert_eq!(paths.config_path, config_path);
+        assert_eq!(paths.config_dir, dir.path().join("nested"));
+        assert_eq!(paths.master_key_path, dir.path().join("nested/master.key"));
+        assert_eq!(paths.registry_path, dir.path().join("nested/devices.json"));
+    }
+
+    #[test]
+    fn init_paths_use_current_dir_for_relative_config_out() {
+        let paths = InitPaths::resolve(Some(Path::new("config.toml")));
+
+        assert_eq!(paths.config_path, PathBuf::from("config.toml"));
+        assert_eq!(paths.config_dir, PathBuf::from("."));
+        assert_eq!(paths.master_key_path, PathBuf::from(".").join("master.key"));
+        assert_eq!(paths.registry_path, PathBuf::from(".").join("devices.json"));
+    }
+
+    #[test]
+    fn build_init_config_enables_crypto_and_device_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut base = test_config(dir.path());
+        base.storage.endpoint = "https://s3.example.test".into();
+        base.crypto.enabled = false;
+        base.crypto.master_key_file = None;
+        base.sync.device_name = None;
+
+        let master_key_path = dir.path().join("master.key");
+        let registry_path = dir.path().join("devices.json");
+        let config = build_init_config(&base, &master_key_path, &registry_path, "laptop");
+
+        assert!(config.crypto.enabled);
+        assert_eq!(
+            config.crypto.master_key_file.as_deref(),
+            Some(master_key_path.as_path())
+        );
+        assert_eq!(
+            config.sync.device_identity.as_deref(),
+            Some(registry_path.as_path())
+        );
+        assert_eq!(config.sync.device_name.as_deref(), Some("laptop"));
+        assert_eq!(config.storage.endpoint, "https://s3.example.test");
+    }
+
+    #[test]
+    fn write_init_config_refuses_existing_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "existing = true\n").unwrap();
+        let config = tcfs_core::config::TcfsConfig::default();
+
+        let err = write_init_config(&config_path, &config, false).unwrap_err();
+        assert!(err.to_string().contains("Config already exists"));
+
+        write_init_config(&config_path, &config, true).unwrap();
+        let reparsed: tcfs_core::config::TcfsConfig =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(reparsed.storage.bucket, config.storage.bucket);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_init_config_sets_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = tcfs_core::config::TcfsConfig::default();
+
+        write_init_config(&config_path, &config, false).unwrap();
+
+        let mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     fn make_encrypted_manifest(
