@@ -313,9 +313,12 @@ done
 [[ -d "$evidence_dir" ]] || fail "evidence dir does not exist: $evidence_dir"
 evidence_dir="$(cd "$evidence_dir" && pwd -P)"
 
-policy_path="$evidence_dir/git-repo-canary-policy.env"
 run_metadata="$evidence_dir/run-metadata.env"
-[[ -f "$policy_path" ]] || fail "missing git-repo-canary-policy.env in $evidence_dir"
+policy_path="$evidence_dir/git-repo-canary-policy.env"
+if [[ ! -f "$policy_path" && -f "$run_metadata" ]]; then
+  policy_path="$run_metadata"
+fi
+[[ -f "$policy_path" ]] || fail "missing git-repo-canary-policy.env or run-metadata.env in $evidence_dir"
 
 shadow_root="$(read_kv "$policy_path" shadow || read_kv "$run_metadata" shadow || true)"
 [[ -n "$shadow_root" ]] || fail "could not determine shadow root from packet"

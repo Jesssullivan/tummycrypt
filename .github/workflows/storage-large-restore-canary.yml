@@ -1,0 +1,344 @@
+name: Storage Large Restore Canary
+
+# TIN-1546: large-object push + fresh-tree restore packet.
+#
+# The scoped storage canary proves HTTPS, public CA trust, and credential scope
+# with a tiny object. This workflow uses the same GitHub environment secrets to
+# generate a synthetic git worktree with a large valid `.git/objects/pack`
+# payload, push it through TCFS, then restore it into a fresh tree with the
+# headroom gate enabled. It is intentionally dispatch-only because it writes
+# large objects to the selected storage prefix.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: "Runner label. Hosted runners require public HTTPS storage."
+        required: false
+        default: "ubuntu-24.04"
+        type: string
+      smoke_environment:
+        description: "GitHub environment containing TCFS_SMOKE_* storage secrets"
+        required: false
+        default: "tcfs-storage-prod-smoke"
+        type: string
+      remote_prefix:
+        description: "Remote prefix; default is gha/storage-posture-large/<run>"
+        required: false
+        default: ""
+        type: string
+      pack_size_mib:
+        description: "Random payload size committed into git history before packing"
+        required: false
+        default: "1024"
+        type: string
+      restore_headroom_margin_mib:
+        description: "Extra free-space margin required before restore"
+        required: false
+        default: "2048"
+        type: string
+      reconcile_timeout_secs:
+        description: "Timeout for each reconcile phase"
+        required: false
+        default: "1800"
+        type: string
+      require_https:
+        description: "Require HTTPS/enforce_tls"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  large-restore:
+    name: Large push + restore
+    if: github.repository == 'Jesssullivan/tummycrypt'
+    runs-on: ${{ github.event.inputs.runner_label }}
+    timeout-minutes: 180
+    environment: ${{ github.event.inputs.smoke_environment }}
+    env:
+      TCFS_SMOKE_S3_ENDPOINT: ${{ secrets.TCFS_SMOKE_S3_ENDPOINT }}
+      TCFS_SMOKE_S3_BUCKET: ${{ secrets.TCFS_SMOKE_S3_BUCKET }}
+      TCFS_SMOKE_S3_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      TCFS_SMOKE_S3_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      TCFS_SMOKE_S3_REGION: ${{ secrets.TCFS_SMOKE_S3_REGION }}
+      TCFS_SMOKE_S3_CA_CERT_PEM: ${{ secrets.TCFS_SMOKE_S3_CA_CERT_PEM }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Initialize evidence paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOG_DIR="$RUNNER_TEMP/tcfs-storage-large-restore"
+          SOURCE_ROOT="$RUNNER_TEMP/tcfs-large-source"
+          SHADOW_ROOT="$RUNNER_TEMP/tcfs-large-shadow"
+          RESTORE_ROOT="$RUNNER_TEMP/tcfs-large-restore"
+          EVIDENCE_DIR="$GITHUB_WORKSPACE/docs/release/evidence/storage-large-restore-canary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$LOG_DIR" "$EVIDENCE_DIR"
+          {
+            echo "LOG_DIR=$LOG_DIR"
+            echo "SOURCE_ROOT=$SOURCE_ROOT"
+            echo "SHADOW_ROOT=$SHADOW_ROOT"
+            echo "RESTORE_ROOT=$RESTORE_ROOT"
+            echo "EVIDENCE_DIR=$EVIDENCE_DIR"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate inputs and storage secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            TCFS_SMOKE_S3_ENDPOINT \
+            TCFS_SMOKE_S3_BUCKET \
+            TCFS_SMOKE_S3_ACCESS_KEY_ID \
+            TCFS_SMOKE_S3_SECRET_ACCESS_KEY
+          do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required storage large-restore secrets: ${missing[*]}"
+            exit 1
+          fi
+
+          for pair in \
+            "pack_size_mib:${{ github.event.inputs.pack_size_mib }}" \
+            "restore_headroom_margin_mib:${{ github.event.inputs.restore_headroom_margin_mib }}" \
+            "reconcile_timeout_secs:${{ github.event.inputs.reconcile_timeout_secs }}"
+          do
+            name="${pair%%:*}"
+            value="${pair#*:}"
+            case "$value" in
+              ''|*[!0-9]*)
+                echo "::error::$name must be a non-negative integer"
+                exit 1
+                ;;
+            esac
+          done
+          if [[ "${{ github.event.inputs.pack_size_mib }}" == "0" ]]; then
+            echo "::error::pack_size_mib must be greater than zero"
+            exit 1
+          fi
+          if [[ "${{ github.event.inputs.reconcile_timeout_secs }}" == "0" ]]; then
+            echo "::error::reconcile_timeout_secs must be greater than zero"
+            exit 1
+          fi
+
+      - name: Validate endpoint posture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/tcfs-smoke-endpoint-preflight.py \
+            --endpoint "$TCFS_SMOKE_S3_ENDPOINT" \
+            --runner-label "${{ github.event.inputs.runner_label }}" \
+            --platform linux
+
+          if [[ "${{ github.event.inputs.require_https }}" == "true" \
+                && "$TCFS_SMOKE_S3_ENDPOINT" != https://* ]]; then
+            echo "::error::require_https=true requires TCFS_SMOKE_S3_ENDPOINT to use https://"
+            exit 1
+          fi
+
+      - name: Prepare storage config environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION="${TCFS_SMOKE_S3_REGION:-us-east-1}"
+          CA_CERT_PATH=""
+          if [[ -n "${TCFS_SMOKE_S3_CA_CERT_PEM:-}" ]]; then
+            CA_CERT_PATH="$RUNNER_TEMP/tcfs-storage-ca.pem"
+            printf '%s\n' "$TCFS_SMOKE_S3_CA_CERT_PEM" > "$CA_CERT_PATH"
+            chmod 600 "$CA_CERT_PATH"
+          fi
+
+          {
+            echo "TCFS_S3_REGION=$REGION"
+            if [[ -n "$CA_CERT_PATH" ]]; then
+              echo "TCFS_STORAGE_S3_CA_CERT_PATH=$CA_CERT_PATH"
+            fi
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "storage_region=$REGION"
+            echo "ca_cert_path_supported=true"
+            echo "ca_cert_path_configured=$([[ -n "$CA_CERT_PATH" ]] && echo true || echo false)"
+          } > "$EVIDENCE_DIR/large-restore-storage-env.env"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Install build and evidence tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            lsof \
+            libfuse3-dev \
+            protobuf-compiler \
+            pkg-config \
+            libssl-dev
+
+      - name: Build release tcfs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p tcfs-cli --bin tcfs
+          target/release/tcfs --version | tee "$LOG_DIR/tcfs-version.txt"
+          sha256sum target/release/tcfs | tee "$LOG_DIR/tcfs-sha256.txt"
+
+      - name: Derive remote
+        shell: bash
+        run: |
+          set -euo pipefail
+          REMOTE_PREFIX="${{ github.event.inputs.remote_prefix }}"
+          if [[ -z "$REMOTE_PREFIX" ]]; then
+            REMOTE_PREFIX="gha/storage-posture-large/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          REMOTE_PREFIX="${REMOTE_PREFIX#/}"
+          REMOTE_PREFIX="${REMOTE_PREFIX%/}"
+          if [[ "$REMOTE_PREFIX" != *storage-posture* ]]; then
+            echo "::error::remote_prefix must contain storage-posture so the storage posture guard stays explicit"
+            exit 1
+          fi
+
+          readarray -t REMOTE_PARTS < <(python3 - <<'PY'
+          import os
+          import urllib.parse
+
+          endpoint = os.environ["TCFS_SMOKE_S3_ENDPOINT"].strip().rstrip("/")
+          parsed = urllib.parse.urlparse(endpoint)
+          if not parsed.scheme or not parsed.netloc:
+              raise SystemExit(f"invalid endpoint: {endpoint!r}")
+          scheme = "seaweedfs+https" if parsed.scheme == "https" else "seaweedfs+http"
+          print(scheme)
+          print(parsed.netloc)
+          PY
+          )
+          REMOTE="${REMOTE_PARTS[0]}://${REMOTE_PARTS[1]}/${TCFS_SMOKE_S3_BUCKET}/${REMOTE_PREFIX}"
+          {
+            echo "REMOTE_PREFIX=$REMOTE_PREFIX"
+            echo "REMOTE=$REMOTE"
+          } >> "$GITHUB_ENV"
+          {
+            echo "remote_prefix=$REMOTE_PREFIX"
+            echo "remote=$REMOTE"
+            echo "endpoint=$TCFS_SMOKE_S3_ENDPOINT"
+            echo "bucket=$TCFS_SMOKE_S3_BUCKET"
+          } > "$EVIDENCE_DIR/large-restore-dispatch.env"
+
+      - name: Generate synthetic git pack source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACK_SIZE_MIB="${{ github.event.inputs.pack_size_mib }}"
+          rm -rf "$SOURCE_ROOT"
+          mkdir -p "$SOURCE_ROOT"
+          git init -q -b main "$SOURCE_ROOT"
+          git -C "$SOURCE_ROOT" config user.email "tcfs-storage-canary@example.invalid"
+          git -C "$SOURCE_ROOT" config user.name "TCFS Storage Canary"
+          cat > "$SOURCE_ROOT/README.md" <<'EOF'
+          # TCFS storage large restore canary
+
+          This repository is generated inside GitHub Actions. Its large random
+          payload is committed and then removed so the working tree stays small
+          while `.git/objects/pack` carries the large restore workload.
+          EOF
+          dd if=/dev/urandom of="$SOURCE_ROOT/large-payload.bin" bs=1M count="$PACK_SIZE_MIB" status=none
+          git -C "$SOURCE_ROOT" add README.md large-payload.bin
+          git -C "$SOURCE_ROOT" commit -q -m "seed large payload"
+          git -C "$SOURCE_ROOT" rm -q large-payload.bin
+          git -C "$SOURCE_ROOT" commit -q -m "remove worktree payload"
+          git -C "$SOURCE_ROOT" gc --prune=now
+          git -C "$SOURCE_ROOT" status --short --branch | tee "$EVIDENCE_DIR/synthetic-source-status.txt"
+          git -C "$SOURCE_ROOT" count-objects -vH | tee "$EVIDENCE_DIR/synthetic-source-count-objects.txt"
+          find "$SOURCE_ROOT/.git/objects/pack" -maxdepth 1 -type f -print0 \
+            | xargs -0 ls -lh \
+            | tee "$EVIDENCE_DIR/synthetic-source-pack-files.txt"
+          {
+            echo "pack_size_mib=$PACK_SIZE_MIB"
+            echo "source_root=$SOURCE_ROOT"
+            echo "source_regular_file_bytes=$(find "$SOURCE_ROOT" -type f -print0 | xargs -0 stat -c '%s' | awk '{s+=$1} END {print s+0}')"
+          } > "$EVIDENCE_DIR/synthetic-source.env"
+
+      - name: Push large canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/home-canary-linux-xr-storage-posture.sh \
+            --source "$SOURCE_ROOT" \
+            --shadow-root "$SHADOW_ROOT" \
+            --evidence-dir "$EVIDENCE_DIR" \
+            --remote "$REMOTE" \
+            --tcfs-bin "$GITHUB_WORKSPACE/target/release/tcfs" \
+            --push \
+            --keep-shadow \
+            --upload-concurrency 4 \
+            --file-upload-concurrency 1 \
+            --chunk-timeout-secs 300 \
+            --progress-heartbeat-secs 60 \
+            --socket-sample-interval-secs 5
+
+      - name: Restore large canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          MARGIN_BYTES=$(( ${{ github.event.inputs.restore_headroom_margin_mib }} * 1024 * 1024 ))
+          RESTORE_REQUIRE_HEADROOM=1 \
+          RESTORE_HEADROOM_MARGIN_BYTES="$MARGIN_BYTES" \
+          RESTORE_RECONCILE_TIMEOUT_SECS="${{ github.event.inputs.reconcile_timeout_secs }}" \
+          REQUIRE_EMPTY_DIRS=1 \
+          TCFS_BIN="$GITHUB_WORKSPACE/target/release/tcfs" \
+          scripts/git-repo-restore-proof.sh \
+            --evidence-dir "$EVIDENCE_DIR" \
+            --restore-root "$RESTORE_ROOT"
+
+      - name: Summarize large restore packet
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "# Storage Large Restore Canary"
+            echo
+            echo "- Evidence: \`$EVIDENCE_DIR\`"
+            echo "- Remote prefix: \`${REMOTE_PREFIX:-unset}\`"
+            echo "- Pack size input MiB: \`${{ github.event.inputs.pack_size_mib }}\`"
+            if [[ -f "$EVIDENCE_DIR/push-storage-summary.env" ]]; then
+              echo
+              echo "## Push"
+              sed -n '1,80p' "$EVIDENCE_DIR/push-storage-summary.env"
+            fi
+            if [[ -f "$EVIDENCE_DIR/s3-socket-summary.env" ]]; then
+              echo
+              echo "## Socket Summary"
+              cat "$EVIDENCE_DIR/s3-socket-summary.env"
+            fi
+            if [[ -f "$EVIDENCE_DIR/restore-proof/restore-proof.env" ]]; then
+              echo
+              echo "## Restore"
+              sed -n '1,120p' "$EVIDENCE_DIR/restore-proof/restore-proof.env"
+            fi
+          } | tee "$EVIDENCE_DIR/large-restore-summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload large restore evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-large-restore-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error

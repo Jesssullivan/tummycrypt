@@ -150,6 +150,10 @@ linux-postinstall-workflow-test:
 linux-package-container-workflow-test:
     @bash scripts/test-linux-package-container-smoke-workflow.sh
 
+# Static regression test for the storage large restore canary workflow
+storage-large-restore-workflow-test:
+    @bash scripts/test-storage-large-restore-canary-workflow.sh
+
 # Installed-binary smoke for release surfaces that ship tcfsd (and optionally tcfs)
 install-smoke *ARGS:
     bash scripts/install-smoke.sh {{ARGS}}
