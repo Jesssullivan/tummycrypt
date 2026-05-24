@@ -32,6 +32,11 @@ on:
         required: false
         default: false
         type: boolean
+      require_conflict_enumerator_status:
+        description: "Fail conflict/status smoke unless the FileProvider enumerator logs hydration_state=conflict"
+        required: false
+        default: false
+        type: boolean
       exercise_dev_id_layered_proof:
         description: "Production Dev ID lane: layer --exercise-evict-rehydrate + --exercise-mutation on top of base hydration proof (mirrors testing-mode coverage without requiring the testing-mode entitlement)"
         required: false
@@ -125,6 +130,7 @@ jobs:
           PACKAGE_ARTIFACT_RUN_ID="${{ github.event.inputs.package_artifact_run_id }}"
           FILEPROVIDER_TESTING_MODE="${{ github.event.inputs.fileprovider_testing_mode }}"
           EXERCISE_CONFLICT_STATUS="${{ github.event.inputs.exercise_conflict_status }}"
+          REQUIRE_CONFLICT_ENUMERATOR_STATUS="${{ github.event.inputs.require_conflict_enumerator_status }}"
           EXERCISE_DEV_ID_LAYERED_PROOF="${{ github.event.inputs.exercise_dev_id_layered_proof }}"
           EXERCISE_RENAME_SAFETY="${{ github.event.inputs.exercise_rename_safety }}"
           LAB_GATEKEEPER_OVERRIDE="${{ github.event.inputs.lab_gatekeeper_override }}"
@@ -153,6 +159,11 @@ jobs:
                 && "$FILEPROVIDER_TESTING_MODE" != "true" \
                 && "$EXERCISE_DEV_ID_LAYERED_PROOF" != "true" ]]; then
             echo "::error::exercise_conflict_status=true requires fileprovider_testing_mode=true or exercise_dev_id_layered_proof=true"
+            exit 1
+          fi
+
+          if [[ "$REQUIRE_CONFLICT_ENUMERATOR_STATUS" == "true" && "$EXERCISE_CONFLICT_STATUS" != "true" ]]; then
+            echo "::error::require_conflict_enumerator_status=true requires exercise_conflict_status=true"
             exit 1
           fi
 
@@ -901,6 +912,9 @@ jobs:
                 --state "$STATE_PATH" \
                 --sync-root "$SYNC_ROOT"
               )
+              if [[ "${{ github.event.inputs.require_conflict_enumerator_status }}" == "true" ]]; then
+                args+=(--require-conflict-enumerator-status)
+              fi
             fi
           elif [[ "${{ github.event.inputs.exercise_dev_id_layered_proof }}" == "true" ]]; then
             printf 'tcfs macOS FileProvider mutation %s run %s attempt %s\n' \
@@ -933,6 +947,9 @@ jobs:
                 --state "$STATE_PATH" \
                 --sync-root "$SYNC_ROOT"
               )
+              if [[ "${{ github.event.inputs.require_conflict_enumerator_status }}" == "true" ]]; then
+                args+=(--require-conflict-enumerator-status)
+              fi
             fi
           fi
 

@@ -14,31 +14,25 @@ TCFS is ready for focused productionization QA, not for broad primary-filesystem
 use.
 
 - The macOS production Developer ID FileProvider lifecycle is proven on
-  petting-zoo-mini by run `26062554542`: install, domain rebuild, enumerate,
-  exact hydrate, host evict/rehydrate, remote mutation, and conflict/status.
-  PR #389 branch run `26079830341` also proves the exact published
-  `v0.12.13-rc1` `.pkg`. Later main-ref repeatability exposed a
-  CloudStorage root authority split, and diagnostic package run `26117175542`
-  proves the signed HostApp user-visible root path at `66ae92f`. Run
-  `26122478486` then proved the exact public `v0.12.13-rc2` GitHub Release
-  `.pkg` through user-visible root enumeration, exact hydrate,
-  evict/rehydrate, mutation, and conflict/status. Product hardening remains
-  open in `TIN-1547`, but PR #412 is now landed on `main` for
-  rename/unsync-vs-delete safety.
-- Linux remains the strongest runtime for CLI/daemon/FUSE work, but package
-  first-use is not fully proven. `TIN-1422` is blocked on `TIN-1540` until the
-  Linux smoke backend is reachable from CI or a private runner.
+  petting-zoo-mini. The current strongest public-asset packet is run
+  `26218940950` against `v0.12.13-rc4`: signed HostApp root enumeration,
+  exact hydrate, evict/rehydrate, mutation upload/readback, rename, and
+  conflict/status without `fileprovider_testing_mode=true`. Product hardening
+  remains open in `TIN-1547` for badge/progress/recovery assertions, a longer
+  desktop soak, and first-run setup handoff.
+- Linux is the strongest runtime for CLI/daemon/FUSE work. `TIN-1540` and
+  `TIN-1422` are closed for the current alpha package-smoke boundary, and
+  `TIN-131` / GitHub #280 are closed for the install/upgrade matrix. That does
+  not yet claim FUSE/systemd/live-storage first-use for every package surface.
 - Real-storage CI exists via `TIN-1421`, but live multi-host fleet acceptance
   remains `TIN-132`; CI does not replace named host evidence.
 - Enrollment and invite flows are not a production trust boundary. `TIN-1424`
   is urgent/prod-blocker, and `TIN-1417` must land before self-enrollment or
   lost-device revocation is product-real.
-- Production S3/storage posture is not proven until `TIN-1546` covers TLS/CA
-  posture, bounded health checks, request/read timeouts, transient error
-  classification, and large-object restore evidence.
-  PR #390 landed bounded remote manifest/index/chunk read attempts, but
-  production-like TLS/CA proof, scoped credential posture, transient-error
-  classification in live packets, and large-pack restore evidence remain open.
+- Production S3/storage posture remains `TIN-1546`. Alpha HTTPS/scoped
+  credential posture is green on current-main storage canary evidence, but the
+  beta-grade gate still needs large restore/load, socket/highwater behavior,
+  transient recovery classification, and soak evidence.
   Use `tcfs storage canary --json` as the scoped read/write/delete/delete-verify
   probe in future packets; it is supporting evidence, not a full posture claim
   by itself.
@@ -54,7 +48,7 @@ Alpha may exercise:
 
 - release artifacts and source builds on disposable or shadow sync roots
 - scoped project trees, repo canaries, and small daily-use folders
-- macOS FileProvider lifecycle on the `v0.12.13-rc2` release asset, with
+- macOS FileProvider lifecycle on the `v0.12.13-rc4` release asset, with
   main-ref and diagnostic-artifact reruns used as release-day regression
   evidence
 - Linux FUSE clean-name traversal and hydrate-on-open after `TIN-1422`
@@ -95,9 +89,9 @@ has shipped and been proven end to end.
 
 | Lane | Alpha gate | Beta gate | Tracker |
 |---|---|---|---|
-| Release and first-use | Exact release artifacts install, configure, `status [ok]`, and perform one real action on macOS, Homebrew, Linux `.deb`, container, and Nix surfaces | Repeatable install and upgrade matrix with no hand-authored config for the common path | `TIN-131`, `#280`, `TIN-1425` |
-| macOS FileProvider | Published rc2 `.pkg` exact hydrate plus evict/rehydrate, mutation, conflict/status on Developer ID surface; rename/unsync-vs-delete safety cut landed in PR #412; main-ref continuous rerun preferred for release-day viability | Badges/progress, recovery UX, and longer desktop soak | `TIN-1547`, `TIN-133` |
-| Linux package smoke | `.deb`/`.rpm` install against reachable SeaweedFS+NATS backend, hydrate fixture, evict, rehydrate | Scheduled package smoke on a stable runner with archived transcripts | `TIN-1422`, `TIN-1540` |
+| Release and first-use | Exact release artifacts install and upgrade for the current package-smoke boundary; first-run config remains manual | Repeatable install and upgrade matrix with no hand-authored config for the common path | `TIN-131`, `#280`, `TIN-1425` |
+| macOS FileProvider | Published rc4 `.pkg` exact hydrate plus evict/rehydrate, mutation, rename, and conflict/status on the Developer ID surface; main-ref continuous rerun preferred for release-day viability | Badges/progress, recovery UX, and longer desktop soak | `TIN-1547`, `TIN-133` |
+| Linux package smoke | `.deb`/`.rpm` install and upgrade package smoke is green for the current alpha boundary | Scheduled package smoke on a stable runner with archived transcripts and broader FUSE/systemd/live-storage first-use | `TIN-1422`, `TIN-1540` |
 | Live fleet | Neo/honey acceptance is current, repeatable, and archived | Scheduled fleet acceptance with failure classification and dashboard history | `TIN-132`, `TIN-1421` |
 | S3/storage posture | TLS/CA posture documented, health/read paths bounded, transient errors separated from missing objects, large-pack restore evidence captured | Production-like S3 endpoint, scoped credentials, latency/object-count budgets, rollback/restore evidence | `TIN-1546`, `TIN-720`, `#327` |
 | Enrollment/security | Admin/operator-provisioned only; self-enrollment disabled for untrusted users | Real per-device identity, complete invite signature/MAC coverage, admin/session gating, safe bootstrap persistence, revocation evidence | `TIN-1417`, `TIN-1424` |
@@ -114,24 +108,19 @@ Start each pass with the read-only gate classifier:
 scripts/tcfs-alpha-gate-preflight.sh
 ```
 
-1. Archive the `v0.12.13-rc2` exact public `.pkg` smoke packet from run
-   `26122478486`, and keep a main-ref/package rerun ready for the next rc or
-   FileProvider change.
-2. Clear `TIN-1540`, then rerun `TIN-1422` against a reachable backend using
-   the corrected `seaweedfs://host:port/bucket/prefix` remote spec, with
-   `seaweedfs+https://` preserved for production-like HTTPS smoke endpoints.
-3. Complete the `TIN-131` first-use matrix for the rc artifact set:
-   Linux `.deb`, Nix external profile, and any upgrade rows not covered by the
-   current Homebrew/container smokes.
-4. Continue the alpha slice of `TIN-1547`: badge/progress/recovery assertions
+1. Keep the `v0.12.13-rc4` exact public `.pkg` smoke packet from run
+   `26218940950` as the current Mac alpha baseline, and keep a main-ref/package
+   rerun ready for the next rc or FileProvider change.
+2. Treat `TIN-1540`, `TIN-1422`, `TIN-131`, and GitHub #280 as closed for the
+   current alpha claim. Re-run the Linux/package lanes on release-day if the
+   release candidate changes.
+3. Continue the alpha slice of `TIN-1547`: badge/progress/recovery assertions
    and longer desktop soak after the landed PR #412 rename/unsync safety cut.
-5. Continue the `TIN-1546` storage mini-gate: production-like TLS/CA endpoint
-   proof, scoped credential posture, transient-error classification, and
-   latency/object-count evidence for the large Git-pack restore path. The
-   operator handoff for the first HTTPS/scoped-credential packet is
-   [`storage-posture-production-gate.md`](storage-posture-production-gate.md).
-6. Refresh `TIN-132` with a current two-host transcript so live fleet evidence
-   is not inferred from CI.
+4. Continue the `TIN-1546` storage mini-gate: large restore/load,
+   socket/highwater, transient recovery, and soak evidence after the current
+   HTTPS/scoped-credential canary.
+5. Refresh `TIN-132` with a current two-host transcript when the release-day
+   fleet claim needs renewal; do not infer named-host acceptance from CI alone.
 
 ## Evidence Required Per QA Run
 

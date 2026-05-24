@@ -689,6 +689,76 @@ cmp -s "$CONFLICT_CONTENT_FILE" "$LOG_DIR/conflict-hydrated-file"
   exit 1
 }
 
+REQUIRED_ENUM_OUT="${TMPDIR}/required-conflict-enumerator.out"
+REQUIRED_ENUM_READ_RETRY_MARKER="${TMPDIR}/required-conflict-read-failed-once"
+assert_fails_contains \
+  "FileProvider enumerator did not log required conflict hydration state for $CONFLICT_REL" \
+  env PATH="$FAKE_BIN:$PATH" \
+    HOME="$HOME_DIR" \
+    TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_FAKE_PLUGINKIT_LOG="$PLUGINKIT_LOG" \
+    TCFS_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
+    TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
+    TCFS_FAKE_TESTING_MODE_ENTITLEMENT=1 \
+    TCFS_FAKE_COMPACT_ENTITLEMENTS=1 \
+    TCFS_FAKE_SKIP_ENUM_CONFLICT_LOG=1 \
+    TCFS_FAKE_REMOTE_ROOT="$CLOUD_ROOT" \
+    TCFS_FAKE_HOST_ROOT_PROBE_ENTRIES="$CLOUD_ROOT/Projects" \
+    TCFS_FAKE_SWIFT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
+    TCFS_FAKE_SWIFT_MARKER="$REQUIRED_ENUM_READ_RETRY_MARKER" \
+    bash "$SCRIPT" \
+      --expected-version 0.12.2 \
+      --config "$CONFIG_PATH" \
+      --expected-file "$EXPECTED_REL" \
+      --expected-content-file "$EXPECTED_CONTENT_FILE" \
+      --app-path "$APP_PATH" \
+      --cloud-root "$CLOUD_ROOT" \
+      --log-dir "${LOG_DIR}-required-conflict-enumerator" \
+      --host-root-probe \
+      --elect-plugin-use \
+      --fileprovider-testing-mode \
+      --require-keychain-config \
+      --exercise-conflict-status \
+      --require-conflict-enumerator-status \
+      --conflict-file "$CONFLICT_REL" \
+      --conflict-content-file "$CONFLICT_CONTENT_FILE" \
+      --state "$STATE_PATH" \
+      --sync-root "$SYNC_ROOT" \
+      --timeout 5
+
+PATH="$FAKE_BIN:$PATH" \
+HOME="$HOME_DIR" \
+TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+TCFS_FAKE_PLUGINKIT_LOG="$PLUGINKIT_LOG" \
+TCFS_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
+TCFS_FAKE_SWIFT_LOG="$SWIFT_LOG" \
+TCFS_FAKE_TESTING_MODE_ENTITLEMENT=1 \
+TCFS_FAKE_COMPACT_ENTITLEMENTS=1 \
+TCFS_FAKE_REMOTE_ROOT="$CLOUD_ROOT" \
+TCFS_FAKE_HOST_ROOT_PROBE_ENTRIES="$CLOUD_ROOT/Projects" \
+TCFS_FAKE_SWIFT_TARGET="$CLOUD_ROOT/$EXPECTED_REL" \
+bash "$SCRIPT" \
+  --expected-version 0.12.2 \
+  --config "$CONFIG_PATH" \
+  --expected-file "$EXPECTED_REL" \
+  --expected-content-file "$EXPECTED_CONTENT_FILE" \
+  --app-path "$APP_PATH" \
+  --cloud-root "$CLOUD_ROOT" \
+  --log-dir "${LOG_DIR}-observed-conflict-enumerator" \
+  --host-root-probe \
+  --elect-plugin-use \
+  --fileprovider-testing-mode \
+  --require-keychain-config \
+  --exercise-conflict-status \
+  --require-conflict-enumerator-status \
+  --conflict-file "$CONFLICT_REL" \
+  --conflict-content-file "$CONFLICT_CONTENT_FILE" \
+  --state "$STATE_PATH" \
+  --sync-root "$SYNC_ROOT" \
+  --timeout 5 \
+  >"$REQUIRED_ENUM_OUT" 2>&1
+assert_contains "$REQUIRED_ENUM_OUT" "FileProvider enumerator conflict status observed"
+
 DIRECT_OUT="${TMPDIR}/direct-host-launch.out"
 DIRECT_HOST_BINARY_LOG="${TMPDIR}/direct-host-binary.log"
 env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
@@ -777,6 +847,12 @@ assert_fails_contains \
     bash "$SCRIPT" \
       --exercise-conflict-status \
       --conflict-file "$CONFLICT_REL"
+
+assert_fails_contains \
+  "--require-conflict-enumerator-status requires --exercise-conflict-status" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --require-conflict-enumerator-status
 
 assert_fails_contains \
   "host app missing com.apple.developer.fileprovider.testing-mode entitlement" \

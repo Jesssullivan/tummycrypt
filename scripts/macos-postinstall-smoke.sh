@@ -49,6 +49,9 @@ Options:
   --exercise-conflict-status  Verify a pre-seeded conflict/status fixture
                               through CLI state, FileProvider enumeration,
                               requestDownload, and exact-content hydration
+  --require-conflict-enumerator-status
+                              Fail if --exercise-conflict-status does not
+                              observe the FileProvider enumerator conflict log
   --conflict-file <relpath>   Relative conflict fixture path under CloudStorage
   --conflict-content <text>   Exact content expected for --conflict-file
   --conflict-content-file <path>
@@ -119,6 +122,7 @@ RENAME_DEST_FILE_REL="${TCFS_FILEPROVIDER_RENAME_DEST_FILE_REL:-}"
 RENAME_CONTENT="${TCFS_FILEPROVIDER_RENAME_CONTENT:-}"
 RENAME_CONTENT_FILE="${TCFS_FILEPROVIDER_RENAME_CONTENT_FILE:-}"
 EXERCISE_CONFLICT_STATUS="${TCFS_EXERCISE_CONFLICT_STATUS:-0}"
+REQUIRE_CONFLICT_ENUMERATOR_STATUS="${TCFS_FILEPROVIDER_REQUIRE_CONFLICT_ENUMERATOR_STATUS:-0}"
 CONFLICT_FILE_REL="${TCFS_FILEPROVIDER_CONFLICT_FILE_REL:-}"
 CONFLICT_CONTENT="${TCFS_FILEPROVIDER_CONFLICT_CONTENT:-}"
 CONFLICT_CONTENT_FILE="${TCFS_FILEPROVIDER_CONFLICT_CONTENT_FILE:-}"
@@ -210,6 +214,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --exercise-conflict-status)
       EXERCISE_CONFLICT_STATUS=1
+      shift
+      ;;
+    --require-conflict-enumerator-status)
+      REQUIRE_CONFLICT_ENUMERATOR_STATUS=1
       shift
       ;;
     --conflict-file)
@@ -381,6 +389,11 @@ fi
 
 if [[ "$EXERCISE_CONFLICT_STATUS" == "1" && "$SKIP_STATUS" -eq 1 ]]; then
   echo "--exercise-conflict-status requires tcfs CLI status checks; remove --skip-status" >&2
+  exit 2
+fi
+
+if [[ "$REQUIRE_CONFLICT_ENUMERATOR_STATUS" == "1" && "$EXERCISE_CONFLICT_STATUS" != "1" ]]; then
+  echo "--require-conflict-enumerator-status requires --exercise-conflict-status" >&2
   exit 2
 fi
 
@@ -2335,6 +2348,11 @@ exercise_fileprovider_conflict_status() {
   if grep -F "item=$rel hydration_state=conflict" "$enum_log" >/dev/null; then
     echo "FileProvider enumerator conflict status observed"
   else
+    if [[ "$REQUIRE_CONFLICT_ENUMERATOR_STATUS" == "1" ]]; then
+      echo "FileProvider enumerator did not log required conflict hydration state for $rel" >&2
+      cat "$enum_log" >&2 || true
+      exit 1
+    fi
     echo "warning: FileProvider enumerator did not log conflict hydration state for $rel; treating Finder status as captured evidence only" >&2
     cat "$enum_log" >&2 || true
   fi

@@ -211,15 +211,10 @@ sync-root stub representation, not the desired primary Finder UX.
 
 - A **continuously** exercised production clean-host Finder/FileProvider
   acceptance lane from Developer ID package install through user enablement,
-  register, enumerate, hydrate, mutate, and conflict handling (updated
-  2026-05-18: single-run install + enumerate + hydrate is now proven on the
-  Dev ID lane by run `26061402177`; continuous coverage and the mutate/conflict
-  legs are still open)
-- A production clean-host Finder/FileProvider lifecycle smoke beyond
-  install/signing/storage/domain-add/enumeration/requestDownload/hydrate gates
-  (updated 2026-05-18: hydrate is now inside the proven set on Dev ID; what
-  remains is evict/rehydrate, mutation upload/readback, and conflict-status
-  preservation)
+  register, enumerate, hydrate, evict/rehydrate, mutate, rename, and conflict
+  handling. The current strongest single-run proof is `v0.12.13-rc4` run
+  `26218940950`; the remaining gap is release-day repeatability and longer soak,
+  not exact hydration.
 - Finder badge visibility as a release gate
 - Conflict UX, notification behavior, and Finder badge/progress visibility as
   release gates
