@@ -215,8 +215,13 @@ files.
   `tcfs init --config-out ...` recovery hint and keeping ambient storage
   credential environment variables out of local install smoke unless storage is
   explicitly required.
-- [ ] Verify `tcfs status [ok]` before exit for storage-backed first-use
-  packets.
+- [x] Verify `tcfs status [ok]` before exit for storage-backed first-use
+  packets; PR `#454` added `--require-storage-ok` Nix profile dispatch support
+  and post-merge main run `26382186102` reached
+  `storage: https://tcfs-smoke-s3.tinyland.dev [ok]` through the installed
+  `tcfs init --config-out` path. The run passed, but `nix profile install`
+  took 27 minutes before the smoke ran; keep profile-install latency visible in
+  future release evidence.
 - [ ] Keep fleet join out of `tcfs init` until `TIN-1417` and `TIN-1424` land;
   `tcfs init` should mean fresh local setup, while invite/pairing belongs to a
   later safe enrollment path.
@@ -251,11 +256,23 @@ until devices have real local private keys and per-device wrapped content keys.
 
 Why third: pairing depends on `TIN-1417`.
 
-- [ ] Add single-use invite redemption state.
+- [x] Add single-use invite redemption state.
 - [ ] Require admin/session gates for enrollment and revocation RPCs.
 - [ ] Stop treating QR payloads with raw S3 credentials as a production path.
 - [ ] Wrap bootstrap material to the new device public key.
 - [ ] Keep iOS fail-closed until real device enrollment proof exists.
+
+2026-05-25 Phase 1 cut:
+
+- [x] PR `#453` added daemon-side invite redemption keyed by
+  `(invite_id, nonce)` and persists the claim before returning brokered
+  credentials.
+- [x] Replay now returns `success=false` with
+  `invite has already been redeemed`.
+- [x] Redemption persistence failures fail closed.
+- [ ] This does not yet add admin/session approval, remove raw long-lived
+  storage secrets from invite payloads, wrap bootstrap material to the
+  recipient device key, or make desktop/iOS join product-safe.
 
 ## Then: Daily-Driver Primitives
 
