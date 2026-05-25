@@ -28,8 +28,11 @@ use.
   remains `TIN-132`; CI does not replace named host evidence.
 - Enrollment and invite flows are not a production trust boundary. `TIN-1417`
   Phase 0 has landed real local age/X25519 device keys, and `TIN-1424`
-  now has single-use invite redemption plus admin-gated control RPCs. The current
-  TIN-1424 recipient-bootstrap cut moves new invite responses to an age-wrapped
+  now has single-use invite redemption plus admin-gated control RPCs. The CLI
+  session handoff now persists `tcfs auth verify` tokens when possible and
+  attaches stored/env tokens to later daemon RPCs, making those admin gates
+  operable without weakening invite redemption. The current TIN-1424
+  recipient-bootstrap cut moves new invite responses to an age-wrapped
   `EnrollmentBootstrap` payload and keeps new CLI invites from embedding raw S3
   secrets by default. That still is not enough for production self-enrollment or
   lost-device revocation: TIN-1417 still needs per-device content-key wrapping,
