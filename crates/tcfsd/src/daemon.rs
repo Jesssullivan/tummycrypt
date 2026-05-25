@@ -146,9 +146,15 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // Load credentials
     let cred_store: SharedCredStore = new_cred_store();
     match tcfs_secrets::CredStore::load(&config.secrets, &config.storage).await {
-        Ok(cs) => {
+        Ok(cs) if cs.s3.is_some() => {
             info!(source = %cs.source, "credentials loaded");
             cred_store.write().await.replace(cs);
+        }
+        Ok(cs) => {
+            warn!(
+                source = %cs.source,
+                "no S3 credentials found (daemon will start without creds)"
+            );
         }
         Err(e) => {
             warn!("credential load failed: {e}  (daemon will start without creds)");
