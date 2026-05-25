@@ -7,6 +7,23 @@ use crate::conflict::VectorClock;
 use crate::index_entry::RemoteEntryKind;
 use serde::{Deserialize, Serialize};
 
+/// One per-device FileKey wrap carried by a regular-file manifest.
+///
+/// This is additive for TIN-1417 Phase 1. Existing manifests continue to use
+/// `encrypted_file_key`; upgraded writers can dual-write this field before the
+/// fleet cuts over to per-device unwrap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WrappedFileKey {
+    /// Stable TCFS device identifier this wrap is intended for.
+    pub recipient_device_id: String,
+    /// Public age recipient used when producing this wrap.
+    pub recipient: String,
+    /// Cryptographic wrap algorithm, for example `age-x25519-v1`.
+    pub algorithm: String,
+    /// Wrapped FileKey payload.
+    pub wrapped_key: String,
+}
+
 /// A manifest describing a synced file's chunks and metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncManifest {
@@ -33,6 +50,9 @@ pub struct SyncManifest {
     /// Base64-encoded wrapped file key (present only when E2E encryption is enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_file_key: Option<String>,
+    /// Per-device wrapped FileKeys for manifest schema v3 migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wrapped_file_keys: Vec<WrappedFileKey>,
 }
 
 /// A manifest for a POSIX symbolic link.
@@ -134,6 +154,7 @@ impl SyncManifest {
             rel_path: None,
             mode: None,
             encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
         })
     }
 
@@ -173,6 +194,12 @@ mod tests {
             rel_path: Some("docs/readme.md".into()),
             mode: Some(0o644),
             encrypted_file_key: None,
+            wrapped_file_keys: vec![WrappedFileKey {
+                recipient_device_id: "device-a".into(),
+                recipient: "age1recipient".into(),
+                algorithm: "age-x25519-v1".into(),
+                wrapped_key: "AGE-ENCRYPTED-PAYLOAD".into(),
+            }],
         };
 
         let bytes = manifest.to_bytes().unwrap();
@@ -183,6 +210,8 @@ mod tests {
         assert_eq!(parsed.chunks.len(), 2);
         assert_eq!(parsed.vclock.get("yoga"), 1);
         assert_eq!(parsed.written_by, "yoga");
+        assert_eq!(parsed.wrapped_file_keys.len(), 1);
+        assert_eq!(parsed.wrapped_file_keys[0].recipient_device_id, "device-a");
     }
 
     #[test]
@@ -268,6 +297,7 @@ mod proptest_suite {
                 rel_path: None,
                 mode: None,
                 encrypted_file_key: None,
+                wrapped_file_keys: Vec::new(),
             };
 
             let bytes = manifest.to_bytes().unwrap();

@@ -11,6 +11,14 @@ persist the secret half in a `0600` `device-<device_id>.age` file beside the
 registry. Manifest wrapping, revoke semantics, pairing, and remote registry
 trust are still open.
 
+2026-05-25 follow-up implementation note: the first Phase 1 substrate slice now
+adds age/X25519 per-recipient FileKey wrap helpers in `tcfs-crypto` and the
+additive `wrapped_file_keys` manifest field in `tcfs-sync`. This does not yet
+change push/pull behavior: writers still emit the legacy `encrypted_file_key`
+only, and readers still unwrap through the shared master key until recipient-set
+resolution and device-secret loading are wired through the sync, VFS, and
+FileProvider paths.
+
 ## Problem Statement
 
 Today every "enrolled" device on a tcfs fleet holds the same shared master key

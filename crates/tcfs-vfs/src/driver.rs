@@ -348,6 +348,7 @@ impl TcfsVfs {
             rel_path: Some(vpath.to_string()),
             mode: None,
             encrypted_file_key,
+            wrapped_file_keys: Vec::new(),
         };
         let manifest_key = format!("{}/manifests/{}", prefix, file_hash);
         self.op

@@ -1265,6 +1265,7 @@ mod tests {
             rel_path: Some("doc.txt".into()),
             mode: None,
             encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
         };
 
         op.write("data/manifests/file-hash", manifest.to_bytes().unwrap())
@@ -1294,6 +1295,7 @@ mod tests {
             rel_path: Some("doc.txt".into()),
             mode: None,
             encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
         };
 
         op.write("data/manifests/file-hash", manifest.to_bytes().unwrap())
@@ -1383,6 +1385,7 @@ mod tests {
             rel_path: Some("doc.txt".into()),
             mode: None,
             encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
         };
 
         op.write("data/manifests/file-hash", manifest.to_bytes().unwrap())

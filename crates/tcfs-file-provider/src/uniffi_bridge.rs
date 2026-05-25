@@ -569,6 +569,7 @@ impl TcfsProviderHandle {
                 rel_path: Some(remote_path.to_string()),
                 mode: None,
                 encrypted_file_key,
+                wrapped_file_keys: Vec::new(),
             };
 
             let manifest_json =

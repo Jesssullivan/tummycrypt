@@ -5724,6 +5724,7 @@ mod tests {
             rel_path: Some(rel_path.to_string()),
             mode: None,
             encrypted_file_key: Some(base64::engine::general_purpose::STANDARD.encode(wrapped)),
+            wrapped_file_keys: Vec::new(),
         }
     }
 

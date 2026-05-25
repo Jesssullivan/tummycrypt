@@ -712,6 +712,7 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                 rel_path: Some(remote_str.to_string()),
                 mode: None,
                 encrypted_file_key,
+                wrapped_file_keys: Vec::new(),
             };
 
             let manifest_json = serde_json::to_vec_pretty(&manifest)?;

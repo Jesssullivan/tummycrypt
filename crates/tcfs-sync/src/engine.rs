@@ -1848,6 +1848,7 @@ async fn upload_file_with_device_with_state(
         rel_path: rel_path.map(|s| s.to_string()),
         mode: file_mode,
         encrypted_file_key,
+        wrapped_file_keys: Vec::new(),
     };
 
     let manifest_bytes = manifest.to_bytes()?;
@@ -3760,6 +3761,7 @@ mod tests {
             rel_path: Some("large.bin".into()),
             mode: None,
             encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
         };
         let manifest_path = format!("data/manifests/{file_hash}");
         op.write(&manifest_path, manifest.to_bytes().unwrap())

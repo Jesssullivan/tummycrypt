@@ -5242,6 +5242,7 @@ name = "tcfs-crypto"
 version = "0.12.13"
 dependencies = [
  "aes-siv",
+ "age",
  "anyhow",
  "argon2",
  "base64 0.22.1",
