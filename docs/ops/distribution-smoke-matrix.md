@@ -88,7 +88,11 @@ Nix profile install smoke also passed in run `26242122899` on hosted
 Ubuntu 24.04: `nix profile install` from `github:Jesssullivan/tummycrypt/v0.12.13-rc4`
 installed `packages.x86_64-linux.tcfs-cli` and `packages.x86_64-linux.tcfsd`,
 the profile binaries reported `tcfs 0.12.13` / `tcfsd 0.12.13`, and
-`scripts/install-smoke.sh` ended with `install smoke passed`.
+`scripts/install-smoke.sh` ended with `install smoke passed`. Current
+`install-smoke.sh` runs the installed `tcfs init` path first when the CLI
+supports `--config-out`, then starts `tcfsd` with the generated config. Older
+published packages and daemon-only surfaces write a minimal explicit config
+before startup so install/upgrade compatibility stays testable.
 
 Remaining distribution proof is now narrower: NixOS host proof and
 release-candidate package version semantics (`0.12.13-1` installed from
@@ -135,7 +139,12 @@ published asset can be `0.12.13-rc1` while the compiled Cargo binary reports
 What this helper proves:
 
 - the installed binaries are executable
-- `tcfsd` can start with an isolated default config
+- current CLI surfaces can run `tcfs init --non-interactive`, validate
+  `tcfs init --check`, and start `tcfsd` with the generated config
+- older CLI surfaces and daemon-only surfaces can start `tcfsd` with a minimal
+  explicit config
+- ambient S3 credential environment variables are cleared from daemon and status
+  probes unless `--require-storage-ok` is requested
 - the daemon creates its Unix socket
 - `tcfs status` works when the CLI is present on that surface
 

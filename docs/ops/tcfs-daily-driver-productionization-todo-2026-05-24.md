@@ -197,9 +197,10 @@ files.
   setup path.
 - [x] Write a valid local `config.toml` from `tcfs init`.
 - [x] Validate local first-run files with `tcfs init --check`.
-- [ ] Make daemon/systemd/LaunchAgent missing-config behavior explicit and
-  recoverable; `tcfsd` currently logs a missing config and runs defaults.
-- [ ] Add installed-binary first-use smoke rows that run `tcfs init
+- [x] Make daemon missing-config behavior explicit and recoverable; `tcfsd`
+  now exits with a `tcfs init --config-out ...` recovery hint instead of
+  running defaults.
+- [x] Add installed-binary first-use smoke rows that run `tcfs init
   --non-interactive --config-out <temp>/config.toml`, then `tcfs init --check
   --config-out <temp>/config.toml`, then start `tcfsd` with that config.
 - [ ] Verify `tcfs status [ok]` before exit for storage-backed first-use

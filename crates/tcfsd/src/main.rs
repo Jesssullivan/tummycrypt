@@ -14,6 +14,7 @@ use tcfsd::worker;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+use tcfsd::config_loader::load_config;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -82,22 +83,6 @@ async fn main() -> Result<()> {
                 "worker mode requires the k8s-worker feature: cargo build --features k8s-worker"
             )
         }
-    }
-}
-
-async fn load_config(path: &PathBuf) -> Result<tcfs_core::config::TcfsConfig> {
-    if path.exists() {
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| anyhow::anyhow!("reading config {}: {e}", path.display()))?;
-        toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("parsing config {}: {e}", path.display()))
-    } else {
-        tracing::warn!(
-            "config file not found: {}  (using defaults)",
-            path.display()
-        );
-        Ok(tcfs_core::config::TcfsConfig::default())
     }
 }
 

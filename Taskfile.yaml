@@ -138,6 +138,7 @@ tasks:
       - task: lazy:test-release-workflow-fileprovider
       - task: lazy:test-release-workflow-container
       - task: lazy:test-linux-package-container-workflow
+      - task: install-smoke-test
       - task: lazy:test-smoke-endpoint-preflight
       - cargo test -p tcfs-cli cli_unsync
       - cargo test -p tcfs-cli cli_pull_after_unsync_hydrates_latest_remote_and_removes_stub
@@ -1064,6 +1065,11 @@ tasks:
     desc: Regression-test Linux package container smoke workflow
     cmds:
       - bash scripts/test-linux-package-container-smoke-workflow.sh
+
+  install-smoke-test:
+    desc: Regression-test the installed-binary smoke helper with fake installed binaries
+    cmds:
+      - bash scripts/test-install-smoke.sh
 
   lazy:test-smoke-endpoint-preflight:
     desc: Regression-test CI smoke endpoint posture preflight

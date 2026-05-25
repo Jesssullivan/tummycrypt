@@ -6,6 +6,7 @@
 //!
 //! Keep the surface minimal — only re-export what tests or tooling require.
 
+pub mod config_loader;
 pub mod cred_store;
 pub mod daemon;
 pub mod grpc;

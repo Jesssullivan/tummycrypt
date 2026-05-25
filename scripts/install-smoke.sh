@@ -5,8 +5,10 @@ usage() {
   cat <<'EOF'
 Usage: scripts/install-smoke.sh [options]
 
-Starts an installed tcfsd in an isolated temp environment, waits for its socket,
-and runs `tcfs status` when the CLI is available.
+Initializes an installed tcfs CLI surface in an isolated temp environment,
+starts tcfsd against that generated config, waits for its socket, and runs
+`tcfs status` when the CLI is available. Daemon-only surfaces get a minimal
+intentional config instead of relying on tcfsd defaults.
 
 Options:
   --expected-version <version>  Require tcfs/tcfsd --version output to include this string
@@ -90,11 +92,91 @@ assert_version() {
   fi
 }
 
+write_daemon_only_config() {
+  cat >"$CONFIG_PATH" <<EOF
+[daemon]
+socket = "$SOCKET_PATH"
+
+[storage]
+endpoint = "http://localhost:8333"
+bucket = "tcfs"
+enforce_tls = false
+
+[sync]
+state_db = "$STATE_DIR/tcfsd/state.db"
+
+[crypto]
+enabled = false
+EOF
+  chmod 600 "$CONFIG_PATH" 2>/dev/null || true
+}
+
+tcfs_supports_init_config_out() {
+  "$TCFS_PATH" init --help 2>&1 | grep -Fq -- "--config-out"
+}
+
+start_daemon() {
+  if [[ "$REQUIRE_STORAGE_OK" -eq 1 ]]; then
+    "$TCFSD_PATH" --config "$CONFIG_PATH" --log-format text
+    return
+  fi
+
+  env \
+    -u TCFS_S3_ACCESS \
+    -u TCFS_S3_SECRET \
+    -u TCFS_S3_ACCESS_FILE \
+    -u TCFS_S3_SECRET_FILE \
+    -u TCFS_S3_ACCESS_KEY_FILE \
+    -u TCFS_S3_SECRET_KEY_FILE \
+    -u AWS_ACCESS_KEY_ID \
+    -u AWS_SECRET_ACCESS_KEY \
+    -u AWS_SESSION_TOKEN \
+    -u AWS_ACCESS_KEY_ID_FILE \
+    -u AWS_SECRET_ACCESS_KEY_FILE \
+    -u SEAWEED_ACCESS_KEY \
+    -u SEAWEED_SECRET_KEY \
+    -u REMOTE_JUGGLER_IDENTITY \
+    -u TCFS_KDBX_PATH \
+    -u AWS_PROFILE \
+    -u AWS_SHARED_CREDENTIALS_FILE \
+    -u AWS_CONFIG_FILE \
+    "$TCFSD_PATH" --config "$CONFIG_PATH" --log-format text
+}
+
+run_tcfs_status() {
+  if [[ "$REQUIRE_STORAGE_OK" -eq 1 ]]; then
+    "$TCFS_PATH" --config "$CONFIG_PATH" status
+    return
+  fi
+
+  env \
+    -u TCFS_S3_ACCESS \
+    -u TCFS_S3_SECRET \
+    -u TCFS_S3_ACCESS_FILE \
+    -u TCFS_S3_SECRET_FILE \
+    -u TCFS_S3_ACCESS_KEY_FILE \
+    -u TCFS_S3_SECRET_KEY_FILE \
+    -u AWS_ACCESS_KEY_ID \
+    -u AWS_SECRET_ACCESS_KEY \
+    -u AWS_SESSION_TOKEN \
+    -u AWS_ACCESS_KEY_ID_FILE \
+    -u AWS_SECRET_ACCESS_KEY_FILE \
+    -u SEAWEED_ACCESS_KEY \
+    -u SEAWEED_SECRET_KEY \
+    -u REMOTE_JUGGLER_IDENTITY \
+    -u TCFS_KDBX_PATH \
+    -u AWS_PROFILE \
+    -u AWS_SHARED_CREDENTIALS_FILE \
+    -u AWS_CONFIG_FILE \
+    "$TCFS_PATH" --config "$CONFIG_PATH" status
+}
+
 # Keep the default short on macOS. GitHub-hosted macOS exposes a long
 # /var/folders/... TMPDIR, and daemon Unix sockets can exceed SUN_LEN there.
 TMP_BASE="${TCFS_INSTALL_SMOKE_TMPDIR:-/tmp}"
 TMP_DIR="$(mktemp -d "${TMP_BASE%/}/tcfs-install-smoke.XXXXXX")"
-CONFIG_PATH="$TMP_DIR/missing-config.toml"
+CONFIG_PATH="$TMP_DIR/config.toml"
+INIT_BASE_CONFIG="$TMP_DIR/init-base-missing.toml"
 HOME_DIR="$TMP_DIR/home"
 STATE_DIR="$HOME_DIR/.local/state"
 CONFIG_DIR="$HOME_DIR/.config"
@@ -124,12 +206,37 @@ assert_version "tcfsd" "$TCFSD_PATH"
 if [[ "$SKIP_CLI" -eq 0 ]]; then
   TCFS_PATH="$(resolve_bin "$TCFS_BIN")"
   assert_version "tcfs" "$TCFS_PATH"
+  if tcfs_supports_init_config_out; then
+    echo "initializing first-run config: $CONFIG_PATH"
+    TCFS_MASTER_PASSWORD="tcfs-install-smoke-passphrase" \
+      "$TCFS_PATH" --config "$INIT_BASE_CONFIG" init \
+        --config-out "$CONFIG_PATH" \
+        --device-name "install-smoke" \
+        --non-interactive \
+        >"$TMP_DIR/tcfs-init.log" 2>&1 || {
+          echo "tcfs init failed" >&2
+          cat "$TMP_DIR/tcfs-init.log" >&2 || true
+          exit 1
+        }
+    "$TCFS_PATH" --config "$CONFIG_PATH" init --check --config-out "$CONFIG_PATH" \
+      >"$TMP_DIR/tcfs-init-check.log" 2>&1 || {
+        echo "tcfs init --check failed" >&2
+        cat "$TMP_DIR/tcfs-init-check.log" >&2 || true
+        exit 1
+      }
+    cat "$TMP_DIR/tcfs-init-check.log"
+  else
+    echo "installed tcfs init does not support --config-out; writing explicit smoke config: $CONFIG_PATH"
+    write_daemon_only_config
+  fi
 else
   TCFS_PATH=""
+  echo "writing daemon-only first-run config: $CONFIG_PATH"
+  write_daemon_only_config
 fi
 
 echo "starting daemon smoke with temp home: $HOME_DIR"
-"$TCFSD_PATH" --config "$CONFIG_PATH" --log-format text >"$DAEMON_LOG" 2>&1 &
+start_daemon >"$DAEMON_LOG" 2>&1 &
 daemon_pid="$!"
 
 for _ in $(seq 1 30); do
@@ -157,7 +264,7 @@ if [[ "$SKIP_CLI" -eq 1 ]]; then
   exit 0
 fi
 
-"$TCFS_PATH" --config "$CONFIG_PATH" status >"$STATUS_LOG" 2>&1 || {
+run_tcfs_status >"$STATUS_LOG" 2>&1 || {
   echo "tcfs status failed" >&2
   cat "$STATUS_LOG" >&2 || true
   echo "--- daemon log ---" >&2

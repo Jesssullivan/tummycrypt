@@ -140,6 +140,12 @@ own its own copy of the prompt sequence.
   a clear journald message: `tcfsd: no config; run 'tcfs init' to set up`.
   Optionally ship a `tcfsd.service` `ExecStartPre=/usr/bin/tcfs init --check`
   hook that fails fast with that message.
+  - 2026-05-24 implementation note: the daemon binary now fails missing config
+    with a `tcfs init --config-out ...` recovery hint, and
+    `scripts/install-smoke.sh` runs installed `tcfs init` before daemon startup
+    when the installed CLI supports `--config-out`. Older published packages
+    and daemon-only surfaces fall back to a minimal explicit smoke config.
+    systemd/LaunchAgent wiring is still a follow-on.
 - **macOS host app** (`swift/fileprovider/Sources/HostApp/HostApp.swift`):
   when `provisionConfig()` (`:194-204`) finds no config, instead of silently
   logging and continuing, launch the first-run wizard inline (sheet) before

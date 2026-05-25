@@ -158,6 +158,10 @@ storage-large-restore-workflow-test:
 install-smoke *ARGS:
     bash scripts/install-smoke.sh {{ARGS}}
 
+# Regression test the installed-binary smoke helper with fake installed binaries
+install-smoke-test:
+    bash scripts/test-install-smoke.sh
+
 # ── Nix ─────────────────────────────────────────────────────────────────────
 
 # Build tcfsd via Nix

@@ -1,36 +1,22 @@
 //! Config loading tests for tcfsd
 //!
 //! Tests the `load_config` path:
-//! - Missing file → default config
+//! - Missing file → actionable setup error
 //! - Valid TOML → parsed config
 //! - Invalid TOML → error
 
 use std::io::Write;
-use tcfs_core::config::TcfsConfig;
+use tcfsd::config_loader::load_config;
 use tempfile::NamedTempFile;
 
-/// Helper: async config loader (mirrors tcfsd::load_config)
-async fn load_config(path: &std::path::Path) -> anyhow::Result<TcfsConfig> {
-    if path.exists() {
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| anyhow::anyhow!("reading config {}: {e}", path.display()))?;
-        toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("parsing config {}: {e}", path.display()))
-    } else {
-        Ok(TcfsConfig::default())
-    }
-}
-
 #[tokio::test]
-async fn missing_config_yields_default() {
+async fn missing_config_returns_actionable_setup_error() {
     let path = std::path::Path::new("/tmp/tcfsd-test-nonexistent.toml");
     assert!(!path.exists());
 
-    let config = load_config(path).await.expect("default should work");
-    // Default config should have sane defaults
-    assert!(!config.crypto.enabled);
-    assert_eq!(config.storage.bucket, TcfsConfig::default().storage.bucket);
+    let err = load_config(path).await.unwrap_err().to_string();
+    assert!(err.contains("tcfsd config not found"), "got: {err}");
+    assert!(err.contains("tcfs init --config-out"), "got: {err}");
 }
 
 #[tokio::test]
