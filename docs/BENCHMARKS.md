@@ -65,12 +65,12 @@ The raw-Git project-tree canary is intentionally allowed to expose these
 storage bottlenecks, but those observations are performance evidence, not a
 production storage posture claim.
 
-Current production-like S3 posture snapshot from `main@84c7389`, run
-`26220824445`, artifact `storage-posture-canary-26220824445-1`:
+Current production-like S3 posture snapshot from `main@43ce227`, run
+`26246264661`, artifact `storage-posture-canary-26246264661-1`:
 
 | Endpoint class | Security/scope | Payload | List | Write | Read | Delete | Verify delete | Scope denial |
 |----------------|----------------|---------|------|-------|------|--------|---------------|--------------|
-| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | `enforce_tls=true`; public CA chain; scoped `tcfs-storage-prod-smoke` identity under `gha/storage-posture/...` | 242 B | 99 ms, 1 entry | 328 ms | 99 ms | 101 ms | 99 ms | `PermissionDenied` in 96 ms for `gha/storage-posture-denied/...` |
+| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | `enforce_tls=true`; public CA chain; scoped `tcfs-storage-prod-smoke` identity under `gha/storage-posture/...` | canary object | Passed | Passed | Passed | Passed | Passed | `PermissionDenied` for `gha/storage-posture-denied/...` |
 
 This packet proves TLS transport, allowed-prefix list permission, scoped
 write/read/delete/delete-verify behavior, and negative credential-scope denial
@@ -78,6 +78,18 @@ for the selected production-smoke identity. It is not a large-object throughput
 or restore benchmark; keep the large-pack rows below open until a
 candidate-package restore packet records object counts, retry/timeout counts,
 socket highwater, and end-to-end restore latency.
+
+Current large-restore companion snapshot from merged-main run `26378842677`,
+artifact `storage-large-restore-canary-26378842677-1`:
+
+| Endpoint class | Workload | Push shape | Restore result | Socket highwater | Transient behavior |
+|----------------|----------|------------|----------------|------------------|--------------------|
+| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | Synthetic Git pack source, 1,074,101,201 regular-file bytes | 30 upload rows, 231 chunks, 1,074,101,201 uploaded bytes, one 1,074,069,980-byte `.pack`, upload concurrency 4, chunk timeout 300s, 442,664 ms total upload elapsed | Passed exact fresh-tree restore: 30 regular files, 1,074,101,201 restored bytes, 2 empty dirs, 186s execute, 5,774,737 B/s | 0 | Restore completed despite 42 `error code: 502` log lines, 20 OpenDAL retry rows, and 1 TCFS chunk-download retry row |
+
+This is the first green production-smoke large-object restore/recovery packet,
+but it is still not the final beta storage benchmark. The next rows need
+package-backed or archived `linux-xr-fast` multi-GiB restore and longer
+soak/load evidence.
 
 Functional follow-up observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`:

@@ -88,6 +88,36 @@ Known evidence:
   ANSI before summarizing push logs, preserve warning/error counts, and allow a
   successful push with transient 5xx retry noise to continue into restore so the
   beta gate can classify convergence.
+- PR `#448` merged the ANSI-stripping push summary parser and transient-storage
+  classification fix as `40b4514`. Branch validation run `26378404972` on
+  `codex/tin-1546-ansi-summary-transient-restore@4c0df129` then passed the
+  large-restore companion against `tcfs-storage-prod-smoke` under
+  `gha/storage-posture/large/26378404972-1`. The run uploaded 30 files,
+  1,074,101,203 file bytes, 243 chunks, and one 1,074,069,982-byte Git pack.
+  Fresh-tree restore passed for 30 regular files, 1,074,101,203 restored bytes,
+  two empty directories, zero symlinks, and zero unsupported special files.
+  Restore execute time was 365 seconds, reported throughput was 2,942,743 B/s,
+  and socket highwater stayed at 0. The restore log still saw live transient
+  S3/Cloudflare `502` read noise: 76 `error code: 502` lines, 36 OpenDAL retry
+  rows, and 3 TCFS chunk-download retry rows. Treat this as the first green
+  1 GiB synthetic Git-pack restore/recovery packet for the alpha storage gate,
+  not yet as multi-GiB `linux-xr-fast`, package-backed restore, soak, or
+  broad-home-directory proof.
+- run `26378842677` repeated the large-restore companion on merged `main` at
+  `40b4514` under `gha/storage-posture/large/26378842677-1`. This is the
+  current canonical alpha large-restore packet. It uploaded 30 files,
+  1,074,101,201 file bytes, 231 chunks, and one 1,074,069,980-byte Git pack.
+  Push completed with `warn_rows=1`, `retry_warning_rows=0`, and
+  `error_rows=0`; the largest pack upload took 439,696 ms. Fresh-tree restore
+  passed for 30 regular files, 1,074,101,201 restored bytes, two empty
+  directories, zero symlinks, and zero unsupported special files. Restore
+  execute time was 186 seconds, reported throughput was 5,774,737 B/s, and
+  socket highwater stayed at 0. The restore log still saw transient
+  S3/Cloudflare `502` read noise: 42 `error code: 502` lines, 20 OpenDAL retry
+  rows, and 1 TCFS chunk-download retry row. Treat this as merged-main alpha
+  proof for scoped HTTPS 1 GiB synthetic Git-pack push/restore with bounded
+  transient recovery; keep TIN-1546 open for package-backed multi-GiB restore,
+  longer soak/load behavior, and benchmark breadth.
 - downstream public-asset smokes on `main@e9b9f82` then used the same
   production-smoke prefix family successfully:
   - Linux `.deb` run `26218940925` used
