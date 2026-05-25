@@ -82,10 +82,10 @@ just neo-honey-smoke
   socket/highwater, transient-recovery, and soak evidence.
 - `TIN-1540` / `TIN-1422`: the hosted HTTPS backend and Linux first-use route
   are closed. Re-run them on release-day if the release candidate changes.
-- `TIN-131/#280`: keep open for NixOS host proof and rc package version
-  semantics. Debian 13, Ubuntu 24.04, Fedora 42, and Nix profile install now
-  have installed-binary or profile smoke, but the hosted container package lane
-  does not prove live-storage/FUSE/systemd behavior.
+- `TIN-131/#280`: closed for the current alpha install/upgrade matrix. Debian
+  13, Ubuntu 24.04, Fedora 42, and Nix profile install now have
+  installed-binary or profile smoke. Keep the boundary explicit: this does not
+  prove live-storage/FUSE/systemd behavior for every package surface.
 - `TIN-132`: fresh named neo/honey transcript exists; keep it current for
   release-day acceptance or record an explicit supersede decision.
 - `TIN-1547`: keep open until badge/progress/recovery, first-run setup, and a
