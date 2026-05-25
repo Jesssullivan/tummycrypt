@@ -22,12 +22,45 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
+use tonic::metadata::MetadataValue;
+#[cfg(unix)]
+use tonic::service::{interceptor::InterceptedService, Interceptor};
+#[cfg(unix)]
 use tonic::transport::{Channel, Endpoint, Uri};
 #[cfg(unix)]
 use tower::service_fn;
 
 #[cfg(unix)]
 use tcfs_core::proto::{tcfs_daemon_client::TcfsDaemonClient, Empty, StatusRequest};
+
+#[cfg(unix)]
+type DaemonClient = TcfsDaemonClient<InterceptedService<Channel, SessionTokenInterceptor>>;
+
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+struct SessionTokenInterceptor {
+    token: Option<String>,
+}
+
+#[cfg(unix)]
+impl Interceptor for SessionTokenInterceptor {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        if let Some(token) = self.token.as_deref().filter(|token| !token.is_empty()) {
+            let value = format!("Bearer {token}")
+                .parse::<MetadataValue<_>>()
+                .map_err(|_| {
+                    tonic::Status::unauthenticated(
+                        "stored TCFS session token is not valid metadata",
+                    )
+                })?;
+            request.metadata_mut().insert("authorization", value);
+        }
+        Ok(request)
+    }
+}
 
 // ── CLI structure ──────────────────────────────────────────────────────────────
 
@@ -2368,8 +2401,39 @@ fn print_update_notice(current: &str, latest: &str) {
 // ── gRPC connection ───────────────────────────────────────────────────────────
 
 #[cfg(unix)]
-async fn connect_daemon(socket_path: &Path) -> Result<TcfsDaemonClient<Channel>> {
+fn load_session_token() -> Option<String> {
+    if let Ok(token) = std::env::var("TCFS_SESSION_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    match tcfs_secrets::keychain::get_secret(tcfs_secrets::keychain::keys::SESSION_TOKEN) {
+        Ok(Some(secret)) => Some(secret.expose_secret().to_string()),
+        Ok(None) => None,
+        Err(err) => {
+            tracing::debug!("failed to read TCFS session token from keychain: {err}");
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+fn store_session_token(token: &str) -> Result<()> {
+    if token.trim().is_empty() {
+        anyhow::bail!("refusing to store an empty session token");
+    }
+
+    let secret = secrecy::SecretString::from(token.to_string());
+    tcfs_secrets::keychain::store_secret(tcfs_secrets::keychain::keys::SESSION_TOKEN, &secret)
+        .context("storing TCFS session token in keychain")
+}
+
+#[cfg(unix)]
+async fn connect_daemon(socket_path: &Path) -> Result<DaemonClient> {
     let path = socket_path.to_path_buf();
+    let token = load_session_token();
 
     // tonic over Unix domain socket: use a tower service_fn connector
     let channel = Endpoint::from_static("http://[::]:0")
@@ -2383,7 +2447,10 @@ async fn connect_daemon(socket_path: &Path) -> Result<TcfsDaemonClient<Channel>>
         .await
         .with_context(|| format!("connecting to tcfsd at {}", socket_path.display()))?;
 
-    Ok(TcfsDaemonClient::new(channel))
+    Ok(TcfsDaemonClient::with_interceptor(
+        channel,
+        SessionTokenInterceptor { token },
+    ))
 }
 
 // ── `tcfs config show` ────────────────────────────────────────────────────────
@@ -4066,7 +4133,19 @@ async fn cmd_auth_verify(config: &tcfs_core::config::TcfsConfig, code: &str) -> 
         .into_inner();
 
     if resp.success {
+        let saved = match store_session_token(&resp.session_token) {
+            Ok(()) => true,
+            Err(err) => {
+                eprintln!("Warning: failed to save session token to platform keychain: {err:#}");
+                false
+            }
+        };
         println!("Authentication successful.");
+        if saved {
+            println!("Session token saved to platform keychain.");
+        } else {
+            println!("Session token was not saved; set TCFS_SESSION_TOKEN to use it manually.");
+        }
         println!(
             "Session token: {}...",
             &resp.session_token[..8.min(resp.session_token.len())]
@@ -5385,6 +5464,36 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_token_interceptor_attaches_bearer_metadata() {
+        let mut interceptor = SessionTokenInterceptor {
+            token: Some("session-token-123".into()),
+        };
+
+        let request = interceptor.call(tonic::Request::new(())).unwrap();
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer session-token-123"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_token_interceptor_skips_missing_token() {
+        let mut interceptor = SessionTokenInterceptor { token: None };
+
+        let request = interceptor.call(tonic::Request::new(())).unwrap();
+
+        assert!(request.metadata().get("authorization").is_none());
     }
 
     #[test]
