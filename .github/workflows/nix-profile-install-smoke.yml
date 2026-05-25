@@ -21,6 +21,21 @@ on:
         required: true
         default: "ubuntu-24.04"
         type: string
+      require_storage_ok:
+        description: "Require installed tcfs status to report storage [ok]"
+        required: true
+        default: false
+        type: boolean
+      smoke_environment:
+        description: "Environment containing TCFS_SMOKE_* storage secrets"
+        required: true
+        default: "tcfs-storage-prod-smoke"
+        type: string
+      remote_prefix:
+        description: "Optional storage prefix override for --require-storage-ok"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -34,10 +49,62 @@ jobs:
     name: Nix profile install smoke
     runs-on: ${{ github.event.inputs.runner_label }}
     timeout-minutes: 60
+    environment: ${{ github.event.inputs.smoke_environment }}
+    env:
+      TCFS_SMOKE_S3_ENDPOINT: ${{ secrets.TCFS_SMOKE_S3_ENDPOINT }}
+      TCFS_SMOKE_S3_BUCKET: ${{ secrets.TCFS_SMOKE_S3_BUCKET }}
+      TCFS_SMOKE_S3_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      TCFS_SMOKE_S3_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      TCFS_SMOKE_S3_REGION: ${{ secrets.TCFS_SMOKE_S3_REGION }}
+      TCFS_SMOKE_S3_CA_CERT_PEM: ${{ secrets.TCFS_SMOKE_S3_CA_CERT_PEM }}
+      TCFS_S3_ACCESS: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      TCFS_S3_SECRET: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TCFS_SMOKE_S3_SECRET_ACCESS_KEY }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+
+      - name: Prepare smoke metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${{ github.event.inputs.ref }}"
+          RUNNER_LABEL="${{ github.event.inputs.runner_label }}"
+          SAFE_REF="$(printf '%s' "$REF" | tr -c 'A-Za-z0-9._-' '-')"
+          SAFE_RUNNER_LABEL="$(printf '%s' "$RUNNER_LABEL" | tr -c 'A-Za-z0-9._-' '-')"
+          echo "TCFS_NIX_SMOKE_ARTIFACT_NAME=nix-profile-install-smoke-${SAFE_REF}-${SAFE_RUNNER_LABEL}" >> "$GITHUB_ENV"
+
+      - name: Validate storage smoke inputs
+        if: ${{ github.event.inputs.require_storage_ok == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            TCFS_SMOKE_S3_ENDPOINT \
+            TCFS_SMOKE_S3_BUCKET \
+            TCFS_SMOKE_S3_ACCESS_KEY_ID \
+            TCFS_SMOKE_S3_SECRET_ACCESS_KEY
+          do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required storage smoke secrets: ${missing[*]}"
+            exit 1
+          fi
+
+          REMOTE_PREFIX="${{ github.event.inputs.remote_prefix }}"
+          if [[ -z "$REMOTE_PREFIX" ]]; then
+            REMOTE_PREFIX="gha/storage-posture/nix-profile/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          if [[ "$REMOTE_PREFIX" != gha/storage-posture/* ]]; then
+            echo "::error::remote_prefix must stay under gha/storage-posture/ for scoped production-smoke credentials"
+            exit 1
+          fi
+
+          echo "TCFS_SMOKE_REMOTE_PREFIX=$REMOTE_PREFIX" >> "$GITHUB_ENV"
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
@@ -84,11 +151,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          args=(
+            --expected-version "${{ github.event.inputs.binary_expected_version }}"
+            --tcfs "$TCFS_NIX_PROFILE/bin/tcfs"
+            --tcfsd "$TCFS_NIX_PROFILE/bin/tcfsd"
+          )
+          if [[ "${{ github.event.inputs.require_storage_ok }}" == "true" ]]; then
+            args+=(--require-storage-ok)
+          fi
           env PATH="$TCFS_NIX_PROFILE/bin:$PATH" \
-            bash scripts/install-smoke.sh \
-              --expected-version "${{ github.event.inputs.binary_expected_version }}" \
-              --tcfs "$TCFS_NIX_PROFILE/bin/tcfs" \
-              --tcfsd "$TCFS_NIX_PROFILE/bin/tcfsd" \
+            bash scripts/install-smoke.sh "${args[@]}" \
             2>&1 | tee "$TCFS_NIX_SMOKE_LOG_DIR/install-smoke.log"
 
       - name: Capture diagnostics
@@ -110,6 +182,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nix-profile-install-smoke-${{ github.event.inputs.ref }}-${{ github.event.inputs.runner_label }}
+          name: ${{ env.TCFS_NIX_SMOKE_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/nix-profile-install-smoke
           if-no-files-found: warn
