@@ -1,6 +1,6 @@
 # TCFS Daily Driver Productionization Todo - 2026-05-24
 
-Status timestamp: 2026-05-25T20:05:00Z
+Status timestamp: 2026-05-25T21:37:00Z
 
 This is the current execution checklist for moving TCFS from an
 evidence-backed alpha surface toward a robust daily-driver filesystem product.
@@ -10,18 +10,19 @@ security, and user-visible control paths are also proven.
 
 ## Current State
 
-- `main` is at `d9ebf704197e50a0666ce4f055487e77c0f9c3a8` after PR
-  `#462` merged the TIN-1621 retry/observability cut for package-backed
-  large restores.
+- `main` is at `e3f20e8c799ccb2d1508dbaf3aa50b64461a38e7` after PR
+  `#466` merged the Rust-owned FileProvider config renderer for `TIN-1425`.
 - Latest prerelease: `v0.12.13-rc4`.
 - Public `Latest` release remains `v0.12.12`.
 - Post-merge CI/Docs/Nix runs on `40b4514` are green:
   - CI `26378706285`
   - Docs `26378706284`
   - Nix CI `26378706243`
-- Post-merge Docs run `26412349803` is green on `main@70e2eee`.
 - Post-merge CI run `26412349802` and Nix CI run `26412349798` are green on
-  `main@70e2eee`.
+  `main@70e2eee`; post-merge Docs run `26412349803` is also green.
+- Post-merge run set for `main@e3f20e8` has started; CI Live Storage
+  `26420301404` and Docs `26420301403` are green. CI `26420301390` and
+  Nix CI `26420301365` are still running at this timestamp.
 - Mainline package-backed storage large-restore run `26412362782` completed on
   `main@70e2eee` with `tcfs_binary_source=nix-package`,
   `pack_size_mib=3072`, `restore_headroom_margin_mib=2048`, and
@@ -32,16 +33,23 @@ security, and user-visible control paths are also proven.
   Cloudflare/S3 `502` reads for one chunk. The artifact classifies the result
   as `regular file hash manifest mismatch`: 29/30 regular files restored and
   only 31,221 bytes present in the restore tree.
-- Fresh package-backed storage large-restore run `26417405494` is running on
-  `main@d9ebf70` with `tcfs_binary_source=nix-package`, `pack_size_mib=3072`,
-  `restore_headroom_margin_mib=2048`, `download_chunk_retries=8`, and
-  `require_https=true`. This is the classification rerun for `TIN-1621` after
-  PR `#462`; do not close the ticket until the artifact proves exact 30/30
-  restore or yields a new classified failure.
-- PR `#459` pre-merge CI was green on head
-  `4426eaa1f3591881756988a93371dd8bfd7a6458`, including CI
-  `26404264594`, Docs `26404264596`, Nix CI `26404264593`, and CI Live
-  Storage `26404264595`.
+- Fresh package-backed storage large-restore run `26417405494` passed on
+  `main@d9ebf70` with `tcfs_binary_source=nix-package`,
+  `pack_size_mib=3072`, `restore_headroom_margin_mib=2048`,
+  `download_chunk_retries=8`, and `require_https=true`. It pushed and restored
+  30 files / 3,222,239,922 bytes exactly, including one 3,222,208,701-byte Git
+  pack, with socket highwater 0. The restore took 2,823 seconds at about
+  1,141,423 B/s and recovered despite 668 S3/Cloudflare `502` log lines,
+  289 OpenDAL retry rows, and 47 TCFS chunk-download retry rows. `TIN-1621` is
+  Done; `TIN-1546` remains open for repeated soak/load, performance SLOs, and
+  transient-recovery classification under less noisy conditions.
+- PR `#465` merged the large-workdir evidence packet shape at
+  `79cd216780321c34bd7e11d1c3bc7337c554155f`.
+- PR `#466` merged the `tcfs config fileprovider` implementation at
+  `e3f20e8c799ccb2d1508dbaf3aa50b64461a38e7`.
+- PR `#467` is open for large-workdir task entrypoints and task-discovery
+  wiring. PR `#468` is open for the additive per-device FileKey wrapping
+  substrate.
 - PR `#460` merged the static TIN-1547 FileProvider surface contract guardrail
   at `aa104ce6273dcff5db1a36a1a8407530227291ac`.
 - PR `#461` merged the TIN-1546 package-backed storage large-restore workflow
@@ -116,6 +124,8 @@ Open beta/daily-driver foundation:
 - `TIN-1619`: selected large-workdir shadow pilot packet
 - `TIN-1620`: one expendable live repo two-machine pilot
 - `TIN-1621`: large-pack restore survives repeated S3 502s
+- `TIN-1622`: storage soak, retry/noise budget, and endpoint SLO after the
+  3 GiB restore
 
 ## This Week: Alpha Closeout
 
@@ -156,10 +166,11 @@ Evidence to archive:
 - [x] socket highwater under the restore/load path
 - [x] final explicit claim boundary
 
-The alpha storage sub-claim is now green for scoped HTTPS credentials plus a
-1 GiB synthetic Git-pack push/restore on merged main. Keep `TIN-1546` open for
-beta because package-backed multi-GiB restore currently fails under repeated
-S3/Cloudflare `502` chunk reads, and longer soak/load behavior plus benchmark
+The alpha storage sub-claim is now green for scoped HTTPS credentials, a 1 GiB
+synthetic Git-pack push/restore on merged main, and one package-backed
+multi-GiB exact restore. Keep `TIN-1546` open for beta because the 3.22 GiB
+restore succeeded only after heavy S3/Cloudflare `502` retry noise and low
+effective restore throughput, and longer soak/load behavior plus benchmark
 rows are still missing.
 
 2026-05-24 progress:
@@ -211,9 +222,13 @@ rows are still missing.
   default chunk-download retry budget, explicit workflow retry input, retry
   budget recording in restore packets, and full error-chain preservation for
   failed pulls.
-- [ ] After `#462` lands, rerun the package-backed 3 GiB restore with
-  `download_chunk_retries=8` and close `TIN-1621` only if the artifact restores
-  30/30 files exactly.
+- [x] After `#462` landed, reran the package-backed 3 GiB restore with
+  `download_chunk_retries=8`. Run `26417405494` restored 30/30 files exactly
+  and closed `TIN-1621`.
+- [ ] Convert the 3.22 GiB restore result into a beta storage follow-up:
+  repeated soak/load, explicit restore SLOs, retry/noise budget, and decision
+  on whether the public HTTPS smoke endpoint is acceptable for beta or needs a
+  stronger backend path. This is tracked as `TIN-1622`.
 
 ### 3. Harden `TIN-1547` FileProvider
 
@@ -304,7 +319,9 @@ until devices have real local private keys and per-device wrapped content keys.
   the local `tcfs init` and `tcfs device enroll` paths.
 - [x] Persist generated local device private keys in an explicitly protected
   `0600` file fallback beside the device registry.
-- [ ] Add file-key wrapping per non-revoked device.
+- [ ] Add file-key wrapping per non-revoked device. PR `#468` stages the
+  additive crypto/manifest substrate for this, but does not yet flip behavior
+  away from the legacy `encrypted_file_key` path.
 - [ ] Prove a revoked device cannot decrypt new content.
 - [ ] Document migration from shared-master fleets.
 

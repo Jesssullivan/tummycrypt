@@ -91,17 +91,19 @@ but it is still not the final beta storage benchmark. The next rows need
 package-backed or archived `linux-xr-fast` multi-GiB restore and longer
 soak/load evidence.
 
-Current package-backed multi-GiB candidate from merged-main run `26412362782`,
-artifact `storage-large-restore-canary-26412362782-1`:
+Latest package-backed multi-GiB candidate from merged-main run `26417405494`,
+artifact `storage-large-restore-canary-26417405494-1`:
 
 | Endpoint class | Workload | Push shape | Restore result | Socket highwater | Transient behavior |
 |----------------|----------|------------|----------------|------------------|--------------------|
-| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | Synthetic Git pack source, 3,222,239,922 regular-file bytes | Nix package `tcfs-cli-0.12.13`; 30 upload rows, 651 chunks, 3,222,239,922 uploaded bytes, one 3,222,208,701-byte `.pack`, upload concurrency 4, chunk timeout 300s, 194,920 ms total upload elapsed | Failed fresh-tree restore after 456s: 29/30 regular files present, 31,221 restored bytes, large `.pack` missing, `regular file hash manifest mismatch` | 0 | Restore hit repeated Cloudflare/S3 `502` reads for one large-pack chunk. OpenDAL retried with backoff and TCFS retried chunk download up to `TCFS_DOWNLOAD_CHUNK_RETRIES=3`, then the reconcile completed with 1 pull error |
+| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | Synthetic Git pack source, 3,222,239,922 regular-file bytes | Nix package `tcfs 0.12.13` (`4fb34c067449bf844576505a977ee7392a54e31b697f9ad5407d3351197bcca1`); 30 upload rows, 676 chunks, 3,222,239,922 uploaded bytes, one 3,222,208,701-byte `.pack`, upload concurrency 4, chunk timeout 300s | Passed exact fresh-tree restore: 30 regular files, 3,222,239,922 restored bytes, 2 empty dirs, 2,823s execute, 1,141,423 B/s | 0 | Restore completed despite 668 `error code: 502` log lines, 289 OpenDAL retry rows, and 47 TCFS chunk-download retry rows |
 
-This is a useful package-backed load packet and a concrete transient-restore
-failure, not package-backed restore proof. The next beta storage cut needs
-stronger chunk-read retry/resume behavior or an endpoint decision that removes
-this repeated 502 pattern, followed by a clean exact-restore rerun.
+This is the first exact package-backed multi-GiB restore packet and closes the
+specific `TIN-1621` failure from run `26412362782`, where the same workload
+restored only 29/30 regular files after repeated `502` reads. It is still not a
+final beta storage benchmark: the throughput is low, the transient error count
+is high, and the next storage cut needs repeated soak/load evidence plus an
+explicit retry/noise budget for the public HTTPS endpoint.
 
 Functional follow-up observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`:
