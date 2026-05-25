@@ -1,7 +1,7 @@
 # TCFS Production Storage Posture Gate
 
 Date: 2026-05-19
-Updated: 2026-05-24
+Updated: 2026-05-25
 
 This is the operator handoff for `TIN-1546`. It defines the minimum storage
 packet required before TCFS can claim production-like S3 readiness for alpha QA.
@@ -66,6 +66,16 @@ Known evidence:
   HTTPS storage posture packet. It still does not prove large-restore
   throughput, socket/highwater behavior, long soak, or transient recovery
   classification.
+- run `26376987029` attempted the large-restore companion on merged `main` at
+  `592d119` with the same public HTTPS production-smoke environment. It failed
+  before restore because the workflow defaulted to
+  `gha/storage-posture-large/...`, outside the scoped credential policy for
+  `gha/storage-posture/...`. The failure confirmed that out-of-scope writes and
+  index listing return `PermissionDenied`/`AccessDenied`, but it did not test
+  large-restore throughput, socket/highwater behavior, or transient recovery.
+  The workflow must rerun under `gha/storage-posture/large/...` and fail
+  immediately if the push evidence shows zero uploaded rows or storage access
+  denials.
 - downstream public-asset smokes on `main@e9b9f82` then used the same
   production-smoke prefix family successfully:
   - Linux `.deb` run `26218940925` used

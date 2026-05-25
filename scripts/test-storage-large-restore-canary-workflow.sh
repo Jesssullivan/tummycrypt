@@ -41,7 +41,8 @@ assert_contains "$WORKFLOW" "name: Storage Large Restore Canary"
 assert_contains "$WORKFLOW" "environment: \${{ github.event.inputs.smoke_environment }}"
 assert_contains "$WORKFLOW" "TCFS_SMOKE_S3_ENDPOINT: \${{ secrets.TCFS_SMOKE_S3_ENDPOINT }}"
 assert_contains "$WORKFLOW" "AWS_ACCESS_KEY_ID: \${{ secrets.TCFS_SMOKE_S3_ACCESS_KEY_ID }}"
-assert_contains "$WORKFLOW" "gha/storage-posture-large/"
+assert_contains "$WORKFLOW" "gha/storage-posture/large/"
+assert_contains "$WORKFLOW" "refusing to run restore against an untrusted prefix"
 assert_contains "$WORKFLOW" "actions/upload-artifact@v4"
 assert_contains "$WORKFLOW" 'TCFS_S3_REGION=$REGION'
 assert_contains "$WORKFLOW" 'TCFS_STORAGE_S3_CA_CERT_PATH=$CA_CERT_PATH'
@@ -64,6 +65,16 @@ assert_contains "$PUSH_STEP" "scripts/home-canary-linux-xr-storage-posture.sh"
 assert_contains "$PUSH_STEP" '--remote "$REMOTE"'
 assert_contains "$PUSH_STEP" "--push"
 assert_contains "$PUSH_STEP" "--socket-sample-interval-secs 5"
+
+VALIDATE_PUSH_STEP="$TMPDIR/validate-push-step.sh"
+extract_step_from_workflow "Validate large canary push evidence" "$VALIDATE_PUSH_STEP"
+assert_contains "$VALIDATE_PUSH_STEP" "push-storage-summary.env"
+assert_contains "$VALIDATE_PUSH_STEP" "push.log"
+assert_contains "$VALIDATE_PUSH_STEP" "require_gt_zero upload_rows"
+assert_contains "$VALIDATE_PUSH_STEP" "require_gt_zero total_file_bytes"
+assert_contains "$VALIDATE_PUSH_STEP" "require_gt_zero pack_rows"
+assert_contains "$VALIDATE_PUSH_STEP" "require_gt_zero pack_file_bytes"
+assert_contains "$VALIDATE_PUSH_STEP" "PermissionDenied|AccessDenied|upload failed|failed to write|Error:"
 
 RESTORE_STEP="$TMPDIR/restore-step.sh"
 extract_step_from_workflow "Restore large canary" "$RESTORE_STEP"

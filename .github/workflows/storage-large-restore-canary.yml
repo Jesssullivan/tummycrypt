@@ -23,7 +23,7 @@ on:
         default: "tcfs-storage-prod-smoke"
         type: string
       remote_prefix:
-        description: "Remote prefix; default is gha/storage-posture-large/<run>"
+        description: "Remote prefix; default is gha/storage-posture/large/<run>"
         required: false
         default: ""
         type: string
@@ -207,12 +207,12 @@ jobs:
           set -euo pipefail
           REMOTE_PREFIX="${{ github.event.inputs.remote_prefix }}"
           if [[ -z "$REMOTE_PREFIX" ]]; then
-            REMOTE_PREFIX="gha/storage-posture-large/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            REMOTE_PREFIX="gha/storage-posture/large/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           fi
           REMOTE_PREFIX="${REMOTE_PREFIX#/}"
           REMOTE_PREFIX="${REMOTE_PREFIX%/}"
-          if [[ "$REMOTE_PREFIX" != *storage-posture* ]]; then
-            echo "::error::remote_prefix must contain storage-posture so the storage posture guard stays explicit"
+          if [[ "$REMOTE_PREFIX" != gha/storage-posture/* ]]; then
+            echo "::error::refusing to run restore against an untrusted prefix: remote_prefix must stay under gha/storage-posture/ for the scoped production-smoke credentials"
             exit 1
           fi
 
@@ -292,6 +292,60 @@ jobs:
             --chunk-timeout-secs 300 \
             --progress-heartbeat-secs 60 \
             --socket-sample-interval-secs 5
+
+      - name: Validate large canary push evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUMMARY="$EVIDENCE_DIR/push-storage-summary.env"
+          PUSH_LOG="$EVIDENCE_DIR/push.log"
+
+          if [[ ! -s "$SUMMARY" ]]; then
+            echo "::error::missing push summary at $SUMMARY"
+            exit 1
+          fi
+          if [[ ! -s "$PUSH_LOG" ]]; then
+            echo "::error::missing push log at $PUSH_LOG"
+            exit 1
+          fi
+
+          kv() {
+            awk -F= -v key="$1" '
+              $1 == key {
+                print substr($0, length($1) + 2)
+                found = 1
+              }
+              END { exit found ? 0 : 1 }
+            ' "$SUMMARY"
+          }
+
+          require_gt_zero() {
+            local key="$1"
+            local value
+            if ! value="$(kv "$key")"; then
+              echo "::error::missing $key in $SUMMARY"
+              exit 1
+            fi
+            if [[ -z "$value" || "$value" == *[!0-9]* ]]; then
+              echo "::error::$key must be a positive integer, got '$value'"
+              exit 1
+            fi
+            if (( value <= 0 )); then
+              echo "::error::$key must be greater than zero, got $value"
+              exit 1
+            fi
+          }
+
+          require_gt_zero upload_rows
+          require_gt_zero total_file_bytes
+          require_gt_zero pack_rows
+          require_gt_zero pack_file_bytes
+
+          if grep -E -i 'PermissionDenied|AccessDenied|upload failed|failed to write|Error:' "$PUSH_LOG" > "$RUNNER_TEMP/tcfs-push-failures.txt"; then
+            echo "::error::push log contains storage/write failures; refusing to run restore"
+            tail -40 "$RUNNER_TEMP/tcfs-push-failures.txt"
+            exit 1
+          fi
 
       - name: Restore large canary
         shell: bash
