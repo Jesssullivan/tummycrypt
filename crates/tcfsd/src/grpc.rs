@@ -259,7 +259,8 @@ impl TcfsDaemonImpl {
                 "AUTH BYPASS: request granted full permissions — \
                  set auth.require_session=true for production"
             );
-            return Ok(tcfs_auth::Session::new(&self.device_id, "local", "bypass"));
+            return Ok(tcfs_auth::Session::new(&self.device_id, "local", "bypass")
+                .with_permissions(tcfs_auth::DevicePermissions::admin()));
         }
 
         // Extract token from "authorization" metadata
@@ -2033,6 +2034,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
     ) -> Result<tonic::Response<AuthEnrollResponse>, tonic::Status> {
         use tcfs_auth::AuthProvider;
 
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "admin")?;
         let req = request.into_inner();
         info!(device_id = %req.device_id, method = %req.method, "auth enroll requested");
 
@@ -2098,6 +2101,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<AuthCompleteEnrollRequest>,
     ) -> Result<tonic::Response<AuthCompleteEnrollResponse>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "admin")?;
         let req = request.into_inner();
         info!(device_id = %req.device_id, method = %req.method, "auth complete enroll requested");
 
@@ -2271,6 +2276,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<AuthRevokeRequest>,
     ) -> Result<tonic::Response<AuthRevokeResponse>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "admin")?;
         let req = request.into_inner();
 
         if !req.session_token.is_empty() {
@@ -2555,12 +2562,13 @@ mod tests {
     use tower::service_fn;
 
     /// Build a TcfsDaemonImpl with in-memory components for testing.
-    fn test_daemon_with_operator_and_master(
+    fn test_daemon_with_operator_master_and_session_requirement(
         operator_value: Option<Operator>,
         master_key: Option<tcfs_crypto::MasterKey>,
+        require_session: bool,
     ) -> TcfsDaemonImpl {
         let mut config = TcfsConfig::default();
-        config.auth.require_session = false;
+        config.auth.require_session = require_session;
         config.storage.bucket = "data".into();
         config.storage.remote_prefix = Some("data".into());
         let config = Arc::new(config);
@@ -2586,6 +2594,17 @@ mod tests {
         )
     }
 
+    fn test_daemon_with_operator_and_master(
+        operator_value: Option<Operator>,
+        master_key: Option<tcfs_crypto::MasterKey>,
+    ) -> TcfsDaemonImpl {
+        test_daemon_with_operator_master_and_session_requirement(operator_value, master_key, false)
+    }
+
+    fn test_daemon_with_required_sessions() -> TcfsDaemonImpl {
+        test_daemon_with_operator_master_and_session_requirement(None, None, true)
+    }
+
     fn test_daemon_with_operator(operator_value: Option<Operator>) -> TcfsDaemonImpl {
         test_daemon_with_operator_and_master(operator_value, None)
     }
@@ -2596,6 +2615,26 @@ mod tests {
 
     fn memory_operator() -> Operator {
         Operator::new(Memory::default()).unwrap().finish()
+    }
+
+    fn request_with_bearer<T>(message: T, token: &str) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
+    }
+
+    async fn insert_test_session(
+        daemon: &TcfsDaemonImpl,
+        device_id: &str,
+        permissions: tcfs_auth::DevicePermissions,
+    ) -> String {
+        let session =
+            tcfs_auth::Session::new(device_id, device_id, "test").with_permissions(permissions);
+        let token = session.token.clone();
+        daemon.session_store.insert(session).await;
+        token
     }
 
     fn test_sync_state(remote_path: &str, last_synced: u64) -> tcfs_sync::state::SyncState {
@@ -2783,6 +2822,138 @@ mod tests {
 
         assert!(!resp.success);
         assert!(resp.error.contains("must be"));
+    }
+
+    #[tokio::test]
+    async fn auth_enroll_requires_admin_session() {
+        let daemon = test_daemon_with_required_sessions();
+        let request = AuthEnrollRequest {
+            device_id: "new-device".into(),
+            method: "totp".into(),
+        };
+
+        let missing = daemon
+            .auth_enroll(tonic::Request::new(request.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::Unauthenticated);
+
+        let user_token = insert_test_session(
+            &daemon,
+            "regular-device",
+            tcfs_auth::DevicePermissions::default(),
+        )
+        .await;
+        let non_admin = daemon
+            .auth_enroll(request_with_bearer(request.clone(), &user_token))
+            .await
+            .unwrap_err();
+        assert_eq!(non_admin.code(), tonic::Code::PermissionDenied);
+
+        let admin_token = insert_test_session(
+            &daemon,
+            "admin-device",
+            tcfs_auth::DevicePermissions::admin(),
+        )
+        .await;
+        let mut unsupported = request;
+        unsupported.method = "unsupported".into();
+        let allowed = daemon
+            .auth_enroll(request_with_bearer(unsupported, &admin_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!allowed.success);
+        assert!(allowed.error.contains("unsupported auth method"));
+    }
+
+    #[tokio::test]
+    async fn auth_complete_enroll_requires_admin_session() {
+        let daemon = test_daemon_with_required_sessions();
+        let request = AuthCompleteEnrollRequest {
+            device_id: "new-device".into(),
+            method: "totp".into(),
+            attestation_data: Vec::new(),
+        };
+
+        let missing = daemon
+            .auth_complete_enroll(tonic::Request::new(request.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::Unauthenticated);
+
+        let user_token = insert_test_session(
+            &daemon,
+            "regular-device",
+            tcfs_auth::DevicePermissions::default(),
+        )
+        .await;
+        let non_admin = daemon
+            .auth_complete_enroll(request_with_bearer(request.clone(), &user_token))
+            .await
+            .unwrap_err();
+        assert_eq!(non_admin.code(), tonic::Code::PermissionDenied);
+
+        let admin_token = insert_test_session(
+            &daemon,
+            "admin-device",
+            tcfs_auth::DevicePermissions::admin(),
+        )
+        .await;
+        let allowed = daemon
+            .auth_complete_enroll(request_with_bearer(request, &admin_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(allowed.success, "admin request failed: {}", allowed.error);
+    }
+
+    #[tokio::test]
+    async fn auth_revoke_requires_admin_session() {
+        let daemon = test_daemon_with_required_sessions();
+        let target_token = insert_test_session(
+            &daemon,
+            "target-device",
+            tcfs_auth::DevicePermissions::default(),
+        )
+        .await;
+        let request = AuthRevokeRequest {
+            session_token: target_token.clone(),
+            device_id: String::new(),
+        };
+
+        let missing = daemon
+            .auth_revoke(tonic::Request::new(request.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::Unauthenticated);
+
+        let user_token = insert_test_session(
+            &daemon,
+            "regular-device",
+            tcfs_auth::DevicePermissions::default(),
+        )
+        .await;
+        let non_admin = daemon
+            .auth_revoke(request_with_bearer(request.clone(), &user_token))
+            .await
+            .unwrap_err();
+        assert_eq!(non_admin.code(), tonic::Code::PermissionDenied);
+        assert!(daemon.session_store.validate(&target_token).await.is_some());
+
+        let admin_token = insert_test_session(
+            &daemon,
+            "admin-device",
+            tcfs_auth::DevicePermissions::admin(),
+        )
+        .await;
+        let allowed = daemon
+            .auth_revoke(request_with_bearer(request, &admin_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(allowed.success, "admin revoke failed: {}", allowed.error);
+        assert!(daemon.session_store.validate(&target_token).await.is_none());
     }
 
     #[tokio::test]
