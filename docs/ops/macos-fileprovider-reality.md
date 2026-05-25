@@ -1279,3 +1279,30 @@ Evidence artifact `macos-postinstall-smoke-v0.12.13-rc4` records:
 This updates the current public package proof from rc2 to rc4. The remaining
 FileProvider hardening lane is now badge/progress assertions, recovery UX,
 longer desktop soak, and first-run setup from installer to valid config/status.
+
+## 2026-05-25 — Public rc4 package five-cycle PZM soak
+
+Run [`26380511749`](https://github.com/Jesssullivan/tummycrypt/actions/runs/26380511749)
+of `macos-postinstall-smoke.yml` installed the public `v0.12.13-rc4` macOS
+arm64 `.pkg` on `petting-zoo-mini` from
+`main@6e6a32851ffa61ae27ecf780b1ec92830d81dfd9` and exercised the hosted
+`tcfs-storage-prod-smoke` backend under remote prefix
+`gha/storage-posture/macos-postinstall/v0.12.13-rc4/tin-1547-soak-20260525T024541Z`.
+
+Evidence artifact `macos-postinstall-smoke-v0.12.13-rc4` records:
+
+- package structure and installed FileProvider signing preflights passed
+- installed-binary smoke passed before the live FileProvider exercise
+- signed HostApp root/user-visible URL path listed `.Trash` and `ci-smoke`
+- exact expected-file hydration passed
+- FileProvider evict plus rehydrate passed five cycles in a row
+- mutation remote pull matched exact content
+- rename safety showed source visible before rename, destination visible after
+  rename, and source after rename as `missing_index`
+- CLI conflict status was `conflict`, and conflict fixture exact-content
+  hydrate passed
+
+This strengthens TIN-1547 from a one-pass public package proof to a short
+desktop soak. It still does not prove visible Finder badge/progress assertions,
+missing-config/storage-denial/hydrate-failure recovery UX, or the first-run
+wizard path from a user-visible installer prompt.

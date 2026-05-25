@@ -138,6 +138,13 @@ Record results using a table like this:
   The LaunchAgent starts `tcfsd` in the user session with
   `--config "$HOME/.config/tcfs/config.toml"` so first-real-use proof must still
   provide a real user config before expecting daemon status to go green.
+- PR #450 made the daemon missing-config path explicit instead of falling back
+  to defaults: `tcfsd --config <missing>` now exits with a recovery hint to run
+  `tcfs init --config-out <path>`. The local installed-binary smoke now runs
+  `tcfs init --non-interactive --config-out <temp>/config.toml`, validates it
+  with `tcfs init --check`, and starts `tcfsd` against that explicit config.
+  This is a first-run setup slice, not storage-backed `tcfs status [ok]` or a
+  GUI wizard claim.
 - The macOS `.pkg` assembly path is
   [`scripts/macos-build-pkg.sh`](../../scripts/macos-build-pkg.sh). Release CI
   uses that script to combine the macOS CLI tarball, `TCFSProvider.app` zip, and

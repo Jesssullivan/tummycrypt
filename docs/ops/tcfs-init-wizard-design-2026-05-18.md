@@ -146,6 +146,11 @@ own its own copy of the prompt sequence.
     when the installed CLI supports `--config-out`. Older published packages
     and daemon-only surfaces fall back to a minimal explicit smoke config.
     systemd/LaunchAgent wiring is still a follow-on.
+  - 2026-05-25 evidence note: PR #450 landed this behavior with local
+    validation through `scripts/test-install-smoke.sh`,
+    `scripts/install-smoke.sh --tcfs target/debug/tcfs --tcfsd target/debug/tcfsd`,
+    `cargo test -p tcfsd`, and `cargo test -p tcfs-cli init`. This does not
+    close storage-backed first-use or the macOS inline wizard.
 - **macOS host app** (`swift/fileprovider/Sources/HostApp/HostApp.swift`):
   when `provisionConfig()` (`:194-204`) finds no config, instead of silently
   logging and continuing, launch the first-run wizard inline (sheet) before
