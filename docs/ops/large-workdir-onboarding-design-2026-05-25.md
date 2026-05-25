@@ -305,6 +305,12 @@ done without overclaiming.
 PR `#462` adds `scripts/large-workdir-inventory.py`, a read-only packet
 generator for `TIN-1618`.
 
+Task entrypoints:
+
+- `task lazy:large-workdir-inventory` for the read-only inventory packet
+- `task lazy:large-workdir-onboarding` for the default shadow-first packet,
+  which currently points at `~/git/linux-xr-fast`
+
 Outputs:
 
 - `inventory.json`

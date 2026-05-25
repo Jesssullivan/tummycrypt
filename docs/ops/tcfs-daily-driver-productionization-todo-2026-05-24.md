@@ -362,8 +362,10 @@ Target window: 2026-06-15 through 2026-06-30.
 - [ ] `TIN-1617`: selected large-workdir onboarding pilot: inventory,
   shadow-root proof, one expendable live repo, then selected subtree rollout.
   Design recon: [Large Workdir Onboarding Design - 2026-05-25](large-workdir-onboarding-design-2026-05-25.md).
-  Packet shape: inventory via `scripts/large-workdir-inventory.py`; shadow
-  packet via `scripts/home-canary-linux-xr-shadow.sh`; evidence under
+  Packet shape: inventory via `task lazy:large-workdir-inventory` or
+  `scripts/large-workdir-inventory.py`; shadow packet via
+  `task lazy:large-workdir-onboarding` or
+  `scripts/home-canary-linux-xr-shadow.sh`; evidence under
   `docs/release/evidence/<run_id>/` with `source-inventory/`,
   `shadow-inventory/`, `push/`, `honey/`, `lifecycle/`, and `restore-proof/`
   as applicable. QA rows for the shadow pilot should stay on the minimal
