@@ -28,10 +28,13 @@ use.
   remains `TIN-132`; CI does not replace named host evidence.
 - Enrollment and invite flows are not a production trust boundary. `TIN-1417`
   Phase 0 has landed real local age/X25519 device keys, and `TIN-1424`
-  Phase 1 has landed single-use invite redemption. That is not enough for
-  production self-enrollment or lost-device revocation: TIN-1417 still needs
-  per-device content-key wrapping, and TIN-1424 still needs admin/session
-  approval, no raw long-lived invite secrets, and recipient-wrapped bootstrap.
+  now has single-use invite redemption plus admin-gated control RPCs. The current
+  TIN-1424 recipient-bootstrap cut moves new invite responses to an age-wrapped
+  `EnrollmentBootstrap` payload and keeps new CLI invites from embedding raw S3
+  secrets by default. That still is not enough for production self-enrollment or
+  lost-device revocation: TIN-1417 still needs per-device content-key wrapping,
+  and TIN-1424 still needs productized pairing approval, safe bootstrap
+  persistence on clients, and revocation evidence.
 - Production S3/storage posture remains `TIN-1546`. Alpha HTTPS/scoped
   credential posture is green on current-main storage canary evidence, but the
   beta-grade gate still needs large restore/load, socket/highwater behavior,
@@ -97,7 +100,7 @@ has shipped and been proven end to end.
 | Linux package smoke | `.deb`/`.rpm` install and upgrade package smoke is green for the current alpha boundary | Scheduled package smoke on a stable runner with archived transcripts and broader FUSE/systemd/live-storage first-use | `TIN-1422`, `TIN-1540` |
 | Live fleet | Neo/honey acceptance is current, repeatable, and archived | Scheduled fleet acceptance with failure classification and dashboard history | `TIN-132`, `TIN-1421` |
 | S3/storage posture | TLS/CA posture documented, health/read paths bounded, transient errors separated from missing objects, large-pack restore evidence captured | Production-like S3 endpoint, scoped credentials, latency/object-count budgets, rollback/restore evidence | `TIN-1546`, `TIN-720`, `#327` |
-| Enrollment/security | Admin/operator-provisioned only; real local device keys and single-use invite redemption exist, but self-enrollment remains disabled for untrusted users | Per-device content-key wrapping, complete invite signature/MAC coverage, admin/session gating, safe bootstrap persistence, revocation evidence | `TIN-1417`, `TIN-1424` |
+| Enrollment/security | Admin/operator-provisioned only; real local device keys, single-use invite redemption, admin-gated control RPCs, and recipient-wrapped enrollment bootstrap exist, but self-enrollment remains disabled for untrusted users | Per-device content-key wrapping, productized pairing approval, safe bootstrap persistence, revocation evidence | `TIN-1417`, `TIN-1424` |
 | Daily-driver primitives | Scoped roots only; no broad home ownership claim | Stable root identity, pin-as-hydrated, subscription selective sync, streaming large-file IO, xattrs, conflict UX, home-dir blacklist | `TIN-1416`, `TIN-1419`, `TIN-1420`, `TIN-1423`, `TIN-1556` |
 | Desktop status and recovery | CLI/log-based inspection is acceptable for trusted operators | Cross-surface sync-state vocabulary, visible progress/errors/conflicts, and clean user-driven recovery | `TIN-1549` |
 | Multitenancy | Out of scope | Tenant/vault identity, namespaced storage/NATS/authz/audit/metrics, migration story | `TIN-1418` |

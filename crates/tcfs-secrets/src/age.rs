@@ -3,6 +3,15 @@
 use crate::identity::IdentityProvider;
 use anyhow::{Context, Result};
 
+/// Encrypt plaintext to an age X25519 public recipient and return ASCII armor.
+pub fn encrypt_for_recipient(public_key: &str, plaintext: &[u8]) -> Result<String> {
+    let recipient: age::x25519::Recipient = public_key
+        .parse()
+        .map_err(|e| anyhow::anyhow!("parsing age recipient public key {public_key}: {e}"))?;
+
+    age::encrypt_and_armor(&recipient, plaintext).context("encrypting age bootstrap payload")
+}
+
 /// Decrypt age-encrypted data using an identity
 ///
 /// `encrypted_data` should be the armored age ciphertext (PEM-like format)
@@ -45,8 +54,21 @@ pub fn decrypt_with_identity(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use secrecy::ExposeSecret;
+
     #[test]
-    fn placeholder() {
-        // Round-trip test added in Phase 5 (requires age key generation)
+    fn encrypt_for_recipient_roundtrips_with_identity() {
+        let identity = age::x25519::Identity::generate();
+        let public_key = identity.to_public().to_string();
+        let ciphertext = encrypt_for_recipient(&public_key, b"bootstrap-secret").unwrap();
+        assert!(ciphertext.contains("BEGIN AGE ENCRYPTED FILE"));
+
+        let provider = IdentityProvider {
+            key_data: identity.to_string().expose_secret().to_string(),
+            source: "test".into(),
+        };
+        let plaintext = decrypt_with_identity(&provider, ciphertext.as_bytes()).unwrap();
+        assert_eq!(plaintext, b"bootstrap-secret");
     }
 }

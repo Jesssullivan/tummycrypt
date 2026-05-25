@@ -277,6 +277,10 @@ message DeviceEnrollResponse {
   string remote_prefix = 10;
   string encryption_passphrase = 11;
   string encryption_salt = 12;
+  // ASCII-armored age ciphertext containing EnrollmentBootstrap JSON encrypted
+  // to DeviceEnrollRequest.public_key. New clients must prefer this over the
+  // legacy plaintext broker fields above.
+  string wrapped_bootstrap_age = 13;
 }
 
 // ── Diagnostics ──────────────────────────────────────────────────────────
