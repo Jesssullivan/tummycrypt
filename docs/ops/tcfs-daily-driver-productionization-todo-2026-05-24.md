@@ -351,6 +351,7 @@ Target window: 2026-06-15 through 2026-06-30.
 
 - [ ] `TIN-1617`: selected large-workdir onboarding pilot: inventory,
   shadow-root proof, one expendable live repo, then selected subtree rollout.
+  Design recon: [Large Workdir Onboarding Design - 2026-05-25](large-workdir-onboarding-design-2026-05-25.md).
 - [x] `TIN-1618`: first read-only inventory helper and regression test for
   candidate roots. It emits `inventory.json`, `inventory.env`, and
   `summary.md`; live pilot packet evidence is still pending.
