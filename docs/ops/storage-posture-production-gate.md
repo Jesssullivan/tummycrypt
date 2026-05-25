@@ -116,7 +116,8 @@ Known evidence:
   S3/Cloudflare `502` read noise: 42 `error code: 502` lines, 20 OpenDAL retry
   rows, and 1 TCFS chunk-download retry row. Treat this as merged-main alpha
   proof for scoped HTTPS 1 GiB synthetic Git-pack push/restore with bounded
-  transient recovery; keep TIN-1546 open for package-backed multi-GiB restore,
+  transient recovery. The run used the workflow's original `cargo-release`
+  binary path, so keep TIN-1546 open for package-backed multi-GiB restore,
   longer soak/load behavior, and benchmark breadth.
 - downstream public-asset smokes on `main@e9b9f82` then used the same
   production-smoke prefix family successfully:
@@ -310,17 +311,20 @@ gh workflow run storage-large-restore-canary.yml \
   --ref main \
   -f runner_label=ubuntu-24.04 \
   -f smoke_environment=tcfs-storage-prod-smoke \
+  -f tcfs_binary_source=nix-package \
   -f pack_size_mib=1024 \
   -f restore_headroom_margin_mib=2048 \
   -f reconcile_timeout_secs=1800 \
   -f require_https=true
 ```
 
-Use a larger `pack_size_mib` value, or a self-hosted runner, when the goal is
-to reproduce the multi-GiB `linux-xr-fast` pack profile exactly. The hosted
-workflow still records socket highwater, push object/chunk counts, restore
-throughput, empty-dir parity, and bounded failure classification for the
-selected size.
+`tcfs_binary_source=nix-package` is the default and is the preferred
+package-backed path for TIN-1546; `cargo-release` is still available for source
+diagnostics. Use a larger `pack_size_mib` value, or a self-hosted runner, when
+the goal is to reproduce the multi-GiB `linux-xr-fast` pack profile exactly.
+The hosted workflow records the selected binary source, socket highwater, push
+object/chunk counts, restore throughput, empty-dir parity, and bounded failure
+classification for the selected size.
 
 The guard compares free bytes on the restore root filesystem against the
 archived shadow regular-file byte total plus the requested margin and writes a

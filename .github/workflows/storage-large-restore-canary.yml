@@ -5,9 +5,11 @@ name: Storage Large Restore Canary
 # The scoped storage canary proves HTTPS, public CA trust, and credential scope
 # with a tiny object. This workflow uses the same GitHub environment secrets to
 # generate a synthetic git worktree with a large valid `.git/objects/pack`
-# payload, push it through TCFS, then restore it into a fresh tree with the
-# headroom gate enabled. It is intentionally dispatch-only because it writes
-# large objects to the selected storage prefix.
+# payload, push it through a selected TCFS binary, then restore it into a fresh
+# tree with the headroom gate enabled. The default binary source is the current
+# Nix package so the lane can produce package-backed evidence; cargo-release is
+# kept for source diagnostics. It is intentionally dispatch-only because it
+# writes large objects to the selected storage prefix.
 
 on:
   workflow_dispatch:
@@ -42,6 +44,14 @@ on:
         required: false
         default: "1800"
         type: string
+      tcfs_binary_source:
+        description: "tcfs binary under test"
+        required: false
+        default: "nix-package"
+        type: choice
+        options:
+          - nix-package
+          - cargo-release
       require_https:
         description: "Require HTTPS/enforce_tls"
         required: false
@@ -130,6 +140,14 @@ jobs:
             echo "::error::reconcile_timeout_secs must be greater than zero"
             exit 1
           fi
+          case "${{ github.event.inputs.tcfs_binary_source }}" in
+            nix-package|cargo-release)
+              ;;
+            *)
+              echo "::error::tcfs_binary_source must be nix-package or cargo-release"
+              exit 1
+              ;;
+          esac
 
       - name: Validate endpoint posture
         shell: bash
@@ -172,14 +190,24 @@ jobs:
           } > "$EVIDENCE_DIR/large-restore-storage-env.env"
 
       - name: Install Rust toolchain
+        if: ${{ github.event.inputs.tcfs_binary_source == 'cargo-release' }}
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
 
       - name: Cache Cargo
+        if: ${{ github.event.inputs.tcfs_binary_source == 'cargo-release' }}
         uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+
+      - name: Install Nix for package-backed binary
+        if: ${{ github.event.inputs.tcfs_binary_source == 'nix-package' }}
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://nix-cache.tinyland.dev/main
+            extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
 
       - name: Install build and evidence tools
         shell: bash
@@ -193,13 +221,43 @@ jobs:
             pkg-config \
             libssl-dev
 
-      - name: Build release tcfs
+      - name: Build cargo release tcfs
+        if: ${{ github.event.inputs.tcfs_binary_source == 'cargo-release' }}
         shell: bash
         run: |
           set -euo pipefail
           cargo build --release -p tcfs-cli --bin tcfs
-          target/release/tcfs --version | tee "$LOG_DIR/tcfs-version.txt"
-          sha256sum target/release/tcfs | tee "$LOG_DIR/tcfs-sha256.txt"
+          TCFS_UNDER_TEST="$GITHUB_WORKSPACE/target/release/tcfs"
+          "$TCFS_UNDER_TEST" --version | tee "$LOG_DIR/tcfs-version.txt"
+          sha256sum "$TCFS_UNDER_TEST" | tee "$LOG_DIR/tcfs-sha256.txt"
+          {
+            echo "tcfs_binary_source=cargo-release"
+            echo "tcfs_bin=$TCFS_UNDER_TEST"
+          } > "$EVIDENCE_DIR/tcfs-binary.env"
+          {
+            echo "TCFS_BIN_UNDER_TEST=$TCFS_UNDER_TEST"
+            echo "TCFS_BINARY_SOURCE=cargo-release"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Nix package tcfs
+        if: ${{ github.event.inputs.tcfs_binary_source == 'nix-package' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix build --accept-flake-config --fallback .#tcfs-cli -o result-tcfs-cli
+          TCFS_UNDER_TEST="$GITHUB_WORKSPACE/result-tcfs-cli/bin/tcfs"
+          "$TCFS_UNDER_TEST" --version | tee "$LOG_DIR/tcfs-version.txt"
+          sha256sum "$TCFS_UNDER_TEST" | tee "$LOG_DIR/tcfs-sha256.txt"
+          {
+            echo "tcfs_binary_source=nix-package"
+            echo "tcfs_bin=$TCFS_UNDER_TEST"
+            echo "nix_system=$(nix eval --impure --raw --expr builtins.currentSystem)"
+            echo "nix_path_info=$(nix path-info -Sh "$GITHUB_WORKSPACE/result-tcfs-cli" || true)"
+          } > "$EVIDENCE_DIR/tcfs-binary.env"
+          {
+            echo "TCFS_BIN_UNDER_TEST=$TCFS_UNDER_TEST"
+            echo "TCFS_BINARY_SOURCE=nix-package"
+          } >> "$GITHUB_ENV"
 
       - name: Derive remote
         shell: bash
@@ -239,6 +297,7 @@ jobs:
             echo "remote=$REMOTE"
             echo "endpoint=$TCFS_SMOKE_S3_ENDPOINT"
             echo "bucket=$TCFS_SMOKE_S3_BUCKET"
+            echo "tcfs_binary_source=${{ github.event.inputs.tcfs_binary_source }}"
           } > "$EVIDENCE_DIR/large-restore-dispatch.env"
 
       - name: Generate synthetic git pack source
@@ -284,7 +343,7 @@ jobs:
             --shadow-root "$SHADOW_ROOT" \
             --evidence-dir "$EVIDENCE_DIR" \
             --remote "$REMOTE" \
-            --tcfs-bin "$GITHUB_WORKSPACE/target/release/tcfs" \
+            --tcfs-bin "$TCFS_BIN_UNDER_TEST" \
             --push \
             --keep-shadow \
             --upload-concurrency 4 \
@@ -374,7 +433,7 @@ jobs:
           RESTORE_HEADROOM_MARGIN_BYTES="$MARGIN_BYTES" \
           RESTORE_RECONCILE_TIMEOUT_SECS="${{ github.event.inputs.reconcile_timeout_secs }}" \
           REQUIRE_EMPTY_DIRS=1 \
-          TCFS_BIN="$GITHUB_WORKSPACE/target/release/tcfs" \
+          TCFS_BIN="$TCFS_BIN_UNDER_TEST" \
           scripts/git-repo-restore-proof.sh \
             --evidence-dir "$EVIDENCE_DIR" \
             --restore-root "$RESTORE_ROOT"
@@ -390,6 +449,8 @@ jobs:
             echo "- Evidence: \`$EVIDENCE_DIR\`"
             echo "- Remote prefix: \`${REMOTE_PREFIX:-unset}\`"
             echo "- Pack size input MiB: \`${{ github.event.inputs.pack_size_mib }}\`"
+            echo "- tcfs binary source: \`${TCFS_BINARY_SOURCE:-unset}\`"
+            echo "- tcfs binary: \`${TCFS_BIN_UNDER_TEST:-unset}\`"
             if [[ -f "$EVIDENCE_DIR/push-storage-summary.env" ]]; then
               echo
               echo "## Push"
