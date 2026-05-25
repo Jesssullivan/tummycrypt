@@ -1,6 +1,10 @@
 # TCFS Alpha Productionization Sprint - May 20, 2026
 
-This is the execution board for the current alpha push. It turns the
+This is the execution board for the current alpha push. The current dated todo
+for the next daily-driver productionization pass is
+[TCFS Daily Driver Productionization Todo - 2026-05-24](tcfs-daily-driver-productionization-todo-2026-05-24.md).
+
+This board turns the
 productionization plan into runnable gates and keeps the claim boundary strict:
 macOS production FileProvider exact hydration, Linux package first-use, and
 scoped HTTPS storage posture are green for the rc4/public-asset path. The
@@ -12,7 +16,7 @@ neo/honey transcript current.
 
 | Lane | Tracker | Current state | Next action |
 | --- | --- | --- | --- |
-| Production S3/storage posture | `TIN-1546` | Current `main@84c7389` run `26220824445` proves public HTTPS, `enforce_tls=true`, public CA trust, allowed-prefix list/write/read/delete/delete-verify, and denied-prefix `PermissionDenied` for `tcfs-storage-prod-smoke` | Run the large-restore companion on a host with the archived shadow root and disk headroom; record socket/highwater, transient recovery, and soak evidence |
+| Production S3/storage posture | `TIN-1546` | Current merged-main run `26246264661` on `main@43ce227` proves public HTTPS, `enforce_tls=true`, public CA trust, allowed-prefix list/write/read/delete/delete-verify, and denied-prefix `PermissionDenied` for `tcfs-storage-prod-smoke`. The dispatch-only `storage-large-restore-canary.yml` lane is staged to run large push + fresh-tree restore using those environment secrets without exposing them locally | Land and dispatch the large-restore companion; record socket/highwater, transient recovery, restore throughput, and soak evidence |
 | Linux package first-use | `TIN-1540`, `TIN-1422`, `TIN-131`, `#280` | Public rc4 `.deb` smoke run `26218940925` passed install, storage `[ok]`, FUSE mount, exact hydrate, `tcfs cache evict` + rehydrate, and mutation remote pull against the hosted-reachable HTTPS backend. Homebrew current tap fresh-install smoke run `26221252765` and upgrade smoke run `26221711601` passed against `homebrew-tap@b5877df` (`v0.12.13-rc4`). PR #442 run `26243913292` passed Debian 13 fresh install, Debian 13 upgrade, Ubuntu 24.04 upgrade, Fedora 42 daemon-only fresh install, and Fedora 42 daemon-only sampled upgrade smokes. Nix profile install smoke passed in run `26242122899` | Finish remaining package proof: NixOS host proof and rc package version semantics |
 | Named fleet acceptance | `TIN-132` | Fresh named transcript is archived at `docs/release/evidence/neo-honey-smoke-20260521T032725Z/`; CI Live Storage remains regression coverage, not a replacement for the named operator lane | Keep the transcript current for release-day acceptance or explicitly supersede the named-lane requirement in Linear |
 | FileProvider post-M10 hardening | `TIN-1547` | Public `v0.12.13-rc4` `.pkg` run `26218940950` passed signed HostApp root enumeration, exact hydrate, evict/rehydrate, mutation, rename, and conflict/status | Add badge/progress/recovery capture, first-run setup proof, and a longer desktop soak |

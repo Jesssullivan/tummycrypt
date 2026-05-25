@@ -1,0 +1,9 @@
+# Run after the shadow prefix is mounted on honey at:
+# /tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/mount
+ssh honey 'mkdir -p /tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z'
+scp /Users/jess/git/tummycrypt/scripts/lazy-hydration-mounted-smoke.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/lazy-hydration-mounted-smoke.sh
+scp /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-linux-xr-fast-20260524T222550Z/selected-hydration-file.content honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/selected-hydration-file.content
+scp /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-linux-xr-fast-20260524T222550Z/source-inventory/symlink-targets.tsv honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/symlink-targets.tsv
+scp /Users/jess/git/tummycrypt/docs/release/evidence/git-repo-canary-linux-xr-fast-20260524T222550Z/honey-linux-xr-shadow-run.sh honey:/tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/honey-linux-xr-shadow-run.sh
+ssh honey 'chmod +x /tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/lazy-hydration-mounted-smoke.sh /tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/honey-linux-xr-shadow-run.sh'
+ssh honey 'TCFS_HONEY_EXPECTED_VERSION_CONTAINS='' TCFS_HONEY_EXPECTED_SHA256='' TCFS_HONEY_START_MOUNT=1 TCFS_HONEY_SMOKE_SCRIPT=/tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/lazy-hydration-mounted-smoke.sh TCFS_HONEY_EXPECTED_CONTENT_FILE=/tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/selected-hydration-file.content TCFS_HONEY_SYMLINK_TARGETS_FILE=/tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/symlink-targets.tsv TCFS_HONEY_MOUNT_LOG=/tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/mount.log TCFS_HONEY_SMOKE_MAX_DEPTH=8 TCFS_HONEY_SMOKE_TIMEOUT_SECS=900 bash /tmp/tcfs-home-canary-linux-xr-shadow-20260524T222551Z/honey-linux-xr-shadow-run.sh'

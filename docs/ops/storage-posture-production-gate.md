@@ -1,7 +1,7 @@
 # TCFS Production Storage Posture Gate
 
 Date: 2026-05-19
-Updated: 2026-05-21
+Updated: 2026-05-24
 
 This is the operator handoff for `TIN-1546`. It defines the minimum storage
 packet required before TCFS can claim production-like S3 readiness for alpha QA.
@@ -58,6 +58,14 @@ Known evidence:
   `gha/storage-posture-denied/current-main/20260521T103646Z`. Treat this as the
   current-main storage posture packet for alpha QA, not as large-restore,
   socket/highwater, transient-recovery, or soak proof.
+- run `26246264661` refreshed the packet on merged `main` at `43ce227` after
+  PR `#442` merged. It used the `tcfs-storage-prod-smoke` environment with
+  public HTTPS, `require_https=true`, `endpoint_tls=true`, `enforce_tls=true`,
+  public CA trust, allowed-prefix list/write/read/delete/delete-verify, and
+  denied-prefix `PermissionDenied`. Treat this as the current alpha scoped
+  HTTPS storage posture packet. It still does not prove large-restore
+  throughput, socket/highwater behavior, long soak, or transient recovery
+  classification.
 - downstream public-asset smokes on `main@e9b9f82` then used the same
   production-smoke prefix family successfully:
   - Linux `.deb` run `26218940925` used
@@ -240,6 +248,27 @@ RESTORE_REQUIRE_HEADROOM=1 \
 RESTORE_HEADROOM_MARGIN_BYTES=$((2 * 1024 * 1024 * 1024)) \
 task lazy:git-repo-restore-proof
 ```
+
+For a repeatable GitHub-hosted packet that uses the existing
+`tcfs-storage-prod-smoke` environment secrets without exposing them locally,
+dispatch the large-restore workflow after it has landed on `main`:
+
+```bash
+gh workflow run storage-large-restore-canary.yml \
+  --ref main \
+  -f runner_label=ubuntu-24.04 \
+  -f smoke_environment=tcfs-storage-prod-smoke \
+  -f pack_size_mib=1024 \
+  -f restore_headroom_margin_mib=2048 \
+  -f reconcile_timeout_secs=1800 \
+  -f require_https=true
+```
+
+Use a larger `pack_size_mib` value, or a self-hosted runner, when the goal is
+to reproduce the multi-GiB `linux-xr-fast` pack profile exactly. The hosted
+workflow still records socket highwater, push object/chunk counts, restore
+throughput, empty-dir parity, and bounded failure classification for the
+selected size.
 
 The guard compares free bytes on the restore root filesystem against the
 archived shadow regular-file byte total plus the requested margin and writes a

@@ -170,6 +170,31 @@ test -f "$PACKET/restore-proof/reconcile-execute.log"
 test -L "$RESTORE/readme-link"
 test -d "$RESTORE/empty-dir"
 
+RUN_METADATA_ONLY_PACKET="$TMPDIR/run-metadata-only-packet"
+RUN_METADATA_ONLY_RESTORE="$TMPDIR/run metadata restored tree"
+RUN_METADATA_ONLY_STATE="$TMPDIR/run-metadata-only-state.json"
+RUN_METADATA_ONLY_CONFIG="$RUN_METADATA_ONLY_PACKET/state/tcfs-linux-xr-shadow.toml"
+mkdir -p "$RUN_METADATA_ONLY_PACKET/state"
+cat >"$RUN_METADATA_ONLY_PACKET/run-metadata.env" <<EOF
+run_id=home-canary-storage-fixture
+shadow=$SHADOW
+remote=seaweedfs+https://example.invalid/tcfs/gha/storage-posture/fixture
+remote_prefix=gha/storage-posture/fixture
+tcfs_command=$FAKE_TCFS
+EOF
+cp "$CONFIG" "$RUN_METADATA_ONLY_CONFIG"
+
+FAKE_RESTORE_SOURCE="$SHADOW" bash "$SCRIPT" \
+  --evidence-dir "$RUN_METADATA_ONLY_PACKET" \
+  --restore-root "$RUN_METADATA_ONLY_RESTORE" \
+  --config "$RUN_METADATA_ONLY_CONFIG" \
+  --state "$RUN_METADATA_ONLY_STATE" \
+  >"$TMPDIR/run-metadata-only.out"
+
+assert_contains "$TMPDIR/run-metadata-only.out" "restore proof status: passed"
+assert_contains "$RUN_METADATA_ONLY_PACKET/restore-proof/restore-proof.env" "remote_prefix=gha/storage-posture/fixture"
+test -f "$RUN_METADATA_ONLY_PACKET/restore-proof/reconcile-execute.log"
+
 HEADROOM_RESTORE="$TMPDIR/restored tree headroom"
 HEADROOM_RESTORE_DIR="$PACKET/restore-proof-headroom"
 assert_fails_contains \

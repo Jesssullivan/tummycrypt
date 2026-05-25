@@ -52,6 +52,8 @@ Environment mirrors:
   TCFS_HOME_CANARY_EVIDENCE_DIR
   TCFS_HOME_CANARY_REMOTE
   TCFS_HOME_CANARY_STATE_DIR
+  TCFS_S3_REGION
+  TCFS_STORAGE_S3_CA_CERT_PATH
   TCFS_HOME_CANARY_PUSH=1
   TCFS_HOME_CANARY_RESUME_AFTER_PUSH=1
   TCFS_HOME_CANARY_REUSE_SHADOW=1
@@ -90,6 +92,12 @@ canonical_existing_path() {
   local path="$1"
   [[ -e "$path" ]] || fail "path does not exist: $path"
   (cd "$path" && pwd -P)
+}
+
+canonical_existing_file() {
+  local path="$1"
+  [[ -f "$path" ]] || fail "file does not exist: $path"
+  (cd "$(dirname "$path")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$path")")
 }
 
 make_physical_dir() {
@@ -151,6 +159,7 @@ storage_s3_connect_timeout_secs="${TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS:-0}"
 storage_s3_pool_idle_timeout_secs="${TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS:-0}"
 storage_s3_pool_max_idle_per_host="${TCFS_STORAGE_S3_POOL_MAX_IDLE_PER_HOST:-0}"
 storage_s3_http1_only="$(bool_env TCFS_STORAGE_S3_HTTP1_ONLY "${TCFS_STORAGE_S3_HTTP1_ONLY:-0}")"
+storage_s3_ca_cert_path="${TCFS_STORAGE_S3_CA_CERT_PATH:-}"
 storage_s3_http1_only_toml=false
 if [[ "$storage_s3_http1_only" == "1" ]]; then
   storage_s3_http1_only_toml=true
@@ -337,6 +346,13 @@ fi
 [[ -n "$prefix" ]] || fail "remote must include a dedicated non-root prefix: $remote"
 endpoint="${remote_endpoint_scheme}://${remote_host}"
 region="${TCFS_S3_REGION:-us-east-1}"
+if [[ -n "$storage_s3_ca_cert_path" ]]; then
+  storage_s3_ca_cert_path="$(canonical_existing_file "$storage_s3_ca_cert_path")"
+fi
+storage_s3_ca_cert_config=""
+if [[ -n "$storage_s3_ca_cert_path" ]]; then
+  storage_s3_ca_cert_config="ca_cert_path = \"$storage_s3_ca_cert_path\""
+fi
 
 tcfs_cmd=()
 tcfs_cmd_is_cargo_fallback=0
@@ -489,6 +505,7 @@ s3_connect_timeout_secs = $storage_s3_connect_timeout_secs
 s3_pool_idle_timeout_secs = $storage_s3_pool_idle_timeout_secs
 s3_pool_max_idle_per_host = $storage_s3_pool_max_idle_per_host
 s3_http1_only = $storage_s3_http1_only_toml
+$storage_s3_ca_cert_config
 
 [sync]
 state_db = "$state_canon/state.db"
@@ -644,6 +661,8 @@ remote=$remote
 remote_prefix=$prefix
 config_path=$config_path
 state_json=$state_json
+storage_region=$region
+storage_s3_ca_cert_path=$storage_s3_ca_cert_path
 tcfs_command=$tcfs_cmd_display
 tcfs_version_status=$tcfs_version_status
 tcfs_version=$tcfs_version

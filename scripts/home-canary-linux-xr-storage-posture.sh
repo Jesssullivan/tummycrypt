@@ -176,6 +176,7 @@ storage_s3_connect_timeout_secs="${TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS:-10}"
 storage_s3_pool_idle_timeout_secs="${TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS:-15}"
 storage_s3_pool_max_idle_per_host="${TCFS_STORAGE_S3_POOL_MAX_IDLE_PER_HOST:-}"
 storage_s3_http1_only="$(bool_env TCFS_STORAGE_S3_HTTP1_ONLY "${TCFS_STORAGE_S3_HTTP1_ONLY:-0}")"
+storage_s3_ca_cert_path="${TCFS_STORAGE_S3_CA_CERT_PATH:-}"
 socket_sample_interval_secs="${TCFS_STORAGE_SOCKET_SAMPLE_INTERVAL_SECS:-5}"
 storage_object_model="large-sequential-fastcdc-for-git-pack-and-rev"
 git_pack_chunk_profile="min=1MiB avg=4MiB max=16MiB"
@@ -373,6 +374,10 @@ fi
 if [[ "$push_remote" == "1" && "$resume_after_push" == "1" ]]; then
   fail "--push and --resume-after-push are mutually exclusive"
 fi
+if [[ -n "$storage_s3_ca_cert_path" ]]; then
+  storage_s3_ca_cert_path="$(canonical_existing_file "$storage_s3_ca_cert_path")"
+  export TCFS_STORAGE_S3_CA_CERT_PATH="$storage_s3_ca_cert_path"
+fi
 
 if [[ -z "$tcfs_bin" ]]; then
   if [[ -x "$REPO_ROOT/target/release/tcfs" ]]; then
@@ -488,6 +493,8 @@ storage_s3_connect_timeout_secs=$storage_s3_connect_timeout_secs
 storage_s3_pool_idle_timeout_secs=$storage_s3_pool_idle_timeout_secs
 storage_s3_pool_max_idle_per_host=$storage_s3_pool_max_idle_per_host
 storage_s3_http1_only=$storage_s3_http1_only
+storage_s3_ca_cert_path_configured=$([[ -n "$storage_s3_ca_cert_path" ]] && echo true || echo false)
+storage_s3_ca_cert_path=$storage_s3_ca_cert_path
 storage_object_model=$storage_object_model
 git_pack_chunk_profile=$git_pack_chunk_profile
 git_pack_reverse_index_chunk_profile=$git_pack_reverse_index_chunk_profile

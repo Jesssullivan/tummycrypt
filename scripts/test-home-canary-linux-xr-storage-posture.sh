@@ -45,6 +45,7 @@ HOME_OK="$TMPDIR/home"
 BIN_DIR="$TMPDIR/target/release"
 DEBUG_BIN_DIR="$TMPDIR/target/debug"
 mkdir -p "$SOURCE/.git/refs/heads" "$SOURCE/src" "$HOME_OK" "$BIN_DIR" "$DEBUG_BIN_DIR"
+CA_CERT="$TMPDIR/storage-ca.pem"
 
 cat >"$SOURCE/README.md" <<'EOF'
 # linux-xr storage posture fixture
@@ -61,6 +62,12 @@ cat >"$SOURCE/.git/config" <<'EOF'
 	filemode = true
 	bare = false
 EOF
+cat >"$CA_CERT" <<'EOF'
+-----BEGIN CERTIFICATE-----
+test fixture only
+-----END CERTIFICATE-----
+EOF
+CA_CERT_CANON="$(cd "$(dirname "$CA_CERT")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$CA_CERT")")"
 ln -s README.md "$SOURCE/readme-link"
 
 cat >"$BIN_DIR/tcfs" <<'EOF'
@@ -180,7 +187,7 @@ assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "fresh_prefix_publish_
 assert_contains "$PUSH_EVIDENCE/push-storage-summary.env" "remote_conflict_check_false_rows=1"
 
 HTTPS_EVIDENCE="$TMPDIR/https-evidence"
-"${RUN_ENV[@]}" bash "$SCRIPT" \
+"${RUN_ENV[@]}" TCFS_S3_REGION=moon-1 TCFS_STORAGE_S3_CA_CERT_PATH="$CA_CERT" bash "$SCRIPT" \
   --source "$SOURCE" \
   --shadow-root "$TMPDIR/https-shadow" \
   --evidence-dir "$HTTPS_EVIDENCE" \
@@ -190,8 +197,14 @@ HTTPS_EVIDENCE="$TMPDIR/https-evidence"
   >"$TMPDIR/https.out"
 assert_contains "$HTTPS_EVIDENCE/storage-posture.env" "endpoint=https://storage.example.invalid"
 assert_contains "$HTTPS_EVIDENCE/storage-posture.env" "transport_tls=true"
+assert_contains "$HTTPS_EVIDENCE/storage-posture.env" "storage_s3_ca_cert_path_configured=true"
+assert_contains "$HTTPS_EVIDENCE/storage-posture.env" "storage_s3_ca_cert_path=$CA_CERT_CANON"
+assert_contains "$HTTPS_EVIDENCE/run-metadata.env" "storage_region=moon-1"
+assert_contains "$HTTPS_EVIDENCE/run-metadata.env" "storage_s3_ca_cert_path=$CA_CERT_CANON"
 assert_contains "$HTTPS_EVIDENCE/tcfs-linux-xr-shadow.toml" "endpoint = \"https://storage.example.invalid\""
+assert_contains "$HTTPS_EVIDENCE/tcfs-linux-xr-shadow.toml" "region = \"moon-1\""
 assert_contains "$HTTPS_EVIDENCE/tcfs-linux-xr-shadow.toml" "enforce_tls = true"
+assert_contains "$HTTPS_EVIDENCE/tcfs-linux-xr-shadow.toml" "ca_cert_path = \"$CA_CERT_CANON\""
 
 gzip -f "$PUSH_EVIDENCE/push.log"
 rm -f "$PUSH_EVIDENCE/push-storage-summary.env" "$PUSH_EVIDENCE/push-storage-summary.md"
