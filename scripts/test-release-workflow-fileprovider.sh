@@ -882,6 +882,8 @@ assert_contains "$PKG_POSTINSTALL" "\"\$LAUNCHCTL_BIN\" asuser \"\$CONSOLE_UID\"
 assert_contains "$PKG_POSTINSTALL" "\"\$LSREGISTER_BIN\" -f \"\$APP_PATH\""
 assert_contains "$PKG_POSTINSTALL" "PLIST_DIR=\"\${TCFS_POSTINSTALL_LAUNCHAGENTS_DIR:-/Library/LaunchAgents}\""
 assert_contains "$PKG_POSTINSTALL" ". \"\$HOME/.config/tcfs/env\""
+assert_contains "$PKG_POSTINSTALL" "tcfsd: no user config; run: /usr/local/bin/tcfs init --config-out"
+assert_contains "$PKG_POSTINSTALL" "exit 0; fi; exec /usr/local/bin/tcfsd"
 assert_contains "$PKG_POSTINSTALL" "exec /usr/local/bin/tcfsd --config \"\$HOME/.config/tcfs/config.toml\" --mode daemon"
 
 POSTINSTALL_APP="${TMPDIR}/Applications/TCFSProvider.app"
@@ -907,11 +909,33 @@ PLIST_PATH="${POSTINSTALL_LAUNCHAGENTS}/io.tinyland.tcfsd.plist"
 }
 assert_contains "$PLIST_PATH" "io.tinyland.tcfsd"
 assert_contains "$PLIST_PATH" ". \"\$HOME/.config/tcfs/env\""
+assert_contains "$PLIST_PATH" "tcfsd: no user config; run: /usr/local/bin/tcfs init --config-out"
+assert_contains "$PLIST_PATH" "exit 0; fi; exec /usr/local/bin/tcfsd"
 assert_contains "$PLIST_PATH" "exec /usr/local/bin/tcfsd --config \"\$HOME/.config/tcfs/config.toml\" --mode daemon"
 assert_contains "$POSTINSTALL_LOG" "lsregister -f $POSTINSTALL_APP"
 assert_contains "$POSTINSTALL_LOG" "launchctl asuser 501"
 assert_contains "$POSTINSTALL_LOG" "launchctl bootstrap gui/501 $PLIST_PATH"
 assert_contains "$POSTINSTALL_LOG" "launchctl enable gui/501/io.tinyland.tcfsd"
+
+UPGRADE_LAUNCHAGENTS="${TMPDIR}/upgrade-launchagents"
+UPGRADE_LOG="${TMPDIR}/upgrade-postinstall.log"
+mkdir -p "$UPGRADE_LAUNCHAGENTS"
+printf 'stale launchagent\n' >"${UPGRADE_LAUNCHAGENTS}/io.tinyland.tcfsd.plist"
+TCFS_POSTINSTALL_APP_PATH="$POSTINSTALL_APP" \
+TCFS_POSTINSTALL_LAUNCHAGENTS_DIR="$UPGRADE_LAUNCHAGENTS" \
+TCFS_POSTINSTALL_PLUGINKIT="$FAKE_BIN/pluginkit" \
+TCFS_POSTINSTALL_LSREGISTER="$FAKE_BIN/lsregister" \
+TCFS_POSTINSTALL_LAUNCHCTL="$FAKE_BIN/launchctl" \
+TCFS_POSTINSTALL_SUDO="$FAKE_BIN/sudo" \
+TCFS_POSTINSTALL_STAT="$FAKE_BIN/stat" \
+TCFS_POSTINSTALL_ID="$FAKE_BIN/id" \
+TCFS_POSTINSTALL_CHOWN="$FAKE_BIN/chown" \
+TCFS_FAKE_POSTINSTALL_LOG="$UPGRADE_LOG" \
+bash "$PKG_POSTINSTALL"
+UPGRADE_PLIST="${UPGRADE_LAUNCHAGENTS}/io.tinyland.tcfsd.plist"
+assert_contains "$UPGRADE_PLIST" "tcfsd: no user config; run: /usr/local/bin/tcfs init --config-out"
+assert_contains "$UPGRADE_PLIST" "exec /usr/local/bin/tcfsd --config \"\$HOME/.config/tcfs/config.toml\" --mode daemon"
+assert_not_contains "$UPGRADE_PLIST" "stale launchagent"
 
 NO_SESSION_LAUNCHAGENTS="${TMPDIR}/no-session-launchagents"
 NO_SESSION_LOG="${TMPDIR}/no-session-postinstall.log"
