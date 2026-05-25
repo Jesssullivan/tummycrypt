@@ -37,6 +37,9 @@ pub mod pam;
 pub mod certificate;
 
 // Re-exports
-pub use enrollment::{EnrollmentInvite, EnrollmentRequest, EnrollmentResult};
+pub use enrollment::{
+    EnrollmentInvite, EnrollmentRequest, EnrollmentResult, InviteRedemption, InviteRedemptionError,
+    InviteRedemptionStore,
+};
 pub use provider::{AuthChallenge, AuthProvider, AuthResponse, VerifyResult};
 pub use session::{DevicePermissions, RateLimitConfig, RateLimiter, Session, SessionStore};

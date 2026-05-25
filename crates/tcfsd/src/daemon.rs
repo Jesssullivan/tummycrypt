@@ -919,6 +919,12 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             warn!("failed to load sessions: {e}");
         }
     }
+    let invite_redemption_path = data_dir.join("invite-redemptions.json");
+    if invite_redemption_path.exists() {
+        if let Err(e) = impl_.load_invite_redemptions(&invite_redemption_path).await {
+            warn!("failed to load invite redemptions: {e}");
+        }
+    }
 
     // Connect to NATS for fleet state sync (non-blocking, best-effort)
     let nats_url = &config.sync.nats_url;
