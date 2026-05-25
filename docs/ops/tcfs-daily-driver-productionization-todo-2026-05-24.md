@@ -280,12 +280,17 @@ files.
   writes the macOS HostApp/FileProvider bootstrap JSON from the same first-run
   state as `config.toml`, using the unified credential resolver and a `0600`
   temp file before atomic install.
+- [x] Add `tcfs config fileprovider --out <path>` so package smokes can render
+  the HostApp/FileProvider JSON from an existing config through installed Rust
+  code instead of the legacy shell/TOML parser.
 - [x] Extend the static FileProvider surface contract test so HostApp drift is
   caught if it stops reading `~/.config/tcfs/fileprovider/config.json` or stops
   enriching `master_key_file` into the Keychain `master_key_base64` payload.
-- [ ] Prove the packaged macOS HostApp consumes that Rust-owned FileProvider
-  JSON path and provisions shared Keychain config without a hand-authored
-  `~/.config/tcfs/fileprovider/config.json`.
+- [ ] Dispatch the macOS postinstall smoke with
+  `require_cli_fileprovider_config=true` on a package that includes
+  `tcfs config fileprovider`, then prove the packaged HostApp consumes that
+  Rust-owned JSON path and provisions shared Keychain config without a
+  hand-authored `~/.config/tcfs/fileprovider/config.json`.
 - [ ] Keep fleet join out of `tcfs init` until the remaining `TIN-1417` and
   `TIN-1424` product slices are complete; `tcfs init` should mean fresh local
   setup, while invite/pairing belongs to a separate safe enrollment path.

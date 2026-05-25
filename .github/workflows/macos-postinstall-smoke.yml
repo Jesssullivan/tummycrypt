@@ -57,6 +57,11 @@ on:
         required: false
         default: false
         type: boolean
+      require_cli_fileprovider_config:
+        description: "Fail unless the installed tcfs CLI renders the FileProvider JSON via `tcfs config fileprovider`"
+        required: false
+        default: false
+        type: boolean
       lab_gatekeeper_override:
         description: "PZM-only non-production lab: require a SystemPolicyRule profile for the installed testing-mode app"
         required: false
@@ -656,11 +661,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" == "true" ]]; then
-            TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY=1 \
-              bash swift/fileprovider/provision-config.sh "$CONFIG_PATH"
+          FILEPROVIDER_CONFIG_PATH="$HOME/.config/tcfs/fileprovider/config.json"
+          REQUIRE_CLI_FILEPROVIDER_CONFIG="${{ github.event.inputs.require_cli_fileprovider_config }}"
+
+          if tcfs --config "$CONFIG_PATH" config fileprovider --help >/dev/null 2>&1; then
+            tcfs --config "$CONFIG_PATH" config fileprovider \
+              --out "$FILEPROVIDER_CONFIG_PATH" \
+              --device-id "gha-macos-postinstall" \
+              --master-key-file "$MASTER_KEY_PATH" \
+              --force
+
+            if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" != "true" && -d "$APP_GROUP_DIR" ]]; then
+              install -m 600 "$FILEPROVIDER_CONFIG_PATH" "$APP_GROUP_DIR/config.json"
+              echo "==> Also written to $APP_GROUP_DIR/config.json"
+            fi
+          elif [[ "$REQUIRE_CLI_FILEPROVIDER_CONFIG" == "true" ]]; then
+            echo "::error::Installed tcfs does not support 'config fileprovider'; cannot prove Rust-owned FileProvider JSON path."
+            exit 1
           else
-            bash swift/fileprovider/provision-config.sh "$CONFIG_PATH"
+            echo "::warning::Installed tcfs lacks 'config fileprovider'; falling back to legacy provision-config.sh"
+            if [[ "${{ github.event.inputs.fileprovider_testing_mode }}" == "true" ]]; then
+              TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY=1 \
+                bash swift/fileprovider/provision-config.sh "$CONFIG_PATH"
+            else
+              bash swift/fileprovider/provision-config.sh "$CONFIG_PATH"
+            fi
           fi
 
       - name: Seed remote fixture

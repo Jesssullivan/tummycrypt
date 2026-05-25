@@ -790,6 +790,12 @@ extract_step_from_workflow \
   "Provision FileProvider config" \
   "$PROVISION_FILEPROVIDER_CONFIG_STEP"
 bash -n "$PROVISION_FILEPROVIDER_CONFIG_STEP"
+assert_contains "$POSTINSTALL_WORKFLOW" "require_cli_fileprovider_config"
+assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "tcfs --config \"\$CONFIG_PATH\" config fileprovider"
+assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "--out \"\$FILEPROVIDER_CONFIG_PATH\""
+assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "--device-id \"gha-macos-postinstall\""
+assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "--master-key-file \"\$MASTER_KEY_PATH\""
+assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "Installed tcfs does not support 'config fileprovider'"
 assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "TCFS_FILEPROVIDER_SKIP_APP_GROUP_COPY=1"
 assert_contains "$PROVISION_FILEPROVIDER_CONFIG_STEP" "swift/fileprovider/provision-config.sh \"\$CONFIG_PATH\""
 

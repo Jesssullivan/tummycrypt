@@ -154,6 +154,13 @@ own its own copy of the prompt sequence.
     `scripts/install-smoke.sh --tcfs target/debug/tcfs --tcfsd target/debug/tcfsd`,
     `cargo test -p tcfsd`, and `cargo test -p tcfs-cli init`. This does not
     close storage-backed first-use or the macOS inline wizard.
+- **macOS FileProvider bootstrap JSON**: `tcfs init --fileprovider-config-out`
+  handles fresh local setup, while `tcfs config fileprovider --out` renders the
+  same HostApp/FileProvider JSON from an existing config for package smokes and
+  operator repros. The macOS postinstall workflow should set
+  `require_cli_fileprovider_config=true` when validating a package new enough to
+  include this command; older tags may still fall back to
+  `swift/fileprovider/provision-config.sh`.
 - **macOS host app** (`swift/fileprovider/Sources/HostApp/HostApp.swift`):
   when `provisionConfig()` (`:194-204`) finds no config, instead of silently
   logging and continuing, launch the first-run wizard inline (sheet) before
