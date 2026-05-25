@@ -1306,3 +1306,25 @@ This strengthens TIN-1547 from a one-pass public package proof to a short
 desktop soak. It still does not prove visible Finder badge/progress assertions,
 missing-config/storage-denial/hydrate-failure recovery UX, or the first-run
 wizard path from a user-visible installer prompt.
+
+## 2026-05-25 — Static FileProvider surface contract guardrail
+
+PR [`#460`](https://github.com/Jesssullivan/tummycrypt/pull/460) merged at
+`aa104ce6273dcff5db1a36a1a8407530227291ac` and added a static contract test
+for the FileProvider product surface:
+
+- decoration declarations stay wired for sync status and conflict/error states
+- fetch progress reporting remains connected to the enumerator/hydration path
+- retained progress release does not regress silently
+- custom action identifiers for unsync/pin remain declared
+- the HostApp keeps reading `~/.config/tcfs/fileprovider/config.json`
+- the HostApp keeps enriching `master_key_file` into a Keychain
+  `master_key_base64` copy for the FileProvider extension
+
+This is a CI drift guardrail, not a live Finder UX packet. It should prevent
+accidental source-level removal of badge/progress/action plumbing, but TIN-1547
+still needs observed signed-host evidence for user-visible badge/progress
+behavior and recovery UX under missing config, storage denial, and hydrate
+failure. The HostApp config assertions are also a static TIN-1425 guardrail;
+they do not replace a packaged HostApp proof that the Rust-owned
+FileProvider JSON path provisions shared Keychain config end to end.

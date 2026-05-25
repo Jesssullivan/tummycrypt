@@ -371,6 +371,8 @@ tcfs_version_status=ok
 tcfs_version="$("$tcfs_bin" --version 2>&1)" || tcfs_version_status=failed
 tcfs_sha256_status=ok
 tcfs_sha256="$(sha256_file "$tcfs_bin" 2>/dev/null)" || tcfs_sha256_status=failed
+download_chunk_retries="${TCFS_DOWNLOAD_CHUNK_RETRIES:-default}"
+download_read_timeout_secs="${TCFS_DOWNLOAD_READ_TIMEOUT_SECS:-default}"
 
 run_with_timeout() {
   local log_path="$1"
@@ -441,6 +443,8 @@ tcfs_version=$tcfs_version
 tcfs_sha256_status=$tcfs_sha256_status
 tcfs_sha256=$tcfs_sha256
 reconcile_timeout_secs=$reconcile_timeout_secs
+download_chunk_retries=$download_chunk_retries
+download_read_timeout_secs=$download_read_timeout_secs
 dry_run_started_at_utc=$dry_run_started_at_utc
 dry_run_completed_at_utc=$dry_run_completed_at_utc
 dry_run_elapsed_secs=$dry_run_elapsed_secs
@@ -636,6 +640,8 @@ tcfs_version=$tcfs_version
 tcfs_sha256_status=$tcfs_sha256_status
 tcfs_sha256=$tcfs_sha256
 reconcile_timeout_secs=$reconcile_timeout_secs
+download_chunk_retries=$download_chunk_retries
+download_read_timeout_secs=$download_read_timeout_secs
 restore_require_headroom=$require_restore_headroom
 restore_free_bytes=$restore_free_bytes
 restore_required_free_bytes=$restore_required_free_bytes

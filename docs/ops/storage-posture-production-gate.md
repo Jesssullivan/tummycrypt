@@ -119,6 +119,32 @@ Known evidence:
   transient recovery. The run used the workflow's original `cargo-release`
   binary path, so keep TIN-1546 open for package-backed multi-GiB restore,
   longer soak/load behavior, and benchmark breadth.
+- PR `#461` merged the package-backed large-restore workflow path at
+  `70e2eee1db417be43f1ab62c319a3013097b45c1`. The workflow default is now
+  `tcfs_binary_source=nix-package`, which builds the current Nix `tcfs-cli`
+  package before generating the synthetic Git-pack source, pushing to S3, and
+  restoring into a fresh tree.
+- run `26412362782` completed the first package-backed multi-GiB
+  large-restore candidate on `main@70e2eee` with
+  `tcfs_binary_source=nix-package`, `pack_size_mib=3072`,
+  `restore_headroom_margin_mib=2048`, `require_https=true`, and the
+  `tcfs-storage-prod-smoke` environment. The workflow validated endpoint
+  posture and storage secrets, skipped the cargo-release path, built the Nix
+  package, generated the synthetic Git-pack source, and pushed 30 files /
+  3,222,239,922 bytes / 651 chunks to
+  `gha/storage-posture/large/26412362782-1`. The largest object was one
+  3,222,208,701-byte `.git/objects/pack/*.pack` with 621 chunks; the largest
+  upload completed in 192,044 ms, socket highwater stayed at 0, and the push
+  summary recorded 13 warning rows, 12 error rows, and no retry-warning or
+  timeout-retry rows. Fresh-tree restore then failed after 456 seconds:
+  29 of 30 regular files restored, only 31,221 of 3,222,239,922 bytes were
+  present, and `regular-files.diff` showed the large `.pack` missing. The
+  execute log shows repeated Cloudflare/S3 `502` reads for one chunk, OpenDAL
+  backoff retries, and a TCFS chunk-download retry capped at
+  `TCFS_DOWNLOAD_CHUNK_RETRIES=3`; the final reason was
+  `regular file hash manifest mismatch`. Treat this as a successful
+  package-backed push/load packet and a concrete beta transient-restore
+  blocker, not as package-backed restore proof.
 - downstream public-asset smokes on `main@e9b9f82` then used the same
   production-smoke prefix family successfully:
   - Linux `.deb` run `26218940925` used
@@ -315,6 +341,7 @@ gh workflow run storage-large-restore-canary.yml \
   -f pack_size_mib=1024 \
   -f restore_headroom_margin_mib=2048 \
   -f reconcile_timeout_secs=1800 \
+  -f download_chunk_retries=8 \
   -f require_https=true
 ```
 
@@ -322,6 +349,8 @@ gh workflow run storage-large-restore-canary.yml \
 package-backed path for TIN-1546; `cargo-release` is still available for source
 diagnostics. Use a larger `pack_size_mib` value, or a self-hosted runner, when
 the goal is to reproduce the multi-GiB `linux-xr-fast` pack profile exactly.
+The `download_chunk_retries` input is intentionally explicit so package-backed
+storage packets record the chunk-read retry budget that was under test.
 The hosted workflow records the selected binary source, socket highwater, push
 object/chunk counts, restore throughput, empty-dir parity, and bounded failure
 classification for the selected size.

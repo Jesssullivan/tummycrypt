@@ -10,6 +10,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ITEM_SWIFT="${REPO_ROOT}/swift/fileprovider/Sources/Extension/FileProviderItem.swift"
 EXTENSION_SWIFT="${REPO_ROOT}/swift/fileprovider/Sources/Extension/FileProviderExtension.swift"
+HOST_SWIFT="${REPO_ROOT}/swift/fileprovider/Sources/HostApp/HostApp.swift"
 PLIST="${REPO_ROOT}/swift/fileprovider/resources/Extension-Info.plist"
 
 fail() {
@@ -88,5 +89,15 @@ assert_contains "$EXTENSION_SWIFT" 'case "io.tinyland.tcfs.action.pin":'
 assert_contains "$EXTENSION_SWIFT" "tcfs_provider_fetch"
 assert_contains "$EXTENSION_SWIFT" "progress.completedUnitCount += 1"
 assert_contains "$EXTENSION_SWIFT" "signalEnumerator("
+
+assert_contains "$HOST_SWIFT" "private static func provisionConfig()"
+assert_contains "$HOST_SWIFT" ".config/tcfs/fileprovider/config.json"
+assert_contains "$HOST_SWIFT" "configForKeychain(config)"
+assert_contains "$HOST_SWIFT" 'object["master_key_file"]'
+assert_contains "$HOST_SWIFT" 'object["master_key_base64"]'
+assert_contains "$HOST_SWIFT" "provisionConfig: added master key material to Keychain copy"
+assert_contains "$HOST_SWIFT" "kSecAttrAccessGroup"
+assert_contains "$HOST_SWIFT" "sharedConfigService"
+assert_contains "$HOST_SWIFT" "sharedConfigAccount"
 
 printf 'FileProvider surface contract tests passed\n'
