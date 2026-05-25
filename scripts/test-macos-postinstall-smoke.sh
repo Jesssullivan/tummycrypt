@@ -590,6 +590,7 @@ bash "$SCRIPT" \
   --fileprovider-testing-mode \
   --require-keychain-config \
   --exercise-evict-rehydrate \
+  --soak-cycles 2 \
   --exercise-mutation \
   --mutation-file "$MUTATION_REL" \
   --mutation-content-file "$MUTATION_CONTENT_FILE" \
@@ -631,6 +632,7 @@ assert_contains "$OUT" "requesting FileProvider eviction for expected file: $EXP
 assert_contains "$OUT" "launching host app binary for eviction request: $APP_PATH/Contents/MacOS/TCFSProvider"
 assert_contains "$OUT" "host app requested FileProvider eviction for expected file"
 assert_contains "$OUT" "FileProvider evict/rehydrate cycle passed"
+assert_contains "$OUT" "FileProvider evict/rehydrate cycle passed (2/2)"
 assert_contains "$OUT" "writing FileProvider mutation fixture: $MUTATION_REL"
 assert_contains "$OUT" "FileProvider mutation local content matched"
 assert_contains "$OUT" "remote mutation pull matched expected content"
@@ -822,6 +824,18 @@ assert_fails_contains \
     bash "$SCRIPT" \
       --expected-file "$EXPECTED_REL" \
       --exercise-evict-rehydrate
+
+assert_fails_contains \
+  "--soak-cycles must be a positive integer" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --soak-cycles 0
+
+assert_fails_contains \
+  "--soak-cycles greater than 1 requires --exercise-evict-rehydrate" \
+  env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+    bash "$SCRIPT" \
+      --soak-cycles 2
 
 assert_fails_contains \
   "--exercise-mutation requires --remote-prefix" \
