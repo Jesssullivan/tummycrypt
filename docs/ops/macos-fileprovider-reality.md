@@ -1,15 +1,16 @@
 # macOS Finder and FileProvider Reality
 
-As of May 21, 2026, the production Developer ID FileProvider lifecycle is
-proven on PZM, including the exact public `v0.12.13-rc4` GitHub Release
-`.pkg`. GitHub Actions run
-`26061402177` first proved installed strict preflight, storage `[ok]`,
+As of May 21, 2026, the published `v0.12.13-rc4` GitHub Release `.pkg` is
+proven on PZM for install, notarization, and strict signing/preflight.
+Separately, GitHub Actions run `26061402177` proved the installed-host
+FileProvider lane through `/Applications/TCFSProvider.app`: storage `[ok]`,
 host-app domain add, CloudStorage enumeration, host-app `requestDownload`, and
-exact-content hydration of a 55-byte seeded fixture through the installed
-`/Applications/TCFSProvider.app`. Follow-up run `26062554542` then proved the
-layered M10 bar on the same production Dev ID lane: hydrate,
-evict/rehydrate, mutation upload/readback, and conflict-status preservation
-without `fileprovider_testing_mode=true`.
+exact-content hydration of a 55-byte seeded fixture. Follow-up run
+`26062554542` then proved the layered M10 bar on the same installed-host lane:
+hydrate, evict/rehydrate, mutation upload/readback, and conflict-status
+preservation without `fileprovider_testing_mode=true`.
+
+This is not a blanket claim of production Finder readiness or first-run UX.
 
 That replaces the previous "production Dev ID Finder hydration is the open
 blocker" status that this document has carried since the May 17 packets.
@@ -123,6 +124,9 @@ In practical terms, the intended operator flow is:
    FileProvider domain
 5. let `fileproviderd` enumerate the domain into `~/Library/CloudStorage/`
 6. use Finder to enumerate and open items, which should hydrate on demand
+
+`TCFSProvider.app` is the host-app container. `io.tinyland.tcfs.fileprovider`
+is the FileProvider appex.
 
 Finder should expose FileProvider items as normal filenames backed by platform
 placeholders / APFS dataless files. Raw `.tc` suffixes are the physical
