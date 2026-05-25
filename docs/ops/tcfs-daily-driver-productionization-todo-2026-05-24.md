@@ -1,6 +1,6 @@
 # TCFS Daily Driver Productionization Todo - 2026-05-24
 
-Status timestamp: 2026-05-25T01:40:00Z
+Status timestamp: 2026-05-25T03:15:00Z
 
 This is the current execution checklist for moving TCFS from an
 evidence-backed alpha surface toward a robust daily-driver filesystem product.
@@ -10,15 +10,19 @@ security, and user-visible control paths are also proven.
 
 ## Current State
 
-- `main` is clean at `40b451477e5046e794ad81bc173a1a0a1fac5d06` after
-  PR `#448` merged the TIN-1546 ANSI summary/transient-restore classifier.
-- No open GitHub PRs.
+- `main` is clean at `1917a44d12d41d4eb112ac02e98597e6fc84a93e` after
+  PR `#450` merged the first TIN-1425 implementation slice for explicit
+  daemon missing-config behavior and installed-binary local first-run smoke.
+- No open GitHub PRs before this evidence-sync update.
 - Latest prerelease: `v0.12.13-rc4`.
 - Public `Latest` release remains `v0.12.12`.
 - Post-merge CI/Docs/Nix runs on `40b4514` are green:
   - CI `26378706285`
   - Docs `26378706284`
   - Nix CI `26378706243`
+- PR `#450` pre-merge CI was green, including CI `26379985552`, Docs
+  `26379985540`, Nix CI `26379985542`, CI Live Storage `26379985538`, and
+  Linux Package Container Smoke `26379985545`.
 - Fresh storage posture canary `26246264661` is green on merged `main`, using
   `tcfs-storage-prod-smoke` with public HTTPS, public CA trust,
   allowed-prefix list/write/read/delete/delete-verify, and denied-prefix
@@ -32,6 +36,10 @@ security, and user-visible control paths are also proven.
   large-restore companion: 1,074,101,201 bytes uploaded/restored, exact
   fresh-tree restore, socket highwater 0, and successful recovery despite 42
   transient `502` read log lines.
+- FileProvider PZM soak run `26380511749` is green for the public
+  `v0.12.13-rc4` macOS arm64 `.pkg`: exact hydrate, five evict/rehydrate
+  cycles, mutation remote pull, rename safety, and CLI conflict-status content
+  hydrate all passed against `tcfs-storage-prod-smoke`.
 
 ## Claim Boundary
 
@@ -165,7 +173,7 @@ hardening, not exact hydration rescue.
   beta scope.
 - [ ] Capture recovery UX behavior for missing config, storage denial, and
   hydrate failure.
-- [ ] Run a longer PZM desktop soak with no stale domain, registration, or
+- [x] Run a longer PZM desktop soak with no stale domain, registration, or
   config drift. The postinstall harness now accepts `--soak-cycles` so the
   existing evict/rehydrate proof can be repeated without changing the default
   one-pass release smoke.
@@ -203,6 +211,10 @@ files.
 - [x] Add installed-binary first-use smoke rows that run `tcfs init
   --non-interactive --config-out <temp>/config.toml`, then `tcfs init --check
   --config-out <temp>/config.toml`, then start `tcfsd` with that config.
+- [x] Land PR `#450`, making `tcfsd` fail missing config with a
+  `tcfs init --config-out ...` recovery hint and keeping ambient storage
+  credential environment variables out of local install smoke unless storage is
+  explicitly required.
 - [ ] Verify `tcfs status [ok]` before exit for storage-backed first-use
   packets.
 - [ ] Keep fleet join out of `tcfs init` until `TIN-1417` and `TIN-1424` land;

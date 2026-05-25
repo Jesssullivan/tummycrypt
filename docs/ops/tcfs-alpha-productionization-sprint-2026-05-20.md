@@ -19,7 +19,7 @@ keeping the named neo/honey transcript current.
 | Production S3/storage posture | `TIN-1546` | Current scoped HTTPS posture run `26246264661` on `main@43ce227` proves public HTTPS, `enforce_tls=true`, public CA trust, allowed-prefix list/write/read/delete/delete-verify, and denied-prefix `PermissionDenied` for `tcfs-storage-prod-smoke`. PR `#448` merged the ANSI summary/transient classification fix, and mainline run `26378842677` on `main@40b4514` passed the 1 GiB synthetic Git-pack large push + fresh-tree restore under `gha/storage-posture/large/...`: 1,074,101,201 bytes uploaded/restored, restore throughput 5,774,737 B/s, socket highwater 0, and exact restore despite transient `502` read retries | Keep TIN-1546 open for package-backed multi-GiB restore, longer soak/load behavior, and benchmark rows |
 | Linux package first-use | `TIN-1540`, `TIN-1422`, `TIN-131`, `#280` | Public rc4 `.deb` smoke run `26218940925` passed install, storage `[ok]`, FUSE mount, exact hydrate, `tcfs cache evict` + rehydrate, and mutation remote pull against the hosted-reachable HTTPS backend. Homebrew current tap fresh-install smoke run `26221252765` and upgrade smoke run `26221711601` passed against `homebrew-tap@b5877df` (`v0.12.13-rc4`). PR #442 run `26243913292` passed Debian 13 fresh install, Debian 13 upgrade, Ubuntu 24.04 upgrade, Fedora 42 daemon-only fresh install, and Fedora 42 daemon-only sampled upgrade smokes. Nix profile install smoke passed in run `26242122899` | Finish remaining package proof: NixOS host proof and rc package version semantics |
 | Named fleet acceptance | `TIN-132` | Fresh named transcript is archived at `docs/release/evidence/neo-honey-smoke-20260521T032725Z/`; CI Live Storage remains regression coverage, not a replacement for the named operator lane | Keep the transcript current for release-day acceptance or explicitly supersede the named-lane requirement in Linear |
-| FileProvider post-M10 hardening | `TIN-1547` | Public `v0.12.13-rc4` `.pkg` run `26218940950` passed signed HostApp root enumeration, exact hydrate, evict/rehydrate, mutation, rename, and conflict/status. The postinstall harness now supports repeated evict/rehydrate soak cycles for PZM evidence packets | Dispatch a longer PZM soak, then add badge/progress/recovery capture and keep first-run setup proof under TIN-1425 |
+| FileProvider post-M10 hardening | `TIN-1547` | Public `v0.12.13-rc4` `.pkg` run `26218940950` passed signed HostApp root enumeration, exact hydrate, evict/rehydrate, mutation, rename, and conflict/status. PZM run `26380511749` repeated the public rc4 package lane with five evict/rehydrate soak cycles against `tcfs-storage-prod-smoke` and passed exact hydrate, mutation remote pull, rename safety, and CLI conflict-status content hydrate | Add badge/progress/recovery capture and keep first-run setup proof under TIN-1425 |
 | Enrollment and beta security | `TIN-1424`, `TIN-1417` | Full invite payload signature coverage landed; self-enrollment remains unsafe as a production trust boundary | Implement single-use redemption and admin/session gating before exposing enrollment UX |
 
 ## One-Command Preflight
@@ -90,8 +90,9 @@ just neo-honey-smoke
   prove live-storage/FUSE/systemd behavior for every package surface.
 - `TIN-132`: fresh named neo/honey transcript exists; keep it current for
   release-day acceptance or record an explicit supersede decision.
-- `TIN-1547`: keep open until badge/progress/recovery, first-run setup, and a
-  longer desktop soak are archived.
+- `TIN-1547`: public rc4 exact hydrate and a five-cycle PZM desktop soak are
+  archived. Keep open until badge/progress/recovery assertions are archived and
+  first-run setup is proven through the user-facing path under TIN-1425.
 
 ## Claim Boundary
 
