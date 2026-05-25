@@ -34,12 +34,14 @@ pub struct TcfsDaemonImpl {
     nats: Arc<TokioMutex<Option<tcfs_sync::NatsClient>>>,
     active_mounts: Arc<TokioMutex<std::collections::HashMap<String, tokio::process::Child>>>,
     path_locks: tcfs_sync::state::PathLocks,
+    data_dir: std::path::PathBuf,
     /// VFS handle from active FUSE mount — used to invalidate negative cache
     /// on NATS events so remote files appear in readdir immediately.
     pub vfs_handle: tokio::sync::watch::Receiver<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
     vfs_tx: tokio::sync::watch::Sender<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
     // Auth infrastructure
     session_store: tcfs_auth::SessionStore,
+    invite_redemptions: tcfs_auth::InviteRedemptionStore,
     totp_provider: Arc<tcfs_auth::totp::TotpProvider>,
     webauthn_provider: Arc<tcfs_auth::webauthn::WebAuthnProvider>,
     rate_limiter: tcfs_auth::RateLimiter,
@@ -172,6 +174,8 @@ impl TcfsDaemonImpl {
             backoff_multiplier: config.auth.rate_limit.backoff_multiplier,
         });
 
+        let data_dir = dirs::data_dir().unwrap_or_default().join("tcfsd");
+
         Self {
             cred_store,
             config,
@@ -182,6 +186,7 @@ impl TcfsDaemonImpl {
             operator,
             device_id,
             device_name,
+            data_dir,
             master_key: Arc::new(TokioMutex::new(master_key)),
             nats_ok: std::sync::atomic::AtomicBool::new(false),
             nats: Arc::new(TokioMutex::new(None)),
@@ -190,6 +195,7 @@ impl TcfsDaemonImpl {
             vfs_handle: vfs_rx,
             vfs_tx,
             session_store: tcfs_auth::SessionStore::new(),
+            invite_redemptions: tcfs_auth::InviteRedemptionStore::new(),
             totp_provider,
             webauthn_provider,
             rate_limiter,
@@ -199,6 +205,12 @@ impl TcfsDaemonImpl {
     /// Get a clone of the session store (for background tasks).
     pub fn session_store(&self) -> tcfs_auth::SessionStore {
         self.session_store.clone()
+    }
+
+    #[cfg(test)]
+    fn with_data_dir(mut self, data_dir: std::path::PathBuf) -> Self {
+        self.data_dir = data_dir;
+        self
     }
 
     /// Load persisted TOTP credentials from disk.
@@ -211,14 +223,23 @@ impl TcfsDaemonImpl {
         self.session_store.load_from_file(path).await
     }
 
+    /// Load persisted invite redemptions from disk.
+    pub async fn load_invite_redemptions(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.invite_redemptions.load_from_file(path).await
+    }
+
     /// Save sessions to disk (called after session changes).
     async fn persist_sessions(&self) {
-        let path = dirs::data_dir()
-            .unwrap_or_default()
-            .join("tcfsd/sessions.json");
+        let path = self.data_dir.join("sessions.json");
         if let Err(e) = self.session_store.save_to_file(&path).await {
             tracing::warn!("failed to persist sessions: {e}");
         }
+    }
+
+    /// Save invite redemptions to disk (called after successful invite use).
+    async fn persist_invite_redemptions(&self) -> anyhow::Result<()> {
+        let path = self.data_dir.join("invite-redemptions.json");
+        self.invite_redemptions.save_to_file(&path).await
     }
 
     /// Validate a session token from gRPC request metadata.
@@ -2287,7 +2308,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         info!(device_name = %req.device_name, platform = %req.platform, "device enroll requested");
 
         // Decode and validate the enrollment invite
-        let invite = tcfs_auth::EnrollmentInvite::decode(&req.invite_data)
+        let invite = tcfs_auth::EnrollmentInvite::decode_any(&req.invite_data)
             .map_err(|e| tonic::Status::invalid_argument(format!("invalid invite: {e}")))?;
 
         if invite.is_expired() {
@@ -2313,6 +2334,34 @@ impl TcfsDaemon for TcfsDaemonImpl {
             return Err(tonic::Status::failed_precondition(
                 "daemon master key not loaded — cannot verify invite signature",
             ));
+        }
+
+        match self
+            .invite_redemptions
+            .claim(
+                &invite.invite_id,
+                &invite.nonce,
+                &req.device_name,
+                &req.public_key,
+                &req.platform,
+            )
+            .await
+        {
+            Ok(_) => {
+                if let Err(e) = self.persist_invite_redemptions().await {
+                    tracing::warn!(error = %e, invite_id = %invite.invite_id, "failed to persist invite redemption");
+                    return Err(tonic::Status::internal(
+                        "failed to persist invite redemption state",
+                    ));
+                }
+            }
+            Err(tcfs_auth::InviteRedemptionError::AlreadyRedeemed { .. }) => {
+                return Ok(tonic::Response::new(DeviceEnrollResponse {
+                    success: false,
+                    error: "invite has already been redeemed".into(),
+                    ..Default::default()
+                }));
+            }
         }
 
         // Enroll device in the local registry
@@ -2506,7 +2555,10 @@ mod tests {
     use tower::service_fn;
 
     /// Build a TcfsDaemonImpl with in-memory components for testing.
-    fn test_daemon_with_operator(operator_value: Option<Operator>) -> TcfsDaemonImpl {
+    fn test_daemon_with_operator_and_master(
+        operator_value: Option<Operator>,
+        master_key: Option<tcfs_crypto::MasterKey>,
+    ) -> TcfsDaemonImpl {
         let mut config = TcfsConfig::default();
         config.auth.require_session = false;
         config.storage.bucket = "data".into();
@@ -2530,8 +2582,12 @@ mod tests {
             tcfs_sync::state::PathLocks::new(),
             "test-device-id".into(),
             "test-device".into(),
-            None,
+            master_key,
         )
+    }
+
+    fn test_daemon_with_operator(operator_value: Option<Operator>) -> TcfsDaemonImpl {
+        test_daemon_with_operator_and_master(operator_value, None)
     }
 
     fn test_daemon() -> TcfsDaemonImpl {
@@ -2727,6 +2783,52 @@ mod tests {
 
         assert!(!resp.success);
         assert!(resp.error.contains("must be"));
+    }
+
+    #[tokio::test]
+    async fn device_enroll_rejects_reused_invite() {
+        let key_bytes = [0xA5; tcfs_crypto::KEY_SIZE];
+        let signing_key: [u8; 32] = *blake3::hash(&key_bytes).as_bytes();
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with_operator_and_master(
+            None,
+            Some(tcfs_crypto::MasterKey::from_bytes(key_bytes)),
+        )
+        .with_data_dir(temp.path().join("tcfsd"));
+
+        let mut invite = tcfs_auth::EnrollmentInvite::new(
+            "admin-device",
+            &signing_key,
+            24,
+            tcfs_auth::DevicePermissions::default(),
+        );
+        invite.storage_endpoint = Some("https://s3.example.invalid".into());
+        invite.storage_bucket = Some("tcfs".into());
+        invite.refresh_signature(&signing_key);
+        let invite_data = invite.encode_compact().unwrap();
+
+        let req = DeviceEnrollRequest {
+            invite_data: invite_data.clone(),
+            device_name: "new-laptop".into(),
+            public_key: "age1testdevice".into(),
+            platform: "linux-x86_64".into(),
+        };
+
+        let first = daemon
+            .device_enroll(tonic::Request::new(req.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.success, "first enrollment failed: {}", first.error);
+        assert!(temp.path().join("tcfsd/invite-redemptions.json").exists());
+
+        let second = daemon
+            .device_enroll(tonic::Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!second.success);
+        assert!(second.error.contains("already been redeemed"));
     }
 
     #[tokio::test]

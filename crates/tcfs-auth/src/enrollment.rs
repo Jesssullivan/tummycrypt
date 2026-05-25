@@ -18,6 +18,10 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::sync::RwLock;
 
 use crate::session::DevicePermissions;
 
@@ -383,6 +387,112 @@ pub struct EnrollmentResult {
     pub available_auth_methods: Vec<String>,
 }
 
+/// Audit record for an invite that has already been redeemed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteRedemption {
+    /// Redeemed invite ID.
+    pub invite_id: String,
+    /// Redeemed invite nonce.
+    pub nonce: String,
+    /// UTC timestamp when the daemon accepted the redemption.
+    pub redeemed_at: DateTime<Utc>,
+    /// Device name requested during redemption.
+    pub device_name: String,
+    /// Device public key presented during redemption.
+    pub public_key: String,
+    /// Device platform presented during redemption.
+    pub platform: String,
+}
+
+#[derive(Debug, Error)]
+pub enum InviteRedemptionError {
+    #[error("invite {invite_id} has already been redeemed")]
+    AlreadyRedeemed { invite_id: String },
+}
+
+/// Thread-safe single-use invite redemption ledger.
+///
+/// The key is `(invite_id, nonce)` so a malicious client cannot replay an
+/// otherwise valid invite payload after the first successful enrollment.
+#[derive(Clone, Default)]
+pub struct InviteRedemptionStore {
+    redemptions: Arc<RwLock<HashMap<String, InviteRedemption>>>,
+}
+
+impl InviteRedemptionStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn key(invite_id: &str, nonce: &str) -> String {
+        format!("{invite_id}:{nonce}")
+    }
+
+    /// Claim an invite nonce. Returns an error if it has already been used.
+    pub async fn claim(
+        &self,
+        invite_id: &str,
+        nonce: &str,
+        device_name: &str,
+        public_key: &str,
+        platform: &str,
+    ) -> Result<InviteRedemption, InviteRedemptionError> {
+        let key = Self::key(invite_id, nonce);
+        let mut redemptions = self.redemptions.write().await;
+        if redemptions.contains_key(&key) {
+            return Err(InviteRedemptionError::AlreadyRedeemed {
+                invite_id: invite_id.to_string(),
+            });
+        }
+
+        let redemption = InviteRedemption {
+            invite_id: invite_id.to_string(),
+            nonce: nonce.to_string(),
+            redeemed_at: Utc::now(),
+            device_name: device_name.to_string(),
+            public_key: public_key.to_string(),
+            platform: platform.to_string(),
+        };
+        redemptions.insert(key, redemption.clone());
+        Ok(redemption)
+    }
+
+    pub async fn is_redeemed(&self, invite_id: &str, nonce: &str) -> bool {
+        self.redemptions
+            .read()
+            .await
+            .contains_key(&Self::key(invite_id, nonce))
+    }
+
+    pub async fn count(&self) -> usize {
+        self.redemptions.read().await.len()
+    }
+
+    pub async fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let redemptions = self.redemptions.read().await;
+        let data = serde_json::to_string_pretty(&*redemptions)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(path, data).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
+    pub async fn load_from_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let data = tokio::fs::read_to_string(path).await?;
+        let loaded: HashMap<String, InviteRedemption> = serde_json::from_str(&data)?;
+        let mut redemptions = self.redemptions.write().await;
+        redemptions.clear();
+        redemptions.extend(loaded);
+        Ok(())
+    }
+}
+
 // Need hex for nonce encoding
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
@@ -562,5 +672,75 @@ mod tests {
         let mut tampered_permissions = invite.clone();
         tampered_permissions.permissions.can_admin = false;
         assert!(!tampered_permissions.verify_signature(&master_key));
+    }
+
+    #[tokio::test]
+    async fn test_invite_redemption_store_rejects_reuse() {
+        let master_key = [42u8; 32];
+        let invite = EnrollmentInvite::new(
+            "admin-device",
+            &master_key,
+            24,
+            DevicePermissions::default(),
+        );
+        let store = InviteRedemptionStore::new();
+
+        let first = store
+            .claim(
+                &invite.invite_id,
+                &invite.nonce,
+                "laptop",
+                "age1test",
+                "linux-x86_64",
+            )
+            .await;
+        assert!(first.is_ok());
+        assert!(store.is_redeemed(&invite.invite_id, &invite.nonce).await);
+
+        let second = store
+            .claim(
+                &invite.invite_id,
+                &invite.nonce,
+                "tablet",
+                "age1other",
+                "ios",
+            )
+            .await;
+        assert!(matches!(
+            second,
+            Err(InviteRedemptionError::AlreadyRedeemed { .. })
+        ));
+        assert_eq!(store.count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_invite_redemption_store_save_load_roundtrip() {
+        let master_key = [42u8; 32];
+        let invite = EnrollmentInvite::new(
+            "admin-device",
+            &master_key,
+            24,
+            DevicePermissions::default(),
+        );
+        let store = InviteRedemptionStore::new();
+        store
+            .claim(
+                &invite.invite_id,
+                &invite.nonce,
+                "laptop",
+                "age1test",
+                "linux-x86_64",
+            )
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invite-redemptions.json");
+        store.save_to_file(&path).await.unwrap();
+
+        let loaded = InviteRedemptionStore::new();
+        loaded.load_from_file(&path).await.unwrap();
+        assert!(loaded.is_redeemed(&invite.invite_id, &invite.nonce).await);
+        assert_eq!(loaded.count().await, 1);
     }
 }
