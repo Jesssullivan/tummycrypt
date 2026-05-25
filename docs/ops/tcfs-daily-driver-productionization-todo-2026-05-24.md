@@ -1,6 +1,6 @@
 # TCFS Daily Driver Productionization Todo - 2026-05-24
 
-Status timestamp: 2026-05-25T14:51:28Z
+Status timestamp: 2026-05-25T20:05:00Z
 
 This is the current execution checklist for moving TCFS from an
 evidence-backed alpha surface toward a robust daily-driver filesystem product.
@@ -10,21 +10,42 @@ security, and user-visible control paths are also proven.
 
 ## Current State
 
-- `main` is at `76ab051c1391fbc94bc6032135eadaeef061156f` after PR
-  `#459` merged the TIN-1424 recipient-wrapped enrollment bootstrap slice.
-- Active PR: `#460` (`5456aa2`) adds a static TIN-1547 FileProvider
-  decorations/progress/custom-action contract guardrail and remains draft
-  until fresh post-rebase CI is green.
+- `main` is at `d9ebf704197e50a0666ce4f055487e77c0f9c3a8` after PR
+  `#462` merged the TIN-1621 retry/observability cut for package-backed
+  large restores.
 - Latest prerelease: `v0.12.13-rc4`.
 - Public `Latest` release remains `v0.12.12`.
 - Post-merge CI/Docs/Nix runs on `40b4514` are green:
   - CI `26378706285`
   - Docs `26378706284`
   - Nix CI `26378706243`
+- Post-merge Docs run `26412349803` is green on `main@70e2eee`.
+- Post-merge CI run `26412349802` and Nix CI run `26412349798` are green on
+  `main@70e2eee`.
+- Mainline package-backed storage large-restore run `26412362782` completed on
+  `main@70e2eee` with `tcfs_binary_source=nix-package`,
+  `pack_size_mib=3072`, `restore_headroom_margin_mib=2048`, and
+  `require_https=true`. The run validated the production-smoke storage
+  environment, built the Nix package successfully, pushed 30 files /
+  3,222,239,922 bytes / 651 chunks with socket highwater 0, then failed
+  fresh-tree restore on the 3.22 GB `.git/objects/pack/*.pack` after repeated
+  Cloudflare/S3 `502` reads for one chunk. The artifact classifies the result
+  as `regular file hash manifest mismatch`: 29/30 regular files restored and
+  only 31,221 bytes present in the restore tree.
+- Fresh package-backed storage large-restore run `26417405494` is running on
+  `main@d9ebf70` with `tcfs_binary_source=nix-package`, `pack_size_mib=3072`,
+  `restore_headroom_margin_mib=2048`, `download_chunk_retries=8`, and
+  `require_https=true`. This is the classification rerun for `TIN-1621` after
+  PR `#462`; do not close the ticket until the artifact proves exact 30/30
+  restore or yields a new classified failure.
 - PR `#459` pre-merge CI was green on head
   `4426eaa1f3591881756988a93371dd8bfd7a6458`, including CI
   `26404264594`, Docs `26404264596`, Nix CI `26404264593`, and CI Live
   Storage `26404264595`.
+- PR `#460` merged the static TIN-1547 FileProvider surface contract guardrail
+  at `aa104ce6273dcff5db1a36a1a8407530227291ac`.
+- PR `#461` merged the TIN-1546 package-backed storage large-restore workflow
+  at `70e2eee1db417be43f1ab62c319a3013097b45c1`.
 - PR `#450` pre-merge CI was green, including CI `26379985552`, Docs
   `26379985540`, Nix CI `26379985542`, CI Live Storage `26379985538`, and
   Linux Package Container Smoke `26379985545`.
@@ -90,6 +111,11 @@ Open beta/daily-driver foundation:
 - `TIN-1549`: desktop status/progress/conflict recovery UX
 - `TIN-1548`: iOS Files.app acceptance
 - `TIN-1569`: Windows installer and Explorer/CFAPI posture
+- `TIN-1617`: selected large-workdir onboarding pilot
+- `TIN-1618`: large-workdir read-only inventory packet
+- `TIN-1619`: selected large-workdir shadow pilot packet
+- `TIN-1620`: one expendable live repo two-machine pilot
+- `TIN-1621`: large-pack restore survives repeated S3 502s
 
 ## This Week: Alpha Closeout
 
@@ -132,8 +158,9 @@ Evidence to archive:
 
 The alpha storage sub-claim is now green for scoped HTTPS credentials plus a
 1 GiB synthetic Git-pack push/restore on merged main. Keep `TIN-1546` open for
-beta because package-backed multi-GiB restore, longer soak/load behavior, and
-benchmark rows are still missing.
+beta because package-backed multi-GiB restore currently fails under repeated
+S3/Cloudflare `502` chunk reads, and longer soak/load behavior plus benchmark
+rows are still missing.
 
 2026-05-24 progress:
 
@@ -171,9 +198,22 @@ benchmark rows are still missing.
 - [x] Updated the dispatch lane so the default large-restore binary source is
   the current Nix `tcfs-cli` package (`tcfs_binary_source=nix-package`) instead
   of only a source-built `target/release/tcfs`.
-- [ ] Dispatch a package-backed multi-GiB restore run against
-  `tcfs-storage-prod-smoke` with `tcfs_binary_source=nix-package`, then attach
-  the artifact to `TIN-1546`.
+- [x] Merged PR `#461` at
+  `70e2eee1db417be43f1ab62c319a3013097b45c1`, making the Nix package path the
+  default for the dispatch-only large-restore lane.
+- [x] Dispatched mainline package-backed multi-GiB restore run `26412362782`
+  against `tcfs-storage-prod-smoke` with `tcfs_binary_source=nix-package`.
+- [x] Attached the `26412362782` result to the sprint truth: package-backed
+  multi-GiB push passed; exact restore failed after repeated Cloudflare/S3
+  `502` reads on one large-pack chunk. Keep `TIN-1546` open for stronger
+  transient restore recovery and a clean package-backed rerun.
+- [x] Added the first `TIN-1621` implementation cut in PR `#462`: larger
+  default chunk-download retry budget, explicit workflow retry input, retry
+  budget recording in restore packets, and full error-chain preservation for
+  failed pulls.
+- [ ] After `#462` lands, rerun the package-backed 3 GiB restore with
+  `download_chunk_retries=8` and close `TIN-1621` only if the artifact restores
+  30/30 files exactly.
 
 ### 3. Harden `TIN-1547` FileProvider
 
@@ -240,6 +280,9 @@ files.
   writes the macOS HostApp/FileProvider bootstrap JSON from the same first-run
   state as `config.toml`, using the unified credential resolver and a `0600`
   temp file before atomic install.
+- [x] Extend the static FileProvider surface contract test so HostApp drift is
+  caught if it stops reading `~/.config/tcfs/fileprovider/config.json` or stops
+  enriching `master_key_file` into the Keychain `master_key_base64` payload.
 - [ ] Prove the packaged macOS HostApp consumes that Rust-owned FileProvider
   JSON path and provisions shared Keychain config without a hand-authored
   `~/.config/tcfs/fileprovider/config.json`.
@@ -311,6 +354,14 @@ Why third: pairing depends on `TIN-1417`.
 
 Target window: 2026-06-15 through 2026-06-30.
 
+- [ ] `TIN-1617`: selected large-workdir onboarding pilot: inventory,
+  shadow-root proof, one expendable live repo, then selected subtree rollout.
+  Design recon: [Large Workdir Onboarding Design - 2026-05-25](large-workdir-onboarding-design-2026-05-25.md).
+- [x] `TIN-1618`: first read-only inventory helper and regression test for
+  candidate roots. It emits `inventory.json`, `inventory.env`, and
+  `summary.md`; live pilot packet evidence is still pending.
+- [ ] `TIN-1619`: shadow pilot packet for one selected large workdir.
+- [ ] `TIN-1620`: one expendable live repo two-machine pilot.
 - [ ] `TIN-1416`: subscription-based selective sync.
 - [ ] `TIN-1556`: stable root IDs and broad-directory ownership.
 - [ ] `TIN-1419`: streaming large-file IO for FUSE/FileProvider writes.
@@ -359,15 +410,7 @@ scripts/storage-posture-canary-dispatch.sh \
   --runner-label ubuntu-24.04
 ```
 
-Large restore packet, on a host with the archived shadow root:
-
-```bash
-RESTORE_REQUIRE_HEADROOM=1 \
-RESTORE_HEADROOM_MARGIN_BYTES=$((2 * 1024 * 1024 * 1024)) \
-task lazy:git-repo-restore-proof
-```
-
-Package-backed hosted large restore packet:
+Package-backed hosted large restore packet after `TIN-1621`:
 
 ```bash
 gh workflow run storage-large-restore-canary.yml \
@@ -378,6 +421,7 @@ gh workflow run storage-large-restore-canary.yml \
   -f pack_size_mib=3072 \
   -f restore_headroom_margin_mib=2048 \
   -f reconcile_timeout_secs=3600 \
+  -f download_chunk_retries=8 \
   -f require_https=true
 ```
 

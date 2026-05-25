@@ -133,6 +133,7 @@ GitHub issues, and Linear mirrors. It should answer two questions quickly:
 
 - [Product Reality and Priority](product-reality-and-priority.md)
 - [TCFS Fleet Parity Sprint Plan - 2026-05-09](fleet-parity-sprint-plan-2026-05-09.md)
+- [TCFS Large Workdir Onboarding Design - 2026-05-25](large-workdir-onboarding-design-2026-05-25.md)
 - [TCFS Lazy Traversal QA Permutation Matrix - 2026-05-09](lazy-traversal-qa-permutation-matrix-2026-05-09.md)
 - [TCFS Workstream Reality Check - 2026-05-09](workstream-reality-check-2026-05-09.md)
 - [Lazy Hydration Demo Acceptance](lazy-hydration-demo.md)

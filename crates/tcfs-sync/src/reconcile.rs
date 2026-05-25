@@ -877,7 +877,7 @@ pub async fn execute_plan(
                 Err(e) => {
                     result
                         .errors
-                        .push((rel_path.clone(), format!("push failed: {e}")));
+                        .push((rel_path.clone(), format!("push failed: {e:#}")));
                 }
             },
 
@@ -922,7 +922,7 @@ pub async fn execute_plan(
                     Err(e) => {
                         result
                             .errors
-                            .push((rel_path.clone(), format!("pull failed: {e}")));
+                            .push((rel_path.clone(), format!("pull failed: {e:#}")));
                     }
                 }
             }
@@ -1094,12 +1094,12 @@ async fn execute_new_remote_pulls_concurrent(
                 }
             }
             Ok((rel_path, Err(e))) => {
-                result.errors.push((rel_path, e.to_string()));
+                result.errors.push((rel_path, format!("{e:#}")));
             }
             Err(e) => {
                 result
                     .errors
-                    .push(("<concurrent-pull-task>".into(), e.to_string()));
+                    .push(("<concurrent-pull-task>".into(), format!("{e:#}")));
             }
         }
     }

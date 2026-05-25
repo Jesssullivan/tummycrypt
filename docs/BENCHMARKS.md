@@ -91,6 +91,18 @@ but it is still not the final beta storage benchmark. The next rows need
 package-backed or archived `linux-xr-fast` multi-GiB restore and longer
 soak/load evidence.
 
+Current package-backed multi-GiB candidate from merged-main run `26412362782`,
+artifact `storage-large-restore-canary-26412362782-1`:
+
+| Endpoint class | Workload | Push shape | Restore result | Socket highwater | Transient behavior |
+|----------------|----------|------------|----------------|------------------|--------------------|
+| Public HTTPS S3-compatible endpoint (`https://tcfs-smoke-s3.tinyland.dev`) | Synthetic Git pack source, 3,222,239,922 regular-file bytes | Nix package `tcfs-cli-0.12.13`; 30 upload rows, 651 chunks, 3,222,239,922 uploaded bytes, one 3,222,208,701-byte `.pack`, upload concurrency 4, chunk timeout 300s, 194,920 ms total upload elapsed | Failed fresh-tree restore after 456s: 29/30 regular files present, 31,221 restored bytes, large `.pack` missing, `regular file hash manifest mismatch` | 0 | Restore hit repeated Cloudflare/S3 `502` reads for one large-pack chunk. OpenDAL retried with backoff and TCFS retried chunk download up to `TCFS_DOWNLOAD_CHUNK_RETRIES=3`, then the reconcile completed with 1 pull error |
+
+This is a useful package-backed load packet and a concrete transient-restore
+failure, not package-backed restore proof. The next beta storage cut needs
+stronger chunk-read retry/resume behavior or an endpoint decision that removes
+this repeated 502 pattern, followed by a clean exact-restore rerun.
+
 Functional follow-up observations from
 `docs/release/evidence/home-canary-linux-xr-shadow-20260511T040325Z/`:
 
@@ -236,7 +248,7 @@ bounded by
 `TCFS_UPLOAD_CHUNK_TIMEOUT_SECS` (default 300, cap 3600, `0` disables) so a
 wedged S3 write slot becomes a retry row instead of an unobservable stall.
 Chunk download attempts are tunable via `TCFS_DOWNLOAD_CHUNK_RETRIES` (default
-3, cap 32) so large restore proofs can increase retry budget without changing
+8, cap 32) so large restore proofs can increase retry budget without changing
 source. Remote read attempts for manifests and chunks are bounded by
 `TCFS_DOWNLOAD_READ_TIMEOUT_SECS` (default 300, cap 3600, `0` disables), so a
 wedged S3 read is classified as a timeout and retried instead of hanging the

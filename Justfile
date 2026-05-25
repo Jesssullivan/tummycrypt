@@ -154,6 +154,14 @@ linux-package-container-workflow-test:
 storage-large-restore-workflow-test:
     @bash scripts/test-storage-large-restore-canary-workflow.sh
 
+# Read-only inventory packet for a candidate large workdir
+large-workdir-inventory ROOT *ARGS:
+    python3 scripts/large-workdir-inventory.py {{ROOT}} {{ARGS}}
+
+# Regression test the large workdir inventory helper
+large-workdir-inventory-test:
+    python3 scripts/test-large-workdir-inventory.py
+
 # Installed-binary smoke for release surfaces that ship tcfsd (and optionally tcfs)
 install-smoke *ARGS:
     bash scripts/install-smoke.sh {{ARGS}}
