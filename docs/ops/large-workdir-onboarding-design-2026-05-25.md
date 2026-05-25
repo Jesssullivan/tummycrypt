@@ -303,3 +303,81 @@ python3 scripts/test-large-workdir-inventory.py
 task lazy:test-large-workdir-inventory
 just large-workdir-inventory-test
 ```
+
+## Packet Shape
+
+Keep the packet layout boring and close to the existing canary evidence
+structure. Reuse the same naming style as the current `home-canary-linux-xr`
+and `git-repo-canary` lanes so the archive is easy to compare.
+
+### `TIN-1618` Inventory Packet
+
+Inputs:
+
+- candidate root path
+- optional `--skip-xattrs` for speed on hosts where xattr probing is noisy
+- optional `--max-unsupported` cap for retaining unsupported paths in the JSON
+
+Outputs:
+
+- `inventory.json`
+- `inventory.env`
+- `summary.md`
+- optional `source-inventory/` folder when the packet is embedded in a larger
+  canary directory
+
+Required evidence:
+
+- source root recorded read-only
+- total bytes, counts, symlink count, hidden directory count, and special file
+  count
+- Git presence and dirty / clean state
+- xattr probe state
+- scan errors and unsupported entries
+- recommendation bucket such as `shadow_pilot_ready` or
+  `blocked_special_files`
+
+### `TIN-1619` Shadow Pilot Packet
+
+Preferred shape:
+
+- source inventory archived first
+- isolated shadow root under `~/TCFS Pilot/real-canaries/`
+- disposable remote prefix under the existing evidence namespace
+- state and config rooted under the packet directory, not under the live source
+
+Required proof rows:
+
+- browse before hydrate
+- selected file hydrate
+- mounted or CLI `ls` / `cat`
+- cache clear and exact rehydrate
+- clean file unsync and recursive clean unsync
+- dirty unsync refusal
+- peer edit while unsynced
+- peer delete / rename while unsynced
+- symlink parity or explicit blocker
+
+### `TIN-1620` One Expendable Live Repo Packet
+
+Only after the shadow packet is boring:
+
+- choose one live repo the operator can lose temporarily
+- run the same two-machine browse / hydrate / unsync / rehydrate pattern
+- archive rollback and fresh-tree restore logs
+- keep the live source repo immutable until this packet is green
+
+### Evidence Directory Convention
+
+Use a timestamped evidence directory under `docs/release/evidence/` and keep
+the familiar subdirectories:
+
+- `source-inventory/`
+- `shadow-inventory/`
+- `push/`
+- `honey/`
+- `lifecycle/`
+- `restore-proof/`
+
+The exact packet may omit subdirectories that do not apply, but the naming
+pattern should stay stable so the archive compares cleanly across runs.
