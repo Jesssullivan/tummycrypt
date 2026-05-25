@@ -1,6 +1,6 @@
 # TCFS Daily Driver Productionization Todo - 2026-05-24
 
-Status timestamp: 2026-05-25T18:03:01Z
+Status timestamp: 2026-05-25T20:05:00Z
 
 This is the current execution checklist for moving TCFS from an
 evidence-backed alpha surface toward a robust daily-driver filesystem product.
@@ -10,10 +10,9 @@ security, and user-visible control paths are also proven.
 
 ## Current State
 
-- `main` is at `70e2eee1db417be43f1ab62c319a3013097b45c1` after PR
-  `#461` merged the package-backed TIN-1546 large-restore workflow path.
-- Draft PR `#462` is open to sync the alpha storage/FileProvider/large-workdir
-  evidence plan with the latest canary results and first inventory tooling.
+- `main` is at `d9ebf704197e50a0666ce4f055487e77c0f9c3a8` after PR
+  `#462` merged the TIN-1621 retry/observability cut for package-backed
+  large restores.
 - Latest prerelease: `v0.12.13-rc4`.
 - Public `Latest` release remains `v0.12.12`.
 - Post-merge CI/Docs/Nix runs on `40b4514` are green:
@@ -33,6 +32,12 @@ security, and user-visible control paths are also proven.
   Cloudflare/S3 `502` reads for one chunk. The artifact classifies the result
   as `regular file hash manifest mismatch`: 29/30 regular files restored and
   only 31,221 bytes present in the restore tree.
+- Fresh package-backed storage large-restore run `26417405494` is running on
+  `main@d9ebf70` with `tcfs_binary_source=nix-package`, `pack_size_mib=3072`,
+  `restore_headroom_margin_mib=2048`, `download_chunk_retries=8`, and
+  `require_https=true`. This is the classification rerun for `TIN-1621` after
+  PR `#462`; do not close the ticket until the artifact proves exact 30/30
+  restore or yields a new classified failure.
 - PR `#459` pre-merge CI was green on head
   `4426eaa1f3591881756988a93371dd8bfd7a6458`, including CI
   `26404264594`, Docs `26404264596`, Nix CI `26404264593`, and CI Live
@@ -351,6 +356,7 @@ Target window: 2026-06-15 through 2026-06-30.
 
 - [ ] `TIN-1617`: selected large-workdir onboarding pilot: inventory,
   shadow-root proof, one expendable live repo, then selected subtree rollout.
+  Design recon: [Large Workdir Onboarding Design - 2026-05-25](large-workdir-onboarding-design-2026-05-25.md).
 - [x] `TIN-1618`: first read-only inventory helper and regression test for
   candidate roots. It emits `inventory.json`, `inventory.env`, and
   `summary.md`; live pilot packet evidence is still pending.

@@ -455,6 +455,7 @@ Linear hygiene decision on April 29, 2026:
 - [Packaged Install To First-Real-Use Acceptance](packaged-install-first-use.md)
 - [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md)
 - [TCFS Feature and Objective Matrix - 2026-05-09](feature-objective-matrix-2026-05-09.md)
+- [TCFS Large Workdir Onboarding Design - 2026-05-25](large-workdir-onboarding-design-2026-05-25.md)
 - [Remote Governance](remote-governance.md)
 - [Lab Host Acceptance Matrix](lab-host-acceptance-matrix.md)
 - [Neo-Honey Live Acceptance](neo-honey-acceptance.md)
