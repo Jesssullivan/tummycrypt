@@ -93,6 +93,11 @@ assert_version() {
 }
 
 write_daemon_only_config() {
+  if [[ "$REQUIRE_STORAGE_OK" -eq 1 ]]; then
+    write_storage_backed_config "$CONFIG_PATH" false
+    return
+  fi
+
   cat >"$CONFIG_PATH" <<EOF
 [daemon]
 socket = "$SOCKET_PATH"
@@ -109,6 +114,92 @@ state_db = "$STATE_DIR/tcfsd/state.db"
 enabled = false
 EOF
   chmod 600 "$CONFIG_PATH" 2>/dev/null || true
+}
+
+storage_env() {
+  local install_var="TCFS_INSTALL_SMOKE_$1"
+  local smoke_var="TCFS_SMOKE_$1"
+  local tcfs_var="TCFS_$1"
+  local default="${2:-}"
+
+  if [[ -n "${!install_var:-}" ]]; then
+    printf '%s\n' "${!install_var}"
+  elif [[ -n "${!smoke_var:-}" ]]; then
+    printf '%s\n' "${!smoke_var}"
+  elif [[ -n "${!tcfs_var:-}" ]]; then
+    printf '%s\n' "${!tcfs_var}"
+  else
+    printf '%s\n' "$default"
+  fi
+}
+
+toml_string() {
+  python3 - "$1" <<'PY'
+import sys
+print('"' + sys.argv[1].replace('\\', '\\\\').replace('"', '\\"') + '"')
+PY
+}
+
+write_storage_backed_config() {
+  local output_path="$1"
+  local crypto_enabled="$2"
+  local endpoint bucket region remote_prefix enforce_tls ca_cert_path ca_cert_pem
+
+  endpoint="$(storage_env S3_ENDPOINT "http://localhost:8333")"
+  bucket="$(storage_env S3_BUCKET "tcfs")"
+  region="$(storage_env S3_REGION "us-east-1")"
+  remote_prefix="$(storage_env REMOTE_PREFIX "")"
+  if [[ -z "$remote_prefix" ]]; then
+    remote_prefix="$(storage_env S3_REMOTE_PREFIX "")"
+  fi
+  ca_cert_path="$(storage_env S3_CA_CERT_PATH "")"
+  ca_cert_pem="$(storage_env S3_CA_CERT_PEM "")"
+  enforce_tls="$(storage_env S3_ENFORCE_TLS "")"
+
+  if [[ -z "$ca_cert_path" && -n "$ca_cert_pem" ]]; then
+    ca_cert_path="$TMP_DIR/storage-ca.pem"
+    printf '%s\n' "$ca_cert_pem" >"$ca_cert_path"
+    chmod 600 "$ca_cert_path" 2>/dev/null || true
+  fi
+
+  if [[ -z "$enforce_tls" ]]; then
+    case "$endpoint" in
+      https://*) enforce_tls="true" ;;
+      *) enforce_tls="false" ;;
+    esac
+  else
+    enforce_tls="$(printf '%s\n' "$enforce_tls" | tr '[:upper:]' '[:lower:]')"
+    case "$enforce_tls" in
+      true|1|yes) enforce_tls="true" ;;
+      false|0|no) enforce_tls="false" ;;
+      *)
+        echo "invalid storage TLS flag for install smoke: $enforce_tls" >&2
+        exit 2
+        ;;
+    esac
+  fi
+
+  {
+    printf '[daemon]\n'
+    printf 'socket = %s\n\n' "$(toml_string "$SOCKET_PATH")"
+    printf '[storage]\n'
+    printf 'endpoint = %s\n' "$(toml_string "$endpoint")"
+    printf 'region = %s\n' "$(toml_string "$region")"
+    printf 'bucket = %s\n' "$(toml_string "$bucket")"
+    printf 'enforce_tls = %s\n' "$enforce_tls"
+    if [[ -n "$remote_prefix" ]]; then
+      printf 'remote_prefix = %s\n' "$(toml_string "$remote_prefix")"
+    fi
+    if [[ -n "$ca_cert_path" ]]; then
+      printf 'ca_cert_path = %s\n' "$(toml_string "$ca_cert_path")"
+    fi
+    printf '\n[sync]\n'
+    printf 'state_db = %s\n\n' "$(toml_string "$STATE_DIR/tcfsd/state.db")"
+    printf '[crypto]\n'
+    printf 'enabled = %s\n' "$crypto_enabled"
+  } >"$output_path"
+
+  chmod 600 "$output_path" 2>/dev/null || true
 }
 
 tcfs_supports_init_config_out() {
@@ -207,6 +298,10 @@ if [[ "$SKIP_CLI" -eq 0 ]]; then
   TCFS_PATH="$(resolve_bin "$TCFS_BIN")"
   assert_version "tcfs" "$TCFS_PATH"
   if tcfs_supports_init_config_out; then
+    if [[ "$REQUIRE_STORAGE_OK" -eq 1 ]]; then
+      echo "writing storage-backed init base config: $INIT_BASE_CONFIG"
+      write_storage_backed_config "$INIT_BASE_CONFIG" true
+    fi
     echo "initializing first-run config: $CONFIG_PATH"
     TCFS_MASTER_PASSWORD="tcfs-install-smoke-passphrase" \
       "$TCFS_PATH" --config "$INIT_BASE_CONFIG" init \

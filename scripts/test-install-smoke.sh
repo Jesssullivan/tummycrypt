@@ -46,7 +46,10 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 
+base_config=""
 if [[ "${1:-}" == "--config" ]]; then
+  base_config="$2"
+  printf 'tcfs base-config:%s\n' "$base_config" >>"$log"
   shift 2
 fi
 
@@ -95,6 +98,11 @@ case "${1:-}" in
       exit 0
     fi
     mkdir -p "$config_dir"
+    if [[ -n "$base_config" && -f "$base_config" ]]; then
+      printf 'tcfs base-config-content-begin\n' >>"$log"
+      cat "$base_config" >>"$log"
+      printf '\ntcfs base-config-content-end\n' >>"$log"
+    fi
     printf '0123456789abcdef0123456789abcdef' >"$config_dir/master.key"
     printf '{"devices":[{"name":"install-smoke"}]}\n' >"$config_dir/devices.json"
     cat >"$config_out" <<CONFIG
@@ -112,7 +120,7 @@ CONFIG
     echo "tcfs initialized successfully."
     ;;
   status)
-    if [[ -n "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${TCFS_S3_ACCESS:-}${TCFS_S3_SECRET:-}${SEAWEED_ACCESS_KEY:-}${SEAWEED_SECRET_KEY:-}" ]]; then
+    if [[ -z "${FAKE_ALLOW_STORAGE_ENV:-}" && -n "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${TCFS_S3_ACCESS:-}${TCFS_S3_SECRET:-}${SEAWEED_ACCESS_KEY:-}${SEAWEED_SECRET_KEY:-}" ]]; then
       printf 'ambient credentials leaked into tcfs status\n' >>"$env_log"
     fi
     echo "tcfsd v0.12.13"
@@ -139,7 +147,7 @@ if [[ "${1:-}" == "--version" ]]; then
 fi
 
 env_log="${FAKE_TCFSD_ENV_LOG:?set FAKE_TCFSD_ENV_LOG}"
-if [[ -n "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${TCFS_S3_ACCESS:-}${TCFS_S3_SECRET:-}${SEAWEED_ACCESS_KEY:-}${SEAWEED_SECRET_KEY:-}" ]]; then
+if [[ -z "${FAKE_ALLOW_STORAGE_ENV:-}" && -n "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${TCFS_S3_ACCESS:-}${TCFS_S3_SECRET:-}${SEAWEED_ACCESS_KEY:-}${SEAWEED_SECRET_KEY:-}" ]]; then
   printf 'ambient credentials leaked into tcfsd\n' >>"$env_log"
 fi
 
@@ -239,6 +247,37 @@ assert_contains "$FAKE_TCFS_LOG" " init --check --config-out "
 assert_not_contains "$FAKE_TCFS_ENV_LOG" "ambient credentials leaked"
 assert_not_contains "$FAKE_TCFSD_ENV_LOG" "ambient credentials leaked"
 assert_not_contains "$CLI_OUT" "missing-config.toml"
+
+STORAGE_OUT="$TMPDIR/storage.out"
+: >"$FAKE_TCFSD_ENV_LOG"
+: >"$FAKE_TCFS_ENV_LOG"
+: >"$FAKE_TCFS_LOG"
+FAKE_ALLOW_STORAGE_ENV=1 \
+TCFS_SMOKE_S3_ENDPOINT="https://storage.example.invalid" \
+TCFS_SMOKE_S3_BUCKET="tcfs-smoke" \
+TCFS_SMOKE_S3_REGION="us-west-2" \
+TCFS_SMOKE_REMOTE_PREFIX="gha/install-smoke/test" \
+TCFS_SMOKE_S3_CA_CERT_PEM="-----BEGIN CERTIFICATE-----
+fake-ca
+-----END CERTIFICATE-----" \
+bash "$SCRIPT" \
+  --tcfs "$FAKE_TCFS" \
+  --tcfsd "$FAKE_TCFSD" \
+  --expected-version 0.12.13 \
+  --require-storage-ok \
+  >"$STORAGE_OUT" 2>&1
+
+assert_contains "$STORAGE_OUT" "writing storage-backed init base config:"
+assert_contains "$STORAGE_OUT" "initializing first-run config:"
+assert_contains "$STORAGE_OUT" "storage: [ok]"
+assert_contains "$FAKE_TCFS_LOG" "tcfs base-config-content-begin"
+assert_contains "$FAKE_TCFS_LOG" 'endpoint = "https://storage.example.invalid"'
+assert_contains "$FAKE_TCFS_LOG" 'bucket = "tcfs-smoke"'
+assert_contains "$FAKE_TCFS_LOG" 'remote_prefix = "gha/install-smoke/test"'
+assert_contains "$FAKE_TCFS_LOG" "enforce_tls = true"
+assert_contains "$FAKE_TCFS_LOG" "ca_cert_path = "
+assert_not_contains "$FAKE_TCFS_ENV_LOG" "ambient credentials leaked"
+assert_not_contains "$FAKE_TCFSD_ENV_LOG" "ambient credentials leaked"
 
 LEGACY_OUT="$TMPDIR/legacy.out"
 FAKE_TCFS_INIT_CONFIG_OUT=0 bash "$SCRIPT" \
