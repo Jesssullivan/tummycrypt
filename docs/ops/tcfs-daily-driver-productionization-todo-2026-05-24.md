@@ -1,6 +1,6 @@
 # TCFS Daily Driver Productionization Todo - 2026-05-24
 
-Status timestamp: 2026-05-24T22:21:01Z
+Status timestamp: 2026-05-25T01:40:00Z
 
 This is the current execution checklist for moving TCFS from an
 evidence-backed alpha surface toward a robust daily-driver filesystem product.
@@ -10,18 +10,28 @@ security, and user-visible control paths are also proven.
 
 ## Current State
 
-- `main` is clean at `43ce2274efe95c7ffd593d201707a88b3858f4b3`.
+- `main` is clean at `40b451477e5046e794ad81bc173a1a0a1fac5d06` after
+  PR `#448` merged the TIN-1546 ANSI summary/transient-restore classifier.
 - No open GitHub PRs.
 - Latest prerelease: `v0.12.13-rc4`.
 - Public `Latest` release remains `v0.12.12`.
-- Post-merge CI/Docs/Nix runs on `43ce227` are green:
-  - CI `26246172625`
-  - Docs `26246172578`
-  - Nix CI `26246172626`
+- Post-merge CI/Docs/Nix runs on `40b4514` are green:
+  - CI `26378706285`
+  - Docs `26378706284`
+  - Nix CI `26378706243`
 - Fresh storage posture canary `26246264661` is green on merged `main`, using
   `tcfs-storage-prod-smoke` with public HTTPS, public CA trust,
   allowed-prefix list/write/read/delete/delete-verify, and denied-prefix
   `PermissionDenied`.
+- Branch validation run `26378404972` is green for the large-restore companion
+  after PR `#448`: 1,074,101,203 bytes uploaded and restored under
+  `gha/storage-posture/large/...`, exact fresh-tree restore, socket highwater
+  0, and successful recovery despite transient S3/Cloudflare `502` read
+  retries.
+- Mainline run `26378842677` is green on `main@40b4514` for the same
+  large-restore companion: 1,074,101,201 bytes uploaded/restored, exact
+  fresh-tree restore, socket highwater 0, and successful recovery despite 42
+  transient `502` read log lines.
 
 ## Claim Boundary
 
@@ -88,7 +98,7 @@ Required next packet:
 
 - [x] Use a host that has, or can recreate, the `linux-xr-fast` shadow root.
 - [x] Confirm restore host disk headroom before restore execution.
-- [ ] Use the headroom gate:
+- [x] Use the headroom gate:
 
 ```bash
 RESTORE_REQUIRE_HEADROOM=1 \
@@ -98,19 +108,19 @@ task lazy:git-repo-restore-proof
 
 Evidence to archive:
 
-- [ ] `restore-proof.env`
-- [ ] reconcile dry-run and execute logs
-- [ ] restored regular-file bytes and restore throughput
-- [ ] partial restore bytes/count if execution fails
-- [ ] retry and timeout counts
-- [ ] transient error classification
-- [ ] socket highwater under the restore/load path
-- [ ] final explicit claim boundary
+- [x] `restore-proof.env`
+- [x] reconcile dry-run and execute logs
+- [x] restored regular-file bytes and restore throughput
+- [x] partial restore bytes/count if execution fails
+- [x] retry and timeout counts
+- [x] transient error classification
+- [x] socket highwater under the restore/load path
+- [x] final explicit claim boundary
 
-Close only the alpha storage sub-claim when the packet proves endpoint scope,
-transport, and bounded failure classes. Keep `TIN-1546` open for beta if
-large restore still fails, soak is missing, or transient recovery remains
-ambiguous.
+The alpha storage sub-claim is now green for scoped HTTPS credentials plus a
+1 GiB synthetic Git-pack push/restore on merged main. Keep `TIN-1546` open for
+beta because package-backed multi-GiB restore, longer soak/load behavior, and
+benchmark rows are still missing.
 
 2026-05-24 progress:
 
@@ -132,11 +142,19 @@ ambiguous.
   `.github/workflows/storage-large-restore-canary.yml`, so the large push and
   fresh-tree restore proof can consume the existing `tcfs-storage-prod-smoke`
   environment secrets without exposing them locally.
-- [ ] Run the remote push/restore proof. The current shell is still pointed at
-  local dev endpoints (`TCFS_S3_ENDPOINT=http://localhost:8333`,
-  `TCFS_NATS_URL=nats://localhost:4222`), so the production-like restore cut
-  must use an explicit HTTPS remote and scoped credentials or a correctly
-  provisioned runner environment.
+- [x] PR `#448` fixed the ANSI-colored tracing summary parser and allowed
+  successful pushes with transient 5xx retry noise to proceed into restore.
+- [x] Branch validation run `26378404972` passed the remote push/restore proof
+  against `tcfs-storage-prod-smoke`: 30 files, 1,074,101,203 bytes uploaded and
+  restored, one 1,074,069,982-byte Git pack, 365-second restore execution,
+  2,942,743 B/s restored throughput, socket highwater 0, 76 transient `502`
+  log lines, 36 OpenDAL retry rows, and 3 TCFS chunk-download retry rows.
+- [x] Mainline run `26378842677` passed the same remote push/restore proof from
+  `main@40b4514`: 30 files, 1,074,101,201 bytes uploaded and restored, one
+  1,074,069,980-byte Git pack, 442,664 ms total upload elapsed,
+  186-second restore execution, 5,774,737 B/s restored throughput, socket
+  highwater 0, 42 transient `502` log lines, 20 OpenDAL retry rows, and
+  1 TCFS chunk-download retry row.
 
 ### 3. Harden `TIN-1547` FileProvider
 
@@ -170,13 +188,25 @@ Target window: 2026-06-01 through 2026-06-14.
 Why first: every installer still lands binaries before the user has a valid
 config, storage credentials, and unlocked encryption state.
 
-- [ ] Implement the CLI wizard path for fresh setup.
-- [ ] Write a valid `config.toml`.
-- [ ] Generate or import master key material.
-- [ ] Verify `tcfs status [ok]` before exit.
+Current code already has the headless base: `tcfs init` can generate/write
+`master.key`, create `devices.json`, write `config.toml` unless
+`--skip-config` is set, and `tcfs init --check` validates the local first-run
+files.
+
+- [x] Generate or import master key material for the trusted single-operator
+  setup path.
+- [x] Write a valid local `config.toml` from `tcfs init`.
+- [x] Validate local first-run files with `tcfs init --check`.
 - [ ] Make daemon/systemd/LaunchAgent missing-config behavior explicit and
-  recoverable.
-- [ ] Add package-smoke first-use rows that do not require hand-edited config.
+  recoverable; `tcfsd` currently logs a missing config and runs defaults.
+- [ ] Add installed-binary first-use smoke rows that run `tcfs init
+  --non-interactive --config-out <temp>/config.toml`, then `tcfs init --check
+  --config-out <temp>/config.toml`, then start `tcfsd` with that config.
+- [ ] Verify `tcfs status [ok]` before exit for storage-backed first-use
+  packets.
+- [ ] Keep fleet join out of `tcfs init` until `TIN-1417` and `TIN-1424` land;
+  `tcfs init` should mean fresh local setup, while invite/pairing belongs to a
+  later safe enrollment path.
 
 ### 6. `TIN-1417` Per-Device Crypto
 
