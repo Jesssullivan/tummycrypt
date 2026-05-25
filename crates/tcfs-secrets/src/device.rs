@@ -4,8 +4,9 @@
 //! Device keys are stored in the platform keychain or an age-encrypted file.
 
 use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// A registered device identity
@@ -38,6 +39,16 @@ pub struct DeviceIdentity {
 pub struct DeviceRegistry {
     /// List of enrolled devices
     pub devices: Vec<DeviceIdentity>,
+}
+
+/// Newly generated local device key material.
+///
+/// The secret half must be persisted outside `DeviceRegistry`; the registry is
+/// intended to be shareable metadata and should only contain public keys.
+#[derive(Clone)]
+pub struct LocalDeviceKey {
+    pub public_key: String,
+    pub secret_key: SecretString,
 }
 
 impl DeviceRegistry {
@@ -141,6 +152,21 @@ impl DeviceRegistry {
         device_id
     }
 
+    /// Enroll a local device with a real age X25519 keypair.
+    ///
+    /// Returns `(device_id, key_material)`. Callers must persist
+    /// `key_material.secret_key` with `save_device_secret_key` before exposing
+    /// the registry as usable.
+    pub fn enroll_local(
+        &mut self,
+        name: &str,
+        description: Option<String>,
+    ) -> (String, LocalDeviceKey) {
+        let key = generate_local_device_key();
+        let device_id = self.enroll(name, &key.public_key, description);
+        (device_id, key)
+    }
+
     /// Load device registry from S3 remote storage.
     pub async fn load_remote(op: &opendal::Operator, meta_prefix: &str) -> Result<Self> {
         let key = format!(
@@ -182,14 +208,71 @@ impl DeviceRegistry {
         name: &str,
         meta_prefix: &str,
     ) -> Result<(String, String)> {
-        let identity = age::x25519::Identity::generate();
-        let public_key = identity.to_public().to_string();
-        let secret_key = identity.to_string().expose_secret().to_string();
-
-        let device_id = self.enroll(name, &public_key, None);
+        let (device_id, key) = self.enroll_local(name, None);
         self.sync_to_remote(op, meta_prefix).await?;
-        Ok((device_id, secret_key))
+        Ok((device_id, key.secret_key.expose_secret().to_string()))
     }
+}
+
+/// Generate a real local age X25519 device identity.
+pub fn generate_local_device_key() -> LocalDeviceKey {
+    let identity = age::x25519::Identity::generate();
+    LocalDeviceKey {
+        public_key: identity.to_public().to_string(),
+        secret_key: SecretString::from(identity.to_string().expose_secret().to_string()),
+    }
+}
+
+/// Return the secret-key path associated with a registry path and device id.
+pub fn device_secret_key_path(registry_path: &Path, device_id: &str) -> PathBuf {
+    registry_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("device-{device_id}.age"))
+}
+
+/// Persist a local device identity secret key with owner-only permissions.
+pub fn save_device_secret_key(
+    path: &Path,
+    secret_key: &SecretString,
+    overwrite: bool,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating device key dir: {}", parent.display()))?;
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    if overwrite {
+        options.truncate(true);
+    } else {
+        options.create_new(true);
+    }
+
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("creating device secret key: {}", path.display()))?;
+    file.write_all(secret_key.expose_secret().as_bytes())
+        .with_context(|| format!("writing device secret key: {}", path.display()))?;
+    file.write_all(b"\n")
+        .with_context(|| format!("writing device secret key newline: {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing device secret key: {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod device secret key: {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Return true when `public_key` is a parseable age X25519 recipient.
+pub fn is_real_age_public_key(public_key: &str) -> bool {
+    public_key.parse::<age::x25519::Recipient>().is_ok()
 }
 
 /// Get the default device registry path
@@ -220,6 +303,7 @@ pub fn default_device_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
 
     #[test]
     fn test_registry_add_and_find() {
@@ -291,6 +375,51 @@ mod tests {
         assert!(!id.is_empty());
         assert!(reg.find("yoga").is_some());
         assert_eq!(reg.find("yoga").unwrap().device_id, id);
+    }
+
+    #[test]
+    fn test_enroll_local_generates_real_age_keypair() {
+        let mut reg = DeviceRegistry::default();
+        let (id, key) = reg.enroll_local("neo", None);
+        let device = reg.find("neo").unwrap();
+
+        assert_eq!(device.device_id, id);
+        assert_eq!(device.public_key, key.public_key);
+        assert!(is_real_age_public_key(&device.public_key));
+        assert!(!device.public_key.starts_with("age1-device-"));
+
+        let identity: age::x25519::Identity = key
+            .secret_key
+            .expose_secret()
+            .parse()
+            .expect("age secret key");
+        assert_eq!(identity.to_public().to_string(), device.public_key);
+    }
+
+    #[test]
+    fn test_save_device_secret_key_uses_owner_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-test.age");
+        let key = generate_local_device_key();
+
+        save_device_secret_key(&path, &key.secret_key, false).unwrap();
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        let identity: age::x25519::Identity =
+            persisted.trim().parse().expect("persisted age secret key");
+        assert_eq!(identity.to_public().to_string(), key.public_key);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let err = save_device_secret_key(&path, &key.secret_key, false).unwrap_err();
+        assert!(
+            err.to_string().contains("creating device secret key"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

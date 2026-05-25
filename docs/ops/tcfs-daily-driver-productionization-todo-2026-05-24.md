@@ -214,12 +214,26 @@ files.
 Why second: real self-enrollment and revocation are not product boundaries
 until devices have real local private keys and per-device wrapped content keys.
 
-- [ ] Replace placeholder CLI enrollment public keys with real X25519 keys.
-- [ ] Persist device private keys in a platform-appropriate secret store or
-  explicitly protected fallback.
+- [x] Replace placeholder CLI enrollment public keys with real X25519 keys for
+  the local `tcfs init` and `tcfs device enroll` paths.
+- [x] Persist generated local device private keys in an explicitly protected
+  `0600` file fallback beside the device registry.
 - [ ] Add file-key wrapping per non-revoked device.
 - [ ] Prove a revoked device cannot decrypt new content.
 - [ ] Document migration from shared-master fleets.
+
+2026-05-25 Phase 0 cut:
+
+- [x] `tcfs-secrets::DeviceRegistry::enroll_local` generates a real
+  age/X25519 keypair and stores only the public `age1...` recipient in
+  `devices.json`.
+- [x] `tcfs init` writes `device-<device_id>.age` beside `devices.json` and
+  `tcfs init --check` rejects placeholder public keys or missing private-key
+  files.
+- [x] `tcfs device enroll` now uses the same local key-generation path instead
+  of `age1-device-<hash>` placeholders.
+- [ ] This does not yet change manifest wrapping, revoke semantics, pairing, or
+  remote registry trust. Those remain the actual beta security boundary.
 
 ### 7. `TIN-1424` Pairing/Admin-Gated Enrollment
 

@@ -3292,8 +3292,9 @@ async fn cmd_init(
 
     // Step 6: Create device registry and enroll this device
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
-    let public_key = format!("age1-device-{}", &blake3_short(&device_name));
-    let device_id = registry.enroll(&device_name, &public_key, None);
+    let (device_id, device_key) = registry.enroll_local(&device_name, None);
+    let device_key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id);
+    tcfs_secrets::device::save_device_secret_key(&device_key_path, &device_key.secret_key, false)?;
     registry.save(&registry_path)?;
 
     if !skip_config {
@@ -3307,6 +3308,7 @@ async fn cmd_init(
     println!();
     println!("  Device name:  {}", device_name);
     println!("  Device ID:    {}", device_id);
+    println!("  Device key:   {}", device_key_path.display());
     println!("  Master key:   {}", master_key_path.display());
     println!("  Registry:     {}", registry_path.display());
     if !skip_config {
@@ -3399,6 +3401,51 @@ fn cmd_init_check(paths: &InitPaths) -> Result<()> {
             paths.registry_path.display()
         );
     }
+    let configured_device_name = std::fs::read_to_string(&paths.config_path)
+        .ok()
+        .and_then(|content| toml::from_str::<tcfs_core::config::TcfsConfig>(&content).ok())
+        .and_then(|config| config.sync.device_name);
+    let active_devices: Vec<_> = registry.active_devices().collect();
+    let local_device = configured_device_name
+        .as_deref()
+        .and_then(|name| {
+            active_devices
+                .iter()
+                .copied()
+                .find(|device| device.name == name)
+        })
+        .or_else(|| {
+            if active_devices.len() == 1 {
+                active_devices.first().copied()
+            } else {
+                None
+            }
+        })
+        .with_context(|| {
+            let expected = configured_device_name
+                .as_deref()
+                .unwrap_or("<unset; registry has multiple active devices>");
+            format!(
+                "tcfs is not initialized; local device '{expected}' was not found in {}",
+                paths.registry_path.display()
+            )
+        })?;
+
+    if !tcfs_secrets::device::is_real_age_public_key(&local_device.public_key) {
+        anyhow::bail!(
+            "tcfs is not initialized with a real device key; '{}' has a placeholder public key. Run 'tcfs init' with a fresh config or migrate the device registry.",
+            local_device.name
+        );
+    }
+    let key_path =
+        tcfs_secrets::device::device_secret_key_path(&paths.registry_path, &local_device.device_id);
+    if !key_path.exists() {
+        anyhow::bail!(
+            "tcfs is not initialized; missing device private key for '{}' ({}). Run 'tcfs init' with a fresh config or restore the device key backup.",
+            local_device.name,
+            key_path.display()
+        );
+    }
 
     println!("tcfs init check [ok]");
     println!("  Config:     {}", paths.config_path.display());
@@ -3456,11 +3503,6 @@ fn rand_salt() -> [u8; 16] {
     use rand::RngCore;
     rand::thread_rng().fill_bytes(&mut salt);
     salt
-}
-
-fn blake3_short(s: &str) -> String {
-    let hash = blake3::hash(s.as_bytes());
-    hash.to_hex().as_str()[..8].to_string()
 }
 
 // ── `tcfs device list` ───────────────────────────────────────────────────────
@@ -3521,16 +3563,16 @@ fn cmd_device_enroll(name: Option<String>) -> Result<()> {
         );
     }
 
-    let public_key = format!(
-        "age1-device-{}",
-        &blake3::hash(device_name.as_bytes()).to_hex().as_str()[..8]
-    );
-    let device_id = registry.enroll(&device_name, &public_key, None);
+    let (device_id, device_key) = registry.enroll_local(&device_name, None);
+    let device_key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id);
+    tcfs_secrets::device::save_device_secret_key(&device_key_path, &device_key.secret_key, false)?;
     registry.save(&registry_path)?;
 
     println!("Device enrolled:");
     println!("  name:      {}", device_name);
     println!("  device_id: {}", device_id);
+    println!("  public_key: {}", device_key.public_key);
+    println!("  key:       {}", device_key_path.display());
     println!("  registry:  {}", registry_path.display());
     println!();
     println!("Next: configure sync in tcfs.toml and run 'tcfs push'");
@@ -5094,6 +5136,56 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn init_check_accepts_real_device_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let master_key_path = dir.path().join("master.key");
+        let registry_path = dir.path().join("devices.json");
+        std::fs::write(&config_path, "config = true\n").unwrap();
+        std::fs::write(&master_key_path, [7u8; tcfs_crypto::KEY_SIZE]).unwrap();
+
+        let mut registry = tcfs_secrets::device::DeviceRegistry::default();
+        let (device_id, key) = registry.enroll_local("laptop", None);
+        registry.save(&registry_path).unwrap();
+        let key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id);
+        tcfs_secrets::device::save_device_secret_key(&key_path, &key.secret_key, false).unwrap();
+
+        let paths = InitPaths {
+            config_dir: dir.path().to_path_buf(),
+            config_path,
+            master_key_path,
+            registry_path,
+        };
+        cmd_init_check(&paths).unwrap();
+    }
+
+    #[test]
+    fn init_check_rejects_placeholder_device_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let master_key_path = dir.path().join("master.key");
+        let registry_path = dir.path().join("devices.json");
+        std::fs::write(&config_path, "config = true\n").unwrap();
+        std::fs::write(&master_key_path, [7u8; tcfs_crypto::KEY_SIZE]).unwrap();
+
+        let mut registry = tcfs_secrets::device::DeviceRegistry::default();
+        registry.enroll("legacy", "age1-device-deadbeef", None);
+        registry.save(&registry_path).unwrap();
+
+        let paths = InitPaths {
+            config_dir: dir.path().to_path_buf(),
+            config_path,
+            master_key_path,
+            registry_path,
+        };
+        let err = cmd_init_check(&paths).unwrap_err();
+        assert!(
+            err.to_string().contains("placeholder public key"),
+            "unexpected error: {err:#}"
+        );
     }
 
     fn make_encrypted_manifest(

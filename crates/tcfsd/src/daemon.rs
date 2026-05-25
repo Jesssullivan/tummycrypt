@@ -111,28 +111,15 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             dev.device_id.clone()
         }
     } else {
-        let identity = age::x25519::Identity::generate();
-        let public_key = identity.to_public().to_string();
-        let secret_key = identity.to_string();
-
-        let id = registry.enroll(&device_name, &public_key, None);
-
-        // Persist the device secret key alongside the registry
-        let secret_key_path = registry_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join(format!("device-{id}.age"));
-        if let Err(e) = std::fs::write(&secret_key_path, secret_key.expose_secret().as_bytes()) {
+        let (id, device_key) = registry.enroll_local(&device_name, None);
+        let secret_key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &id);
+        if let Err(e) = tcfs_secrets::device::save_device_secret_key(
+            &secret_key_path,
+            &device_key.secret_key,
+            false,
+        ) {
             warn!("failed to write device secret key: {e}");
         } else {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &secret_key_path,
-                    std::fs::Permissions::from_mode(0o600),
-                );
-            }
             info!(path = %secret_key_path.display(), "device secret key saved");
         }
 

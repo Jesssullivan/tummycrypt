@@ -95,6 +95,9 @@ These calls resolve the open questions for the first implementation slice:
    for single-operator setup, but invite/join verification must stay blocked
    until TIN-1417/TIN-1424 provide real per-device public keys, full invite
    payload signatures, and no raw long-lived storage secrets in invites.
+   2026-05-25 update: the local `tcfs init` and `tcfs device enroll` paths now
+   generate real age/X25519 device keys; invite/join remains blocked on the
+   rest of TIN-1417/TIN-1424.
 3. **Use an inline macOS sheet, backed by Rust-owned state.** Do not shell out
    to Terminal for the primary Mac path. The Swift host app should render the
    form, but validators, config rendering, and final verification stay in the
@@ -187,11 +190,9 @@ own its own copy of the prompt sequence.
    "join existing fleet via invite", or do we split into `tcfs init` (new) and
    `tcfs enroll <invite>` (join)? The latter is easier to document and harder
    to misuse, but doubles the surface the postinstall hook has to nudge toward.
-2. **TIN-1417 ordering.** If per-device pubkey work (TIN-1417) has not landed
-   when TIN-1425 ships, do we fall back to the current
-   `format!("age1-device-{}", blake3_short(name))` placeholder
-   (`crates/tcfs-cli/src/main.rs:2872`) with a `TODO(TIN-1417)` comment, or
-   block the wizard's "verify" step until real pubkeys exist?
+2. **TIN-1417 ordering.** Local real device keys have landed for fresh setup.
+   The remaining ordering question is invite/join verification: keep that path
+   blocked until per-device wrapping and pairing/admin gates are in place.
 3. **macOS host-app inline vs. terminal hand-off.** Should the first-run sheet
    in `TCFSProviderApp` render the prompts itself (SwiftUI form, full control
    over UX) or shell out to `Terminal.app` running `tcfs init` (one source of

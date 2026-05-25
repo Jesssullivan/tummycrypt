@@ -5,6 +5,12 @@ proposes the architecture; the user reviews and aligns before any code lands.
 
 Date: 2026-05-18.
 
+2026-05-25 implementation note: the Phase 0 local-key slice has now started.
+`tcfs init` and `tcfs device enroll` generate real age/X25519 device keys and
+persist the secret half in a `0600` `device-<device_id>.age` file beside the
+registry. Manifest wrapping, revoke semantics, pairing, and remote registry
+trust are still open.
+
 ## Problem Statement
 
 Today every "enrolled" device on a tcfs fleet holds the same shared master key
@@ -185,11 +191,11 @@ projected bytes-to-rewrite before the operator confirms.
 Existing fleets are on shared-master-key model with `encrypted_file_key:
 Option<String>` (one wrap). Phased rollout:
 
-1. **Phase 0 (this PR's follow-on, additive only)**: real keypair generation
-   inside `cmd_device_enroll`. Persist secret to keychain. Publish public key
-   to the remote registry via the existing `sync_to_remote` path. No manifest
-   format change yet. Existing fleets keep working unchanged because the new
-   per-device key is unused at the wrap layer.
+1. **Phase 0 (started 2026-05-25, additive only)**: real keypair generation
+   inside local `tcfs init` and `tcfs device enroll`. Persist the secret half in
+   a protected file fallback for now; the keychain-backed store remains a
+   follow-up. No manifest format change yet. Existing fleets keep working
+   unchanged because the new per-device key is unused at the wrap layer.
 2. **Phase 1 (manifest schema v3)**: add `wrapped_file_keys:
    Vec<WrappedFileKey>` alongside the legacy `encrypted_file_key`. Push paths
    write both. Pull paths prefer `wrapped_file_keys` and fall back to the
