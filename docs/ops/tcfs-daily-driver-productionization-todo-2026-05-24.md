@@ -168,6 +168,12 @@ benchmark rows are still missing.
   186-second restore execution, 5,774,737 B/s restored throughput, socket
   highwater 0, 42 transient `502` log lines, 20 OpenDAL retry rows, and
   1 TCFS chunk-download retry row.
+- [x] Updated the dispatch lane so the default large-restore binary source is
+  the current Nix `tcfs-cli` package (`tcfs_binary_source=nix-package`) instead
+  of only a source-built `target/release/tcfs`.
+- [ ] Dispatch a package-backed multi-GiB restore run against
+  `tcfs-storage-prod-smoke` with `tcfs_binary_source=nix-package`, then attach
+  the artifact to `TIN-1546`.
 
 ### 3. Harden `TIN-1547` FileProvider
 
@@ -359,6 +365,20 @@ Large restore packet, on a host with the archived shadow root:
 RESTORE_REQUIRE_HEADROOM=1 \
 RESTORE_HEADROOM_MARGIN_BYTES=$((2 * 1024 * 1024 * 1024)) \
 task lazy:git-repo-restore-proof
+```
+
+Package-backed hosted large restore packet:
+
+```bash
+gh workflow run storage-large-restore-canary.yml \
+  --ref main \
+  -f runner_label=ubuntu-24.04 \
+  -f smoke_environment=tcfs-storage-prod-smoke \
+  -f tcfs_binary_source=nix-package \
+  -f pack_size_mib=3072 \
+  -f restore_headroom_margin_mib=2048 \
+  -f reconcile_timeout_secs=3600 \
+  -f require_https=true
 ```
 
 Named fleet acceptance, from the operator environment:
