@@ -27,6 +27,9 @@ Options:
                               File containing exact expected content
   --exercise-evict-rehydrate  After initial exact hydration, request provider
                               eviction and verify a second exact rehydrate
+  --soak-cycles <count>       Number of evict/rehydrate cycles to run when
+                              --exercise-evict-rehydrate is enabled
+                              (default: 1)
   --exercise-mutation         Write a new file through the CloudStorage root
                               and verify the upload by pulling it from remote
   --mutation-file <relpath>   Relative mutation file path under CloudStorage
@@ -112,6 +115,7 @@ EXPECTED_FILE_REL=""
 EXPECTED_CONTENT=""
 EXPECTED_CONTENT_FILE=""
 EXERCISE_EVICT_REHYDRATE="${TCFS_EXERCISE_EVICT_REHYDRATE:-0}"
+SOAK_CYCLES="${TCFS_FILEPROVIDER_SOAK_CYCLES:-1}"
 EXERCISE_MUTATION="${TCFS_EXERCISE_MUTATION:-0}"
 MUTATION_FILE_REL="${TCFS_FILEPROVIDER_MUTATION_FILE_REL:-}"
 MUTATION_CONTENT="${TCFS_FILEPROVIDER_MUTATION_CONTENT:-}"
@@ -175,6 +179,10 @@ while [[ $# -gt 0 ]]; do
     --exercise-evict-rehydrate)
       EXERCISE_EVICT_REHYDRATE=1
       shift
+      ;;
+    --soak-cycles)
+      SOAK_CYCLES="$2"
+      shift 2
       ;;
     --exercise-mutation)
       EXERCISE_MUTATION=1
@@ -364,6 +372,23 @@ fi
 
 if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" && "$SEED_EXPECTED_FILE" != "1" && -z "$EXPECTED_CONTENT" && -z "$EXPECTED_CONTENT_FILE" ]]; then
   echo "--exercise-evict-rehydrate requires --expected-content, --expected-content-file, or --seed-expected-file" >&2
+  exit 2
+fi
+
+case "$SOAK_CYCLES" in
+  ''|*[!0-9]*)
+    echo "--soak-cycles must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+
+if (( SOAK_CYCLES < 1 )); then
+  echo "--soak-cycles must be a positive integer" >&2
+  exit 2
+fi
+
+if (( SOAK_CYCLES > 1 )) && [[ "$EXERCISE_EVICT_REHYDRATE" != "1" ]]; then
+  echo "--soak-cycles greater than 1 requires --exercise-evict-rehydrate" >&2
   exit 2
 fi
 
@@ -2426,10 +2451,14 @@ if [[ -n "$EXPECTED_FILE_REL" ]]; then
   fi
   hydrate_expected_file "$EXPECTED_PATH"
   if [[ "$EXERCISE_EVICT_REHYDRATE" == "1" ]]; then
-    request_expected_file_eviction "$EXPECTED_FILE_REL"
-    request_expected_file_download "$EXPECTED_FILE_REL"
-    hydrate_expected_file "$EXPECTED_PATH"
-    echo "FileProvider evict/rehydrate cycle passed"
+    cycle=1
+    while (( cycle <= SOAK_CYCLES )); do
+      request_expected_file_eviction "$EXPECTED_FILE_REL"
+      request_expected_file_download "$EXPECTED_FILE_REL"
+      hydrate_expected_file "$EXPECTED_PATH"
+      echo "FileProvider evict/rehydrate cycle passed (${cycle}/${SOAK_CYCLES})"
+      cycle=$((cycle + 1))
+    done
   fi
 else
   echo "warning: --expected-file not provided; hydration was not exercised" >&2

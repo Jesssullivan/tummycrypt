@@ -148,7 +148,9 @@ hardening, not exact hydration rescue.
 - [ ] Capture recovery UX behavior for missing config, storage denial, and
   hydrate failure.
 - [ ] Run a longer PZM desktop soak with no stale domain, registration, or
-  config drift.
+  config drift. The postinstall harness now accepts `--soak-cycles` so the
+  existing evict/rehydrate proof can be repeated without changing the default
+  one-pass release smoke.
 - [ ] Keep installer-to-valid-config first-run proof under `TIN-1425`.
 - [ ] Update `docs/ops/macos-fileprovider-reality.md` only with new evidence,
   not optimistic wording.

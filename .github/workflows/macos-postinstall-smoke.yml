@@ -42,6 +42,11 @@ on:
         required: false
         default: false
         type: boolean
+      soak_cycles:
+        description: "Number of FileProvider evict/rehydrate cycles for layered proof or testing-mode soak"
+        required: false
+        default: "1"
+        type: string
       exercise_rename_safety:
         description: "Post-M10 hardening lane: rename a FileProvider file and prove the new remote path is readable while the old path is no longer visible"
         required: false
@@ -132,6 +137,7 @@ jobs:
           EXERCISE_CONFLICT_STATUS="${{ github.event.inputs.exercise_conflict_status }}"
           REQUIRE_CONFLICT_ENUMERATOR_STATUS="${{ github.event.inputs.require_conflict_enumerator_status }}"
           EXERCISE_DEV_ID_LAYERED_PROOF="${{ github.event.inputs.exercise_dev_id_layered_proof }}"
+          SOAK_CYCLES="${{ github.event.inputs.soak_cycles }}"
           EXERCISE_RENAME_SAFETY="${{ github.event.inputs.exercise_rename_safety }}"
           LAB_GATEKEEPER_OVERRIDE="${{ github.event.inputs.lab_gatekeeper_override }}"
           RUNNER_LABEL="${{ github.event.inputs.runner_label }}"
@@ -171,6 +177,23 @@ jobs:
                 && "$FILEPROVIDER_TESTING_MODE" != "true" \
                 && "$EXERCISE_DEV_ID_LAYERED_PROOF" != "true" ]]; then
             echo "::error::exercise_rename_safety=true requires fileprovider_testing_mode=true or exercise_dev_id_layered_proof=true"
+            exit 1
+          fi
+
+          case "$SOAK_CYCLES" in
+            ''|*[!0-9]*)
+              echo "::error::soak_cycles must be a positive integer"
+              exit 1
+              ;;
+          esac
+          if [[ "$SOAK_CYCLES" == "0" ]]; then
+            echo "::error::soak_cycles must be a positive integer"
+            exit 1
+          fi
+          if [[ "$SOAK_CYCLES" != "1" \
+                && "$FILEPROVIDER_TESTING_MODE" != "true" \
+                && "$EXERCISE_DEV_ID_LAYERED_PROOF" != "true" ]]; then
+            echo "::error::soak_cycles greater than 1 requires fileprovider_testing_mode=true or exercise_dev_id_layered_proof=true"
             exit 1
           fi
 
@@ -865,6 +888,7 @@ jobs:
             --expected-file "${FIXTURE_REL}" \
             --expected-content-file "$EXPECTED_CONTENT_FILE" \
             --require-keychain-config \
+            --soak-cycles "${{ github.event.inputs.soak_cycles }}" \
             --log-dir "$LOG_DIR/harness"
           )
 
