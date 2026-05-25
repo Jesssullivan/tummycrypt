@@ -1,6 +1,6 @@
 # TCFS Daily Driver Productionization Todo - 2026-05-24
 
-Status timestamp: 2026-05-25T03:15:00Z
+Status timestamp: 2026-05-25T05:40:00Z
 
 This is the current execution checklist for moving TCFS from an
 evidence-backed alpha surface toward a robust daily-driver filesystem product.
@@ -10,10 +10,11 @@ security, and user-visible control paths are also proven.
 
 ## Current State
 
-- `main` is clean at `1917a44d12d41d4eb112ac02e98597e6fc84a93e` after
-  PR `#450` merged the first TIN-1425 implementation slice for explicit
-  daemon missing-config behavior and installed-binary local first-run smoke.
-- No open GitHub PRs before this evidence-sync update.
+- `main` is at `3c220d2ba41bb3b89cc03ecf6a8bca16a110da76` after PR
+  `#456` merged the TIN-1424 admin-gated enrollment/revocation control RPC
+  slice.
+- Active PR: `#458` (`dd5b74d7358b31ba9692347d4ae00614faad5f5a`) adds
+  `tcfs init --fileprovider-config-out` and is waiting on remote checks.
 - Latest prerelease: `v0.12.13-rc4`.
 - Public `Latest` release remains `v0.12.12`.
 - Post-merge CI/Docs/Nix runs on `40b4514` are green:
@@ -222,6 +223,13 @@ files.
   `tcfs init --config-out` path. The run passed, but `nix profile install`
   took 27 minutes before the smoke ran; keep profile-install latency visible in
   future release evidence.
+- [x] Add an explicit `tcfs init --fileprovider-config-out <path>` path that
+  writes the macOS HostApp/FileProvider bootstrap JSON from the same first-run
+  state as `config.toml`, using the unified credential resolver and a `0600`
+  temp file before atomic install.
+- [ ] Prove the packaged macOS HostApp consumes that Rust-owned FileProvider
+  JSON path and provisions shared Keychain config without a hand-authored
+  `~/.config/tcfs/fileprovider/config.json`.
 - [ ] Keep fleet join out of `tcfs init` until `TIN-1417` and `TIN-1424` land;
   `tcfs init` should mean fresh local setup, while invite/pairing belongs to a
   later safe enrollment path.
@@ -257,7 +265,7 @@ until devices have real local private keys and per-device wrapped content keys.
 Why third: pairing depends on `TIN-1417`.
 
 - [x] Add single-use invite redemption state.
-- [ ] Require admin/session gates for enrollment and revocation RPCs.
+- [x] Require admin/session gates for enrollment and revocation control RPCs.
 - [ ] Stop treating QR payloads with raw S3 credentials as a production path.
 - [ ] Wrap bootstrap material to the new device public key.
 - [ ] Keep iOS fail-closed until real device enrollment proof exists.
@@ -270,9 +278,13 @@ Why third: pairing depends on `TIN-1417`.
 - [x] Replay now returns `success=false` with
   `invite has already been redeemed`.
 - [x] Redemption persistence failures fail closed.
-- [ ] This does not yet add admin/session approval, remove raw long-lived
-  storage secrets from invite payloads, wrap bootstrap material to the
-  recipient device key, or make desktop/iOS join product-safe.
+- [x] PR `#456` added admin/session gates for enrollment and revocation control
+  RPCs and merged at
+  `3c220d2ba41bb3b89cc03ecf6a8bca16a110da76` after green CI, live-storage,
+  Nix, FileProvider staticlib, iOS typecheck, cargo-deny, and Secret Scan.
+- [ ] This does not yet remove raw long-lived storage secrets from invite
+  payloads, wrap bootstrap material to the recipient device key, or make
+  desktop/iOS join product-safe.
 
 ## Then: Daily-Driver Primitives
 

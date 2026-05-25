@@ -81,6 +81,16 @@ enum Commands {
         #[arg(long)]
         device_name: Option<String>,
         #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        skip_config: bool,
+        #[arg(long)]
+        force_config: bool,
+        #[arg(long)]
+        config_out: Option<PathBuf>,
+        #[arg(long)]
+        fileprovider_config_out: Option<PathBuf>,
+        #[arg(long)]
         non_interactive: bool,
         #[arg(long, env = "TCFS_MASTER_PASSWORD", hide_env_values = true)]
         password: Option<String>,
@@ -357,12 +367,59 @@ fn parse_init() {
         .expect("init");
     if let Commands::Init {
         device_name,
+        check,
+        skip_config,
+        force_config,
+        config_out,
+        fileprovider_config_out,
         non_interactive,
         ..
     } = cli.command
     {
         assert_eq!(device_name, Some("neo".to_string()));
+        assert!(!check);
+        assert!(!skip_config);
+        assert!(!force_config);
+        assert!(config_out.is_none());
+        assert!(fileprovider_config_out.is_none());
         assert!(non_interactive);
+    } else {
+        panic!("expected Init");
+    }
+}
+
+#[test]
+fn parse_init_first_run_config_paths() {
+    let cli = Cli::try_parse_from([
+        "tcfs",
+        "init",
+        "--check",
+        "--skip-config",
+        "--force-config",
+        "--config-out",
+        "/tmp/tcfs/config.toml",
+        "--fileprovider-config-out",
+        "/tmp/tcfs/fileprovider/config.json",
+    ])
+    .expect("init config paths");
+
+    if let Commands::Init {
+        check,
+        skip_config,
+        force_config,
+        config_out,
+        fileprovider_config_out,
+        ..
+    } = cli.command
+    {
+        assert!(check);
+        assert!(skip_config);
+        assert!(force_config);
+        assert_eq!(config_out, Some(PathBuf::from("/tmp/tcfs/config.toml")));
+        assert_eq!(
+            fileprovider_config_out,
+            Some(PathBuf::from("/tmp/tcfs/fileprovider/config.json"))
+        );
     } else {
         panic!("expected Init");
     }
