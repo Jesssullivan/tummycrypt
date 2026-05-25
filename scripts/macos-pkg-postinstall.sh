@@ -21,8 +21,7 @@ CHOWN_BIN="${TCFS_POSTINSTALL_CHOWN:-/usr/sbin/chown}"
 PLIST_DIR="${TCFS_POSTINSTALL_LAUNCHAGENTS_DIR:-/Library/LaunchAgents}"
 PLIST_PATH="${PLIST_DIR}/io.tinyland.tcfsd.plist"
 mkdir -p "$PLIST_DIR"
-if [ ! -f "$PLIST_PATH" ]; then
-  cat >"$PLIST_PATH" <<'PLIST'
+cat >"$PLIST_PATH" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -33,7 +32,7 @@ if [ ! -f "$PLIST_PATH" ]; then
   <array>
     <string>/bin/sh</string>
     <string>-lc</string>
-    <string>if [ -f "$HOME/.config/tcfs/env" ]; then set -a; . "$HOME/.config/tcfs/env"; set +a; fi; exec /usr/local/bin/tcfsd --config "$HOME/.config/tcfs/config.toml" --mode daemon</string>
+    <string>if [ -f "$HOME/.config/tcfs/env" ]; then set -a; . "$HOME/.config/tcfs/env"; set +a; fi; if [ ! -f "$HOME/.config/tcfs/config.toml" ]; then echo "tcfsd: no user config; run: /usr/local/bin/tcfs init --config-out \"$HOME/.config/tcfs/config.toml\"" &gt;&amp;2; exit 0; fi; exec /usr/local/bin/tcfsd --config "$HOME/.config/tcfs/config.toml" --mode daemon</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -44,9 +43,8 @@ if [ ! -f "$PLIST_PATH" ]; then
 </dict>
   </plist>
 PLIST
-  chmod 644 "$PLIST_PATH"
-  "$CHOWN_BIN" root:wheel "$PLIST_PATH" 2>/dev/null || true
-fi
+chmod 644 "$PLIST_PATH"
+"$CHOWN_BIN" root:wheel "$PLIST_PATH" 2>/dev/null || true
 
 CONSOLE_USER="$("$STAT_BIN" -f %Su /dev/console 2>/dev/null || true)"
 if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
