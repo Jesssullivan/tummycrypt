@@ -528,6 +528,21 @@ enum TrashAction {
 enum ConfigAction {
     /// Print the active configuration (merged defaults + config file)
     Show,
+    /// Render the macOS FileProvider bootstrap JSON from the active config
+    Fileprovider {
+        /// Path to write (default: ~/.config/tcfs/fileprovider/config.json)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Device ID to place in the FileProvider bootstrap JSON
+        #[arg(long)]
+        device_id: Option<String>,
+        /// Master key file path to hand to the HostApp for Keychain enrichment
+        #[arg(long)]
+        master_key_file: Option<PathBuf>,
+        /// Overwrite an existing FileProvider config JSON
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -603,6 +618,24 @@ async fn main() -> Result<()> {
         Commands::Config {
             action: ConfigAction::Show,
         } => cmd_config_show(&config, &cli.config),
+        Commands::Config {
+            action:
+                ConfigAction::Fileprovider {
+                    out,
+                    device_id,
+                    master_key_file,
+                    force,
+                },
+        } => {
+            cmd_config_fileprovider(
+                &config,
+                out.as_deref(),
+                device_id.as_deref(),
+                master_key_file.as_deref(),
+                force,
+            )
+            .await
+        }
         Commands::Kdbx {
             action:
                 KdbxAction::Resolve {
@@ -2470,6 +2503,29 @@ fn cmd_config_show(config: &tcfs_core::config::TcfsConfig, config_path: &Path) -
     Ok(())
 }
 
+async fn cmd_config_fileprovider(
+    config: &tcfs_core::config::TcfsConfig,
+    out: Option<&Path>,
+    device_id: Option<&str>,
+    master_key_file: Option<&Path>,
+    force: bool,
+) -> Result<()> {
+    let config_path = out
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_fileprovider_config_path);
+    let device_id = resolve_fileprovider_device_id(config, device_id)?;
+    let master_key_path = resolve_fileprovider_master_key_path(config, master_key_file)?;
+
+    write_fileprovider_init_config(&config_path, config, &master_key_path, &device_id, force)
+        .await?;
+    println!("FileProvider config: {}", config_path.display());
+    Ok(())
+}
+
+fn default_fileprovider_config_path() -> PathBuf {
+    default_user_config_dir().join("fileprovider/config.json")
+}
+
 // ── `tcfs kdbx resolve` ───────────────────────────────────────────────────────
 
 fn cmd_kdbx_resolve(
@@ -3568,6 +3624,61 @@ fn build_init_config(
     config.sync.device_identity = Some(registry_path.to_path_buf());
     config.sync.device_name = Some(device_name.to_string());
     config
+}
+
+fn resolve_fileprovider_device_id(
+    config: &tcfs_core::config::TcfsConfig,
+    explicit: Option<&str>,
+) -> Result<String> {
+    if let Some(device_id) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(device_id.to_string());
+    }
+
+    if let Some(registry_path) = &config.sync.device_identity {
+        if let Ok(registry) = tcfs_secrets::device::DeviceRegistry::load(registry_path) {
+            let active_devices: Vec<_> = registry.active_devices().collect();
+            if let Some(device_name) = config.sync.device_name.as_deref() {
+                if let Some(device) = active_devices
+                    .iter()
+                    .copied()
+                    .find(|device| device.name == device_name)
+                {
+                    if !device.device_id.is_empty() {
+                        return Ok(device.device_id.clone());
+                    }
+                }
+            }
+            if active_devices.len() == 1 && !active_devices[0].device_id.is_empty() {
+                return Ok(active_devices[0].device_id.clone());
+            }
+        }
+    }
+
+    if let Some(device_name) = config
+        .sync
+        .device_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(device_name.to_string());
+    }
+
+    anyhow::bail!(
+        "FileProvider config requires a device id; pass --device-id or configure sync.device_name/device_identity"
+    )
+}
+
+fn resolve_fileprovider_master_key_path(
+    config: &tcfs_core::config::TcfsConfig,
+    explicit: Option<&Path>,
+) -> Result<PathBuf> {
+    explicit
+        .map(Path::to_path_buf)
+        .or_else(|| config.crypto.master_key_file.clone())
+        .context(
+            "FileProvider config requires a master key file; pass --master-key-file or configure crypto.master_key_file",
+        )
 }
 
 fn write_init_config(
@@ -5408,6 +5519,55 @@ mod tests {
             json["master_key_file"].as_str(),
             Some(master_key_path.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn resolve_fileprovider_device_id_prefers_explicit_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+
+        let resolved = resolve_fileprovider_device_id(&config, Some(" device-from-ci ")).unwrap();
+
+        assert_eq!(resolved, "device-from-ci");
+    }
+
+    #[test]
+    fn resolve_fileprovider_device_id_reads_registry_for_configured_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("devices.json");
+        let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path).unwrap();
+        let (device_id, _device_key) = registry.enroll_local("macbook", None);
+        registry.save(&registry_path).unwrap();
+
+        let mut config = test_config(dir.path());
+        config.sync.device_identity = Some(registry_path);
+        config.sync.device_name = Some("macbook".into());
+
+        let resolved = resolve_fileprovider_device_id(&config, None).unwrap();
+
+        assert_eq!(resolved, device_id);
+    }
+
+    #[test]
+    fn resolve_fileprovider_device_id_falls_back_to_device_name_for_packaged_smoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.sync.device_name = Some("gha-macos-postinstall".into());
+
+        let resolved = resolve_fileprovider_device_id(&config, None).unwrap();
+
+        assert_eq!(resolved, "gha-macos-postinstall");
+    }
+
+    #[test]
+    fn resolve_fileprovider_master_key_path_prefers_explicit_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let explicit = dir.path().join("explicit-master.key");
+
+        let resolved = resolve_fileprovider_master_key_path(&config, Some(&explicit)).unwrap();
+
+        assert_eq!(resolved, explicit);
     }
 
     #[test]
