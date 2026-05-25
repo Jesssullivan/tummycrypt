@@ -244,6 +244,27 @@ packets ([vfs_lifecycle_test.rs](../../crates/tcfs-vfs/tests/vfs_lifecycle_test.
 [multi_machine_sim.rs](../../crates/tcfs-sync/tests/multi_machine_sim.rs),
 [lazy-traversal-qa-permutation-matrix-2026-05-09.md](lazy-traversal-qa-permutation-matrix-2026-05-09.md)).
 
+### Onboarding Pilot Rows
+
+The large-workdir onboarding plan should explicitly inherit the following rows
+from the existing matrix instead of redefining them:
+
+| Pilot | Minimum rows that must be called out | Why |
+| --- | --- | --- |
+| `TIN-1619` shadow pilot | T1, T2, T3, T4, T5, T6, T12, plus the Linux-mounted multi-machine rows M1, M2, M3, M6 | This is the smallest claimable surface for browse, `cat`, cache clear, clean unsync, symlink truth, and cross-host rehydrate without live-source ownership. |
+| `TIN-1620` expendable live repo | T1, T3, T4, T5, T6, T10, T11, plus M3, M5, M5-R, M6, M8 | This is the first live-source step, so it must prove exact content, safe unsync / resync, conflict recovery, and peer edit/delete/rename behavior before anything broader is implied. |
+
+Rows that should stay explicitly out of claim for this onboarding plan:
+
+- M4 / M4-L reverse-read behavior, because the neo/macOS mounted reverse-read
+  path remains open
+- Finder production rows F1-F7, except as separate package-backed macOS proof
+  outside this onboarding track
+- T7, T13, T14, and T15, because they are force-unsync, metadata/perf/soak
+  breadth rows rather than the minimal onboarding bar
+- keep-synced / pin semantics until they are a named product contract
+- broad `~/git`, `~/Documents`, `.local`, dotdir, or `/tmp` ownership
+
 ## Deliverable Map
 
 | Workstream | What it closes | Why it matters |
@@ -310,6 +331,12 @@ Keep the packet layout boring and close to the existing canary evidence
 structure. Reuse the same naming style as the current `home-canary-linux-xr`
 and `git-repo-canary` lanes so the archive is easy to compare.
 
+For the first shadow pilot, use `/Users/jess/git/linux-xr-fast` as the primary
+workdir when host headroom allows. If the host cannot hold the full stress
+packet yet, use `/Users/jess/git/oauth-mux` only to verify the command path and
+evidence layout. The packet should still stay shadow-first and must not mutate
+the live source tree.
+
 ### `TIN-1618` Inventory Packet
 
 Inputs:
@@ -346,6 +373,49 @@ Preferred shape:
 - disposable remote prefix under the existing evidence namespace
 - state and config rooted under the packet directory, not under the live source
 
+Concrete command path:
+
+```bash
+run_id="large-workdir-<UTC>"
+evidence_dir="docs/release/evidence/${run_id}"
+
+python3 scripts/large-workdir-inventory.py \
+  /Users/jess/git/linux-xr-fast \
+  --out-dir "${evidence_dir}/source-inventory"
+
+TCFS_HOME_CANARY_SOURCE=/Users/jess/git/linux-xr-fast \
+TCFS_HOME_CANARY_EVIDENCE_DIR="${evidence_dir}" \
+TCFS_HOME_CANARY_SHADOW_ROOT="$HOME/TCFS Pilot/real-canaries/linux-xr-fast-shadow-<UTC>" \
+TCFS_HOME_CANARY_REMOTE="seaweedfs+https://<host>/<bucket>/tcfs/${run_id}" \
+TCFS_HOME_CANARY_STATE_DIR="${evidence_dir}/state" \
+TCFS_HOME_CANARY_PUSH=1 \
+TCFS_HOME_CANARY_RUN_HONEY=1 \
+TCFS_HOME_CANARY_RUN_LINUX_LIFECYCLE=1 \
+TCFS_HONEY_START_MOUNT=1 \
+scripts/home-canary-linux-xr-shadow.sh
+```
+
+Packet outputs to archive:
+
+- `source-inventory/inventory.json`
+- `source-inventory/inventory.env`
+- `source-inventory/summary.md`
+- `source-inventory/root.txt`, `counts.env`, `tree-maxdepth-12.txt`,
+  `symlinks.txt`, `symlink-targets.tsv`, `hidden-dirs.txt`,
+  `unsupported-special-files.txt`, `git-status-porcelain.txt`,
+  `git-remotes.txt`, and `git-summary.env`
+- `shadow-inventory/` with the same inventory files
+- `shadow-copy.log`
+- `selected-hydration-file.txt`, `selected-hydration-file.content`, and
+  `selected-hydration-file.sha256`
+- `push.log` or `push.log.gz`
+- `push-storage-summary.env` and `push-storage-summary.md`
+- `push-run-metadata.env`, `run-metadata.env`, `result.env`, and
+  `parity-gates.env`
+- `honey-linux-xr-shadow.log`, `honey-mount.log`, and
+  `honey-linux-xr-shadow-commands.txt`
+- `linux-lifecycle-companion.log` and `linux-lifecycle/`
+
 Required proof rows:
 
 - browse before hydrate
@@ -357,15 +427,46 @@ Required proof rows:
 - peer edit while unsynced
 - peer delete / rename while unsynced
 - symlink parity or explicit blocker
+- `parity-gates.env` reports `scoped-project-tree-parity-evidence-complete`
+- `push.log` does not contain skipped symlink rows
+- no unsupported special files remain unaddressed
 
 ### `TIN-1620` One Expendable Live Repo Packet
 
-Only after the shadow packet is boring:
+Only after the shadow packet is boring and the acceptance rows above are
+proven:
 
 - choose one live repo the operator can lose temporarily
-- run the same two-machine browse / hydrate / unsync / rehydrate pattern
-- archive rollback and fresh-tree restore logs
-- keep the live source repo immutable until this packet is green
+- keep the live source repo immutable until the packet starts, then treat the
+  live tree as expendable only for the duration of the pilot
+- run the same two-machine browse / hydrate / unsync / rehydrate pattern using
+  the repo-local equivalent of `task lazy:git-repo-canary`
+- archive a matching restore / rollback packet with
+  `task lazy:git-repo-restore-proof`
+- capture live-source inventory, shadow inventory, remote prefix, config,
+  state, and command transcript under the same evidence naming convention as
+  the current git-repo canary packets
+
+Packet evidence must include:
+
+- source inventory before any mutation
+- exact source and shadow paths
+- remote prefix and restore root
+- per-host command transcripts for `ls`, `find`, `cat`, `unsync`, `resync`,
+  and `sync-status`
+- peer-edit and peer-delete/rename observations while the first host remains
+  unsynced
+- rollback proof showing the repo can return to a clean, exact tree after the
+  live-source experiment
+
+Claim boundary for `TIN-1620`:
+
+- still not broad `~/git`
+- still not home-directory takeover
+- still not production Finder readiness
+- still not `keep synced` / pin semantics
+- still not `/tmp`
+- still not a general self-service onboarding story for arbitrary users
 
 ### Evidence Directory Convention
 

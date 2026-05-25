@@ -361,7 +361,10 @@ Target window: 2026-06-15 through 2026-06-30.
   packet via `scripts/home-canary-linux-xr-shadow.sh`; evidence under
   `docs/release/evidence/<run_id>/` with `source-inventory/`,
   `shadow-inventory/`, `push/`, `honey/`, `lifecycle/`, and `restore-proof/`
-  as applicable.
+  as applicable. QA rows for the shadow pilot should stay on the minimal
+  browse/hydrate/unsync/re-hydrate set: `T1`, `T2`, `T3`, `T4`, `T5`, `T6`,
+  `T12`, `M1`, `M2`, `M3`, `M6`. The expendable live-repo step then adds
+  `T10`, `T11`, `M5`, `M5-R`, and `M8`.
 - [x] `TIN-1618`: first read-only inventory helper and regression test for
   candidate roots. It emits `inventory.json`, `inventory.env`, and
   `summary.md`; live pilot packet evidence is still pending.
