@@ -341,10 +341,28 @@ jobs:
           require_gt_zero pack_rows
           require_gt_zero pack_file_bytes
 
-          if grep -E -i 'PermissionDenied|AccessDenied|upload failed|failed to write|Error:' "$PUSH_LOG" > "$RUNNER_TEMP/tcfs-push-failures.txt"; then
-            echo "::error::push log contains storage/write failures; refusing to run restore"
+          if grep -E -i 'PermissionDenied|AccessDenied|InvalidAccessKeyId|SignatureDoesNotMatch|NoSuchBucket|upload failed permanently|failed to write remote|Error:' "$PUSH_LOG" > "$RUNNER_TEMP/tcfs-push-failures.txt"; then
+            echo "::error::push log contains fatal storage/write failures; refusing to run restore"
             tail -40 "$RUNNER_TEMP/tcfs-push-failures.txt"
             exit 1
+          fi
+
+          num_or_zero() {
+            local key="$1"
+            local value
+            value="$(kv "$key" || true)"
+            if [[ -z "$value" || "$value" == *[!0-9]* ]]; then
+              echo 0
+            else
+              echo "$value"
+            fi
+          }
+
+          WARN_ROWS="$(num_or_zero warn_rows)"
+          RETRY_WARNING_ROWS="$(num_or_zero retry_warning_rows)"
+          ERROR_ROWS="$(num_or_zero error_rows)"
+          if (( WARN_ROWS > 0 || RETRY_WARNING_ROWS > 0 || ERROR_ROWS > 0 )); then
+            echo "::warning::push completed with transient storage noise (warn_rows=${WARN_ROWS}, retry_warning_rows=${RETRY_WARNING_ROWS}, error_rows=${ERROR_ROWS}); continuing to restore so TIN-1546 can classify recovery"
           fi
 
       - name: Restore large canary

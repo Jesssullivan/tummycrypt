@@ -76,6 +76,18 @@ Known evidence:
   The workflow must rerun under `gha/storage-posture/large/...` and fail
   immediately if the push evidence shows zero uploaded rows or storage access
   denials.
+- run `26378068281` reran the large-restore companion on merged `main` at
+  `e95fffe` under the corrected `gha/storage-posture/large/...` prefix. Scoped
+  credentials passed and the push reached the synthetic 1 GiB Git pack, but the
+  raw log recorded repeated transient Cloudflare `502` write-close failures
+  before eventual upload completion. The workflow then failed in the push
+  evidence gate because the storage-summary parser did not strip ANSI-colored
+  tracing fields and therefore reported `upload_rows=0` even though `push.log`
+  showed `uploaded: 30 files (1.0 GB)`. Treat this as useful transient-recovery
+  blocker evidence, not a restore packet. The follow-up requirement is to strip
+  ANSI before summarizing push logs, preserve warning/error counts, and allow a
+  successful push with transient 5xx retry noise to continue into restore so the
+  beta gate can classify convergence.
 - downstream public-asset smokes on `main@e9b9f82` then used the same
   production-smoke prefix family successfully:
   - Linux `.deb` run `26218940925` used

@@ -784,6 +784,13 @@ write_push_storage_summary() {
 
   summarize_push_log() {
     awk '
+    BEGIN {
+      esc = sprintf("%c", 27)
+    }
+    {
+      line = $0
+      gsub(esc "\\[[0-9;]*[A-Za-z]", "", line)
+    }
     function value_after(line, key, rest, parts) {
       rest = line
       start = index(rest, key "=")
@@ -828,46 +835,47 @@ write_push_storage_summary() {
         chunk_write_timeout_values = chunk_write_timeout_values "," value
       }
     }
-    /chunk upload progress/ {
+    line ~ /chunk upload progress/ {
       progress_rows += 1
       next
     }
-    /chunk upload heartbeat/ {
+    line ~ /chunk upload heartbeat/ {
       heartbeat_rows += 1
       next
     }
-    / WARN / {
+    line ~ / WARN / {
       warn_rows += 1
-      if ($0 ~ /attempt=/ && $0 ~ /delay_ms=/) {
+      if (line ~ /attempt=/ && line ~ /delay_ms=/) {
         retry_warning_rows += 1
       }
-      if ($0 ~ /kind=timeout/ || $0 ~ /chunk upload timed out/) {
+      if (line ~ /kind=timeout/ || line ~ /chunk upload timed out/) {
         timeout_retry_warning_rows += 1
       }
     }
-    / ERROR / {
+    line ~ / ERROR / {
       error_rows += 1
     }
-    /uploaded path=/ {
+    line ~ /uploaded path=/ {
       rows += 1
+      split(line, fields, " ")
       if (first_timestamp == "") {
-        first_timestamp = $1
+        first_timestamp = fields[1]
       }
-      last_timestamp = $1
+      last_timestamp = fields[1]
 
-      path = uploaded_path($0)
-      chunks = value_after($0, "chunks") + 0
-      bytes = value_after($0, "bytes") + 0
-      uploaded_bytes = value_after($0, "uploaded_bytes") + 0
-      upload_elapsed_ms = value_after($0, "upload_elapsed_ms") + 0
-      upload_bytes_per_sec = value_after($0, "upload_bytes_per_sec") + 0
-      upload_chunks_per_sec = value_after($0, "upload_chunks_per_sec") + 0
-      streaming = value_after($0, "streaming")
-      fresh_prefix_publish = value_after($0, "fresh_prefix_publish")
-      remote_conflict_check = value_after($0, "remote_conflict_check")
-      exists_check = value_after($0, "chunk_exists_check")
-      concurrency = value_after($0, "chunk_upload_concurrency")
-      chunk_write_timeout = value_after($0, "chunk_write_timeout_secs")
+      path = uploaded_path(line)
+      chunks = value_after(line, "chunks") + 0
+      bytes = value_after(line, "bytes") + 0
+      uploaded_bytes = value_after(line, "uploaded_bytes") + 0
+      upload_elapsed_ms = value_after(line, "upload_elapsed_ms") + 0
+      upload_bytes_per_sec = value_after(line, "upload_bytes_per_sec") + 0
+      upload_chunks_per_sec = value_after(line, "upload_chunks_per_sec") + 0
+      streaming = value_after(line, "streaming")
+      fresh_prefix_publish = value_after(line, "fresh_prefix_publish")
+      remote_conflict_check = value_after(line, "remote_conflict_check")
+      exists_check = value_after(line, "chunk_exists_check")
+      concurrency = value_after(line, "chunk_upload_concurrency")
+      chunk_write_timeout = value_after(line, "chunk_write_timeout_secs")
 
       total_chunks += chunks
       total_file_bytes += bytes
