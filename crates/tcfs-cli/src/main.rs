@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use secrecy::ExposeSecret;
 use serde::Serialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -179,6 +180,9 @@ enum Commands {
         /// Config path to write/check (default: ~/.config/tcfs/config.toml)
         #[arg(long)]
         config_out: Option<PathBuf>,
+        /// Optional FileProvider bootstrap JSON path to write for macOS HostApp provisioning
+        #[arg(long)]
+        fileprovider_config_out: Option<PathBuf>,
         /// Non-interactive mode (use with --password)
         #[arg(long)]
         non_interactive: bool,
@@ -631,18 +635,22 @@ async fn main() -> Result<()> {
             skip_config,
             force_config,
             config_out,
+            fileprovider_config_out,
             non_interactive,
             password,
         } => {
             cmd_init(
                 &config,
-                device_name,
-                check,
-                skip_config,
-                force_config,
-                config_out.as_deref(),
-                non_interactive,
-                password,
+                InitOptions {
+                    device_name,
+                    check,
+                    skip_config,
+                    force_config,
+                    config_out: config_out.as_deref(),
+                    fileprovider_config_out: fileprovider_config_out.as_deref(),
+                    non_interactive,
+                    password,
+                },
             )
             .await
         }
@@ -3187,16 +3195,30 @@ fn print_dirty_unsync_paths(root: &std::path::Path, dirty: &[DirtyUnsyncPath]) {
 
 // ── `tcfs init` ──────────────────────────────────────────────────────────────
 
-async fn cmd_init(
-    config: &tcfs_core::config::TcfsConfig,
+#[derive(Debug)]
+struct InitOptions<'a> {
     device_name: Option<String>,
     check: bool,
     skip_config: bool,
     force_config: bool,
-    config_out: Option<&Path>,
+    config_out: Option<&'a Path>,
+    fileprovider_config_out: Option<&'a Path>,
     non_interactive: bool,
     password: Option<String>,
-) -> Result<()> {
+}
+
+async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'_>) -> Result<()> {
+    let InitOptions {
+        device_name,
+        check,
+        skip_config,
+        force_config,
+        config_out,
+        fileprovider_config_out,
+        non_interactive,
+        password,
+    } = options;
+
     let device_name = device_name.unwrap_or_else(tcfs_secrets::device::default_device_name);
     let init_paths = InitPaths::resolve(config_out);
     let config_path = init_paths.config_path.clone();
@@ -3297,9 +3319,19 @@ async fn cmd_init(
     tcfs_secrets::device::save_device_secret_key(&device_key_path, &device_key.secret_key, false)?;
     registry.save(&registry_path)?;
 
+    let init_config = build_init_config(config, &master_key_path, &registry_path, &device_name);
     if !skip_config {
-        let init_config = build_init_config(config, &master_key_path, &registry_path, &device_name);
         write_init_config(&config_path, &init_config, force_config)?;
+    }
+    if let Some(fileprovider_config_path) = fileprovider_config_out {
+        write_fileprovider_init_config(
+            fileprovider_config_path,
+            &init_config,
+            &master_key_path,
+            &device_id,
+            force_config,
+        )
+        .await?;
     }
 
     // Step 7: Print success message
@@ -3313,6 +3345,9 @@ async fn cmd_init(
     println!("  Registry:     {}", registry_path.display());
     if !skip_config {
         println!("  Config:       {}", config_path.display());
+    }
+    if let Some(fileprovider_config_path) = fileprovider_config_out {
+        println!("  FileProvider: {}", fileprovider_config_path.display());
     }
     println!();
     println!("Next steps:");
@@ -3495,6 +3530,166 @@ fn write_init_config(
         std::fs::set_permissions(config_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("setting permissions on: {}", config_path.display()))?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct FileProviderInitConfig {
+    s3_endpoint: String,
+    s3_bucket: String,
+    s3_access: String,
+    s3_secret: String,
+    remote_prefix: String,
+    device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon_socket: Option<String>,
+    master_key_file: String,
+}
+
+fn build_fileprovider_init_config(
+    config: &tcfs_core::config::TcfsConfig,
+    s3: &tcfs_secrets::S3Credentials,
+    master_key_path: &Path,
+    device_id: &str,
+) -> FileProviderInitConfig {
+    FileProviderInitConfig {
+        s3_endpoint: config.storage.endpoint.clone(),
+        s3_bucket: config.storage.bucket.clone(),
+        s3_access: s3.access_key_id.clone(),
+        s3_secret: s3.secret_access_key.expose_secret().to_string(),
+        remote_prefix: config.storage.resolved_prefix().to_string(),
+        device_id: device_id.to_string(),
+        daemon_endpoint: config.daemon.fileprovider_endpoint.clone(),
+        daemon_socket: config
+            .daemon
+            .fileprovider_socket
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned()),
+        master_key_file: master_key_path.to_string_lossy().into_owned(),
+    }
+}
+
+async fn write_fileprovider_init_config(
+    config_path: &Path,
+    config: &tcfs_core::config::TcfsConfig,
+    master_key_path: &Path,
+    device_id: &str,
+    force: bool,
+) -> Result<()> {
+    if config_path.exists() && !force {
+        anyhow::bail!(
+            "FileProvider config already exists: {}. Pass --force-config to overwrite it.",
+            config_path.display()
+        );
+    }
+    let cred_store = tcfs_secrets::CredStore::load(&config.secrets, &config.storage)
+        .await
+        .context("credential discovery failed for FileProvider init config")?;
+    let s3 = cred_store.s3.context(
+        "S3 credentials not found for FileProvider init config.\n\
+         Set TCFS_S3_ACCESS and TCFS_S3_SECRET environment variables,\n\
+         or configure storage.credentials_file in tcfs.toml,\n\
+         or use ~/.aws/credentials file.",
+    )?;
+    tracing::info!(source = %cred_store.source, "FileProvider init credentials loaded");
+
+    let rendered = serde_json::to_string_pretty(&build_fileprovider_init_config(
+        config,
+        &s3,
+        master_key_path,
+        device_id,
+    ))
+    .context("serializing FileProvider init config to JSON")?;
+    write_fileprovider_config_file(config_path, &rendered, force)
+}
+
+fn write_fileprovider_config_file(config_path: &Path, rendered: &str, force: bool) -> Result<()> {
+    if config_path.exists() && !force {
+        anyhow::bail!(
+            "FileProvider config already exists: {}. Pass --force-config to overwrite it.",
+            config_path.display()
+        );
+    }
+    if let Some(parent) = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating FileProvider config dir: {}", parent.display()))?;
+    }
+
+    let parent = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let filename = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.json");
+    let temp_path = parent.join(format!(".{filename}.{}.tmp", std::process::id()));
+    let write_result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut file = options.open(&temp_path).with_context(|| {
+            format!(
+                "creating FileProvider config temp file: {}",
+                temp_path.display()
+            )
+        })?;
+        file.write_all(rendered.as_bytes()).with_context(|| {
+            format!(
+                "writing FileProvider config temp file: {}",
+                temp_path.display()
+            )
+        })?;
+        file.sync_all().with_context(|| {
+            format!(
+                "syncing FileProvider config temp file: {}",
+                temp_path.display()
+            )
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on: {}", temp_path.display()))?;
+    }
+    if config_path.exists() && !force {
+        let _ = std::fs::remove_file(&temp_path);
+        anyhow::bail!(
+            "FileProvider config already exists: {}. Pass --force-config to overwrite it.",
+            config_path.display()
+        );
+    }
+
+    #[cfg(windows)]
+    if force && config_path.exists() {
+        std::fs::remove_file(config_path)
+            .with_context(|| format!("replacing FileProvider config: {}", config_path.display()))?;
+    }
+
+    if let Err(error) = std::fs::rename(&temp_path, config_path)
+        .with_context(|| format!("installing FileProvider config: {}", config_path.display()))
+    {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
     Ok(())
 }
 
@@ -5119,6 +5314,68 @@ mod tests {
         assert_eq!(reparsed.storage.bucket, config.storage.bucket);
     }
 
+    #[test]
+    fn build_fileprovider_init_config_emits_hostapp_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.storage.endpoint = "https://s3.example.test".into();
+        config.storage.bucket = "tcfs-smoke".into();
+        config.storage.remote_prefix = Some("devices/neo".into());
+        config.daemon.fileprovider_endpoint = Some("http://127.0.0.1:19101".into());
+        config.daemon.fileprovider_socket = Some(dir.path().join("tcfsd-fileprovider.sock"));
+
+        let s3 = tcfs_secrets::S3Credentials {
+            access_key_id: "access-key".into(),
+            secret_access_key: secrecy::SecretString::from("secret-key".to_string()),
+            endpoint: config.storage.endpoint.clone(),
+            region: config.storage.region.clone(),
+        };
+        let master_key_path = dir.path().join("master.key");
+        let rendered = build_fileprovider_init_config(&config, &s3, &master_key_path, "device-1");
+
+        assert_eq!(rendered.s3_endpoint, "https://s3.example.test");
+        assert_eq!(rendered.s3_bucket, "tcfs-smoke");
+        assert_eq!(rendered.s3_access, "access-key");
+        assert_eq!(rendered.s3_secret, "secret-key");
+        assert_eq!(rendered.remote_prefix, "devices/neo");
+        assert_eq!(rendered.device_id, "device-1");
+        assert_eq!(
+            rendered.daemon_endpoint.as_deref(),
+            Some("http://127.0.0.1:19101")
+        );
+        assert_eq!(
+            rendered.daemon_socket.as_deref(),
+            Some(dir.path().join("tcfsd-fileprovider.sock").to_str().unwrap())
+        );
+        assert_eq!(rendered.master_key_file, master_key_path.to_string_lossy());
+
+        let json = serde_json::to_value(&rendered).unwrap();
+        assert_eq!(json["s3_secret"], "secret-key");
+        assert_eq!(
+            json["master_key_file"].as_str(),
+            Some(master_key_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn write_fileprovider_config_file_refuses_existing_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("fileprovider/config.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "{}").unwrap();
+
+        let err = write_fileprovider_config_file(&config_path, "{\"ok\":true}", false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("FileProvider config already exists"));
+
+        write_fileprovider_config_file(&config_path, "{\"ok\":true}", true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "{\"ok\":true}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn write_init_config_sets_owner_only_mode() {
@@ -5129,6 +5386,24 @@ mod tests {
         let config = tcfs_core::config::TcfsConfig::default();
 
         write_init_config(&config_path, &config, false).unwrap();
+
+        let mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_fileprovider_config_file_sets_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("fileprovider/config.json");
+
+        write_fileprovider_config_file(&config_path, "{\"ok\":true}", false).unwrap();
 
         let mode = std::fs::metadata(&config_path)
             .unwrap()
