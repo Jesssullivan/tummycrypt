@@ -44,6 +44,11 @@ on:
         required: false
         default: "1800"
         type: string
+      download_chunk_retries:
+        description: "TCFS chunk read attempts for restore"
+        required: false
+        default: "8"
+        type: string
       tcfs_binary_source:
         description: "tcfs binary under test"
         required: false
@@ -121,7 +126,8 @@ jobs:
           for pair in \
             "pack_size_mib:${{ github.event.inputs.pack_size_mib }}" \
             "restore_headroom_margin_mib:${{ github.event.inputs.restore_headroom_margin_mib }}" \
-            "reconcile_timeout_secs:${{ github.event.inputs.reconcile_timeout_secs }}"
+            "reconcile_timeout_secs:${{ github.event.inputs.reconcile_timeout_secs }}" \
+            "download_chunk_retries:${{ github.event.inputs.download_chunk_retries }}"
           do
             name="${pair%%:*}"
             value="${pair#*:}"
@@ -138,6 +144,14 @@ jobs:
           fi
           if [[ "${{ github.event.inputs.reconcile_timeout_secs }}" == "0" ]]; then
             echo "::error::reconcile_timeout_secs must be greater than zero"
+            exit 1
+          fi
+          if [[ "${{ github.event.inputs.download_chunk_retries }}" == "0" ]]; then
+            echo "::error::download_chunk_retries must be greater than zero"
+            exit 1
+          fi
+          if (( ${{ github.event.inputs.download_chunk_retries }} > 32 )); then
+            echo "::error::download_chunk_retries must be <= 32"
             exit 1
           fi
           case "${{ github.event.inputs.tcfs_binary_source }}" in
@@ -298,6 +312,7 @@ jobs:
             echo "endpoint=$TCFS_SMOKE_S3_ENDPOINT"
             echo "bucket=$TCFS_SMOKE_S3_BUCKET"
             echo "tcfs_binary_source=${{ github.event.inputs.tcfs_binary_source }}"
+            echo "download_chunk_retries=${{ github.event.inputs.download_chunk_retries }}"
           } > "$EVIDENCE_DIR/large-restore-dispatch.env"
 
       - name: Generate synthetic git pack source
@@ -433,6 +448,7 @@ jobs:
           RESTORE_HEADROOM_MARGIN_BYTES="$MARGIN_BYTES" \
           RESTORE_RECONCILE_TIMEOUT_SECS="${{ github.event.inputs.reconcile_timeout_secs }}" \
           REQUIRE_EMPTY_DIRS=1 \
+          TCFS_DOWNLOAD_CHUNK_RETRIES="${{ github.event.inputs.download_chunk_retries }}" \
           TCFS_BIN="$TCFS_BIN_UNDER_TEST" \
           scripts/git-repo-restore-proof.sh \
             --evidence-dir "$EVIDENCE_DIR" \

@@ -34,6 +34,9 @@ use crate::state::{make_sync_state_full, FileSyncStatus, StateCache, SyncState};
 /// Default number of retry attempts for chunk upload/download operations.
 const CHUNK_MAX_RETRIES: u32 = 3;
 
+/// Default number of retry attempts for chunk downloads.
+const DEFAULT_DOWNLOAD_CHUNK_RETRIES: u32 = 8;
+
 /// Base delay between retries (doubles each attempt: 100ms, 200ms, 400ms).
 const CHUNK_RETRY_BASE_MS: u64 = 100;
 
@@ -98,11 +101,11 @@ fn upload_chunk_concurrency() -> usize {
 
 fn download_chunk_retries_from_env_value(value: Option<&str>) -> u32 {
     let Some(raw) = value else {
-        return CHUNK_MAX_RETRIES;
+        return DEFAULT_DOWNLOAD_CHUNK_RETRIES;
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return CHUNK_MAX_RETRIES;
+        return DEFAULT_DOWNLOAD_CHUNK_RETRIES;
     }
 
     trimmed
@@ -110,7 +113,7 @@ fn download_chunk_retries_from_env_value(value: Option<&str>) -> u32 {
         .ok()
         .filter(|value| *value > 0)
         .map(|value| value.min(MAX_DOWNLOAD_CHUNK_RETRIES))
-        .unwrap_or(CHUNK_MAX_RETRIES)
+        .unwrap_or(DEFAULT_DOWNLOAD_CHUNK_RETRIES)
 }
 
 fn download_chunk_retries() -> u32 {
@@ -645,7 +648,13 @@ enum ChunkReadError {
 impl std::fmt::Display for ChunkReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Transport { source, .. } => write!(f, "{source}"),
+            Self::Transport { source, elapsed } => {
+                write!(
+                    f,
+                    "chunk transport read failed after {} ms: {source}",
+                    elapsed.as_millis()
+                )
+            }
             Self::Timeout { timeout, .. } => {
                 write!(
                     f,
@@ -706,6 +715,7 @@ where
     Sleep: FnMut(std::time::Duration) -> SleepFuture,
     SleepFuture: std::future::Future<Output = ()>,
 {
+    let overall_started = Instant::now();
     retry_with_backoff(
         max_attempts,
         |_| {
@@ -781,7 +791,12 @@ where
         sleep,
     )
     .await
-    .map_err(|err| anyhow::Error::new(err).context(format!("downloading chunk {chunk_idx}: {key}")))
+    .map_err(|err| {
+        anyhow::Error::new(err).context(format!(
+            "downloading chunk {chunk_idx}: {key} after {max_attempts} attempts over {} ms",
+            overall_started.elapsed().as_millis()
+        ))
+    })
 }
 
 async fn read_chunk_with_retry(
@@ -3252,19 +3267,19 @@ mod tests {
     fn download_chunk_retries_env_is_bounded() {
         assert_eq!(
             download_chunk_retries_from_env_value(None),
-            CHUNK_MAX_RETRIES
+            DEFAULT_DOWNLOAD_CHUNK_RETRIES
         );
         assert_eq!(
             download_chunk_retries_from_env_value(Some("")),
-            CHUNK_MAX_RETRIES
+            DEFAULT_DOWNLOAD_CHUNK_RETRIES
         );
         assert_eq!(
             download_chunk_retries_from_env_value(Some("not-a-number")),
-            CHUNK_MAX_RETRIES
+            DEFAULT_DOWNLOAD_CHUNK_RETRIES
         );
         assert_eq!(
             download_chunk_retries_from_env_value(Some("0")),
-            CHUNK_MAX_RETRIES
+            DEFAULT_DOWNLOAD_CHUNK_RETRIES
         );
         assert_eq!(download_chunk_retries_from_env_value(Some("7")), 7);
         assert_eq!(

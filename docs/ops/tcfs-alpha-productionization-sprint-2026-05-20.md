@@ -8,15 +8,17 @@ This board turns the
 productionization plan into runnable gates and keeps the claim boundary strict:
 macOS production FileProvider exact hydration, Linux package first-use, scoped
 HTTPS storage posture, and the first 1 GiB synthetic Git-pack restore/recovery
-packet are green. The remaining alpha-to-beta work is package-backed
-large-restore breadth, longer storage soak, FileProvider UX hardening, and
-keeping the named neo/honey transcript current.
+packet are green. The first package-backed 3 GiB synthetic Git-pack candidate
+proved the push/load side and exposed a restore-blocking transient `502` read
+on the large pack. The remaining alpha-to-beta work is stronger large-restore
+transient recovery, longer storage soak, FileProvider UX hardening, and keeping
+the named neo/honey transcript current.
 
 ## Current Truth
 
 | Lane | Tracker | Current state | Next action |
 | --- | --- | --- | --- |
-| Production S3/storage posture | `TIN-1546` | Current scoped HTTPS posture run `26246264661` on `main@43ce227` proves public HTTPS, `enforce_tls=true`, public CA trust, allowed-prefix list/write/read/delete/delete-verify, and denied-prefix `PermissionDenied` for `tcfs-storage-prod-smoke`. PR `#448` merged the ANSI summary/transient classification fix, and mainline run `26378842677` on `main@40b4514` passed the 1 GiB synthetic Git-pack large push + fresh-tree restore under `gha/storage-posture/large/...`: 1,074,101,201 bytes uploaded/restored, restore throughput 5,774,737 B/s, socket highwater 0, and exact restore despite transient `502` read retries. The next workflow cut should use the default `tcfs_binary_source=nix-package` path so the large-restore packet is package-backed | Keep TIN-1546 open for package-backed multi-GiB restore, longer soak/load behavior, and benchmark rows |
+| Production S3/storage posture | `TIN-1546` | Current scoped HTTPS posture run `26246264661` on `main@43ce227` proves public HTTPS, `enforce_tls=true`, public CA trust, allowed-prefix list/write/read/delete/delete-verify, and denied-prefix `PermissionDenied` for `tcfs-storage-prod-smoke`. PR `#448` merged the ANSI summary/transient classification fix, and mainline run `26378842677` on `main@40b4514` passed the 1 GiB synthetic Git-pack large push + fresh-tree restore under `gha/storage-posture/large/...`: 1,074,101,201 bytes uploaded/restored, restore throughput 5,774,737 B/s, socket highwater 0, and exact restore despite transient `502` read retries. PR `#461` merged the package-backed large-restore dispatch path at `70e2eee`. Run `26412362782` on `main@70e2eee` used `tcfs_binary_source=nix-package`, `pack_size_mib=3072`, and `require_https=true`; it pushed 30 files / 3,222,239,922 bytes / 651 chunks with socket highwater 0, then failed fresh-tree restore after repeated Cloudflare/S3 `502` reads on one large-pack chunk. Restore ended with 29/30 files present, the 3.22 GB `.pack` missing, and reason `regular file hash manifest mismatch` | Attach the `26412362782` artifact to TIN-1546, then implement/prove stronger large-pack transient restore recovery before claiming package-backed multi-GiB restore |
 | Linux package first-use | `TIN-1540`, `TIN-1422`, `TIN-131`, `#280` | Public rc4 `.deb` smoke run `26218940925` passed install, storage `[ok]`, FUSE mount, exact hydrate, `tcfs cache evict` + rehydrate, and mutation remote pull against the hosted-reachable HTTPS backend. Homebrew current tap fresh-install smoke run `26221252765` and upgrade smoke run `26221711601` passed against `homebrew-tap@b5877df` (`v0.12.13-rc4`). PR #442 run `26243913292` passed Debian 13 fresh install, Debian 13 upgrade, Ubuntu 24.04 upgrade, Fedora 42 daemon-only fresh install, and Fedora 42 daemon-only sampled upgrade smokes. Nix profile install smoke passed in run `26242122899`; post-merge run `26382186102` then proved storage-backed `tcfs init --config-out`, `tcfs init check [ok]`, and live `storage: https://tcfs-smoke-s3.tinyland.dev [ok]`, with a 27-minute profile install latency caveat | Finish remaining package proof: NixOS host proof, rc package version semantics, and bounded Nix profile install latency |
 | Named fleet acceptance | `TIN-132` | Fresh named transcript is archived at `docs/release/evidence/neo-honey-smoke-20260521T032725Z/`; CI Live Storage remains regression coverage, not a replacement for the named operator lane | Keep the transcript current for release-day acceptance or explicitly supersede the named-lane requirement in Linear |
 | FileProvider post-M10 hardening | `TIN-1547` | Public `v0.12.13-rc4` `.pkg` run `26218940950` passed signed HostApp root enumeration, exact hydrate, evict/rehydrate, mutation, rename, and conflict/status. PZM run `26380511749` repeated the public rc4 package lane with five evict/rehydrate soak cycles against `tcfs-storage-prod-smoke` and passed exact hydrate, mutation remote pull, rename safety, and CLI conflict-status content hydrate | Add badge/progress/recovery capture and keep first-run setup proof under TIN-1425 |
@@ -80,10 +82,12 @@ just neo-honey-smoke
   `enforce_tls=true`, delete verification, and denial-prefix
   `PermissionDenied`. Attach a matching `storage-large-restore-canary-*`
   artifact for large-object recovery; the merged-main 1 GiB synthetic Git-pack
-  packet is `26378842677`. The next large-restore dispatch should run with
-  `tcfs_binary_source=nix-package` and a larger pack size before claiming the
-  package-backed TIN-1546 cut. Keep the larger TIN-1546 lane open for
-  soak/load behavior and benchmark rows.
+  packet is `26378842677`. PR `#461` made the dispatch default package-backed.
+  Mainline run `26412362782` is the current package-backed 3 GiB artifact: push
+  passed, restore failed on a repeated `502` chunk read for the large Git pack.
+  Do not claim the package-backed TIN-1546 cut until a rerun proves exact
+  multi-GiB restore. Keep the larger TIN-1546 lane open for soak/load behavior
+  and benchmark rows.
 - `TIN-1540` / `TIN-1422`: the hosted HTTPS backend and Linux first-use route
   are closed. Re-run them on release-day if the release candidate changes.
 - `TIN-131/#280`: closed for the current alpha install/upgrade matrix. Debian

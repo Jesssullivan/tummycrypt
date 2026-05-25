@@ -46,6 +46,8 @@ assert_contains "$WORKFLOW" "refusing to run restore against an untrusted prefix
 assert_contains "$WORKFLOW" "actions/upload-artifact@v4"
 assert_contains "$WORKFLOW" "tcfs_binary_source:"
 assert_contains "$WORKFLOW" "default: \"nix-package\""
+assert_contains "$WORKFLOW" "download_chunk_retries:"
+assert_contains "$WORKFLOW" "TCFS_DOWNLOAD_CHUNK_RETRIES="
 assert_contains "$WORKFLOW" "cachix/install-nix-action@v31"
 assert_contains "$WORKFLOW" 'TCFS_S3_REGION=$REGION'
 assert_contains "$WORKFLOW" 'TCFS_STORAGE_S3_CA_CERT_PATH=$CA_CERT_PATH'
@@ -96,6 +98,7 @@ extract_step_from_workflow "Restore large canary" "$RESTORE_STEP"
 assert_contains "$RESTORE_STEP" "RESTORE_REQUIRE_HEADROOM=1"
 assert_contains "$RESTORE_STEP" 'RESTORE_HEADROOM_MARGIN_BYTES="$MARGIN_BYTES"'
 assert_contains "$RESTORE_STEP" "REQUIRE_EMPTY_DIRS=1"
+assert_contains "$RESTORE_STEP" 'TCFS_DOWNLOAD_CHUNK_RETRIES="${{ github.event.inputs.download_chunk_retries }}"'
 assert_contains "$RESTORE_STEP" 'TCFS_BIN="$TCFS_BIN_UNDER_TEST"'
 assert_contains "$RESTORE_STEP" "scripts/git-repo-restore-proof.sh"
 assert_contains "$RESTORE_STEP" '--restore-root "$RESTORE_ROOT"'
