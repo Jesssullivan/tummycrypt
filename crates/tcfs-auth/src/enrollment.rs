@@ -387,6 +387,30 @@ pub struct EnrollmentResult {
     pub available_auth_methods: Vec<String>,
 }
 
+/// Secret bootstrap material returned to a joining device.
+///
+/// This payload must be encrypted to the joining device's public key before it
+/// crosses an enrollment boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnrollmentBootstrap {
+    /// NATS server URL (if fleet sync is enabled).
+    pub nats_url: Option<String>,
+    /// Storage endpoint URL.
+    pub storage_endpoint: Option<String>,
+    /// S3 bucket name.
+    pub storage_bucket: Option<String>,
+    /// S3 access key.
+    pub storage_access_key: Option<String>,
+    /// S3 secret key.
+    pub storage_secret_key: Option<String>,
+    /// Remote prefix for file sync.
+    pub remote_prefix: Option<String>,
+    /// Base64-encoded TCFS master key for the current shared-master fleet.
+    pub master_key_base64: Option<String>,
+    /// Encryption salt (if passphrase-based E2EE is enabled).
+    pub encryption_salt: Option<String>,
+}
+
 /// Audit record for an invite that has already been redeemed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InviteRedemption {

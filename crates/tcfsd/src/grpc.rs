@@ -11,6 +11,8 @@ use tracing::{info, warn};
 
 use crate::cred_store::SharedCredStore;
 
+use base64::Engine;
+use secrecy::ExposeSecret;
 use tcfs_core::config::TcfsConfig;
 use tcfs_core::proto::{
     tcfs_daemon_server::{TcfsDaemon, TcfsDaemonServer},
@@ -200,6 +202,78 @@ impl TcfsDaemonImpl {
             webauthn_provider,
             rate_limiter,
         }
+    }
+
+    async fn enrollment_bootstrap_for_invite(
+        &self,
+        invite: &tcfs_auth::EnrollmentInvite,
+    ) -> Result<tcfs_auth::EnrollmentBootstrap, tonic::Status> {
+        let (storage_access_key, storage_secret_key) =
+            self.enrollment_storage_credentials(invite).await;
+        if storage_access_key.is_none() || storage_secret_key.is_none() {
+            return Err(tonic::Status::failed_precondition(
+                "storage credentials unavailable for enrollment bootstrap",
+            ));
+        }
+
+        let master_key_base64 = {
+            let master = self.master_key.lock().await;
+            let master = master.as_ref().ok_or_else(|| {
+                tonic::Status::failed_precondition(
+                    "daemon master key not loaded — cannot wrap enrollment bootstrap",
+                )
+            })?;
+            base64::engine::general_purpose::STANDARD.encode(master.as_bytes())
+        };
+
+        Ok(tcfs_auth::EnrollmentBootstrap {
+            nats_url: invite
+                .nats_url
+                .clone()
+                .or_else(|| Some(self.config.sync.nats_url.clone()).filter(|url| !url.is_empty())),
+            storage_endpoint: invite.storage_endpoint.clone().or_else(|| {
+                Some(self.config.storage.endpoint.clone()).filter(|url| !url.is_empty())
+            }),
+            storage_bucket: invite.storage_bucket.clone().or_else(|| {
+                Some(self.config.storage.bucket.clone()).filter(|bucket| !bucket.is_empty())
+            }),
+            storage_access_key,
+            storage_secret_key,
+            remote_prefix: invite
+                .remote_prefix
+                .clone()
+                .or_else(|| Some(self.config.storage.resolved_prefix().to_string())),
+            master_key_base64: Some(master_key_base64),
+            encryption_salt: invite
+                .encryption_salt
+                .clone()
+                .or_else(|| self.config.crypto.kdf_salt.clone()),
+        })
+    }
+
+    async fn enrollment_storage_credentials(
+        &self,
+        invite: &tcfs_auth::EnrollmentInvite,
+    ) -> (Option<String>, Option<String>) {
+        if invite.storage_access_key.is_some() && invite.storage_secret_key.is_some() {
+            return (
+                invite.storage_access_key.clone(),
+                invite.storage_secret_key.clone(),
+            );
+        }
+
+        let store = self.cred_store.read().await;
+        if let Some(s3) = store.as_ref().and_then(|store| store.s3.as_ref()) {
+            return (
+                Some(s3.access_key_id.clone()),
+                Some(s3.secret_access_key.expose_secret().to_string()),
+            );
+        }
+
+        (
+            invite.storage_access_key.clone(),
+            invite.storage_secret_key.clone(),
+        )
     }
 
     /// Get a clone of the session store (for background tasks).
@@ -2326,6 +2400,14 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }));
         }
 
+        if !tcfs_secrets::device::is_real_age_public_key(&req.public_key) {
+            return Ok(tonic::Response::new(DeviceEnrollResponse {
+                success: false,
+                error: "invalid device public key; expected age X25519 recipient".into(),
+                ..Default::default()
+            }));
+        }
+
         // Validate invite signature against master key
         if let Some(mk) = self.master_key.lock().await.as_ref() {
             let signing_key: [u8; 32] = *blake3::hash(mk.as_bytes()).as_bytes();
@@ -2342,6 +2424,15 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 "daemon master key not loaded — cannot verify invite signature",
             ));
         }
+
+        let bootstrap = self.enrollment_bootstrap_for_invite(&invite).await?;
+        let bootstrap_json = serde_json::to_vec(&bootstrap).map_err(|e| {
+            tonic::Status::internal(format!("serializing enrollment bootstrap: {e}"))
+        })?;
+        let wrapped_bootstrap_age =
+            tcfs_secrets::age::encrypt_for_recipient(&req.public_key, &bootstrap_json).map_err(
+                |e| tonic::Status::invalid_argument(format!("wrapping enrollment bootstrap: {e}")),
+            )?;
 
         match self
             .invite_redemptions
@@ -2384,16 +2475,17 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Ok(tonic::Response::new(DeviceEnrollResponse {
             success: true,
             device_id,
-            nats_url: invite.nats_url.unwrap_or_default(),
-            storage_endpoint: invite.storage_endpoint.unwrap_or_default(),
+            nats_url: bootstrap.nats_url.unwrap_or_default(),
+            storage_endpoint: bootstrap.storage_endpoint.unwrap_or_default(),
             available_auth_methods: vec!["totp".into()],
             error: String::new(),
-            storage_bucket: invite.storage_bucket.unwrap_or_default(),
-            storage_access_key: invite.storage_access_key.unwrap_or_default(),
-            storage_secret: invite.storage_secret_key.unwrap_or_default(),
-            remote_prefix: invite.remote_prefix.unwrap_or_default(),
-            encryption_passphrase: invite.encryption_passphrase.unwrap_or_default(),
-            encryption_salt: invite.encryption_salt.unwrap_or_default(),
+            storage_bucket: bootstrap.storage_bucket.unwrap_or_default(),
+            storage_access_key: String::new(),
+            storage_secret: String::new(),
+            remote_prefix: bootstrap.remote_prefix.unwrap_or_default(),
+            encryption_passphrase: String::new(),
+            encryption_salt: bootstrap.encryption_salt.unwrap_or_default(),
+            wrapped_bootstrap_age,
         }))
     }
 
@@ -2555,8 +2647,10 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use opendal::services::Memory;
     use opendal::Operator;
+    use secrecy::{ExposeSecret, SecretString};
     use tcfs_core::proto::tcfs_daemon_client::TcfsDaemonClient;
     use tonic::transport::{Channel, Endpoint, Uri};
     use tower::service_fn;
@@ -2615,6 +2709,30 @@ mod tests {
 
     fn memory_operator() -> Operator {
         Operator::new(Memory::default()).unwrap().finish()
+    }
+
+    fn test_device_keypair() -> tcfs_secrets::device::LocalDeviceKey {
+        tcfs_secrets::device::generate_local_device_key()
+    }
+
+    async fn insert_test_s3_credentials(
+        daemon: &TcfsDaemonImpl,
+        access_key: &str,
+        secret_key: &str,
+    ) {
+        daemon
+            .cred_store
+            .write()
+            .await
+            .replace(tcfs_secrets::CredStore {
+                s3: Some(tcfs_secrets::S3Credentials {
+                    access_key_id: access_key.into(),
+                    secret_access_key: SecretString::from(secret_key.to_string()),
+                    endpoint: daemon.config.storage.endpoint.clone(),
+                    region: daemon.config.storage.region.clone(),
+                }),
+                source: "test".into(),
+            });
     }
 
     fn request_with_bearer<T>(message: T, token: &str) -> tonic::Request<T> {
@@ -2975,13 +3093,16 @@ mod tests {
         );
         invite.storage_endpoint = Some("https://s3.example.invalid".into());
         invite.storage_bucket = Some("tcfs".into());
+        invite.storage_access_key = Some("test-access".into());
+        invite.storage_secret_key = Some("test-secret".into());
         invite.refresh_signature(&signing_key);
         let invite_data = invite.encode_compact().unwrap();
+        let keypair = test_device_keypair();
 
         let req = DeviceEnrollRequest {
             invite_data: invite_data.clone(),
             device_name: "new-laptop".into(),
-            public_key: "age1testdevice".into(),
+            public_key: keypair.public_key.clone(),
             platform: "linux-x86_64".into(),
         };
 
@@ -3000,6 +3121,134 @@ mod tests {
             .into_inner();
         assert!(!second.success);
         assert!(second.error.contains("already been redeemed"));
+    }
+
+    #[tokio::test]
+    async fn device_enroll_rejects_invalid_public_key_before_claiming_invite() {
+        let key_bytes = [0xC7; tcfs_crypto::KEY_SIZE];
+        let signing_key: [u8; 32] = *blake3::hash(&key_bytes).as_bytes();
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with_operator_and_master(
+            None,
+            Some(tcfs_crypto::MasterKey::from_bytes(key_bytes)),
+        )
+        .with_data_dir(temp.path().join("tcfsd"));
+
+        let mut invite = tcfs_auth::EnrollmentInvite::new(
+            "admin-device",
+            &signing_key,
+            24,
+            tcfs_auth::DevicePermissions::default(),
+        );
+        invite.storage_endpoint = Some("https://s3.example.invalid".into());
+        invite.storage_bucket = Some("tcfs".into());
+        invite.storage_access_key = Some("test-access".into());
+        invite.storage_secret_key = Some("test-secret".into());
+        invite.refresh_signature(&signing_key);
+        let invite_data = invite.encode_compact().unwrap();
+
+        let rejected = daemon
+            .device_enroll(tonic::Request::new(DeviceEnrollRequest {
+                invite_data: invite_data.clone(),
+                device_name: "new-laptop".into(),
+                public_key: "not-an-age-recipient".into(),
+                platform: "linux-x86_64".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!rejected.success);
+        assert!(rejected.error.contains("invalid device public key"));
+        assert!(!temp.path().join("tcfsd/invite-redemptions.json").exists());
+
+        let keypair = test_device_keypair();
+        let accepted = daemon
+            .device_enroll(tonic::Request::new(DeviceEnrollRequest {
+                invite_data,
+                device_name: "new-laptop".into(),
+                public_key: keypair.public_key.clone(),
+                platform: "linux-x86_64".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(accepted.success, "retry failed: {}", accepted.error);
+    }
+
+    #[tokio::test]
+    async fn device_enroll_wraps_bootstrap_to_joining_device_key() {
+        let key_bytes = [0xB6; tcfs_crypto::KEY_SIZE];
+        let signing_key: [u8; 32] = *blake3::hash(&key_bytes).as_bytes();
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = test_daemon_with_operator_and_master(
+            None,
+            Some(tcfs_crypto::MasterKey::from_bytes(key_bytes)),
+        )
+        .with_data_dir(temp.path().join("tcfsd"));
+        insert_test_s3_credentials(&daemon, "daemon-access", "daemon-secret").await;
+
+        let mut invite = tcfs_auth::EnrollmentInvite::new(
+            "admin-device",
+            &signing_key,
+            24,
+            tcfs_auth::DevicePermissions::default(),
+        );
+        invite.storage_endpoint = Some("https://s3.example.invalid".into());
+        invite.storage_bucket = Some("tcfs".into());
+        invite.remote_prefix = Some("tenant/a".into());
+        invite.refresh_signature(&signing_key);
+        let invite_data = invite.encode_compact().unwrap();
+        let keypair = test_device_keypair();
+
+        let resp = daemon
+            .device_enroll(tonic::Request::new(DeviceEnrollRequest {
+                invite_data,
+                device_name: "new-laptop".into(),
+                public_key: keypair.public_key.clone(),
+                platform: "linux-x86_64".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.success, "enrollment failed: {}", resp.error);
+        assert!(resp.storage_access_key.is_empty());
+        assert!(resp.storage_secret.is_empty());
+        assert!(resp.encryption_passphrase.is_empty());
+        assert!(resp
+            .wrapped_bootstrap_age
+            .contains("BEGIN AGE ENCRYPTED FILE"));
+
+        let identity = tcfs_secrets::IdentityProvider {
+            key_data: keypair.secret_key.expose_secret().to_string(),
+            source: "test".into(),
+        };
+        let plaintext = tcfs_secrets::age::decrypt_with_identity(
+            &identity,
+            resp.wrapped_bootstrap_age.as_bytes(),
+        )
+        .unwrap();
+        let bootstrap: tcfs_auth::EnrollmentBootstrap = serde_json::from_slice(&plaintext).unwrap();
+
+        assert_eq!(
+            bootstrap.storage_endpoint.as_deref(),
+            Some("https://s3.example.invalid")
+        );
+        assert_eq!(bootstrap.storage_bucket.as_deref(), Some("tcfs"));
+        assert_eq!(
+            bootstrap.storage_access_key.as_deref(),
+            Some("daemon-access")
+        );
+        assert_eq!(
+            bootstrap.storage_secret_key.as_deref(),
+            Some("daemon-secret")
+        );
+        assert_eq!(bootstrap.remote_prefix.as_deref(), Some("tenant/a"));
+        let expected_master_key = base64::engine::general_purpose::STANDARD.encode(key_bytes);
+        assert_eq!(
+            bootstrap.master_key_base64.as_deref(),
+            Some(expected_master_key.as_str())
+        );
     }
 
     #[tokio::test]

@@ -4161,33 +4161,11 @@ async fn cmd_device_invite(
         DevicePermissions::default(),
     );
 
-    // Include storage credentials for credential brokering
+    // Include non-secret routing metadata. Secret bootstrap material is brokered
+    // by tcfsd during DeviceEnroll and wrapped to the joining device public key.
     invite.storage_endpoint = Some(config.storage.endpoint.clone());
     invite.storage_bucket = Some(config.storage.bucket.clone());
-    invite.remote_prefix = Some(String::from("default"));
-
-    // Load S3 credentials from environment (sops-nix populates these)
-    if let Ok(access_key) = std::env::var("AWS_ACCESS_KEY_ID").or_else(|_| {
-        std::env::var("TCFS_S3_ACCESS_KEY_FILE")
-            .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
-    }) {
-        invite.storage_access_key = Some(access_key);
-    }
-    if let Ok(secret_key) = std::env::var("AWS_SECRET_ACCESS_KEY").or_else(|_| {
-        std::env::var("TCFS_S3_SECRET_KEY_FILE")
-            .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
-    }) {
-        invite.storage_secret_key = Some(secret_key);
-    }
-
-    // Include encryption config if enabled
-    if config.crypto.enabled {
-        if let Ok(passphrase) = std::env::var("TCFS_ENCRYPTION_KEY_FILE")
-            .and_then(|f| std::fs::read_to_string(f).map_err(|_| std::env::VarError::NotPresent))
-        {
-            invite.encryption_passphrase = Some(passphrase);
-        }
-    }
+    invite.remote_prefix = Some(config.storage.resolved_prefix().to_string());
 
     invite.refresh_signature(&signing_key);
 
@@ -4205,11 +4183,7 @@ async fn cmd_device_invite(
         "Storage: {} (bucket: {})",
         config.storage.endpoint, config.storage.bucket
     );
-    if invite.storage_access_key.is_some() {
-        println!("Credentials: included (S3 access key brokered)");
-    } else {
-        println!("Credentials: NOT included (set AWS_ACCESS_KEY_ID or TCFS_S3_ACCESS_KEY_FILE)");
-    }
+    println!("Credentials: not embedded in invite; daemon wraps bootstrap during enrollment");
     println!(
         "Payload: {} bytes compact, {} bytes full",
         compact.len(),

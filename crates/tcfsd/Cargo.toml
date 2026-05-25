@@ -45,6 +45,7 @@ tempfile = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 age = { workspace = true }
+base64 = { workspace = true }
 uuid = { workspace = true }
 dirs = "6"
 openssl = { workspace = true, optional = true }
