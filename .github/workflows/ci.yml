@@ -54,6 +54,9 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
+      - name: FileProvider surface contract
+        run: bash scripts/test-fileprovider-surface-contract.sh
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets
 

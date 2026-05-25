@@ -1,6 +1,6 @@
 # TCFS Daily Driver Productionization Todo - 2026-05-24
 
-Status timestamp: 2026-05-25T05:40:00Z
+Status timestamp: 2026-05-25T14:51:28Z
 
 This is the current execution checklist for moving TCFS from an
 evidence-backed alpha surface toward a robust daily-driver filesystem product.
@@ -10,17 +10,21 @@ security, and user-visible control paths are also proven.
 
 ## Current State
 
-- `main` is at `3c220d2ba41bb3b89cc03ecf6a8bca16a110da76` after PR
-  `#456` merged the TIN-1424 admin-gated enrollment/revocation control RPC
-  slice.
-- Active PR: `#458` (`dd5b74d7358b31ba9692347d4ae00614faad5f5a`) adds
-  `tcfs init --fileprovider-config-out` and is waiting on remote checks.
+- `main` is at `76ab051c1391fbc94bc6032135eadaeef061156f` after PR
+  `#459` merged the TIN-1424 recipient-wrapped enrollment bootstrap slice.
+- Active PR: `#460` (`5456aa2`) adds a static TIN-1547 FileProvider
+  decorations/progress/custom-action contract guardrail and remains draft
+  until fresh post-rebase CI is green.
 - Latest prerelease: `v0.12.13-rc4`.
 - Public `Latest` release remains `v0.12.12`.
 - Post-merge CI/Docs/Nix runs on `40b4514` are green:
   - CI `26378706285`
   - Docs `26378706284`
   - Nix CI `26378706243`
+- PR `#459` pre-merge CI was green on head
+  `4426eaa1f3591881756988a93371dd8bfd7a6458`, including CI
+  `26404264594`, Docs `26404264596`, Nix CI `26404264593`, and CI Live
+  Storage `26404264595`.
 - PR `#450` pre-merge CI was green, including CI `26379985552`, Docs
   `26379985540`, Nix CI `26379985542`, CI Live Storage `26379985538`, and
   Linux Package Container Smoke `26379985545`.
@@ -178,6 +182,9 @@ hardening, not exact hydration rescue.
   config drift. The postinstall harness now accepts `--soak-cycles` so the
   existing evict/rehydrate proof can be repeated without changing the default
   one-pass release smoke.
+- [x] Add a static FileProvider surface contract test for decoration
+  declarations, fetch progress wiring, and custom action identifiers. This is
+  a CI guardrail only; it does not replace a live Finder badge/progress packet.
 - [ ] Keep installer-to-valid-config first-run proof under `TIN-1425`.
 - [ ] Update `docs/ops/macos-fileprovider-reality.md` only with new evidence,
   not optimistic wording.
@@ -230,9 +237,9 @@ files.
 - [ ] Prove the packaged macOS HostApp consumes that Rust-owned FileProvider
   JSON path and provisions shared Keychain config without a hand-authored
   `~/.config/tcfs/fileprovider/config.json`.
-- [ ] Keep fleet join out of `tcfs init` until `TIN-1417` and `TIN-1424` land;
-  `tcfs init` should mean fresh local setup, while invite/pairing belongs to a
-  later safe enrollment path.
+- [ ] Keep fleet join out of `tcfs init` until the remaining `TIN-1417` and
+  `TIN-1424` product slices are complete; `tcfs init` should mean fresh local
+  setup, while invite/pairing belongs to a separate safe enrollment path.
 
 ### 6. `TIN-1417` Per-Device Crypto
 
@@ -266,8 +273,9 @@ Why third: pairing depends on `TIN-1417`.
 
 - [x] Add single-use invite redemption state.
 - [x] Require admin/session gates for enrollment and revocation control RPCs.
-- [ ] Stop treating QR payloads with raw S3 credentials as a production path.
-- [ ] Wrap bootstrap material to the new device public key.
+- [x] Stop treating new QR payloads with raw S3 credentials as the default
+  production path.
+- [x] Wrap bootstrap material to the new device public key.
 - [ ] Keep iOS fail-closed until real device enrollment proof exists.
 
 2026-05-25 Phase 1 cut:
@@ -282,9 +290,16 @@ Why third: pairing depends on `TIN-1417`.
   RPCs and merged at
   `3c220d2ba41bb3b89cc03ecf6a8bca16a110da76` after green CI, live-storage,
   Nix, FileProvider staticlib, iOS typecheck, cargo-deny, and Secret Scan.
-- [ ] This does not yet remove raw long-lived storage secrets from invite
-  payloads, wrap bootstrap material to the recipient device key, or make
-  desktop/iOS join product-safe.
+- [x] PR `#459` added `DeviceEnrollResponse.wrapped_bootstrap_age`, requires a
+  real age/X25519 joining-device public key, wraps S3/bootstrap/master-key
+  material to that key, rejects malformed public keys before invite claim, and
+  stops returning raw S3/passphrase fields in new enrollment responses. It
+  merged at `76ab051c1391fbc94bc6032135eadaeef061156f` after green CI,
+  live-storage, Docs, Nix, FileProvider staticlib, iOS typecheck,
+  cargo-deny, and Secret Scan.
+- [ ] This does not yet productize pairing approval, client-side bootstrap
+  persistence, iOS/Desktop join acceptance, per-device content-key wrapping, or
+  true revocation denial for new content.
 
 ## Then: Daily-Driver Primitives
 
