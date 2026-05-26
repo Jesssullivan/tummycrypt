@@ -389,6 +389,11 @@ Target window: 2026-06-15 through 2026-06-30.
   browse/hydrate/unsync/re-hydrate set: `T1`, `T2`, `T3`, `T4`, `T5`, `T6`,
   `T12`, `M1`, `M2`, `M3`, `M6`. The expendable live-repo step then adds
   `T10`, `T11`, `M5`, `M5-R`, and `M8`.
+  First execution packet archived at
+  `docs/release/evidence/large-workdir-20260526T000907Z/`: source inventory,
+  isolated shadow copy, and parity gate output are green for the shadow-first
+  shape, but push/honey/lifecycle remain pending because the local Docker-backed
+  SeaweedFS/NATS dev stack is not running in this workspace.
 - [x] `TIN-1618`: first read-only inventory helper and regression test for
   candidate roots. It emits `inventory.json`, `inventory.env`, and
   `summary.md`; live pilot packet evidence is still pending.

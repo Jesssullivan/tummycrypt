@@ -422,6 +422,11 @@ Packet outputs to archive:
   `honey-linux-xr-shadow-commands.txt`
 - `linux-lifecycle-companion.log` and `linux-lifecycle/`
 
+First execution packet archived at
+`docs/release/evidence/large-workdir-20260526T000907Z/`. That run proves the
+inventory + isolated shadow shape and leaves push/honey/lifecycle pending until
+the local backend stack is available.
+
 Required proof rows:
 
 - browse before hydrate
