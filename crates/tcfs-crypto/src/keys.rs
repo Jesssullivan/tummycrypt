@@ -6,11 +6,15 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::Zeroize;
 
 use crate::kdf::MasterKey;
 use crate::{KEY_SIZE, NONCE_SIZE, TAG_SIZE};
+
+/// Algorithm marker for file keys wrapped to age X25519 device recipients.
+pub const AGE_X25519_FILE_KEY_ALGORITHM: &str = "age-x25519-v1";
 
 /// A per-file 256-bit encryption key. Zeroized on drop.
 #[derive(Clone)]
@@ -40,6 +44,28 @@ impl std::fmt::Debug for FileKey {
             .field("bytes", &"[REDACTED]")
             .finish()
     }
+}
+
+/// An active device recipient for per-device FileKey wrapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgeFileKeyRecipient {
+    /// Stable TCFS device identifier.
+    pub device_id: String,
+    /// age X25519 public recipient string (`age1...`).
+    pub recipient: String,
+}
+
+/// One FileKey wrap addressed to one device recipient.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgeWrappedFileKey {
+    /// Stable TCFS device identifier this wrap is intended for.
+    pub recipient_device_id: String,
+    /// Public recipient used when wrapping, retained for audit/migration checks.
+    pub recipient: String,
+    /// Cryptographic wrap algorithm.
+    pub algorithm: String,
+    /// Armored age ciphertext containing the 32-byte FileKey.
+    pub wrapped_key: String,
 }
 
 /// Generate a random 256-bit file encryption key.
@@ -125,10 +151,115 @@ pub fn unwrap_key(master: &MasterKey, wrapped: &[u8]) -> anyhow::Result<FileKey>
     Ok(FileKey::from_bytes(key_bytes))
 }
 
+/// Wrap a FileKey once per active age X25519 device recipient.
+///
+/// This is the additive TIN-1417 primitive for manifest schema v3. Existing
+/// master-key wraps remain supported during migration; callers should dual-write
+/// this recipient list before cutting over reads to per-device identities.
+pub fn wrap_file_key_for_age_recipients(
+    file_key: &FileKey,
+    recipients: &[AgeFileKeyRecipient],
+) -> anyhow::Result<Vec<AgeWrappedFileKey>> {
+    if recipients.is_empty() {
+        anyhow::bail!("at least one recipient is required to wrap a file key");
+    }
+
+    recipients
+        .iter()
+        .map(|recipient| {
+            let age_recipient: age::x25519::Recipient =
+                recipient.recipient.parse().map_err(|e| {
+                    anyhow::anyhow!("parsing age recipient for {}: {e}", recipient.device_id)
+                })?;
+            let wrapped_key =
+                age::encrypt_and_armor(&age_recipient, file_key.as_bytes()).map_err(|e| {
+                    anyhow::anyhow!("wrapping file key for {}: {e}", recipient.device_id)
+                })?;
+            Ok(AgeWrappedFileKey {
+                recipient_device_id: recipient.device_id.clone(),
+                recipient: recipient.recipient.clone(),
+                algorithm: AGE_X25519_FILE_KEY_ALGORITHM.to_string(),
+                wrapped_key,
+            })
+        })
+        .collect()
+}
+
+/// Unwrap a FileKey using a local age X25519 identity.
+///
+/// If `device_id` is provided, only wraps addressed to that device are tried.
+/// Otherwise every supported wrap is attempted. Non-matching wraps fail closed
+/// and do not produce corrupted keys.
+pub fn unwrap_file_key_with_age_identity(
+    wrapped_keys: &[AgeWrappedFileKey],
+    identity_secret: &str,
+    device_id: Option<&str>,
+) -> anyhow::Result<FileKey> {
+    use age::armor::ArmoredReader;
+    use std::io::Read;
+
+    let identity: age::x25519::Identity = identity_secret
+        .parse()
+        .map_err(|e| anyhow::anyhow!("parsing age identity: {e}"))?;
+    let mut saw_candidate = false;
+
+    for wrapped in wrapped_keys {
+        if wrapped.algorithm != AGE_X25519_FILE_KEY_ALGORITHM {
+            continue;
+        }
+        if device_id.is_some_and(|id| id != wrapped.recipient_device_id) {
+            continue;
+        }
+        saw_candidate = true;
+
+        let armored = ArmoredReader::new(wrapped.wrapped_key.as_bytes());
+        let decryptor = match age::Decryptor::new(armored) {
+            Ok(decryptor) => decryptor,
+            Err(_) => continue,
+        };
+        if decryptor.is_scrypt() {
+            continue;
+        }
+
+        let mut reader = match decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity)) {
+            Ok(reader) => reader,
+            Err(_) => continue,
+        };
+        let mut plaintext = Vec::new();
+        if reader.read_to_end(&mut plaintext).is_err() {
+            plaintext.zeroize();
+            continue;
+        }
+
+        if plaintext.len() != KEY_SIZE {
+            plaintext.zeroize();
+            anyhow::bail!(
+                "age-wrapped file key for {} had wrong size: {} bytes",
+                wrapped.recipient_device_id,
+                plaintext.len()
+            );
+        }
+
+        let mut key_bytes = [0u8; KEY_SIZE];
+        key_bytes.copy_from_slice(&plaintext);
+        plaintext.zeroize();
+        return Ok(FileKey::from_bytes(key_bytes));
+    }
+
+    if saw_candidate {
+        anyhow::bail!("no decryptable age-wrapped file key for this identity");
+    }
+    if let Some(device_id) = device_id {
+        anyhow::bail!("manifest has no supported age-wrapped file key for device {device_id}");
+    }
+    anyhow::bail!("manifest has no supported age-wrapped file key entries")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kdf::MasterKey;
+    use secrecy::ExposeSecret;
 
     fn test_master_key() -> MasterKey {
         MasterKey::from_bytes([42u8; KEY_SIZE])
@@ -184,5 +315,67 @@ mod tests {
 
         // nonce (24) + key (32) + tag (16) = 72
         assert_eq!(wrapped.len(), NONCE_SIZE + KEY_SIZE + TAG_SIZE);
+    }
+
+    #[test]
+    fn test_age_recipient_file_key_wrap_roundtrip() {
+        let device_a = age::x25519::Identity::generate();
+        let device_b = age::x25519::Identity::generate();
+        let outsider = age::x25519::Identity::generate();
+        let file_key = generate_file_key();
+
+        let wrapped = wrap_file_key_for_age_recipients(
+            &file_key,
+            &[
+                AgeFileKeyRecipient {
+                    device_id: "device-a".into(),
+                    recipient: device_a.to_public().to_string(),
+                },
+                AgeFileKeyRecipient {
+                    device_id: "device-b".into(),
+                    recipient: device_b.to_public().to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(wrapped.len(), 2);
+        assert!(wrapped
+            .iter()
+            .all(|wrap| wrap.algorithm == AGE_X25519_FILE_KEY_ALGORITHM));
+
+        let a = unwrap_file_key_with_age_identity(
+            &wrapped,
+            device_a.to_string().expose_secret(),
+            Some("device-a"),
+        )
+        .unwrap();
+        let b = unwrap_file_key_with_age_identity(
+            &wrapped,
+            device_b.to_string().expose_secret(),
+            Some("device-b"),
+        )
+        .unwrap();
+
+        assert_eq!(a.as_bytes(), file_key.as_bytes());
+        assert_eq!(b.as_bytes(), file_key.as_bytes());
+
+        let outsider_result =
+            unwrap_file_key_with_age_identity(&wrapped, outsider.to_string().expose_secret(), None);
+        assert!(outsider_result.is_err());
+    }
+
+    #[test]
+    fn test_age_wrap_rejects_bad_recipient() {
+        let file_key = generate_file_key();
+        let result = wrap_file_key_for_age_recipients(
+            &file_key,
+            &[AgeFileKeyRecipient {
+                device_id: "bad-device".into(),
+                recipient: "age1-not-a-real-recipient".into(),
+            }],
+        );
+
+        assert!(result.is_err());
     }
 }

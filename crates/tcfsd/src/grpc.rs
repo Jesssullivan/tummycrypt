@@ -1483,6 +1483,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     rel_path: Some(req.path.clone()),
                     mode: None,
                     encrypted_file_key: None,
+                    wrapped_file_keys: Vec::new(),
                 };
 
                 // Upload updated manifest
