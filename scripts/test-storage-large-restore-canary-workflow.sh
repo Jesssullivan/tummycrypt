@@ -48,6 +48,15 @@ assert_contains "$WORKFLOW" "tcfs_binary_source:"
 assert_contains "$WORKFLOW" "default: \"nix-package\""
 assert_contains "$WORKFLOW" "download_chunk_retries:"
 assert_contains "$WORKFLOW" "TCFS_DOWNLOAD_CHUNK_RETRIES="
+assert_contains "$WORKFLOW" "min_restore_throughput_bps:"
+assert_contains "$WORKFLOW" "max_restore_elapsed_secs:"
+assert_contains "$WORKFLOW" "max_502_log_lines:"
+assert_contains "$WORKFLOW" "max_opendal_retry_rows:"
+assert_contains "$WORKFLOW" "max_tcfs_chunk_retry_rows:"
+assert_contains "$WORKFLOW" "max_push_warn_rows:"
+assert_contains "$WORKFLOW" "max_push_error_rows:"
+assert_contains "$WORKFLOW" "max_socket_highwater:"
+assert_contains "$WORKFLOW" "Evaluate storage SLO budgets"
 assert_contains "$WORKFLOW" "cachix/install-nix-action@v31"
 assert_contains "$WORKFLOW" 'TCFS_S3_REGION=$REGION'
 assert_contains "$WORKFLOW" 'TCFS_STORAGE_S3_CA_CERT_PATH=$CA_CERT_PATH'
@@ -102,5 +111,18 @@ assert_contains "$RESTORE_STEP" 'TCFS_DOWNLOAD_CHUNK_RETRIES="${{ github.event.i
 assert_contains "$RESTORE_STEP" 'TCFS_BIN="$TCFS_BIN_UNDER_TEST"'
 assert_contains "$RESTORE_STEP" "scripts/git-repo-restore-proof.sh"
 assert_contains "$RESTORE_STEP" '--restore-root "$RESTORE_ROOT"'
+
+SLO_STEP="$TMPDIR/slo-step.sh"
+extract_step_from_workflow "Evaluate storage SLO budgets" "$SLO_STEP"
+assert_contains "$SLO_STEP" "scripts/evaluate-storage-large-restore-slo.sh"
+assert_contains "$SLO_STEP" '--evidence-dir "$EVIDENCE_DIR"'
+assert_contains "$SLO_STEP" '--min-restore-throughput-bps "${{ github.event.inputs.min_restore_throughput_bps }}"'
+assert_contains "$SLO_STEP" '--max-restore-elapsed-secs "${{ github.event.inputs.max_restore_elapsed_secs }}"'
+assert_contains "$SLO_STEP" '--max-502-log-lines "${{ github.event.inputs.max_502_log_lines }}"'
+assert_contains "$SLO_STEP" '--max-opendal-retry-rows "${{ github.event.inputs.max_opendal_retry_rows }}"'
+assert_contains "$SLO_STEP" '--max-tcfs-chunk-retry-rows "${{ github.event.inputs.max_tcfs_chunk_retry_rows }}"'
+assert_contains "$SLO_STEP" '--max-push-warn-rows "${{ github.event.inputs.max_push_warn_rows }}"'
+assert_contains "$SLO_STEP" '--max-push-error-rows "${{ github.event.inputs.max_push_error_rows }}"'
+assert_contains "$SLO_STEP" '--max-socket-highwater "${{ github.event.inputs.max_socket_highwater }}"'
 
 printf 'storage large restore canary workflow tests passed\n'

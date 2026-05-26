@@ -664,6 +664,49 @@ tasks:
     cmds:
       - bash scripts/test-git-repo-restore-proof.sh
 
+  lazy:storage-large-restore-slo:
+    desc: "Evaluate a storage large-restore packet against optional SLO budgets"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          args=()
+
+          if [[ -n "${EVIDENCE_DIR:-}" ]]; then
+            args+=(--evidence-dir "$EVIDENCE_DIR")
+          fi
+          if [[ -n "${MIN_RESTORE_THROUGHPUT_BPS:-}" ]]; then
+            args+=(--min-restore-throughput-bps "$MIN_RESTORE_THROUGHPUT_BPS")
+          fi
+          if [[ -n "${MAX_RESTORE_ELAPSED_SECS:-}" ]]; then
+            args+=(--max-restore-elapsed-secs "$MAX_RESTORE_ELAPSED_SECS")
+          fi
+          if [[ -n "${MAX_502_LOG_LINES:-}" ]]; then
+            args+=(--max-502-log-lines "$MAX_502_LOG_LINES")
+          fi
+          if [[ -n "${MAX_OPENDAL_RETRY_ROWS:-}" ]]; then
+            args+=(--max-opendal-retry-rows "$MAX_OPENDAL_RETRY_ROWS")
+          fi
+          if [[ -n "${MAX_TCFS_CHUNK_RETRY_ROWS:-}" ]]; then
+            args+=(--max-tcfs-chunk-retry-rows "$MAX_TCFS_CHUNK_RETRY_ROWS")
+          fi
+          if [[ -n "${MAX_PUSH_WARN_ROWS:-}" ]]; then
+            args+=(--max-push-warn-rows "$MAX_PUSH_WARN_ROWS")
+          fi
+          if [[ -n "${MAX_PUSH_ERROR_ROWS:-}" ]]; then
+            args+=(--max-push-error-rows "$MAX_PUSH_ERROR_ROWS")
+          fi
+          if [[ -n "${MAX_SOCKET_HIGHWATER:-}" ]]; then
+            args+=(--max-socket-highwater "$MAX_SOCKET_HIGHWATER")
+          fi
+
+          scripts/evaluate-storage-large-restore-slo.sh "${args[@]}"
+          EOF
+
+  lazy:test-storage-large-restore-slo:
+    desc: Regression-test the storage large-restore SLO evaluator
+    cmds:
+      - bash scripts/test-evaluate-storage-large-restore-slo.sh
+
   lazy:tcfs-symlink-package-probe:
     desc: "Probe candidate package/current tcfs binaries for sync_symlinks behavior"
     cmds:

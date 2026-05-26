@@ -49,6 +49,46 @@ on:
         required: false
         default: "8"
         type: string
+      min_restore_throughput_bps:
+        description: "Fail if restore throughput is below this bytes/sec budget; 0 observes only"
+        required: false
+        default: "0"
+        type: string
+      max_restore_elapsed_secs:
+        description: "Fail if restore execute elapsed seconds exceed this budget; 0 observes only"
+        required: false
+        default: "0"
+        type: string
+      max_502_log_lines:
+        description: "Fail if restore logs contain more HTTP 502 lines than this budget; 0 observes only"
+        required: false
+        default: "0"
+        type: string
+      max_opendal_retry_rows:
+        description: "Fail if restore logs contain more OpenDAL retry rows than this budget; 0 observes only"
+        required: false
+        default: "0"
+        type: string
+      max_tcfs_chunk_retry_rows:
+        description: "Fail if restore logs contain more TCFS chunk retry rows than this budget; 0 observes only"
+        required: false
+        default: "0"
+        type: string
+      max_push_warn_rows:
+        description: "Fail if push summary has more warning rows than this budget; 0 observes only"
+        required: false
+        default: "0"
+        type: string
+      max_push_error_rows:
+        description: "Fail if push summary has more error rows than this budget; 0 observes only"
+        required: false
+        default: "0"
+        type: string
+      max_socket_highwater:
+        description: "Fail if sampled S3 socket highwater exceeds this budget; 0 observes only"
+        required: false
+        default: "0"
+        type: string
       tcfs_binary_source:
         description: "tcfs binary under test"
         required: false
@@ -127,7 +167,15 @@ jobs:
             "pack_size_mib:${{ github.event.inputs.pack_size_mib }}" \
             "restore_headroom_margin_mib:${{ github.event.inputs.restore_headroom_margin_mib }}" \
             "reconcile_timeout_secs:${{ github.event.inputs.reconcile_timeout_secs }}" \
-            "download_chunk_retries:${{ github.event.inputs.download_chunk_retries }}"
+            "download_chunk_retries:${{ github.event.inputs.download_chunk_retries }}" \
+            "min_restore_throughput_bps:${{ github.event.inputs.min_restore_throughput_bps }}" \
+            "max_restore_elapsed_secs:${{ github.event.inputs.max_restore_elapsed_secs }}" \
+            "max_502_log_lines:${{ github.event.inputs.max_502_log_lines }}" \
+            "max_opendal_retry_rows:${{ github.event.inputs.max_opendal_retry_rows }}" \
+            "max_tcfs_chunk_retry_rows:${{ github.event.inputs.max_tcfs_chunk_retry_rows }}" \
+            "max_push_warn_rows:${{ github.event.inputs.max_push_warn_rows }}" \
+            "max_push_error_rows:${{ github.event.inputs.max_push_error_rows }}" \
+            "max_socket_highwater:${{ github.event.inputs.max_socket_highwater }}"
           do
             name="${pair%%:*}"
             value="${pair#*:}"
@@ -454,6 +502,22 @@ jobs:
             --evidence-dir "$EVIDENCE_DIR" \
             --restore-root "$RESTORE_ROOT"
 
+      - name: Evaluate storage SLO budgets
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/evaluate-storage-large-restore-slo.sh \
+            --evidence-dir "$EVIDENCE_DIR" \
+            --min-restore-throughput-bps "${{ github.event.inputs.min_restore_throughput_bps }}" \
+            --max-restore-elapsed-secs "${{ github.event.inputs.max_restore_elapsed_secs }}" \
+            --max-502-log-lines "${{ github.event.inputs.max_502_log_lines }}" \
+            --max-opendal-retry-rows "${{ github.event.inputs.max_opendal_retry_rows }}" \
+            --max-tcfs-chunk-retry-rows "${{ github.event.inputs.max_tcfs_chunk_retry_rows }}" \
+            --max-push-warn-rows "${{ github.event.inputs.max_push_warn_rows }}" \
+            --max-push-error-rows "${{ github.event.inputs.max_push_error_rows }}" \
+            --max-socket-highwater "${{ github.event.inputs.max_socket_highwater }}"
+
       - name: Summarize large restore packet
         if: always()
         shell: bash
@@ -481,6 +545,11 @@ jobs:
               echo
               echo "## Restore"
               sed -n '1,120p' "$EVIDENCE_DIR/restore-proof/restore-proof.env"
+            fi
+            if [[ -f "$EVIDENCE_DIR/storage-slo-summary.env" ]]; then
+              echo
+              echo "## Storage SLO"
+              sed -n '1,120p' "$EVIDENCE_DIR/storage-slo-summary.env"
             fi
           } | tee "$EVIDENCE_DIR/large-restore-summary.md" >> "$GITHUB_STEP_SUMMARY"
 
