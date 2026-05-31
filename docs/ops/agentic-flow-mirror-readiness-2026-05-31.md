@@ -37,9 +37,9 @@ Hard deny before any manifest or staging copy:
 - Secret stores: `.ssh`, `.gnupg`, `sops-nix`, `nix/secrets`.
 - Live database files: `*.sqlite`, `*.sqlite3`, `*.db`, `*.sqlite-wal`,
   `*.sqlite-shm`, `*.db-wal`, `*.db-shm`, `*-wal`, `*-shm`.
-- Runtime/caches: `*.log`, `.cache`, `node_modules`, `.tmp`, `log/`, `logs/`,
-  plugin caches, package caches, `.claude/worktrees`, `.crush/logs`, generated
-  build outputs.
+- Runtime/caches: `*.log`, `.cache`, `node_modules`, `.tmp`, `tmp/`, `log/`,
+  `logs/`, `backups/`, plugin caches, package caches, `.claude/worktrees`,
+  `.claude/backups`, `.codex/tmp`, `.crush/logs`, generated build outputs.
 - Repo generated outputs: `target`, `node_modules`, `.svelte-kit`, `build`,
   `.direnv`, `.venv`, `.cache`, `.artifacts` unless a repo-specific artifact
   row explicitly opts in.
@@ -105,6 +105,31 @@ No row marked `deny`, `defer-active-writer`, or `future-ttl` may enter a staging
 copy. No staging copy should be sent to `honey` until `TIN-1417` and `TIN-1736`
 are green.
 
+The manifest-consuming local staging pass is:
+
+```bash
+scripts/agentic-flow-mirror-prepare.py \
+  --manifest /tmp/tcfs-agentic-flow-manifest/manifest.jsonl \
+  --stage-dir /tmp/tcfs-agentic-flow-stage \
+  --copy-allowed \
+  --snapshot-sqlite \
+  --sqlite-timeout-secs 600
+```
+
+Defaults are conservative:
+
+- without `--copy-allowed`, it writes only `prepare-summary.json` and
+  `snapshot-results.jsonl`;
+- `.jsonl` transcript rows are not copied unless `--copy-transcripts` is
+  explicitly supplied because several agent transcripts are active writers;
+- `decision=deny` rows are never copied;
+- `decision=snapshot` rows are copied only via `sqlite3 SOURCE ".backup
+  SNAPSHOT"` followed by `PRAGMA integrity_check;`;
+- each SQLite command is bounded by `--sqlite-timeout-secs` and timeout failures
+  are recorded in `snapshot-results.jsonl`;
+- the prepare step revalidates that no credential/env, live DB/WAL/SHM, log, or
+  denied runtime/worktree path appears as `decision=allow`.
+
 ## Acceptance
 
 - Manifest generation proves zero raw auth/env/secret paths in the allow set.
@@ -114,3 +139,24 @@ are green.
 - Every selected repo has branch, dirty, remote, size, and exclude posture
   recorded.
 - `/private/tmp` remains out of scope except for future TTL/cap inventory.
+
+## Evidence Status (2026-05-31)
+
+`docs/release/evidence/agentic-flow-mirror-20260531T053812Z/` records the first
+manifest-consuming local staging pass:
+
+- 17,531 manifest rows; 17,241 allow, 284 deny, 6 snapshot-required.
+- Zero allowed raw env/auth, raw live DB/WAL/SHM, repo-local worktree, tmp, or
+  backup paths.
+- 13,417 non-transcript allowed files copied to `/private/tmp` staging.
+- 1,192 transcript rows skipped by default because active-writer handling is not
+  yet proven.
+- 3 SQLite snapshots passed `PRAGMA integrity_check;`.
+- 3 SQLite snapshots failed and block closure:
+  `~/.codex/logs_2.sqlite` timed out, `~/.codex/goals_1.sqlite` could not be
+  opened by sqlite3 in this sandboxed run, and `opencode.db` timed out.
+
+Decision from this evidence: live agent SQLite is not part of the first
+automatic mirror. Either quiesce the owning agent process and snapshot with a
+longer operator-approved window, or keep the DB excluded and mirror static
+config/transcripts separately.

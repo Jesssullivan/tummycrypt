@@ -421,7 +421,9 @@ Target window: 2026-06-15 through 2026-06-30.
 - [ ] `TIN-1740`: agentic-flow mirror readiness for honey/server+1:
   prepare-only manifests for agent dots, selected repos, `../lab`, and future
   `/tmp` TTL/cap handling. Snapshot SQLite via `sqlite3 .backup` and keep raw
-  auth/env/secret/live-WAL files out of staging.
+  auth/env/secret/live-WAL files out of staging. 2026-05-31 local staging
+  evidence is partial: manifest-consuming copy works for non-transcript allowed
+  rows, but three live/problem SQLite rows still require quiesce-or-exclude.
 - [ ] `TIN-1416`: subscription-based selective sync.
 - [ ] `TIN-1556`: stable root IDs and broad-directory ownership.
 - [ ] `TIN-1419`: streaming large-file IO for FUSE/FileProvider writes.
