@@ -63,6 +63,25 @@ def test_manifest_classification() -> None:
         assert by_name["backups"]["decision"] == "deny"
         assert by_name["tmp"]["decision"] == "deny"
 
+        static_out = Path(tmp) / "static-out"
+        subprocess.run(
+            [
+                str(SCRIPT),
+                str(root),
+                "--out-dir",
+                str(static_out),
+                "--sqlite-mode",
+                "deny",
+            ],
+            check=True,
+        )
+        static_rows = load_manifest(static_out / "manifest.jsonl")
+        static_by_name = {Path(str(row["source_path"])).name: row for row in static_rows}
+        static_summary = json.loads((static_out / "summary.json").read_text())
+        assert static_summary["sqlite_mode"] == "deny"
+        assert static_by_name["logs_2.sqlite"]["decision"] == "deny"
+        assert static_by_name["logs_2.sqlite"]["reason"] == "sqlite-excluded-static-profile"
+
         stage = Path(tmp) / "stage"
         subprocess.run(
             [

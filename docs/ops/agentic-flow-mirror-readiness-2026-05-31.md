@@ -105,6 +105,14 @@ No row marked `deny`, `defer-active-writer`, or `future-ttl` may enter a staging
 copy. No staging copy should be sent to `honey` until `TIN-1417` and `TIN-1736`
 are green.
 
+Two SQLite profiles are supported:
+
+- `--sqlite-mode snapshot` (default) records base DB files as `decision=snapshot`
+  rows and requires `agentic-flow-mirror-prepare.py --snapshot-sqlite`.
+- `--sqlite-mode deny` records base DB files as `decision=deny` with
+  `sqlite-excluded-static-profile`. This is the first automatic mirror profile:
+  it mirrors static config/repo files without attempting live agent DB backup.
+
 The manifest-consuming local staging pass is:
 
 ```bash
@@ -160,3 +168,19 @@ Decision from this evidence: live agent SQLite is not part of the first
 automatic mirror. Either quiesce the owning agent process and snapshot with a
 longer operator-approved window, or keep the DB excluded and mirror static
 config/transcripts separately.
+
+The static-first closure path is to rerun the inventory with
+`--sqlite-mode deny` and run staging without `--snapshot-sqlite`. That run must
+show zero snapshot rows and zero prepare errors before it can become the first
+automatic mirror cohort.
+
+`docs/release/evidence/agentic-flow-mirror-static-20260531T064802Z/` records
+that static-first pass:
+
+- 17,575 manifest rows; 17,285 allow, 290 deny, 0 snapshot-required.
+- Zero allowed raw env/auth, raw live DB/WAL/SHM, repo-local worktree, tmp, or
+  backup paths.
+- 6 SQLite DB rows explicitly denied by `sqlite-excluded-static-profile`.
+- 13,460 non-transcript allowed files copied to `/private/tmp` staging.
+- 1,193 transcript rows skipped by default.
+- 0 prepare errors.

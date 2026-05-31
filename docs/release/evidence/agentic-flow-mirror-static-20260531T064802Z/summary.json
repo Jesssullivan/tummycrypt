@@ -1,0 +1,19 @@
+{
+  "decisions": {
+    "allow": 17285,
+    "deny": 290
+  },
+  "generated_at": "2026-05-31T06:55:21Z",
+  "reasons": {
+    "append-log-active-writer-check-required": 1193,
+    "credential-or-env": 17,
+    "default-allow": 16092,
+    "generated-output": 4,
+    "live-db-sidecar": 8,
+    "secret-or-runtime-dir": 30,
+    "sqlite-excluded-static-profile": 6,
+    "symlink-deferred": 225
+  },
+  "rows": 17575,
+  "sqlite_mode": "deny"
+}

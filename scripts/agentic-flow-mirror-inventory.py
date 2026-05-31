@@ -100,6 +100,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Hash allowed regular files. Denied and snapshot-required files are never hashed.",
     )
+    parser.add_argument(
+        "--sqlite-mode",
+        choices=("snapshot", "deny"),
+        default="snapshot",
+        help=(
+            "How to classify base SQLite/DB files. snapshot keeps them as "
+            "snapshot-required rows; deny excludes them from the first static mirror."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -151,7 +160,7 @@ def has_component(path: Path, candidates: set[str]) -> str | None:
     return None
 
 
-def classify(path: Path, root: Path) -> tuple[str, str, str]:
+def classify(path: Path, root: Path, *, sqlite_mode: str = "snapshot") -> tuple[str, str, str]:
     rel = path.relative_to(root) if path != root else Path(path.name)
     name = path.name
 
@@ -170,6 +179,8 @@ def classify(path: Path, root: Path) -> tuple[str, str, str]:
         return "deny", "live-db-sidecar", name
 
     if name.endswith(DB_SUFFIXES):
+        if sqlite_mode == "deny":
+            return "deny", "sqlite-excluded-static-profile", name
         return "snapshot", "sqlite-backup-required", name
 
     if name.endswith(".log"):
@@ -224,7 +235,7 @@ def run_git(root: Path, args: list[str]) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def iter_paths(source: Path) -> list[Path]:
+def iter_paths(source: Path, *, sqlite_mode: str = "snapshot") -> list[Path]:
     source = source.expanduser()
     if not source.exists():
         return [source]
@@ -238,7 +249,7 @@ def iter_paths(source: Path) -> list[Path]:
         for dirname in dirs:
             path = current_path / dirname
             rows.append(path)
-            decision, _, _ = classify(path, source)
+            decision, _, _ = classify(path, source, sqlite_mode=sqlite_mode)
             if decision == "allow":
                 kept_dirs.append(dirname)
         dirs[:] = kept_dirs
@@ -247,12 +258,14 @@ def iter_paths(source: Path) -> list[Path]:
     return rows
 
 
-def build_manifest(sources: list[Path], *, hash_allowed: bool) -> list[ManifestRow]:
+def build_manifest(
+    sources: list[Path], *, hash_allowed: bool, sqlite_mode: str = "snapshot"
+) -> list[ManifestRow]:
     rows: list[ManifestRow] = []
     for source in sources:
         root = source.expanduser()
         branch, dirty, remotes = repo_info(root) if root.exists() and root.is_dir() else ("", "", "")
-        for path in iter_paths(root):
+        for path in iter_paths(root, sqlite_mode=sqlite_mode):
             if not path.exists() and not path.is_symlink():
                 rows.append(
                     ManifestRow(
@@ -266,7 +279,7 @@ def build_manifest(sources: list[Path], *, hash_allowed: bool) -> list[ManifestR
                 )
                 continue
 
-            decision, reason, _ = classify(path, root)
+            decision, reason, _ = classify(path, root, sqlite_mode=sqlite_mode)
             digest = ""
             if hash_allowed and decision == "allow" and path.is_file() and not path.is_symlink():
                 digest = sha256_file(path)
@@ -288,7 +301,7 @@ def build_manifest(sources: list[Path], *, hash_allowed: bool) -> list[ManifestR
     return rows
 
 
-def write_outputs(rows: list[ManifestRow], out_dir: Path) -> None:
+def write_outputs(rows: list[ManifestRow], out_dir: Path, *, sqlite_mode: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "manifest.jsonl").open("w") as f:
         for row in rows:
@@ -297,6 +310,7 @@ def write_outputs(rows: list[ManifestRow], out_dir: Path) -> None:
     summary = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "rows": len(rows),
+        "sqlite_mode": sqlite_mode,
         "decisions": {},
         "reasons": {},
     }
@@ -308,8 +322,10 @@ def write_outputs(rows: list[ManifestRow], out_dir: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    rows = build_manifest(args.sources, hash_allowed=args.hash_allowed)
-    write_outputs(rows, args.out_dir)
+    rows = build_manifest(
+        args.sources, hash_allowed=args.hash_allowed, sqlite_mode=args.sqlite_mode
+    )
+    write_outputs(rows, args.out_dir, sqlite_mode=args.sqlite_mode)
 
 
 if __name__ == "__main__":
