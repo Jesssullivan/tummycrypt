@@ -416,17 +416,27 @@ Target window: 2026-06-15 through 2026-06-30.
   reconcile, and daemon-owned `folder-policies.json` (Gate G0 core enforcement).
 - [ ] `TIN-1736`: enroll honey as device #2 on the per-device crypto path —
   fleet backbone + real second device (Gates G2+G3, the keystone).
+  2026-05-31 read-only preflight helper added:
+  `scripts/honey-backbone-preflight.sh` / `task lazy:honey-backbone-preflight`.
+  First audit shows `neo` storage+NATS green, `honey` storage green but NATS
+  disconnected, split NATS reachability (`neo` reaches `nats-tcfs`; `honey`
+  reaches `10.245.131.232`), and divergent device registries with a
+  placeholder-shaped honey public key. G2/G3 remain blocked until NATS is
+  canonical from both hosts and honey is re-enrolled through the production
+  per-device path.
 - [ ] `TIN-1738`: agent-state-dir cross-host beachhead
   (`~/.claude/projects`, neo↔honey; Gate G4 daily-driver beachhead).
-- [ ] `TIN-1740`: agentic-flow mirror readiness for honey/server+1:
+- [x] `TIN-1740`: agentic-flow mirror readiness for honey/server+1:
   prepare-only manifests for agent dots, selected repos, `../lab`, and future
   `/tmp` TTL/cap handling. Snapshot SQLite via `sqlite3 .backup` and keep raw
-  auth/env/secret/live-WAL files out of staging. 2026-05-31 local staging
-  evidence is partial: manifest-consuming copy works for non-transcript allowed
-  rows, but three live/problem SQLite rows still require quiesce-or-exclude.
-  2026-05-31 static-first follow-up is clean for first automatic mirror prep:
-  `--sqlite-mode deny` excludes six DB rows, copies static non-transcript rows
-  with zero prepare errors, and leaves live SQLite for a separate quiesce lane.
+  auth/env/secret/live-WAL files out of staging. 2026-05-31 closure landed a
+  static-first profile (`--sqlite-mode=deny`) with evidence under
+  `docs/release/evidence/agentic-flow-mirror-static-20260531T064802Z/`:
+  17,575 inventory rows, 13,460 staged files, 1,193 transcripts skipped,
+  6 SQLite DBs denied, 0 snapshot attempts, 0 errors, and zero env/auth/raw
+  DB/worktree/tmp/backup safety violations. This closes the prepare-only static
+  mirror lane only; live JSONL writer handling, live SQLite transfer, honey
+  transport, and `/tmp` remain behind G1/G2/G3/G4.
 - [ ] `TIN-1416`: subscription-based selective sync.
 - [ ] `TIN-1556`: stable root IDs and broad-directory ownership.
 - [ ] `TIN-1419`: streaming large-file IO for FUSE/FileProvider writes.

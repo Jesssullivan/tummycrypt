@@ -1,0 +1,3 @@
+$ ssh honey tcfs device list
+Enrolled devices (1):
+  honey [active] id=d1176e5d — enrolled 1771810657 — age1-device-6b746182
