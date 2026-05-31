@@ -258,23 +258,38 @@ local_devices="$LOG_DIR/local-device-list.out"
 honey_devices="$LOG_DIR/honey-device-list.out"
 honey_device_status="$LOG_DIR/honey-device-status.out"
 
-blockers=()
+declare -a daemon_blockers=()
+declare -a registry_blockers=()
+declare -a blockers=()
 status="0"
 proof="honey-backbone-preflight-complete"
 failed_step=""
 
-status_has_storage_ok "$local_status" || blockers+=("neo storage is not OK")
-status_has_nats_connected "$local_status" || blockers+=("neo NATS is not connected")
-status_has_storage_ok "$honey_status" || blockers+=("honey storage is not OK")
-status_has_nats_connected "$honey_status" || blockers+=("honey NATS is not connected")
-device_list_has_name "$local_devices" honey || blockers+=("neo device registry does not include honey")
-device_list_has_name "$honey_devices" neo || blockers+=("honey device registry does not include neo")
+status_has_storage_ok "$local_status" || daemon_blockers+=("neo storage is not OK")
+status_has_nats_connected "$local_status" || daemon_blockers+=("neo NATS is not connected")
+status_has_storage_ok "$honey_status" || daemon_blockers+=("honey storage is not OK")
+status_has_nats_connected "$honey_status" || daemon_blockers+=("honey NATS is not connected")
+device_list_has_name "$local_devices" honey || registry_blockers+=("neo device registry does not include honey")
+device_list_has_name "$honey_devices" neo || registry_blockers+=("honey device registry does not include neo")
 if public_key_is_placeholder "$honey_device_status"; then
-  blockers+=("honey device public key is placeholder-shaped")
+  registry_blockers+=("honey device public key is placeholder-shaped")
 fi
 
-if (( ${#blockers[@]} > 0 )); then
-  proof="blocked-g2-g3"
+set +u
+blockers=("${daemon_blockers[@]}" "${registry_blockers[@]}")
+daemon_blocker_count="${#daemon_blockers[@]}"
+registry_blocker_count="${#registry_blockers[@]}"
+blocker_count="${#blockers[@]}"
+set -u
+
+if (( blocker_count > 0 )); then
+  if (( daemon_blocker_count > 0 && registry_blocker_count > 0 )); then
+    proof="blocked-g2-g3"
+  elif (( daemon_blocker_count > 0 )); then
+    proof="blocked-g2"
+  else
+    proof="blocked-g3"
+  fi
   failed_step="honey-backbone"
   if (( STRICT == 1 )); then
     status="1"
