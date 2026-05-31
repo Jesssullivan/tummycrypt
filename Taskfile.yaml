@@ -171,6 +171,16 @@ tasks:
     cmds:
       - bash scripts/test-lazy-hydration-desktop-honey-demo.sh
 
+  lazy:honey-backbone-preflight:
+    desc: "Read-only G2/G3 preflight for neo/honey daemon, NATS, and device registry posture"
+    cmds:
+      - bash scripts/honey-backbone-preflight.sh
+
+  lazy:test-honey-backbone-preflight:
+    desc: Regression-test the read-only honey backbone preflight helper
+    cmds:
+      - bash scripts/test-honey-backbone-preflight.sh
+
   lazy:fleet-pilot-plan:
     desc: "Prepare isolated fleet parity pilot artifacts; add PUSH/RUN_HONEY/RUN_LINUX_LIFECYCLE env flags to execute"
     cmds:

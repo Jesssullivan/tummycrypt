@@ -1,0 +1,8 @@
+$ ssh honey tcfs device status
+This device: honey
+  device_id:       d1176e5d-8baa-413e-8d50-68c1dbd36506
+  public_key:      age1-device-6b746182
+  signing_key:     cee0c0c1f519992b
+  enrolled_at:     1771810657
+  revoked:         false
+  last_nats_seq:   0

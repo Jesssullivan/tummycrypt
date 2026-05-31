@@ -52,6 +52,27 @@ the original `inventory → shadow → live-repo` sequence:
 - Corruption hazards (open-WAL sqlite): `~/.codex/logs_2.sqlite` (762 MB+WAL),
   `state_5.sqlite`, `opencode.db`, claude `history.jsonl`.
 
+### G2/G3 Preflight Update (2026-05-31)
+
+`scripts/honey-backbone-preflight.sh` now captures the read-only
+neo↔honey backbone posture before any mutating smoke or enrollment attempt.
+The first live audit changed the shape of the blocker:
+
+- `neo` now reports storage OK and NATS connected.
+- `honey` is SSH-reachable and reports storage OK, but `tcfs status` reports
+  NATS not connected.
+- The two hosts are pointed at different reachable NATS paths: `neo` reaches
+  `nats-tcfs`; `honey` reaches `10.245.131.232`; each times out against the
+  other's endpoint.
+- Device registries are not converged: `neo` does not list `honey`; `honey`
+  lists only itself, and its current public key is placeholder-shaped
+  (`age1-device-*`).
+
+So G2/G3 remains blocked, but no longer because neo cannot reach NATS. The
+next fix is to make the NATS endpoint canonical from both hosts, then enroll
+`honey` through the production per-device path so both registries list real
+age public keys.
+
 ## Findings (2026-05-30)
 
 - **`sync-policy.toml` `[never_sync]` is not enforced.** The
