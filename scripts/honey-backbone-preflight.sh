@@ -128,6 +128,11 @@ device_list_has_name() {
   grep -Eq "(^|[[:space:]])${name}([[:space:]]|\\[|$)" "$file"
 }
 
+device_list_has_neo_peer() {
+  local file="$1"
+  device_list_has_name "$file" neo || device_list_has_name "$file" neo.local
+}
+
 public_key_is_placeholder() {
   local file="$1"
   grep -Eq 'public_key:[[:space:]]+age1-device-' "$file"
@@ -270,7 +275,7 @@ status_has_nats_connected "$local_status" || daemon_blockers+=("neo NATS is not 
 status_has_storage_ok "$honey_status" || daemon_blockers+=("honey storage is not OK")
 status_has_nats_connected "$honey_status" || daemon_blockers+=("honey NATS is not connected")
 device_list_has_name "$local_devices" honey || registry_blockers+=("neo device registry does not include honey")
-device_list_has_name "$honey_devices" neo || registry_blockers+=("honey device registry does not include neo")
+device_list_has_neo_peer "$honey_devices" || registry_blockers+=("honey device registry does not include neo/neo.local")
 if public_key_is_placeholder "$honey_device_status"; then
   registry_blockers+=("honey device public key is placeholder-shaped")
 fi
@@ -315,7 +320,7 @@ fi
   printf '| Check | Result |\n'
   printf '| --- | --- |\n'
   printf '| neo registry includes honey | %s |\n' "$(device_list_has_name "$local_devices" honey && printf yes || printf no)"
-  printf '| honey registry includes neo | %s |\n' "$(device_list_has_name "$honey_devices" neo && printf yes || printf no)"
+  printf '| honey registry includes neo/neo.local | %s |\n' "$(device_list_has_neo_peer "$honey_devices" && printf yes || printf no)"
   printf '| honey public key placeholder-shaped | %s |\n\n' "$(public_key_is_placeholder "$honey_device_status" && printf yes || printf no)"
   printf '## NATS Endpoint Probes\n\n'
   printf 'See `nats-probes.tsv` for raw read-only probes from both hosts.\n\n'

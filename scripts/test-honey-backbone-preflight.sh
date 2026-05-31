@@ -58,9 +58,12 @@ OUT
     ;;
   "device list")
     cat <<'OUT'
-Enrolled devices (1):
+Enrolled devices (2):
   neo.local [active] id=03d8a0bd
 OUT
+    if [[ "${FAKE_LOCAL_INCLUDE_HONEY:-0}" == 1 ]]; then
+      printf '  honey [active] id=d1176e5d\n'
+    fi
     ;;
   *)
     printf 'unexpected tcfs args: %s\n' "$*" >&2
@@ -97,17 +100,28 @@ OUT
     printf '  nats:          %s\n' "${FAKE_HONEY_NATS_STATUS:-not connected}"
     ;;
   "tcfs device status")
-    cat <<'OUT'
+    if [[ "${FAKE_HONEY_REAL_KEY:-0}" == 1 ]]; then
+      cat <<'OUT'
+This device: honey
+  device_id:       d1176e5d-8baa-413e-8d50-68c1dbd36506
+  public_key:      age13xlyh4d7xcj2qu8xks4x3cdy697cf6g4a9q3z6qtnjy2m6te7g3s4vfpaz
+OUT
+    else
+      cat <<'OUT'
 This device: honey
   device_id:       d1176e5d-8baa-413e-8d50-68c1dbd36506
   public_key:      age1-device-6b746182
 OUT
+    fi
     ;;
   "tcfs device list")
     cat <<'OUT'
-Enrolled devices (1):
+Enrolled devices (2):
   honey [active] id=d1176e5d
 OUT
+    if [[ "${FAKE_HONEY_INCLUDE_NEO:-0}" == 1 ]]; then
+      printf '  neo.local [active] id=03d8a0bd\n'
+    fi
     ;;
   *config.toml*)
     cat <<'OUT'
@@ -181,6 +195,7 @@ assert_contains "$LOG_DIR/result.env" 'status=0'
 assert_contains "$LOG_DIR/result.env" 'proof=blocked-g2-g3'
 assert_contains "$LOG_DIR/summary.md" 'honey NATS is not connected'
 assert_contains "$LOG_DIR/summary.md" 'neo device registry does not include honey'
+assert_contains "$LOG_DIR/summary.md" 'honey device registry does not include neo/neo.local'
 assert_contains "$LOG_DIR/summary.md" 'honey device public key is placeholder-shaped'
 assert_contains "$LOG_DIR/local-config.redacted.toml" 'secret = <redacted>'
 assert_contains "$LOG_DIR/honey-config.redacted.toml" 'secret = <redacted>'
@@ -204,10 +219,30 @@ PATH="$FAKE_BIN:$PATH" HOME="$FAKE_HOME" FAKE_HONEY_NATS_STATUS=connected bash "
 assert_contains "$TMPDIR/g3.out" 'Status: `blocked-g3`'
 assert_contains "$G3_LOG_DIR/result.env" 'proof=blocked-g3'
 assert_contains "$G3_LOG_DIR/summary.md" 'neo device registry does not include honey'
+assert_contains "$G3_LOG_DIR/summary.md" 'honey device registry does not include neo/neo.local'
 if grep -Fq 'honey NATS is not connected' "$G3_LOG_DIR/summary.md"; then
   printf 'did not expect honey NATS blocker in registry-only evidence\n' >&2
   cat "$G3_LOG_DIR/summary.md" >&2
   exit 1
 fi
+
+COMPLETE_LOG_DIR="$TMPDIR/complete-evidence"
+PATH="$FAKE_BIN:$PATH" \
+  HOME="$FAKE_HOME" \
+  FAKE_HONEY_NATS_STATUS=connected \
+  FAKE_LOCAL_INCLUDE_HONEY=1 \
+  FAKE_HONEY_INCLUDE_NEO=1 \
+  FAKE_HONEY_REAL_KEY=1 \
+  bash "$SCRIPT" \
+  --log-dir "$COMPLETE_LOG_DIR" \
+  --clear-nats-targets \
+  --nats-target nats-tcfs \
+  --strict \
+  >"$TMPDIR/complete.out"
+assert_contains "$TMPDIR/complete.out" 'Status: `honey-backbone-preflight-complete`'
+assert_contains "$COMPLETE_LOG_DIR/result.env" 'status=0'
+assert_contains "$COMPLETE_LOG_DIR/result.env" 'proof=honey-backbone-preflight-complete'
+assert_contains "$COMPLETE_LOG_DIR/summary.md" '| honey registry includes neo/neo.local | yes |'
+assert_contains "$COMPLETE_LOG_DIR/summary.md" '| honey public key placeholder-shaped | no |'
 
 printf 'honey backbone preflight tests passed\n'

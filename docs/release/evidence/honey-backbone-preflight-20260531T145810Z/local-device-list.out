@@ -1,0 +1,8 @@
+$ tcfs device list
+Enrolled devices (6):
+  neo.local [active] id=03d8a0bd — enrolled 1773866714 — age156vuzu696tp0vm66q2h40zpg6atl3czrcvzepnyv4js84tv4450q6yf6hd
+  Mac.localdomain [active] id=be005d70 — enrolled 1776296035 — age18t0vka95dk4vax4wwj8qqf8xume9f8fqgqn4z4t4phuxen2c7ces4nkyjq
+  local-fileprovider-coordinated [active] id=d6d65d8d — enrolled 1777653729 — age1ktnl4zs2rd0rdhh3d0qty73q3rt4hzprcpsf0lg9hsg7jtdnv4msegaghf
+  local-fileprovider-data [active] id=f1d980ab — enrolled 1777653880 — age1687hqe5hka9szwa47l0w9rugn6ul8c93da9q79gwt3df0ktku48qazqlyk
+  local-fileprovider-request-download [active] id=ff818f17 — enrolled 1777654458 — age1e5unmkhtz3asxs2364l5lljv5p7zltt8rxg9yhl2h47parddrymsjc7phq
+  honey [active] id=d1176e5d — enrolled 1771810657 — age13xlyh4d7xcj2qu8xks4x3cdy697cf6g4a9q3z6qtnjy2m6te7g3s4vfpaz
