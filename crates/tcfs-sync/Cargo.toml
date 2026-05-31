@@ -45,3 +45,5 @@ full = ["dep:rocksdb", "nats", "crypto"]
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
+age = { workspace = true }
+secrecy = { workspace = true }

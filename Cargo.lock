@@ -5452,6 +5452,7 @@ dependencies = [
 name = "tcfs-sync"
 version = "0.12.13"
 dependencies = [
+ "age",
  "anyhow",
  "async-nats",
  "base64 0.22.1",
@@ -5465,6 +5466,7 @@ dependencies = [
  "proptest",
  "rayon",
  "rocksdb",
+ "secrecy",
  "serde",
  "serde_json",
  "tcfs-chunks",

@@ -20,6 +20,64 @@ use tcfs_core::proto::{
 };
 use tcfs_sync::state::StateCacheBackend;
 
+/// Build an `EncryptionContext`, attaching per-device wrapping (TIN-1417) when
+/// `crypto.per_device_wrapping` is enabled and the device registry has real age
+/// recipients. Falls back to legacy shared-master wrapping (and logs why) if the
+/// registry can't be loaded, has no real recipients, or this device's age secret
+/// is missing — never producing content this device cannot read back.
+pub(crate) fn build_encryption_context(
+    config: &TcfsConfig,
+    device_id: &str,
+    master_key: &tcfs_crypto::MasterKey,
+) -> tcfs_sync::engine::EncryptionContext {
+    use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext};
+
+    let base = EncryptionContext::new(master_key.clone());
+    if !config.crypto.per_device_wrapping {
+        return base;
+    }
+    let registry_path = config
+        .sync
+        .device_identity
+        .clone()
+        .unwrap_or_else(tcfs_secrets::device::default_registry_path);
+    let registry = match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("per-device wrapping: registry load failed ({e}); using master wrap");
+            return base;
+        }
+    };
+    let recipients: Vec<tcfs_crypto::AgeFileKeyRecipient> = registry
+        .active_devices()
+        .filter(|d| tcfs_secrets::device::is_real_age_public_key(&d.public_key))
+        .map(|d| tcfs_crypto::AgeFileKeyRecipient {
+            device_id: d.device_id.clone(),
+            recipient: d.public_key.clone(),
+        })
+        .collect();
+    if recipients.is_empty() {
+        tracing::warn!(
+            "per-device wrapping enabled but no active age recipients; using master wrap"
+        );
+        return base;
+    }
+    let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
+    let identity = match std::fs::read_to_string(&secret_path) {
+        Ok(s) => DeviceUnwrapIdentity {
+            device_id: device_id.to_string(),
+            secret: s.trim().to_string(),
+        },
+        Err(e) => {
+            tracing::warn!(
+                "per-device wrapping: local device secret unreadable ({e}); using master wrap"
+            );
+            return base;
+        }
+    };
+    base.with_device_wrapping(recipients, Some(identity))
+}
+
 /// Implementation of the TcfsDaemon gRPC service
 pub struct TcfsDaemonImpl {
     cred_store: SharedCredStore,
@@ -851,9 +909,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let mk_guard = self.master_key.lock().await;
             let enc_ctx = mk_guard
                 .as_ref()
-                .map(|mk| tcfs_sync::engine::EncryptionContext {
-                    master_key: mk.clone(),
-                });
+                .map(|mk| build_encryption_context(&self.config, &self.device_id, mk));
             tcfs_sync::engine::upload_file_with_device(
                 &op,
                 &local_path,
@@ -991,9 +1047,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let mk_guard = self.master_key.lock().await;
             let enc_ctx = mk_guard
                 .as_ref()
-                .map(|mk| tcfs_sync::engine::EncryptionContext {
-                    master_key: mk.clone(),
-                });
+                .map(|mk| build_encryption_context(&self.config, &self.device_id, mk));
             tcfs_sync::engine::download_file_with_device(
                 &op,
                 &resolved_manifest,
@@ -1087,9 +1141,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let mk_guard = self.master_key.lock().await;
             let enc_ctx = mk_guard
                 .as_ref()
-                .map(|mk| tcfs_sync::engine::EncryptionContext {
-                    master_key: mk.clone(),
-                });
+                .map(|mk| build_encryption_context(&self.config, &self.device_id, mk));
             tcfs_sync::engine::download_file_with_device(
                 &op,
                 &manifest_path,

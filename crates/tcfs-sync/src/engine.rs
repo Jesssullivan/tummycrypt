@@ -984,6 +984,49 @@ where
 #[cfg(feature = "crypto")]
 pub struct EncryptionContext {
     pub master_key: tcfs_crypto::MasterKey,
+    /// Active-device recipients for per-device FileKey wrapping (TIN-1417).
+    ///
+    /// When non-empty, writes emit per-device `wrapped_file_keys` and OMIT the
+    /// master-wrapped `encrypted_file_key`, so a device removed from this set
+    /// (revoked) cannot decrypt newly written content. Empty = legacy
+    /// shared-master behavior.
+    pub device_recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
+    /// This device's age identity, used to unwrap per-device manifests on read.
+    /// `None` relies on the master-key fallback (legacy manifests).
+    pub device_identity: Option<DeviceUnwrapIdentity>,
+}
+
+/// A local device's age X25519 identity for unwrapping per-device manifests.
+#[cfg(feature = "crypto")]
+#[derive(Clone)]
+pub struct DeviceUnwrapIdentity {
+    /// Stable TCFS device id this identity belongs to.
+    pub device_id: String,
+    /// Armored age X25519 secret key (`AGE-SECRET-KEY-1...`).
+    pub secret: String,
+}
+
+#[cfg(feature = "crypto")]
+impl EncryptionContext {
+    /// Legacy shared-master context: no per-device recipients or identity.
+    pub fn new(master_key: tcfs_crypto::MasterKey) -> Self {
+        Self {
+            master_key,
+            device_recipients: Vec::new(),
+            device_identity: None,
+        }
+    }
+
+    /// Attach per-device wrapping recipients and this device's unwrap identity.
+    pub fn with_device_wrapping(
+        mut self,
+        recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
+        identity: Option<DeviceUnwrapIdentity>,
+    ) -> Self {
+        self.device_recipients = recipients;
+        self.device_identity = identity;
+        self
+    }
 }
 
 /// Type alias for optional encryption context (feature-gated).
@@ -1806,20 +1849,41 @@ async fn upload_file_with_device_with_state(
 
     ensure_source_matches_snapshot(local_path, &snapshot, "manifest publish")?;
 
-    // Wrap file key for manifest if encryption is enabled
+    // Wrap the file key for the manifest. With per-device recipients (TIN-1417)
+    // we emit only per-device `wrapped_file_keys` and OMIT the master-wrapped
+    // `encrypted_file_key`, so a revoked device (absent from the recipient set)
+    // cannot decrypt new content. Without recipients we keep the legacy
+    // shared-master wrap for backward compatibility.
     #[cfg(feature = "crypto")]
-    let encrypted_file_key = if let (Some(ctx), Some(ref fk)) = (encryption, &file_key) {
-        let wrapped = tcfs_crypto::wrap_key(&ctx.master_key, fk).context("wrapping file key")?;
-        Some(base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &wrapped,
-        ))
+    let (encrypted_file_key, wrapped_file_keys) = if let (Some(ctx), Some(ref fk)) =
+        (encryption, &file_key)
+    {
+        if ctx.device_recipients.is_empty() {
+            let wrapped =
+                tcfs_crypto::wrap_key(&ctx.master_key, fk).context("wrapping file key")?;
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wrapped);
+            (Some(b64), Vec::new())
+        } else {
+            let wrapped = tcfs_crypto::wrap_file_key_for_age_recipients(fk, &ctx.device_recipients)
+                .context("wrapping file key for device recipients")?
+                .into_iter()
+                .map(|w| crate::manifest::WrappedFileKey {
+                    recipient_device_id: w.recipient_device_id,
+                    recipient: w.recipient,
+                    algorithm: w.algorithm,
+                    wrapped_key: w.wrapped_key,
+                })
+                .collect();
+            (None, wrapped)
+        }
     } else {
-        None
+        (None, Vec::new())
     };
 
     #[cfg(not(feature = "crypto"))]
     let encrypted_file_key: Option<String> = None;
+    #[cfg(not(feature = "crypto"))]
+    let wrapped_file_keys: Vec<crate::manifest::WrappedFileKey> = Vec::new();
 
     // Capture Unix file permissions for cross-device preservation
     #[cfg(unix)]
@@ -1849,7 +1913,7 @@ async fn upload_file_with_device_with_state(
         rel_path: rel_path.map(|s| s.to_string()),
         mode: file_mode,
         encrypted_file_key,
-        wrapped_file_keys: Vec::new(),
+        wrapped_file_keys,
     };
 
     let manifest_bytes = manifest.to_bytes()?;
@@ -2154,9 +2218,41 @@ pub async fn download_file_with_device(
         });
     }
 
-    // Unwrap file key if manifest is encrypted
+    // Unwrap the file key if the manifest is encrypted. Prefer per-device wraps
+    // (TIN-1417): when present, the file key is unwrapped with this device's age
+    // identity. Manifests carrying only the legacy master-wrapped key fall back
+    // to master-key unwrap.
     #[cfg(feature = "crypto")]
-    let file_key = if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
+    let file_key = if !manifest.wrapped_file_keys.is_empty() {
+        let ctx = encryption.ok_or_else(|| {
+            anyhow::anyhow!(
+                "manifest is per-device encrypted but no encryption context provided for: {remote_manifest}"
+            )
+        })?;
+        let identity = ctx.device_identity.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "manifest is per-device encrypted but this device has no age identity for: {remote_manifest}"
+            )
+        })?;
+        let age_wraps: Vec<tcfs_crypto::AgeWrappedFileKey> = manifest
+            .wrapped_file_keys
+            .iter()
+            .map(|w| tcfs_crypto::AgeWrappedFileKey {
+                recipient_device_id: w.recipient_device_id.clone(),
+                recipient: w.recipient.clone(),
+                algorithm: w.algorithm.clone(),
+                wrapped_key: w.wrapped_key.clone(),
+            })
+            .collect();
+        Some(
+            tcfs_crypto::unwrap_file_key_with_age_identity(
+                &age_wraps,
+                &identity.secret,
+                Some(&identity.device_id),
+            )
+            .context("unwrapping per-device file key from manifest")?,
+        )
+    } else if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
         let ctx = encryption.ok_or_else(|| {
             anyhow::anyhow!(
                 "manifest is encrypted but no encryption context provided for: {remote_manifest}"
