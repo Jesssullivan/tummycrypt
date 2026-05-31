@@ -335,6 +335,10 @@ until devices have real local private keys and per-device wrapped content keys.
   files.
 - [x] `tcfs device enroll` now uses the same local key-generation path instead
   of `age1-device-<hash>` placeholders.
+- [x] `tcfs device enroll --repair-placeholder --sync-remote` repairs an
+  existing legacy placeholder in place, preserves the device id, writes the
+  device private key beside `devices.json`, and merges the local registry with
+  `{remote_prefix}/tcfs-meta/devices.json`.
 - [ ] This does not yet change manifest wrapping, revoke semantics, pairing, or
   remote registry trust. Those remain the actual beta security boundary.
 
@@ -382,8 +386,9 @@ Target window: 2026-06-15 through 2026-06-30.
 > workstreams. Operator ordering: crypto-first (`TIN-1417` / G1) → honey as
 > device #2 (`TIN-1736` / G2+G3) → agent-dir beachhead `~/.claude/projects`
 > (`TIN-1738` / G4), with guardrail hardening (`TIN-1737` / G0) as a step-zero
-> blocker. `neo` currently reports `nats_ok:false`; that backbone fix (G2) is
-> the keystone that unblocks the stalled shadow pilot and every cross-host goal.
+> blocker. Follow-up 2026-05-31: honey generation 384 activated
+> `nats_tls=false`; neo and honey now both report storage OK and NATS connected,
+> so the remaining honey blocker is G3 registry/enrollment convergence.
 > Follow-up 2026-05-31: `TIN-1740` adds the prepare-only mirror lane for
 > agentic-flow pickup on honey/server+1. The lane prepares manifests and
 > snapshot rules only; no honey transfer occurs before G1/G2/G3.

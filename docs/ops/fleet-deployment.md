@@ -15,7 +15,10 @@ tracked in [On-Prem Authority Recovery](onprem-authority-recovery.md).
 
 - tcfs v0.3.0+ installed on all machines
 - SeaweedFS S3 reachable from all machines (verified: `dees-appu-bearts:8333`)
-- Each machine enrolled: `tcfs device enroll --name $(hostname)`
+- Each machine enrolled with a real age key and storage-backed registry merge:
+  `tcfs device enroll --name $(hostname) --sync-remote`
+  - If a host already has a legacy `age1-device-*` placeholder entry, repair it
+    explicitly with `--repair-placeholder --sync-remote`.
 - All fleet machines on the same Tailscale tailnet
 
 ---
