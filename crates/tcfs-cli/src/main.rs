@@ -892,6 +892,14 @@ fn resolve_state_path(
     db.with_extension("json")
 }
 
+/// Resolve the daemon-owned per-folder policy store.
+fn policy_store_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("tcfsd")
+        .join("folder-policies.json")
+}
+
 // ── Progress bar helpers ──────────────────────────────────────────────────────
 
 fn make_progress_bar(total: u64, prefix: &str) -> ProgressBar {
@@ -4972,14 +4980,8 @@ async fn cmd_rotate_credentials(
 
 // ── `tcfs policy` ────────────────────────────────────────────────────────────
 
-async fn cmd_policy(config: &tcfs_core::config::TcfsConfig, action: PolicyAction) -> Result<()> {
-    let policy_path = config
-        .sync
-        .sync_root
-        .as_ref()
-        .map(|r| r.join(".tcfs-policy.json"))
-        .unwrap_or_else(|| PathBuf::from(".tcfs-policy.json"));
-
+async fn cmd_policy(_config: &tcfs_core::config::TcfsConfig, action: PolicyAction) -> Result<()> {
+    let policy_path = policy_store_path();
     let mut store = tcfs_sync::policy::PolicyStore::open(&policy_path).unwrap_or_default();
 
     match action {

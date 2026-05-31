@@ -4,7 +4,7 @@ Status: operator-directed re-sequencing of the `TIN-1617` large-workdir
 onboarding plan toward a daily-driver fleet.
 
 Tracker: `TIN-1617` (epic). New sub-issues: `TIN-1736`, `TIN-1737`,
-`TIN-1738`.
+`TIN-1738`, `TIN-1740`.
 
 This document does not replace
 [large-workdir-onboarding-design-2026-05-25.md](large-workdir-onboarding-design-2026-05-25.md);
@@ -42,12 +42,10 @@ the original `inventory → shadow → live-repo` sequence:
 - `tcfsd` 0.12.2 running; device `03d8a0bd… / neo.local`; `active_mounts: 0`.
 - `storage_ok: true` (`seaweedfs-tcfs:8333`); **`nats_ok: false`** — the
   cross-device bus is down. This is the literal G2 blocker.
-- `~/.config/tcfs/sync-policy.toml` (home-manager generated) already encodes the
-  tiered model: `[git_repos]` base `/Users/jess/git` with 3 enrolled paths
-  (`crush-dots`, `tinyland-sunshine`, `fuzzy-crush`) and a strong
-  `exclude_patterns` list; `[dotfiles]` base `~/.config`; `[never_sync]` for
-  caches/sockets. The piecemeal "one dir at a time" mechanism exists; it is not
-  yet verb-driven (G6) and `never_sync` does not yet cover secrets/WAL (G0).
+- `~/.config/tcfs/sync-policy.toml` (home-manager generated) encodes the old
+  tiered model, but it is not read by `tcfsd`. It is a migration hint only.
+  The enforced path is `Blacklist` + `sync.exclude_patterns` +
+  `folder-policies.json`; G6 must drive that surface directly.
 - Secret surfaces that must be excluded before any `~/` enrollment: `~/.ssh`,
   `~/.gnupg`, `~/.config/sops-nix/secrets`, credential symlinks
   (`~/.claude/.credentials.json`, `~/.codex/auth.json`), 22 `~/git/**/.env`.
@@ -64,15 +62,16 @@ the original `inventory → shadow → live-repo` sequence:
   `sync.exclude_patterns` + built-in rules) plus per-folder
   `folder-policies.json` (`PolicyStore`, per-path `SyncMode`). Gate G0 is
   therefore implemented in the enforced `Blacklist`, not the decorative TOML.
-- **Consequence for G6 (`TIN-1416`):** the selective-sync verb loop must target
-  the enforced mechanism (config `exclude_patterns` + `folder-policies.json`),
-  or the daemon must be taught to consume `sync-policy.toml`. Decide before
-  building the verb loop; otherwise "enrolled" repos in the TOML are not
-  actually governed by the daemon.
-- **G0 shipped (`cdbee53`):** fail-closed security deny-set (secret dirs/files,
-  dotenv, live SQLite/DB) added to `Blacklist` with deny-tests, checked before
-  user globs and before the hidden-dir rule (which is off when
-  `sync_hidden_dirs=true` for agent dotdirs).
+- **Consequence for G6 (`TIN-1416`):** the selective-sync verb loop targets the
+  enforced mechanism only. **Decision (2026-05-30): retire the TOML.** The
+  enforced `Blacklist` + `sync.exclude_patterns` + `folder-policies.json` are
+  the single source of truth; the verb loop (`TIN-1416`) drives those, and the
+  unenforced home-manager `sync-policy.toml` is to be removed rather than wired
+  so there is no second, misleading policy surface.
+- **G0 implementation status:** `cdbee53` shipped the fail-closed
+  `Blacklist` deny-set and blacklist tests. The guardrail is only fully
+  claimable when collection, watcher scheduling, and periodic reconcile all use
+  the same config-derived blacklist and `folder-policies.json`.
 
 ## Parallelizable Workstreams
 
@@ -83,11 +82,12 @@ the next section, not through stream ownership.
 | --- | --- | --- | --- | --- |
 | WS-1 | Per-device crypto + revocation | `TIN-1417` | Critical path | Make per-device wrap the write path; prove revoked device cannot decrypt new content. |
 | WS-2 | Fleet backbone health | `TIN-1736`, rel `TIN-1546` | Fully parallel to WS-1 | Fix neo `nats_ok:false`; verify honey RKE2 SeaweedFS+NATS. Infra, no code dep. |
-| WS-3 | Guardrails (enforced `Blacklist`) | `TIN-1737`, rel `TIN-1416` | Fully parallel, single-host | Fail-closed secret/WAL deny-set in `Blacklist` + deny-test. Step-zero blocker for any `~/` enrollment. **G0 shipped (`cdbee53`).** |
-| WS-4 | Selective-sync verb loop | `TIN-1416` | Parallel, single-host buildable now | `tcfs sub add/remove/list` round-tripping with home-manager `sync-policy.toml`. |
+| WS-3 | Guardrails (enforced `Blacklist`) | `TIN-1737`, rel `TIN-1416` | Fully parallel, single-host | Fail-closed secret/WAL deny-set in `Blacklist` + collect/watcher/reconcile enforcement. Step-zero blocker for any `~/` enrollment. |
+| WS-4 | Selective-sync verb loop | `TIN-1416` | Parallel, single-host buildable now | `tcfs sub add/remove/list` drives enforced subscriptions and `folder-policies.json`; no home-manager TOML round-trip. |
 | WS-5 | Enrollment / pairing UX | `TIN-1424`, `TIN-1425` | Partially gated by WS-1 | Invite→enroll→bootstrap client persistence; first-run wizard closeout. |
 | WS-6 | Storage soak / SLO | `TIN-1546`, `TIN-1622` | Ongoing, parallel | Gates the live-repo step (G5), not the agent-dir step (G4). |
-| WS-7 | Agent-dir target prep | `TIN-1738` | Read-only now | Inventory `~/.claude/projects`; design scoped policy; scrub plan. |
+| WS-7 | Agent-dir and mirror target prep | `TIN-1738`, `TIN-1740` | Read-only now | Inventory agent state, selected repos, and `../lab`; prepare manifests, snapshot rules, and scrub plan. |
+| WS-8 | Prepare-only mirror lane | `TIN-1740` | Parallel, no transfer before G3 | Build TCFS-ready manifests/staging rules for agent dots, selected repos, `../lab`, and future `/tmp` TTL/cap handling. |
 
 ## Gate Model (Inflection Points)
 
@@ -96,13 +96,13 @@ step proceeds. Each gate has a machine-checkable test gate.
 
 | Gate | Definition | Requires | Test gate (proof) | Tracker |
 | --- | --- | --- | --- | --- |
-| **G0** | Guardrails locked | WS-3 | Deny-test (`tcfs-sync` `blacklist` suite) asserts the enforced `Blacklist` denies the secret/WAL set fail-closed even with `sync_hidden_dirs=true`. **Shipped `cdbee53`.** Follow-up: wire/retire `sync-policy.toml` `[never_sync]` (see Findings). | `TIN-1737` |
+| **G0** | Guardrails locked | WS-3 | Deny-test (`tcfs-sync` `blacklist` + `collect_` suites) asserts the enforced `Blacklist` denies the secret/WAL set fail-closed even with `sync_hidden_dirs=true`; watcher scheduling and periodic reconcile use config-derived `Blacklist`; policy reads/writes use one `folder-policies.json` store. | `TIN-1737` |
 | **G1** | Crypto production-ready | WS-1 | Integration test: per-device wrap is the active write path; a revoked device **cannot decrypt new content**; existing content still readable; migration doc exists. (`TIN-1417` acceptance.) | `TIN-1417` |
 | **G2** | Backbone green | WS-2 | `tcfs daemon status` on **both** neo and honey reports `nats_ok: true` and `storage_ok: true`. | `TIN-1736` |
 | **G3** | honey enrolled (device #2) | G1 + G2 | `tcfs device list` shows two real `age1…` devices (no placeholders); honey enrolled via per-device wrap path; bootstrap age-wrapped (no raw S3 creds); push-on-neo → hydrate-on-honey exact bytes. | `TIN-1736` |
 | **G4** | Agent-dir beachhead | G0 + G3 + WS-7 | `~/.claude/projects` proves QA rows T1–T6, T12 + multi-machine M1/M2/M3/M6 across neo↔honey; edit→hydrate→unsync→rehydrate exact; evidence packet archived. | `TIN-1738` |
 | **G5** | One expendable live repo | G4 + WS-6 | TIN-1620 acceptance: two-machine browse/hydrate/unsync/rehydrate + conflict (T10/T11) + rollback/fresh-tree restore. | `TIN-1620` |
-| **G6** | Verb loop GA | WS-4 | `tcfs sub add/remove/list` (or policy-path add/remove) round-trips with home-manager; remove dehydrates per policy; proptest extended. | `TIN-1416` |
+| **G6** | Verb loop GA | WS-4 | `tcfs sub add/remove/list` (or policy-path add/remove) writes enforced subscriptions / `folder-policies.json`; remove dehydrates per policy; proptest extended. | `TIN-1416` |
 
 ### Dependency graph
 
@@ -113,6 +113,7 @@ WS-1 ──▶ G1 ──┐                     G4 (TIN-1738) ──▶ G5 (TIN-
               ├──▶ G3 (TIN-1736) ──▶  ▲
 WS-2 ──▶ G2 ──┘                        │
 WS-7 ─────────────────────────────────┘
+WS-8 ──▶ prepare-only mirror lane (TIN-1740) [no honey transfer before G3]
 WS-4 ──▶ G6 (TIN-1416)        [parallel, lands independently]
 WS-6 ─────────────────────────▶ feeds G5
 WS-5 ─────────────────────────▶ supports G3 (real enrollment UX)
@@ -152,6 +153,7 @@ Inherits the global stop rules from the productionization todo, plus:
 - `TIN-1736` honey device #2 / backbone (G2+G3)
 - `TIN-1737` guardrails (G0)
 - `TIN-1738` agent-dir beachhead (G4)
+- `TIN-1740` agentic-flow mirror readiness for honey/server+1
 - `TIN-1417` per-device crypto (G1) · `TIN-1416` selective-sync verb loop (G6)
 - `TIN-1620` one expendable live repo (G5) · `TIN-1546`/`TIN-1622` storage soak
 - Design seed: [large-workdir-onboarding-design-2026-05-25.md](large-workdir-onboarding-design-2026-05-25.md)

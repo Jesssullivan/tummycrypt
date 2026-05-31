@@ -445,6 +445,11 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         "blacklist configured"
     );
 
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("tcfsd");
+    let policy_store_path = data_dir.join("folder-policies.json");
+
     // Per-path locks: prevent concurrent operations on the same file.
     // Shared across the watcher/scheduler and the state sync loop.
     let path_locks = tcfs_sync::state::PathLocks::new();
@@ -484,19 +489,17 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     // Consults the blacklist to filter excluded paths before scheduling.
                     let bridge_blacklist = blacklist.clone();
                     let bridge_policy_store = {
-                        let policy_path = sync_root.join(".tcfs-policy.json");
-                        tcfs_sync::policy::PolicyStore::open(&policy_path).unwrap_or_default()
+                        tcfs_sync::policy::PolicyStore::open(&policy_store_path).unwrap_or_default()
                     };
                     tokio::spawn(async move {
                         while let Some(event) = watch_rx.recv().await {
-                            // Check blacklist before scheduling
-                            let filename = event
-                                .path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("");
-                            let is_dir = event.path.is_dir();
-                            if let Some(reason) = bridge_blacklist.check_name(filename, is_dir) {
+                            // Check blacklist before scheduling. Full component
+                            // checks are required so events inside an existing
+                            // denied subtree (for example `.ssh/id_ed25519`)
+                            // cannot bypass final-name filtering.
+                            if let Some(reason) =
+                                bridge_blacklist.check_path_components(&event.path)
+                            {
                                 debug!(
                                     path = %event.path.display(),
                                     reason = %reason,
@@ -891,9 +894,6 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     );
 
     // Load persisted auth credentials (best-effort)
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("tcfsd");
     let totp_cred_path = data_dir.join("totp-credentials.json");
     if totp_cred_path.exists() {
         if let Err(e) = impl_.load_totp_credentials(&totp_cred_path).await {
@@ -961,7 +961,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sync_conflict_mode = config.sync.conflict_mode.clone();
                     let sync_root = config.sync.sync_root.clone();
                     let storage_prefix = config.storage.resolved_prefix().to_string();
-                    let policy_path = data_dir.join("folder-policies.json");
+                    let policy_path = policy_store_path.clone();
                     let download_threshold = config.sync.auto_download_threshold;
                     spawn_state_sync_loop(
                         &nats,
@@ -1081,7 +1081,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             } else {
                 0
             };
-            let _recon_policy_path = data_dir.join("folder-policies.json");
+            let recon_blacklist = blacklist.clone();
 
             info!(
                 interval_secs = recon_interval,
@@ -1120,7 +1120,6 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     };
                     drop(op_guard);
 
-                    let blacklist = tcfs_sync::blacklist::Blacklist::default();
                     let recon_config = tcfs_sync::reconcile::ReconcileConfig::default();
 
                     let cache = recon_state.lock().await;
@@ -1130,7 +1129,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         &recon_prefix,
                         &cache,
                         &recon_device,
-                        &blacklist,
+                        &recon_blacklist,
                         &recon_config,
                     )
                     .await
@@ -1252,7 +1251,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         let unsync_interval = config.sync.auto_unsync_interval_secs;
         let unsync_max_age = config.sync.auto_unsync_max_age_secs;
         let unsync_dry_run = config.sync.auto_unsync_dry_run;
-        let unsync_policy_path = data_dir.join("folder-policies.json");
+        let unsync_policy_path = policy_store_path.clone();
         let unsync_vfs = impl_.vfs_handle.clone();
         let disk_pressure_pct = config.sync.auto_unsync_disk_pressure_pct;
         let max_per_sweep = config.sync.auto_unsync_max_per_sweep;

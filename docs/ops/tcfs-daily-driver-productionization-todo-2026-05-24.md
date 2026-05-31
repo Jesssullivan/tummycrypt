@@ -384,6 +384,9 @@ Target window: 2026-06-15 through 2026-06-30.
 > (`TIN-1738` / G4), with guardrail hardening (`TIN-1737` / G0) as a step-zero
 > blocker. `neo` currently reports `nats_ok:false`; that backbone fix (G2) is
 > the keystone that unblocks the stalled shadow pilot and every cross-host goal.
+> Follow-up 2026-05-31: `TIN-1740` adds the prepare-only mirror lane for
+> agentic-flow pickup on honey/server+1. The lane prepares manifests and
+> snapshot rules only; no honey transfer occurs before G1/G2/G3.
 
 - [ ] `TIN-1617`: selected large-workdir onboarding pilot: inventory,
   shadow-root proof, one expendable live repo, then selected subtree rollout.
@@ -414,6 +417,10 @@ Target window: 2026-06-15 through 2026-06-30.
   fleet backbone + real second device (Gates G2+G3, the keystone).
 - [ ] `TIN-1738`: agent-state-dir cross-host beachhead
   (`~/.claude/projects`, neo↔honey; Gate G4 daily-driver beachhead).
+- [ ] `TIN-1740`: agentic-flow mirror readiness for honey/server+1:
+  prepare-only manifests for agent dots, selected repos, `../lab`, and future
+  `/tmp` TTL/cap handling. Snapshot SQLite via `sqlite3 .backup` and keep raw
+  auth/env/secret/live-WAL files out of staging.
 - [ ] `TIN-1416`: subscription-based selective sync.
 - [ ] `TIN-1556`: stable root IDs and broad-directory ownership.
 - [ ] `TIN-1419`: streaming large-file IO for FUSE/FileProvider writes.

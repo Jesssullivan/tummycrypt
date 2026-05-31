@@ -46,6 +46,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 rpassword = { workspace = true }
+dirs = "6"
 
 [features]
 default = []
