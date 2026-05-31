@@ -21,10 +21,21 @@ DENY_DIRS = {
     ".ssh",
     ".tmp",
     ".venv",
+    ".claude/worktrees",
+    ".codex/cache",
+    ".codex/log",
+    ".codex/plugins/cache",
+    ".crush/logs",
+    ".claude/plugins/cache",
+    "cache",
+    "log",
+    "logs",
     "node_modules",
     "nix/secrets",
+    "plugins/cache",
     "sops-nix",
     "target",
+    "worktrees",
 }
 DENY_FILES = {
     ".credentials.json",
@@ -113,7 +124,13 @@ def sha256_file(path: Path) -> str:
 
 
 def is_dotenv(name: str) -> bool:
-    return name == ".env" or name.startswith(".env.") or name.endswith(".env")
+    return (
+        name == ".env"
+        or name == ".envrc"
+        or name.startswith(".env.")
+        or name.endswith(".env")
+        or ".env." in name
+    )
 
 
 def has_component(path: Path, candidates: set[str]) -> str | None:

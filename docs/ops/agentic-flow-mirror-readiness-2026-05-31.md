@@ -33,12 +33,13 @@ Hard deny before any manifest or staging copy:
 
 - Credential/auth/env names: `auth.json`, `.credentials.json`,
   `mcp-auth.json`, `mcp-needs-auth-cache.json`, `session-env`, `.env`,
-  `.env.*`, `*.env`, `.netrc`, `.pgpass`.
+  `.envrc`, `.env.*`, `*.env`, `*.env.*`, `.netrc`, `.pgpass`.
 - Secret stores: `.ssh`, `.gnupg`, `sops-nix`, `nix/secrets`.
 - Live database files: `*.sqlite`, `*.sqlite3`, `*.db`, `*.sqlite-wal`,
   `*.sqlite-shm`, `*.db-wal`, `*.db-shm`, `*-wal`, `*-shm`.
-- Runtime/caches: `*.log`, `.cache`, `node_modules`, `.tmp`, plugin caches,
-  package caches, `.claude/worktrees`, `.crush/logs`, generated build outputs.
+- Runtime/caches: `*.log`, `.cache`, `node_modules`, `.tmp`, `log/`, `logs/`,
+  plugin caches, package caches, `.claude/worktrees`, `.crush/logs`, generated
+  build outputs.
 - Repo generated outputs: `target`, `node_modules`, `.svelte-kit`, `build`,
   `.direnv`, `.venv`, `.cache`, `.artifacts` unless a repo-specific artifact
   row explicitly opts in.
