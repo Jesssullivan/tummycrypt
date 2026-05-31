@@ -163,7 +163,9 @@ from the unchecked historical task list below.
 1. Deploy updated Home Manager config to all 3 machines
 2. On each machine:
    ```bash
-   tcfs device enroll --name $(hostname)
+   tcfs device enroll --name $(hostname) --sync-remote
+   # If migrating a legacy placeholder:
+   tcfs device enroll --name $(hostname) --repair-placeholder --sync-remote
    tcfs device list  # verify all 3 visible
    ```
 3. Verify S3 registry at `tcfs-meta/devices.json` shows 3 devices

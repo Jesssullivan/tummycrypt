@@ -426,6 +426,12 @@ enum DeviceAction {
         /// Device name (default: hostname)
         #[arg(long)]
         name: Option<String>,
+        /// Replace an existing placeholder/legacy public key with a real age key
+        #[arg(long)]
+        repair_placeholder: bool,
+        /// Merge the local registry with the storage-backed fleet registry
+        #[arg(long)]
+        sync_remote: bool,
     },
     /// List enrolled devices
     List,
@@ -721,7 +727,11 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::Device { action } => match action {
-            DeviceAction::Enroll { name } => cmd_device_enroll(name),
+            DeviceAction::Enroll {
+                name,
+                repair_placeholder,
+                sync_remote,
+            } => cmd_device_enroll(&config, name, repair_placeholder, sync_remote).await,
             DeviceAction::List => cmd_device_list(),
             DeviceAction::Revoke { name } => cmd_device_revoke(&name),
             DeviceAction::Status => cmd_device_status(),
@@ -3995,33 +4005,199 @@ fn cmd_device_revoke(name: &str) -> Result<()> {
 
 // ── `tcfs device enroll` ──────────────────────────────────────────────────────
 
-fn cmd_device_enroll(name: Option<String>) -> Result<()> {
+async fn cmd_device_enroll(
+    config: &tcfs_core::config::TcfsConfig,
+    name: Option<String>,
+    repair_placeholder: bool,
+    sync_remote: bool,
+) -> Result<()> {
     let device_name = name.unwrap_or_else(tcfs_secrets::device::default_device_name);
     let registry_path = tcfs_secrets::device::default_registry_path();
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
 
-    if registry.find(&device_name).is_some() {
+    let mut enrolled_or_repaired = false;
+    let device_id: String;
+    let public_key: String;
+    let mut device_key_path: Option<PathBuf> = None;
+
+    if let Some(device) = registry.find(&device_name) {
+        if !tcfs_secrets::device::is_real_age_public_key(&device.public_key) {
+            if !repair_placeholder {
+                anyhow::bail!(
+                    "Device '{}' is already enrolled with a placeholder/legacy public key. Re-run with --repair-placeholder to generate a real age device key.",
+                    device_name
+                );
+            }
+            let key_path =
+                repair_placeholder_device_key(&mut registry, &registry_path, &device_name)?;
+            device_key_path = Some(key_path);
+            enrolled_or_repaired = true;
+        } else if !sync_remote {
+            anyhow::bail!(
+                "Device '{}' is already enrolled. Use 'tcfs device list' to see devices.",
+                device_name
+            );
+        }
+        let device = registry.find(&device_name).with_context(|| {
+            format!(
+                "device '{}' disappeared while preparing enrollment output",
+                device_name
+            )
+        })?;
+        device_id = device.device_id.clone();
+        public_key = device.public_key.clone();
+    } else {
+        let (new_device_id, device_key) = registry.enroll_local(&device_name, None);
+        let key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &new_device_id);
+        tcfs_secrets::device::save_device_secret_key(&key_path, &device_key.secret_key, false)?;
+        device_id = new_device_id;
+        public_key = device_key.public_key;
+        device_key_path = Some(key_path);
+        enrolled_or_repaired = true;
+    }
+
+    registry.save(&registry_path)?;
+
+    if sync_remote {
+        let op = build_operator(config).await?;
+        let meta_prefix = config.storage.resolved_prefix();
+        let remote = tcfs_secrets::device::DeviceRegistry::load_remote(&op, meta_prefix).await?;
+        merge_device_registry(&mut registry, &remote)?;
+        tcfs_secrets::device::DeviceRegistry::sync_to_remote(&registry, &op, meta_prefix).await?;
+        registry.save(&registry_path)?;
+    }
+
+    if enrolled_or_repaired {
+        println!("Device enrolled:");
+    } else {
+        println!("Device already enrolled:");
+    }
+    println!("  name:      {}", device_name);
+    println!("  device_id: {}", device_id);
+    println!("  public_key: {}", public_key);
+    if let Some(path) = device_key_path {
+        println!("  key:       {}", path.display());
+    }
+    println!("  registry:  {}", registry_path.display());
+    if sync_remote {
+        println!(
+            "  remote:    {}/tcfs-meta/devices.json",
+            config.storage.resolved_prefix().trim_end_matches('/')
+        );
+    }
+    println!();
+    if sync_remote {
+        println!("Next: run the same command on peer devices to pull the merged registry.");
+    } else {
+        println!("Next: configure sync in tcfs.toml and run 'tcfs push'");
+    }
+
+    Ok(())
+}
+
+fn repair_placeholder_device_key(
+    registry: &mut tcfs_secrets::device::DeviceRegistry,
+    registry_path: &Path,
+    device_name: &str,
+) -> Result<PathBuf> {
+    let needs_device_id = registry
+        .find(device_name)
+        .map(|device| device.device_id.is_empty())
+        .unwrap_or(false);
+    if needs_device_id {
+        registry.backfill_device_id(device_name);
+    }
+
+    let device = registry
+        .devices
+        .iter_mut()
+        .find(|device| device.name == device_name)
+        .with_context(|| format!("device '{device_name}' not found in registry"))?;
+
+    if tcfs_secrets::device::is_real_age_public_key(&device.public_key) {
+        anyhow::bail!("device '{device_name}' already has a real age public key");
+    }
+
+    let key = tcfs_secrets::device::generate_local_device_key();
+    device.public_key = key.public_key.clone();
+    device.signing_key_hash =
+        blake3::hash(device.public_key.as_bytes()).to_hex().as_str()[..16].to_string();
+    device.revoked = false;
+
+    let key_path = tcfs_secrets::device::device_secret_key_path(registry_path, &device.device_id);
+    tcfs_secrets::device::save_device_secret_key(&key_path, &key.secret_key, false)?;
+    Ok(key_path)
+}
+
+fn merge_device_registry(
+    local: &mut tcfs_secrets::device::DeviceRegistry,
+    incoming: &tcfs_secrets::device::DeviceRegistry,
+) -> Result<usize> {
+    let mut changed = 0usize;
+    for incoming_device in &incoming.devices {
+        let existing = local.devices.iter_mut().find(|device| {
+            (!device.device_id.is_empty() && device.device_id == incoming_device.device_id)
+                || device.name == incoming_device.name
+        });
+
+        if let Some(existing_device) = existing {
+            if merge_device_entry(existing_device, incoming_device)? {
+                changed += 1;
+            }
+        } else {
+            local.devices.push(incoming_device.clone());
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
+fn merge_device_entry(
+    existing: &mut tcfs_secrets::device::DeviceIdentity,
+    incoming: &tcfs_secrets::device::DeviceIdentity,
+) -> Result<bool> {
+    let existing_real = tcfs_secrets::device::is_real_age_public_key(&existing.public_key);
+    let incoming_real = tcfs_secrets::device::is_real_age_public_key(&incoming.public_key);
+
+    if existing_real
+        && incoming_real
+        && existing.public_key != incoming.public_key
+        && (existing.device_id == incoming.device_id || existing.name == incoming.name)
+    {
         anyhow::bail!(
-            "Device '{}' is already enrolled. Use 'tcfs device list' to see devices.",
-            device_name
+            "registry conflict for device '{}' ({}): two real public keys differ",
+            existing.name,
+            existing.device_id
         );
     }
 
-    let (device_id, device_key) = registry.enroll_local(&device_name, None);
-    let device_key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id);
-    tcfs_secrets::device::save_device_secret_key(&device_key_path, &device_key.secret_key, false)?;
-    registry.save(&registry_path)?;
+    if incoming_real && !existing_real {
+        *existing = incoming.clone();
+        return Ok(true);
+    }
 
-    println!("Device enrolled:");
-    println!("  name:      {}", device_name);
-    println!("  device_id: {}", device_id);
-    println!("  public_key: {}", device_key.public_key);
-    println!("  key:       {}", device_key_path.display());
-    println!("  registry:  {}", registry_path.display());
-    println!();
-    println!("Next: configure sync in tcfs.toml and run 'tcfs push'");
-
-    Ok(())
+    let mut changed = false;
+    if existing.device_id.is_empty() && !incoming.device_id.is_empty() {
+        existing.device_id = incoming.device_id.clone();
+        changed = true;
+    }
+    if existing.signing_key_hash.is_empty() && !incoming.signing_key_hash.is_empty() {
+        existing.signing_key_hash = incoming.signing_key_hash.clone();
+        changed = true;
+    }
+    if existing.description.is_none() && incoming.description.is_some() {
+        existing.description = incoming.description.clone();
+        changed = true;
+    }
+    if existing.revoked != incoming.revoked && incoming.revoked {
+        existing.revoked = true;
+        changed = true;
+    }
+    if incoming.last_nats_seq > existing.last_nats_seq {
+        existing.last_nats_seq = incoming.last_nats_seq;
+        changed = true;
+    }
+    Ok(changed)
 }
 
 // ── `tcfs device status` ─────────────────────────────────────────────────────
@@ -5765,6 +5941,63 @@ mod tests {
         let err = cmd_init_check(&paths).unwrap_err();
         assert!(
             err.to_string().contains("placeholder public key"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn repair_placeholder_device_key_preserves_device_id_and_writes_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("devices.json");
+        let mut registry = tcfs_secrets::device::DeviceRegistry::default();
+        let device_id = registry.enroll("honey", "age1-device-6b746182", None);
+
+        let key_path =
+            repair_placeholder_device_key(&mut registry, &registry_path, "honey").unwrap();
+        let repaired = registry.find("honey").unwrap();
+
+        assert_eq!(repaired.device_id, device_id);
+        assert!(tcfs_secrets::device::is_real_age_public_key(
+            &repaired.public_key
+        ));
+        assert_eq!(
+            key_path,
+            tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id)
+        );
+        assert!(key_path.exists());
+    }
+
+    #[test]
+    fn merge_device_registry_prefers_real_key_over_placeholder() {
+        let mut local = tcfs_secrets::device::DeviceRegistry::default();
+        let device_id = local.enroll("honey", "age1-device-6b746182", None);
+        let mut incoming = tcfs_secrets::device::DeviceRegistry::default();
+        let (_incoming_id, key) = incoming.enroll_local("honey", None);
+        incoming.devices[0].device_id = device_id.clone();
+
+        let changed = merge_device_registry(&mut local, &incoming).unwrap();
+
+        assert_eq!(changed, 1);
+        let merged = local.find("honey").unwrap();
+        assert_eq!(merged.device_id, device_id);
+        assert_eq!(merged.public_key, key.public_key);
+        assert!(tcfs_secrets::device::is_real_age_public_key(
+            &merged.public_key
+        ));
+    }
+
+    #[test]
+    fn merge_device_registry_rejects_conflicting_real_keys_for_same_device_id() {
+        let mut local = tcfs_secrets::device::DeviceRegistry::default();
+        let (device_id, _local_key) = local.enroll_local("honey", None);
+        let mut incoming = tcfs_secrets::device::DeviceRegistry::default();
+        incoming.enroll_local("honey", None);
+        incoming.devices[0].device_id = device_id;
+
+        let err = merge_device_registry(&mut local, &incoming).unwrap_err();
+
+        assert!(
+            err.to_string().contains("two real public keys differ"),
             "unexpected error: {err:#}"
         );
     }
