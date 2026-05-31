@@ -93,8 +93,8 @@ case "$*" in
 tcfsd v0.12.2
   device:        honey (d1176e5d)
   storage:       http://10.245.93.143:8333 [ok]
-  nats:          not connected
 OUT
+    printf '  nats:          %s\n' "${FAKE_HONEY_NATS_STATUS:-not connected}"
     ;;
   "tcfs device status")
     cat <<'OUT'
@@ -194,5 +194,20 @@ assert_fails env PATH="$FAKE_BIN:$PATH" HOME="$FAKE_HOME" bash "$SCRIPT" \
   --nats-target nats-tcfs \
   --strict
 assert_contains "$STRICT_LOG_DIR/result.env" 'status=1'
+
+G3_LOG_DIR="$TMPDIR/g3-evidence"
+PATH="$FAKE_BIN:$PATH" HOME="$FAKE_HOME" FAKE_HONEY_NATS_STATUS=connected bash "$SCRIPT" \
+  --log-dir "$G3_LOG_DIR" \
+  --clear-nats-targets \
+  --nats-target nats-tcfs \
+  >"$TMPDIR/g3.out"
+assert_contains "$TMPDIR/g3.out" 'Status: `blocked-g3`'
+assert_contains "$G3_LOG_DIR/result.env" 'proof=blocked-g3'
+assert_contains "$G3_LOG_DIR/summary.md" 'neo device registry does not include honey'
+if grep -Fq 'honey NATS is not connected' "$G3_LOG_DIR/summary.md"; then
+  printf 'did not expect honey NATS blocker in registry-only evidence\n' >&2
+  cat "$G3_LOG_DIR/summary.md" >&2
+  exit 1
+fi
 
 printf 'honey backbone preflight tests passed\n'
