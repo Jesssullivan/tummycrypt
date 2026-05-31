@@ -13,6 +13,8 @@ use tcfs_crypto::MasterKey;
 use crate::cred_store::{new_shared as new_cred_store, SharedCredStore};
 use crate::grpc::TcfsDaemonImpl;
 
+const REMOTE_INDEX_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Record a watcher-detected conflict in the state cache, inserting a synthetic
 /// entry when the cache has no prior record for `path`.
 ///
@@ -307,82 +309,19 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         let _ = state_cache_inner.flush();
     }
 
-    // ── Remote index discovery ────────────────────────────────────────────
-    // Populate state cache with remote-only files so FileProvider can enumerate
-    // the full tree, not just locally-synced files.
-    if let Some(ref op) = operator {
-        let sync_root = config
-            .sync
-            .sync_root
-            .as_deref()
-            .unwrap_or(std::path::Path::new("/tmp/tcfs"));
-        // Bound startup remote-index discovery so a slow/unreachable S3
-        // endpoint cannot block the gRPC socket bind that happens later in
-        // run(). On timeout, log non-fatally and continue — the socket still
-        // binds and periodic reconcile retries. Prevents the "daemon running
-        // but no socket" startup hang.
-        let discovery = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            tcfs_sync::reconcile::list_remote_index(op, resolved_prefix),
-        )
-        .await;
-        match discovery {
-            Ok(Ok(remote_index)) => {
-                let mut discovered = 0usize;
-                for (rel_path, entry) in &remote_index {
-                    let local_key = std::path::PathBuf::from(sync_root).join(rel_path);
-                    if state_cache_inner.get(&local_key).is_none() {
-                        state_cache_inner.set(
-                            &local_key,
-                            tcfs_sync::state::SyncState {
-                                blake3: String::new(),
-                                size: entry.size,
-                                mtime: 0,
-                                chunk_count: entry.chunks,
-                                remote_path: format!(
-                                    "{}/manifests/{}",
-                                    resolved_prefix, entry.manifest_hash
-                                ),
-                                last_synced: 0,
-                                vclock: Default::default(),
-                                device_id: String::new(),
-                                conflict: None,
-                                status: tcfs_sync::state::FileSyncStatus::NotSynced,
-                            },
-                        );
-                        discovered += 1;
-                    }
-                }
-                if discovered > 0 {
-                    info!(
-                        discovered,
-                        total = remote_index.len(),
-                        "remote index discovery: added new entries to state cache"
-                    );
-                    let _ = state_cache_inner.flush();
-                } else {
-                    info!(
-                        total = remote_index.len(),
-                        "remote index discovery: cache already up to date"
-                    );
-                }
-            }
-            Ok(Err(e)) => {
-                warn!("remote index discovery failed (non-fatal): {e}");
-            }
-            Err(_elapsed) => {
-                warn!(
-                    "remote index discovery timed out after 60s (non-fatal); \
-                     binding socket anyway, periodic reconcile will retry"
-                );
-            }
-        }
-    }
-
     let state_cache = Arc::new(tokio::sync::Mutex::new(state_cache_inner));
 
     // Wrap operator in Arc<Mutex> for shared access
     let operator = Arc::new(tokio::sync::Mutex::new(operator));
+
+    // Populate remote-only entries without blocking daemon readiness. The gRPC
+    // socket must bind even when object storage is slow or unreachable.
+    spawn_remote_index_discovery(
+        operator.clone(),
+        state_cache.clone(),
+        config.sync.sync_root.clone(),
+        resolved_prefix.to_string(),
+    );
 
     // Shared NATS handle — created early so the watcher scheduler can publish events.
     // Starts as None; populated later when NATS connects (see set_nats call below).
@@ -1388,6 +1327,87 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn spawn_remote_index_discovery(
+    operator: Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+    state_cache: Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+    sync_root: Option<std::path::PathBuf>,
+    storage_prefix: String,
+) {
+    tokio::spawn(async move {
+        let operator = {
+            let guard = operator.lock().await;
+            guard.clone()
+        };
+        let Some(operator) = operator else {
+            debug!("remote index discovery skipped: storage operator unavailable");
+            return;
+        };
+
+        let sync_root = sync_root.unwrap_or_else(|| std::path::PathBuf::from("/tmp/tcfs"));
+        let discovery = tokio::time::timeout(
+            REMOTE_INDEX_DISCOVERY_TIMEOUT,
+            tcfs_sync::reconcile::list_remote_index(&operator, &storage_prefix),
+        )
+        .await;
+
+        match discovery {
+            Ok(Ok(remote_index)) => {
+                let mut cache = state_cache.lock().await;
+                let mut discovered = 0usize;
+                for (rel_path, entry) in &remote_index {
+                    let local_key = sync_root.join(rel_path);
+                    if cache.get(&local_key).is_none() {
+                        cache.set(
+                            &local_key,
+                            tcfs_sync::state::SyncState {
+                                blake3: String::new(),
+                                size: entry.size,
+                                mtime: 0,
+                                chunk_count: entry.chunks,
+                                remote_path: format!(
+                                    "{}/manifests/{}",
+                                    storage_prefix, entry.manifest_hash
+                                ),
+                                last_synced: 0,
+                                vclock: Default::default(),
+                                device_id: String::new(),
+                                conflict: None,
+                                status: tcfs_sync::state::FileSyncStatus::NotSynced,
+                            },
+                        );
+                        discovered += 1;
+                    }
+                }
+
+                if discovered > 0 {
+                    info!(
+                        discovered,
+                        total = remote_index.len(),
+                        "remote index discovery: added new entries to state cache"
+                    );
+                    if let Err(e) = cache.flush() {
+                        warn!(error = %e, "state cache flush failed");
+                    }
+                } else {
+                    info!(
+                        total = remote_index.len(),
+                        "remote index discovery: cache already up to date"
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("remote index discovery failed (non-fatal): {e}");
+            }
+            Err(_elapsed) => {
+                warn!(
+                    seconds = REMOTE_INDEX_DISCOVERY_TIMEOUT.as_secs(),
+                    "remote index discovery timed out (non-fatal); periodic reconcile will retry"
+                );
+            }
+        }
+    });
 }
 
 /// Spawn a background task that consumes state events from NATS.
