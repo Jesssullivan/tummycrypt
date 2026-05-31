@@ -376,6 +376,15 @@ Why third: pairing depends on `TIN-1417`.
 
 Target window: 2026-06-15 through 2026-06-30.
 
+> Re-sequenced 2026-05-30: see
+> [large-workdir-daily-driver-sequencing-2026-05-30.md](large-workdir-daily-driver-sequencing-2026-05-30.md)
+> for the gate model (G0-G6), per-gate test gates, and parallelizable
+> workstreams. Operator ordering: crypto-first (`TIN-1417` / G1) → honey as
+> device #2 (`TIN-1736` / G2+G3) → agent-dir beachhead `~/.claude/projects`
+> (`TIN-1738` / G4), with guardrail hardening (`TIN-1737` / G0) as a step-zero
+> blocker. `neo` currently reports `nats_ok:false`; that backbone fix (G2) is
+> the keystone that unblocks the stalled shadow pilot and every cross-host goal.
+
 - [ ] `TIN-1617`: selected large-workdir onboarding pilot: inventory,
   shadow-root proof, one expendable live repo, then selected subtree rollout.
   Design recon: [Large Workdir Onboarding Design - 2026-05-25](large-workdir-onboarding-design-2026-05-25.md).
@@ -399,6 +408,12 @@ Target window: 2026-06-15 through 2026-06-30.
   `summary.md`; live pilot packet evidence is still pending.
 - [ ] `TIN-1619`: shadow pilot packet for one selected large workdir.
 - [ ] `TIN-1620`: one expendable live repo two-machine pilot.
+- [ ] `TIN-1737`: large-workdir guardrails — `never_sync` hardening for secrets
+  and open-WAL sqlite before any `~/` enrollment (Gate G0; step-zero blocker).
+- [ ] `TIN-1736`: enroll honey as device #2 on the per-device crypto path —
+  fleet backbone + real second device (Gates G2+G3, the keystone).
+- [ ] `TIN-1738`: agent-state-dir cross-host beachhead
+  (`~/.claude/projects`, neo↔honey; Gate G4 daily-driver beachhead).
 - [ ] `TIN-1416`: subscription-based selective sync.
 - [ ] `TIN-1556`: stable root IDs and broad-directory ownership.
 - [ ] `TIN-1419`: streaming large-file IO for FUSE/FileProvider writes.

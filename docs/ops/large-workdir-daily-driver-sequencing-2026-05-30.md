@@ -1,0 +1,138 @@
+# TCFS Large Workdir → Daily Driver Sequencing - 2026-05-30
+
+Status: operator-directed re-sequencing of the `TIN-1617` large-workdir
+onboarding plan toward a daily-driver fleet.
+
+Tracker: `TIN-1617` (epic). New sub-issues: `TIN-1736`, `TIN-1737`,
+`TIN-1738`.
+
+This document does not replace
+[large-workdir-onboarding-design-2026-05-25.md](large-workdir-onboarding-design-2026-05-25.md);
+it re-orders that ladder around three operator decisions and adds the
+gate / test-gate / workstream structure needed to run the streams in
+parallel. It is execution scaffolding, not a release claim. The claim
+boundary in the design doc still holds.
+
+## Operator Decisions (2026-05-30)
+
+The user story is the senior systems engineer who wants TCFS as the overlay
+for `~/git` trees and agent dotdirs across many Rocky/macOS machines, with
+selective unsync/rehydrate per host and a controlled join path for more
+machines — eventually working from `honey` by default. Three decisions reshape
+the original `inventory → shadow → live-repo` sequence:
+
+1. **Crypto-first.** Per-device file-key wrapping + revocation-denies-new-content
+   (`TIN-1417`) is now an explicit gate **before** any new machine joins —
+   not a parallel nicety. The second device should be enrolled on the
+   production-grade path from day one.
+2. **`honey` is the keystone.** Almost everything cross-host is blocked on the
+   same root cause: `honey` (SeaweedFS + NATS on RKE2) is not enrolled and the
+   neo↔honey state bus is down (`neo` reports `storage_ok: true`,
+   `nats_ok: false`). Enrolling `honey` as a real device #2 on a green backbone
+   unblocks the stalled shadow pilot, cross-host unsync→rehydrate, and
+   "daily-drive honey" at once. Tracked as `TIN-1736`.
+3. **First live target is an agent-state dir, not a repo.** The first directory
+   to live cross-host is `~/.claude/projects`, so agent work continues from any
+   machine. Because that is the highest-risk class in `~`, the secret/WAL
+   guardrails move from "later" to a **step-zero blocker** (`TIN-1737`), and the
+   beachhead itself is `TIN-1738`.
+
+## Live Reality Anchor (neo, 2026-05-30)
+
+- `tcfsd` 0.12.2 running; device `03d8a0bd… / neo.local`; `active_mounts: 0`.
+- `storage_ok: true` (`seaweedfs-tcfs:8333`); **`nats_ok: false`** — the
+  cross-device bus is down. This is the literal G2 blocker.
+- `~/.config/tcfs/sync-policy.toml` (home-manager generated) already encodes the
+  tiered model: `[git_repos]` base `/Users/jess/git` with 3 enrolled paths
+  (`crush-dots`, `tinyland-sunshine`, `fuzzy-crush`) and a strong
+  `exclude_patterns` list; `[dotfiles]` base `~/.config`; `[never_sync]` for
+  caches/sockets. The piecemeal "one dir at a time" mechanism exists; it is not
+  yet verb-driven (G6) and `never_sync` does not yet cover secrets/WAL (G0).
+- Secret surfaces that must be excluded before any `~/` enrollment: `~/.ssh`,
+  `~/.gnupg`, `~/.config/sops-nix/secrets`, credential symlinks
+  (`~/.claude/.credentials.json`, `~/.codex/auth.json`), 22 `~/git/**/.env`.
+- Corruption hazards (open-WAL sqlite): `~/.codex/logs_2.sqlite` (762 MB+WAL),
+  `state_5.sqlite`, `opencode.db`, claude `history.jsonl`.
+
+## Parallelizable Workstreams
+
+These run concurrently. Dependencies are expressed only through the gates in
+the next section, not through stream ownership.
+
+| WS | Stream | Tracker(s) | Parallel? | Notes |
+| --- | --- | --- | --- | --- |
+| WS-1 | Per-device crypto + revocation | `TIN-1417` | Critical path | Make per-device wrap the write path; prove revoked device cannot decrypt new content. |
+| WS-2 | Fleet backbone health | `TIN-1736`, rel `TIN-1546` | Fully parallel to WS-1 | Fix neo `nats_ok:false`; verify honey RKE2 SeaweedFS+NATS. Infra, no code dep. |
+| WS-3 | Guardrails / never_sync | `TIN-1737`, rel `TIN-1416` | Fully parallel, single-host | Exclude secrets + open-WAL sqlite; deny-test. Step-zero blocker for any `~/` enrollment. |
+| WS-4 | Selective-sync verb loop | `TIN-1416` | Parallel, single-host buildable now | `tcfs sub add/remove/list` round-tripping with home-manager `sync-policy.toml`. |
+| WS-5 | Enrollment / pairing UX | `TIN-1424`, `TIN-1425` | Partially gated by WS-1 | Invite→enroll→bootstrap client persistence; first-run wizard closeout. |
+| WS-6 | Storage soak / SLO | `TIN-1546`, `TIN-1622` | Ongoing, parallel | Gates the live-repo step (G5), not the agent-dir step (G4). |
+| WS-7 | Agent-dir target prep | `TIN-1738` | Read-only now | Inventory `~/.claude/projects`; design scoped policy; scrub plan. |
+
+## Gate Model (Inflection Points)
+
+Gates are convergence points where parallel streams must meet before the next
+step proceeds. Each gate has a machine-checkable test gate.
+
+| Gate | Definition | Requires | Test gate (proof) | Tracker |
+| --- | --- | --- | --- | --- |
+| **G0** | Guardrails locked | WS-3 | Deny-test: enrolling `~/.claude/projects` or `~/.codex` captures **zero** paths matching the secret/WAL set; fail-closed. Hardened `never_sync` is the home-manager generated default. | `TIN-1737` |
+| **G1** | Crypto production-ready | WS-1 | Integration test: per-device wrap is the active write path; a revoked device **cannot decrypt new content**; existing content still readable; migration doc exists. (`TIN-1417` acceptance.) | `TIN-1417` |
+| **G2** | Backbone green | WS-2 | `tcfs daemon status` on **both** neo and honey reports `nats_ok: true` and `storage_ok: true`. | `TIN-1736` |
+| **G3** | honey enrolled (device #2) | G1 + G2 | `tcfs device list` shows two real `age1…` devices (no placeholders); honey enrolled via per-device wrap path; bootstrap age-wrapped (no raw S3 creds); push-on-neo → hydrate-on-honey exact bytes. | `TIN-1736` |
+| **G4** | Agent-dir beachhead | G0 + G3 + WS-7 | `~/.claude/projects` proves QA rows T1–T6, T12 + multi-machine M1/M2/M3/M6 across neo↔honey; edit→hydrate→unsync→rehydrate exact; evidence packet archived. | `TIN-1738` |
+| **G5** | One expendable live repo | G4 + WS-6 | TIN-1620 acceptance: two-machine browse/hydrate/unsync/rehydrate + conflict (T10/T11) + rollback/fresh-tree restore. | `TIN-1620` |
+| **G6** | Verb loop GA | WS-4 | `tcfs sub add/remove/list` (or policy-path add/remove) round-trips with home-manager; remove dehydrates per policy; proptest extended. | `TIN-1416` |
+
+### Dependency graph
+
+```text
+WS-3 ──▶ G0 ─────────────────────────────┐
+                                          ▼
+WS-1 ──▶ G1 ──┐                     G4 (TIN-1738) ──▶ G5 (TIN-1620)
+              ├──▶ G3 (TIN-1736) ──▶  ▲
+WS-2 ──▶ G2 ──┘                        │
+WS-7 ─────────────────────────────────┘
+WS-4 ──▶ G6 (TIN-1416)        [parallel, lands independently]
+WS-6 ─────────────────────────▶ feeds G5
+WS-5 ─────────────────────────▶ supports G3 (real enrollment UX)
+```
+
+The critical path to the daily-driver beachhead is
+`G1 + G2 → G3 → G4`, with `G0` as a parallel hard precondition on the agent-dir
+target. `G5`, `G6` follow but do not block the beachhead.
+
+## Timeline
+
+Mapped onto the existing productionization windows
+([tcfs-daily-driver-productionization-todo-2026-05-24.md](tcfs-daily-driver-productionization-todo-2026-05-24.md)).
+
+| Window | Dates | Targets |
+| --- | --- | --- |
+| Alpha closeout | through 2026-05-31 | **G0** guardrails (`TIN-1737`, due 06-02); WS-6 soak continues; keep storage gate (`TIN-1546`) honest. |
+| Beta foundations | 2026-06-01 → 06-14 | **G1** crypto (`TIN-1417`, due 06-07); **G2** backbone + **G3** honey enrolled (`TIN-1736`, due 06-12). WS-4 / WS-5 in parallel. |
+| Daily-driver primitives | 2026-06-15 → 06-30 | **G4** agent-dir beachhead (`TIN-1738`, due 06-20); then **G5** live repo (`TIN-1620`); **G6** verb loop (`TIN-1416`). |
+
+## Guardrails / Stop Rules (agent-dir specific)
+
+Inherits the global stop rules from the productionization todo, plus:
+
+- Never enroll a path matching the secret set (`~/.ssh`, `~/.gnupg`,
+  `~/.config/sops-nix`, credential symlinks, `*.env`). Fail-closed.
+- Never sync an open-WAL sqlite live (`*.sqlite*`, `*.db*`). Snapshot-only or
+  exclude. Append-only `.jsonl` transcripts are acceptable.
+- Scope the agent-dir target to `~/.claude/projects`, not all of `~/.claude`,
+  so the root-level credential symlink is structurally out of scope.
+- `linux-xr/.git` (6.2 GB) stays a *stress* target only, never a daily-driver
+  enrollment. `target/` and `node_modules` remain excluded.
+
+## Cross-links
+
+- Epic: `TIN-1617` — https://linear.app/tinyland/issue/TIN-1617
+- `TIN-1736` honey device #2 / backbone (G2+G3)
+- `TIN-1737` guardrails (G0)
+- `TIN-1738` agent-dir beachhead (G4)
+- `TIN-1417` per-device crypto (G1) · `TIN-1416` selective-sync verb loop (G6)
+- `TIN-1620` one expendable live repo (G5) · `TIN-1546`/`TIN-1622` storage soak
+- Design seed: [large-workdir-onboarding-design-2026-05-25.md](large-workdir-onboarding-design-2026-05-25.md)
+- Execution checklist: [tcfs-daily-driver-productionization-todo-2026-05-24.md](tcfs-daily-driver-productionization-todo-2026-05-24.md)
