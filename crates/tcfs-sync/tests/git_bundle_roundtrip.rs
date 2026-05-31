@@ -78,8 +78,7 @@ async fn git_bundle_mode_preserves_history_on_peer() {
     let op = memory_operator();
     let prefix = "test/git-bundle";
 
-    let mut state =
-        tcfs_sync::state::StateCache::open(&src_tmp.path().join("state.db")).unwrap();
+    let mut state = tcfs_sync::state::StateCache::open(&src_tmp.path().join("state.db")).unwrap();
 
     // Bundle mode: include .git, but capture it as a bundle (not raw walk).
     let config = tcfs_sync::engine::CollectConfig {
@@ -118,7 +117,10 @@ async fn git_bundle_mode_preserves_history_on_peer() {
     )
     .await
     .expect("push tree in bundle mode");
-    assert!(uploaded >= 3, "expected README, file2, bundle: got {uploaded}");
+    assert!(
+        uploaded >= 3,
+        "expected README, file2, bundle: got {uploaded}"
+    );
 
     // ── Peer rehydrate ───────────────────────────────────────────────────
     let peer_tmp = TempDir::new().unwrap();
@@ -130,10 +132,9 @@ async fn git_bundle_mode_preserves_history_on_peer() {
 
     // Pull every synced working-tree path (incl. the bundle) into the peer.
     for rel in &rels {
-        let manifest =
-            tcfs_sync::engine::resolve_manifest_path(&op, rel, prefix, Some(&repo))
-                .await
-                .unwrap_or_else(|e| panic!("resolve manifest for {rel}: {e}"));
+        let manifest = tcfs_sync::engine::resolve_manifest_path(&op, rel, prefix, Some(&repo))
+            .await
+            .unwrap_or_else(|e| panic!("resolve manifest for {rel}: {e}"));
         let dst = peer_repo.join(rel);
         std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
         tcfs_sync::engine::download_file_with_device(
