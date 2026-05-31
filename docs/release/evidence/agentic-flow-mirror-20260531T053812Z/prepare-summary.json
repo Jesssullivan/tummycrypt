@@ -1,0 +1,22 @@
+{
+  "allow_rows": 17241,
+  "copied_files": 13417,
+  "copy_allowed_requested": true,
+  "copy_transcripts_requested": false,
+  "created_dirs": 2632,
+  "deny_rows": 284,
+  "errors": [
+    "snapshot failed for /Users/jess/.codex/logs_2.sqlite: sqlite3 timed out after 30s",
+    "snapshot failed for /Users/jess/.codex/goals_1.sqlite: Error: unable to open database file",
+    "snapshot failed for /Users/jess/.local/share/opencode/opencode.db: sqlite3 timed out after 30s"
+  ],
+  "generated_at": "2026-05-31T05:39:14Z",
+  "manifest": "/private/tmp/tcfs-agentic-flow-20260531T053812Z/manifest.jsonl",
+  "rows": 17531,
+  "skipped_transcripts": 1192,
+  "snapshot_rows": 6,
+  "snapshot_sqlite_requested": true,
+  "snapshots_failed": 3,
+  "snapshots_ok": 3,
+  "stage_dir": "/private/tmp/tcfs-agentic-flow-stage-20260531T053812Z"
+}

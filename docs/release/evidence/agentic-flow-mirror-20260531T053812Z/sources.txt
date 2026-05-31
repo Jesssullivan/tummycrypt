@@ -1,0 +1,10 @@
+/Users/jess/.codex
+/Users/jess/.claude
+/Users/jess/.config/opencode
+/Users/jess/.local/share/opencode
+/Users/jess/git/tummycrypt/.claude
+/Users/jess/git/tummycrypt/.crush
+/Users/jess/git/ci-templates
+/Users/jess/git/dell-7810
+/Users/jess/git/xoxdwm
+/Users/jess/git/lab

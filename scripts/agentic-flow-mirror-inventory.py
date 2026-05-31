@@ -22,12 +22,15 @@ DENY_DIRS = {
     ".tmp",
     ".venv",
     ".claude/worktrees",
+    ".claude/backups",
     ".codex/cache",
     ".codex/log",
     ".codex/plugins/cache",
+    ".codex/tmp",
     ".crush/logs",
     ".claude/plugins/cache",
     "cache",
+    "backups",
     "log",
     "logs",
     "node_modules",
@@ -35,6 +38,7 @@ DENY_DIRS = {
     "plugins/cache",
     "sops-nix",
     "target",
+    "tmp",
     "worktrees",
 }
 DENY_FILES = {
