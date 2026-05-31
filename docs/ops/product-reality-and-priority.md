@@ -19,6 +19,13 @@ Current execution todo:
 
 ## Current Product Posture
 
+2026-05-25 storage update: run `26417405494` is now the first exact
+package-backed multi-GiB restore packet for `TIN-1546`: 30 files and
+3,222,239,922 bytes restored from the public HTTPS production-smoke endpoint.
+The table below still keeps the broader storage lane open because the same run
+needed heavy `502` retry recovery and restored at about 1.14 MB/s; beta still
+needs repeated soak/load, retry/noise budgets, and endpoint posture decisions.
+
 | Surface | Current truth | Source of proof |
 | --- | --- | --- |
 | Linux CLI + daemon | strongest and most routinely proven path; x86_64 FUSE lifecycle has current real-host evidence, while packaged systemd/mount first-use remains a separate gate | CI, release smoke, live host acceptance, archived Linux lifecycle evidence |

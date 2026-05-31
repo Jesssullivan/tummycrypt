@@ -31,6 +31,21 @@ def run_inventory(root: Path, out_dir: Path) -> dict[str, object]:
     return json.loads((out_dir / "inventory.json").read_text())
 
 
+def run_inventory_default(root: Path, out_dir: Path) -> dict[str, object]:
+    subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            str(root),
+            "--out-dir",
+            str(out_dir),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    return json.loads((out_dir / "inventory.json").read_text())
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
@@ -73,6 +88,12 @@ def main() -> int:
         assert (out_dir / "inventory.env").exists()
         summary = (out_dir / "summary.md").read_text()
         assert "read-only inventory" in summary
+
+        if not hasattr(os, "listxattr"):
+            out_dir2 = base / "packet-default-xattr"
+            data2 = run_inventory_default(root, out_dir2)
+            assert data2["xattr_probe"] == "unsupported", data2
+            assert (out_dir2 / "inventory.json").exists()
 
     print("large workdir inventory tests passed")
     return 0

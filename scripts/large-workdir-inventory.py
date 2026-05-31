@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def list_xattrs(path: Path) -> list[str]:
+    if not hasattr(os, "listxattr"):
+        raise AttributeError("os.listxattr unavailable on this platform")
     try:
         return os.listxattr(path, follow_symlinks=False)
     except TypeError:
@@ -92,6 +94,7 @@ def scan(root: Path, *, skip_xattrs: bool, max_unsupported: int) -> Inventory:
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     inventory.git_present = (resolved / ".git").exists()
+    probe_xattrs = not skip_xattrs
     if skip_xattrs:
         inventory.xattr_probe = "skipped"
 
@@ -117,10 +120,13 @@ def scan(root: Path, *, skip_xattrs: bool, max_unsupported: int) -> Inventory:
                     inventory.unsupported_entries.append(f"{rel(resolved, path)}: stat {exc}")
                 continue
 
-            if not skip_xattrs:
+            if probe_xattrs:
                 try:
                     if list_xattrs(path):
                         inventory.xattr_entries_with_attrs += 1
+                except AttributeError:
+                    inventory.xattr_probe = "unsupported"
+                    probe_xattrs = False
                 except OSError:
                     inventory.xattr_errors += 1
 

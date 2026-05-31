@@ -145,6 +145,23 @@ Known evidence:
   `regular file hash manifest mismatch`. Treat this as a successful
   package-backed push/load packet and a concrete beta transient-restore
   blocker, not as package-backed restore proof.
+- run `26417405494` reran the same package-backed 3 GiB workload on
+  `main@d9ebf70` after the retry/observability hardening in PR `#462`. It used
+  `tcfs_binary_source=nix-package`, `pack_size_mib=3072`,
+  `restore_headroom_margin_mib=2048`, `download_chunk_retries=8`,
+  `require_https=true`, and the `tcfs-storage-prod-smoke` environment. The
+  workflow built Nix package `tcfs 0.12.13` with SHA-256
+  `4fb34c067449bf844576505a977ee7392a54e31b697f9ad5407d3351197bcca1`, pushed
+  30 files / 3,222,239,922 bytes / 676 chunks to
+  `gha/storage-posture/large/26417405494-1`, and restored the fresh tree
+  exactly: 30/30 regular files, 3,222,239,922/3,222,239,922 bytes, and 2/2
+  empty directories. Restore elapsed time was 2,823 seconds with effective
+  throughput of 1,141,423 B/s, socket highwater stayed at 0, and the run
+  recovered despite 668 Cloudflare/S3 `502` log lines, 289 OpenDAL retry rows,
+  and 47 TCFS chunk-download retry rows. Treat this as the first exact
+  package-backed multi-GiB restore packet and the closeout for `TIN-1621`, but
+  keep `TIN-1546` open for repeated soak/load behavior, performance SLOs, and
+  an explicit retry/noise budget or endpoint decision.
 - downstream public-asset smokes on `main@e9b9f82` then used the same
   production-smoke prefix family successfully:
   - Linux `.deb` run `26218940925` used

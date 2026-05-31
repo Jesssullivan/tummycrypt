@@ -741,6 +741,46 @@ tasks:
     cmds:
       - bash scripts/test-tcfs-symlink-package-probe.sh
 
+  lazy:large-workdir-inventory:
+    desc: "Read-only inventory packet for a selected large workdir"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          root="${ROOT:-/Users/jess/git/linux-xr-fast}"
+          args=()
+
+          if [[ -n "${OUT_DIR:-}" ]]; then
+            args+=(--out-dir "$OUT_DIR")
+          fi
+          if [[ "${SKIP_XATTRS:-0}" == "1" ]]; then
+            args+=(--skip-xattrs)
+          fi
+          if [[ -n "${MAX_UNSUPPORTED:-}" ]]; then
+            args+=(--max-unsupported "$MAX_UNSUPPORTED")
+          fi
+
+          if [[ "${#args[@]}" -gt 0 ]]; then
+            python3 scripts/large-workdir-inventory.py "$root" "${args[@]}"
+          else
+            python3 scripts/large-workdir-inventory.py "$root"
+          fi
+          EOF
+
+  lazy:large-workdir-onboarding:
+    desc: "Large workdir onboarding packet: inventory plus shadow-first pilot"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+          export SOURCE="${SOURCE:-/Users/jess/git/linux-xr-fast}"
+          export EVIDENCE_DIR="${EVIDENCE_DIR:-docs/release/evidence/large-workdir-${timestamp}}"
+          export SHADOW_ROOT="${SHADOW_ROOT:-$HOME/TCFS Pilot/real-canaries/linux-xr-fast-shadow-${timestamp}}"
+          export REMOTE="${REMOTE:-seaweedfs://localhost:8333/tcfs/large-workdir-${timestamp}}"
+          export STATE_DIR="${STATE_DIR:-$EVIDENCE_DIR/state}"
+
+          task lazy:home-canary-linux-xr-shadow
+          EOF
+
   lazy:home-canary-linux-xr-shadow:
     desc: "Real project-tree canary: isolated /Users/jess/git/linux-xr shadow packet"
     cmds:

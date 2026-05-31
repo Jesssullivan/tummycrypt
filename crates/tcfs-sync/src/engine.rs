@@ -23,6 +23,7 @@ use tracing::{debug, info, warn};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
+use crate::blacklist::{Blacklist, BlacklistReason};
 use crate::conflict::{compare_clocks, SyncOutcome, VectorClock};
 use crate::index_entry::{
     manifest_key, read_index_entry_record_from_store, resolve_visible_index_entry,
@@ -2704,11 +2705,24 @@ pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<CollectResul
     let mut files = Vec::new();
     let mut symlinks = Vec::new();
     let mut empty_dirs = Vec::new();
-    let exclude_matchers: Vec<glob::Pattern> = config
-        .exclude_patterns
-        .iter()
-        .filter_map(|p| glob::Pattern::new(p).ok())
-        .collect();
+    let blacklist = Blacklist::new(
+        &config.exclude_patterns,
+        config.sync_hidden_dirs,
+        config.sync_git_dirs,
+        &config.git_sync_mode,
+    );
+    if let Some(reason) = blacklist.check_security_path_components(root) {
+        warn!(
+            path = %root.display(),
+            reason = %reason,
+            "skipping collection root: security deny-set"
+        );
+        return Ok(CollectResult {
+            files,
+            symlinks,
+            empty_dirs,
+        });
+    }
     // Track visited canonical paths for symlink cycle detection
     let mut visited = std::collections::HashSet::new();
     if let Ok(canon) = std::fs::canonicalize(root) {
@@ -2720,7 +2734,7 @@ pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<CollectResul
         &mut symlinks,
         &mut empty_dirs,
         config,
-        &exclude_matchers,
+        &blacklist,
         &mut visited,
     )?;
     files.sort(); // deterministic order
@@ -2739,7 +2753,7 @@ fn collect_files_inner(
     symlinks: &mut Vec<PathBuf>,
     empty_dirs: &mut Vec<PathBuf>,
     config: &CollectConfig,
-    excludes: &[glob::Pattern],
+    blacklist: &Blacklist,
     visited: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
     let before = out.len();
@@ -2755,20 +2769,41 @@ fn collect_files_inner(
         let ft = entry.file_type().context("file_type dir entry")?;
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            // Check exclude patterns
-            if excludes.iter().any(|p| p.matches(name)) {
+            if let Some(reason) = blacklist.check_name(name, ft.is_dir()) {
+                match &reason {
+                    BlacklistReason::Security(_) => warn!(
+                        path = %path.display(),
+                        reason = %reason,
+                        "skipping path: security deny-set"
+                    ),
+                    _ => debug!(
+                        path = %path.display(),
+                        reason = %reason,
+                        "skipping path: blacklist"
+                    ),
+                }
                 continue;
             }
 
             // Handle symlinks explicitly
             if ft.is_symlink() {
+                let target = std::fs::read_link(&path).unwrap_or_default();
+                if let Some(reason) = blacklist.check_security_path_components(&target) {
+                    warn!(
+                        path = %path.display(),
+                        target = %target.display(),
+                        reason = %reason,
+                        "skipping symlink: target matches security deny-set"
+                    );
+                    continue;
+                }
+
                 if config.preserve_symlinks {
                     symlinks.push(path);
                     continue;
                 }
 
                 if !config.follow_symlinks {
-                    let target = std::fs::read_link(&path).unwrap_or_default();
                     warn!(
                         path = %path.display(),
                         target = %target.display(),
@@ -2780,6 +2815,15 @@ fn collect_files_inner(
                 // Follow the symlink — resolve target and check for cycles
                 match std::fs::canonicalize(&path) {
                     Ok(real) => {
+                        if let Some(reason) = blacklist.check_security_path_components(&real) {
+                            warn!(
+                                path = %path.display(),
+                                target = %real.display(),
+                                reason = %reason,
+                                "skipping symlink: resolved target matches security deny-set"
+                            );
+                            continue;
+                        }
                         if !visited.insert(real.clone()) {
                             warn!(
                                 path = %path.display(),
@@ -2792,7 +2836,7 @@ fn collect_files_inner(
                         match std::fs::metadata(&real) {
                             Ok(meta) if meta.is_dir() => {
                                 collect_files_inner(
-                                    &path, out, symlinks, empty_dirs, config, excludes, visited,
+                                    &path, out, symlinks, empty_dirs, config, blacklist, visited,
                                 )?;
                             }
                             Ok(meta) if meta.is_file() => {
@@ -2820,11 +2864,6 @@ fn collect_files_inner(
             }
 
             if ft.is_dir() {
-                // Always skip these
-                if name == "target" || name == "node_modules" || name == ".DS_Store" {
-                    continue;
-                }
-
                 // Track visited directories — skip if already traversed
                 // (prevents re-traversal when a symlink was followed first)
                 if let Ok(canon) = std::fs::canonicalize(&path) {
@@ -2855,18 +2894,13 @@ fn collect_files_inner(
                         }
                         // In raw mode, recurse into .git
                         collect_files_inner(
-                            &path, out, symlinks, empty_dirs, config, excludes, visited,
+                            &path, out, symlinks, empty_dirs, config, blacklist, visited,
                         )?;
                     }
                     continue;
                 }
 
-                // Handle other hidden directories
-                if name.starts_with('.') && !config.sync_hidden_dirs {
-                    continue;
-                }
-
-                collect_files_inner(&path, out, symlinks, empty_dirs, config, excludes, visited)?;
+                collect_files_inner(&path, out, symlinks, empty_dirs, config, blacklist, visited)?;
             } else if ft.is_file() {
                 out.push(path);
             }
@@ -3162,6 +3196,18 @@ mod tests {
             sync_empty_dirs: false,
             ..Default::default()
         }
+    }
+
+    fn rel_names(paths: &[PathBuf], root: &Path) -> Vec<String> {
+        paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect()
     }
 
     fn test_manifest_bytes(file_hash: &str, file_size: u64) -> Vec<u8> {
@@ -3516,6 +3562,104 @@ mod tests {
             empty_names.contains(&"real_empty".to_string()),
             "real empty dir should be detected"
         );
+    }
+
+    #[test]
+    fn collect_applies_security_deny_set_with_hidden_dirs_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join(".claude/projects/demo")).unwrap();
+        std::fs::create_dir_all(root.join(".claude/projects/demo/.ssh")).unwrap();
+        std::fs::create_dir_all(root.join(".claude/projects/demo/.config/sops-nix/secrets"))
+            .unwrap();
+        std::fs::write(root.join(".claude/projects/demo/session.jsonl"), b"ok").unwrap();
+        std::fs::write(root.join(".claude/projects/demo/notes.md"), b"ok").unwrap();
+        std::fs::write(root.join(".claude/projects/demo/.env"), b"secret").unwrap();
+        std::fs::write(root.join(".claude/projects/demo/logs_2.sqlite"), b"db").unwrap();
+        std::fs::write(root.join(".claude/projects/demo/opencode.db-wal"), b"db").unwrap();
+        std::fs::write(
+            root.join(".claude/projects/demo/.credentials.json"),
+            b"secret",
+        )
+        .unwrap();
+        std::fs::write(root.join(".claude/projects/demo/auth.json"), b"secret").unwrap();
+        std::fs::write(
+            root.join(".claude/projects/demo/.ssh/id_ed25519"),
+            b"secret",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".claude/projects/demo/.config/sops-nix/secrets/database"),
+            b"secret",
+        )
+        .unwrap();
+
+        let result = collect_files(
+            root,
+            &CollectConfig {
+                sync_hidden_dirs: true,
+                sync_git_dirs: true,
+                git_sync_mode: "raw".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let files = rel_names(&result.files, root);
+        assert_eq!(
+            files,
+            vec![
+                ".claude/projects/demo/notes.md".to_string(),
+                ".claude/projects/demo/session.jsonl".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_refuses_security_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".ssh");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("id_ed25519"), b"secret").unwrap();
+
+        let result = collect_files(
+            &root,
+            &CollectConfig {
+                sync_hidden_dirs: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.files.is_empty());
+        assert!(result.symlinks.is_empty());
+        assert!(result.empty_dirs.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_refuses_security_symlink_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join(".ssh/id_ed25519"), b"secret").unwrap();
+        std::fs::write(root.join("session.jsonl"), b"ok").unwrap();
+        std::os::unix::fs::symlink("session.jsonl", root.join("session-link")).unwrap();
+        std::os::unix::fs::symlink(".ssh/id_ed25519", root.join("key-link")).unwrap();
+
+        let result = collect_files(
+            root,
+            &CollectConfig {
+                sync_hidden_dirs: true,
+                preserve_symlinks: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(rel_names(&result.files, root), vec!["session.jsonl"]);
+        assert_eq!(rel_names(&result.symlinks, root), vec!["session-link"]);
     }
 
     // ── normalize_rel_path ───────────────────────────────────────────────

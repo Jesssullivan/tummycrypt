@@ -107,6 +107,24 @@ Every live QA packet should archive:
 - platform signing/profile/build details for FileProvider runs
 - blocker notes when a row is not claimed, especially symlinks, tombstones, keep-synced/pin semantics, and production Finder signing
 
+## Large-Workdir Onboarding Packets
+
+The large-workdir onboarding design narrows the generic matrix into two packet
+shapes:
+
+| Packet | Minimum rows to inherit | Notes |
+| --- | --- | --- |
+| `TIN-1619` shadow pilot | `T1`, `T2`, `T3`, `T4`, `T5`, `T6`, `T12`, `M1`, `M2`, `M3`, `M6` | Smallest claimable onboarding surface. It proves browse-before-hydrate, exact open-on-demand, cache clear/rehydrate, clean unsync, symlink parity, and cross-host rehydrate without live-source ownership. |
+| `TIN-1620` expendable live repo | `T1`, `T3`, `T4`, `T5`, `T6`, `T10`, `T11`, `M3`, `M5`, `M5-R`, `M6`, `M8` | First live-source step. It inherits the shadow bar, then adds exact conflict recovery plus peer edit/delete/rename behavior while one host remains unsynced. |
+
+Rows that stay out of claim for these onboarding packets:
+
+- `T7`, `T13`, `T14`, `T15`
+- `M4`, `M4-L`, `M5-D`, `M7`
+- `F1-F7`
+- keep-synced/pin semantics until product contract is explicit
+- broad `~/git`, `~/Documents`, `.local`, dotdir, or `/tmp` ownership
+
 ## Claimability Bars
 
 These are the explicit bars before QA or release notes can turn desirable

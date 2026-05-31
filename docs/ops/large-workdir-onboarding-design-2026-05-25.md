@@ -305,6 +305,12 @@ done without overclaiming.
 PR `#462` adds `scripts/large-workdir-inventory.py`, a read-only packet
 generator for `TIN-1618`.
 
+Task entrypoints:
+
+- `task lazy:large-workdir-inventory` for the read-only inventory packet
+- `task lazy:large-workdir-onboarding` for the default shadow-first packet,
+  which currently points at `~/git/linux-xr-fast`
+
 Outputs:
 
 - `inventory.json`
@@ -415,6 +421,11 @@ Packet outputs to archive:
 - `honey-linux-xr-shadow.log`, `honey-mount.log`, and
   `honey-linux-xr-shadow-commands.txt`
 - `linux-lifecycle-companion.log` and `linux-lifecycle/`
+
+First execution packet archived at
+`docs/release/evidence/large-workdir-20260526T000907Z/`. That run proves the
+inventory + isolated shadow shape and leaves push/honey/lifecycle pending until
+the local backend stack is available.
 
 Required proof rows:
 

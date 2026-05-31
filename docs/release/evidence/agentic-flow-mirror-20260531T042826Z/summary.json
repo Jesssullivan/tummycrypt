@@ -1,0 +1,19 @@
+{
+  "decisions": {
+    "allow": 17228,
+    "deny": 303,
+    "snapshot": 6
+  },
+  "generated_at": "2026-05-31T04:37:48Z",
+  "reasons": {
+    "append-log-active-writer-check-required": 1190,
+    "credential-or-env": 17,
+    "default-allow": 16038,
+    "generated-output": 4,
+    "live-db-sidecar": 8,
+    "secret-or-runtime-dir": 28,
+    "sqlite-backup-required": 6,
+    "symlink-deferred": 246
+  },
+  "rows": 17537
+}
