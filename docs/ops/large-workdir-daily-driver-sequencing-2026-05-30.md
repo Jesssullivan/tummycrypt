@@ -69,9 +69,11 @@ the original `inventory → shadow → live-repo` sequence:
   unenforced home-manager `sync-policy.toml` is to be removed rather than wired
   so there is no second, misleading policy surface.
 - **G0 implementation status:** `cdbee53` shipped the fail-closed
-  `Blacklist` deny-set and blacklist tests. The guardrail is only fully
-  claimable when collection, watcher scheduling, and periodic reconcile all use
-  the same config-derived blacklist and `folder-policies.json`.
+  `Blacklist` deny-set and blacklist tests. `0a175e0` wired collection, watcher
+  scheduling, periodic reconcile, and CLI policy writes to the same
+  config-derived blacklist and daemon-owned `folder-policies.json`. Residual
+  agentic-flow mirror preparation now lives under `TIN-1740`: SQLite snapshot
+  integrity and manifest-consuming staging copy proof.
 
 ## Parallelizable Workstreams
 

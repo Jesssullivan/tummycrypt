@@ -411,8 +411,9 @@ Target window: 2026-06-15 through 2026-06-30.
   `summary.md`; live pilot packet evidence is still pending.
 - [ ] `TIN-1619`: shadow pilot packet for one selected large workdir.
 - [ ] `TIN-1620`: one expendable live repo two-machine pilot.
-- [ ] `TIN-1737`: large-workdir guardrails — `never_sync` hardening for secrets
-  and open-WAL sqlite before any `~/` enrollment (Gate G0; step-zero blocker).
+- [x] `TIN-1737`: large-workdir guardrails — fail-closed secret/live-DB deny-set
+  is enforced through `Blacklist`, collection, watcher scheduling, periodic
+  reconcile, and daemon-owned `folder-policies.json` (Gate G0 core enforcement).
 - [ ] `TIN-1736`: enroll honey as device #2 on the per-device crypto path —
   fleet backbone + real second device (Gates G2+G3, the keystone).
 - [ ] `TIN-1738`: agent-state-dir cross-host beachhead
