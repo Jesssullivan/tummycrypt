@@ -1,0 +1,18 @@
+{
+  "allow_rows": 17285,
+  "copied_files": 13460,
+  "copy_allowed_requested": true,
+  "copy_transcripts_requested": false,
+  "created_dirs": 2632,
+  "deny_rows": 290,
+  "errors": [],
+  "generated_at": "2026-05-31T06:55:50Z",
+  "manifest": "/private/tmp/tcfs-agentic-flow-static-20260531T064802Z/manifest.jsonl",
+  "rows": 17575,
+  "skipped_transcripts": 1193,
+  "snapshot_rows": 0,
+  "snapshot_sqlite_requested": false,
+  "snapshots_failed": 0,
+  "snapshots_ok": 0,
+  "stage_dir": "/private/tmp/tcfs-agentic-flow-static-stage-20260531T064802Z"
+}

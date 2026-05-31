@@ -424,6 +424,9 @@ Target window: 2026-06-15 through 2026-06-30.
   auth/env/secret/live-WAL files out of staging. 2026-05-31 local staging
   evidence is partial: manifest-consuming copy works for non-transcript allowed
   rows, but three live/problem SQLite rows still require quiesce-or-exclude.
+  2026-05-31 static-first follow-up is clean for first automatic mirror prep:
+  `--sqlite-mode deny` excludes six DB rows, copies static non-transcript rows
+  with zero prepare errors, and leaves live SQLite for a separate quiesce lane.
 - [ ] `TIN-1416`: subscription-based selective sync.
 - [ ] `TIN-1556`: stable root IDs and broad-directory ownership.
 - [ ] `TIN-1419`: streaming large-file IO for FUSE/FileProvider writes.
