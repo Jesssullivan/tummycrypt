@@ -109,6 +109,18 @@ in {
       description = "NATS server URL for real-time state sync";
     };
 
+    natsTls = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Whether the daemon connects to NATS over TLS. Defaults to false: the lab
+        NATS endpoints are plaintext and already transport-encrypted over the
+        tailnet (WireGuard). The Rust config default is true ("for security"),
+        so this must be emitted explicitly to connect to a plaintext server.
+        Set true only when the NATS server actually serves TLS.
+      '';
+    };
+
     excludePatterns = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
@@ -157,6 +169,9 @@ in {
       lib.recursiveUpdate {
         daemon.socket = "%t/tcfsd/tcfsd.sock";
         secrets.age_identity = cfg.identity;
+        # Emit nats_tls explicitly — the Rust default is true, but lab NATS is
+        # plaintext (tailnet-encrypted). Consumer `settings` can override.
+        sync.nats_tls = cfg.natsTls;
       } (lib.recursiveUpdate
         (lib.optionalAttrs (cfg.syncRoot != null) {
           sync.sync_root = cfg.syncRoot;

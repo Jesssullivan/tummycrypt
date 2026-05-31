@@ -316,8 +316,18 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             .sync_root
             .as_deref()
             .unwrap_or(std::path::Path::new("/tmp/tcfs"));
-        match tcfs_sync::reconcile::list_remote_index(op, resolved_prefix).await {
-            Ok(remote_index) => {
+        // Bound startup remote-index discovery so a slow/unreachable S3
+        // endpoint cannot block the gRPC socket bind that happens later in
+        // run(). On timeout, log non-fatally and continue — the socket still
+        // binds and periodic reconcile retries. Prevents the "daemon running
+        // but no socket" startup hang.
+        let discovery = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            tcfs_sync::reconcile::list_remote_index(op, resolved_prefix),
+        )
+        .await;
+        match discovery {
+            Ok(Ok(remote_index)) => {
                 let mut discovered = 0usize;
                 for (rel_path, entry) in &remote_index {
                     let local_key = std::path::PathBuf::from(sync_root).join(rel_path);
@@ -357,8 +367,14 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     );
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("remote index discovery failed (non-fatal): {e}");
+            }
+            Err(_elapsed) => {
+                warn!(
+                    "remote index discovery timed out after 60s (non-fatal); \
+                     binding socket anyway, periodic reconcile will retry"
+                );
             }
         }
     }
