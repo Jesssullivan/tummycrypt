@@ -1302,14 +1302,23 @@ async fn cmd_pull_with_operator(
             .await
             .with_context(|| format!("resolving manifest for: {manifest_path}"))?;
 
-    // Default local path: current dir + manifest hash (last path component)
-    let hash_basename = resolved_manifest
-        .split('/')
-        .next_back()
-        .unwrap_or("downloaded");
-    let local_path = local
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(hash_basename));
+    // Default local destination:
+    // - an explicit `local` always wins;
+    // - if the user pulled by file path, write back to that path (not a
+    //   hash-named file in the current directory);
+    // - otherwise (a remote manifest reference) fall back to the manifest hash
+    //   basename in the current directory.
+    let local_path = match local {
+        Some(p) => p.to_path_buf(),
+        None if is_file_path => PathBuf::from(manifest_path),
+        None => {
+            let hash_basename = resolved_manifest
+                .split('/')
+                .next_back()
+                .unwrap_or("downloaded");
+            PathBuf::from(hash_basename)
+        }
+    };
 
     println!("Pulling {} → {}", manifest_path, local_path.display(),);
 
@@ -5893,6 +5902,44 @@ enabled = false
         .unwrap();
 
         assert_eq!(std::fs::read(&pulled).unwrap(), b"hello from tcfs");
+    }
+
+    #[tokio::test]
+    async fn cli_pull_by_file_path_without_dest_writes_to_file_path() {
+        // Regression: `tcfs pull <file-path>` with no explicit destination must
+        // write back to that file path, not to a hash-named file in the cwd.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        std::fs::create_dir_all(sync_root.join("docs")).unwrap();
+        let source = sync_root.join("docs/readme.txt");
+        std::fs::write(&source, b"hello from tcfs").unwrap();
+
+        let op = memory_op();
+        let state_path = dir.path().join("state.json");
+        let config = test_config(&sync_root);
+
+        cmd_push_with_operator(&config, &op, &source, None, &state_path, "test-device")
+            .await
+            .unwrap();
+
+        // Locally drift the file, then pull by file path with NO explicit dest.
+        // (Keep the file present so manifest resolution by path still works.)
+        std::fs::write(&source, b"locally drifted content").unwrap();
+        cmd_pull_with_operator(
+            &config,
+            &op,
+            &source.to_string_lossy(),
+            None,
+            None,
+            &state_path,
+            "test-device",
+        )
+        .await
+        .unwrap();
+
+        // The fix: pull wrote back to the file path (not a hash-named cwd file),
+        // restoring the exact pushed bytes.
+        assert_eq!(std::fs::read(&source).unwrap(), b"hello from tcfs");
     }
 
     #[tokio::test]
