@@ -1854,31 +1854,30 @@ async fn upload_file_with_device_with_state(
     // cannot decrypt new content. Without recipients we keep the legacy
     // shared-master wrap for backward compatibility.
     #[cfg(feature = "crypto")]
-    let (encrypted_file_key, wrapped_file_keys) =
-        if let (Some(ctx), Some(ref fk)) = (encryption, &file_key) {
-            if ctx.device_recipients.is_empty() {
-                let wrapped =
-                    tcfs_crypto::wrap_key(&ctx.master_key, fk).context("wrapping file key")?;
-                let b64 =
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wrapped);
-                (Some(b64), Vec::new())
-            } else {
-                let wrapped =
-                    tcfs_crypto::wrap_file_key_for_age_recipients(fk, &ctx.device_recipients)
-                        .context("wrapping file key for device recipients")?
-                        .into_iter()
-                        .map(|w| crate::manifest::WrappedFileKey {
-                            recipient_device_id: w.recipient_device_id,
-                            recipient: w.recipient,
-                            algorithm: w.algorithm,
-                            wrapped_key: w.wrapped_key,
-                        })
-                        .collect();
-                (None, wrapped)
-            }
+    let (encrypted_file_key, wrapped_file_keys) = if let (Some(ctx), Some(ref fk)) =
+        (encryption, &file_key)
+    {
+        if ctx.device_recipients.is_empty() {
+            let wrapped =
+                tcfs_crypto::wrap_key(&ctx.master_key, fk).context("wrapping file key")?;
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wrapped);
+            (Some(b64), Vec::new())
         } else {
-            (None, Vec::new())
-        };
+            let wrapped = tcfs_crypto::wrap_file_key_for_age_recipients(fk, &ctx.device_recipients)
+                .context("wrapping file key for device recipients")?
+                .into_iter()
+                .map(|w| crate::manifest::WrappedFileKey {
+                    recipient_device_id: w.recipient_device_id,
+                    recipient: w.recipient,
+                    algorithm: w.algorithm,
+                    wrapped_key: w.wrapped_key,
+                })
+                .collect();
+            (None, wrapped)
+        }
+    } else {
+        (None, Vec::new())
+    };
 
     #[cfg(not(feature = "crypto"))]
     let encrypted_file_key: Option<String> = None;

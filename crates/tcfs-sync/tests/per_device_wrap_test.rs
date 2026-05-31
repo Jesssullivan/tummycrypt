@@ -78,7 +78,11 @@ async fn per_device_wrap_roundtrip_and_manifest_shape() {
     let manifest_bytes = op.read(&up.remote_path).await.unwrap();
     let manifest =
         tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes()).unwrap();
-    assert_eq!(manifest.wrapped_file_keys.len(), 2, "one wrap per recipient");
+    assert_eq!(
+        manifest.wrapped_file_keys.len(),
+        2,
+        "one wrap per recipient"
+    );
     assert!(
         manifest.encrypted_file_key.is_none(),
         "per-device manifest must not carry the master-wrapped key (clean-cut)"

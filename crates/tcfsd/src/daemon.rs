@@ -547,6 +547,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sched_metrics = daemon_metrics.clone();
                     let sched_master_key = master_key.clone();
                     let sched_path_locks = path_locks.clone();
+                    let sched_config = config.clone();
 
                     tokio::spawn({
                         let scheduler = scheduler.clone();
@@ -563,6 +564,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     let metrics = sched_metrics.clone();
                                     let mk = sched_master_key.clone();
                                     let locks = sched_path_locks.clone();
+                                    let cfg = sched_config.clone();
 
                                     Box::pin(async move {
                                         // Acquire per-path lock to prevent concurrent operations
@@ -596,7 +598,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     cache.set(&task.path, active);
                                                 }
 
-                                                let enc_ctx = mk.as_ref().map(|k| tcfs_sync::engine::EncryptionContext::new(k.clone()));
+                                                let enc_ctx = mk.as_ref().map(|k| crate::grpc::build_encryption_context(&cfg, &device, k));
                                                 let upload_result =
                                                     tcfs_sync::engine::upload_file_with_device(
                                                         op_ref,
@@ -1070,6 +1072,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             let recon_state = impl_.state_cache_handle();
             let recon_op = operator.clone();
             let recon_device = device_id.clone();
+            let recon_tcfs_config = config.clone();
             let recon_master_key = impl_.master_key_handle();
             let orphan_chunk_cleanup_grace_secs = config.sync.orphan_chunk_cleanup_grace_secs;
             let orphan_chunk_cleanup_sweep_interval_secs = if orphan_chunk_cleanup_grace_secs > 0 {
@@ -1155,10 +1158,13 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
                         // Build encryption context from master key (if loaded)
                         let mk_guard = recon_master_key.lock().await;
-                        let enc_ctx =
-                            mk_guard
-                                .as_ref()
-                                .map(|k| tcfs_sync::engine::EncryptionContext::new(k.clone()));
+                        let enc_ctx = mk_guard.as_ref().map(|k| {
+                            crate::grpc::build_encryption_context(
+                                &recon_tcfs_config,
+                                &recon_device,
+                                k,
+                            )
+                        });
                         drop(mk_guard);
 
                         let mut cache = recon_state.lock().await;
