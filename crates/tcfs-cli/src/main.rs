@@ -37,6 +37,13 @@ use tcfs_core::proto::{tcfs_daemon_client::TcfsDaemonClient, Empty, StatusReques
 type DaemonClient = TcfsDaemonClient<InterceptedService<Channel, SessionTokenInterceptor>>;
 
 #[cfg(unix)]
+const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(unix)]
+const DAEMON_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
+const SESSION_TOKEN_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(unix)]
 #[derive(Clone, Debug)]
 struct SessionTokenInterceptor {
     token: Option<String>,
@@ -2326,21 +2333,27 @@ async fn cmd_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
         std::process::exit(1);
     }
 
-    let mut client = connect_daemon(socket).await?;
+    let mut client = connect_daemon_without_session(socket).await?;
 
     // Daemon status
-    let status = client
-        .status(tonic::Request::new(StatusRequest {}))
-        .await
-        .context("status RPC failed")?
-        .into_inner();
+    let status = tokio::time::timeout(
+        DAEMON_RPC_TIMEOUT,
+        client.status(tonic::Request::new(StatusRequest {})),
+    )
+    .await
+    .context("status RPC timed out")?
+    .context("status RPC failed")?
+    .into_inner();
 
     // Credential status
-    let creds = client
-        .credential_status(tonic::Request::new(Empty {}))
-        .await
-        .context("credential_status RPC failed")?
-        .into_inner();
+    let creds = tokio::time::timeout(
+        DAEMON_RPC_TIMEOUT,
+        client.credential_status(tonic::Request::new(Empty {})),
+    )
+    .await
+    .context("credential_status RPC timed out")?
+    .context("credential_status RPC failed")?
+    .into_inner();
 
     let uptime = format_uptime(status.uptime_secs);
 
@@ -2515,7 +2528,7 @@ fn print_update_notice(current: &str, latest: &str) {
 // ── gRPC connection ───────────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn load_session_token() -> Option<String> {
+async fn load_session_token() -> Option<String> {
     if let Ok(token) = std::env::var("TCFS_SESSION_TOKEN") {
         let trimmed = token.trim();
         if !trimmed.is_empty() {
@@ -2523,11 +2536,25 @@ fn load_session_token() -> Option<String> {
         }
     }
 
-    match tcfs_secrets::keychain::get_secret(tcfs_secrets::keychain::keys::SESSION_TOKEN) {
-        Ok(Some(secret)) => Some(secret.expose_secret().to_string()),
-        Ok(None) => None,
-        Err(err) => {
-            tracing::debug!("failed to read TCFS session token from keychain: {err}");
+    let lookup = tokio::task::spawn_blocking(|| {
+        match tcfs_secrets::keychain::get_secret(tcfs_secrets::keychain::keys::SESSION_TOKEN) {
+            Ok(Some(secret)) => Some(secret.expose_secret().to_string()),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::debug!("failed to read TCFS session token from keychain: {err}");
+                None
+            }
+        }
+    });
+
+    match tokio::time::timeout(SESSION_TOKEN_LOOKUP_TIMEOUT, lookup).await {
+        Ok(Ok(token)) => token,
+        Ok(Err(err)) => {
+            tracing::debug!("TCFS session token keychain lookup task failed: {err}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("TCFS session token keychain lookup timed out");
             None
         }
     }
@@ -2546,19 +2573,45 @@ fn store_session_token(token: &str) -> Result<()> {
 
 #[cfg(unix)]
 async fn connect_daemon(socket_path: &Path) -> Result<DaemonClient> {
+    let token = load_session_token().await;
+    connect_daemon_with_token(socket_path, token).await
+}
+
+#[cfg(unix)]
+async fn connect_daemon_without_session(socket_path: &Path) -> Result<DaemonClient> {
+    connect_daemon_with_token(socket_path, None).await
+}
+
+#[cfg(unix)]
+async fn connect_daemon_with_token(
+    socket_path: &Path,
+    token: Option<String>,
+) -> Result<DaemonClient> {
     let path = socket_path.to_path_buf();
-    let token = load_session_token();
 
     // tonic over Unix domain socket: use a tower service_fn connector
-    let channel = Endpoint::from_static("http://[::]:0")
-        .connect_with_connector(service_fn(move |_: Uri| {
-            let path = path.clone();
-            async move {
-                let stream = tokio::net::UnixStream::connect(&path).await?;
-                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
-            }
-        }))
+    let endpoint = Endpoint::from_static("http://[::]:0");
+    let connect = endpoint.connect_with_connector(service_fn(move |_: Uri| {
+        let path = path.clone();
+        async move {
+            let stream = tokio::time::timeout(
+                DAEMON_CONNECT_TIMEOUT,
+                tokio::net::UnixStream::connect(&path),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out connecting to tcfsd",
+                )
+            })??;
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+        }
+    }));
+
+    let channel = tokio::time::timeout(DAEMON_CONNECT_TIMEOUT, connect)
         .await
+        .with_context(|| format!("timed out connecting to tcfsd at {}", socket_path.display()))?
         .with_context(|| format!("connecting to tcfsd at {}", socket_path.display()))?;
 
     Ok(TcfsDaemonClient::with_interceptor(
@@ -4288,14 +4341,17 @@ async fn cmd_auth_unlock(
     };
 
     // Send to daemon via gRPC
-    let mut client = connect_daemon(&config.daemon.socket).await?;
-    let resp = client
-        .auth_unlock(tcfs_core::proto::AuthUnlockRequest {
+    let mut client = connect_daemon_without_session(&config.daemon.socket).await?;
+    let resp = tokio::time::timeout(
+        DAEMON_RPC_TIMEOUT,
+        client.auth_unlock(tcfs_core::proto::AuthUnlockRequest {
             master_key: key_bytes,
-        })
-        .await
-        .context("auth_unlock RPC failed")?
-        .into_inner();
+        }),
+    )
+    .await
+    .context("auth_unlock RPC timed out")?
+    .context("auth_unlock RPC failed")?
+    .into_inner();
 
     if resp.success {
         println!("Encryption unlocked. Master key loaded into daemon.");
@@ -4310,12 +4366,15 @@ async fn cmd_auth_unlock(
 #[cfg(unix)]
 async fn cmd_auth_lock(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     // Clear from daemon
-    let mut client = connect_daemon(&config.daemon.socket).await?;
-    let resp = client
-        .auth_lock(tcfs_core::proto::Empty {})
-        .await
-        .context("auth_lock RPC failed")?
-        .into_inner();
+    let mut client = connect_daemon_without_session(&config.daemon.socket).await?;
+    let resp = tokio::time::timeout(
+        DAEMON_RPC_TIMEOUT,
+        client.auth_lock(tcfs_core::proto::Empty {}),
+    )
+    .await
+    .context("auth_lock RPC timed out")?
+    .context("auth_lock RPC failed")?
+    .into_inner();
 
     if !resp.success {
         anyhow::bail!("lock failed: {}", resp.error);
@@ -4331,12 +4390,15 @@ async fn cmd_auth_lock(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
 
 #[cfg(unix)]
 async fn cmd_auth_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
-    let mut client = connect_daemon(&config.daemon.socket).await?;
-    let resp = client
-        .auth_status(tcfs_core::proto::Empty {})
-        .await
-        .context("auth_status RPC failed")?
-        .into_inner();
+    let mut client = connect_daemon_without_session(&config.daemon.socket).await?;
+    let resp = tokio::time::timeout(
+        DAEMON_RPC_TIMEOUT,
+        client.auth_status(tcfs_core::proto::Empty {}),
+    )
+    .await
+    .context("auth_status RPC timed out")?
+    .context("auth_status RPC failed")?
+    .into_inner();
 
     if resp.crypto_enabled {
         if resp.unlocked {

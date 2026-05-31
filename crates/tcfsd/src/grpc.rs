@@ -2123,7 +2123,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         _request: tonic::Request<Empty>,
     ) -> Result<tonic::Response<AuthStatusResponse>, tonic::Status> {
         use tcfs_auth::AuthProvider;
-        let guard = self.master_key.lock().await;
+        let unlocked = self.master_key.lock().await.is_some();
 
         // Build available methods dynamically
         let mut methods = vec!["master_key".into()];
@@ -2139,12 +2139,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let active_sessions = self.session_store.active_count().await;
 
         Ok(tonic::Response::new(AuthStatusResponse {
-            unlocked: guard.is_some(),
+            unlocked,
             crypto_enabled: self.config.crypto.enabled,
             session_device_id: self.device_id.clone(),
             auth_method: if active_sessions > 0 {
                 "session".into()
-            } else if guard.is_some() {
+            } else if unlocked {
                 "master_key".into()
             } else {
                 String::new()
@@ -2652,16 +2652,39 @@ pub async fn serve(
     };
 
     // Spawn a second gRPC server on the FileProvider socket if configured.
-    // Uses a separate tokio task with a shared shutdown notify.
+    //
+    // This listener is optional. Keep its bind path off the startup critical
+    // path so a stale App Group socket cannot leave the primary daemon socket
+    // bound but unserved.
     let fp_handle = if let Some(fp_path) = fileprovider_socket {
-        let secondary = bind_uds(fp_path).await?;
-        info!(socket = %fp_path.display(), "gRPC FileProvider socket ready");
-
+        let fp_path = fp_path.to_path_buf();
         let fp_service = service.clone();
         let fp_shutdown = Arc::new(tokio::sync::Notify::new());
         let fp_shutdown_clone = fp_shutdown.clone();
 
         let handle = tokio::spawn(async move {
+            let bind_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), bind_uds(&fp_path)).await;
+
+            let secondary = match bind_result {
+                Ok(Ok(listener)) => listener,
+                Ok(Err(e)) => {
+                    warn!(
+                        socket = %fp_path.display(),
+                        "FileProvider gRPC socket bind failed; primary daemon socket remains active: {e}"
+                    );
+                    return;
+                }
+                Err(_) => {
+                    warn!(
+                        socket = %fp_path.display(),
+                        "FileProvider gRPC socket bind timed out; primary daemon socket remains active"
+                    );
+                    return;
+                }
+            };
+
+            info!(socket = %fp_path.display(), "gRPC FileProvider socket ready");
             if let Err(e) = Server::builder()
                 .add_service(fp_service)
                 .serve_with_incoming_shutdown(secondary, fp_shutdown_clone.notified())
@@ -2685,7 +2708,12 @@ pub async fn serve(
     // Stop the FileProvider server when the primary shuts down
     if let Some((handle, notify)) = fp_handle {
         notify.notify_one();
-        let _ = handle.await;
+        if tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .is_err()
+        {
+            warn!("FileProvider gRPC server did not stop within timeout");
+        }
     }
     if let Some((handle, notify)) = tcp_handle {
         notify.notify_one();
@@ -2898,6 +2926,45 @@ mod tests {
         assert!(!resp.nats_ok);
         assert_eq!(resp.active_mounts, 0);
         assert!(resp.uptime_secs >= 0);
+    }
+
+    #[tokio::test]
+    async fn primary_uds_serves_when_fileprovider_socket_bind_fails() {
+        let daemon = test_daemon();
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("tcfsd.sock");
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        let fileprovider_socket = not_a_dir.join("tcfsd-fileprovider.sock");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown_for_server = shutdown.clone();
+
+        let socket_path_for_server = socket_path.clone();
+        let handle = tokio::spawn(async move {
+            serve(
+                &socket_path_for_server,
+                Some(&fileprovider_socket),
+                None,
+                daemon,
+                shutdown_for_server.notified(),
+            )
+            .await
+        });
+
+        let mut client = connect_test_client(&socket_path).await;
+        let resp = client
+            .status(tonic::Request::new(StatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.device_id, "test-device-id");
+
+        shutdown.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("server shutdown timed out")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
