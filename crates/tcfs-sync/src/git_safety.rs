@@ -5,6 +5,13 @@
 
 use std::path::Path;
 
+/// Relative path (under the repo working root) where the TCFS git bundle is
+/// written and synced as a normal object. Keeping it inside the working tree
+/// (not under `.git/`) means it flows through the regular file collector and
+/// is visible to the peer pull as an ordinary path, while the raw `.git/*`
+/// internals are skipped by the collector in bundle mode.
+pub const GIT_BUNDLE_REL_PATH: &str = ".git-tcfs-bundle";
+
 /// Result of checking whether a .git directory is safe to sync.
 #[derive(Debug, Clone, Default)]
 pub struct GitSafetyCheck {
@@ -76,7 +83,7 @@ pub fn git_is_safe(git_dir: &Path) -> GitSafetyCheck {
 /// Runs `git bundle create --all` to create a single file containing
 /// all refs and objects, suitable for transporting a complete repository.
 pub fn snapshot_git_for_sync(repo_root: &Path) -> anyhow::Result<std::path::PathBuf> {
-    let bundle_path = repo_root.join(".git-tcfs-bundle");
+    let bundle_path = repo_root.join(GIT_BUNDLE_REL_PATH);
 
     let output = std::process::Command::new("git")
         .args(["bundle", "create", &bundle_path.to_string_lossy(), "--all"])
@@ -92,7 +99,67 @@ pub fn snapshot_git_for_sync(repo_root: &Path) -> anyhow::Result<std::path::Path
     Ok(bundle_path)
 }
 
-/// Restore a git repository from a bundle.
+/// Restore git history from a TCFS bundle into an existing working tree.
+///
+/// Unlike a fresh `git clone`, this is designed for the rehydrate path where
+/// the working-tree files have already been materialized by TCFS as normal
+/// objects: only the `.git` metadata (objects, refs, logs) is missing. It:
+///
+/// 1. `git init`s the repo in place if there is no `.git` directory yet.
+/// 2. `git fetch`es every ref from the bundle into the live object store
+///    (`+refs/*:refs/*`), which repopulates branches, tags, and history.
+/// 3. Restores `HEAD` to the bundle's default branch so `git log` / `git
+///    status` / `git fetch` work against a real ref.
+///
+/// The working-tree files are left untouched: after this runs, `git status`
+/// compares the freshly-restored index/HEAD against the already-synced files,
+/// so a faithfully-synced tree reports clean.
+pub fn restore_git_bundle_into(bundle: &Path, repo_root: &Path) -> anyhow::Result<()> {
+    if !bundle.exists() {
+        anyhow::bail!("git bundle not found: {}", bundle.display());
+    }
+
+    let git_dir = repo_root.join(".git");
+    if !git_dir.exists() {
+        run_git(repo_root, &["init", "--quiet"]).map_err(|e| anyhow::anyhow!("git init: {e}"))?;
+    }
+
+    // Park HEAD on a throwaway unborn branch before fetching. A fresh `git
+    // init` puts HEAD on `refs/heads/main` (or `master`); git then refuses
+    // `+refs/*:refs/*` because it would fetch into the currently checked-out
+    // branch. Pointing HEAD at a ref the bundle does not contain makes every
+    // real branch non-current, so the mirror fetch succeeds. We restore HEAD
+    // to the real branch immediately after.
+    run_git(
+        repo_root,
+        &["symbolic-ref", "HEAD", "refs/heads/__tcfs_bundle_restore"],
+    )
+    .map_err(|e| anyhow::anyhow!("parking HEAD before bundle fetch: {e}"))?;
+
+    // Pull every ref from the bundle into the live repo. `+refs/*:refs/*`
+    // mirrors heads, tags, and remotes so history is complete.
+    let bundle_str = bundle.to_string_lossy().to_string();
+    run_git(
+        repo_root,
+        &["fetch", "--quiet", &bundle_str, "+refs/*:refs/*"],
+    )
+    .map_err(|e| anyhow::anyhow!("git fetch from bundle: {e}"))?;
+
+    // Restore HEAD to the bundle's default branch. The bundle stores the
+    // symbolic HEAD target; resolve it so the peer lands on the same branch.
+    if let Some(branch) = bundle_head_branch(bundle) {
+        // Point HEAD at the branch without touching the working tree.
+        let _ = run_git(repo_root, &["symbolic-ref", "HEAD", &branch]);
+        // Make the index match HEAD without overwriting synced files.
+        let _ = run_git(repo_root, &["reset", "--mixed", "--quiet"]);
+    }
+
+    Ok(())
+}
+
+/// Backwards-compatible clone-based restore (creates a fresh checkout at
+/// `target`). Retained for callers that want a standalone clone rather than an
+/// in-place working-tree restore.
 pub fn restore_git_from_bundle(bundle: &Path, target: &Path) -> anyhow::Result<()> {
     let output = std::process::Command::new("git")
         .args([
@@ -109,6 +176,56 @@ pub fn restore_git_from_bundle(bundle: &Path, target: &Path) -> anyhow::Result<(
     }
 
     Ok(())
+}
+
+/// Run a git command in `cwd`, returning an error with captured stderr on
+/// non-zero exit.
+fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| anyhow::anyhow!("running git {args:?}: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git {args:?} failed: {stderr}");
+    }
+    Ok(())
+}
+
+/// Resolve the bundle's default HEAD branch ref (e.g. `refs/heads/main`) by
+/// listing its refs. Returns `None` if HEAD cannot be determined.
+fn bundle_head_branch(bundle: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["bundle", "list-heads", &bundle.to_string_lossy()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    // `git bundle list-heads` prints `<sha> HEAD` for the symbolic head and
+    // `<sha> refs/heads/<branch>` lines. Find the SHA that HEAD points at,
+    // then map it back to a concrete branch ref.
+    let mut head_sha: Option<String> = None;
+    for line in listing.lines() {
+        let mut parts = line.split_whitespace();
+        let sha = parts.next().unwrap_or_default();
+        let refname = parts.next().unwrap_or_default();
+        if refname == "HEAD" {
+            head_sha = Some(sha.to_string());
+        }
+    }
+    let head_sha = head_sha?;
+    for line in listing.lines() {
+        let mut parts = line.split_whitespace();
+        let sha = parts.next().unwrap_or_default();
+        let refname = parts.next().unwrap_or_default();
+        if sha == head_sha && refname.starts_with("refs/heads/") {
+            return Some(refname.to_string());
+        }
+    }
+    None
 }
 
 /// Acquire a cooperative lock on .git/tcfs.lock for raw sync mode.

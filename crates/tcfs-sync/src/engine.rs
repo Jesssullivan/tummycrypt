@@ -2833,6 +2833,14 @@ pub fn collect_files(root: &Path, config: &CollectConfig) -> Result<CollectResul
         &blacklist,
         &mut visited,
     )?;
+
+    // Bundle mode: for every enrolled git repo, capture `.git` as a single
+    // `git bundle` and add the bundle to the upload set as a normal object.
+    // The raw `.git/*` internals were skipped by `collect_files_inner`.
+    if config.sync_git_dirs && config.git_sync_mode == "bundle" {
+        collect_git_bundles(root, &mut files);
+    }
+
     files.sort(); // deterministic order
     symlinks.sort();
     empty_dirs.sort();
@@ -3010,6 +3018,123 @@ fn collect_files_inner(
     }
 
     Ok(())
+}
+
+/// Walk `root` for git working trees (directories containing a `.git`
+/// directory) and, for each one that is safe to snapshot, create a git bundle
+/// and append its path to `files` so it is uploaded as a normal TCFS object.
+///
+/// Repos with in-progress operations (rebase, merge, lockfiles) are skipped
+/// this cycle and will be retried on the next sync once the operation settles.
+/// Bundle staleness is handled implicitly: `git bundle create --all` always
+/// reflects current refs, and the resulting object only re-uploads chunks that
+/// actually changed (content-addressed dedup).
+fn collect_git_bundles(root: &Path, files: &mut Vec<PathBuf>) {
+    let mut repos = Vec::new();
+    find_git_repos(root, &mut repos);
+    for repo_root in repos {
+        let git_dir = repo_root.join(".git");
+        let safety = crate::git_safety::git_is_safe(&git_dir);
+        if !safety.blocking.is_empty() {
+            warn!(
+                repo = %repo_root.display(),
+                blocking = ?safety.blocking,
+                "skipping git bundle: active git operation in progress"
+            );
+            continue;
+        }
+        match crate::git_safety::snapshot_git_for_sync(&repo_root) {
+            Ok(bundle_path) => {
+                debug!(repo = %repo_root.display(), bundle = %bundle_path.display(), "captured git bundle");
+                files.push(bundle_path);
+            }
+            Err(e) => {
+                warn!(repo = %repo_root.display(), "git bundle failed: {e}");
+            }
+        }
+    }
+}
+
+/// Recursively find directories under `root` that contain a `.git` directory
+/// (i.e. git working-tree roots). Does not descend into `.git` itself.
+fn find_git_repos(dir: &Path, out: &mut Vec<PathBuf>) {
+    if dir.join(".git").is_dir() {
+        out.push(dir.to_path_buf());
+        // Still descend to catch nested submodule/worktree repos.
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == ".git" {
+            continue;
+        }
+        find_git_repos(&path, out);
+    }
+}
+
+/// Restore git history from any TCFS bundles materialized under `root`.
+///
+/// Call this after a pull/rehydrate completes: for every
+/// `.git-tcfs-bundle` file found under `root`, restore the repo's `.git`
+/// metadata in place so `git log` / `git status` / `git fetch` work on the
+/// peer. The synced working-tree files are left untouched.
+///
+/// Returns the number of repos successfully restored.
+pub fn restore_git_bundles_under(root: &Path) -> usize {
+    let mut bundles = Vec::new();
+    find_git_bundles(root, &mut bundles);
+    let mut restored = 0usize;
+    for bundle in bundles {
+        let Some(repo_root) = bundle.parent() else {
+            continue;
+        };
+        match crate::git_safety::restore_git_bundle_into(&bundle, repo_root) {
+            Ok(()) => {
+                info!(repo = %repo_root.display(), "restored git history from bundle");
+                restored += 1;
+            }
+            Err(e) => {
+                warn!(repo = %repo_root.display(), "git bundle restore failed: {e}");
+            }
+        }
+    }
+    restored
+}
+
+/// Recursively find `.git-tcfs-bundle` files under `dir`.
+fn find_git_bundles(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name == crate::git_safety::GIT_BUNDLE_REL_PATH {
+                out.push(path.clone());
+            }
+        }
+        if ft.is_dir() {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name == ".git" {
+                continue;
+            }
+            find_git_bundles(&path, out);
+        }
+    }
 }
 
 /// Normalize a filesystem path into a stable S3 index key component.
