@@ -1137,9 +1137,7 @@ async fn cmd_push_with_operator(
             });
         let enc_ctx = master_key
             .as_ref()
-            .map(|mk| tcfs_sync::engine::EncryptionContext {
-                master_key: mk.clone(),
-            });
+            .map(|mk| tcfs_sync::engine::EncryptionContext::new(mk.clone()));
 
         let result = tcfs_sync::engine::upload_file_with_device(
             op,
@@ -1341,9 +1339,7 @@ async fn cmd_pull_with_operator(
         });
     let enc_ctx = master_key
         .as_ref()
-        .map(|mk| tcfs_sync::engine::EncryptionContext {
-            master_key: mk.clone(),
-        });
+        .map(|mk| tcfs_sync::engine::EncryptionContext::new(mk.clone()));
 
     let result = tcfs_sync::engine::download_file_with_device(
         op,
@@ -5195,9 +5191,7 @@ async fn cmd_reconcile(
             });
         let enc_ctx = master_key
             .as_ref()
-            .map(|mk| tcfs_sync::engine::EncryptionContext {
-                master_key: mk.clone(),
-            });
+            .map(|mk| tcfs_sync::engine::EncryptionContext::new(mk.clone()));
 
         let result = tcfs_sync::reconcile::execute_plan(
             &plan,

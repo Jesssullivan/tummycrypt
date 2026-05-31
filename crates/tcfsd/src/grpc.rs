@@ -851,9 +851,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let mk_guard = self.master_key.lock().await;
             let enc_ctx = mk_guard
                 .as_ref()
-                .map(|mk| tcfs_sync::engine::EncryptionContext {
-                    master_key: mk.clone(),
-                });
+                .map(|mk| tcfs_sync::engine::EncryptionContext::new(mk.clone()));
             tcfs_sync::engine::upload_file_with_device(
                 &op,
                 &local_path,
@@ -991,9 +989,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let mk_guard = self.master_key.lock().await;
             let enc_ctx = mk_guard
                 .as_ref()
-                .map(|mk| tcfs_sync::engine::EncryptionContext {
-                    master_key: mk.clone(),
-                });
+                .map(|mk| tcfs_sync::engine::EncryptionContext::new(mk.clone()));
             tcfs_sync::engine::download_file_with_device(
                 &op,
                 &resolved_manifest,
@@ -1087,9 +1083,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let mk_guard = self.master_key.lock().await;
             let enc_ctx = mk_guard
                 .as_ref()
-                .map(|mk| tcfs_sync::engine::EncryptionContext {
-                    master_key: mk.clone(),
-                });
+                .map(|mk| tcfs_sync::engine::EncryptionContext::new(mk.clone()));
             tcfs_sync::engine::download_file_with_device(
                 &op,
                 &manifest_path,

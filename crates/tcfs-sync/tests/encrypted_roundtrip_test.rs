@@ -24,7 +24,7 @@ fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf
 
 fn test_encryption_context() -> tcfs_sync::engine::EncryptionContext {
     let master_key = tcfs_crypto::MasterKey::from_bytes([42u8; 32]);
-    tcfs_sync::engine::EncryptionContext { master_key }
+    tcfs_sync::engine::EncryptionContext::new(master_key)
 }
 
 #[tokio::test]

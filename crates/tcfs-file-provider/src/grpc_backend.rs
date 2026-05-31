@@ -231,9 +231,7 @@ async fn fetch_direct_to_file(
 
     let enc_ctx = master_key
         .as_ref()
-        .map(|mk| tcfs_sync::engine::EncryptionContext {
-            master_key: mk.clone(),
-        });
+        .map(|mk| tcfs_sync::engine::EncryptionContext::new(mk.clone()));
 
     tcfs_sync::engine::download_file_with_device(
         &operator,

@@ -596,9 +596,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     cache.set(&task.path, active);
                                                 }
 
-                                                let enc_ctx = mk.as_ref().map(|k| tcfs_sync::engine::EncryptionContext {
-                                                    master_key: k.clone(),
-                                                });
+                                                let enc_ctx = mk.as_ref().map(|k| tcfs_sync::engine::EncryptionContext::new(k.clone()));
                                                 let upload_result =
                                                     tcfs_sync::engine::upload_file_with_device(
                                                         op_ref,
@@ -1160,9 +1158,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         let enc_ctx =
                             mk_guard
                                 .as_ref()
-                                .map(|k| tcfs_sync::engine::EncryptionContext {
-                                    master_key: k.clone(),
-                                });
+                                .map(|k| tcfs_sync::engine::EncryptionContext::new(k.clone()));
                         drop(mk_guard);
 
                         let mut cache = recon_state.lock().await;
