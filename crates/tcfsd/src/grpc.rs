@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::transport::Server;
 use tracing::{info, warn};
@@ -2605,16 +2606,41 @@ fn bind_uds_blocking(socket_path: PathBuf) -> Result<StdUnixListener> {
         std::fs::create_dir_all(parent)?;
     }
     let listener = StdUnixListener::bind(&socket_path)?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| anyhow::anyhow!("setting socket nonblocking mode: {e}"))?;
+    if let Err(e) = listener.set_nonblocking(true) {
+        drop(listener);
+        let _ = std::fs::remove_file(&socket_path);
+        return Err(anyhow::anyhow!("setting socket nonblocking mode: {e}"));
+    }
 
     // Restrict socket to owner-only access (prevents other users from connecting)
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| anyhow::anyhow!("setting socket permissions: {e}"))?;
+    if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        let _ = std::fs::remove_file(&socket_path);
+        return Err(anyhow::anyhow!("setting socket permissions: {e}"));
+    }
 
     Ok(listener)
+}
+
+#[cfg(unix)]
+fn spawn_uds_bind_with<F>(socket_path: PathBuf, binder: F) -> JoinHandle<Result<StdUnixListener>>
+where
+    F: FnOnce(PathBuf) -> Result<StdUnixListener> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || binder(socket_path))
+}
+
+#[cfg(unix)]
+async fn finish_uds_bind(
+    bind_task: &mut JoinHandle<Result<StdUnixListener>>,
+) -> Result<UnixListenerStream> {
+    let listener = bind_task
+        .await
+        .map_err(|e| anyhow::anyhow!("Unix socket bind task failed: {e}"))??;
+    let listener = UnixListener::from_std(listener)?;
+
+    Ok(UnixListenerStream::new(listener))
 }
 
 #[cfg(unix)]
@@ -2622,13 +2648,62 @@ async fn bind_uds_with<F>(socket_path: &Path, binder: F) -> Result<UnixListenerS
 where
     F: FnOnce(PathBuf) -> Result<StdUnixListener> + Send + 'static,
 {
-    let socket_path = socket_path.to_path_buf();
-    let listener = tokio::task::spawn_blocking(move || binder(socket_path))
-        .await
-        .map_err(|e| anyhow::anyhow!("Unix socket bind task failed: {e}"))??;
-    let listener = UnixListener::from_std(listener)?;
+    let mut bind_task = spawn_uds_bind_with(socket_path.to_path_buf(), binder);
+    finish_uds_bind(&mut bind_task).await
+}
 
-    Ok(UnixListenerStream::new(listener))
+#[cfg(unix)]
+fn cleanup_late_uds_bind(socket_path: PathBuf, mut bind_task: JoinHandle<Result<StdUnixListener>>) {
+    tokio::spawn(async move {
+        match finish_uds_bind(&mut bind_task).await {
+            Ok(listener) => {
+                drop(listener);
+                if let Err(e) = std::fs::remove_file(&socket_path) {
+                    warn!(
+                        socket = %socket_path.display(),
+                        "late Unix socket bind completed after shutdown but cleanup failed: {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    socket = %socket_path.display(),
+                    "late Unix socket bind completed after shutdown with error: {e}"
+                );
+            }
+        }
+    });
+}
+
+#[cfg(unix)]
+async fn bind_optional_uds_with_warning<F>(
+    socket_path: PathBuf,
+    warn_after: std::time::Duration,
+    shutdown: Arc<tokio::sync::Notify>,
+    binder: F,
+) -> Option<Result<UnixListenerStream>>
+where
+    F: FnOnce(PathBuf) -> Result<StdUnixListener> + Send + 'static,
+{
+    let mut bind_task = spawn_uds_bind_with(socket_path.clone(), binder);
+
+    match tokio::time::timeout(warn_after, finish_uds_bind(&mut bind_task)).await {
+        Ok(result) => Some(result),
+        Err(_) => {
+            warn!(
+                socket = %socket_path.display(),
+                "FileProvider gRPC socket bind still pending; primary daemon socket remains active"
+            );
+
+            tokio::select! {
+                result = finish_uds_bind(&mut bind_task) => Some(result),
+                _ = shutdown.notified() => {
+                    cleanup_late_uds_bind(socket_path, bind_task);
+                    None
+                }
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2691,23 +2766,23 @@ pub async fn serve(
         let fp_shutdown_clone = fp_shutdown.clone();
 
         let handle = tokio::spawn(async move {
-            let bind_result =
-                tokio::time::timeout(std::time::Duration::from_secs(5), bind_uds(&fp_path)).await;
-
-            let secondary = match bind_result {
-                Ok(Ok(listener)) => listener,
-                Ok(Err(e)) => {
+            let secondary = match bind_optional_uds_with_warning(
+                fp_path.clone(),
+                std::time::Duration::from_secs(5),
+                fp_shutdown_clone.clone(),
+                bind_uds_blocking,
+            )
+            .await
+            {
+                Some(Ok(listener)) => listener,
+                Some(Err(e)) => {
                     warn!(
                         socket = %fp_path.display(),
                         "FileProvider gRPC socket bind failed; primary daemon socket remains active: {e}"
                     );
                     return;
                 }
-                Err(_) => {
-                    warn!(
-                        socket = %fp_path.display(),
-                        "FileProvider gRPC socket bind timed out; primary daemon socket remains active"
-                    );
+                None => {
                     return;
                 }
             };
@@ -2995,6 +3070,64 @@ mod tests {
         cvar.notify_all();
         let result = bind_task.await.expect("bind task panicked");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn optional_uds_late_bind_is_served_after_startup_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("tcfsd-fileprovider.sock");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let release_for_binder = release.clone();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let socket_path_for_bind = socket_path.clone();
+        let mut bind_task = tokio::spawn(async move {
+            bind_optional_uds_with_warning(
+                socket_path_for_bind,
+                std::time::Duration::from_millis(20),
+                shutdown,
+                move |path| {
+                    let _ = started_tx.send(());
+                    let (lock, cvar) = &*release_for_binder;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = cvar.wait(released).unwrap();
+                    }
+                    bind_uds_blocking(path)
+                },
+            )
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+            .await
+            .expect("blocking binder did not start")
+            .expect("blocking binder did not signal start");
+
+        let startup_budget_result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut bind_task).await;
+        assert!(
+            startup_budget_result.is_err(),
+            "optional bind should keep waiting after the startup warning budget"
+        );
+
+        let (lock, cvar) = &*release;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+
+        let stream = tokio::time::timeout(std::time::Duration::from_secs(2), bind_task)
+            .await
+            .expect("late bind task timed out")
+            .expect("late bind task panicked")
+            .expect("late bind returned None")
+            .expect("late bind failed");
+
+        let client = tokio::net::UnixStream::connect(&socket_path)
+            .await
+            .expect("late-bound socket should accept connections");
+        drop(client);
+        drop(stream);
     }
 
     #[tokio::test]
