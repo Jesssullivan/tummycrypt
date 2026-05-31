@@ -1,7 +1,10 @@
 //! tonic gRPC server over Unix domain socket and optional TCP
 
 use anyhow::Result;
+#[cfg(unix)]
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::Mutex as TokioMutex;
@@ -2588,24 +2591,49 @@ impl TcfsDaemon for TcfsDaemonImpl {
 }
 
 /// Bind a Unix domain socket, removing any stale socket and creating parent dirs.
-async fn bind_uds(socket_path: &Path) -> Result<UnixListenerStream> {
+///
+/// `UnixListener::bind` is synchronous on Unix. On macOS we have observed
+/// App Group paths wedge inside `bind(2)`, so keep the filesystem work on the
+/// blocking pool. That lets callers put a real timeout around optional sockets
+/// without sacrificing a Tokio runtime worker.
+#[cfg(unix)]
+fn bind_uds_blocking(socket_path: PathBuf) -> Result<StdUnixListener> {
     if socket_path.exists() {
-        tokio::fs::remove_file(socket_path).await?;
+        std::fs::remove_file(&socket_path)?;
     }
     if let Some(parent) = socket_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        std::fs::create_dir_all(parent)?;
     }
-    let listener = UnixListener::bind(socket_path)?;
+    let listener = StdUnixListener::bind(&socket_path)?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| anyhow::anyhow!("setting socket nonblocking mode: {e}"))?;
 
     // Restrict socket to owner-only access (prevents other users from connecting)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| anyhow::anyhow!("setting socket permissions: {e}"))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| anyhow::anyhow!("setting socket permissions: {e}"))?;
+
+    Ok(listener)
+}
+
+#[cfg(unix)]
+async fn bind_uds_with<F>(socket_path: &Path, binder: F) -> Result<UnixListenerStream>
+where
+    F: FnOnce(PathBuf) -> Result<StdUnixListener> + Send + 'static,
+{
+    let socket_path = socket_path.to_path_buf();
+    let listener = tokio::task::spawn_blocking(move || binder(socket_path))
+        .await
+        .map_err(|e| anyhow::anyhow!("Unix socket bind task failed: {e}"))??;
+    let listener = UnixListener::from_std(listener)?;
 
     Ok(UnixListenerStream::new(listener))
+}
+
+#[cfg(unix)]
+async fn bind_uds(socket_path: &Path) -> Result<UnixListenerStream> {
+    bind_uds_with(socket_path, bind_uds_blocking).await
 }
 
 /// Start the gRPC server on a Unix domain socket with graceful shutdown support.
@@ -2926,6 +2954,47 @@ mod tests {
         assert!(!resp.nats_ok);
         assert_eq!(resp.active_mounts, 0);
         assert!(resp.uptime_secs >= 0);
+    }
+
+    #[tokio::test]
+    async fn bind_uds_timeout_can_fire_while_blocking_bind_is_stuck() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("tcfsd.sock");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let release_for_binder = release.clone();
+
+        let socket_path_for_bind = socket_path.clone();
+        let mut bind_task = tokio::spawn(async move {
+            bind_uds_with(&socket_path_for_bind, move |_path| {
+                let _ = started_tx.send(());
+                let (lock, cvar) = &*release_for_binder;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = cvar.wait(released).unwrap();
+                }
+                Err(anyhow::anyhow!("released test binder"))
+            })
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+            .await
+            .expect("blocking binder did not start")
+            .expect("blocking binder did not signal start");
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut bind_task).await;
+        assert!(
+            result.is_err(),
+            "bind_uds timeout should fire even while blocking bind is stuck"
+        );
+
+        let (lock, cvar) = &*release;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+        let result = bind_task.await.expect("bind task panicked");
+        assert!(result.is_err());
     }
 
     #[tokio::test]
