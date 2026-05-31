@@ -34,9 +34,7 @@ async fn encrypted_push_pull_roundtrip() {
     let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db.json")).unwrap();
 
     let master_key = generate_test_master_key();
-    let enc_ctx = EncryptionContext {
-        master_key: master_key.clone(),
-    };
+    let enc_ctx = EncryptionContext::new(master_key.clone());
 
     // Push with encryption
     let upload = tcfs_sync::engine::upload_file_with_device(
@@ -122,9 +120,7 @@ async fn encrypted_large_file_multi_chunk() {
     let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db.json")).unwrap();
 
     let master_key = generate_test_master_key();
-    let enc_ctx = EncryptionContext {
-        master_key: master_key.clone(),
-    };
+    let enc_ctx = EncryptionContext::new(master_key.clone());
 
     let upload = tcfs_sync::engine::upload_file_with_device(
         &op,
@@ -172,9 +168,7 @@ async fn pull_without_key_fails_on_encrypted_file() {
     let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db.json")).unwrap();
 
     let master_key = generate_test_master_key();
-    let enc_ctx = EncryptionContext {
-        master_key: master_key.clone(),
-    };
+    let enc_ctx = EncryptionContext::new(master_key.clone());
 
     // Push with encryption
     let upload = tcfs_sync::engine::upload_file_with_device(
@@ -222,9 +216,7 @@ async fn wrong_key_fails_decryption() {
     let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db.json")).unwrap();
 
     let key_a = generate_test_master_key();
-    let enc_ctx_a = EncryptionContext {
-        master_key: key_a.clone(),
-    };
+    let enc_ctx_a = EncryptionContext::new(key_a.clone());
 
     // Push with key A
     let upload = tcfs_sync::engine::upload_file_with_device(
@@ -243,9 +235,7 @@ async fn wrong_key_fails_decryption() {
     // Pull with key B (different key)
     let key_b_bytes: [u8; 32] = [0xFF; 32];
     let key_b = tcfs_crypto::MasterKey::from_bytes(key_b_bytes);
-    let enc_ctx_b = EncryptionContext {
-        master_key: key_b.clone(),
-    };
+    let enc_ctx_b = EncryptionContext::new(key_b.clone());
 
     let result = tcfs_sync::engine::download_file_with_device(
         &op,
