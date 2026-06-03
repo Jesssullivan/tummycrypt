@@ -86,7 +86,7 @@ assert_contains "$EVIDENCE/run-metadata.env" "push=0"
 assert_contains "$EVIDENCE/run-metadata.env" "honey_start_mount=1"
 assert_contains "$EVIDENCE/run-metadata.env" "honey_smoke_max_depth=8"
 assert_contains "$EVIDENCE/run-metadata.env" "honey_smoke_timeout_secs=900"
-assert_contains "$EVIDENCE/run-metadata.env" "upload_assume_fresh_prefix=0"
+assert_contains "$EVIDENCE/run-metadata.env" "upload_assume_fresh_prefix=1"
 assert_contains "$EVIDENCE/run-metadata.env" "upload_file_concurrency=0"
 assert_contains "$EVIDENCE/run-metadata.env" "upload_chunk_concurrency=0"
 assert_contains "$EVIDENCE/result.env" "status=plan-only"
@@ -136,6 +136,20 @@ test -L "$SHADOW/broken-link"
 test -f "$STATE/tcfs-linux-xr-shadow.toml"
 test -f "$EVIDENCE/selected-hydration-file.content"
 
+NO_ASSUME_EVIDENCE="$TMPDIR/no-assume-evidence"
+NO_ASSUME_SHADOW="$TMPDIR/no-assume-shadow"
+NO_ASSUME_STATE="$TMPDIR/no-assume-state"
+HOME="$HOME_OK" bash "$SCRIPT" \
+  --source "$SOURCE" \
+  --shadow-root "$NO_ASSUME_SHADOW" \
+  --evidence-dir "$NO_ASSUME_EVIDENCE" \
+  --state-dir "$NO_ASSUME_STATE" \
+  --remote seaweedfs://example.invalid/tcfs/home-canary-test-no-assume \
+  --no-assume-fresh-prefix \
+  >"$TMPDIR/no-assume.out"
+
+assert_contains "$NO_ASSUME_EVIDENCE/run-metadata.env" "upload_assume_fresh_prefix=0"
+
 RESUME_EVIDENCE="$TMPDIR/resume-evidence"
 RESUME_STATE="$TMPDIR/resume-state"
 mkdir -p "$RESUME_EVIDENCE" "$RESUME_STATE"
@@ -168,7 +182,7 @@ HOME="$HOME_OK" bash "$SCRIPT" \
 assert_contains "$RESUME_EVIDENCE/shadow-copy.log" "reused existing shadow"
 assert_contains "$RESUME_EVIDENCE/run-metadata.env" "resume_after_push=1"
 assert_contains "$RESUME_EVIDENCE/run-metadata.env" "reuse_shadow=1"
-assert_contains "$RESUME_EVIDENCE/run-metadata.env" "upload_assume_fresh_prefix=0"
+assert_contains "$RESUME_EVIDENCE/run-metadata.env" "upload_assume_fresh_prefix=1"
 assert_contains "$RESUME_EVIDENCE/result.env" "status=0"
 assert_contains "$RESUME_EVIDENCE/result.env" "proof=shadow-push"
 assert_contains "$RESUME_EVIDENCE/result.env" "parity_status=full-project-parity-not-claimed"

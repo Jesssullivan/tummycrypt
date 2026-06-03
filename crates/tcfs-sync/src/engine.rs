@@ -464,6 +464,136 @@ async fn write_chunk_with_retry(
     .await
 }
 
+async fn chunk_exists_with_retry_inner<Exists, ExistsFuture, Sleep, SleepFuture>(
+    key: &str,
+    chunk_idx: usize,
+    logical_len: u64,
+    exists_timeout: Option<Duration>,
+    mut exists: Exists,
+    sleep: Sleep,
+) -> Result<bool>
+where
+    Exists: FnMut() -> ExistsFuture,
+    ExistsFuture: std::future::Future<Output = Result<bool>>,
+    Sleep: FnMut(std::time::Duration) -> SleepFuture,
+    SleepFuture: std::future::Future<Output = ()>,
+{
+    #[derive(Debug)]
+    enum ChunkExistsError {
+        Transport {
+            source: anyhow::Error,
+            elapsed: Duration,
+        },
+        Timeout {
+            timeout: Duration,
+            elapsed: Duration,
+        },
+    }
+
+    impl ChunkExistsError {
+        fn kind(&self) -> &'static str {
+            match self {
+                Self::Transport { .. } => "transport",
+                Self::Timeout { .. } => "timeout",
+            }
+        }
+
+        fn elapsed(&self) -> Duration {
+            match self {
+                Self::Transport { elapsed, .. } | Self::Timeout { elapsed, .. } => *elapsed,
+            }
+        }
+
+        fn timeout_ms(&self) -> u128 {
+            match self {
+                Self::Transport { .. } => 0,
+                Self::Timeout { timeout, .. } => timeout.as_millis(),
+            }
+        }
+    }
+
+    impl std::fmt::Display for ChunkExistsError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Transport { source, .. } => write!(f, "{source}"),
+                Self::Timeout { timeout, .. } => {
+                    write!(
+                        f,
+                        "chunk existence check timed out after {} ms",
+                        timeout.as_millis()
+                    )
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for ChunkExistsError {}
+
+    retry_with_backoff(
+        CHUNK_MAX_RETRIES,
+        |_| {
+            let fut = exists();
+            async move {
+                let started = std::time::Instant::now();
+                match exists_timeout {
+                    Some(limit) => match tokio::time::timeout(limit, fut).await {
+                        Ok(result) => result.map_err(|source| ChunkExistsError::Transport {
+                            source,
+                            elapsed: started.elapsed(),
+                        }),
+                        Err(_) => Err(ChunkExistsError::Timeout {
+                            timeout: limit,
+                            elapsed: started.elapsed(),
+                        }),
+                    },
+                    None => fut.await.map_err(|source| ChunkExistsError::Transport {
+                        source,
+                        elapsed: started.elapsed(),
+                    }),
+                }
+            }
+        },
+        |attempt, delay, err: &ChunkExistsError| {
+            warn!(
+                key = key,
+                chunk = chunk_idx,
+                bytes = logical_len,
+                attempt,
+                max = CHUNK_MAX_RETRIES,
+                kind = err.kind(),
+                timeout_ms = err.timeout_ms(),
+                elapsed_ms = err.elapsed().as_millis(),
+                delay_ms = delay.as_millis(),
+                error = %err,
+                "chunk existence check failed, retrying"
+            );
+        },
+        sleep,
+    )
+    .await
+    .map_err(|err| {
+        anyhow::Error::new(err).context(format!("checking chunk existence {chunk_idx}: {key}"))
+    })
+}
+
+async fn chunk_exists_with_retry(
+    op: &Operator,
+    key: &str,
+    chunk_idx: usize,
+    logical_len: u64,
+    exists_timeout: Option<Duration>,
+) -> Result<bool> {
+    chunk_exists_with_retry_inner(
+        key,
+        chunk_idx,
+        logical_len,
+        exists_timeout,
+        || async { op.exists(key).await.map_err(anyhow::Error::from) },
+        tokio::time::sleep,
+    )
+    .await
+}
+
 async fn maybe_upload_chunk(
     op: Operator,
     chunk_key: String,
@@ -473,7 +603,13 @@ async fn maybe_upload_chunk(
     assume_fresh_prefix: bool,
     write_timeout: Option<Duration>,
 ) -> Result<u64> {
-    if assume_fresh_prefix || !op.exists(&chunk_key).await.unwrap_or(false) {
+    let exists = if assume_fresh_prefix {
+        false
+    } else {
+        chunk_exists_with_retry(&op, &chunk_key, chunk_idx, logical_len, write_timeout).await?
+    };
+
+    if !exists {
         write_chunk_with_retry(
             &op,
             &chunk_key,

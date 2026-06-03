@@ -603,6 +603,9 @@ tasks:
           if [[ "${FORWARD_AWS_ENV:-0}" == "1" ]]; then
             args+=(--forward-aws-env)
           fi
+          if [[ "${NO_ASSUME_FRESH_PREFIX:-0}" == "1" ]]; then
+            args+=(--no-assume-fresh-prefix)
+          fi
           if [[ "${KEEP_SHADOW:-0}" == "1" ]]; then
             args+=(--keep-shadow)
           fi

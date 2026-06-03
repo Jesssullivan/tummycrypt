@@ -42,6 +42,9 @@ Options:
                           Mounted traversal depth. Default: 8
   --honey-smoke-timeout-secs <n>
                           Bound mounted smoke when timeout(1) exists. Default: 900
+  --no-assume-fresh-prefix
+                          Check remote chunks before writing. Default assumes a
+                          disposable fresh prefix and skips chunk exists checks.
   --forward-aws-env      Forward AWS env to honey for mount/lifecycle companions
   --keep-shadow          Do not print cleanup hint for the shadow
   -h, --help             Show this help
@@ -60,6 +63,7 @@ Environment mirrors:
   TCFS_HOME_CANARY_CREATE_BUCKET=1
   TCFS_HOME_CANARY_RUN_HONEY=1
   TCFS_HOME_CANARY_RUN_LINUX_LIFECYCLE=1
+  TCFS_UPLOAD_ASSUME_FRESH_PREFIX=0|1
 EOF
 }
 
@@ -152,7 +156,7 @@ honey_smoke_max_depth="${TCFS_HONEY_SMOKE_MAX_DEPTH:-8}"
 honey_smoke_timeout_secs="${TCFS_HONEY_SMOKE_TIMEOUT_SECS:-900}"
 forward_aws_env="$(bool_env TCFS_HONEY_FORWARD_AWS_ENV "${TCFS_HONEY_FORWARD_AWS_ENV:-0}")"
 storage_max_concurrent_ops="${TCFS_STORAGE_MAX_CONCURRENT_OPS:-${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}}"
-upload_assume_fresh_prefix="$(bool_env TCFS_UPLOAD_ASSUME_FRESH_PREFIX "${TCFS_UPLOAD_ASSUME_FRESH_PREFIX:-0}")"
+upload_assume_fresh_prefix="$(bool_env TCFS_UPLOAD_ASSUME_FRESH_PREFIX "${TCFS_UPLOAD_ASSUME_FRESH_PREFIX:-1}")"
 upload_file_concurrency="${TCFS_UPLOAD_FILE_CONCURRENCY:-0}"
 upload_chunk_concurrency="${TCFS_UPLOAD_CHUNK_CONCURRENCY:-0}"
 storage_s3_connect_timeout_secs="${TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS:-0}"
@@ -259,6 +263,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail "--honey-smoke-timeout-secs requires a value"
       honey_smoke_timeout_secs="$2"
       shift 2
+      ;;
+    --no-assume-fresh-prefix)
+      upload_assume_fresh_prefix=0
+      shift
       ;;
     --forward-aws-env)
       forward_aws_env=1
@@ -1111,6 +1119,11 @@ if [[ "$push_remote" == "1" ]]; then
   [[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || fail "set AWS_ACCESS_KEY_ID for $endpoint"
   [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || fail "set AWS_SECRET_ACCESS_KEY for $endpoint"
   create_bucket_if_requested
+  if [[ "$upload_assume_fresh_prefix" == "1" ]]; then
+    export TCFS_UPLOAD_ASSUME_FRESH_PREFIX=1
+  else
+    unset TCFS_UPLOAD_ASSUME_FRESH_PREFIX
+  fi
   printf 'pushing shadow to disposable prefix: %s\n' "$remote"
   "${tcfs_cmd[@]}" --config "$config_path" push "$shadow_canon" --prefix "$prefix" --state "$state_json" \
     >"$evidence_dir/push.log" 2>&1 || push_rc=$?
