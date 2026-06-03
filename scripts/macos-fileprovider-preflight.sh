@@ -206,9 +206,34 @@ detect_app_path() {
   exit 1
 }
 
+canonical_path() {
+  local path="$1"
+  local parent
+  local base
+
+  if [[ -d "$path" ]]; then
+    (cd "$path" && pwd -P)
+    return
+  fi
+
+  parent="$(dirname "$path")"
+  base="$(basename "$path")"
+  if [[ -d "$parent" ]]; then
+    printf '%s/%s\n' "$(cd "$parent" && pwd -P)" "$base"
+    return
+  fi
+
+  printf '%s\n' "$path"
+}
+
 check_pluginkit() {
   local output
   local count
+  local expected_extension
+  local expected_extension_canonical
+  local matched_expected_path=0
+  local registered_path_count=0
+  local path
 
   output="$(pluginkit -m -A -D -vvv -i "$PLUGIN_ID" 2>&1)" || {
     echo "pluginkit lookup failed for $PLUGIN_ID" >&2
@@ -233,6 +258,36 @@ check_pluginkit() {
       print_pluginkit_duplicate_hint "$output"
       exit 1
     fi
+  fi
+
+  expected_extension="$APP_PATH/Contents/Extensions/TCFSFileProvider.appex"
+  expected_extension_canonical="$(canonical_path "$expected_extension")"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    registered_path_count=$((registered_path_count + 1))
+    if [[ "$(canonical_path "$path")" == "$expected_extension_canonical" ]]; then
+      matched_expected_path=1
+    fi
+  done < <(
+    awk '
+      /^[[:space:]]*Path = / {
+        path = $0
+        sub(/^[[:space:]]*Path = /, "", path)
+        print path
+      }
+    ' <<<"$output"
+  )
+
+  if (( registered_path_count == 0 )); then
+    echo "pluginkit output did not include a FileProvider extension path for $PLUGIN_ID" >&2
+    exit 1
+  fi
+
+  if (( matched_expected_path == 0 )); then
+    echo "pluginkit registered FileProvider extension does not match selected app path" >&2
+    echo "selected extension: $expected_extension_canonical" >&2
+    print_pluginkit_duplicate_hint "$output"
+    exit 1
   fi
 }
 
