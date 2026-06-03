@@ -134,8 +134,9 @@ fi
 EOF
 cat >"$FAKE_BIN/pluginkit" <<'EOF'
 #!/usr/bin/env bash
+app_path="${TCFS_FAKE_PLUGIN_APP_PATH:-/Users/test/Applications/TCFSProvider.app}"
 printf 'io.tinyland.tcfs.fileprovider(0.2.0)\n'
-printf '            Path = /Users/test/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex\n'
+printf '            Path = %s/Contents/Extensions/TCFSFileProvider.appex\n' "$app_path"
 if [[ "${TCFS_FAKE_PLUGIN_DUPES:-0}" == "1" ]]; then
   printf 'io.tinyland.tcfs.fileprovider(0.1.0)\n'
   printf '            Path = /Users/test/git/tummycrypt/build/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex\n'
@@ -223,6 +224,7 @@ fi
 exit 1
 EOF
 chmod +x "$FAKE_BIN"/*
+export TCFS_FAKE_PLUGIN_APP_PATH="$APP_PATH"
 
 OUT="${TMPDIR}/positive.out"
 ERR="${TMPDIR}/positive.err"
@@ -379,6 +381,27 @@ assert_contains "${TMPDIR}/dupes.combined" "multiple FileProvider registrations 
 assert_contains "${TMPDIR}/dupes.combined" "registered FileProvider extension paths:"
 assert_contains "${TMPDIR}/dupes.combined" "/Users/test/git/tummycrypt/build/TCFSProvider.app"
 assert_contains "${TMPDIR}/dupes.combined" "cleanup is not performed automatically"
+
+STALE_OUT="${TMPDIR}/stale-plugin.out"
+STALE_ERR="${TMPDIR}/stale-plugin.err"
+if env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_PLUGIN_APP_PATH=/Users/test/Applications/TCFSProvider.app \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --fileprovider-config "$FILEPROVIDER_CONFIG" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    >"$STALE_OUT" \
+    2>"$STALE_ERR"; then
+  printf 'expected stale pluginkit registration to fail\n' >&2
+  exit 1
+fi
+cat "$STALE_OUT" "$STALE_ERR" >"${TMPDIR}/stale-plugin.combined"
+assert_contains "${TMPDIR}/stale-plugin.combined" "pluginkit registered FileProvider extension does not match selected app path"
+assert_contains "${TMPDIR}/stale-plugin.combined" "selected extension:"
+assert_contains "${TMPDIR}/stale-plugin.combined" "TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex"
+assert_contains "${TMPDIR}/stale-plugin.combined" "/Users/test/Applications/TCFSProvider.app/Contents/Extensions/TCFSFileProvider.appex"
+assert_contains "${TMPDIR}/stale-plugin.combined" "cleanup is not performed automatically"
 
 UNAVAILABLE_OUT="${TMPDIR}/unavailable.out"
 UNAVAILABLE_ERR="${TMPDIR}/unavailable.err"
