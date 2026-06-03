@@ -6,32 +6,32 @@
 #   brew install Jesssullivan/tummycrypt/tcfs
 #
 # This template is used by CI to generate the versioned formula.
-# Placeholders: 0.12.13-rc4, eced300f1e523daa8864970bdcee7d364b200070d68ded3de75f8da4ec585ec4, 132b60e50f6853d622de783ccfbf80eefbe54175e2e5ff446580c560f0547f56,
-#               15c3cbdfd841a19c15a448142f2d766b2e6c222667f8b7c7f39a396ba671ef95, c5952a495a5d6f24918bcdf7fc8deb051dc5451d18db23b450fdfd979d1a52ca
+# Placeholders: 0.12.14, 55719e35b624df25386baf63d74247c39a25e857b7c3855cfd4edd6cfae69175, f171ee9c26a843dd29aa99a17ea73536da635b8c96aba4ba3bfbc183608ad7f2,
+#               56c158ec2ce4e598a73d1b86fb2b901535ad03468ceb2436d5b9c3122a0d036c, 48618f077f52792a0d418ea97400c9e41a51ae848a29eb67fcc8e24267056059
 
 class Tcfs < Formula
   desc "FOSS self-hosted odrive replacement — FUSE-based, SeaweedFS-backed file sync"
   homepage "https://github.com/Jesssullivan/tummycrypt"
-  version "0.12.13-rc4"
+  version "0.12.14"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.13-rc4/tcfs-0.12.13-rc4-macos-aarch64.tar.gz"
-      sha256 "eced300f1e523daa8864970bdcee7d364b200070d68ded3de75f8da4ec585ec4"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.14/tcfs-0.12.14-macos-aarch64.tar.gz"
+      sha256 "55719e35b624df25386baf63d74247c39a25e857b7c3855cfd4edd6cfae69175"
     else
-      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.13-rc4/tcfs-0.12.13-rc4-macos-x86_64.tar.gz"
-      sha256 "132b60e50f6853d622de783ccfbf80eefbe54175e2e5ff446580c560f0547f56"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.14/tcfs-0.12.14-macos-x86_64.tar.gz"
+      sha256 "f171ee9c26a843dd29aa99a17ea73536da635b8c96aba4ba3bfbc183608ad7f2"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.13-rc4/tcfs-0.12.13-rc4-linux-aarch64.tar.gz"
-      sha256 "c5952a495a5d6f24918bcdf7fc8deb051dc5451d18db23b450fdfd979d1a52ca"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.14/tcfs-0.12.14-linux-aarch64.tar.gz"
+      sha256 "48618f077f52792a0d418ea97400c9e41a51ae848a29eb67fcc8e24267056059"
     else
-      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.13-rc4/tcfs-0.12.13-rc4-linux-x86_64.tar.gz"
-      sha256 "15c3cbdfd841a19c15a448142f2d766b2e6c222667f8b7c7f39a396ba671ef95"
+      url "https://github.com/Jesssullivan/tummycrypt/releases/download/v0.12.14/tcfs-0.12.14-linux-x86_64.tar.gz"
+      sha256 "56c158ec2ce4e598a73d1b86fb2b901535ad03468ceb2436d5b9c3122a0d036c"
     end
   end
 
