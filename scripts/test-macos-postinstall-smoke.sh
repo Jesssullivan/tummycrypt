@@ -400,6 +400,17 @@ if [[ -n "${TCFS_FAKE_FIND_HANG_TARGET:-}" ]]; then
 fi
 exec /usr/bin/find "$@"
 EOF
+cat >"$FAKE_BIN/env" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/bin/env "$@"
+EOF
+cat >"$FAKE_BIN/xattr" <<'EOF'
+#!/usr/bin/env bash
+for path in "$@"; do
+  [[ "$path" == -* ]] && continue
+  printf '%s: %s\n' "com.apple.provenance" "$path"
+done
+EOF
 cat >"$APP_PATH/Contents/MacOS/TCFSProvider" <<'EOF'
 #!/usr/bin/env bash
 if [[ -n "${TCFS_FAKE_HOST_BINARY_LOG:-}" ]]; then
@@ -485,6 +496,10 @@ if [[ -n "${TCFS_FAKE_SWIFT_LOG:-}" ]]; then
   printf 'swift' >>"$TCFS_FAKE_SWIFT_LOG"
   printf ' %q' "$@" >>"$TCFS_FAKE_SWIFT_LOG"
   printf '\n' >>"$TCFS_FAKE_SWIFT_LOG"
+fi
+if [[ -n "${TCFS_FAKE_SWIFT_ENV_LOG:-}" ]]; then
+  printf 'SDKROOT=%s\n' "${SDKROOT:-}" >>"$TCFS_FAKE_SWIFT_ENV_LOG"
+  printf 'DEVELOPER_DIR=%s\n' "${DEVELOPER_DIR:-}" >>"$TCFS_FAKE_SWIFT_ENV_LOG"
 fi
 
 helper="${1:-}"
@@ -885,6 +900,8 @@ assert_fails_contains \
 assert_fails_contains \
   "FileProvider extension used build-time embedded config" \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_COORDINATED_READ=0 \
+    LOG_SHOW_TIMEOUT_SECS=1 \
     TCFS_FAKE_EXTENSION_LOG="2026-04-30 TCFSFileProvider extension loadConfig: loaded from build-time embedded config" \
     bash "$SCRIPT" \
       --expected-version 0.12.2 \
@@ -900,6 +917,8 @@ assert_fails_contains \
 assert_fails_contains \
   "FileProvider extension did not log shared Keychain config load" \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_COORDINATED_READ=0 \
+    LOG_SHOW_TIMEOUT_SECS=1 \
     TCFS_FAKE_EXTENSION_LOG="" \
     bash "$SCRIPT" \
       --expected-version 0.12.2 \
@@ -915,6 +934,8 @@ assert_fails_contains \
 assert_fails_contains \
   "expected file is not backed by a visible remote index entry" \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_COORDINATED_READ=0 \
+    LOG_SHOW_TIMEOUT_SECS=1 \
     TCFS_FAKE_INDEX_STATUS="missing_index" \
     bash "$SCRIPT" \
       --expected-version 0.12.2 \
@@ -931,6 +952,8 @@ printf 'wrong content\n' >"${TMPDIR}/wrong-content.txt"
 assert_fails_contains \
   "hydrated file content mismatch" \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_COORDINATED_READ=0 \
+    LOG_SHOW_TIMEOUT_SECS=1 \
     bash "$SCRIPT" \
       --expected-version 0.12.2 \
       --config "$CONFIG_PATH" \
@@ -1144,6 +1167,8 @@ mkdir -p "$DISABLED_ROOT"
 assert_fails_contains \
   "FileProvider domain is disabled by macOS (NSFileProviderErrorDomain -2011)" \
   env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+    TCFS_COORDINATED_READ=0 \
+    LOG_SHOW_TIMEOUT_SECS=1 \
     TCFS_FAKE_FILEPROVIDER_SYSTEM_LOG='2026-05-01 fileproviderd FP -2011 "Sync is not enabled for TCFSProvider."' \
     bash "$SCRIPT" \
       --expected-version 0.12.2 \
@@ -1151,10 +1176,38 @@ assert_fails_contains \
       --app-path "$APP_PATH" \
       --cloud-root "$DISABLED_ROOT" \
       --log-dir "${TMPDIR}/domain-disabled-logs" \
-      --timeout 2
+      --timeout 1
 
 assert_contains \
   "${TMPDIR}/domain-disabled-logs/fileprovider-system.log" \
   'Sync is not enabled for TCFSProvider'
+
+SWIFT_ENV_LOG="${TMPDIR}/swift-env.log"
+SWIFT_ENV_OUT="${TMPDIR}/swift-env.out"
+if ! env PATH="$FAKE_BIN:$PATH" HOME="$HOME_DIR" \
+  SDKROOT="/nix/store/bad-apple-sdk" \
+  DEVELOPER_DIR="/nix/store/bad-developer-dir" \
+  TCFS_FAKE_OPEN_LOG="$OPEN_LOG" \
+  TCFS_FAKE_FIND_PERMISSION_TARGET="$CLOUD_ROOT" \
+  TCFS_FAKE_SWIFT_LIST_TARGET="$CLOUD_ROOT" \
+  TCFS_FAKE_SWIFT_LIST_OUTPUT="$CLOUD_ROOT/Projects" \
+  TCFS_FAKE_SWIFT_ENV_LOG="$SWIFT_ENV_LOG" \
+  LOG_SHOW_TIMEOUT_SECS=1 \
+  bash "$SCRIPT" \
+    --expected-version 0.12.2 \
+    --config "$CONFIG_PATH" \
+    --app-path "$APP_PATH" \
+    --cloud-root "$CLOUD_ROOT" \
+    --log-dir "${TMPDIR}/swift-env-logs" \
+    --timeout 2 \
+    >"$SWIFT_ENV_OUT" 2>&1; then
+  cat "$SWIFT_ENV_OUT" >&2 || true
+  exit 1
+fi
+assert_contains "$SWIFT_ENV_OUT" "coordinated enumeration sample:"
+assert_contains "$SWIFT_ENV_LOG" "SDKROOT="
+assert_contains "$SWIFT_ENV_LOG" "DEVELOPER_DIR="
+assert_not_contains "$SWIFT_ENV_LOG" "/nix/store/bad-apple-sdk"
+assert_not_contains "$SWIFT_ENV_LOG" "/nix/store/bad-developer-dir"
 
 printf 'macOS post-install smoke tests passed\n'

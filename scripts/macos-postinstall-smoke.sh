@@ -488,6 +488,17 @@ run_bounded_append_to_log() {
   return "$status"
 }
 
+swift_helper_available() {
+  command -v swift >/dev/null 2>&1
+}
+
+run_swift_helper() {
+  # Nix dev shells export SDKROOT/DEVELOPER_DIR to the Nix Apple SDK. The
+  # system Swift driver then sees a mismatched SDK and fails before the helper
+  # can exercise FileProvider. Use the host Xcode defaults for these probes.
+  /usr/bin/env -u SDKROOT -u DEVELOPER_DIR swift "$@"
+}
+
 wait_for_pid_with_timeout() {
   local pid="$1"
   local timeout_secs="$2"
@@ -1680,12 +1691,12 @@ run_coordinated_root_listing() {
 
   [[ "$COORDINATED_READ" != "0" ]] || return 2
   [[ -f "$helper" ]] || return 2
-  command -v swift >/dev/null 2>&1 || return 2
+  swift_helper_available || return 2
 
   run_bounded_to_log \
     "$label" \
     "$LOG_SHOW_TIMEOUT_SECS" \
-    swift "$helper" "$root" || return "$?"
+    run_swift_helper "$helper" "$root" || return "$?"
 
   listing="$(cat "$LOG_DIR/${label}.log" 2>/dev/null || true)"
   [[ -n "$listing" ]] || return 1
@@ -1810,8 +1821,8 @@ read_fileprovider_file() {
   local helper="$REPO_ROOT/scripts/macos-fileprovider-coordinated-read.swift"
   local pid
 
-  if [[ "$COORDINATED_READ" != "0" && -f "$helper" ]] && command -v swift >/dev/null 2>&1; then
-    swift "$helper" "$path" "$hydrated_copy" &
+  if [[ "$COORDINATED_READ" != "0" && -f "$helper" ]] && swift_helper_available; then
+    run_swift_helper "$helper" "$path" "$hydrated_copy" &
     pid="$!"
     wait_for_pid_with_timeout "$pid" "$READ_TIMEOUT_SECS" "coordinated FileProvider read"
   else

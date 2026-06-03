@@ -119,8 +119,12 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     ) -> Progress {
         // Start with estimated size; updated by callback as real size is known
         let progress = Progress(totalUnitCount: 0)
+        let itemId = itemIdentifier.rawValue
+
+        logger.error("fetchContents start for \(itemId, privacy: .public)")
 
         guard let prov = provider else {
+            logger.error("fetchContents provider unavailable for \(itemId, privacy: .public)")
             completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
             return progress
         }
@@ -132,7 +136,9 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             let tempDir = FileManager.default.temporaryDirectory
             let tempFile = tempDir.appendingPathComponent(UUID().uuidString)
 
-            let itemId = itemIdentifier.rawValue
+            logger.error(
+                "fetchContents fetching \(itemId, privacy: .public) to \(tempFile.path, privacy: .public)"
+            )
 
             // C callback that updates NSProgress from Rust's chunk loop
             let callback: @convention(c) (UInt64, UInt64, UnsafeRawPointer?) -> Void = {
@@ -160,6 +166,9 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 let fileSize = (try? FileManager.default.attributesOfItem(
                     atPath: tempFile.path
                 )[.size] as? UInt64) ?? 0
+                logger.error(
+                    "fetchContents completed for \(itemId, privacy: .public): bytes=\(fileSize)"
+                )
 
                 let parentId = TCFSFileProviderExtension.parentIdentifier(forPath: itemId)
                 let item = TCFSFileProviderItem(
