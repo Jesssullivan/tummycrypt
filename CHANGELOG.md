@@ -9,6 +9,50 @@ Current release-proof posture is tracked in `docs/release/evidence/` and
 `docs/ops/product-reality-and-priority.md`; older entries below may describe
 historical release intent rather than the current supported/proven surface.
 
+## [0.12.14] - 2026-06-03
+
+First finalized release of the 0.12.13→0.12.14 line (0.12.13 shipped only as
+rc1–rc4 prereleases). Captures the fail-closed secrets deny-set and the
+daemon-startup reliability fixes that landed on `main` after `v0.12.13-rc4` —
+previously present in deployed builds but in no published tag.
+
+### Security
+
+- **Fail-closed secrets deny-set in the sync `Blacklist`** (TIN-1737,
+  `crates/tcfs-sync/src/blacklist.rs`): secret-bearing paths are never synced —
+  `.ssh/`, `.gnupg/`, `sops-nix/` directories; `auth.json`, `.netrc`,
+  `.pgpass`, `.credentials.json` files; `.env*` files; and `.sqlite*`/`.db*`
+  suffixes. Enforced fail-closed so a misconfiguration cannot leak credentials.
+- **Per-device file-key wrapping substrate** (TIN-1417, behind a flag,
+  default off): age-recipient per-device key wrapping is now available via
+  `crypto.per_device_wrapping`; the default remains shared-master so existing
+  fleets are unaffected until the migration lands.
+- **Enrollment & auth hardening**: single-use enrollment invites; admin-gated
+  enrollment control RPCs; device-invite enrollment bootstrap (TIN-1424);
+  real local age identities generated on enrollment; auth sessions are now
+  persisted and attached to protected RPCs.
+
+### Added
+
+- **Device registry sync during enrollment** (#476): enrolling a device now
+  publishes it into the shared device registry.
+- **FileProvider config rendering** (#466, TIN-1425): the daemon and CLI
+  render the FileProvider config from the active config; `tcfs init` writes a
+  config; FileProvider surface contract is asserted in CI (TIN-1547).
+- **`natsTls` config option** (default `false`, #473).
+- **Storage restore SLO budgets** in CI (TIN-1622).
+
+### Fixed
+
+- **Daemon control-plane startup hangs** (TIN-1758): readiness no longer blocks
+  on remote index discovery; the FileProvider socket bind is kept off the
+  runtime workers and serves late socket binds — the daemon comes up reliably
+  under load.
+- **`tcfs pull <abspath>`** writing into a hash-named file in the cwd instead of
+  the requested path (#473).
+- Hardened large-restore retry observability; avoided a macOS LaunchAgent
+  config restart loop (#457).
+
 ## [0.12.13] - 2026-05-18
 
 ### Added
