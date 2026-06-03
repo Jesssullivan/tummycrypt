@@ -1448,6 +1448,7 @@ async fn cmd_pull_with_operator(
 
     state.flush().context("flushing state cache")?;
     remove_adjacent_stub_after_pull(&result.local_path).await?;
+    restore_git_history_after_pull(&result.local_path).await?;
 
     pb.finish_with_message("done".to_string());
     println!();
@@ -1496,6 +1497,43 @@ async fn remove_adjacent_stub_after_pull(local_path: &Path) -> Result<()> {
             Err(err).with_context(|| format!("removing stale stub: {}", stub_path.display()))
         }
     }
+}
+
+/// If the pulled file is a TCFS git bundle (`.git-tcfs-bundle`), reconstruct
+/// the repo's `.git` metadata in place so the rehydrated working tree has
+/// working history (`git log` / `git status` / `git fetch`).
+///
+/// The bundle artifact is intentionally left in place: it is a synced object,
+/// so deleting it locally would propagate as a deletion to peers on the next
+/// reconcile. Artifact cleanup (gitignore / post-restore prune) is tracked as
+/// a follow-up.
+async fn restore_git_history_after_pull(local_path: &Path) -> Result<()> {
+    let is_bundle = local_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == tcfs_sync::git_safety::GIT_BUNDLE_REL_PATH)
+        .unwrap_or(false);
+    if !is_bundle {
+        return Ok(());
+    }
+    let Some(repo_root) = local_path.parent().map(|p| p.to_path_buf()) else {
+        return Ok(());
+    };
+    let bundle = local_path.to_path_buf();
+    // git invokes blocking subprocesses; keep them off the async runtime.
+    tokio::task::spawn_blocking(move || {
+        tcfs_sync::git_safety::restore_git_bundle_into(&bundle, &repo_root)
+    })
+    .await
+    .context("joining git bundle restore task")?
+    .with_context(|| {
+        format!(
+            "restoring git history from bundle: {}",
+            local_path.display()
+        )
+    })?;
+    println!("  restored git history from bundle");
+    Ok(())
 }
 
 async fn cmd_pull(
