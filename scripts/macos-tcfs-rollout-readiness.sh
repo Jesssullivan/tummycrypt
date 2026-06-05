@@ -210,8 +210,7 @@ plist_value() {
 }
 
 check_launch_agent() {
-  local program=""
-  local status=""
+  local argv0=""
 
   if [[ ! -f "$LAUNCH_AGENT" ]]; then
     fail "LaunchAgent plist not found: $LAUNCH_AGENT"
@@ -222,23 +221,23 @@ check_launch_agent() {
   note "launch label: $LAUNCH_LABEL"
 
   if [[ -x "$PLISTBUDDY_BIN" ]]; then
-    program="$(plist_value "ProgramArguments:2" "$LAUNCH_AGENT" || true)"
-    if [[ -n "$program" ]]; then
-      note "launch agent command: $program"
-      note "launch agent command inspection: not executed"
+    argv0="$(plist_value "ProgramArguments:0" "$LAUNCH_AGENT" || true)"
+    if [[ -n "$argv0" ]]; then
+      note "launch agent command: configured (argv0: $argv0)"
+      note "launch agent command inspection: redacted"
     else
-      warn "could not read ProgramArguments:2 from LaunchAgent"
+      warn "could not read ProgramArguments:0 from LaunchAgent"
     fi
   else
     warn "PlistBuddy not executable: $PLISTBUDDY_BIN"
   fi
 
   if command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1; then
-    status="$("$LAUNCHCTL_BIN" print "gui/$(id -u)/$LAUNCH_LABEL" 2>&1 || true)"
-    if grep -Fq "Could not find service" <<<"$status"; then
-      fail "launchd service not found: $LAUNCH_LABEL"
-    else
+    if "$LAUNCHCTL_BIN" list 2>/dev/null \
+      | awk -v label="$LAUNCH_LABEL" '$3 == label { found = 1 } END { exit found ? 0 : 1 }'; then
       note "launchd service: present ($LAUNCH_LABEL)"
+    else
+      fail "launchd service not found: $LAUNCH_LABEL"
     fi
   else
     warn "launchctl not found"
