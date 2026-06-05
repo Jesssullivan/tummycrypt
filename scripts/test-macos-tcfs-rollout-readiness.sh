@@ -149,6 +149,8 @@ EOF
 cat >"$FAKE_BIN/pluginkit" <<'EOF'
 #!/usr/bin/env bash
 printf '+    io.tinyland.tcfs.fileprovider(0.2.0)\n'
+printf '            Path = %s/Contents/Extensions/TCFSFileProvider.appex\n' "${TCFS_FAKE_PLUGIN_APP_PATH:-$TCFS_APP_PATH}"
+printf '   Parent Bundle = %s\n' "${TCFS_FAKE_PLUGIN_APP_PATH:-$TCFS_APP_PATH}"
 EOF
 cat >"$FAKE_BIN/spctl" <<'EOF'
 #!/usr/bin/env bash
@@ -205,5 +207,10 @@ assert_fails_contains \
 
 assert_contains "$TMPDIR/failure.combined" "rollout-readiness=fail"
 assert_not_exists "$WRAPPER_SENTINEL"
+
+assert_fails_contains \
+  "FileProvider plugin registration does not point at expected app path" \
+  env "${COMMON_ENV[@]}" TCFS_FAKE_PLUGIN_APP_PATH="$TMPDIR/shadow/TCFSProvider.app" "$SCRIPT"
+assert_contains "$TMPDIR/failure.combined" "rollout-readiness=fail"
 
 printf 'macOS TCFS rollout readiness tests passed\n'

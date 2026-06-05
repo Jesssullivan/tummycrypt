@@ -22,7 +22,7 @@ Options:
                                  (default: ~/Library/LaunchAgents/dev.tinyland.tcfsd.plist)
   --launch-label <label>         launchd label (default: dev.tinyland.tcfsd)
   --app-path <path>              TCFSProvider.app path
-                                 (default: ~/Applications/TCFSProvider.app)
+                                 (default: /Applications/TCFSProvider.app)
   --plugin-id <id>               FileProvider extension id
                                  (default: io.tinyland.tcfs.fileprovider)
   --status-timeout <seconds>     Bound tcfs status (default: 8)
@@ -38,7 +38,7 @@ EXPECTED_TUMMYCRYPT_REV="${TCFS_EXPECTED_TUMMYCRYPT_REV:-}"
 LAB_ROOT="${TCFS_LAB_ROOT:-$HOME/git/lab}"
 LAUNCH_AGENT="${TCFS_LAUNCH_AGENT:-$HOME/Library/LaunchAgents/dev.tinyland.tcfsd.plist}"
 LAUNCH_LABEL="${TCFS_LAUNCH_LABEL:-dev.tinyland.tcfsd}"
-APP_PATH="${TCFS_APP_PATH:-$HOME/Applications/TCFSProvider.app}"
+APP_PATH="${TCFS_APP_PATH:-/Applications/TCFSProvider.app}"
 PLUGIN_ID="${TCFS_PLUGIN_ID:-io.tinyland.tcfs.fileprovider}"
 STATUS_TIMEOUT="${TCFS_STATUS_TIMEOUT:-8}"
 SKIP_STATUS="${TCFS_SKIP_STATUS:-0}"
@@ -279,14 +279,16 @@ check_app_bundle() {
 check_pluginkit() {
   local output
   local count
+  local expected_extension
 
   if ! command -v "$PLUGINKIT_BIN" >/dev/null 2>&1; then
     warn "pluginkit not found"
     return
   fi
 
-  output="$("$PLUGINKIT_BIN" -m -A -p com.apple.fileprovider-nonui 2>&1 || true)"
+  output="$("$PLUGINKIT_BIN" -m -A -D -vvv -p com.apple.fileprovider-nonui 2>&1 || true)"
   count="$(grep -F -c "$PLUGIN_ID" <<<"$output" || true)"
+  expected_extension="$APP_PATH/Contents/Extensions/TCFSFileProvider.appex"
 
   note "FileProvider plugin registrations for $PLUGIN_ID: $count"
   case "$count" in
@@ -294,6 +296,15 @@ check_pluginkit() {
     1) ;;
     *) fail "multiple FileProvider plugin registrations for $PLUGIN_ID: $count" ;;
   esac
+
+  if [[ "$count" == "1" ]]; then
+    if grep -Fq "Path = $expected_extension" <<<"$output" \
+      || grep -Fq "Parent Bundle = $APP_PATH" <<<"$output"; then
+      note "FileProvider plugin registration path: matches app path"
+    else
+      fail "FileProvider plugin registration does not point at expected app path: $APP_PATH"
+    fi
+  fi
 }
 
 check_status() {
