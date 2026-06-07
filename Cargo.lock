@@ -5316,6 +5316,7 @@ dependencies = [
  "tcfs-chunks",
  "tcfs-core",
  "tcfs-crypto",
+ "tcfs-secrets",
  "tcfs-storage",
  "tcfs-sync",
  "tempfile",

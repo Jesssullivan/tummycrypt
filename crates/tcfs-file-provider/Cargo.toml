@@ -16,7 +16,7 @@ direct = ["dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:tcfs-sy
 ## gRPC backend — delegates metadata/watch operations to tcfsd daemon and
 ## downloads file content in-process so FileProvider temp files are written by
 ## the extension, not by the daemon.
-grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream", "dep:futures", "dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:tcfs-sync", "tcfs-sync/crypto", "dep:opendal", "dep:base64"]
+grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream", "dep:futures", "dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:tcfs-sync", "tcfs-sync/crypto", "dep:tcfs-secrets", "dep:opendal", "dep:base64"]
 ## UniFFI bindings for iOS (proc-macro based, no UDL needed)
 uniffi = ["direct", "dep:uniffi", "dep:tcfs-auth", "dep:blake3"]
 
@@ -26,6 +26,7 @@ tcfs-storage = { path = "../tcfs-storage", optional = true }
 tcfs-chunks = { path = "../tcfs-chunks", optional = true }
 tcfs-crypto = { path = "../tcfs-crypto", optional = true }
 tcfs-sync = { path = "../tcfs-sync", optional = true }
+tcfs-secrets = { path = "../tcfs-secrets", optional = true }
 secrecy = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 opendal = { workspace = true, optional = true }

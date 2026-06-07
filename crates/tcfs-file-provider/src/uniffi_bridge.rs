@@ -305,6 +305,17 @@ impl TcfsProviderHandle {
                 message: e.to_string(),
             })?;
 
+            // Fail CLOSED on per-device manifests: this backend only unwraps
+            // master-wrapped keys. A `wrapped_file_keys` manifest would
+            // otherwise fall through to "no file key" and copy raw ciphertext.
+            if !manifest.wrapped_file_keys.is_empty() {
+                return Err(ProviderError::Decryption {
+                    message: "manifest is per-device encrypted (wrapped_file_keys present); \
+                              this backend only supports master-key unwrapping"
+                        .to_string(),
+                });
+            }
+
             let file_key = match (&self.master_key, &manifest.encrypted_file_key) {
                 (Some(mk), Some(wrapped_b64)) => {
                     let wrapped = base64::engine::general_purpose::STANDARD
@@ -400,6 +411,15 @@ impl TcfsProviderHandle {
             .map_err(|e| ProviderError::Storage {
                 message: e.to_string(),
             })?;
+
+            // Fail CLOSED on per-device manifests (see hydrate path above).
+            if !manifest.wrapped_file_keys.is_empty() {
+                return Err(ProviderError::Decryption {
+                    message: "manifest is per-device encrypted (wrapped_file_keys present); \
+                              this backend only supports master-key unwrapping"
+                        .to_string(),
+                });
+            }
 
             // Unwrap file key if encrypted
             let file_key = match (&self.master_key, &manifest.encrypted_file_key) {

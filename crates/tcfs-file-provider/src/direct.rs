@@ -395,6 +395,11 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
             let manifest =
                 tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())?;
 
+            // Fail CLOSED on per-device manifests: this direct backend only
+            // unwraps master-wrapped keys. A `wrapped_file_keys` manifest would
+            // otherwise fall through to "no file key" and copy raw ciphertext.
+            crate::device_ctx::ensure_master_decryptable(&manifest)?;
+
             // Unwrap file key if E2EE manifest
             let file_key = match (&prov.master_key, &manifest.encrypted_file_key) {
                 (Some(mk), Some(wrapped_b64)) => {
@@ -515,6 +520,9 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
             let manifest_bytes = prov.operator.read(&manifest_path).await?;
             let manifest =
                 tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())?;
+
+            // Fail CLOSED on per-device manifests (see fetch path above).
+            crate::device_ctx::ensure_master_decryptable(&manifest)?;
 
             let file_key = match (&prov.master_key, &manifest.encrypted_file_key) {
                 (Some(mk), Some(wrapped_b64)) => {

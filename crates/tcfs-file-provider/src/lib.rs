@@ -96,6 +96,11 @@ mod direct;
 #[cfg(any(feature = "direct", feature = "grpc"))]
 mod storage_bounds;
 
+// Device-aware encryption-context wiring (TIN-1417 / B1), shared across the
+// FileProvider backends.
+#[cfg(any(feature = "direct", feature = "grpc"))]
+mod device_ctx;
+
 #[cfg(feature = "direct")]
 pub use direct::*;
 
