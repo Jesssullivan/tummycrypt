@@ -33,6 +33,12 @@ pub struct TcfsProvider {
     /// write into the extension's sandbox temp container.
     direct_operator: Option<opendal::Operator>,
     direct_master_key: Option<tcfs_crypto::MasterKey>,
+    /// Per-device unwrap identity for reading `wrapped_file_keys` manifests
+    /// (TIN-1417). `None` (the default) preserves master-only behavior.
+    direct_device_identity: Option<tcfs_sync::engine::DeviceUnwrapIdentity>,
+    /// Active-device recipients carried alongside the identity so the read
+    /// context can be reconstructed per fetch. Empty in the default config.
+    direct_device_recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
     /// Daemon connection target for lazy reconnection.
     target: DaemonTarget,
     last_error: Mutex<Option<String>>,
@@ -215,11 +221,14 @@ fn error_code_for_fetch_error(error: &anyhow::Error) -> TcfsError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_direct_to_file(
     operator: opendal::Operator,
     remote_prefix: String,
     device_id: String,
     master_key: Option<tcfs_crypto::MasterKey>,
+    device_recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
+    device_identity: Option<tcfs_sync::engine::DeviceUnwrapIdentity>,
     remote_path: String,
     dest_path: PathBuf,
     progress: Option<tcfs_sync::engine::ProgressFn>,
@@ -229,9 +238,17 @@ async fn fetch_direct_to_file(
             .await
             .with_context(|| format!("resolving manifest for: {remote_path}"))?;
 
-    let enc_ctx = master_key
-        .as_ref()
-        .map(|mk| tcfs_sync::engine::EncryptionContext::new(mk.clone()));
+    // Build the read context with this device's unwrap identity attached
+    // (TIN-1417). With the default config `device_recipients` is empty and
+    // `device_identity` is None, so `with_device_wrapping` is a no-op and this
+    // equals the prior `EncryptionContext::new(mk)` exactly (byte-identical for
+    // master-only manifests). When a per-device (`wrapped_file_keys`) manifest
+    // is read, the engine's read switch fails CLOSED with a clear error if no
+    // identity is attached — it never silently master-falls-back.
+    let enc_ctx = master_key.as_ref().map(|mk| {
+        tcfs_sync::engine::EncryptionContext::new(mk.clone())
+            .with_device_wrapping(device_recipients, device_identity)
+    });
 
     tcfs_sync::engine::download_file_with_device(
         &operator,
@@ -303,6 +320,19 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
         let direct_operator = build_direct_operator(&config);
         let direct_master_key = master_key_from_config(&config);
 
+        // Build the DEVICE-AWARE read context once (TIN-1417). With the default
+        // config (`per_device_wrapping` absent/false) this yields an empty
+        // recipient set and no identity — byte-identical to the prior
+        // master-only behavior. When enabled, it loads this device's age secret
+        // so per-device (`wrapped_file_keys`) manifests become readable.
+        let (direct_device_recipients, direct_device_identity) = match &direct_master_key {
+            Some(mk) => {
+                let ctx = crate::device_ctx::build_encryption_context(&config, &device_id, mk);
+                (ctx.device_recipients, ctx.device_identity)
+            }
+            None => (Vec::new(), None),
+        };
+
         // Multi-threaded runtime with 2 workers — one for the background watch
         // stream, one for synchronous FFI calls (enumerate, fetch, upload).
         // The gRPC backend only does network I/O (no file coordination), so
@@ -331,6 +361,8 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
             device_id,
             direct_operator,
             direct_master_key,
+            direct_device_identity,
+            direct_device_recipients,
             target,
             last_error: Mutex::new(None),
         }))
@@ -603,6 +635,8 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
         let remote_prefix = prov.remote_prefix.clone();
         let device_id = prov.device_id.clone();
         let direct_master_key = prov.direct_master_key.clone();
+        let direct_device_recipients = prov.direct_device_recipients.clone();
+        let direct_device_identity = prov.direct_device_identity.clone();
         let target = prov.target.clone();
 
         let fetch_result = std::thread::spawn(move || {
@@ -615,6 +649,8 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
                     remote_prefix,
                     device_id,
                     direct_master_key,
+                    direct_device_recipients,
+                    direct_device_identity,
                     remote,
                     dest,
                     None,
@@ -713,6 +749,8 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
         let remote_prefix = prov.remote_prefix.clone();
         let device_id = prov.device_id.clone();
         let direct_master_key = prov.direct_master_key.clone();
+        let direct_device_recipients = prov.direct_device_recipients.clone();
+        let direct_device_identity = prov.direct_device_identity.clone();
         let target = prov.target.clone();
 
         let fetch_result = std::thread::spawn(move || {
@@ -734,6 +772,8 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
                     remote_prefix,
                     device_id,
                     direct_master_key,
+                    direct_device_recipients,
+                    direct_device_identity,
                     remote,
                     dest,
                     progress,
