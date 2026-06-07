@@ -986,14 +986,25 @@ pub struct EncryptionContext {
     pub master_key: tcfs_crypto::MasterKey,
     /// Active-device recipients for per-device FileKey wrapping (TIN-1417).
     ///
-    /// When non-empty, writes emit per-device `wrapped_file_keys` and OMIT the
-    /// master-wrapped `encrypted_file_key`, so a device removed from this set
-    /// (revoked) cannot decrypt newly written content. Empty = legacy
-    /// shared-master behavior.
+    /// When non-empty, writes emit per-device `wrapped_file_keys`. By default
+    /// (`strict_device_wrap == false`) this is a Phase-1 DUAL-WRITE: the
+    /// master-wrapped `encrypted_file_key` is ALSO kept as a rollback fallback,
+    /// so both per-device and master-key readers can decrypt. When
+    /// `strict_device_wrap` is true the master wrap is OMITTED (clean-cut), so a
+    /// device removed from this set (revoked) cannot decrypt newly written
+    /// content. Empty = legacy shared-master behavior.
     pub device_recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
     /// This device's age identity, used to unwrap per-device manifests on read.
     /// `None` relies on the master-key fallback (legacy manifests).
     pub device_identity: Option<DeviceUnwrapIdentity>,
+    /// Strict (CONTRACT) per-device wrapping. Only consulted when
+    /// `device_recipients` is non-empty. When false (default), the write path
+    /// DUAL-WRITES both the master wrap and the per-device wraps (rollback
+    /// cushion). When true, the master wrap is dropped and only
+    /// `wrapped_file_keys` is emitted — the original TIN-1417 clean-cut. Safe to
+    /// enable only after a fleet roll-call. Maps to
+    /// `crypto.per_device_wrap_strict`.
+    pub strict_device_wrap: bool,
 }
 
 /// A local device's age X25519 identity for unwrapping per-device manifests.
@@ -1014,10 +1025,15 @@ impl EncryptionContext {
             master_key,
             device_recipients: Vec::new(),
             device_identity: None,
+            strict_device_wrap: false,
         }
     }
 
     /// Attach per-device wrapping recipients and this device's unwrap identity.
+    ///
+    /// Leaves `strict_device_wrap` at its current value (default false =
+    /// dual-write). Use [`Self::with_strict_device_wrap`] to opt into the
+    /// master-omitted clean-cut after a fleet roll-call.
     pub fn with_device_wrapping(
         mut self,
         recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
@@ -1025,6 +1041,15 @@ impl EncryptionContext {
     ) -> Self {
         self.device_recipients = recipients;
         self.device_identity = identity;
+        self
+    }
+
+    /// Set strict (CONTRACT) per-device wrapping: when `true`, the write path
+    /// drops the master wrap and emits ONLY `wrapped_file_keys`. When `false`
+    /// (default) it dual-writes both the master wrap and the per-device wraps as
+    /// a rollback cushion. Maps to `crypto.per_device_wrap_strict`.
+    pub fn with_strict_device_wrap(mut self, strict: bool) -> Self {
+        self.strict_device_wrap = strict;
         self
     }
 }
@@ -1850,10 +1875,14 @@ async fn upload_file_with_device_with_state(
     ensure_source_matches_snapshot(local_path, &snapshot, "manifest publish")?;
 
     // Wrap the file key for the manifest. With per-device recipients (TIN-1417)
-    // we emit only per-device `wrapped_file_keys` and OMIT the master-wrapped
-    // `encrypted_file_key`, so a revoked device (absent from the recipient set)
-    // cannot decrypt new content. Without recipients we keep the legacy
-    // shared-master wrap for backward compatibility.
+    // we emit per-device `wrapped_file_keys`. By default this is a Phase-1
+    // DUAL-WRITE: we ALSO keep the master-wrapped `encrypted_file_key` as a
+    // rollback fallback, so per-device readers and master-key/old-binary readers
+    // can both decrypt. When `strict_device_wrap` is set (the CONTRACT switch,
+    // `crypto.per_device_wrap_strict`, only after a fleet roll-call) we OMIT the
+    // master wrap, so a revoked device (absent from the recipient set) cannot
+    // decrypt new content. Without recipients we keep the legacy shared-master
+    // wrap for backward compatibility.
     #[cfg(feature = "crypto")]
     let (encrypted_file_key, wrapped_file_keys) = if let (Some(ctx), Some(ref fk)) =
         (encryption, &file_key)
@@ -1874,7 +1903,19 @@ async fn upload_file_with_device_with_state(
                     wrapped_key: w.wrapped_key,
                 })
                 .collect();
-            (None, wrapped)
+            // Dual-write (default): keep the master wrap as a rollback fallback.
+            // Strict: drop it (clean-cut, no master-key rollback).
+            let master_b64 = if ctx.strict_device_wrap {
+                None
+            } else {
+                let master_wrapped = tcfs_crypto::wrap_key(&ctx.master_key, fk)
+                    .context("wrapping file key under master (dual-write fallback)")?;
+                Some(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &master_wrapped,
+                ))
+            };
+            (master_b64, wrapped)
         }
     } else {
         (None, Vec::new())

@@ -329,12 +329,24 @@ pub struct CryptoConfig {
     /// Generated once per vault. If unset and passphrase_file is used, a random
     /// salt is generated and must be persisted by the caller.
     pub kdf_salt: Option<String>,
-    /// Wrap file keys per-device (age/X25519) for non-revoked devices instead of
-    /// under the shared master key (TIN-1417). When true, new manifests carry
-    /// `wrapped_file_keys` and omit `encrypted_file_key`, so a revoked device
-    /// cannot decrypt newly written content. Default false (legacy shared-master)
-    /// until a fleet has real per-device identities enrolled.
+    /// Wrap file keys per-device (age/X25519) for non-revoked devices in addition
+    /// to the shared master key (TIN-1417). This is the EXPAND switch: when true,
+    /// new manifests carry `wrapped_file_keys`. By default it remains a Phase-1
+    /// DUAL-WRITE — manifests ALSO keep the master-wrapped `encrypted_file_key`
+    /// as a rollback fallback readable by old binaries and the master-key path —
+    /// so per-device readers and master-key readers can both decrypt. Default
+    /// false (legacy shared-master) until a fleet has real per-device identities
+    /// enrolled. See `per_device_wrap_strict` to CONTRACT (drop the master wrap).
     pub per_device_wrapping: bool,
+    /// Strict per-device wrapping: the CONTRACT switch (TIN-1417 Phase-2). Only
+    /// meaningful when `per_device_wrapping` is true. When true, new manifests
+    /// OMIT the master-wrapped `encrypted_file_key` and carry ONLY
+    /// `wrapped_file_keys`, so a revoked device (absent from the recipient set)
+    /// cannot decrypt newly written content AND there is no master-key rollback.
+    /// This is unreadable by old binaries / the master-key-only path, so it is
+    /// only safe after a fleet roll-call confirms every active device has a real
+    /// per-device identity enrolled. Default false (dual-write rollback cushion).
+    pub per_device_wrap_strict: bool,
 }
 
 impl Default for CryptoConfig {
@@ -349,6 +361,7 @@ impl Default for CryptoConfig {
             passphrase_file: None,
             kdf_salt: None,
             per_device_wrapping: false,
+            per_device_wrap_strict: false,
         }
     }
 }

@@ -1,11 +1,16 @@
 //! Integration tests for per-device file-key wrapping (TIN-1417).
 //!
-//! Exercises the real engine write/read paths to prove:
+//! Exercises the real engine write/read paths. These tests cover the STRICT
+//! (CONTRACT / clean-cut) mode — `EncryptionContext::with_strict_device_wrap(true)`,
+//! i.e. `crypto.per_device_wrap_strict = true` — to prove:
 //! - per-device recipients produce `wrapped_file_keys` and OMIT the
 //!   master-wrapped `encrypted_file_key` (clean-cut), and every recipient can
 //!   hydrate exact bytes;
 //! - a revoked device (absent from the recipient set on a new write) cannot
 //!   decrypt content written after revocation, while an active device can.
+//!
+//! The default Phase-1 DUAL-WRITE mode (strict off) is covered in
+//! `per_device_dual_write_test.rs`.
 
 #![cfg(feature = "crypto")]
 
@@ -55,7 +60,8 @@ async fn per_device_wrap_roundtrip_and_manifest_shape() {
     let (rec_b, id_b) = device("device-b");
 
     let write_ctx = EncryptionContext::new(master())
-        .with_device_wrapping(vec![rec_a, rec_b], Some(id_a.clone()));
+        .with_device_wrapping(vec![rec_a, rec_b], Some(id_a.clone()))
+        .with_strict_device_wrap(true);
 
     let content = b"per-device wrapped payload that should round-trip exactly";
     let src = tmp.path().join("doc.txt");
@@ -118,8 +124,10 @@ async fn revoked_device_cannot_decrypt_new_content() {
     let (_rec_b, id_b) = device("device-b");
 
     // New content is written for the active set [A] only — B has been revoked.
-    let write_ctx =
-        EncryptionContext::new(master()).with_device_wrapping(vec![rec_a], Some(id_a.clone()));
+    // Strict (clean-cut): no master rollback, so revocation is total.
+    let write_ctx = EncryptionContext::new(master())
+        .with_device_wrapping(vec![rec_a], Some(id_a.clone()))
+        .with_strict_device_wrap(true);
 
     let content = b"content written after device-b was revoked";
     let src = tmp.path().join("after-revoke.txt");

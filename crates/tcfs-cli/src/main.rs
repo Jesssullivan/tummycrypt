@@ -1105,6 +1105,11 @@ fn resolve_sync_status_lookup_path(path: &Path) -> Result<PathBuf> {
 /// recipients. Falls back to legacy shared-master wrapping (logging why) if the
 /// registry can't be loaded, has no real recipients, or this device's age secret
 /// is missing — never producing content this device cannot read back.
+///
+/// By default (Phase-1) the write path DUAL-WRITES: per-device `wrapped_file_keys`
+/// plus the master-wrapped `encrypted_file_key` as a rollback fallback. Setting
+/// `crypto.per_device_wrap_strict` flips it to the CONTRACT (clean-cut) behavior
+/// that drops the master wrap — only safe after a fleet roll-call.
 fn build_encryption_context(
     config: &tcfs_core::config::TcfsConfig,
     device_id: &str,
@@ -1156,6 +1161,7 @@ fn build_encryption_context(
         }
     };
     base.with_device_wrapping(recipients, Some(identity))
+        .with_strict_device_wrap(config.crypto.per_device_wrap_strict)
 }
 
 // ── `tcfs push` ───────────────────────────────────────────────────────────────
