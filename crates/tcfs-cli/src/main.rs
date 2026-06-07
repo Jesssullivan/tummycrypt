@@ -3896,6 +3896,27 @@ struct FileProviderInitConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     daemon_socket: Option<String>,
     master_key_file: String,
+    /// Per-device file-key wrapping (TIN-1417 / Track B1). Mirrors
+    /// `crypto.per_device_wrapping` from the active config. The FileProvider
+    /// extension reads this key to decide whether to build a device-aware
+    /// `EncryptionContext` (see `tcfs-file-provider` `device_ctx`). Omitted
+    /// from the rendered JSON when false so the default-off output stays
+    /// byte-identical to the legacy master-only bootstrap.
+    #[serde(skip_serializing_if = "is_false")]
+    per_device_wrapping: bool,
+    /// Path to the device registry (`devices.json`) the FileProvider must read
+    /// to resolve active age recipients + this device's secret
+    /// (`device-<id>.age` alongside it). Only emitted when
+    /// `per_device_wrapping` is true; the extension otherwise falls back to its
+    /// own default registry path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_registry_path: Option<String>,
+}
+
+/// `skip_serializing_if` predicate so `per_device_wrapping` is omitted from the
+/// rendered FileProvider JSON when off, keeping default-off output unchanged.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn build_fileprovider_init_config(
@@ -3904,6 +3925,18 @@ fn build_fileprovider_init_config(
     master_key_path: &Path,
     device_id: &str,
 ) -> FileProviderInitConfig {
+    let per_device_wrapping = config.crypto.per_device_wrapping;
+    // Only surface the device registry path when per-device wrapping is on, so
+    // the default-off rendered JSON is byte-identical to the legacy bootstrap.
+    let device_registry_path = if per_device_wrapping {
+        Some(
+            resolve_fileprovider_registry_path(config)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        None
+    };
     FileProviderInitConfig {
         s3_endpoint: config.storage.endpoint.clone(),
         s3_bucket: config.storage.bucket.clone(),
@@ -3918,7 +3951,23 @@ fn build_fileprovider_init_config(
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
         master_key_file: master_key_path.to_string_lossy().into_owned(),
+        per_device_wrapping,
+        device_registry_path,
     }
+}
+
+/// Resolve the device-registry (`devices.json`) path the FileProvider should
+/// read for per-device unwrap. Mirrors `resolve_fileprovider_device_id`: prefer
+/// the configured `sync.device_identity` registry path, falling back to the
+/// shared default. The device secret key (`device-<id>.age`) lives alongside
+/// this file and is derived by the extension via
+/// `tcfs_secrets::device::device_secret_key_path`.
+fn resolve_fileprovider_registry_path(config: &tcfs_core::config::TcfsConfig) -> PathBuf {
+    config
+        .sync
+        .device_identity
+        .clone()
+        .unwrap_or_else(tcfs_secrets::device::default_registry_path)
 }
 
 async fn write_fileprovider_init_config(
@@ -5857,6 +5906,103 @@ mod tests {
         assert_eq!(
             json["master_key_file"].as_str(),
             Some(master_key_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn build_fileprovider_init_config_omits_per_device_keys_when_disabled() {
+        // Default-off must stay byte-identical to the legacy master-only
+        // bootstrap: the per-device keys are absent from the rendered JSON.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        assert!(!config.crypto.per_device_wrapping);
+        // Even with a registry path configured, off => not emitted.
+        config.sync.device_identity = Some(dir.path().join("devices.json"));
+
+        let s3 = tcfs_secrets::S3Credentials {
+            access_key_id: "access-key".into(),
+            secret_access_key: secrecy::SecretString::from("secret-key".to_string()),
+            endpoint: config.storage.endpoint.clone(),
+            region: config.storage.region.clone(),
+        };
+        let master_key_path = dir.path().join("master.key");
+        let rendered = build_fileprovider_init_config(&config, &s3, &master_key_path, "device-1");
+
+        assert!(!rendered.per_device_wrapping);
+        assert_eq!(rendered.device_registry_path, None);
+
+        let json = serde_json::to_value(&rendered).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(
+            !obj.contains_key("per_device_wrapping"),
+            "per_device_wrapping must be omitted when off (byte-identical default)"
+        );
+        assert!(
+            !obj.contains_key("device_registry_path"),
+            "device_registry_path must be omitted when wrapping is off"
+        );
+    }
+
+    #[test]
+    fn build_fileprovider_init_config_emits_per_device_keys_when_enabled() {
+        // When per-device wrapping is on, the rendered FileProvider config must
+        // carry the keys PR #492's read path consumes: `per_device_wrapping`
+        // (true) and `device_registry_path` (the configured registry).
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = dir.path().join("devices.json");
+        let mut config = test_config(dir.path());
+        config.crypto.per_device_wrapping = true;
+        config.sync.device_identity = Some(registry_path.clone());
+
+        let s3 = tcfs_secrets::S3Credentials {
+            access_key_id: "access-key".into(),
+            secret_access_key: secrecy::SecretString::from("secret-key".to_string()),
+            endpoint: config.storage.endpoint.clone(),
+            region: config.storage.region.clone(),
+        };
+        let master_key_path = dir.path().join("master.key");
+        let rendered = build_fileprovider_init_config(&config, &s3, &master_key_path, "device-1");
+
+        assert!(rendered.per_device_wrapping);
+        assert_eq!(
+            rendered.device_registry_path.as_deref(),
+            Some(registry_path.to_string_lossy().as_ref())
+        );
+
+        let json = serde_json::to_value(&rendered).unwrap();
+        assert_eq!(json["per_device_wrapping"], serde_json::Value::Bool(true));
+        assert_eq!(
+            json["device_registry_path"].as_str(),
+            Some(registry_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn build_fileprovider_init_config_falls_back_to_default_registry_when_enabled() {
+        // With wrapping on but no explicit registry, fall back to the shared
+        // default registry path (matching the extension's own fallback).
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.crypto.per_device_wrapping = true;
+        config.sync.device_identity = None;
+
+        let s3 = tcfs_secrets::S3Credentials {
+            access_key_id: "access-key".into(),
+            secret_access_key: secrecy::SecretString::from("secret-key".to_string()),
+            endpoint: config.storage.endpoint.clone(),
+            region: config.storage.region.clone(),
+        };
+        let master_key_path = dir.path().join("master.key");
+        let rendered = build_fileprovider_init_config(&config, &s3, &master_key_path, "device-1");
+
+        assert!(rendered.per_device_wrapping);
+        assert_eq!(
+            rendered.device_registry_path,
+            Some(
+                tcfs_secrets::device::default_registry_path()
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
     }
 
