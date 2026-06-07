@@ -4106,18 +4106,9 @@ mod tests {
     /// Drive `download_file_with_device` for a symlink manifest and report
     /// whether a link was actually materialized at `local_path`.
     async fn restore_symlink(op: &Operator, manifest_path: &str, local_path: &Path) -> bool {
-        download_file_with_device(
-            op,
-            manifest_path,
-            local_path,
-            "data",
-            None,
-            "",
-            None,
-            None,
-        )
-        .await
-        .expect("download_file_with_device should not hard-error on a refused symlink");
+        download_file_with_device(op, manifest_path, local_path, "data", None, "", None, None)
+            .await
+            .expect("download_file_with_device should not hard-error on a refused symlink");
         // A refused target leaves nothing behind; a created link shows up via
         // symlink_metadata (which does not follow the link).
         std::fs::symlink_metadata(local_path)
@@ -4131,8 +4122,7 @@ mod tests {
         let op = memory_op();
         let tmp = tempfile::tempdir().unwrap();
         let local = tmp.path().join("root/sub/link");
-        let mp =
-            publish_symlink_manifest(&op, "trav", "../../.ssh/authorized_keys").await;
+        let mp = publish_symlink_manifest(&op, "trav", "../../.ssh/authorized_keys").await;
 
         let created = restore_symlink(&op, &mp, &local).await;
         assert!(!created, "`..`-escape target must not be materialized");
@@ -4162,7 +4152,10 @@ mod tests {
         let mp = publish_symlink_manifest(&op, "deny", ".gnupg/x").await;
 
         let created = restore_symlink(&op, &mp, &local).await;
-        assert!(!created, "deny-set (resolved) target must not be materialized");
+        assert!(
+            !created,
+            "deny-set (resolved) target must not be materialized"
+        );
         assert!(std::fs::symlink_metadata(&local).is_err());
     }
 
@@ -4176,7 +4169,10 @@ mod tests {
         let mp = publish_symlink_manifest(&op, "ok", "sibling.txt").await;
 
         let created = restore_symlink(&op, &mp, &local).await;
-        assert!(created, "benign in-root relative target must still be created");
+        assert!(
+            created,
+            "benign in-root relative target must still be created"
+        );
         let read_back = std::fs::read_link(&local).unwrap();
         assert_eq!(read_back, Path::new("sibling.txt"));
     }
