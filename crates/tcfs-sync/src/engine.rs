@@ -1993,6 +1993,24 @@ pub async fn upload_symlink_with_device(
     rel_path: &str,
 ) -> Result<UploadResult> {
     let target = read_symlink_target_text(local_path)?;
+
+    // (TIN-1737) Self-defense on the upload side: refuse to *publish* a symlink
+    // whose target is absolute, climbs out of its own directory, or resolves
+    // onto the security deny-set. The egress collector already screens targets,
+    // but this public API can be called directly, so we fail closed here too.
+    if let Err(reason) = validate_restored_symlink_target(local_path, &target) {
+        warn!(
+            local = %local_path.display(),
+            target = %target,
+            reason = %reason,
+            "refusing to upload symlink: fail-closed egress guard"
+        );
+        anyhow::bail!(
+            "refusing to upload symlink {} -> {target}: {reason}",
+            local_path.display()
+        );
+    }
+
     let symlink_hash = symlink_manifest_hash(&target);
     let remote_manifest = format!("{remote_prefix}/manifests/{symlink_hash}");
 
@@ -2111,7 +2129,18 @@ pub async fn download_file_with_device(
         .with_context(|| format!("reading manifest: {remote_manifest}"))?;
 
     if let Ok(manifest) = SymlinkManifest::from_bytes(&manifest_bytes) {
-        create_local_symlink(local_path, &manifest.symlink_target).await?;
+        let created = create_local_symlink(local_path, &manifest.symlink_target).await?;
+        if !created {
+            // Fail-closed guard refused this target (absolute / `..`-escape /
+            // deny-set). A warn was already logged; report a zero-byte no-op so
+            // a single hostile manifest does not abort the rest of the pull.
+            return Ok(DownloadResult {
+                remote_path: remote_manifest.to_string(),
+                local_path: local_path.to_path_buf(),
+                bytes: 0,
+                sync_state: None,
+            });
+        }
         let mut sync_state_for_result = None;
         if !_device_id.is_empty() {
             let mut local_vclock = state
@@ -2412,7 +2441,179 @@ pub async fn download_file_with_device(
     })
 }
 
-async fn create_local_symlink(local_path: &Path, target: &str) -> Result<()> {
+/// Why a restored symlink target was refused. Used for structured warn logging.
+///
+/// (TIN-1737) Symlink restore is an *ingress* path: a hostile peer can publish a
+/// `SymlinkManifest` whose target points outside the sync root or at a local
+/// secret store, and every pulling host would otherwise materialize it
+/// verbatim. We fail closed here, before the link is ever created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SymlinkRejection {
+    /// Target string was empty.
+    Empty,
+    /// Target is an absolute path (`/etc/passwd`, `C:\...`, UNC).
+    Absolute,
+    /// Target uses `..` to escape above the link's own directory (and therefore
+    /// the sync root, since the link is always created inside the root).
+    Traversal,
+    /// Resolved target lands on the fail-closed security deny-set
+    /// (`.ssh`, `.gnupg`, dotenv, credential files, live DBs, ...).
+    DenySet(BlacklistReason),
+}
+
+impl std::fmt::Display for SymlinkRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SymlinkRejection::Empty => write!(f, "empty target"),
+            SymlinkRejection::Absolute => write!(f, "absolute target"),
+            SymlinkRejection::Traversal => write!(f, "`..` escapes sync root"),
+            SymlinkRejection::DenySet(reason) => write!(f, "deny-set: {reason}"),
+        }
+    }
+}
+
+/// Lexically normalize `rel` (a relative path) joined onto `base`, collapsing
+/// `.` and `..` components *without touching the filesystem* (no `canonicalize`,
+/// which would follow existing links and could itself be attacker-influenced).
+///
+/// Returns the number of leading `..` components that remain after collapsing —
+/// i.e. how many directory levels the path climbs *above* `base`. Zero means the
+/// resolved path stays at or below `base`. Also returns the normalized path so
+/// callers can re-run the deny-set check across every resolved component.
+fn lexical_resolve(base: &Path, rel: &Path) -> (usize, PathBuf) {
+    use std::path::Component;
+
+    // `depth` counts directory levels we currently sit *below* `base`. Pushing a
+    // normal component descends (+1); a `..` ascends. While `depth > 0` a `..`
+    // just pops the last descent; at `depth == 0` a `..` climbs above `base` and
+    // is an escape. `escapes` is the max depth above base that we ever reach.
+    let mut components: Vec<std::ffi::OsString> = Vec::new();
+    let mut depth: usize = 0;
+    let mut escapes: usize = 0;
+
+    for comp in rel.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth > 0 {
+                    depth -= 1;
+                    components.pop();
+                } else {
+                    escapes += 1;
+                }
+            }
+            Component::Normal(name) => {
+                // Below base we track descent depth so a later `..` pops a real
+                // directory; once we have escaped above base (`escapes > 0`) the
+                // remaining names are recorded as the residual escape path only.
+                if escapes == 0 {
+                    depth += 1;
+                }
+                components.push(name.to_os_string());
+            }
+            // RootDir / Prefix should not appear here (absolute is rejected
+            // earlier), but if they do, treat conservatively as part of the path.
+            other => components.push(other.as_os_str().to_os_string()),
+        }
+    }
+
+    // Build the resolved path anchored at `base`, prefixed by any net escape.
+    let mut out = PathBuf::new();
+    if escapes == 0 {
+        out.push(base);
+    } else {
+        for _ in 0..escapes {
+            out.push("..");
+        }
+    }
+    for name in &components {
+        out.push(name);
+    }
+    (escapes, out)
+}
+
+/// Fail-closed validation for a restored symlink target (TIN-1737).
+///
+/// `local_path` is the would-be link location; `target` is the attacker-supplied
+/// link body. Rejects: empty, absolute, `..`-escape above the link's directory,
+/// or any resolved component hitting the security deny-set. Returns `Ok(())` for
+/// a benign in-root relative target.
+///
+/// NOTE: `create_local_symlink` does not receive the sync root, so the link's
+/// own parent directory is used as the escape boundary. This is *more* strict
+/// than "must stay within the sync root" (the link is always created inside the
+/// root), so it can refuse an otherwise-legitimate `../sibling/file` target that
+/// crosses one directory but stays in-root. That is the conservative, fail-closed
+/// trade-off; loosening it safely requires threading the real sync root down to
+/// every restore caller.
+fn validate_restored_symlink_target(
+    local_path: &Path,
+    target: &str,
+) -> std::result::Result<(), SymlinkRejection> {
+    if target.is_empty() {
+        return Err(SymlinkRejection::Empty);
+    }
+
+    let target_path = Path::new(target);
+
+    // (a) Absolute targets are always refused: `is_absolute` is platform-correct
+    // (covers `/etc/...`, Windows drive `C:\`, and UNC `\\server\share`).
+    if target_path.is_absolute() {
+        return Err(SymlinkRejection::Absolute);
+    }
+    // Defense-in-depth: refuse a leading `/` even if a non-unix `is_absolute`
+    // ever disagreed, and refuse a Windows-style drive/UNC prefix explicitly.
+    if target.starts_with('/') || target.starts_with('\\') {
+        return Err(SymlinkRejection::Absolute);
+    }
+    if target_path
+        .components()
+        .next()
+        .is_some_and(|c| matches!(c, std::path::Component::Prefix(_)))
+    {
+        return Err(SymlinkRejection::Absolute);
+    }
+
+    let base = local_path.parent().unwrap_or_else(|| Path::new("."));
+    let (escapes, resolved) = lexical_resolve(base, target_path);
+
+    // (b) `..` escape above the link's directory (and thus the sync root).
+    if escapes > 0 {
+        return Err(SymlinkRejection::Traversal);
+    }
+
+    // (c) Resolved target hits the fail-closed security deny-set. We reuse the
+    // egress-side `check_security_path_components`, which is config-independent.
+    // A default Blacklist is sufficient because the security deny-set is fixed.
+    let blacklist = Blacklist::default();
+    if let Some(reason) = blacklist.check_security_path_components(&resolved) {
+        return Err(SymlinkRejection::DenySet(reason));
+    }
+    // Also screen the raw target components directly, in case the resolved form
+    // (anchored at `base`) somehow masked a security name. Belt and suspenders.
+    if let Some(reason) = blacklist.check_security_path_components(target_path) {
+        return Err(SymlinkRejection::DenySet(reason));
+    }
+
+    Ok(())
+}
+
+/// Create a restored symlink after fail-closed target validation (TIN-1737).
+///
+/// Returns `Ok(true)` when the link was created, `Ok(false)` when the target was
+/// refused (skipped with a structured warn — *not* an error, so a single hostile
+/// entry does not abort the whole pull). Reserved I/O failures still return `Err`.
+async fn create_local_symlink(local_path: &Path, target: &str) -> Result<bool> {
+    if let Err(reason) = validate_restored_symlink_target(local_path, target) {
+        warn!(
+            local = %local_path.display(),
+            target = %target,
+            reason = %reason,
+            "refusing to restore symlink: fail-closed ingress guard"
+        );
+        return Ok(false);
+    }
+
     if let Some(parent) = local_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -2437,7 +2638,7 @@ async fn create_local_symlink(local_path: &Path, target: &str) -> Result<()> {
     tokio::fs::rename(&tmp, local_path)
         .await
         .with_context(|| format!("renaming symlink to: {}", local_path.display()))?;
-    Ok(())
+    Ok(true)
 }
 
 fn make_symlink_sync_state(
@@ -3881,6 +4082,135 @@ mod tests {
 
         assert_eq!(rel_names(&result.files, root), vec!["session.jsonl"]);
         assert_eq!(rel_names(&result.symlinks, root), vec!["session-link"]);
+    }
+
+    // ── symlink restore ingress guard (TIN-1737) ─────────────────────────
+
+    /// Publish a `SymlinkManifest` for `target` into a memory operator at a
+    /// deterministic manifest path and return that path.
+    async fn publish_symlink_manifest(op: &Operator, hash: &str, target: &str) -> String {
+        let manifest = SymlinkManifest::new(
+            target.to_string(),
+            VectorClock::new(),
+            "hostile-peer".to_string(),
+            0,
+            Some("link".to_string()),
+        );
+        let manifest_path = format!("data/manifests/{hash}");
+        op.write(&manifest_path, manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+        manifest_path
+    }
+
+    /// Drive `download_file_with_device` for a symlink manifest and report
+    /// whether a link was actually materialized at `local_path`.
+    async fn restore_symlink(op: &Operator, manifest_path: &str, local_path: &Path) -> bool {
+        download_file_with_device(
+            op,
+            manifest_path,
+            local_path,
+            "data",
+            None,
+            "",
+            None,
+            None,
+        )
+        .await
+        .expect("download_file_with_device should not hard-error on a refused symlink");
+        // A refused target leaves nothing behind; a created link shows up via
+        // symlink_metadata (which does not follow the link).
+        std::fs::symlink_metadata(local_path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_restore_refuses_parent_traversal_target() {
+        let op = memory_op();
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("root/sub/link");
+        let mp =
+            publish_symlink_manifest(&op, "trav", "../../.ssh/authorized_keys").await;
+
+        let created = restore_symlink(&op, &mp, &local).await;
+        assert!(!created, "`..`-escape target must not be materialized");
+        assert!(!local.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_restore_refuses_absolute_target() {
+        let op = memory_op();
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("root/link");
+        let mp = publish_symlink_manifest(&op, "abs", "/etc/passwd").await;
+
+        let created = restore_symlink(&op, &mp, &local).await;
+        assert!(!created, "absolute target must not be materialized");
+        assert!(std::fs::symlink_metadata(&local).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_restore_refuses_deny_set_target() {
+        let op = memory_op();
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("root/link");
+        // In-root relative target that lands inside a security deny-set dir.
+        let mp = publish_symlink_manifest(&op, "deny", ".gnupg/x").await;
+
+        let created = restore_symlink(&op, &mp, &local).await;
+        assert!(!created, "deny-set (resolved) target must not be materialized");
+        assert!(std::fs::symlink_metadata(&local).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_restore_allows_benign_in_root_target() {
+        let op = memory_op();
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("root/sub/link");
+        // Sibling file within the same directory — legitimate relative target.
+        let mp = publish_symlink_manifest(&op, "ok", "sibling.txt").await;
+
+        let created = restore_symlink(&op, &mp, &local).await;
+        assert!(created, "benign in-root relative target must still be created");
+        let read_back = std::fs::read_link(&local).unwrap();
+        assert_eq!(read_back, Path::new("sibling.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_restored_symlink_target_rules() {
+        let link = Path::new("/sync/root/sub/link");
+        // Refusals.
+        assert!(matches!(
+            validate_restored_symlink_target(link, ""),
+            Err(SymlinkRejection::Empty)
+        ));
+        assert!(matches!(
+            validate_restored_symlink_target(link, "/etc/passwd"),
+            Err(SymlinkRejection::Absolute)
+        ));
+        assert!(matches!(
+            validate_restored_symlink_target(link, "../../.ssh/authorized_keys"),
+            // `..`-escape is detected before the deny-set check.
+            Err(SymlinkRejection::Traversal)
+        ));
+        assert!(matches!(
+            validate_restored_symlink_target(link, ".gnupg/x"),
+            Err(SymlinkRejection::DenySet(_))
+        ));
+        assert!(matches!(
+            validate_restored_symlink_target(link, "nested/.ssh/id_ed25519"),
+            Err(SymlinkRejection::DenySet(_))
+        ));
+        // Allowed: benign in-root relative targets.
+        assert!(validate_restored_symlink_target(link, "sibling.txt").is_ok());
+        assert!(validate_restored_symlink_target(link, "./nested/file").is_ok());
+        assert!(validate_restored_symlink_target(link, "a/b/c").is_ok());
     }
 
     // ── normalize_rel_path ───────────────────────────────────────────────
