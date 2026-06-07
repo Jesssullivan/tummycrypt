@@ -89,9 +89,7 @@ pub(crate) fn build_encryption_context(
     let registry = match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(
-                "per-device wrapping: registry load failed ({e}); using master wrap"
-            );
+            tracing::warn!("per-device wrapping: registry load failed ({e}); using master wrap");
             return base;
         }
     };
@@ -158,8 +156,7 @@ mod tests {
         });
         registry.save(&registry_path).expect("save registry");
 
-        let secret_path =
-            tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
+        let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
         tcfs_secrets::device::save_device_secret_key(&secret_path, &key.secret_key, true)
             .expect("save device secret");
 
@@ -262,8 +259,7 @@ mod tests {
             .unwrap()
             .finish();
         let prefix = "test/fp-per-device";
-        let mut state =
-            tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+        let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
 
         // Build the write context from the same registry the FP read context uses.
         let enabled_config = serde_json::json!({
@@ -281,7 +277,14 @@ mod tests {
         std::fs::write(&src, content).unwrap();
 
         let up = tcfs_sync::engine::upload_file_with_device(
-            &op, &src, prefix, &mut state, None, "device-a", None, Some(&write_ctx),
+            &op,
+            &src,
+            prefix,
+            &mut state,
+            None,
+            "device-a",
+            None,
+            Some(&write_ctx),
         )
         .await
         .expect("per-device upload should succeed");
@@ -298,7 +301,14 @@ mod tests {
         let read_ctx = build_encryption_context(&enabled_config, "device-a", &master());
         let dst_ok = tmp.path().join("ok.txt");
         tcfs_sync::engine::download_file_with_device(
-            &op, &up.remote_path, &dst_ok, prefix, None, "device-a", None, Some(&read_ctx),
+            &op,
+            &up.remote_path,
+            &dst_ok,
+            prefix,
+            None,
+            "device-a",
+            None,
+            Some(&read_ctx),
         )
         .await
         .expect("device-aware FP context should read per-device manifest");
@@ -311,7 +321,14 @@ mod tests {
         assert!(master_only.device_identity.is_none());
         let dst_closed = tmp.path().join("closed.txt");
         let res = tcfs_sync::engine::download_file_with_device(
-            &op, &up.remote_path, &dst_closed, prefix, None, "device-a", None, Some(&master_only),
+            &op,
+            &up.remote_path,
+            &dst_closed,
+            prefix,
+            None,
+            "device-a",
+            None,
+            Some(&master_only),
         )
         .await;
         assert!(
@@ -334,8 +351,7 @@ mod tests {
             .unwrap()
             .finish();
         let prefix = "test/fp-master-only";
-        let mut state =
-            tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+        let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
 
         // Legacy master-only write (no per-device recipients).
         let write_ctx = tcfs_sync::engine::EncryptionContext::new(master());
@@ -344,7 +360,14 @@ mod tests {
         std::fs::write(&src, content).unwrap();
 
         let up = tcfs_sync::engine::upload_file_with_device(
-            &op, &src, prefix, &mut state, None, "device-a", None, Some(&write_ctx),
+            &op,
+            &src,
+            prefix,
+            &mut state,
+            None,
+            "device-a",
+            None,
+            Some(&write_ctx),
         )
         .await
         .expect("master-only upload should succeed");
@@ -360,7 +383,14 @@ mod tests {
         let read_ctx = build_encryption_context(&serde_json::json!({}), "device-a", &master());
         let dst = tmp.path().join("out.txt");
         tcfs_sync::engine::download_file_with_device(
-            &op, &up.remote_path, &dst, prefix, None, "device-a", None, Some(&read_ctx),
+            &op,
+            &up.remote_path,
+            &dst,
+            prefix,
+            None,
+            "device-a",
+            None,
+            Some(&read_ctx),
         )
         .await
         .expect("default FP context must read master-only manifest unchanged");
