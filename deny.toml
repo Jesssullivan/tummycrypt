@@ -13,6 +13,7 @@ targets = [
 ignore = [
     "RUSTSEC-2025-0141",  # bincode unmaintained — transitive dep, no direct usage
     "RUSTSEC-2026-0097",  # rand 0.8.5 unsound with custom logger — transitive via age, no custom logger in TCFS
+    "RUSTSEC-2026-0173",  # proc-macro-error2 unmaintained — build-time proc-macro dep via age→i18n-embed-fl; no runtime or security impact
     # RUSTSEC-2025-0067/0068 removed: serde_yml migrated to serde_norway
 ]
 
