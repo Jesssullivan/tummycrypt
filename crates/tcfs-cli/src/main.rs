@@ -740,7 +740,7 @@ async fn main() -> Result<()> {
                 sync_remote,
             } => cmd_device_enroll(&config, name, repair_placeholder, sync_remote).await,
             DeviceAction::List => cmd_device_list(),
-            DeviceAction::Revoke { name } => cmd_device_revoke(&name),
+            DeviceAction::Revoke { name } => cmd_device_revoke(&config, &name),
             DeviceAction::Status => cmd_device_status(),
             DeviceAction::Invite { expiry_hours, qr } => {
                 cmd_device_invite(&config, expiry_hours, qr).await
@@ -963,7 +963,10 @@ fn load_device_id(config: &tcfs_core::config::TcfsConfig) -> String {
                     let new_id = registry
                         .backfill_device_id(&device_name)
                         .expect("backfill_device_id with valid device name");
-                    if let Err(e) = registry.save(&registry_path) {
+                    // TIN-1417 B4: keep the signature valid after a backfill write.
+                    if let Err(e) =
+                        save_registry_signed_or_warn(&mut registry, &registry_path, config)
+                    {
                         eprintln!("warning: failed to save backfilled device registry: {e}");
                     } else {
                         eprintln!(
@@ -1130,11 +1133,24 @@ fn build_encryption_context(
         .device_identity
         .clone()
         .unwrap_or_else(tcfs_secrets::device::default_registry_path);
-    let registry = match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
-        Ok(r) => r,
+    // TIN-1417 B4: build recipients only from a signature-VERIFIED registry;
+    // an unsigned/tampered registry falls back to the shared master wrap.
+    let registry = match tcfs_secrets::device::DeviceRegistry::load_verified(
+        &registry_path,
+        master_key.as_bytes(),
+    ) {
+        Ok((r, tcfs_secrets::device::RegistryTrust::Signed)) => r,
+        Ok((_, tcfs_secrets::device::RegistryTrust::UnsignedLegacy)) => {
+            tracing::warn!(
+                "wrap_mode={requested:?}: device registry is UNSIGNED (legacy); refusing \
+                 per-device recipients from an unverified registry — using master wrap."
+            );
+            return base;
+        }
         Err(e) => {
             tracing::warn!(
-                "wrap_mode={requested:?}: registry load failed ({e}); using master wrap"
+                "wrap_mode={requested:?}: device registry FAILED signature verification ({e}); \
+                 refusing per-device recipients — using master wrap (fail-closed)"
             );
             return base;
         }
@@ -3649,7 +3665,9 @@ async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'
     let (device_id, device_key) = registry.enroll_local(&device_name, None);
     let device_key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id);
     tcfs_secrets::device::save_device_secret_key(&device_key_path, &device_key.secret_key, false)?;
-    registry.save(&registry_path)?;
+    // TIN-1417 B4: sign the registry with the freshly written master key so the
+    // very first registry on disk is signed (no migration window for new setups).
+    registry.save_signed(&registry_path, master_key.as_bytes())?;
 
     let init_config = build_init_config(config, &master_key_path, &registry_path, &device_name);
     if !skip_config {
@@ -4169,12 +4187,14 @@ fn cmd_device_list() -> Result<()> {
 
 // ── `tcfs device revoke` ─────────────────────────────────────────────────────
 
-fn cmd_device_revoke(name: &str) -> Result<()> {
+fn cmd_device_revoke(config: &tcfs_core::config::TcfsConfig, name: &str) -> Result<()> {
     let registry_path = tcfs_secrets::device::default_registry_path();
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
 
     if registry.revoke(name) {
-        registry.save(&registry_path)?;
+        // TIN-1417 B4: re-sign so the revocation is recorded in a signed envelope
+        // (revoked + revoked_at), making per-device revocation trustworthy.
+        save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
         println!("Revoked device: {}", name);
     } else {
         anyhow::bail!("Device '{}' not found", name);
@@ -4236,15 +4256,38 @@ async fn cmd_device_enroll(
         enrolled_or_repaired = true;
     }
 
-    registry.save(&registry_path)?;
+    save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
 
     if sync_remote {
         let op = build_operator(config).await?;
         let meta_prefix = config.storage.resolved_prefix();
-        let remote = tcfs_secrets::device::DeviceRegistry::load_remote(&op, meta_prefix).await?;
+        // TIN-1417 B4: verify the remote registry before merging so a tampered
+        // remote registry is rejected rather than silently merged into ours.
+        let remote = match master_key_for_registry_signing(config) {
+            Some(mk) => {
+                let (remote, _trust) = tcfs_secrets::device::DeviceRegistry::load_remote_verified(
+                    &op,
+                    meta_prefix,
+                    mk.as_bytes(),
+                )
+                .await?;
+                remote
+            }
+            None => tcfs_secrets::device::DeviceRegistry::load_remote(&op, meta_prefix).await?,
+        };
         merge_device_registry(&mut registry, &remote)?;
-        tcfs_secrets::device::DeviceRegistry::sync_to_remote(&registry, &op, meta_prefix).await?;
-        registry.save(&registry_path)?;
+        match master_key_for_registry_signing(config) {
+            Some(mk) => {
+                registry
+                    .sync_to_remote_signed(&op, meta_prefix, mk.as_bytes())
+                    .await?
+            }
+            None => {
+                tcfs_secrets::device::DeviceRegistry::sync_to_remote(&registry, &op, meta_prefix)
+                    .await?
+            }
+        }
+        save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
     }
 
     if enrolled_or_repaired {
@@ -4954,6 +4997,39 @@ fn read_rotation_state(path: &Path) -> Result<KeyRotationState> {
     let data = std::fs::read(path)
         .with_context(|| format!("reading key rotation state: {}", path.display()))?;
     serde_json::from_slice(&data).context("parsing key rotation state")
+}
+
+/// Best-effort load of the master key for *signing the device registry*
+/// (TIN-1417 B4). Returns `None` (with a loud warning) when no master key file is
+/// configured/readable, so registry mutations still succeed but leave the
+/// registry unsigned for the migration window instead of hard-failing.
+fn master_key_for_registry_signing(
+    config: &tcfs_core::config::TcfsConfig,
+) -> Option<tcfs_crypto::MasterKey> {
+    let path = config.crypto.master_key_file.as_ref()?;
+    match read_master_key(path) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            tracing::warn!(
+                "TIN-1417 B4: cannot read master key for registry signing ({e}); the device \
+                 registry will be written UNSIGNED. Per-device wrapping will refuse to trust it."
+            );
+            None
+        }
+    }
+}
+
+/// Sign (if a master key is available) and save the registry to disk. Falls back
+/// to an unsigned save with a warning when no master key is configured.
+fn save_registry_signed_or_warn(
+    registry: &mut tcfs_secrets::device::DeviceRegistry,
+    path: &Path,
+    config: &tcfs_core::config::TcfsConfig,
+) -> Result<()> {
+    match master_key_for_registry_signing(config) {
+        Some(mk) => registry.save_signed(path, mk.as_bytes()),
+        None => registry.save(path),
+    }
 }
 
 fn read_master_key(path: &Path) -> Result<tcfs_crypto::MasterKey> {

@@ -243,6 +243,31 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         warn!("E2E encryption: configured but master key unavailable");
     }
 
+    // TIN-1417 B4: ensure the on-disk device registry is signed with the
+    // master-derived key. The auto-enroll above runs before the master key is
+    // available, so a first-run registry is written unsigned; re-sign it here so
+    // per-device wrapping can trust it. Best-effort: a load/verify failure here
+    // (e.g. a registry signed by a *different* master) is logged, not fatal.
+    if let Some(ref mk) = master_key {
+        match tcfs_secrets::device::DeviceRegistry::load_verified(&registry_path, mk.as_bytes()) {
+            Ok((_, tcfs_secrets::device::RegistryTrust::Signed)) => {}
+            Ok((mut reg, tcfs_secrets::device::RegistryTrust::UnsignedLegacy)) => {
+                if let Err(e) = reg.save_signed(&registry_path, mk.as_bytes()) {
+                    warn!("TIN-1417 B4: failed to sign device registry: {e}");
+                } else {
+                    info!("TIN-1417 B4: signed previously-unsigned device registry");
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "TIN-1417 B4: device registry failed signature verification ({e}); leaving \
+                     as-is. Per-device wrapping will refuse to trust it until re-signed with the \
+                     correct master key."
+                );
+            }
+        }
+    }
+
     // Build storage operator and verify connectivity
     let mut operator: Option<opendal::Operator> = None;
     let storage_ok = if let Some(s3) = cred_store.read().await.as_ref().and_then(|c| c.s3.as_ref())
