@@ -395,9 +395,11 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
             let manifest =
                 tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())?;
 
-            // Fail CLOSED on per-device manifests: this direct backend only
-            // unwraps master-wrapped keys. A `wrapped_file_keys` manifest would
-            // otherwise fall through to "no file key" and copy raw ciphertext.
+            // Fail CLOSED on PerDevice/v3 manifests: this direct backend only
+            // unwraps master-wrapped keys. A `wrapped_file_keys` manifest with no
+            // master wrap would otherwise fall through to "no file key" and copy
+            // raw ciphertext. Dual/v2 (both wraps present) is permitted and read
+            // via the master wrap below (TIN-1898, mirrors the engine switch).
             crate::device_ctx::ensure_master_decryptable(&manifest)?;
 
             // Unwrap file key if E2EE manifest
@@ -521,7 +523,8 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
             let manifest =
                 tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())?;
 
-            // Fail CLOSED on per-device manifests (see fetch path above).
+            // Fail CLOSED on PerDevice/v3 manifests only (see fetch path above);
+            // Dual/v2 reads via the master wrap (TIN-1898).
             crate::device_ctx::ensure_master_decryptable(&manifest)?;
 
             let file_key = match (&prov.master_key, &manifest.encrypted_file_key) {
@@ -1353,6 +1356,232 @@ mod tests {
             assert!(!item.is_directory);
 
             crate::tcfs_file_items_free(items, count);
+            tcfs_provider_free(prov);
+        }
+    }
+
+    // ── TIN-1898: Dual/master-wrap fallback on the master-only direct backend ──
+    //
+    // The direct backend carries no per-device age identity. Mirroring the engine
+    // read switch (tcfs-sync/src/engine.rs ~:2395), a Dual/v2 manifest (BOTH a
+    // master `encrypted_file_key` AND `wrapped_file_keys`) must be READABLE here
+    // via the master wrap; a PerDevice/v3 manifest (wrapped_file_keys, NO master
+    // wrap) must stay strictly FAIL-CLOSED; a plain master-only manifest is
+    // unchanged.
+
+    /// Build a `TcfsProvider` over a caller-supplied operator + master key so the
+    /// test can seed the same in-memory store the provider reads from.
+    fn master_provider_on(
+        operator: opendal::Operator,
+        prefix: &str,
+        master_key: tcfs_crypto::MasterKey,
+    ) -> *mut TcfsProvider {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        Box::into_raw(Box::new(TcfsProvider {
+            runtime,
+            operator,
+            remote_prefix: prefix.to_string(),
+            device_id: "test-device".to_string(),
+            master_key: Some(master_key),
+            last_error: Mutex::new(None),
+        }))
+    }
+
+    /// Seed a single-chunk encrypted file under `prefix` for `rel`, returning the
+    /// FileKey-derived ciphertext layout. `include_master` toggles the master
+    /// `encrypted_file_key`; `include_wraps` toggles a `wrapped_file_keys` entry.
+    ///
+    /// Combinations:
+    /// - master only       -> (true,  false): plain v2 master manifest.
+    /// - dual              -> (true,  true) : v2 with BOTH wraps.
+    /// - per-device / v3   -> (false, true) : wrapped_file_keys, NO master wrap.
+    ///
+    /// The per-device wrap is a placeholder `WrappedFileKey` — the master-only
+    /// backend never attempts to unwrap it (it has no identity), exactly as in
+    /// production; only its presence/absence drives the guard decision.
+    fn seed_encrypted_file(
+        operator: &opendal::Operator,
+        prefix: &str,
+        rel: &str,
+        content: &[u8],
+        master_key: &tcfs_crypto::MasterKey,
+        include_master: bool,
+        include_wraps: bool,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("seed runtime");
+        rt.block_on(async {
+            let file_hash = tcfs_chunks::hash_bytes(content);
+            let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
+            let file_id: [u8; 32] = *file_hash.as_bytes();
+
+            let file_key = tcfs_crypto::generate_file_key();
+            let encrypted =
+                tcfs_crypto::encrypt_chunk(&file_key, 0, &file_id, content).expect("encrypt chunk");
+            let chunk_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&encrypted));
+
+            // chunks/<hash> = encrypted chunk bytes
+            operator
+                .write(
+                    &format!("{}/chunks/{}", prefix.trim_end_matches('/'), chunk_hash),
+                    encrypted,
+                )
+                .await
+                .expect("write chunk");
+
+            let encrypted_file_key = if include_master {
+                let wrapped = tcfs_crypto::wrap_key(master_key, &file_key).expect("wrap master");
+                Some(base64::engine::general_purpose::STANDARD.encode(wrapped))
+            } else {
+                None
+            };
+            let wrapped_file_keys = if include_wraps {
+                // Placeholder per-device wrap: never unwrapped by this backend.
+                vec![tcfs_sync::manifest::WrappedFileKey {
+                    recipient_device_id: "device-b".to_string(),
+                    recipient: "age1placeholderrecipientnotparsedbymasterbackend".to_string(),
+                    algorithm: "age-x25519-file-key-v1".to_string(),
+                    wrapped_key: "PLACEHOLDER-WRAP".to_string(),
+                }]
+            } else {
+                Vec::new()
+            };
+
+            let manifest = tcfs_sync::manifest::SyncManifest {
+                // v3 iff per-device-only (no master wrap); else v2.
+                version: if include_wraps && !include_master {
+                    3
+                } else {
+                    2
+                },
+                file_hash: file_hash_hex.clone(),
+                file_size: content.len() as u64,
+                chunks: vec![chunk_hash],
+                vclock: tcfs_sync::conflict::VectorClock::default(),
+                written_by: "device-b".to_string(),
+                written_at: 0,
+                rel_path: Some(rel.to_string()),
+                mode: None,
+                encrypted_file_key,
+                wrapped_file_keys,
+            };
+
+            operator
+                .write(
+                    &format!(
+                        "{}/manifests/{}",
+                        prefix.trim_end_matches('/'),
+                        file_hash_hex
+                    ),
+                    manifest.to_bytes().expect("manifest bytes"),
+                )
+                .await
+                .expect("write manifest");
+
+            let index = tcfs_sync::index_entry::RemoteIndexEntry::new(
+                file_hash_hex,
+                content.len() as u64,
+                1,
+            );
+            operator
+                .write(
+                    &format!("{}/index/{}", prefix.trim_end_matches('/'), rel),
+                    index.to_legacy_bytes(),
+                )
+                .await
+                .expect("write index");
+        });
+    }
+
+    /// A Dual/v2 manifest (master + per-device wraps) is READABLE via the
+    /// master-only direct backend through the master wrap — fetch succeeds and
+    /// the plaintext round-trips. This is the core TIN-1898 fix.
+    #[test]
+    fn dual_manifest_reads_via_master_wrap_on_direct_backend() {
+        let operator = opendal::Operator::new(opendal::services::Memory::default())
+            .expect("memory operator")
+            .finish();
+        let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
+        let prefix = "dual";
+        let content = b"dual manifest readable via master fallback on the FP direct backend";
+        seed_encrypted_file(&operator, prefix, "dual.txt", content, &master, true, true);
+
+        let prov = master_provider_on(operator, prefix, master);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        unsafe {
+            let c_item = CString::new("dual.txt").unwrap();
+            let c_dest = CString::new(dest.to_str().unwrap()).unwrap();
+            let err = tcfs_provider_fetch(prov, c_item.as_ptr(), c_dest.as_ptr());
+            assert_eq!(
+                err,
+                TcfsError::TcfsErrorNone,
+                "Dual manifest must be readable via the master wrap"
+            );
+            assert_eq!(std::fs::read(&dest).unwrap(), content);
+            tcfs_provider_free(prov);
+        }
+    }
+
+    /// A PerDevice/v3 manifest (wrapped_file_keys, NO master wrap) still FAILS
+    /// CLOSED on the master-only direct backend: fetch errors and no file is
+    /// materialized (never raw ciphertext).
+    #[test]
+    fn per_device_manifest_fails_closed_on_direct_backend() {
+        let operator = opendal::Operator::new(opendal::services::Memory::default())
+            .expect("memory operator")
+            .finish();
+        let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
+        let prefix = "pd";
+        let content = b"per-device-only payload that the master-only backend cannot read";
+        seed_encrypted_file(&operator, prefix, "pd.txt", content, &master, false, true);
+
+        let prov = master_provider_on(operator, prefix, master);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        unsafe {
+            let c_item = CString::new("pd.txt").unwrap();
+            let c_dest = CString::new(dest.to_str().unwrap()).unwrap();
+            let err = tcfs_provider_fetch(prov, c_item.as_ptr(), c_dest.as_ptr());
+            assert_ne!(
+                err,
+                TcfsError::TcfsErrorNone,
+                "PerDevice/v3 manifest must FAIL CLOSED on the master-only backend"
+            );
+            assert!(
+                !dest.exists(),
+                "fail-closed fetch must not materialize a (corrupt) file"
+            );
+            tcfs_provider_free(prov);
+        }
+    }
+
+    /// A plain master-only manifest reads unchanged on the direct backend —
+    /// regression guard for the default `wrap_mode=master` path.
+    #[test]
+    fn master_only_manifest_reads_unchanged_on_direct_backend() {
+        let operator = opendal::Operator::new(opendal::services::Memory::default())
+            .expect("memory operator")
+            .finish();
+        let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
+        let prefix = "mo";
+        let content = b"plain master-only payload, unchanged";
+        seed_encrypted_file(&operator, prefix, "mo.txt", content, &master, true, false);
+
+        let prov = master_provider_on(operator, prefix, master);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        unsafe {
+            let c_item = CString::new("mo.txt").unwrap();
+            let c_dest = CString::new(dest.to_str().unwrap()).unwrap();
+            let err = tcfs_provider_fetch(prov, c_item.as_ptr(), c_dest.as_ptr());
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(std::fs::read(&dest).unwrap(), content);
             tcfs_provider_free(prov);
         }
     }
