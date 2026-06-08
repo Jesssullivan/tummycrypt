@@ -63,6 +63,43 @@ host_name() {
   hostname 2>/dev/null || printf 'unknown-host\n'
 }
 
+emit_candidate_paths() {
+  local root="$1"
+  local mode="$2"
+
+  (
+    cd "$root"
+    case "$mode" in
+      repo)
+        find . -type f \
+          ! -path './.git/*' \
+          ! -path './node_modules/*' \
+          ! -path './target/*' \
+          ! -path './.svelte-kit/*' \
+          ! -path './build/*' \
+          ! -path './.venv/*' \
+          -print
+        ;;
+      agent)
+        find . -type f \
+          ! -name 'auth.json' \
+          ! -name '.credentials.json' \
+          ! -name 'mcp-auth.json' \
+          ! -name 'mcp-needs-auth-cache.json' \
+          ! -name '*.sqlite' \
+          ! -name '*.db' \
+          ! -name '*-wal' \
+          ! -name '*-shm' \
+          ! -path './.cache/*' \
+          -print
+        ;;
+      *)
+        fail "unknown hash mode: $mode"
+        ;;
+    esac
+  )
+}
+
 write_tree_hashes() {
   local root="$1"
   local output="$2"
@@ -83,40 +120,12 @@ write_tree_hashes() {
   local hashed=0
   local skipped_by_count=0
   local skipped_by_size=0
-  local list_file
-  list_file="$(mktemp "${TMPDIR:-/tmp}/tcfs-git-roam-hash-list.XXXXXX")"
 
-  (
-    cd "$root"
-    case "$mode" in
-      repo)
-        find . -type f \
-          ! -path './.git/*' \
-          ! -path './node_modules/*' \
-          ! -path './target/*' \
-          ! -path './.svelte-kit/*' \
-          ! -path './build/*' \
-          ! -path './.venv/*' \
-          -print | LC_ALL=C sort
-        ;;
-      agent)
-        find . -type f \
-          ! -name 'auth.json' \
-          ! -name '.credentials.json' \
-          ! -name 'mcp-auth.json' \
-          ! -name 'mcp-needs-auth-cache.json' \
-          ! -name '*.sqlite' \
-          ! -name '*.db' \
-          ! -name '*-wal' \
-          ! -name '*-shm' \
-          ! -path './.cache/*' \
-          -print | LC_ALL=C sort
-        ;;
-      *)
-        fail "unknown hash mode: $mode"
-        ;;
-    esac
-  ) >"$list_file"
+  local list_file=""
+  if [[ "$max_files" == "0" ]]; then
+    list_file="$(mktemp "${TMPDIR:-/tmp}/tcfs-git-roam-hash-list.XXXXXX")"
+    emit_candidate_paths "$root" "$mode" | LC_ALL=C sort >"$list_file"
+  fi
 
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
@@ -141,8 +150,16 @@ write_tree_hashes() {
     hashed=$((hashed + 1))
     printf 'scanned=%s\nhashed=%s\nskipped_by_count=%s\nskipped_by_size=%s\nmax_hash_files=%s\nmax_hash_file_bytes=%s\n' \
       "$scanned" "$hashed" "$skipped_by_count" "$skipped_by_size" "$max_files" "$max_file_bytes" >"$meta_output"
-  done >"$output" <"$list_file"
-  rm -f "$list_file"
+  done >"$output" < <(
+    if [[ -n "$list_file" ]]; then
+      cat "$list_file"
+    else
+      emit_candidate_paths "$root" "$mode"
+    fi
+  )
+  if [[ -n "$list_file" ]]; then
+    rm -f "$list_file"
+  fi
 
   if [[ ! -s "$meta_output" ]]; then
     printf 'scanned=0\nhashed=0\nskipped_by_count=0\nskipped_by_size=0\nmax_hash_files=%s\nmax_hash_file_bytes=%s\n' \
