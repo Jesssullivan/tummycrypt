@@ -26,7 +26,7 @@
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -144,8 +144,15 @@ pub struct DeviceRegistry {
 pub enum RegistryTrust {
     /// Envelope carried a valid signature from the expected master-derived signer.
     Signed,
-    /// Legacy registry with no signature. Accepted only inside the migration
-    /// window; callers must treat its recipient set as UNVERIFIED.
+    /// Legacy registry with no signature. Accepted only inside the bounded
+    /// TIN-1417 B4 migration window; callers MUST treat its recipient set as
+    /// UNVERIFIED and MUST NOT launder it into a signed registry (see
+    /// `enforce_remote_merge_trust` on the enroll `--sync-remote` path).
+    ///
+    /// MIGRATION WINDOW (TODO TIN-1417 B5, hard-reject by 2026-09-01): once every
+    /// fleet has re-saved at least once with a master key, the read-side builders
+    /// and the remote-merge path should reject `UnsignedLegacy` outright instead
+    /// of falling back to the master wrap / requiring an opt-in flag.
     UnsignedLegacy,
 }
 
@@ -359,7 +366,10 @@ impl DeviceRegistry {
                     .map_err(|_| anyhow::anyhow!("registry signature is not 64 bytes"))?;
                 let signature = Signature::from_bytes(&sig_arr);
                 let payload = self.canonical_signing_payload()?;
-                expected.verify(&payload, &signature).map_err(|_| {
+                // verify_strict (not verify): rejects non-canonical / small-order
+                // signature components, closing Ed25519 malleability so a tampered
+                // registry cannot ride along on a malleable-but-valid signature.
+                expected.verify_strict(&payload, &signature).map_err(|_| {
                     anyhow::anyhow!(
                         "device registry signature FAILED verification; the device list was \
                          tampered with or re-signed by a different key"
