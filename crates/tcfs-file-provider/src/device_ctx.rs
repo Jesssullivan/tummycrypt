@@ -32,21 +32,38 @@
 /// Fail CLOSED when a manifest that this backend cannot decrypt would otherwise
 /// be copied to disk as raw ciphertext (silent corruption).
 ///
-/// The `direct`/`uniffi` backends only implement master-key unwrapping. A
-/// per-device manifest carries `wrapped_file_keys` and OMITS the master-wrapped
-/// `encrypted_file_key`, so those backends would fall through to "no file key"
-/// and write encrypted chunk bytes verbatim. This guard turns that into a loud,
-/// explicit error instead.
+/// The `direct`/`uniffi` backends only implement master-key unwrapping (they
+/// carry no per-device age identity). The decision mirrors the engine read
+/// switch (TIN-1898, `tcfs-sync/src/engine.rs` ~:2395): a manifest's
+/// `wrapped_file_keys` being non-empty is NOT on its own a reason to fail —
+/// what matters is whether a usable master wrap is also present.
+///
+/// - **Dual (v2)** manifests carry BOTH `wrapped_file_keys` AND a master
+///   `encrypted_file_key`. A backend with no per-device identity can (and must)
+///   fall back to the master wrap — exactly as the engine does. This guard
+///   therefore PERMITS Dual manifests; the master-unwrap path below handles
+///   them via `encrypted_file_key`.
+/// - **PerDevice (v3)** manifests carry `wrapped_file_keys` and OMIT the
+///   master wrap (`encrypted_file_key == None`). A master-only backend cannot
+///   decrypt them, so it would fall through to "no file key" and write
+///   encrypted chunk bytes verbatim. For these we stay strictly fail-closed and
+///   turn the situation into a loud, explicit error instead of materializing raw
+///   ciphertext.
+///
+/// In short: reject iff `wrapped_file_keys` is non-empty AND there is no master
+/// wrap to fall back to. This keeps `wrap_mode=master` and Dual content readable
+/// on the legacy backends while never silently materializing PerDevice/v3
+/// ciphertext.
 #[cfg(any(feature = "direct", test))]
 pub(crate) fn ensure_master_decryptable(
     manifest: &tcfs_sync::manifest::SyncManifest,
 ) -> anyhow::Result<()> {
-    if !manifest.wrapped_file_keys.is_empty() {
+    if !manifest.wrapped_file_keys.is_empty() && manifest.encrypted_file_key.is_none() {
         anyhow::bail!(
-            "manifest is per-device encrypted (wrapped_file_keys present) but this \
-             FileProvider backend only supports master-key unwrapping; refusing to \
-             materialize raw ciphertext. Use the gRPC backend with a device identity \
-             configured to read per-device content."
+            "manifest is per-device encrypted (wrapped_file_keys present, no master \
+             wrap) but this FileProvider backend only supports master-key unwrapping; \
+             refusing to materialize raw ciphertext. Use the gRPC backend with a device \
+             identity configured to read per-device content."
         );
     }
     Ok(())
@@ -849,10 +866,12 @@ mod tests {
         );
     }
 
-    /// The fail-loud guard for the master-only backends rejects per-device
-    /// manifests instead of copying raw ciphertext.
+    /// The fail-loud guard for the master-only backends rejects PerDevice/v3
+    /// manifests (wrapped_file_keys present, NO master wrap) instead of copying
+    /// raw ciphertext — but PERMITS Dual/v2 manifests (both wraps present) and
+    /// plain master-only manifests, mirroring the engine read switch (TIN-1898).
     #[test]
-    fn ensure_master_decryptable_rejects_per_device_manifest() {
+    fn ensure_master_decryptable_rejects_per_device_but_allows_dual_and_master() {
         let base = || tcfs_sync::manifest::SyncManifest {
             version: 2,
             file_hash: String::new(),
@@ -867,17 +886,38 @@ mod tests {
             wrapped_file_keys: Vec::new(),
         };
 
-        let mut per_device = base();
-        per_device
-            .wrapped_file_keys
-            .push(tcfs_sync::manifest::WrappedFileKey {
-                recipient_device_id: "device-a".to_string(),
-                recipient: "age1example".to_string(),
-                algorithm: "age-x25519-v1".to_string(),
-                wrapped_key: "deadbeef".to_string(),
-            });
-        assert!(ensure_master_decryptable(&per_device).is_err());
+        let wrap = || tcfs_sync::manifest::WrappedFileKey {
+            recipient_device_id: "device-a".to_string(),
+            recipient: "age1example".to_string(),
+            algorithm: "age-x25519-v1".to_string(),
+            wrapped_key: "deadbeef".to_string(),
+        };
 
+        // PerDevice/v3: wrapped_file_keys present, encrypted_file_key absent ->
+        // no master wrap to fall back to -> MUST fail closed.
+        let mut per_device = base();
+        per_device.wrapped_file_keys.push(wrap());
+        assert!(
+            ensure_master_decryptable(&per_device).is_err(),
+            "PerDevice/v3 (no master wrap) must fail closed"
+        );
+
+        // Dual/v2: BOTH wraps present -> master fallback is available -> PERMIT
+        // (the master-unwrap path handles it). Mirrors engine.rs ~:2434.
+        let mut dual = base();
+        dual.wrapped_file_keys.push(wrap());
+        dual.encrypted_file_key = Some("bWFzdGVyd3JhcA==".to_string());
+        assert!(
+            ensure_master_decryptable(&dual).is_ok(),
+            "Dual/v2 (both wraps) must be permitted via the master wrap"
+        );
+
+        // Plain master-only manifest stays readable, unchanged.
+        let mut master_only = base();
+        master_only.encrypted_file_key = Some("bWFzdGVyd3JhcA==".to_string());
+        assert!(ensure_master_decryptable(&master_only).is_ok());
+
+        // Plaintext (no wraps at all) stays readable, unchanged.
         assert!(ensure_master_decryptable(&base()).is_ok());
     }
 }

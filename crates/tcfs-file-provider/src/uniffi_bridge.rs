@@ -305,13 +305,16 @@ impl TcfsProviderHandle {
                 message: e.to_string(),
             })?;
 
-            // Fail CLOSED on per-device manifests: this backend only unwraps
-            // master-wrapped keys. A `wrapped_file_keys` manifest would
+            // Fail CLOSED on PerDevice/v3 manifests only: this backend unwraps
+            // master-wrapped keys only (no per-device age identity). A manifest
+            // with `wrapped_file_keys` AND no master `encrypted_file_key` would
             // otherwise fall through to "no file key" and copy raw ciphertext.
-            if !manifest.wrapped_file_keys.is_empty() {
+            // Dual/v2 manifests (both wraps present) are readable via the master
+            // wrap below, mirroring the engine read switch (TIN-1898).
+            if !manifest.wrapped_file_keys.is_empty() && manifest.encrypted_file_key.is_none() {
                 return Err(ProviderError::Decryption {
-                    message: "manifest is per-device encrypted (wrapped_file_keys present); \
-                              this backend only supports master-key unwrapping"
+                    message: "manifest is per-device encrypted (wrapped_file_keys present, \
+                              no master wrap); this backend only supports master-key unwrapping"
                         .to_string(),
                 });
             }
@@ -412,11 +415,13 @@ impl TcfsProviderHandle {
                 message: e.to_string(),
             })?;
 
-            // Fail CLOSED on per-device manifests (see hydrate path above).
-            if !manifest.wrapped_file_keys.is_empty() {
+            // Fail CLOSED on PerDevice/v3 manifests only (see hydrate path above):
+            // Dual/v2 (both wraps) is readable via the master wrap; only a
+            // wrapped_file_keys manifest with NO master wrap is refused.
+            if !manifest.wrapped_file_keys.is_empty() && manifest.encrypted_file_key.is_none() {
                 return Err(ProviderError::Decryption {
-                    message: "manifest is per-device encrypted (wrapped_file_keys present); \
-                              this backend only supports master-key unwrapping"
+                    message: "manifest is per-device encrypted (wrapped_file_keys present, \
+                              no master wrap); this backend only supports master-key unwrapping"
                         .to_string(),
                 });
             }
@@ -881,9 +886,197 @@ fn verify_bootstrap_signature(
     Ok(diff == 0)
 }
 
+/// Test-only constructor: build a handle directly over a caller-supplied
+/// operator + optional master key, bypassing the S3/network constructor so
+/// unit tests can seed an in-memory store and exercise the read path.
+#[cfg(test)]
+impl TcfsProviderHandle {
+    fn new_for_test(
+        operator: opendal::Operator,
+        remote_prefix: &str,
+        master_key: Option<tcfs_crypto::MasterKey>,
+    ) -> Arc<Self> {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        Arc::new(Self {
+            runtime,
+            operator,
+            remote_prefix: remote_prefix.to_string(),
+            device_id: "ios-test".to_string(),
+            master_key,
+            #[cfg(feature = "uniffi")]
+            totp_provider: Arc::new(tcfs_auth::totp::TotpProvider::new(
+                tcfs_auth::totp::TotpConfig::default(),
+            )),
+            #[cfg(feature = "uniffi")]
+            session_store: tcfs_auth::SessionStore::new(),
+        })
+    }
+}
+
 #[cfg(all(test, feature = "uniffi"))]
 mod tests {
     use super::*;
+    use base64::Engine;
+
+    /// Seed a single-chunk encrypted file under `prefix` for `rel`. See the
+    /// direct-backend `seed_encrypted_file` for the layout rationale (TIN-1898).
+    /// `include_master`/`include_wraps` select master-only / dual / per-device.
+    fn seed_encrypted_file(
+        operator: &opendal::Operator,
+        prefix: &str,
+        rel: &str,
+        content: &[u8],
+        master_key: &tcfs_crypto::MasterKey,
+        include_master: bool,
+        include_wraps: bool,
+    ) {
+        let rt = tokio::runtime::Runtime::new().expect("seed runtime");
+        rt.block_on(async {
+            let file_hash = tcfs_chunks::hash_bytes(content);
+            let file_hash_hex = tcfs_chunks::hash_to_hex(&file_hash);
+            let file_id: [u8; 32] = *file_hash.as_bytes();
+
+            let file_key = tcfs_crypto::generate_file_key();
+            let encrypted =
+                tcfs_crypto::encrypt_chunk(&file_key, 0, &file_id, content).expect("encrypt chunk");
+            let chunk_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&encrypted));
+
+            operator
+                .write(
+                    &format!("{}/chunks/{}", prefix.trim_end_matches('/'), chunk_hash),
+                    encrypted,
+                )
+                .await
+                .expect("write chunk");
+
+            let encrypted_file_key = if include_master {
+                let wrapped = tcfs_crypto::wrap_key(master_key, &file_key).expect("wrap master");
+                Some(base64::engine::general_purpose::STANDARD.encode(wrapped))
+            } else {
+                None
+            };
+            let wrapped_file_keys = if include_wraps {
+                vec![tcfs_sync::manifest::WrappedFileKey {
+                    recipient_device_id: "device-b".to_string(),
+                    recipient: "age1placeholderrecipientnotparsedbymasterbackend".to_string(),
+                    algorithm: "age-x25519-file-key-v1".to_string(),
+                    wrapped_key: "PLACEHOLDER-WRAP".to_string(),
+                }]
+            } else {
+                Vec::new()
+            };
+
+            let manifest = tcfs_sync::manifest::SyncManifest {
+                version: if include_wraps && !include_master {
+                    3
+                } else {
+                    2
+                },
+                file_hash: file_hash_hex.clone(),
+                file_size: content.len() as u64,
+                chunks: vec![chunk_hash],
+                vclock: tcfs_sync::conflict::VectorClock::default(),
+                written_by: "device-b".to_string(),
+                written_at: 0,
+                rel_path: Some(rel.to_string()),
+                mode: None,
+                encrypted_file_key,
+                wrapped_file_keys,
+            };
+
+            operator
+                .write(
+                    &format!(
+                        "{}/manifests/{}",
+                        prefix.trim_end_matches('/'),
+                        file_hash_hex
+                    ),
+                    manifest.to_bytes().expect("manifest bytes"),
+                )
+                .await
+                .expect("write manifest");
+
+            let index = tcfs_sync::index_entry::RemoteIndexEntry::new(
+                file_hash_hex,
+                content.len() as u64,
+                1,
+            );
+            operator
+                .write(
+                    &format!("{}/index/{}", prefix.trim_end_matches('/'), rel),
+                    index.to_legacy_bytes(),
+                )
+                .await
+                .expect("write index");
+        });
+    }
+
+    fn memory_operator() -> opendal::Operator {
+        opendal::Operator::new(opendal::services::Memory::default())
+            .expect("memory operator")
+            .finish()
+    }
+
+    /// TIN-1898: a Dual/v2 manifest (master + per-device wraps) is READABLE via
+    /// the master-only uniffi backend through the master wrap.
+    #[test]
+    fn dual_manifest_reads_via_master_wrap_on_uniffi_backend() {
+        let operator = memory_operator();
+        let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
+        let prefix = "dual";
+        let content = b"dual manifest readable via master fallback on the uniffi backend";
+        seed_encrypted_file(&operator, prefix, "dual.txt", content, &master, true, true);
+
+        let handle = TcfsProviderHandle::new_for_test(operator, prefix, Some(master));
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        handle
+            .hydrate_file(&format!("{prefix}/index/dual.txt"), dest.to_str().unwrap())
+            .expect("Dual manifest must hydrate via the master wrap");
+        assert_eq!(std::fs::read(&dest).unwrap(), content);
+    }
+
+    /// TIN-1898: a PerDevice/v3 manifest (wrapped_file_keys, NO master wrap)
+    /// still FAILS CLOSED on the master-only uniffi backend and writes no file.
+    #[test]
+    fn per_device_manifest_fails_closed_on_uniffi_backend() {
+        let operator = memory_operator();
+        let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
+        let prefix = "pd";
+        let content = b"per-device-only payload the uniffi master backend cannot read";
+        seed_encrypted_file(&operator, prefix, "pd.txt", content, &master, false, true);
+
+        let handle = TcfsProviderHandle::new_for_test(operator, prefix, Some(master));
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let res = handle.hydrate_file(&format!("{prefix}/index/pd.txt"), dest.to_str().unwrap());
+        assert!(
+            matches!(res, Err(ProviderError::Decryption { .. })),
+            "PerDevice/v3 must FAIL CLOSED with a Decryption error, got {res:?}"
+        );
+        assert!(
+            !dest.exists(),
+            "fail-closed hydrate must not materialize a (corrupt) file"
+        );
+    }
+
+    /// A plain master-only manifest reads unchanged on the uniffi backend.
+    #[test]
+    fn master_only_manifest_reads_unchanged_on_uniffi_backend() {
+        let operator = memory_operator();
+        let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
+        let prefix = "mo";
+        let content = b"plain master-only payload, unchanged (uniffi)";
+        seed_encrypted_file(&operator, prefix, "mo.txt", content, &master, true, false);
+
+        let handle = TcfsProviderHandle::new_for_test(operator, prefix, Some(master));
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        handle
+            .hydrate_file(&format!("{prefix}/index/mo.txt"), dest.to_str().unwrap())
+            .expect("master-only manifest must hydrate unchanged");
+        assert_eq!(std::fs::read(&dest).unwrap(), content);
+    }
 
     fn test_provider() -> Arc<TcfsProviderHandle> {
         TcfsProviderHandle::new(ProviderConfig {
