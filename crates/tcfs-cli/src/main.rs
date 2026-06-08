@@ -268,6 +268,19 @@ enum Commands {
         non_interactive: bool,
     },
 
+    /// Scoped, per-device-aware FileKey rotation (TIN-1899 / B2 forward secrecy)
+    ///
+    /// SEPARATE from `rotate-key` (which rotates the shared MASTER key and only
+    /// re-wraps master-wrapped manifests). `key rotate <prefix>` generates a
+    /// FRESH FileKey for every manifest under <prefix>, re-encrypts the content
+    /// under new BLAKE3 content addresses, and re-wraps to the CURRENT
+    /// (post-revocation) recipient set — so a revoked device that is absent from
+    /// the recipient set can no longer decrypt the re-keyed content.
+    Key {
+        #[command(subcommand)]
+        action: KeyAction,
+    },
+
     /// Reconcile local directory with remote storage
     ///
     /// Diffs local tree against remote index and shows what would change.
@@ -465,6 +478,41 @@ enum DeviceAction {
         /// Render QR code in terminal (compact encoding for phone scanning)
         #[arg(long)]
         qr: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum KeyAction {
+    /// Rotate FileKeys for all manifests under a prefix (forward secrecy).
+    ///
+    /// Without `--rotate-keys` this is a dry-run that reports the projected
+    /// bytes-to-rewrite. With `--rotate-keys` it generates fresh FileKeys,
+    /// re-encrypts content under new BLAKE3 addresses, re-wraps to the current
+    /// recipient set, publishes new manifests, and GCs the orphaned old chunks.
+    Rotate {
+        /// Remote prefix under which to rotate (e.g. `projects/secret`). Relative
+        /// to the configured storage prefix; manifests are scanned under
+        /// `<storage_prefix>/manifests/<prefix>`.
+        prefix: String,
+        /// Actually perform the rotation. Without this flag the command only
+        /// projects the bytes-to-rewrite and exits (safe dry-run).
+        #[arg(long)]
+        rotate_keys: bool,
+        /// Resume an interrupted rotation from its `.rotate-state.json`.
+        #[arg(long)]
+        resume: bool,
+        /// Skip the interactive confirmation prompt (for automation). Has no
+        /// effect without `--rotate-keys`.
+        #[arg(long)]
+        non_interactive: bool,
+        /// GC orphaned old chunks IMMEDIATELY (grace=0) instead of honoring the
+        /// configured `orphan_chunk_cleanup_grace_secs`. Reference-safe either
+        /// way (only chunks unreferenced by ANY live manifest are swept), but
+        /// the default grace protects a concurrent reader in a multi-writer
+        /// fleet that still holds an old chunk address. Use only when you are
+        /// certain no reader is mid-flight.
+        #[arg(long)]
+        gc_immediate: bool,
     },
 }
 
@@ -800,6 +848,25 @@ async fn main() -> Result<()> {
             password,
             non_interactive,
         } => cmd_rotate_key(&config, old_key_file.as_deref(), password, non_interactive).await,
+        Commands::Key { action } => match action {
+            KeyAction::Rotate {
+                prefix,
+                rotate_keys,
+                resume,
+                non_interactive,
+                gc_immediate,
+            } => {
+                cmd_key_rotate(
+                    &config,
+                    &prefix,
+                    rotate_keys,
+                    resume,
+                    non_interactive,
+                    gc_immediate,
+                )
+                .await
+            }
+        },
         Commands::Reconcile {
             path,
             prefix,
@@ -4209,13 +4276,38 @@ fn cmd_device_revoke(config: &tcfs_core::config::TcfsConfig, name: &str) -> Resu
     let registry_path = tcfs_secrets::device::default_registry_path();
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
 
+    // Capture the public key for the forward-secrecy notice before mutating.
+    let recipient = registry.find(name).map(|d| d.public_key.clone());
+
     if registry.revoke(name) {
-        // TIN-1417 B4: re-sign so the revocation is recorded in a signed envelope
-        // (revoked + revoked_at), making per-device revocation trustworthy.
+        // TIN-1899: recipient-set REMOVAL is the DEFAULT, cheap, immediate action.
+        // `revoke()` drops the device from `active_devices()`, so every recipient
+        // set built afterwards (CLI/daemon/FileProvider via load_verified) excludes
+        // it: NO new content is wrapped to the revoked device. We re-sign so the
+        // signed envelope records `revoked + revoked_at` and the removal is
+        // trustworthy (TIN-1417 B4).
         save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
-        println!("Revoked device: {}", name);
+        println!("Revoked device: {name}");
+        println!("  Dropped from the recipient set (immediate): no NEW content will be wrapped to this device.");
+        if let Some(recipient) = recipient {
+            println!("  Removed age recipient: {recipient}");
+        }
+
+        // LOUD forward-secrecy warning: recipient-set removal alone does NOT
+        // re-key content the device could already read.
+        eprintln!();
+        eprintln!(
+            "  WARNING (forward secrecy): the revoked device RETAINS read access to content it \
+             already pulled AND to any content that has not yet been re-keyed (its old FileKey \
+             wraps and cached chunks are unchanged)."
+        );
+        eprintln!(
+            "  To achieve forward secrecy, re-key the affected content (expensive):\n      \
+             tcfs key rotate <prefix> --rotate-keys\n  This generates fresh FileKeys, re-encrypts \
+             content under new addresses, and re-wraps ONLY to the current recipient set."
+        );
     } else {
-        anyhow::bail!("Device '{}' not found", name);
+        anyhow::bail!("Device '{name}' not found");
     }
 
     Ok(())
@@ -4992,7 +5084,20 @@ struct KeyRotationState {
     status: KeyRotationStatus,
     rotated_manifests: u64,
     already_rotated_manifests: u64,
-    skipped_plaintext_manifests: u64,
+    /// Manifests that carry NO wrapped FileKey at all (genuinely plaintext /
+    /// unencrypted content). The master rotate has nothing to re-wrap for these,
+    /// so they are skipped. Renamed from the old `skipped_plaintext_manifests`
+    /// (TIN-1899): that name conflated two very different cases. This counter now
+    /// means *only* "no key material present". Per-device-only manifests are
+    /// tracked separately by `skipped_per_device_manifests`.
+    skipped_keyless_manifests: u64,
+    /// Manifests that carry ONLY per-device wraps (`encrypted_file_key == None`,
+    /// `wrapped_file_keys` non-empty) and therefore cannot be re-wrapped by the
+    /// MASTER rotate (TIN-1899). The scoped `tcfs key rotate <prefix>` command is
+    /// the only path that re-keys these; the master rotate records them here and
+    /// loudly tells the operator to run the scoped command for forward secrecy.
+    #[serde(default)]
+    skipped_per_device_manifests: u64,
     error_count: u64,
     last_manifest_path: Option<String>,
 }
@@ -5007,7 +5112,8 @@ impl KeyRotationState {
             status: KeyRotationStatus::RewritingManifests,
             rotated_manifests: 0,
             already_rotated_manifests: 0,
-            skipped_plaintext_manifests: 0,
+            skipped_keyless_manifests: 0,
+            skipped_per_device_manifests: 0,
             error_count: 0,
             last_manifest_path: None,
         }
@@ -5017,7 +5123,8 @@ impl KeyRotationState {
         self.status = KeyRotationStatus::RewritingManifests;
         self.rotated_manifests = 0;
         self.already_rotated_manifests = 0;
-        self.skipped_plaintext_manifests = 0;
+        self.skipped_keyless_manifests = 0;
+        self.skipped_per_device_manifests = 0;
         self.error_count = 0;
         self.last_manifest_path = None;
     }
@@ -5304,7 +5411,17 @@ async fn rotate_manifests_with_resume(
         let wrapped_b64 = match &manifest.encrypted_file_key {
             Some(k) => k.clone(),
             None => {
-                state.skipped_plaintext_manifests += 1;
+                // TIN-1899: distinguish genuinely-keyless (plaintext) manifests
+                // from per-device-only (v3) manifests. The MASTER rotate cannot
+                // re-wrap per-device manifests (no master wrap to read) and must
+                // NOT silently treat them as plaintext — that was the old
+                // forward-secrecy gap. Count them separately and tell the
+                // operator to run the scoped `tcfs key rotate <prefix>`.
+                if manifest.wrapped_file_keys.is_empty() {
+                    state.skipped_keyless_manifests += 1;
+                } else {
+                    state.skipped_per_device_manifests += 1;
+                }
                 state.last_manifest_path = Some(path.clone());
                 write_rotation_state(state_path, state)?;
                 continue;
@@ -5468,10 +5585,25 @@ async fn cmd_rotate_key(
         rotation.state.already_rotated_manifests
     );
     println!(
-        "  Manifests skipped (plaintext): {}",
-        rotation.state.skipped_plaintext_manifests
+        "  Manifests skipped (keyless/plaintext): {}",
+        rotation.state.skipped_keyless_manifests
+    );
+    println!(
+        "  Manifests skipped (per-device only): {}",
+        rotation.state.skipped_per_device_manifests
     );
     println!("  New master key: {}", key_path.display());
+
+    if rotation.state.skipped_per_device_manifests > 0 {
+        eprintln!();
+        eprintln!(
+            "  WARNING: {} per-device-only (v3) manifest(s) were NOT re-keyed by this MASTER \
+             rotation.\n  The master rotate cannot re-wrap content that carries no master wrap. \
+             To rotate FileKeys for per-device content (forward secrecy on device revoke), run:\n    \
+             tcfs key rotate <prefix> --rotate-keys",
+            rotation.state.skipped_per_device_manifests
+        );
+    }
 
     #[cfg(unix)]
     if let Ok(mut client) = connect_daemon(&config.daemon.socket).await {
@@ -5482,6 +5614,647 @@ async fn cmd_rotate_key(
             })
             .await;
         println!("  Daemon notified with new key.");
+    }
+
+    Ok(())
+}
+
+// ── `tcfs key rotate <prefix>` (TIN-1899 / B2 forward secrecy) ─────────────
+//
+// Scoped, per-device-aware FileKey rotation. SEPARATE from the master
+// `rotate-key` above (which re-wraps master-wrapped manifests under a new master
+// key). This command:
+//   1. Decrypts each manifest's current FileKey via the existing read path
+//      (master OR per-device, per the manifest's wrap shape).
+//   2. Generates a FRESH random FileKey; re-encrypts every chunk under it and
+//      uploads the new ciphertext under its NEW BLAKE3 content address.
+//   3. Re-wraps the new FileKey to the CURRENT (post-revocation) recipient set
+//      resolved from the VERIFIED device registry, honoring `crypto.wrap_mode`.
+//      A device absent from that set gets NO wrap -> cannot decrypt the re-key.
+//   4. Publishes the new manifest, then GCs orphaned old chunks once no live
+//      manifest references them (reference-safe; never deletes referenced data).
+//
+// Resumable via `.rotate-state.json`: a kill mid-run resumes, skipping manifests
+// already published.
+
+/// Resumable state for the scoped per-device key rotation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ScopedRotationState {
+    version: u32,
+    started_at: u64,
+    /// Full manifest prefix scanned (resolved storage prefix + scope).
+    manifest_prefix: String,
+    /// Manifest object keys that have been fully re-keyed AND published.
+    /// Re-reading these on resume is a no-op (idempotent skip).
+    done_manifests: Vec<String>,
+    /// Count of manifests re-keyed this run (cumulative across resumes).
+    rotated_manifests: u64,
+    /// Manifests skipped because they carry NO FileKey at all (plaintext).
+    skipped_keyless_manifests: u64,
+    /// Manifests skipped on resume because they were already published.
+    already_done_manifests: u64,
+    /// Total plaintext bytes re-encrypted (for reporting).
+    bytes_rewritten: u64,
+    /// Set once every in-scope manifest has been published; gates GC.
+    all_published: bool,
+}
+
+impl ScopedRotationState {
+    fn new(manifest_prefix: &str) -> Self {
+        Self {
+            version: 1,
+            started_at: now_epoch(),
+            manifest_prefix: manifest_prefix.to_string(),
+            done_manifests: Vec::new(),
+            rotated_manifests: 0,
+            skipped_keyless_manifests: 0,
+            already_done_manifests: 0,
+            bytes_rewritten: 0,
+            all_published: false,
+        }
+    }
+
+    fn is_done(&self, path: &str) -> bool {
+        self.done_manifests.iter().any(|p| p == path)
+    }
+
+    fn mark_done(&mut self, path: &str) {
+        if !self.is_done(path) {
+            self.done_manifests.push(path.to_string());
+        }
+    }
+}
+
+/// Resolve the scoped rotation's state-file path (adjacent to the sync state).
+fn scoped_rotation_state_path(config: &tcfs_core::config::TcfsConfig, scope: &str) -> PathBuf {
+    let base = resolve_state_path(config, None);
+    let parent = base.parent().unwrap_or(Path::new(".")).to_path_buf();
+    // Encode the scope so distinct prefixes get distinct resume files.
+    let tag: String = scope
+        .trim_matches('/')
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    parent.join(format!(".key-rotate-{tag}.rotate-state.json"))
+}
+
+fn write_scoped_rotation_state(path: &Path, state: &ScopedRotationState) -> Result<()> {
+    let data = serde_json::to_vec_pretty(state).context("serializing scoped rotation state")?;
+    atomic_write_bytes(path, &data, Some(0o600))
+}
+
+fn read_scoped_rotation_state(path: &Path) -> Result<ScopedRotationState> {
+    let data = std::fs::read(path)
+        .with_context(|| format!("reading scoped rotation state: {}", path.display()))?;
+    serde_json::from_slice(&data).context("parsing scoped rotation state")
+}
+
+/// Load the master key (required to verify the signed registry and to read/write
+/// master-wrapped manifests). Mirrors how the other CLI crypto paths resolve it.
+fn load_master_key_for_rotation(
+    config: &tcfs_core::config::TcfsConfig,
+) -> Result<tcfs_crypto::MasterKey> {
+    let key_path = config.crypto.master_key_file.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no master key configured (crypto.master_key_file); key rotation requires it to \
+             verify the signed device registry and read existing wraps"
+        )
+    })?;
+    read_master_key(&key_path)
+        .with_context(|| format!("reading master key: {}", key_path.display()))
+}
+
+/// Build the current (post-revocation) recipient set + this device's unwrap
+/// identity, honoring `crypto.wrap_mode`. Returns the `EncryptionContext` used
+/// for BOTH the read (unwrap) and write (re-wrap) sides of the rotation.
+fn rotation_encryption_context(
+    config: &tcfs_core::config::TcfsConfig,
+    master_key: &tcfs_crypto::MasterKey,
+) -> tcfs_sync::engine::EncryptionContext {
+    let device_id = load_device_id(config);
+    // Reuse the canonical builder: it loads the VERIFIED registry (post-B4
+    // load_verified), filters to active+real recipients, and applies the
+    // roll-call gate. A revoked device is dropped from active_devices() and thus
+    // from the recipient set -- exactly the forward-secrecy requirement.
+    build_encryption_context(config, &device_id, master_key)
+}
+
+/// Unwrap the FileKey carried by a manifest using the rotation context.
+///
+/// Mirrors the engine read path: prefer the per-device wrap (using this device's
+/// age identity), fall back to the master wrap when one is present (Dual/v2).
+/// Returns `Ok(None)` for a genuinely keyless (plaintext) manifest.
+fn unwrap_manifest_file_key(
+    manifest: &tcfs_sync::manifest::SyncManifest,
+    ctx: &tcfs_sync::engine::EncryptionContext,
+    manifest_path: &str,
+) -> Result<Option<tcfs_crypto::FileKey>> {
+    if !manifest.wrapped_file_keys.is_empty() {
+        let per_device: Result<tcfs_crypto::FileKey> = (|| {
+            let identity = ctx.device_identity.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "manifest {manifest_path} is per-device encrypted but this device has no age \
+                     identity to unwrap it (configure wrap_mode + device secret)"
+                )
+            })?;
+            let age_wraps: Vec<tcfs_crypto::AgeWrappedFileKey> = manifest
+                .wrapped_file_keys
+                .iter()
+                .map(|w| tcfs_crypto::AgeWrappedFileKey {
+                    recipient_device_id: w.recipient_device_id.clone(),
+                    recipient: w.recipient.clone(),
+                    algorithm: w.algorithm.clone(),
+                    wrapped_key: w.wrapped_key.clone(),
+                })
+                .collect();
+            tcfs_crypto::unwrap_file_key_with_age_identity(
+                &age_wraps,
+                &identity.secret,
+                Some(&identity.device_id),
+            )
+            .with_context(|| format!("unwrapping per-device file key for {manifest_path}"))
+        })();
+
+        match per_device {
+            Ok(fk) => return Ok(Some(fk)),
+            Err(per_device_err) => {
+                if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
+                    let wrapped = base64::engine::general_purpose::STANDARD
+                        .decode(wrapped_b64)
+                        .context("decoding master-wrapped file key")?;
+                    return Ok(Some(
+                        tcfs_crypto::unwrap_key(&ctx.master_key, &wrapped).with_context(|| {
+                            format!("unwrapping master file key for {manifest_path}")
+                        })?,
+                    ));
+                }
+                return Err(per_device_err);
+            }
+        }
+    }
+
+    if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
+        let wrapped = base64::engine::general_purpose::STANDARD
+            .decode(wrapped_b64)
+            .context("decoding master-wrapped file key")?;
+        return Ok(Some(
+            tcfs_crypto::unwrap_key(&ctx.master_key, &wrapped)
+                .with_context(|| format!("unwrapping master file key for {manifest_path}"))?,
+        ));
+    }
+
+    Ok(None)
+}
+
+/// Build the master wrap + per-device wraps for a fresh FileKey, honoring the
+/// context's `wrap_mode`. Returns `(encrypted_file_key, wrapped_file_keys,
+/// manifest_version)` mirroring the engine write path exactly.
+fn wrap_rotated_file_key(
+    ctx: &tcfs_sync::engine::EncryptionContext,
+    file_key: &tcfs_crypto::FileKey,
+) -> Result<(
+    Option<String>,
+    Vec<tcfs_sync::manifest::WrappedFileKey>,
+    u32,
+)> {
+    use tcfs_sync::engine::WrapMode;
+
+    let master_wrap = || -> Result<String> {
+        let wrapped = tcfs_crypto::wrap_key(&ctx.master_key, file_key)?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(&wrapped))
+    };
+    let device_wraps = || -> Result<Vec<tcfs_sync::manifest::WrappedFileKey>> {
+        let wraps =
+            tcfs_crypto::wrap_file_key_for_age_recipients(file_key, &ctx.device_recipients)?;
+        Ok(wraps
+            .into_iter()
+            .map(|w| tcfs_sync::manifest::WrappedFileKey {
+                recipient_device_id: w.recipient_device_id,
+                recipient: w.recipient,
+                algorithm: w.algorithm,
+                wrapped_key: w.wrapped_key,
+            })
+            .collect())
+    };
+
+    match ctx.wrap_mode {
+        WrapMode::Master => Ok((Some(master_wrap()?), Vec::new(), 2)),
+        WrapMode::Dual => {
+            if ctx.device_recipients.is_empty() {
+                anyhow::bail!(
+                    "wrap_mode=Dual requires per-device recipients but none are configured"
+                );
+            }
+            Ok((Some(master_wrap()?), device_wraps()?, 2))
+        }
+        WrapMode::PerDevice => {
+            if ctx.device_recipients.is_empty() {
+                anyhow::bail!(
+                    "wrap_mode=PerDevice requires per-device recipients but none are configured"
+                );
+            }
+            // v3: per-device-only, NO master wrap -> a revoked device absent from
+            // the recipient set has no path to the FileKey.
+            Ok((None, device_wraps()?, 3))
+        }
+    }
+}
+
+enum RekeyOutcome {
+    Rotated { bytes_rewritten: u64 },
+    Keyless,
+}
+
+/// Re-key ONE manifest: decrypt the old FileKey, generate a fresh one,
+/// re-encrypt every chunk under it (new BLAKE3 addresses), re-wrap to the
+/// current recipient set, and publish the new manifest. The OLD chunks are
+/// intentionally left in place -- they are swept by the post-publish GC once no
+/// live manifest references them.
+async fn rekey_one_manifest(
+    op: &opendal::Operator,
+    remote_prefix: &str,
+    manifest_path: &str,
+    ctx: &tcfs_sync::engine::EncryptionContext,
+) -> Result<RekeyOutcome> {
+    let data = op
+        .read(manifest_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("reading manifest {manifest_path}: {e}"))?
+        .to_bytes();
+    let mut manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&data)
+        .with_context(|| format!("parsing manifest {manifest_path}"))?;
+
+    let Some(old_file_key) = unwrap_manifest_file_key(&manifest, ctx, manifest_path)? else {
+        return Ok(RekeyOutcome::Keyless);
+    };
+
+    // file_id (AAD) is BLAKE3 of the plaintext file_hash. Plaintext is unchanged
+    // by re-keying, so file_id and file_hash stay identical -- only the FileKey
+    // (and therefore the ciphertext + its content address) changes.
+    let file_id: [u8; 32] = {
+        let hash = tcfs_chunks::hash_from_hex(&manifest.file_hash)
+            .with_context(|| format!("parsing file_hash for {manifest_path}"))?;
+        *hash.as_bytes()
+    };
+
+    let new_file_key = tcfs_crypto::generate_file_key();
+    let mut new_chunk_hashes: Vec<String> = Vec::with_capacity(manifest.chunks.len());
+    let mut bytes_rewritten: u64 = 0;
+
+    for (i, old_hash) in manifest.chunks.iter().enumerate() {
+        let old_chunk_key = format!("{remote_prefix}/chunks/{old_hash}");
+        let ciphertext = op
+            .read(&old_chunk_key)
+            .await
+            .map_err(|e| anyhow::anyhow!("reading chunk {old_chunk_key}: {e}"))?
+            .to_vec();
+        let plaintext = tcfs_crypto::decrypt_chunk(&old_file_key, i as u64, &file_id, &ciphertext)
+            .with_context(|| format!("decrypting chunk {i} of {manifest_path}"))?;
+        bytes_rewritten += plaintext.len() as u64;
+
+        let new_ciphertext =
+            tcfs_crypto::encrypt_chunk(&new_file_key, i as u64, &file_id, &plaintext)
+                .with_context(|| format!("re-encrypting chunk {i} of {manifest_path}"))?;
+        let new_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&new_ciphertext));
+        let new_chunk_key = format!("{remote_prefix}/chunks/{new_hash}");
+
+        // Content-addressed: if the new ciphertext already exists (idempotent
+        // resume / dedupe), the write is a harmless overwrite of identical bytes.
+        op.write(&new_chunk_key, new_ciphertext)
+            .await
+            .map_err(|e| anyhow::anyhow!("writing re-encrypted chunk {new_chunk_key}: {e}"))?;
+        new_chunk_hashes.push(new_hash);
+    }
+
+    // Swap in the new content addresses + new wraps, then publish.
+    manifest.chunks = new_chunk_hashes;
+    let (encrypted_file_key, wrapped_file_keys, version) =
+        wrap_rotated_file_key(ctx, &new_file_key)?;
+    manifest.encrypted_file_key = encrypted_file_key;
+    manifest.wrapped_file_keys = wrapped_file_keys;
+    manifest.version = version;
+
+    let new_data = manifest
+        .to_bytes()
+        .with_context(|| format!("serializing rotated manifest {manifest_path}"))?;
+    op.write(manifest_path, new_data)
+        .await
+        .map_err(|e| anyhow::anyhow!("publishing rotated manifest {manifest_path}: {e}"))?;
+
+    Ok(RekeyOutcome::Rotated { bytes_rewritten })
+}
+
+/// List the in-scope manifest object keys (non-directory) under the prefix.
+async fn list_scoped_manifests(
+    op: &opendal::Operator,
+    manifest_prefix: &str,
+) -> Result<Vec<String>> {
+    let entries = op
+        .list_with(manifest_prefix)
+        .recursive(true)
+        .await
+        .with_context(|| format!("listing manifests under {manifest_prefix}"))?;
+    let mut paths: Vec<String> = entries
+        .into_iter()
+        .filter(|e| !e.metadata().is_dir() && !e.path().ends_with('/'))
+        .map(|e| e.path().to_string())
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+/// Whether the closing message after a rotation may truthfully claim per-device
+/// forward secrecy.
+///
+/// Forward secrecy from re-keying only holds when the re-wrapped content carries
+/// NO path back to a shared, unchanged secret. That is exactly
+/// [`WrapMode::PerDevice`] with a non-empty recipient set (manifest v3, no master
+/// wrap). Under the DEFAULT [`WrapMode::Master`] (and [`WrapMode::Dual`]) the
+/// re-keyed FileKey is re-wrapped to the UNCHANGED shared master key, so a
+/// revoked master-key holder STILL decrypts the re-keyed content — claiming
+/// forward secrecy there would be false and dangerous.
+fn rotation_grants_forward_secrecy(ctx: &tcfs_sync::engine::EncryptionContext) -> bool {
+    use tcfs_sync::engine::WrapMode;
+    ctx.wrap_mode == WrapMode::PerDevice && !ctx.device_recipients.is_empty()
+}
+
+/// The closing forward-secrecy summary for a completed rotation, rendered as
+/// lines to print. Gated on [`rotation_grants_forward_secrecy`]: only the
+/// per-device path earns the reassurance; Master/Dual gets a LOUD warning that
+/// no per-device forward secrecy was gained.
+fn forward_secrecy_summary_lines(ctx: &tcfs_sync::engine::EncryptionContext) -> Vec<String> {
+    if rotation_grants_forward_secrecy(ctx) {
+        vec![
+            "Forward secrecy: devices absent from the current recipient set can no longer \
+             decrypt the re-keyed content (per-device wrap, no master wrap). (They may still \
+             hold content they previously pulled.)"
+                .to_string(),
+        ]
+    } else {
+        vec![
+            "WARNING: NO per-device forward secrecy was gained by this rotation.".to_string(),
+            format!(
+                "  wrap_mode={:?}: the re-keyed content was re-wrapped to the UNCHANGED shared \
+                 master key.",
+                ctx.wrap_mode
+            ),
+            "  A revoked device that still holds the master key can STILL decrypt the re-keyed \
+             content."
+                .to_string(),
+            "  Per-device forward secrecy requires wrap_mode=PerDevice (per-device-only wraps, \
+             no master wrap) with a real recipient set."
+                .to_string(),
+        ]
+    }
+}
+
+async fn cmd_key_rotate(
+    config: &tcfs_core::config::TcfsConfig,
+    scope: &str,
+    rotate_keys: bool,
+    resume: bool,
+    non_interactive: bool,
+    gc_immediate: bool,
+) -> Result<()> {
+    let storage_prefix = config.storage.resolved_prefix().to_string();
+    let scope_clean = scope.trim_matches('/');
+    let manifest_prefix = if scope_clean.is_empty() {
+        format!("{storage_prefix}/manifests/")
+    } else {
+        format!("{storage_prefix}/manifests/{scope_clean}/")
+    };
+    let remote_prefix = storage_prefix.clone();
+
+    let master_key = load_master_key_for_rotation(config)?;
+    let ctx = rotation_encryption_context(config, &master_key);
+
+    let op = build_operator(config).await?;
+
+    println!("Scanning manifests under: {manifest_prefix}");
+    let manifests = list_scoped_manifests(&op, &manifest_prefix).await?;
+    if manifests.is_empty() {
+        println!("No manifests found under that prefix. Nothing to rotate.");
+        return Ok(());
+    }
+
+    // Project bytes-to-rewrite by summing manifest file sizes (cheap; reads
+    // manifests only, not chunks).
+    let mut projected_bytes: u64 = 0;
+    let mut encrypted_count: u64 = 0;
+    for path in &manifests {
+        if let Ok(data) = op.read(path).await {
+            if let Ok(m) = tcfs_sync::manifest::SyncManifest::from_bytes(&data.to_bytes()) {
+                let has_key = m.encrypted_file_key.is_some() || !m.wrapped_file_keys.is_empty();
+                if has_key {
+                    projected_bytes += m.file_size;
+                    encrypted_count += 1;
+                }
+            }
+        }
+    }
+
+    println!(
+        "  Manifests in scope: {} ({} encrypted)",
+        manifests.len(),
+        encrypted_count
+    );
+    println!(
+        "  Recipient set (post-revocation): {} device(s), wrap_mode={:?}",
+        ctx.device_recipients.len(),
+        ctx.wrap_mode
+    );
+    for r in &ctx.device_recipients {
+        println!("    - {} ({})", r.device_id, r.recipient);
+    }
+    println!(
+        "  Projected bytes to re-encrypt: {} ({:.2} MiB)",
+        projected_bytes,
+        projected_bytes as f64 / (1024.0 * 1024.0)
+    );
+
+    if !rotate_keys {
+        println!();
+        println!(
+            "Dry run -- no changes made. Re-run with --rotate-keys to perform the rotation. \
+             Content is re-encrypted under fresh FileKeys per the existing index (no \
+             re-chunking; file_hash/file_id stay valid), re-wrapped to the current recipient \
+             set, and the orphaned old chunks are GC'd."
+        );
+        return Ok(());
+    }
+
+    // Confirmation prompt before the expensive rewrite.
+    if !non_interactive {
+        println!();
+        println!(
+            "This will re-encrypt {projected_bytes} bytes across {encrypted_count} file(s), \
+             upload new chunks, publish new manifests, and GC the orphaned old chunks."
+        );
+        let confirm =
+            rpassword::prompt_password("Type 'ROTATE' to confirm scoped FileKey rotation: ")
+                .context("reading confirmation")?;
+        if confirm != "ROTATE" {
+            anyhow::bail!("key rotation cancelled");
+        }
+    }
+
+    let state_path = scoped_rotation_state_path(config, scope);
+    let mut state = if resume && state_path.exists() {
+        let existing = read_scoped_rotation_state(&state_path)?;
+        if existing.manifest_prefix != manifest_prefix {
+            anyhow::bail!(
+                "resume state targets {} but this invocation resolved to {}",
+                existing.manifest_prefix,
+                manifest_prefix
+            );
+        }
+        println!(
+            "Resuming scoped rotation: {} manifest(s) already published.",
+            existing.done_manifests.len()
+        );
+        existing
+    } else {
+        if state_path.exists() && !resume {
+            anyhow::bail!(
+                "a scoped rotation is already in progress for this prefix ({}). Pass --resume to \
+                 continue it, or remove the state file to start over.",
+                state_path.display()
+            );
+        }
+        let s = ScopedRotationState::new(&manifest_prefix);
+        write_scoped_rotation_state(&state_path, &s)?;
+        s
+    };
+
+    println!();
+    println!("Re-keying manifests...");
+    for path in &manifests {
+        if state.is_done(path) {
+            state.already_done_manifests += 1;
+            continue;
+        }
+        match rekey_one_manifest(&op, &remote_prefix, path, &ctx).await {
+            Ok(RekeyOutcome::Rotated { bytes_rewritten }) => {
+                state.rotated_manifests += 1;
+                state.bytes_rewritten += bytes_rewritten;
+                state.mark_done(path);
+                write_scoped_rotation_state(&state_path, &state)?;
+                println!("  re-keyed: {path}");
+            }
+            Ok(RekeyOutcome::Keyless) => {
+                state.skipped_keyless_manifests += 1;
+                state.mark_done(path);
+                write_scoped_rotation_state(&state_path, &state)?;
+                println!("  skipped (keyless/plaintext): {path}");
+            }
+            Err(e) => {
+                // Persist progress and surface a resumable error. Already-published
+                // manifests are in done_manifests; old chunks are NOT yet GC'd, so
+                // nothing referenced by a live manifest can be lost.
+                write_scoped_rotation_state(&state_path, &state)?;
+                println!(
+                    "\nScoped rotation paused with resumable state preserved:\n  Resume state: {}\n  \
+                     Re-run with --resume after fixing the failure.",
+                    state_path.display()
+                );
+                return Err(e).with_context(|| format!("re-keying manifest {path}"));
+            }
+        }
+    }
+
+    // All in-scope manifests are now published with NEW chunk addresses. The old
+    // chunks are orphaned (no live manifest references them) and safe to sweep.
+    state.all_published = true;
+    write_scoped_rotation_state(&state_path, &state)?;
+
+    // GC grace: default to the configured orphan_chunk_cleanup_grace_secs so a
+    // concurrent reader in a multi-writer fleet that still holds an old chunk
+    // address won't 404 mid-flight. `--gc-immediate` opts into grace=0 (the old
+    // hardcoded behavior). Either way GC is reference-safe: only chunks
+    // unreferenced by ANY live manifest are eligible.
+    let gc_grace = if gc_immediate {
+        Duration::from_secs(0)
+    } else {
+        Duration::from_secs(config.sync.orphan_chunk_cleanup_grace_secs)
+    };
+    println!();
+    if gc_immediate {
+        println!(
+            "GC: sweeping chunks no longer referenced by ANY live manifest under {remote_prefix} \
+             (grace=0, immediate) ..."
+        );
+    } else {
+        println!(
+            "GC: sweeping chunks no longer referenced by ANY live manifest under {remote_prefix} \
+             (grace={}s; older orphans only — pass --gc-immediate for grace=0) ...",
+            config.sync.orphan_chunk_cleanup_grace_secs
+        );
+    }
+    let cleanup = tcfs_sync::reconcile::cleanup_orphaned_chunks(
+        &op,
+        &remote_prefix,
+        gc_grace,
+        SystemTime::now(),
+    )
+    .await
+    .context("GC of orphaned chunks after rotation")?;
+
+    let deferred_orphans =
+        cleanup.skipped_within_grace.len() + cleanup.skipped_missing_last_modified.len();
+    println!(
+        "  GC: {} orphaned, {} deleted, {} deferred (within grace), {} referenced (kept), {} \
+         errors",
+        cleanup.orphaned_chunks_found,
+        cleanup.deleted_chunks.len(),
+        deferred_orphans,
+        cleanup.referenced_chunks,
+        cleanup.delete_errors.len()
+    );
+    if deferred_orphans > 0 && !gc_immediate {
+        println!(
+            "       {deferred_orphans} orphaned chunk(s) are within the grace window and will be \
+             swept by a later GC (or now with --gc-immediate)."
+        );
+    }
+    for (hash, err) in &cleanup.delete_errors {
+        eprintln!("    GC error: {hash}: {err}");
+    }
+
+    // Rotation complete: drop the resume artifact.
+    if let Err(e) = std::fs::remove_file(&state_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!(
+                "  WARN: failed to remove resume state {}: {e}",
+                state_path.display()
+            );
+        }
+    }
+
+    println!();
+    println!("Scoped FileKey rotation complete:");
+    println!("  Manifests re-keyed:      {}", state.rotated_manifests);
+    println!(
+        "  Skipped (keyless):       {}",
+        state.skipped_keyless_manifests
+    );
+    println!(
+        "  Already done (resume):   {}",
+        state.already_done_manifests
+    );
+    println!("  Bytes re-encrypted:      {}", state.bytes_rewritten);
+    println!(
+        "  Old chunks GC'd:         {}",
+        cleanup.deleted_chunks.len()
+    );
+    println!();
+    for line in forward_secrecy_summary_lines(&ctx) {
+        println!("{line}");
     }
 
     Ok(())
@@ -7693,5 +8466,563 @@ enabled = false
         assert!(prepared.is_none());
         assert!(!paths.state_path.exists());
         assert!(!paths.pending_key_path.exists());
+    }
+
+    // ── TIN-1899: scoped per-device key rotation tests ──────────────────────
+
+    use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext, WrapMode as EngWrapMode};
+
+    /// A throwaway age X25519 device identity for tests.
+    struct TestDevice {
+        device_id: String,
+        recipient: String,
+        secret: String,
+    }
+
+    fn test_device(device_id: &str) -> TestDevice {
+        // Reuse the production age X25519 keypair generator (avoids a direct
+        // `age` dev-dependency in tcfs-cli).
+        let key = tcfs_secrets::device::generate_local_device_key();
+        TestDevice {
+            device_id: device_id.to_string(),
+            recipient: key.public_key.clone(),
+            secret: key.secret_key.expose_secret().to_string(),
+        }
+    }
+
+    fn recipient_of(d: &TestDevice) -> tcfs_crypto::AgeFileKeyRecipient {
+        tcfs_crypto::AgeFileKeyRecipient {
+            device_id: d.device_id.clone(),
+            recipient: d.recipient.clone(),
+        }
+    }
+
+    fn identity_of(d: &TestDevice) -> DeviceUnwrapIdentity {
+        DeviceUnwrapIdentity {
+            device_id: d.device_id.clone(),
+            secret: d.secret.clone(),
+        }
+    }
+
+    /// Build a per-device (v3) EncryptionContext: per-device-only wraps, this
+    /// device's unwrap identity, and the given recipient set.
+    fn per_device_ctx(
+        master: &tcfs_crypto::MasterKey,
+        recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
+        identity: DeviceUnwrapIdentity,
+    ) -> EncryptionContext {
+        EncryptionContext::new(master.clone()).with_wrap_mode(
+            EngWrapMode::PerDevice,
+            recipients,
+            Some(identity),
+        )
+    }
+
+    /// Seed a real encrypted file (chunks + manifest) into the operator using the
+    /// given context's wrap shape. Returns the published manifest path.
+    async fn seed_encrypted_file(
+        op: &Operator,
+        remote_prefix: &str,
+        rel_path: &str,
+        plaintext: &[u8],
+        ctx: &EncryptionContext,
+    ) -> String {
+        let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(plaintext));
+        let file_id: [u8; 32] = *tcfs_chunks::hash_from_hex(&file_hash).unwrap().as_bytes();
+        let file_key = tcfs_crypto::generate_file_key();
+
+        // One chunk for test simplicity (the production path chunks via FastCDC;
+        // re-keying is per-chunk-index either way).
+        let ciphertext = tcfs_crypto::encrypt_chunk(&file_key, 0, &file_id, plaintext).unwrap();
+        let chunk_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&ciphertext));
+        op.write(&format!("{remote_prefix}/chunks/{chunk_hash}"), ciphertext)
+            .await
+            .unwrap();
+
+        let (encrypted_file_key, wrapped_file_keys, version) =
+            wrap_rotated_file_key(ctx, &file_key).unwrap();
+
+        let manifest = tcfs_sync::manifest::SyncManifest {
+            version,
+            file_hash,
+            file_size: plaintext.len() as u64,
+            chunks: vec![chunk_hash],
+            vclock: tcfs_sync::conflict::VectorClock::new(),
+            written_by: "seed-device".into(),
+            written_at: 0,
+            rel_path: Some(rel_path.to_string()),
+            mode: None,
+            encrypted_file_key,
+            wrapped_file_keys,
+        };
+        let manifest_path = format!("{remote_prefix}/manifests/{rel_path}");
+        op.write(&manifest_path, manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+        manifest_path
+    }
+
+    /// Decrypt a published manifest's content end-to-end with the given context.
+    async fn decrypt_published(
+        op: &Operator,
+        remote_prefix: &str,
+        manifest_path: &str,
+        ctx: &EncryptionContext,
+    ) -> Result<Vec<u8>> {
+        let data = op.read(manifest_path).await.unwrap().to_vec();
+        let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&data).unwrap();
+        let fk = unwrap_manifest_file_key(&manifest, ctx, manifest_path)?
+            .ok_or_else(|| anyhow::anyhow!("keyless manifest"))?;
+        let file_id: [u8; 32] = *tcfs_chunks::hash_from_hex(&manifest.file_hash)
+            .unwrap()
+            .as_bytes();
+        let mut out = Vec::new();
+        for (i, hash) in manifest.chunks.iter().enumerate() {
+            let ct = op
+                .read(&format!("{remote_prefix}/chunks/{hash}"))
+                .await
+                .unwrap()
+                .to_vec();
+            let pt = tcfs_crypto::decrypt_chunk(&fk, i as u64, &file_id, &ct)?;
+            out.extend_from_slice(&pt);
+        }
+        Ok(out)
+    }
+
+    async fn chunk_count(op: &Operator, remote_prefix: &str) -> usize {
+        op.list_with(&format!("{remote_prefix}/chunks/"))
+            .recursive(true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| !e.metadata().is_dir() && !e.path().ends_with('/'))
+            .count()
+    }
+
+    /// (a) After revoke X + scoped rotate, device X (absent from the new
+    /// recipient set) gets a HARD unwrap error on the re-keyed manifest, while a
+    /// still-current device decrypts fine.
+    #[tokio::test]
+    async fn scoped_rotate_revokes_per_device_read() {
+        let op = memory_op();
+        let master = master_key(0x42);
+        let keep = test_device("device-keep");
+        let revoke = test_device("device-revoke");
+
+        // Before rotation: BOTH devices are recipients (per-device-only v3).
+        let writer_ctx = per_device_ctx(
+            &master,
+            vec![recipient_of(&keep), recipient_of(&revoke)],
+            identity_of(&keep),
+        );
+        let plaintext = b"top secret payload that must rotate";
+        let manifest_path =
+            seed_encrypted_file(&op, "data", "secret/a.txt", plaintext, &writer_ctx).await;
+
+        // Sanity: the revoked device CAN read pre-rotation content.
+        let revoke_reader = per_device_ctx(
+            &master,
+            vec![recipient_of(&keep), recipient_of(&revoke)],
+            identity_of(&revoke),
+        );
+        assert_eq!(
+            decrypt_published(&op, "data", &manifest_path, &revoke_reader)
+                .await
+                .unwrap(),
+            plaintext
+        );
+
+        // Post-revocation recipient set: ONLY the kept device.
+        let rotate_ctx = per_device_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
+        let outcome = rekey_one_manifest(&op, "data", &manifest_path, &rotate_ctx)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RekeyOutcome::Rotated { .. }));
+
+        // The kept device still decrypts the re-keyed manifest.
+        let keep_reader = per_device_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
+        assert_eq!(
+            decrypt_published(&op, "data", &manifest_path, &keep_reader)
+                .await
+                .unwrap(),
+            plaintext
+        );
+
+        // The revoked device gets a HARD unwrap error on the re-keyed manifest.
+        let revoke_after =
+            per_device_ctx(&master, vec![recipient_of(&revoke)], identity_of(&revoke));
+        let err = decrypt_published(&op, "data", &manifest_path, &revoke_after)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unwrap") || msg.contains("no decryptable") || msg.contains("file key"),
+            "expected a hard unwrap error for the revoked device, got: {msg}"
+        );
+
+        // The re-keyed manifest carries NO wrap addressed to the revoked device.
+        let data = op.read(&manifest_path).await.unwrap().to_vec();
+        let m = tcfs_sync::manifest::SyncManifest::from_bytes(&data).unwrap();
+        assert!(
+            !m.wrapped_file_keys
+                .iter()
+                .any(|w| w.recipient_device_id == "device-revoke"),
+            "re-keyed manifest must not wrap to the revoked device"
+        );
+        assert!(m
+            .wrapped_file_keys
+            .iter()
+            .any(|w| w.recipient_device_id == "device-keep"));
+    }
+
+    /// (c) Orphaned old chunks are GC'd ONLY after publish, and referenced chunks
+    /// are never deleted.
+    #[tokio::test]
+    async fn scoped_rotate_gcs_orphans_only_after_publish() {
+        let op = memory_op();
+        let master = master_key(0x42);
+        let keep = test_device("device-keep");
+
+        let ctx = per_device_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
+        let manifest_path =
+            seed_encrypted_file(&op, "data", "secret/a.txt", b"payload one", &ctx).await;
+
+        // Capture the original chunk address.
+        let before = op.read(&manifest_path).await.unwrap().to_vec();
+        let old_hash = tcfs_sync::manifest::SyncManifest::from_bytes(&before)
+            .unwrap()
+            .chunks[0]
+            .clone();
+        assert_eq!(chunk_count(&op, "data").await, 1);
+
+        // Re-key: writes a NEW chunk; the OLD chunk is still present (orphan).
+        rekey_one_manifest(&op, "data", &manifest_path, &ctx)
+            .await
+            .unwrap();
+        let after = op.read(&manifest_path).await.unwrap().to_vec();
+        let new_hash = tcfs_sync::manifest::SyncManifest::from_bytes(&after)
+            .unwrap()
+            .chunks[0]
+            .clone();
+        assert_ne!(
+            old_hash, new_hash,
+            "re-key must produce a new content address"
+        );
+        assert_eq!(
+            chunk_count(&op, "data").await,
+            2,
+            "old chunk is NOT deleted before GC"
+        );
+        assert!(op.exists(&format!("data/chunks/{old_hash}")).await.unwrap());
+
+        // GC SAFETY (reference correctness): after publish, the OLD chunk is no
+        // longer referenced by ANY live manifest and is identified as orphaned,
+        // while the NEW (referenced) chunk is NEVER classified as orphaned.
+        //
+        // NOTE: the opendal Memory backend reports `last_modified: None`, so the
+        // grace-gated *deletion* path conservatively keeps timestamp-less chunks
+        // (verified in tcfs-sync's plan_orphaned_chunk_cleanup_respects_grace_period).
+        // We therefore assert the orphan-identification invariant the rotation
+        // depends on for safety, rather than physical deletion on this backend.
+        let report = tcfs_sync::reconcile::find_orphaned_chunks(&op, "data")
+            .await
+            .unwrap();
+        assert_eq!(
+            report.orphaned_chunks,
+            vec![old_hash.clone()],
+            "exactly the old chunk is orphaned after publish"
+        );
+        assert_eq!(report.referenced_chunks, 1, "the new chunk is referenced");
+        assert!(
+            !report.orphaned_chunks.contains(&new_hash),
+            "the referenced new chunk must NEVER be classified as orphaned"
+        );
+
+        // The cleanup call runs cleanly and never deletes a referenced chunk; on
+        // a timestamp-bearing backend it would also delete the orphan.
+        let cleanup = tcfs_sync::reconcile::cleanup_orphaned_chunks(
+            &op,
+            "data",
+            Duration::from_secs(0),
+            SystemTime::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cleanup.orphaned_chunks_found, 1,
+            "GC found exactly the old orphan"
+        );
+        assert!(
+            !cleanup.deleted_chunks.contains(&new_hash),
+            "GC must never delete the referenced new chunk"
+        );
+        assert!(
+            op.exists(&format!("data/chunks/{new_hash}")).await.unwrap(),
+            "the live (referenced) chunk survives GC"
+        );
+    }
+
+    /// (b) Resumability: a kill mid-run leaves published manifests in
+    /// done_manifests, and the resume skips them without losing data.
+    #[tokio::test]
+    async fn scoped_rotate_state_resumes_published_manifests() {
+        let op = memory_op();
+        let master = master_key(0x42);
+        let keep = test_device("device-keep");
+        let ctx = per_device_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
+
+        let m_a = seed_encrypted_file(&op, "data", "secret/a.txt", b"alpha", &ctx).await;
+        let m_b = seed_encrypted_file(&op, "data", "secret/b.txt", b"bravo", &ctx).await;
+
+        // Simulate a kill after publishing only manifest A.
+        let mut state = ScopedRotationState::new("data/manifests/secret/");
+        rekey_one_manifest(&op, "data", &m_a, &ctx).await.unwrap();
+        state.mark_done(&m_a);
+        state.rotated_manifests += 1;
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join(".key-rotate.json");
+        write_scoped_rotation_state(&state_path, &state).unwrap();
+
+        // Resume: A is skipped (idempotent), B is freshly re-keyed.
+        let resumed = read_scoped_rotation_state(&state_path).unwrap();
+        assert!(resumed.is_done(&m_a));
+        assert!(!resumed.is_done(&m_b));
+
+        let manifests = list_scoped_manifests(&op, "data/manifests/secret/")
+            .await
+            .unwrap();
+        let mut state = resumed;
+        for path in &manifests {
+            if state.is_done(path) {
+                state.already_done_manifests += 1;
+                continue;
+            }
+            rekey_one_manifest(&op, "data", path, &ctx).await.unwrap();
+            state.mark_done(path);
+            state.rotated_manifests += 1;
+        }
+        assert_eq!(state.already_done_manifests, 1);
+        assert!(state.is_done(&m_b));
+
+        // Both manifests decrypt cleanly with the kept device after resume.
+        assert_eq!(
+            decrypt_published(&op, "data", &m_a, &ctx).await.unwrap(),
+            b"alpha"
+        );
+        assert_eq!(
+            decrypt_published(&op, "data", &m_b, &ctx).await.unwrap(),
+            b"bravo"
+        );
+    }
+
+    /// (d) The renamed master-rotate counter distinguishes genuinely-plaintext
+    /// manifests from per-device-only manifests.
+    #[tokio::test]
+    async fn master_rotate_counter_distinguishes_plaintext_from_per_device() {
+        let op = memory_op();
+        let old_master = master_key(0x11);
+        let new_master = master_key(0x22);
+        let device = test_device("device-keep");
+
+        // 1) genuinely keyless (plaintext) manifest.
+        let plaintext_manifest = tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: "hash-plain".into(),
+            file_size: 0,
+            chunks: vec![],
+            vclock: tcfs_sync::conflict::VectorClock::new(),
+            written_by: "t".into(),
+            written_at: 0,
+            rel_path: Some("plain.txt".into()),
+            mode: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        op.write(
+            "data/manifests/plain",
+            plaintext_manifest.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // 2) per-device-only (v3) manifest: no master wrap, has device wraps.
+        let pd_ctx = per_device_ctx(
+            &old_master,
+            vec![recipient_of(&device)],
+            identity_of(&device),
+        );
+        seed_encrypted_file(&op, "data", "perdev.txt", b"secret", &pd_ctx).await;
+
+        // 3) a normal master-wrapped manifest (gets rotated).
+        op.write(
+            "data/manifests/master",
+            make_encrypted_manifest(&old_master, "hash-m", "master.txt")
+                .to_bytes()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let mut state = KeyRotationState::new("data/manifests/", Path::new("/tmp/pending"));
+        let _dir = tempfile::tempdir().unwrap();
+        let state_path = _dir.path().join("rotate-state.json");
+        rotate_manifests_with_resume(
+            &op,
+            "data/manifests/",
+            &old_master,
+            &new_master,
+            &mut state,
+            &state_path,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            state.skipped_keyless_manifests, 1,
+            "exactly one genuinely-plaintext manifest"
+        );
+        assert_eq!(
+            state.skipped_per_device_manifests, 1,
+            "exactly one per-device-only manifest (NOT counted as plaintext)"
+        );
+        assert_eq!(state.rotated_manifests, 1, "the master-wrapped one rotated");
+    }
+
+    // ── TIN-1899 must-fix: forward-secrecy messaging is gated on wrap_mode ──
+
+    /// Build a DEFAULT Master-wrap context: this is what `cmd_key_rotate`
+    /// constructs via `build_encryption_context` when `crypto.wrap_mode` is the
+    /// default `Master`. Re-keyed content is re-wrapped to the unchanged shared
+    /// master key — NO per-device forward secrecy.
+    fn master_ctx(master: &tcfs_crypto::MasterKey) -> EncryptionContext {
+        EncryptionContext::new(master.clone())
+    }
+
+    /// Build a Dual context: master wrap + per-device wraps. The master wrap is
+    /// retained, so a revoked master-key holder still decrypts — also NO
+    /// per-device forward secrecy.
+    fn dual_ctx(
+        master: &tcfs_crypto::MasterKey,
+        recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
+        identity: DeviceUnwrapIdentity,
+    ) -> EncryptionContext {
+        EncryptionContext::new(master.clone()).with_wrap_mode(
+            EngWrapMode::Dual,
+            recipients,
+            Some(identity),
+        )
+    }
+
+    /// The must-fix: under DEFAULT Master wrap, `cmd_key_rotate`'s closing
+    /// summary must NOT claim forward secrecy. It must instead emit the LOUD
+    /// warning that re-keyed content was re-wrapped to the UNCHANGED shared
+    /// master key and a revoked master-key holder still decrypts. This drives the
+    /// exact decision logic `cmd_key_rotate` prints (see
+    /// `forward_secrecy_summary_lines`).
+    #[test]
+    fn master_wrap_rotation_warns_no_forward_secrecy() {
+        let master = master_key(0x42);
+        let ctx = master_ctx(&master);
+
+        assert!(
+            !rotation_grants_forward_secrecy(&ctx),
+            "Master wrap must NOT be reported as granting forward secrecy"
+        );
+
+        let summary = forward_secrecy_summary_lines(&ctx).join("\n");
+        // The LOUD warning is present...
+        assert!(
+            summary.contains("WARNING: NO per-device forward secrecy"),
+            "Master-mode summary must warn that NO forward secrecy was gained: {summary}"
+        );
+        assert!(
+            summary.contains("UNCHANGED shared master key"),
+            "Master-mode summary must name the unchanged shared master key: {summary}"
+        );
+        assert!(
+            summary.contains("can STILL decrypt"),
+            "Master-mode summary must state a revoked holder STILL decrypts: {summary}"
+        );
+        assert!(
+            summary.contains("wrap_mode=PerDevice"),
+            "Master-mode summary must point at PerDevice as the fix: {summary}"
+        );
+        // ...and the PerDevice reassurance is ABSENT.
+        assert!(
+            !summary.contains("can no longer decrypt the re-keyed content"),
+            "Master-mode summary must NOT print the PerDevice forward-secrecy reassurance: \
+             {summary}"
+        );
+    }
+
+    /// Dual wrap (master wrap retained alongside per-device wraps) is ALSO not
+    /// forward-secret: the master wrap is an unchanged shared-secret path back to
+    /// the FileKey. It must get the same warning as Master.
+    #[test]
+    fn dual_wrap_rotation_warns_no_forward_secrecy() {
+        let master = master_key(0x42);
+        let keep = test_device("device-keep");
+        let ctx = dual_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
+
+        assert!(
+            !rotation_grants_forward_secrecy(&ctx),
+            "Dual wrap retains the master wrap and must NOT be reported as forward-secret"
+        );
+        let summary = forward_secrecy_summary_lines(&ctx).join("\n");
+        assert!(
+            summary.contains("WARNING: NO per-device forward secrecy"),
+            "Dual-mode summary must warn that NO forward secrecy was gained: {summary}"
+        );
+        assert!(
+            !summary.contains("can no longer decrypt the re-keyed content"),
+            "Dual-mode summary must NOT print the PerDevice reassurance: {summary}"
+        );
+    }
+
+    /// The ONLY path that earns the reassurance: PerDevice with a real recipient
+    /// set (per-device-only wraps, no master wrap, manifest v3).
+    #[test]
+    fn per_device_wrap_rotation_reports_forward_secrecy() {
+        let master = master_key(0x42);
+        let keep = test_device("device-keep");
+        let ctx = per_device_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
+
+        assert!(
+            rotation_grants_forward_secrecy(&ctx),
+            "PerDevice wrap with recipients MUST be reported as granting forward secrecy"
+        );
+        let summary = forward_secrecy_summary_lines(&ctx).join("\n");
+        assert!(
+            summary.contains("can no longer decrypt the re-keyed content"),
+            "PerDevice summary must print the forward-secrecy reassurance: {summary}"
+        );
+        assert!(
+            !summary.contains("WARNING: NO per-device forward secrecy"),
+            "PerDevice summary must NOT print the no-forward-secrecy warning: {summary}"
+        );
+    }
+
+    /// Defense in depth: PerDevice with an EMPTY recipient set is not a real
+    /// forward-secrecy guarantee (no one is a recipient); it must NOT earn the
+    /// reassurance. (In practice the write path rejects an empty PerDevice set,
+    /// but the messaging gate must not depend on that.)
+    #[test]
+    fn per_device_wrap_without_recipients_does_not_claim_forward_secrecy() {
+        let master = master_key(0x42);
+        let ctx = EncryptionContext::new(master.clone()).with_wrap_mode(
+            EngWrapMode::PerDevice,
+            Vec::new(),
+            None,
+        );
+        assert!(
+            !rotation_grants_forward_secrecy(&ctx),
+            "PerDevice with no recipients must NOT be reported as forward-secret"
+        );
+        let summary = forward_secrecy_summary_lines(&ctx).join("\n");
+        assert!(
+            summary.contains("WARNING: NO per-device forward secrecy"),
+            "empty-recipient PerDevice must warn rather than reassure: {summary}"
+        );
     }
 }
