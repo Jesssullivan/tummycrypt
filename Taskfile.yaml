@@ -629,6 +629,42 @@ tasks:
     cmds:
       - bash scripts/test-git-repo-canary.sh
 
+  lazy:dev-env-fingerprint:
+    desc: "Git-aware dev-env zero-diff fingerprint (G5/TIN-1620 precision layer over T2/T3/T8/T10)"
+    cmds:
+      - cmd: |
+          bash -euo pipefail <<'EOF'
+          mode="${MODE:-self-test}"
+          case "$mode" in
+            self-test)
+              scripts/repo-roam-fingerprint.sh self-test "${OUT_DIR:-}"
+              ;;
+            capture)
+              : "${REPO:?set REPO=<git worktree> for MODE=capture}"
+              : "${OUT_DIR:?set OUT_DIR=<evidence dir> for MODE=capture}"
+              scripts/repo-roam-fingerprint.sh capture "$REPO" "$OUT_DIR"
+              ;;
+            compare)
+              : "${DIR_A:?set DIR_A=<source fingerprint> for MODE=compare}"
+              : "${DIR_B:?set DIR_B=<rehydrated fingerprint> for MODE=compare}"
+              scripts/repo-roam-fingerprint.sh compare "$DIR_A" "$DIR_B"
+              ;;
+            seed-canary)
+              : "${OUT_DIR:?set OUT_DIR=<throwaway dir> for MODE=seed-canary}"
+              scripts/repo-roam-fingerprint.sh seed-canary "$OUT_DIR"
+              ;;
+            *)
+              echo "MODE must be self-test|capture|compare|seed-canary" >&2
+              exit 2
+              ;;
+          esac
+          EOF
+
+  lazy:test-dev-env-fingerprint:
+    desc: Regression-test the git-aware dev-env fingerprint tool
+    cmds:
+      - bash scripts/test-repo-roam-fingerprint.sh
+
   lazy:git-repo-restore-proof:
     desc: "Fresh-tree restore proof for an existing pushed git repo canary packet"
     cmds:
