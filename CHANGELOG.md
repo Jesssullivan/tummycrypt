@@ -9,6 +9,25 @@ Current release-proof posture is tracked in `docs/release/evidence/` and
 `docs/ops/product-reality-and-priority.md`; older entries below may describe
 historical release intent rather than the current supported/proven surface.
 
+## [Unreleased]
+
+### Changed
+
+- **Per-device file-key wrapping is now a tri-state `crypto.wrap_mode`**
+  (TIN-1417, replaces the `crypto.per_device_wrapping` boolean). Values:
+  `master` (DEFAULT — shared-master wrap, byte-identical to the previous
+  default), `dual` (EXPAND/transitional — emits BOTH the master wrap and
+  per-device wraps; manifest stays v2 and back-compatible), and `per_device`
+  (CONTRACT — emits per-device wraps ONLY, drops the master wrap for true
+  revocation, and bumps the manifest to v3 so pre-per-device binaries fail
+  CLOSED). Back-compat: a legacy `crypto.per_device_wrapping = true` config
+  deserializes to `dual` (keeps the master fallback); `false`/absent maps to
+  `master`. A present `wrap_mode` is canonical and wins. The daemon REFUSES to
+  drop the master wrap (`per_device`) until a roll-call probe confirms every
+  active, non-revoked device carries a real age recipient; otherwise it falls
+  back to `dual` and warns loudly. Default remains `master`, so existing fleets
+  are unaffected until the migration is explicitly enabled.
+
 ## [0.12.14] - 2026-06-03
 
 First finalized release of the 0.12.13→0.12.14 line (0.12.13 shipped only as
