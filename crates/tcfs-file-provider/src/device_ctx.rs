@@ -81,38 +81,66 @@ fn wrap_mode_from_config(config: &serde_json::Value) -> tcfs_core::config::WrapM
     }
 }
 
-/// Build a DEVICE-AWARE `EncryptionContext` for the FileProvider read path,
-/// mirroring `tcfsd`'s `build_encryption_context`.
+/// Resolve the active per-device recipient set, PREFERRING values inlined into
+/// the config over an on-disk registry read (TIN-1417 Keychain inlining).
 ///
-/// Default-off invariant: returns `EncryptionContext::new(master_key)` verbatim
-/// unless the config selects a non-`Master` `wrap_mode` (or the legacy
-/// `per_device_wrapping: true` alias). In that case it loads the device registry
-/// plus this device's age secret and attaches them, like the daemon, and applies
-/// the same roll-call gate (PerDevice downgrades to Dual unless every active
-/// device has a real age recipient).
+/// Under the macOS FileProvider sandbox the `.appex` cannot `fs`-read
+/// `~/.config/tcfs` (where the device registry lives); it receives its config
+/// from the shared Keychain instead. The Swift host therefore inlines the
+/// already-VERIFIED active recipients into the Keychain config copy under
+/// `device_recipients`, exactly mirroring how it inlines `master_key_base64`.
+/// When that key is present we trust it verbatim and never touch the filesystem;
+/// otherwise we fall back to loading `devices.json` (the non-sandboxed path used
+/// by the daemon/CLI and by tests).
 ///
-/// Like the daemon, this falls back to the master-only context (and logs why)
-/// only when per-device wrapping is requested but the registry/recipients/secret
-/// are unavailable — it never produces a context that this device cannot read
-/// back. The engine's read switch independently fails CLOSED if it then meets a
-/// per-device manifest with no identity attached.
+/// Returns `(recipients, all_capable)`. `all_capable` reflects whether every
+/// active device carries a real age recipient — for the inlined path it is
+/// supplied by the host under `device_recipients_all_capable` (the host runs the
+/// same roll-call against the verified registry); for the fs path it is derived
+/// from the loaded registry's `roll_call()`. It gates the PerDevice contract
+/// mode exactly as the daemon's roll-call gate does.
 #[cfg(feature = "grpc")]
-pub(crate) fn build_encryption_context(
+fn resolve_recipients(
     config: &serde_json::Value,
-    device_id: &str,
-    master_key: &tcfs_crypto::MasterKey,
-) -> tcfs_sync::engine::EncryptionContext {
-    use tcfs_core::config::WrapMode;
-    use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext};
-
-    let base = EncryptionContext::new(master_key.clone());
-
-    // Default-off: byte-identical master-only behavior unless explicitly enabled.
-    let requested = wrap_mode_from_config(config);
-    if requested == WrapMode::Master {
-        return base;
+    requested: tcfs_core::config::WrapMode,
+) -> Option<(Vec<tcfs_crypto::AgeFileKeyRecipient>, bool)> {
+    // Inlined-first: the Keychain-provided config copy carries the verified
+    // active recipients so the sandboxed FileProvider never reads devices.json.
+    if let Some(arr) = config
+        .get("device_recipients")
+        .and_then(serde_json::Value::as_array)
+    {
+        let recipients: Vec<tcfs_crypto::AgeFileKeyRecipient> = arr
+            .iter()
+            .filter_map(|entry| {
+                let device_id = entry.get("device_id")?.as_str()?.to_string();
+                let recipient = entry.get("recipient")?.as_str()?.to_string();
+                if !tcfs_secrets::device::is_real_age_public_key(&recipient) {
+                    return None;
+                }
+                Some(tcfs_crypto::AgeFileKeyRecipient {
+                    device_id,
+                    recipient,
+                })
+            })
+            .collect();
+        if recipients.is_empty() {
+            tracing::warn!(
+                "wrap_mode={requested:?}: inlined device_recipients present but empty/invalid; \
+                 using master wrap"
+            );
+            return None;
+        }
+        // The host computes capability against the verified registry; default to
+        // false (no PerDevice drop) when the signal is absent.
+        let all_capable = config
+            .get("device_recipients_all_capable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        return Some((recipients, all_capable));
     }
 
+    // FS fallback (non-sandboxed daemon/CLI/test path): load the registry.
     let registry_path = config
         .get("device_registry_path")
         .and_then(serde_json::Value::as_str)
@@ -125,7 +153,7 @@ pub(crate) fn build_encryption_context(
             tracing::warn!(
                 "wrap_mode={requested:?}: registry load failed ({e}); using master wrap"
             );
-            return base;
+            return None;
         }
     };
 
@@ -141,36 +169,122 @@ pub(crate) fn build_encryption_context(
         tracing::warn!(
             "wrap_mode={requested:?} enabled but no active age recipients; using master wrap"
         );
-        return base;
+        return None;
     }
 
+    let all_capable = registry.roll_call().all_capable();
+    Some((recipients, all_capable))
+}
+
+/// Resolve THIS device's age unwrap identity, PREFERRING a secret inlined into
+/// the config over an on-disk `device-<id>.age` read (TIN-1417 Keychain
+/// inlining).
+///
+/// The macOS FileProvider `.appex` cannot `fs`-read `device-<id>.age`, so the
+/// Swift host inlines this device's armored age secret into the Keychain config
+/// copy under `device_secret`, mirroring `master_key_base64`. When present we use
+/// it verbatim; otherwise we fall back to reading `device-<id>.age` from disk
+/// (the daemon/CLI/test path).
+#[cfg(feature = "grpc")]
+fn resolve_device_identity(
+    config: &serde_json::Value,
+    device_id: &str,
+    requested: tcfs_core::config::WrapMode,
+) -> Option<tcfs_sync::engine::DeviceUnwrapIdentity> {
+    use tcfs_sync::engine::DeviceUnwrapIdentity;
+
+    // Inlined-first: prefer the Keychain-provided secret over the fs read.
+    if let Some(secret) = config
+        .get("device_secret")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        return Some(DeviceUnwrapIdentity {
+            device_id: device_id.to_string(),
+            secret: secret.trim().to_string(),
+        });
+    }
+
+    // FS fallback: read device-<id>.age relative to the registry path.
+    let registry_path = config
+        .get("device_registry_path")
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(tcfs_secrets::device::default_registry_path);
     let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
-    let identity = match std::fs::read_to_string(&secret_path) {
-        Ok(s) => DeviceUnwrapIdentity {
+    match std::fs::read_to_string(&secret_path) {
+        Ok(s) => Some(DeviceUnwrapIdentity {
             device_id: device_id.to_string(),
             secret: s.trim().to_string(),
-        },
+        }),
         Err(e) => {
             tracing::warn!(
                 "wrap_mode={requested:?}: local device secret unreadable ({e}); using master wrap"
             );
-            return base;
+            None
         }
+    }
+}
+
+/// Build a DEVICE-AWARE `EncryptionContext` for the FileProvider read path,
+/// mirroring `tcfsd`'s `build_encryption_context`.
+///
+/// Default-off invariant: returns `EncryptionContext::new(master_key)` verbatim
+/// unless the config selects a non-`Master` `wrap_mode` (or the legacy
+/// `per_device_wrapping: true` alias). In that case it resolves the active
+/// recipient set plus this device's age secret and attaches them, like the
+/// daemon, and applies the same roll-call gate (PerDevice downgrades to Dual
+/// unless every active device has a real age recipient).
+///
+/// SANDBOX (TIN-1417): both the recipient set and this device's secret are
+/// resolved INLINED-FIRST — preferring values the Swift host wrote into the
+/// shared-Keychain config copy (`device_recipients` / `device_secret`) over an
+/// on-disk read of `devices.json` / `device-<id>.age`. The macOS FileProvider
+/// `.appex` cannot `fs`-read `~/.config/tcfs`, so the inlined path is the only
+/// one that works in-sandbox; the fs path remains the fallback for the
+/// non-sandboxed daemon/CLI and for tests.
+///
+/// Like the daemon, this falls back to the master-only context (and logs why)
+/// only when per-device wrapping is requested but the registry/recipients/secret
+/// are unavailable — it never produces a context that this device cannot read
+/// back. The engine's read switch independently fails CLOSED if it then meets a
+/// per-device manifest with no identity attached.
+#[cfg(feature = "grpc")]
+pub(crate) fn build_encryption_context(
+    config: &serde_json::Value,
+    device_id: &str,
+    master_key: &tcfs_crypto::MasterKey,
+) -> tcfs_sync::engine::EncryptionContext {
+    use tcfs_core::config::WrapMode;
+    use tcfs_sync::engine::EncryptionContext;
+
+    let base = EncryptionContext::new(master_key.clone());
+
+    // Default-off: byte-identical master-only behavior unless explicitly enabled.
+    let requested = wrap_mode_from_config(config);
+    if requested == WrapMode::Master {
+        return base;
+    }
+
+    let (recipients, all_capable) = match resolve_recipients(config, requested) {
+        Some(v) => v,
+        None => return base,
+    };
+
+    let identity = match resolve_device_identity(config, device_id, requested) {
+        Some(id) => id,
+        None => return base,
     };
 
     // Roll-call gate: refuse PerDevice (drop master wrap) unless every active
     // device is per-device-capable; otherwise degrade to Dual + warn.
     let effective = if requested == WrapMode::PerDevice {
-        let roll_call = registry.roll_call();
-        if roll_call.all_capable() {
+        if all_capable {
             WrapMode::PerDevice
         } else {
             tracing::warn!(
-                active = roll_call.active,
-                capable = roll_call.capable,
-                blockers = ?roll_call.incapable_devices,
-                "wrap_mode=PerDevice REFUSED by roll-call gate; falling back to Dual \
-                 (keeping the master wrap)"
+                "wrap_mode=PerDevice REFUSED by roll-call gate (not all active devices \
+                 carry a real age recipient); falling back to Dual (keeping the master wrap)"
             );
             WrapMode::Dual
         }
@@ -184,6 +298,7 @@ pub(crate) fn build_encryption_context(
 #[cfg(all(test, feature = "grpc"))]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
     use tcfs_secrets::device::{DeviceIdentity, DeviceRegistry};
 
     fn master() -> tcfs_crypto::MasterKey {
@@ -473,6 +588,146 @@ mod tests {
         .await
         .expect("default FP context must read master-only manifest unchanged");
         assert_eq!(std::fs::read(&dst).unwrap(), content);
+    }
+
+    /// SANDBOX (TIN-1417): the INLINED Keychain-config path is preferred over any
+    /// fs read. With `device_recipients` + `device_secret` inlined and NO
+    /// registry/secret on disk (and a deliberately bogus `device_registry_path`),
+    /// the context still attaches recipients + this device's identity — proving
+    /// the FileProvider `.appex` can build a device-aware context without ever
+    /// touching `~/.config/tcfs`.
+    #[test]
+    fn inlined_recipients_and_secret_are_preferred_without_fs() {
+        let key = tcfs_secrets::device::generate_local_device_key();
+        let secret = key.secret_key.expose_secret().to_string();
+        let config = serde_json::json!({
+            "wrap_mode": "per_device",
+            // Point at a path that does NOT exist on disk to prove no fs read
+            // happens when the inlined values are present.
+            "device_registry_path": "/nonexistent/tcfs/devices.json",
+            "device_recipients": [
+                { "device_id": "device-a", "recipient": key.public_key }
+            ],
+            "device_recipients_all_capable": true,
+            "device_secret": secret,
+        });
+        let ctx = build_encryption_context(&config, "device-a", &master());
+        assert_eq!(
+            ctx.wrap_mode,
+            tcfs_sync::engine::WrapMode::PerDevice,
+            "inlined all_capable=true should keep PerDevice"
+        );
+        assert_eq!(
+            ctx.device_recipients.len(),
+            1,
+            "inlined recipient set must be used"
+        );
+        assert_eq!(ctx.device_recipients[0].device_id, "device-a");
+        let identity = ctx
+            .device_identity
+            .as_ref()
+            .expect("inlined secret must attach a device identity");
+        assert_eq!(identity.device_id, "device-a");
+        assert_eq!(
+            identity.secret, secret,
+            "inlined secret must be used verbatim (no fs read)"
+        );
+    }
+
+    /// The inlined `device_recipients_all_capable=false` signal trips the same
+    /// roll-call gate as the fs path: PerDevice downgrades to Dual (keeping the
+    /// master wrap) even though recipients + secret are present.
+    #[test]
+    fn inlined_not_all_capable_downgrades_per_device_to_dual() {
+        let key = tcfs_secrets::device::generate_local_device_key();
+        let secret = key.secret_key.expose_secret().to_string();
+        let config = serde_json::json!({
+            "wrap_mode": "per_device",
+            "device_recipients": [
+                { "device_id": "device-a", "recipient": key.public_key }
+            ],
+            "device_recipients_all_capable": false,
+            "device_secret": secret,
+        });
+        let ctx = build_encryption_context(&config, "device-a", &master());
+        assert_eq!(
+            ctx.wrap_mode,
+            tcfs_sync::engine::WrapMode::Dual,
+            "all_capable=false must downgrade PerDevice -> Dual"
+        );
+        assert_eq!(ctx.device_recipients.len(), 1);
+        assert!(ctx.device_identity.is_some());
+    }
+
+    /// The fs path is the FALLBACK: when no inlined values are present the context
+    /// is built from `devices.json` + `device-<id>.age` exactly as before. This is
+    /// the daemon/CLI/non-sandboxed path. (Regression guard that inlining did not
+    /// break the on-disk path.)
+    #[test]
+    fn fs_path_is_used_as_fallback_when_not_inlined() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _pub = provision_device(tmp.path(), "device-a");
+        let config = serde_json::json!({
+            "wrap_mode": "per_device",
+            "device_registry_path": tmp.path().join("devices.json").to_str().unwrap(),
+        });
+        let ctx = build_encryption_context(&config, "device-a", &master());
+        assert_eq!(ctx.wrap_mode, tcfs_sync::engine::WrapMode::PerDevice);
+        assert_eq!(ctx.device_recipients.len(), 1);
+        let identity = ctx
+            .device_identity
+            .as_ref()
+            .expect("fs fallback must attach a device identity");
+        assert!(identity.secret.starts_with("AGE-SECRET-KEY-"));
+    }
+
+    /// Mixed precedence: inlined recipients but NO inlined secret -> the secret is
+    /// resolved via the fs fallback. Proves the two resolvers are independent and
+    /// each is inlined-first / fs-fallback on its own.
+    #[test]
+    fn inlined_recipients_with_fs_secret_fallback() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pub_key = provision_device(tmp.path(), "device-a");
+        let config = serde_json::json!({
+            "wrap_mode": "per_device",
+            "device_registry_path": tmp.path().join("devices.json").to_str().unwrap(),
+            "device_recipients": [
+                { "device_id": "device-a", "recipient": pub_key }
+            ],
+            "device_recipients_all_capable": true,
+            // No device_secret -> falls back to reading device-a.age from disk.
+        });
+        let ctx = build_encryption_context(&config, "device-a", &master());
+        assert_eq!(ctx.wrap_mode, tcfs_sync::engine::WrapMode::PerDevice);
+        assert_eq!(ctx.device_recipients.len(), 1);
+        let identity = ctx
+            .device_identity
+            .as_ref()
+            .expect("secret should resolve via fs fallback");
+        assert!(identity.secret.starts_with("AGE-SECRET-KEY-"));
+    }
+
+    /// Inlined `device_secret` present but recipients absent and no on-disk
+    /// registry -> recipient resolution fails, so the context fails back to
+    /// master-only (never a half-wired identity-only context). Fail-safe.
+    #[test]
+    fn inlined_secret_without_recipients_falls_back_to_master() {
+        let key = tcfs_secrets::device::generate_local_device_key();
+        let secret = key.secret_key.expose_secret().to_string();
+        let config = serde_json::json!({
+            "wrap_mode": "per_device",
+            "device_registry_path": "/nonexistent/tcfs/devices.json",
+            "device_secret": secret,
+        });
+        let ctx = build_encryption_context(&config, "device-a", &master());
+        assert!(
+            ctx.device_recipients.is_empty(),
+            "no recipients resolvable -> master-only"
+        );
+        assert!(
+            ctx.device_identity.is_none(),
+            "must not attach a half-wired identity-only context"
+        );
     }
 
     /// The fail-loud guard for the master-only backends rejects per-device

@@ -372,30 +372,178 @@ struct TCFSProviderApp {
             return config
         }
 
+        // (1) Master-key material — the established inlining (host reads
+        //     master_key_file from ~/.config/tcfs and inlines master_key_base64
+        //     so the sandboxed FileProvider .appex can decrypt without an fs read).
         if let encoded = object["master_key_base64"] as? String, !encoded.isEmpty {
-            return serializeConfigObject(object, fallback: config)
-        }
-
-        guard let keyPath = object["master_key_file"] as? String, !keyPath.isEmpty else {
+            // Already inlined; still try the per-device enrichment below.
+        } else if let keyPath = object["master_key_file"] as? String, !keyPath.isEmpty {
+            let expandedKeyPath = (keyPath as NSString).expandingTildeInPath
+            let keyURL = URL(fileURLWithPath: expandedKeyPath)
+            if let keyData = try? Data(contentsOf: keyURL) {
+                if keyData.count == 32 {
+                    object["master_key_base64"] = keyData.base64EncodedString()
+                    hostEvent("provisionConfig: added master key material to Keychain copy")
+                } else {
+                    hostEvent(
+                        "provisionConfig: master_key_file has invalid byte length \(keyData.count)"
+                    )
+                }
+            } else {
+                hostEvent("provisionConfig: master_key_file could not be read")
+            }
+        } else {
             hostLogger.warning("provisionConfig: no master_key_file for Keychain enrichment")
-            return serializeConfigObject(object, fallback: config)
         }
 
-        let expandedKeyPath = (keyPath as NSString).expandingTildeInPath
-        let keyURL = URL(fileURLWithPath: expandedKeyPath)
-        guard let keyData = try? Data(contentsOf: keyURL) else {
-            hostEvent("provisionConfig: master_key_file could not be read")
-            return serializeConfigObject(object, fallback: config)
-        }
+        // (2) Per-device material (TIN-1417) — inert unless wrap_mode is
+        //     dual/per_device. The macOS FileProvider .appex cannot fs-read
+        //     ~/.config/tcfs (devices.json / device-<id>.age), so the host (which
+        //     CAN read them) inlines the active recipients + this device's age
+        //     secret into the Keychain config copy, mirroring master_key_base64.
+        enrichPerDeviceMaterial(&object)
 
-        guard keyData.count == 32 else {
-            hostEvent("provisionConfig: master_key_file has invalid byte length \(keyData.count)")
-            return serializeConfigObject(object, fallback: config)
-        }
-
-        object["master_key_base64"] = keyData.base64EncodedString()
-        hostEvent("provisionConfig: added master key material to Keychain copy")
         return serializeConfigObject(object, fallback: config)
+    }
+
+    /// Returns true when the config selects a non-master wrap mode (dual /
+    /// per_device, or the legacy `per_device_wrapping: true` alias). Per-device
+    /// Keychain inlining is INERT for the default `master` mode — the inlined
+    /// fields are simply not written, keeping wrap_mode=master byte-identical.
+    private static func wrapModeIsPerDevice(_ object: [String: Any]) -> Bool {
+        if let mode = object["wrap_mode"] as? String, !mode.isEmpty {
+            return mode == "dual" || mode == "per_device"
+        }
+        if let legacy = object["per_device_wrapping"] as? Bool {
+            return legacy
+        }
+        return false
+    }
+
+    /// Inline the active per-device recipients and THIS device's age secret into
+    /// the Keychain config copy so the sandboxed FileProvider can build a
+    /// device-aware EncryptionContext without reading ~/.config/tcfs.
+    ///
+    /// The inlined keys are consumed by the Rust read-side
+    /// (`crates/tcfs-file-provider/src/device_ctx.rs`,
+    /// `resolve_recipients` / `resolve_device_identity`), which prefers them over
+    /// the on-disk registry/secret:
+    ///   - `device_recipients`: [{ "device_id", "recipient" }, ...] — active,
+    ///     non-revoked devices that carry a real age recipient.
+    ///   - `device_recipients_all_capable`: Bool — the host's roll-call result
+    ///     (every active device carries a real age recipient). Gates the
+    ///     PerDevice contract drop on the Rust side exactly like the daemon.
+    ///   - `device_secret`: String — this device's armored age secret
+    ///     (`device-<device_id>.age` contents).
+    ///
+    /// DRAFT / UNVERIFIED: this cannot be compiled or device-tested in the agent
+    /// sandbox; it needs a real-device Xcode build + FileProvider QA. The
+    /// registry here is read with NO signature verification (see B4 — the
+    /// DeviceRegistry is forgeable today); this code only mirrors the existing
+    /// trust posture and does NOT add a new trust boundary.
+    private static func enrichPerDeviceMaterial(_ object: inout [String: Any]) {
+        guard wrapModeIsPerDevice(object) else {
+            // wrap_mode=master (default): leave the config untouched.
+            return
+        }
+
+        // Resolve the registry path: explicit override, else default
+        // ~/.config/tcfs/devices.json.
+        let registryPath: String
+        if let explicit = object["device_registry_path"] as? String, !explicit.isEmpty {
+            registryPath = (explicit as NSString).expandingTildeInPath
+        } else {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            registryPath = home.appendingPathComponent(".config/tcfs/devices.json").path
+        }
+
+        let registryURL = URL(fileURLWithPath: registryPath)
+        guard let registryData = try? Data(contentsOf: registryURL),
+              let registryObject = try? JSONSerialization.jsonObject(with: registryData)
+              as? [String: Any],
+              let devices = registryObject["devices"] as? [[String: Any]]
+        else {
+            hostEvent("provisionConfig: device registry unreadable; skipping per-device inlining")
+            return
+        }
+
+        // Active (non-revoked) devices that carry a *real* age recipient. Mirrors
+        // the Rust `active_devices().filter(is_real_age_public_key)` and the
+        // roll-call gate (all_capable = no active device lacks a real recipient).
+        var recipients: [[String: String]] = []
+        var activeCount = 0
+        var capableCount = 0
+        for device in devices {
+            let revoked = (device["revoked"] as? Bool) ?? false
+            if revoked { continue }
+            activeCount += 1
+            guard let deviceId = device["device_id"] as? String, !deviceId.isEmpty,
+                  let publicKey = device["public_key"] as? String,
+                  isRealAgePublicKey(publicKey)
+            else {
+                continue
+            }
+            capableCount += 1
+            recipients.append(["device_id": deviceId, "recipient": publicKey])
+        }
+
+        guard !recipients.isEmpty else {
+            hostEvent("provisionConfig: no active age recipients; skipping per-device inlining")
+            return
+        }
+
+        object["device_recipients"] = recipients
+        // all_capable iff every active device carried a real recipient.
+        object["device_recipients_all_capable"] = (activeCount == capableCount)
+
+        // Inline THIS device's age secret (device-<device_id>.age), resolved
+        // relative to the registry directory — mirrors the Rust
+        // `device_secret_key_path(registry_path, device_id)` layout.
+        if let deviceId = object["device_id"] as? String, !deviceId.isEmpty {
+            let registryDir = registryURL.deletingLastPathComponent()
+            let secretURL = registryDir.appendingPathComponent("device-\(deviceId).age")
+            if let secretData = try? Data(contentsOf: secretURL),
+               let secret = String(data: secretData, encoding: .utf8) {
+                let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    object["device_secret"] = trimmed
+                    hostEvent(
+                        "provisionConfig: inlined \(recipients.count) recipient(s) + device "
+                            + "secret for \(deviceId) (all_capable="
+                            + "\(activeCount == capableCount))"
+                    )
+                } else {
+                    hostEvent("provisionConfig: device secret file empty; recipients inlined only")
+                }
+            } else {
+                // Recipients inlined but no local secret — the Rust read-side then
+                // falls back to its fs read (which fails closed in-sandbox). We do
+                // NOT inline a partial/empty secret.
+                hostEvent("provisionConfig: device-\(deviceId).age unreadable; recipients only")
+            }
+        } else {
+            hostEvent("provisionConfig: no device_id in config; cannot inline device secret")
+        }
+    }
+
+    /// Approximate Swift mirror of `tcfs_secrets::device::is_real_age_public_key`,
+    /// which in Rust does a FULL `age::x25519::Recipient` bech32 parse. Swift has
+    /// no age crate here, so this only checks the `age1` prefix and a plausible
+    /// length — a deliberately conservative heuristic.
+    ///
+    /// SAFETY: the Rust read-side (`resolve_recipients`) RE-VALIDATES every
+    /// inlined recipient with the real `is_real_age_public_key`, so a Swift
+    /// false-positive cannot inject a malformed recipient into the wrap set. The
+    /// one Swift-only signal the Rust side trusts is
+    /// `device_recipients_all_capable`; a Swift over-count there could let the
+    /// Rust side enter PerDevice (drop the master wrap) prematurely. Hardening
+    /// this to a real bech32/age parse on the Swift side is a follow-up (needs an
+    /// age-Swift dependency); flagged for real-device review.
+    private static func isRealAgePublicKey(_ publicKey: String) -> Bool {
+        let trimmed = publicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        // age1 + bech32 payload; real keys are ~62 chars. Require a healthy
+        // minimum to reject obvious placeholders without over-trusting.
+        return trimmed.hasPrefix("age1") && trimmed.count >= 50
     }
 
     private static func serializeConfigObject(
