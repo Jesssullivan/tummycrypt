@@ -300,6 +300,82 @@ async fn dual_and_per_device_without_recipients_fail_closed() {
     }
 }
 
+/// A Dual (v2) manifest carries BOTH a master wrap and per-device wraps. A
+/// Master-mode / no-identity read context (e.g. a peer device that never
+/// attached an age identity) MUST fall back to the master wrap and hydrate exact
+/// bytes — NOT error "no age identity". This is the whole point of Dual's
+/// rollback/recovery rationale and the live daemon/FP read path for a Master
+/// device reading peer-written Dual content.
+#[tokio::test]
+async fn dual_manifest_master_only_read_falls_back_to_master_wrap() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/dual-master-read";
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+
+    // Write in Dual mode: recipients + identity attached, master wrap retained.
+    let (rec_a, id_a) = device("device-a");
+    let (rec_b, _id_b) = device("device-b");
+    let write_ctx = EncryptionContext::new(master()).with_wrap_mode(
+        WrapMode::Dual,
+        vec![rec_a, rec_b],
+        Some(id_a),
+    );
+
+    let content = b"dual payload readable by a master-only device with no age identity";
+    let src = tmp.path().join("doc.txt");
+    std::fs::write(&src, content).unwrap();
+
+    let up = tcfs_sync::engine::upload_file_with_device(
+        &op,
+        &src,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        None,
+        Some(&write_ctx),
+    )
+    .await
+    .expect("dual upload should succeed");
+
+    // Sanity: the manifest is a real Dual manifest (v2, both fields present).
+    let manifest_bytes = op.read(&up.remote_path).await.unwrap().to_bytes();
+    let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes).unwrap();
+    assert_eq!(manifest.version, 2, "Dual stays manifest v2");
+    assert!(
+        manifest.encrypted_file_key.is_some(),
+        "Dual must retain the master wrap"
+    );
+    assert!(
+        !manifest.wrapped_file_keys.is_empty(),
+        "Dual must also carry per-device wraps"
+    );
+
+    // Read back with a pure master context: NO device identity attached. The
+    // read switch must NOT error "no age identity"; it must fall back to the
+    // master wrap and produce byte-exact plaintext.
+    let master_only = EncryptionContext::new(master());
+    let dst = tmp.path().join("out.txt");
+    tcfs_sync::engine::download_file_with_device(
+        &op,
+        &up.remote_path,
+        &dst,
+        prefix,
+        None,
+        "master-reader",
+        None,
+        Some(&master_only),
+    )
+    .await
+    .expect("master-only read of a Dual manifest must succeed via master-wrap fallback");
+    assert_eq!(
+        std::fs::read(&dst).unwrap(),
+        content,
+        "master-wrap fallback must reconstruct exact plaintext"
+    );
+}
+
 /// A v3 (per-device) manifest must be REJECTED fail-closed by a master-only read
 /// context (a binary/context without a per-device identity).
 #[tokio::test]

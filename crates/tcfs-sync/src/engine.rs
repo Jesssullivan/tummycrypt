@@ -2368,37 +2368,17 @@ pub async fn download_file_with_device(
     // (TIN-1417): when present, the file key is unwrapped with this device's age
     // identity. Manifests carrying only the legacy master-wrapped key fall back
     // to master-key unwrap.
+    //
+    // Dual manifests (v2) carry BOTH `wrapped_file_keys` AND a master
+    // `encrypted_file_key`. A device that has NO usable per-device wrap (no
+    // encryption context, no age identity, or no stanza addressing it) MUST fall
+    // back to the master wrap when one is present — this is the whole point of
+    // Dual's rollback/recovery rationale, and keeps a Master-mode/no-identity
+    // device able to read peer-written Dual content. PerDevice manifests (v3)
+    // carry NO master wrap (`encrypted_file_key == None`); for those the
+    // per-device path is the only path and we stay strictly fail-closed.
     #[cfg(feature = "crypto")]
-    let file_key = if !manifest.wrapped_file_keys.is_empty() {
-        let ctx = encryption.ok_or_else(|| {
-            anyhow::anyhow!(
-                "manifest is per-device encrypted but no encryption context provided for: {remote_manifest}"
-            )
-        })?;
-        let identity = ctx.device_identity.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "manifest is per-device encrypted but this device has no age identity for: {remote_manifest}"
-            )
-        })?;
-        let age_wraps: Vec<tcfs_crypto::AgeWrappedFileKey> = manifest
-            .wrapped_file_keys
-            .iter()
-            .map(|w| tcfs_crypto::AgeWrappedFileKey {
-                recipient_device_id: w.recipient_device_id.clone(),
-                recipient: w.recipient.clone(),
-                algorithm: w.algorithm.clone(),
-                wrapped_key: w.wrapped_key.clone(),
-            })
-            .collect();
-        Some(
-            tcfs_crypto::unwrap_file_key_with_age_identity(
-                &age_wraps,
-                &identity.secret,
-                Some(&identity.device_id),
-            )
-            .context("unwrapping per-device file key from manifest")?,
-        )
-    } else if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
+    let unwrap_master = |wrapped_b64: &str| -> Result<tcfs_crypto::FileKey> {
         let ctx = encryption.ok_or_else(|| {
             anyhow::anyhow!(
                 "manifest is encrypted but no encryption context provided for: {remote_manifest}"
@@ -2407,10 +2387,64 @@ pub async fn download_file_with_device(
         let wrapped =
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, wrapped_b64)
                 .context("decoding wrapped file key from manifest")?;
-        Some(
-            tcfs_crypto::unwrap_key(&ctx.master_key, &wrapped)
-                .context("unwrapping file key from manifest")?,
-        )
+        tcfs_crypto::unwrap_key(&ctx.master_key, &wrapped)
+            .context("unwrapping file key from manifest")
+    };
+
+    #[cfg(feature = "crypto")]
+    let file_key = if !manifest.wrapped_file_keys.is_empty() {
+        // Attempt the per-device unwrap first (preferred). Capture the failure
+        // instead of propagating so we can fall back to the master wrap when the
+        // manifest carries one (Dual/v2).
+        let per_device: Result<tcfs_crypto::FileKey> = (|| {
+            let ctx = encryption.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "manifest is per-device encrypted but no encryption context provided for: {remote_manifest}"
+                )
+            })?;
+            let identity = ctx.device_identity.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "manifest is per-device encrypted but this device has no age identity for: {remote_manifest}"
+                )
+            })?;
+            let age_wraps: Vec<tcfs_crypto::AgeWrappedFileKey> = manifest
+                .wrapped_file_keys
+                .iter()
+                .map(|w| tcfs_crypto::AgeWrappedFileKey {
+                    recipient_device_id: w.recipient_device_id.clone(),
+                    recipient: w.recipient.clone(),
+                    algorithm: w.algorithm.clone(),
+                    wrapped_key: w.wrapped_key.clone(),
+                })
+                .collect();
+            tcfs_crypto::unwrap_file_key_with_age_identity(
+                &age_wraps,
+                &identity.secret,
+                Some(&identity.device_id),
+            )
+            .context("unwrapping per-device file key from manifest")
+        })();
+
+        match per_device {
+            Ok(fk) => Some(fk),
+            Err(per_device_err) => {
+                // Fall back to the master wrap ONLY when one is actually present
+                // (Dual/v2). A v3 (PerDevice) manifest has no master wrap and
+                // MUST stay strictly fail-closed — surface the per-device error.
+                if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
+                    debug!(
+                        remote = %remote_manifest,
+                        error = %per_device_err,
+                        "per-device unwrap unavailable; falling back to master wrap (Dual manifest)"
+                    );
+                    Some(unwrap_master(wrapped_b64)?)
+                } else {
+                    return Err(per_device_err);
+                }
+            }
+        }
+    } else if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
+        Some(unwrap_master(wrapped_b64)?)
     } else {
         None
     };
