@@ -24,22 +24,35 @@ use tcfs_core::proto::{
 };
 use tcfs_sync::state::StateCacheBackend;
 
-/// Build an `EncryptionContext`, attaching per-device wrapping (TIN-1417) when
-/// `crypto.per_device_wrapping` is enabled and the device registry has real age
-/// recipients. Falls back to legacy shared-master wrapping (and logs why) if the
-/// registry can't be loaded, has no real recipients, or this device's age secret
-/// is missing — never producing content this device cannot read back.
+/// Build an `EncryptionContext` honoring `crypto.wrap_mode` (TIN-1417).
+///
+/// - `Master` (default): legacy shared-master wrap. Byte-identical to the prior
+///   default; returns `EncryptionContext::new(master_key)` verbatim.
+/// - `Dual` (EXPAND): emit BOTH the master wrap and per-device wraps. Requires a
+///   real age recipient set; if none are available we log and fall back to
+///   master (never produce content this device cannot read back).
+/// - `PerDevice` (CONTRACT): drop the master wrap. Gated behind a roll-call
+///   probe — we refuse PerDevice and **fall back to Dual + warn loudly** unless
+///   EVERY active (non-revoked) device carries a real age recipient. We also
+///   fall back if the local device secret is unreadable.
+///
+/// Whenever the requested mode cannot be honored safely we degrade to the most
+/// conservative mode that still keeps every device able to read (Dual, then
+/// Master), and log why — we never silently drop the master fallback.
 pub(crate) fn build_encryption_context(
     config: &TcfsConfig,
     device_id: &str,
     master_key: &tcfs_crypto::MasterKey,
 ) -> tcfs_sync::engine::EncryptionContext {
+    use tcfs_core::config::WrapMode;
     use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext};
 
     let base = EncryptionContext::new(master_key.clone());
-    if !config.crypto.per_device_wrapping {
+    let requested = config.crypto.wrap_mode;
+    if requested == WrapMode::Master {
         return base;
     }
+
     let registry_path = config
         .sync
         .device_identity
@@ -48,10 +61,13 @@ pub(crate) fn build_encryption_context(
     let registry = match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("per-device wrapping: registry load failed ({e}); using master wrap");
+            tracing::warn!(
+                "wrap_mode={requested:?}: registry load failed ({e}); using master wrap"
+            );
             return base;
         }
     };
+
     let recipients: Vec<tcfs_crypto::AgeFileKeyRecipient> = registry
         .active_devices()
         .filter(|d| tcfs_secrets::device::is_real_age_public_key(&d.public_key))
@@ -62,10 +78,11 @@ pub(crate) fn build_encryption_context(
         .collect();
     if recipients.is_empty() {
         tracing::warn!(
-            "per-device wrapping enabled but no active age recipients; using master wrap"
+            "wrap_mode={requested:?} enabled but no active age recipients; using master wrap"
         );
         return base;
     }
+
     let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
     let identity = match std::fs::read_to_string(&secret_path) {
         Ok(s) => DeviceUnwrapIdentity {
@@ -74,12 +91,44 @@ pub(crate) fn build_encryption_context(
         },
         Err(e) => {
             tracing::warn!(
-                "per-device wrapping: local device secret unreadable ({e}); using master wrap"
+                "wrap_mode={requested:?}: local device secret unreadable ({e}); using master wrap"
             );
             return base;
         }
     };
-    base.with_device_wrapping(recipients, Some(identity))
+
+    // Roll-call gate: PerDevice (CONTRACT) drops the master wrap, so it is only
+    // safe when EVERY active device can do per-device unwrap. If not, degrade to
+    // Dual (keeps the master fallback) and warn loudly.
+    let effective = resolve_wrap_mode_with_roll_call(requested, &registry);
+    base.with_wrap_mode(effective, recipients, Some(identity))
+}
+
+/// Apply the roll-call gate to a requested wrap mode.
+///
+/// `PerDevice` is downgraded to `Dual` (with a loud warning) unless every active
+/// device carries a real age recipient. `Master`/`Dual` pass through unchanged.
+pub(crate) fn resolve_wrap_mode_with_roll_call(
+    requested: tcfs_core::config::WrapMode,
+    registry: &tcfs_secrets::device::DeviceRegistry,
+) -> tcfs_core::config::WrapMode {
+    use tcfs_core::config::WrapMode;
+    if requested != WrapMode::PerDevice {
+        return requested;
+    }
+    let roll_call = registry.roll_call();
+    if roll_call.all_capable() {
+        return WrapMode::PerDevice;
+    }
+    tracing::warn!(
+        active = roll_call.active,
+        capable = roll_call.capable,
+        blockers = ?roll_call.incapable_devices,
+        "wrap_mode=PerDevice REFUSED by roll-call gate: not every active device has a real \
+         age recipient; falling back to Dual (keeping the master wrap) to avoid locking out \
+         devices. Enroll real age recipients for the listed devices to enable true revocation."
+    );
+    WrapMode::Dual
 }
 
 /// Implementation of the TcfsDaemon gRPC service
@@ -4046,5 +4095,49 @@ mod tests {
             "docs/nested/deep.md"
         );
         assert_eq!(sanitize_rel_path("./current.txt").unwrap(), "./current.txt");
+    }
+
+    // ── TIN-1417: roll-call gate for the PerDevice CONTRACT ────────────────
+
+    #[test]
+    fn roll_call_gate_passes_per_device_when_all_capable() {
+        use tcfs_core::config::WrapMode;
+        let mut reg = tcfs_secrets::device::DeviceRegistry::default();
+        let real = tcfs_secrets::device::generate_local_device_key().public_key;
+        reg.enroll("a", &real, None);
+        assert_eq!(
+            resolve_wrap_mode_with_roll_call(WrapMode::PerDevice, &reg),
+            WrapMode::PerDevice,
+            "all active devices capable => PerDevice honored"
+        );
+    }
+
+    #[test]
+    fn roll_call_gate_downgrades_per_device_to_dual_when_blocked() {
+        use tcfs_core::config::WrapMode;
+        let mut reg = tcfs_secrets::device::DeviceRegistry::default();
+        let real = tcfs_secrets::device::generate_local_device_key().public_key;
+        reg.enroll("a", &real, None);
+        // A second active device without a real age recipient blocks the contract.
+        reg.enroll("placeholder", "age1xoxd-not-a-real-key", None);
+        assert_eq!(
+            resolve_wrap_mode_with_roll_call(WrapMode::PerDevice, &reg),
+            WrapMode::Dual,
+            "a non-capable active device must downgrade PerDevice -> Dual"
+        );
+    }
+
+    #[test]
+    fn roll_call_gate_passes_dual_and_master_through() {
+        use tcfs_core::config::WrapMode;
+        let reg = tcfs_secrets::device::DeviceRegistry::default();
+        assert_eq!(
+            resolve_wrap_mode_with_roll_call(WrapMode::Master, &reg),
+            WrapMode::Master
+        );
+        assert_eq!(
+            resolve_wrap_mode_with_roll_call(WrapMode::Dual, &reg),
+            WrapMode::Dual
+        );
     }
 }

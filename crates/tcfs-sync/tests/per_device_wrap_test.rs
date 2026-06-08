@@ -14,7 +14,7 @@ use secrecy::ExposeSecret;
 use tempfile::TempDir;
 
 use tcfs_crypto::AgeFileKeyRecipient;
-use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext};
+use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext, WrapMode};
 
 fn memory_operator() -> Operator {
     Operator::new(opendal::services::Memory::default())
@@ -171,4 +171,263 @@ async fn revoked_device_cannot_decrypt_new_content() {
     .await
     .expect("active device download should succeed");
     assert_eq!(std::fs::read(&dst_a).unwrap(), content);
+}
+
+// ── TIN-1417: tri-state wrap_mode write-path shapes + v3 fail-closed ────────
+
+async fn upload_with_ctx(
+    op: &Operator,
+    tmp: &TempDir,
+    prefix: &str,
+    ctx: &EncryptionContext,
+    content: &[u8],
+) -> tcfs_sync::manifest::SyncManifest {
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+    let src = tmp.path().join("doc.txt");
+    std::fs::write(&src, content).unwrap();
+    let up = tcfs_sync::engine::upload_file_with_device(
+        op,
+        &src,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        None,
+        Some(ctx),
+    )
+    .await
+    .expect("upload should succeed");
+    let bytes = op.read(&up.remote_path).await.unwrap().to_bytes();
+    tcfs_sync::manifest::SyncManifest::from_bytes(&bytes).unwrap()
+}
+
+/// Master mode (DEFAULT): master-wrapped key only, no per-device wraps, v2.
+#[tokio::test]
+async fn wrap_mode_master_emits_encrypted_file_key_only_v2() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let (rec_a, id_a) = device("device-a");
+    // Even with recipients/identity attached, Master must emit master-only.
+    let ctx =
+        EncryptionContext::new(master()).with_wrap_mode(WrapMode::Master, vec![rec_a], Some(id_a));
+    let manifest = upload_with_ctx(&op, &tmp, "test/master", &ctx, b"master payload").await;
+    assert_eq!(manifest.version, 2, "Master stays manifest v2");
+    assert!(
+        manifest.encrypted_file_key.is_some(),
+        "Master must emit the master-wrapped key"
+    );
+    assert!(
+        manifest.wrapped_file_keys.is_empty(),
+        "Master must NOT emit per-device wraps"
+    );
+}
+
+/// Dual mode (EXPAND): BOTH master wrap and per-device wraps, stays v2.
+#[tokio::test]
+async fn wrap_mode_dual_emits_both_fields_v2() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let (rec_a, id_a) = device("device-a");
+    let (rec_b, _id_b) = device("device-b");
+    let ctx = EncryptionContext::new(master()).with_wrap_mode(
+        WrapMode::Dual,
+        vec![rec_a, rec_b],
+        Some(id_a),
+    );
+    let manifest = upload_with_ctx(&op, &tmp, "test/dual", &ctx, b"dual payload").await;
+    assert_eq!(manifest.version, 2, "Dual is back-compatible: stays v2");
+    assert!(
+        manifest.encrypted_file_key.is_some(),
+        "Dual must emit the master wrap (rollback + master readers)"
+    );
+    assert_eq!(
+        manifest.wrapped_file_keys.len(),
+        2,
+        "Dual must also emit one per-device wrap per recipient"
+    );
+}
+
+/// PerDevice mode (CONTRACT): per-device wraps only, master wrap dropped, v3.
+#[tokio::test]
+async fn wrap_mode_per_device_emits_wrapped_only_v3() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let (rec_a, id_a) = device("device-a");
+    let ctx = EncryptionContext::new(master()).with_wrap_mode(
+        WrapMode::PerDevice,
+        vec![rec_a],
+        Some(id_a.clone()),
+    );
+    let manifest = upload_with_ctx(&op, &tmp, "test/perdev", &ctx, b"per-device payload").await;
+    assert_eq!(manifest.version, 3, "PerDevice bumps the manifest to v3");
+    assert!(
+        manifest.encrypted_file_key.is_none(),
+        "PerDevice must DROP the master wrap (true revocation)"
+    );
+    assert!(
+        !manifest.wrapped_file_keys.is_empty(),
+        "PerDevice must emit per-device wraps"
+    );
+}
+
+/// Dual/PerDevice with no recipients must FAIL CLOSED rather than silently
+/// degrading to master-only / writing an unreadable manifest.
+#[tokio::test]
+async fn dual_and_per_device_without_recipients_fail_closed() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+    let src = tmp.path().join("doc.txt");
+    std::fs::write(&src, b"x").unwrap();
+
+    for mode in [WrapMode::Dual, WrapMode::PerDevice] {
+        let ctx = EncryptionContext::new(master()).with_wrap_mode(mode, Vec::new(), None);
+        let res = tcfs_sync::engine::upload_file_with_device(
+            &op,
+            &src,
+            "test/failclosed",
+            &mut state,
+            None,
+            "device-a",
+            None,
+            Some(&ctx),
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "wrap_mode={mode:?} with no recipients must fail closed"
+        );
+    }
+}
+
+/// A Dual (v2) manifest carries BOTH a master wrap and per-device wraps. A
+/// Master-mode / no-identity read context (e.g. a peer device that never
+/// attached an age identity) MUST fall back to the master wrap and hydrate exact
+/// bytes — NOT error "no age identity". This is the whole point of Dual's
+/// rollback/recovery rationale and the live daemon/FP read path for a Master
+/// device reading peer-written Dual content.
+#[tokio::test]
+async fn dual_manifest_master_only_read_falls_back_to_master_wrap() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/dual-master-read";
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
+
+    // Write in Dual mode: recipients + identity attached, master wrap retained.
+    let (rec_a, id_a) = device("device-a");
+    let (rec_b, _id_b) = device("device-b");
+    let write_ctx = EncryptionContext::new(master()).with_wrap_mode(
+        WrapMode::Dual,
+        vec![rec_a, rec_b],
+        Some(id_a),
+    );
+
+    let content = b"dual payload readable by a master-only device with no age identity";
+    let src = tmp.path().join("doc.txt");
+    std::fs::write(&src, content).unwrap();
+
+    let up = tcfs_sync::engine::upload_file_with_device(
+        &op,
+        &src,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        None,
+        Some(&write_ctx),
+    )
+    .await
+    .expect("dual upload should succeed");
+
+    // Sanity: the manifest is a real Dual manifest (v2, both fields present).
+    let manifest_bytes = op.read(&up.remote_path).await.unwrap().to_bytes();
+    let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes).unwrap();
+    assert_eq!(manifest.version, 2, "Dual stays manifest v2");
+    assert!(
+        manifest.encrypted_file_key.is_some(),
+        "Dual must retain the master wrap"
+    );
+    assert!(
+        !manifest.wrapped_file_keys.is_empty(),
+        "Dual must also carry per-device wraps"
+    );
+
+    // Read back with a pure master context: NO device identity attached. The
+    // read switch must NOT error "no age identity"; it must fall back to the
+    // master wrap and produce byte-exact plaintext.
+    let master_only = EncryptionContext::new(master());
+    let dst = tmp.path().join("out.txt");
+    tcfs_sync::engine::download_file_with_device(
+        &op,
+        &up.remote_path,
+        &dst,
+        prefix,
+        None,
+        "master-reader",
+        None,
+        Some(&master_only),
+    )
+    .await
+    .expect("master-only read of a Dual manifest must succeed via master-wrap fallback");
+    assert_eq!(
+        std::fs::read(&dst).unwrap(),
+        content,
+        "master-wrap fallback must reconstruct exact plaintext"
+    );
+}
+
+/// A v3 (per-device) manifest must be REJECTED fail-closed by a master-only read
+/// context (a binary/context without a per-device identity).
+#[tokio::test]
+async fn v3_manifest_rejected_fail_closed_by_master_only_read() {
+    let tmp = TempDir::new().unwrap();
+    let op = memory_operator();
+    let prefix = "test/v3-failclosed";
+    let (rec_a, id_a) = device("device-a");
+    let write_ctx = EncryptionContext::new(master()).with_wrap_mode(
+        WrapMode::PerDevice,
+        vec![rec_a],
+        Some(id_a),
+    );
+    let manifest = upload_with_ctx(&op, &tmp, prefix, &write_ctx, b"v3 payload").await;
+    assert_eq!(manifest.version, 3);
+
+    // Reconstruct the remote manifest path the same way upload did.
+    let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state2.db")).unwrap();
+    let src = tmp.path().join("doc.txt");
+    let up = tcfs_sync::engine::upload_file_with_device(
+        &op,
+        &src,
+        prefix,
+        &mut state,
+        None,
+        "device-a",
+        None,
+        Some(&write_ctx),
+    )
+    .await
+    .unwrap();
+
+    // Master-only context: no device identity attached -> must fail closed.
+    let master_only = EncryptionContext::new(master());
+    let dst = tmp.path().join("out.txt");
+    let res = tcfs_sync::engine::download_file_with_device(
+        &op,
+        &up.remote_path,
+        &dst,
+        prefix,
+        None,
+        "device-a",
+        None,
+        Some(&master_only),
+    )
+    .await;
+    assert!(
+        res.is_err(),
+        "a master-only context must reject a v3 per-device manifest (fail-closed)"
+    );
+    assert!(
+        !dst.exists(),
+        "fail-closed read must not materialize a file"
+    );
 }

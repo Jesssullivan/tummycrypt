@@ -239,15 +239,25 @@ async fn fetch_direct_to_file(
             .with_context(|| format!("resolving manifest for: {remote_path}"))?;
 
     // Build the read context with this device's unwrap identity attached
-    // (TIN-1417). With the default config `device_recipients` is empty and
-    // `device_identity` is None, so `with_device_wrapping` is a no-op and this
-    // equals the prior `EncryptionContext::new(mk)` exactly (byte-identical for
-    // master-only manifests). When a per-device (`wrapped_file_keys`) manifest
-    // is read, the engine's read switch fails CLOSED with a clear error if no
+    // (TIN-1417). This is a READ path, so `wrap_mode` (which only drives the
+    // write path) is immaterial here — the engine's read switch branches on the
+    // manifest's own shape (`wrapped_file_keys` vs `encrypted_file_key`). With
+    // the default config `device_recipients` is empty and `device_identity` is
+    // None, so this equals `EncryptionContext::new(mk)` (byte-identical for
+    // master-only manifests). When a per-device (`wrapped_file_keys`) manifest is
+    // read, the engine's read switch fails CLOSED with a clear error if no
     // identity is attached — it never silently master-falls-back.
     let enc_ctx = master_key.as_ref().map(|mk| {
-        tcfs_sync::engine::EncryptionContext::new(mk.clone())
-            .with_device_wrapping(device_recipients, device_identity)
+        let mode = if device_recipients.is_empty() {
+            tcfs_sync::engine::WrapMode::Master
+        } else {
+            tcfs_sync::engine::WrapMode::PerDevice
+        };
+        tcfs_sync::engine::EncryptionContext::new(mk.clone()).with_wrap_mode(
+            mode,
+            device_recipients,
+            device_identity,
+        )
     });
 
     tcfs_sync::engine::download_file_with_device(
