@@ -2227,7 +2227,7 @@ pub async fn upload_symlink_with_device(
     })
 }
 
-fn read_symlink_target_text(path: &Path) -> Result<String> {
+pub(crate) fn read_symlink_target_text(path: &Path) -> Result<String> {
     let target = std::fs::read_link(path)
         .with_context(|| format!("reading symlink target: {}", path.display()))?;
     target
@@ -2236,7 +2236,12 @@ fn read_symlink_target_text(path: &Path) -> Result<String> {
         .with_context(|| format!("symlink target is not valid UTF-8: {}", path.display()))
 }
 
-fn symlink_manifest_hash(target: &str) -> String {
+/// Stable identity hash for a symlink, keyed only on its target text.
+///
+/// This is the single source of truth shared by the symlink push path
+/// (`upload_symlink_with_device`), the pull path, and the reconcile compare
+/// path so that all three agree on when two symlinks are "the same".
+pub(crate) fn symlink_manifest_hash(target: &str) -> String {
     let mut data = b"tcfs-symlink-v1\0".to_vec();
     data.extend_from_slice(target.as_bytes());
     tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
