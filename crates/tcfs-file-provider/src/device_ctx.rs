@@ -119,11 +119,25 @@ pub(crate) fn build_encryption_context(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(tcfs_secrets::device::default_registry_path);
 
-    let registry = match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
-        Ok(r) => r,
+    // TIN-1417 B4: the recipient set must come from a signature-VERIFIED registry.
+    // Like the daemon/CLI, an unsigned or tampered registry falls back to the
+    // shared master wrap rather than wrapping to an unverified recipient.
+    let registry = match tcfs_secrets::device::DeviceRegistry::load_verified(
+        &registry_path,
+        master_key.as_bytes(),
+    ) {
+        Ok((r, tcfs_secrets::device::RegistryTrust::Signed)) => r,
+        Ok((_, tcfs_secrets::device::RegistryTrust::UnsignedLegacy)) => {
+            tracing::warn!(
+                "wrap_mode={requested:?}: device registry is UNSIGNED (legacy); refusing \
+                 per-device recipients from an unverified registry — using master wrap."
+            );
+            return base;
+        }
         Err(e) => {
             tracing::warn!(
-                "wrap_mode={requested:?}: registry load failed ({e}); using master wrap"
+                "wrap_mode={requested:?}: device registry FAILED signature verification ({e}); \
+                 refusing per-device recipients — using master wrap (fail-closed)"
             );
             return base;
         }
@@ -207,9 +221,16 @@ mod tests {
             description: None,
             enrolled_at: 0,
             revoked: false,
+            revoked_at: None,
+            enrolled_by: None,
+            signing_pubkey: None,
             last_nats_seq: 0,
         });
-        registry.save(&registry_path).expect("save registry");
+        // TIN-1417 B4: build_encryption_context now requires a signature-verified
+        // registry, so sign with the same master key the tests use.
+        registry
+            .save_signed(&registry_path, master().as_bytes())
+            .expect("save signed registry");
 
         let secret_path = tcfs_secrets::device::device_secret_key_path(&registry_path, device_id);
         tcfs_secrets::device::save_device_secret_key(&secret_path, &key.secret_key, true)
@@ -310,9 +331,14 @@ mod tests {
             description: None,
             enrolled_at: 0,
             revoked: false,
+            revoked_at: None,
+            enrolled_by: None,
+            signing_pubkey: None,
             last_nats_seq: 0,
         });
-        registry.save(&registry_path).unwrap();
+        registry
+            .save_signed(&registry_path, master().as_bytes())
+            .unwrap();
 
         let config = serde_json::json!({
             "wrap_mode": "per_device",

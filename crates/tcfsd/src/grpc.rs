@@ -58,11 +58,27 @@ pub(crate) fn build_encryption_context(
         .device_identity
         .clone()
         .unwrap_or_else(tcfs_secrets::device::default_registry_path);
-    let registry = match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
-        Ok(r) => r,
+    // TIN-1417 B4: the recipient set MUST come from a signature-VERIFIED registry.
+    // A tampered/unsigned registry must never source per-device recipients —
+    // fall back to the shared master wrap (and warn) instead of wrapping to an
+    // unverified, possibly-hostile recipient.
+    let registry = match tcfs_secrets::device::DeviceRegistry::load_verified(
+        &registry_path,
+        master_key.as_bytes(),
+    ) {
+        Ok((r, tcfs_secrets::device::RegistryTrust::Signed)) => r,
+        Ok((_, tcfs_secrets::device::RegistryTrust::UnsignedLegacy)) => {
+            tracing::warn!(
+                "wrap_mode={requested:?}: device registry is UNSIGNED (legacy); refusing to \
+                 build a per-device recipient set from an unverified registry — using master \
+                 wrap. Re-save the registry with a master-key command to sign it."
+            );
+            return base;
+        }
         Err(e) => {
             tracing::warn!(
-                "wrap_mode={requested:?}: registry load failed ({e}); using master wrap"
+                "wrap_mode={requested:?}: device registry FAILED signature verification ({e}); \
+                 refusing per-device recipients — using master wrap (fail-closed)"
             );
             return base;
         }

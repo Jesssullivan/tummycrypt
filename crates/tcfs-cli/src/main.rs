@@ -439,6 +439,14 @@ enum DeviceAction {
         /// Merge the local registry with the storage-backed fleet registry
         #[arg(long)]
         sync_remote: bool,
+        /// TIN-1417 B4 migration escape hatch: explicitly accept and re-sign an
+        /// UNSIGNED (legacy) remote registry during `--sync-remote`. Without this
+        /// flag an unsigned remote is REFUSED on the merge path, because merging
+        /// then re-signing it with the local master would launder an
+        /// attacker-injected recipient into a validly-signed registry. Only pass
+        /// this when you trust the remote object store has not been tampered with.
+        #[arg(long, requires = "sync_remote")]
+        accept_unsigned_remote: bool,
     },
     /// List enrolled devices
     List,
@@ -738,9 +746,19 @@ async fn main() -> Result<()> {
                 name,
                 repair_placeholder,
                 sync_remote,
-            } => cmd_device_enroll(&config, name, repair_placeholder, sync_remote).await,
+                accept_unsigned_remote,
+            } => {
+                cmd_device_enroll(
+                    &config,
+                    name,
+                    repair_placeholder,
+                    sync_remote,
+                    accept_unsigned_remote,
+                )
+                .await
+            }
             DeviceAction::List => cmd_device_list(),
-            DeviceAction::Revoke { name } => cmd_device_revoke(&name),
+            DeviceAction::Revoke { name } => cmd_device_revoke(&config, &name),
             DeviceAction::Status => cmd_device_status(),
             DeviceAction::Invite { expiry_hours, qr } => {
                 cmd_device_invite(&config, expiry_hours, qr).await
@@ -963,7 +981,10 @@ fn load_device_id(config: &tcfs_core::config::TcfsConfig) -> String {
                     let new_id = registry
                         .backfill_device_id(&device_name)
                         .expect("backfill_device_id with valid device name");
-                    if let Err(e) = registry.save(&registry_path) {
+                    // TIN-1417 B4: keep the signature valid after a backfill write.
+                    if let Err(e) =
+                        save_registry_signed_or_warn(&mut registry, &registry_path, config)
+                    {
                         eprintln!("warning: failed to save backfilled device registry: {e}");
                     } else {
                         eprintln!(
@@ -1130,11 +1151,24 @@ fn build_encryption_context(
         .device_identity
         .clone()
         .unwrap_or_else(tcfs_secrets::device::default_registry_path);
-    let registry = match tcfs_secrets::device::DeviceRegistry::load(&registry_path) {
-        Ok(r) => r,
+    // TIN-1417 B4: build recipients only from a signature-VERIFIED registry;
+    // an unsigned/tampered registry falls back to the shared master wrap.
+    let registry = match tcfs_secrets::device::DeviceRegistry::load_verified(
+        &registry_path,
+        master_key.as_bytes(),
+    ) {
+        Ok((r, tcfs_secrets::device::RegistryTrust::Signed)) => r,
+        Ok((_, tcfs_secrets::device::RegistryTrust::UnsignedLegacy)) => {
+            tracing::warn!(
+                "wrap_mode={requested:?}: device registry is UNSIGNED (legacy); refusing \
+                 per-device recipients from an unverified registry — using master wrap."
+            );
+            return base;
+        }
         Err(e) => {
             tracing::warn!(
-                "wrap_mode={requested:?}: registry load failed ({e}); using master wrap"
+                "wrap_mode={requested:?}: device registry FAILED signature verification ({e}); \
+                 refusing per-device recipients — using master wrap (fail-closed)"
             );
             return base;
         }
@@ -3649,7 +3683,9 @@ async fn cmd_init(config: &tcfs_core::config::TcfsConfig, options: InitOptions<'
     let (device_id, device_key) = registry.enroll_local(&device_name, None);
     let device_key_path = tcfs_secrets::device::device_secret_key_path(&registry_path, &device_id);
     tcfs_secrets::device::save_device_secret_key(&device_key_path, &device_key.secret_key, false)?;
-    registry.save(&registry_path)?;
+    // TIN-1417 B4: sign the registry with the freshly written master key so the
+    // very first registry on disk is signed (no migration window for new setups).
+    registry.save_signed(&registry_path, master_key.as_bytes())?;
 
     let init_config = build_init_config(config, &master_key_path, &registry_path, &device_name);
     if !skip_config {
@@ -4169,12 +4205,14 @@ fn cmd_device_list() -> Result<()> {
 
 // ── `tcfs device revoke` ─────────────────────────────────────────────────────
 
-fn cmd_device_revoke(name: &str) -> Result<()> {
+fn cmd_device_revoke(config: &tcfs_core::config::TcfsConfig, name: &str) -> Result<()> {
     let registry_path = tcfs_secrets::device::default_registry_path();
     let mut registry = tcfs_secrets::device::DeviceRegistry::load(&registry_path)?;
 
     if registry.revoke(name) {
-        registry.save(&registry_path)?;
+        // TIN-1417 B4: re-sign so the revocation is recorded in a signed envelope
+        // (revoked + revoked_at), making per-device revocation trustworthy.
+        save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
         println!("Revoked device: {}", name);
     } else {
         anyhow::bail!("Device '{}' not found", name);
@@ -4190,6 +4228,7 @@ async fn cmd_device_enroll(
     name: Option<String>,
     repair_placeholder: bool,
     sync_remote: bool,
+    accept_unsigned_remote: bool,
 ) -> Result<()> {
     let device_name = name.unwrap_or_else(tcfs_secrets::device::default_device_name);
     let registry_path = tcfs_secrets::device::default_registry_path();
@@ -4236,15 +4275,51 @@ async fn cmd_device_enroll(
         enrolled_or_repaired = true;
     }
 
-    registry.save(&registry_path)?;
+    save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
 
     if sync_remote {
         let op = build_operator(config).await?;
         let meta_prefix = config.storage.resolved_prefix();
-        let remote = tcfs_secrets::device::DeviceRegistry::load_remote(&op, meta_prefix).await?;
+        // TIN-1417 B4: verify the remote registry before merging. The remote object
+        // store is the primary tamper surface, so a signature-PRESENT-but-invalid
+        // remote is hard-rejected by `load_remote_verified`. An UNSIGNED (legacy)
+        // remote verifies as `UnsignedLegacy` and its trust MUST be bound here: if
+        // we merged it and then re-signed the result with our real master, an
+        // attacker who stripped the signature and injected a recipient would have
+        // their entry LAUNDERED into a validly-signed registry. So we refuse to
+        // merge an unsigned remote unless the operator explicitly opts in with
+        // `--accept-unsigned-remote` (loud warning below).
+        let remote = match master_key_for_registry_signing(config) {
+            Some(mk) => {
+                let (remote, trust) = tcfs_secrets::device::DeviceRegistry::load_remote_verified(
+                    &op,
+                    meta_prefix,
+                    mk.as_bytes(),
+                )
+                .await?;
+                enforce_remote_merge_trust(trust, accept_unsigned_remote)?;
+                remote
+            }
+            None => {
+                // No master key available: we cannot verify the remote at all, and
+                // we will write the merged result UNSIGNED anyway (no laundering
+                // into a signed registry is possible). Preserve legacy behaviour.
+                tcfs_secrets::device::DeviceRegistry::load_remote(&op, meta_prefix).await?
+            }
+        };
         merge_device_registry(&mut registry, &remote)?;
-        tcfs_secrets::device::DeviceRegistry::sync_to_remote(&registry, &op, meta_prefix).await?;
-        registry.save(&registry_path)?;
+        match master_key_for_registry_signing(config) {
+            Some(mk) => {
+                registry
+                    .sync_to_remote_signed(&op, meta_prefix, mk.as_bytes())
+                    .await?
+            }
+            None => {
+                tcfs_secrets::device::DeviceRegistry::sync_to_remote(&registry, &op, meta_prefix)
+                    .await?
+            }
+        }
+        save_registry_signed_or_warn(&mut registry, &registry_path, config)?;
     }
 
     if enrolled_or_repaired {
@@ -4273,6 +4348,59 @@ async fn cmd_device_enroll(
     }
 
     Ok(())
+}
+
+/// TIN-1417 B4 — close the unsigned-remote LAUNDERING bypass on the enroll
+/// `--sync-remote` path.
+///
+/// `load_remote_verified` already HARD-REJECTS a signature-present-but-invalid
+/// remote (tampering). The remaining hole is `RegistryTrust::UnsignedLegacy`: an
+/// attacker can strip the signature off the remote `devices.json` and inject a
+/// hostile recipient; the stripped registry verifies as "unsigned" rather than
+/// "tampered". If we merged that into our local registry and then re-signed the
+/// result with the real master key, the injected recipient would be laundered
+/// into a validly-signed registry — defeating B4 entirely.
+///
+/// So we REFUSE to merge an unsigned remote by default. The operator may opt in
+/// with `--accept-unsigned-remote` (e.g. a genuine one-time migration of a
+/// trusted legacy fleet), which logs a loud warning and proceeds.
+///
+/// MIGRATION WINDOW (TODO TIN-1417 B5, hard-reject by 2026-09-01): once all
+/// fleets have re-signed at least once, drop `--accept-unsigned-remote` and make
+/// an unsigned remote on the merge path an unconditional hard error. Track the
+/// last-seen-unsigned timestamp in fleet telemetry to confirm the window can
+/// close.
+fn enforce_remote_merge_trust(
+    trust: tcfs_secrets::device::RegistryTrust,
+    accept_unsigned_remote: bool,
+) -> Result<()> {
+    match trust {
+        tcfs_secrets::device::RegistryTrust::Signed => Ok(()),
+        tcfs_secrets::device::RegistryTrust::UnsignedLegacy => {
+            if accept_unsigned_remote {
+                tracing::warn!(
+                    "TIN-1417 B4: merging an UNSIGNED (legacy) remote device registry because \
+                     --accept-unsigned-remote was passed. Its recipient set is UNVERIFIED; you \
+                     are about to RE-SIGN it with this device's master key. Only proceed if you \
+                     trust the remote object store has not been tampered with."
+                );
+                eprintln!(
+                    "WARNING: accepting and re-signing an UNSIGNED remote device registry \
+                     (--accept-unsigned-remote). Its recipients are UNVERIFIED."
+                );
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "TIN-1417 B4: refusing to merge an UNSIGNED (legacy) remote device registry \
+                     on the enroll --sync-remote path. Merging then re-signing it with this \
+                     device's master key would launder any attacker-injected recipient into a \
+                     validly-signed registry. Re-save the remote with a master-key-holding \
+                     command to sign it, or (only if you trust the remote store) re-run with \
+                     --accept-unsigned-remote to explicitly accept and re-sign it."
+                );
+            }
+        }
+    }
 }
 
 fn repair_placeholder_device_key(
@@ -4954,6 +5082,39 @@ fn read_rotation_state(path: &Path) -> Result<KeyRotationState> {
     let data = std::fs::read(path)
         .with_context(|| format!("reading key rotation state: {}", path.display()))?;
     serde_json::from_slice(&data).context("parsing key rotation state")
+}
+
+/// Best-effort load of the master key for *signing the device registry*
+/// (TIN-1417 B4). Returns `None` (with a loud warning) when no master key file is
+/// configured/readable, so registry mutations still succeed but leave the
+/// registry unsigned for the migration window instead of hard-failing.
+fn master_key_for_registry_signing(
+    config: &tcfs_core::config::TcfsConfig,
+) -> Option<tcfs_crypto::MasterKey> {
+    let path = config.crypto.master_key_file.as_ref()?;
+    match read_master_key(path) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            tracing::warn!(
+                "TIN-1417 B4: cannot read master key for registry signing ({e}); the device \
+                 registry will be written UNSIGNED. Per-device wrapping will refuse to trust it."
+            );
+            None
+        }
+    }
+}
+
+/// Sign (if a master key is available) and save the registry to disk. Falls back
+/// to an unsigned save with a warning when no master key is configured.
+fn save_registry_signed_or_warn(
+    registry: &mut tcfs_secrets::device::DeviceRegistry,
+    path: &Path,
+    config: &tcfs_core::config::TcfsConfig,
+) -> Result<()> {
+    match master_key_for_registry_signing(config) {
+        Some(mk) => registry.save_signed(path, mk.as_bytes()),
+        None => registry.save(path),
+    }
 }
 
 fn read_master_key(path: &Path) -> Result<tcfs_crypto::MasterKey> {
@@ -6303,6 +6464,114 @@ mod tests {
         assert!(tcfs_secrets::device::is_real_age_public_key(
             &merged.public_key
         ));
+    }
+
+    // ── TIN-1417 B4: unsigned-remote LAUNDERING bypass is BLOCKED ──────────────
+
+    /// End-to-end attack reproduction: an attacker with object-store write access
+    /// strips the signature off the remote `devices.json` and injects a hostile
+    /// recipient. A normal master-holder running `tcfs device enroll --sync-remote`
+    /// must REFUSE to merge it (so the injected recipient is never re-signed into a
+    /// validly-signed registry), unless `--accept-unsigned-remote` is passed.
+    #[tokio::test]
+    async fn unsigned_remote_with_injected_recipient_is_refused_not_laundered() {
+        let op = memory_op();
+        let meta_prefix = "data";
+        let master = master_key(0x42);
+
+        // 1. Honest fleet publishes a SIGNED remote registry.
+        let mut honest = tcfs_secrets::device::DeviceRegistry::default();
+        honest.enroll(
+            "alpha",
+            &tcfs_secrets::device::generate_local_device_key().public_key,
+            None,
+        );
+        honest
+            .sync_to_remote_signed(&op, meta_prefix, master.as_bytes())
+            .await
+            .unwrap();
+
+        // 2. Attacker rewrites the remote: injects a hostile recipient AND strips
+        //    the signature envelope so it reads as UnsignedLegacy (not "tampered").
+        let key = format!("{meta_prefix}/tcfs-meta/devices.json");
+        let raw = op.read(&key).await.unwrap().to_bytes().to_vec();
+        let mut value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let attacker_pubkey = tcfs_secrets::device::generate_local_device_key().public_key;
+        value["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": "attacker",
+                "device_id": "attacker-id",
+                "public_key": attacker_pubkey,
+                "enrolled_at": 1,
+                "revoked": false
+            }));
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("registry_signature");
+        obj.remove("signer_pubkey");
+        obj.remove("sig_alg");
+        op.write(&key, serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
+
+        // 3. Master-holder loads + verifies the remote: it is UnsignedLegacy
+        //    (signature stripped), NOT a hard tamper error.
+        let (remote, trust) = tcfs_secrets::device::DeviceRegistry::load_remote_verified(
+            &op,
+            meta_prefix,
+            master.as_bytes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(trust, tcfs_secrets::device::RegistryTrust::UnsignedLegacy);
+        assert!(
+            remote.devices.iter().any(|d| d.name == "attacker"),
+            "sanity: the stripped remote really does carry the injected recipient"
+        );
+
+        // 4. The merge-path trust gate must REFUSE it (no laundering).
+        let err = enforce_remote_merge_trust(trust.clone(), false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("UNSIGNED") && msg.contains("launder"),
+            "unsigned remote must be refused on the merge path: {msg}"
+        );
+
+        // 5. Prove the laundering would have happened WITHOUT the gate: if we had
+        //    merged + re-signed, the attacker's recipient would be in a validly
+        //    signed registry. The gate is what prevents that, so we never merge.
+        let mut local = tcfs_secrets::device::DeviceRegistry::default();
+        // Gate refuses -> local stays clean; we never call merge.
+        assert!(
+            !local.devices.iter().any(|d| d.name == "attacker"),
+            "local registry must NOT contain the laundered recipient"
+        );
+        // Demonstrate the counterfactual is real (defense-in-depth assertion):
+        merge_device_registry(&mut local, &remote).unwrap();
+        local.sign(master.as_bytes()).unwrap();
+        assert!(
+            local.find("attacker").is_some()
+                && local.verify_signature(master.as_bytes()).unwrap()
+                    == tcfs_secrets::device::RegistryTrust::Signed,
+            "counterfactual: merging an unsigned remote then re-signing DOES launder \
+             the recipient — which is exactly why the merge-path gate must refuse it"
+        );
+    }
+
+    /// The explicit operator escape hatch (`--accept-unsigned-remote`) allows the
+    /// unsigned remote through, for genuine one-time legacy migration.
+    #[test]
+    fn accept_unsigned_remote_flag_allows_merge() {
+        enforce_remote_merge_trust(tcfs_secrets::device::RegistryTrust::UnsignedLegacy, true)
+            .expect("--accept-unsigned-remote must allow an unsigned remote through");
+    }
+
+    /// A signed remote always passes the gate regardless of the flag.
+    #[test]
+    fn signed_remote_passes_merge_gate() {
+        enforce_remote_merge_trust(tcfs_secrets::device::RegistryTrust::Signed, false)
+            .expect("a signed remote must pass the merge gate");
     }
 
     #[test]

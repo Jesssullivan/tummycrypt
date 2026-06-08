@@ -857,6 +857,9 @@ mod tests {
                     description: Some("primary".into()),
                     enrolled_at: 1,
                     revoked: false,
+                    revoked_at: None,
+                    enrolled_by: None,
+                    signing_pubkey: None,
                     last_nats_seq: 7,
                 },
                 tcfs_secrets::device::DeviceIdentity {
@@ -867,9 +870,15 @@ mod tests {
                     description: None,
                     enrolled_at: 2,
                     revoked: true,
+                    revoked_at: Some(2),
+                    enrolled_by: None,
+                    signing_pubkey: None,
                     last_nats_seq: 3,
                 },
             ],
+            registry_signature: None,
+            signer_pubkey: None,
+            sig_alg: None,
         };
         registry.save(&registry_path).unwrap();
 

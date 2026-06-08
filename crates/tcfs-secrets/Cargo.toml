@@ -29,6 +29,9 @@ hostname = "0.4"
 uuid = { workspace = true }
 blake3 = { workspace = true }
 opendal = { workspace = true }
+ed25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
