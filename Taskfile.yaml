@@ -707,6 +707,12 @@ tasks:
           if [[ -n "${EVIDENCE_DIR:-}" ]]; then
             args+=(--evidence-dir "$EVIDENCE_DIR")
           fi
+          if [[ -n "${MAX_HASH_FILES:-}" ]]; then
+            args+=(--max-hash-files "$MAX_HASH_FILES")
+          fi
+          if [[ -n "${MAX_HASH_FILE_BYTES:-}" ]]; then
+            args+=(--max-hash-file-bytes "$MAX_HASH_FILE_BYTES")
+          fi
 
           scripts/git-roam-daily-driver-harness.sh "${args[@]}"
           EOF

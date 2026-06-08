@@ -20,6 +20,8 @@ Options:
   --third-host <host>           Optional third enrolled host, e.g. bumble
   --remote-prefix <prefix>      Expected TCFS prefix. Default: git-roam/<name>
   --evidence-dir <path>         Evidence output dir
+  --max-hash-files <n>          Hash at most n files per tree. Default: 5000; 0 = unlimited
+  --max-hash-file-bytes <n>     Skip individual files larger than n bytes. Default: 52428800; 0 = unlimited
   -h, --help                    Show this help
 
 Environment mirrors:
@@ -31,6 +33,8 @@ Environment mirrors:
   TCFS_GIT_ROAM_THIRD_HOST
   TCFS_GIT_ROAM_REMOTE_PREFIX
   TCFS_GIT_ROAM_EVIDENCE_DIR
+  TCFS_GIT_ROAM_MAX_HASH_FILES
+  TCFS_GIT_ROAM_MAX_HASH_FILE_BYTES
 EOF
 }
 
@@ -63,12 +67,24 @@ write_tree_hashes() {
   local root="$1"
   local output="$2"
   local mode="$3"
+  local max_files="$4"
+  local max_file_bytes="$5"
+  local meta_output="$6"
 
   : >"$output"
+  : >"$meta_output"
   if [[ ! -d "$root" ]]; then
     printf 'status=missing root=%s\n' "$root" >"$output"
+    printf 'status=missing\n' >"$meta_output"
     return 0
   fi
+
+  local scanned=0
+  local hashed=0
+  local skipped_by_count=0
+  local skipped_by_size=0
+  local list_file
+  list_file="$(mktemp "${TMPDIR:-/tmp}/tcfs-git-roam-hash-list.XXXXXX")"
 
   (
     cd "$root"
@@ -100,10 +116,38 @@ write_tree_hashes() {
         fail "unknown hash mode: $mode"
         ;;
     esac
-  ) | while IFS= read -r rel; do
+  ) >"$list_file"
+
+  while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
+    if rel_path_is_denied "$rel"; then
+      continue
+    fi
+    scanned=$((scanned + 1))
+    if [[ "$max_files" != "0" && "$hashed" -ge "$max_files" ]]; then
+      skipped_by_count=1
+      printf 'scanned=%s\nhashed=%s\nskipped_by_count=%s\nskipped_by_size=%s\nmax_hash_files=%s\nmax_hash_file_bytes=%s\n' \
+        "$scanned" "$hashed" "$skipped_by_count" "$skipped_by_size" "$max_files" "$max_file_bytes" >"$meta_output"
+      break
+    fi
+    local file_size
+    file_size="$(cd "$root" && wc -c <"$rel" | tr -d ' ')"
+    if [[ "$max_file_bytes" != "0" && "$file_size" -gt "$max_file_bytes" ]]; then
+      skipped_by_size=$((skipped_by_size + 1))
+      printf 'SKIP_SIZE %s %s\n' "$file_size" "$rel"
+      continue
+    fi
     (cd "$root" && shasum -a 256 "$rel")
-  done >"$output"
+    hashed=$((hashed + 1))
+    printf 'scanned=%s\nhashed=%s\nskipped_by_count=%s\nskipped_by_size=%s\nmax_hash_files=%s\nmax_hash_file_bytes=%s\n' \
+      "$scanned" "$hashed" "$skipped_by_count" "$skipped_by_size" "$max_files" "$max_file_bytes" >"$meta_output"
+  done >"$output" <"$list_file"
+  rm -f "$list_file"
+
+  if [[ ! -s "$meta_output" ]]; then
+    printf 'scanned=0\nhashed=0\nskipped_by_count=0\nskipped_by_size=0\nmax_hash_files=%s\nmax_hash_file_bytes=%s\n' \
+      "$max_files" "$max_file_bytes" >"$meta_output"
+  fi
 }
 
 write_symlinks() {
@@ -115,7 +159,36 @@ write_symlinks() {
   while IFS= read -r link_path; do
     [[ -n "$link_path" ]] || continue
     printf '%s -> %s\n' "$link_path" "$(readlink "$link_path" 2>/dev/null || true)"
-  done < <(find "$root" -type l -print | LC_ALL=C sort)
+  done >"$output" < <(find "$root" -type l -print | LC_ALL=C sort)
+}
+
+rel_path_is_denied() {
+  local rel="$1"
+  local base
+  base="$(basename "$rel")"
+
+  case "$rel" in
+    ./.git|./.git/*|*/.git|*/.git/*|\
+    ./node_modules|./node_modules/*|*/node_modules|*/node_modules/*|\
+    ./target|./target/*|*/target|*/target/*|\
+    ./.svelte-kit|./.svelte-kit/*|*/.svelte-kit|*/.svelte-kit/*|\
+    ./build|./build/*|*/build|*/build/*|\
+    ./.venv|./.venv/*|*/.venv|*/.venv/*|\
+    ./.ssh|./.ssh/*|*/.ssh|*/.ssh/*|\
+    ./.gnupg|./.gnupg/*|*/.gnupg|*/.gnupg/*|\
+    ./.config/sops-nix/secrets|./.config/sops-nix/secrets/*|*/.config/sops-nix/secrets|*/.config/sops-nix/secrets/*)
+      return 0
+      ;;
+  esac
+
+  case "$base" in
+    .env|.env.*|auth.json|.credentials.json|mcp-auth.json|mcp-needs-auth-cache.json|session-env|\
+    *.sqlite|*.db|*-wal|*-shm|*.wal|*.shm|*.log)
+      return 0
+      ;;
+  esac
+
+  return 1
 }
 
 write_policy_scan() {
@@ -163,6 +236,8 @@ continuation_host="${TCFS_GIT_ROAM_CONTINUATION_HOST:-honey}"
 third_host="${TCFS_GIT_ROAM_THIRD_HOST:-}"
 remote_prefix="${TCFS_GIT_ROAM_REMOTE_PREFIX:-}"
 evidence_dir="${TCFS_GIT_ROAM_EVIDENCE_DIR:-}"
+max_hash_files="${TCFS_GIT_ROAM_MAX_HASH_FILES:-5000}"
+max_hash_file_bytes="${TCFS_GIT_ROAM_MAX_HASH_FILE_BYTES:-52428800}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 
 while [[ $# -gt 0 ]]; do
@@ -207,6 +282,16 @@ while [[ $# -gt 0 ]]; do
       evidence_dir="$2"
       shift 2
       ;;
+    --max-hash-files)
+      [[ $# -ge 2 ]] || fail "--max-hash-files requires a value"
+      max_hash_files="$2"
+      shift 2
+      ;;
+    --max-hash-file-bytes)
+      [[ $# -ge 2 ]] || fail "--max-hash-file-bytes requires a value"
+      max_hash_file_bytes="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -216,6 +301,9 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+[[ "$max_hash_files" =~ ^[0-9]+$ ]] || fail "--max-hash-files must be a non-negative integer"
+[[ "$max_hash_file_bytes" =~ ^[0-9]+$ ]] || fail "--max-hash-file-bytes must be a non-negative integer"
 
 repo_root="$(canonical_existing_path "$repo_root")"
 git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
@@ -250,6 +338,8 @@ git_status_count="$(git -C "$repo_root" status --porcelain=v1 | wc -l | tr -d ' 
   printf 'third_host=%s\n' "$third_host"
   printf 'remote_prefix=%s\n' "$remote_prefix"
   printf 'dirty_status_count=%s\n' "$git_status_count"
+  printf 'max_hash_files=%s\n' "$max_hash_files"
+  printf 'max_hash_file_bytes=%s\n' "$max_hash_file_bytes"
   printf 'tcfs_mutation=0\n'
   printf 'ssh_mutation=0\n'
   printf 'live_repo_claim=0\n'
@@ -267,8 +357,10 @@ git_status_count="$(git -C "$repo_root" status --porcelain=v1 | wc -l | tr -d ' 
   git -C "$repo_root" show-ref --heads --tags || true
 } >"$evidence_dir/git-source.txt"
 
-write_tree_hashes "$repo_root" "$evidence_dir/tree-source.sha256" repo
-write_tree_hashes "$agent_root" "$evidence_dir/agent-source.sha256" agent
+write_tree_hashes "$repo_root" "$evidence_dir/tree-source.sha256" repo \
+  "$max_hash_files" "$max_hash_file_bytes" "$evidence_dir/tree-source.hash.env"
+write_tree_hashes "$agent_root" "$evidence_dir/agent-source.sha256" agent \
+  "$max_hash_files" "$max_hash_file_bytes" "$evidence_dir/agent-source.hash.env"
 write_symlinks "$repo_root" "$evidence_dir/symlinks.txt"
 : >"$evidence_dir/policy-deny.txt"
 write_policy_scan "$repo_root" repo "$evidence_dir/policy-deny.txt"

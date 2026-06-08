@@ -66,6 +66,8 @@ bash "$SCRIPT" \
   --continuation-host honey \
   --third-host bumble \
   --remote-prefix git/ci-templates \
+  --max-hash-files 1 \
+  --max-hash-file-bytes 20 \
   --evidence-dir "$EVIDENCE" \
   >"$OUT"
 
@@ -76,13 +78,17 @@ assert_contains "$EVIDENCE/source.env" "origin_host=neo"
 assert_contains "$EVIDENCE/source.env" "continuation_host=honey"
 assert_contains "$EVIDENCE/source.env" "third_host=bumble"
 assert_contains "$EVIDENCE/source.env" "remote_prefix=git/ci-templates"
+assert_contains "$EVIDENCE/source.env" "max_hash_files=1"
+assert_contains "$EVIDENCE/source.env" "max_hash_file_bytes=20"
 assert_contains "$EVIDENCE/source.env" "tcfs_mutation=0"
 assert_contains "$EVIDENCE/source.env" "daily_driver_claim=0"
 assert_contains "$EVIDENCE/git-source.txt" "##"
 assert_contains "$EVIDENCE/git-source.txt" "README.md"
-assert_contains "$EVIDENCE/tree-source.sha256" "./README.md"
-assert_contains "$EVIDENCE/tree-source.sha256" "./src/new.txt"
+assert_contains "$EVIDENCE/tree-source.hash.env" "hashed=1"
+assert_contains "$EVIDENCE/tree-source.hash.env" "skipped_by_count="
+assert_contains "$EVIDENCE/tree-source.hash.env" "max_hash_files=1"
 assert_contains "$EVIDENCE/agent-source.sha256" "./project-one/session.jsonl"
+assert_contains "$EVIDENCE/agent-source.hash.env" "hashed=1"
 assert_contains "$EVIDENCE/policy-deny.txt" "secret-deny"
 assert_contains "$EVIDENCE/policy-deny.txt" ".env.local"
 assert_contains "$EVIDENCE/policy-deny.txt" "generated-deny"
@@ -91,6 +97,19 @@ assert_contains "$EVIDENCE/policy-deny.txt" "live-db-deny"
 assert_contains "$EVIDENCE/gates.env" "r1_single_origin_dirty_wip=pending-live"
 assert_contains "$EVIDENCE/result.env" "daily_driver_git_claim=0"
 assert_contains "$EVIDENCE/README.md" "Status: plan-only."
+
+UNBOUNDED="$TMPDIR/evidence-unbounded"
+bash "$SCRIPT" \
+  --repo "$FIXTURE" \
+  --agent-root "$AGENT" \
+  --name ci-templates \
+  --max-hash-files 0 \
+  --max-hash-file-bytes 0 \
+  --evidence-dir "$UNBOUNDED" \
+  >"$TMPDIR/out-unbounded.txt"
+assert_contains "$UNBOUNDED/tree-source.sha256" "./README.md"
+assert_contains "$UNBOUNDED/tree-source.sha256" "./src/new.txt"
+assert_contains "$UNBOUNDED/agent-source.sha256" "./project-one/session.jsonl"
 
 NOT_GIT="$TMPDIR/not-git"
 mkdir -p "$NOT_GIT"

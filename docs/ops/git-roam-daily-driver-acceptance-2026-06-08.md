@@ -69,6 +69,20 @@ Recommended root classes:
 | Live DB/WAL | Deny or snapshot-only | `*.sqlite`, `*.db`, `*-wal`, `*-shm`; never live-mirror open WAL streams. |
 | Large artifacts | Repo-specific | Example: `rockies/.artifacts` needs explicit policy. |
 
+### Git Metadata Mode Boundary
+
+`sync_git_dirs` is currently a global `sync` config field consumed by
+`tcfs reconcile` through `Blacklist::from_sync_config`, not a per-root
+`extraReconcileRoots` knob. The default Git mode is `bundle`: raw `.git`
+internals are skipped, a `.git-tcfs-bundle` object is synced, and pull-side
+restore reconstructs Git history/refs from that bundle.
+
+Raw `.git` as ordinary files (`git_sync_mode = "raw"`) is a separate stress
+mode. It may become useful for exact index/stash/worktree experiments, but it
+is not the default daily-driver claim and must prove index/mtime, lockfile,
+symlink, mode, and concurrent-operation safety before it can replace the
+bundle/restore path.
+
 ## Acceptance Gates
 
 ### R0 - Policy And Inventory
@@ -203,6 +217,11 @@ Existing helpers already cover important pieces:
 - `task lazy:neo-honey-conflict-plan`
 
 Missing combined harnesses before the golden objective can be claimed:
+
+The plan-only harness bounds hash collection by default so a real agent
+transcript tree cannot become an accidental long-running scan. Use
+`MAX_HASH_FILES=0 MAX_HASH_FILE_BYTES=0` only when the live canary intentionally
+needs full plaintext hash manifests.
 
 1. `git-roam-dirty-wip` - upgrades the plan-only packet into an executed R1
    dirty snapshot and asserts exact
