@@ -181,3 +181,4 @@ Inherits the global stop rules from the productionization todo, plus:
 - `TIN-1620` one expendable live repo (G5) · `TIN-1546`/`TIN-1622` storage soak
 - Design seed: [large-workdir-onboarding-design-2026-05-25.md](large-workdir-onboarding-design-2026-05-25.md)
 - Execution checklist: [tcfs-daily-driver-productionization-todo-2026-05-24.md](tcfs-daily-driver-productionization-todo-2026-05-24.md)
+- `~/git` daily-driver acceptance: [git-roam-daily-driver-acceptance-2026-06-08.md](git-roam-daily-driver-acceptance-2026-06-08.md)
