@@ -526,24 +526,142 @@ struct TCFSProviderApp {
         }
     }
 
-    /// Approximate Swift mirror of `tcfs_secrets::device::is_real_age_public_key`,
-    /// which in Rust does a FULL `age::x25519::Recipient` bech32 parse. Swift has
-    /// no age crate here, so this only checks the `age1` prefix and a plausible
-    /// length — a deliberately conservative heuristic.
+    /// Swift mirror of `tcfs_secrets::device::is_real_age_public_key`, which in
+    /// Rust does a FULL `age::x25519::Recipient` bech32 parse. Swift has no age
+    /// crate here, so this performs a real bech32 decode in pure Swift —
+    /// validating the `age` human-readable part, the bech32 charset, the BCH
+    /// checksum, and that the decoded payload is exactly the 32-byte X25519
+    /// public key an age recipient carries — instead of a prefix/length
+    /// heuristic. An age v1 recipient is `bech32("age", x25519_pubkey[32])`.
     ///
-    /// SAFETY: the Rust read-side (`resolve_recipients`) RE-VALIDATES every
-    /// inlined recipient with the real `is_real_age_public_key`, so a Swift
-    /// false-positive cannot inject a malformed recipient into the wrap set. The
-    /// one Swift-only signal the Rust side trusts is
-    /// `device_recipients_all_capable`; a Swift over-count there could let the
-    /// Rust side enter PerDevice (drop the master wrap) prematurely. Hardening
-    /// this to a real bech32/age parse on the Swift side is a follow-up (needs an
-    /// age-Swift dependency); flagged for real-device review.
+    /// DEFENSE IN DEPTH (this is one of two layers — neither is solely trusted):
+    ///   1. The Rust read-side (`resolve_recipients`) RE-VALIDATES every inlined
+    ///      recipient with the real `is_real_age_public_key` and RE-DERIVES
+    ///      `all_capable` from its OWN re-validated set — it does NOT trust the
+    ///      host's `device_recipients_all_capable` boolean. So even a Swift
+    ///      false-positive here cannot inject a malformed recipient into the wrap
+    ///      set NOR force a premature PerDevice master-wrap drop (lockout).
+    ///   2. This bech32 decode tightens the host-side roll call so the inlined
+    ///      `device_recipients_all_capable` signal is accurate in the common
+    ///      case, reducing spurious Dual downgrades.
+    ///
+    /// NOTE: this still does not verify registry AUTHENTICITY (a forged registry
+    /// can carry a genuinely well-formed attacker recipient) — that is B4's
+    /// signed-registry job, out of scope here.
+    ///
+    /// DRAFT / UNVERIFIED: cannot be compiled or device-tested in the agent
+    /// sandbox; needs a real-device Xcode build + FileProvider QA. Do not claim
+    /// Swift build success.
     private static func isRealAgePublicKey(_ publicKey: String) -> Bool {
         let trimmed = publicKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        // age1 + bech32 payload; real keys are ~62 chars. Require a healthy
-        // minimum to reject obvious placeholders without over-trusting.
-        return trimmed.hasPrefix("age1") && trimmed.count >= 50
+        guard let decoded = decodeBech32(trimmed), decoded.hrp == "age" else {
+            return false
+        }
+        // age v1 recipient payload is the raw 32-byte X25519 public key.
+        return decoded.data.count == 32
+    }
+
+    /// Minimal bech32 decoder (BIP-0173) sufficient to validate an age v1
+    /// recipient: lowercase-only, HRP separated by the last `1`, valid charset,
+    /// and a correct BCH checksum. Returns the human-readable part and the
+    /// 8-bit-regrouped data payload, or nil on any malformation. (age uses
+    /// classic bech32, not bech32m.)
+    private static func decodeBech32(_ input: String) -> (hrp: String, data: [UInt8])? {
+        // Reject mixed case (bech32 forbids it) and non-ASCII.
+        let lower = input.lowercased()
+        if lower != input && input.uppercased() != input {
+            return nil
+        }
+        let s = lower
+        guard s.count >= 8, s.count <= 1023, s.allSatisfy({ $0.isASCII }) else {
+            return nil
+        }
+        guard let sepIndex = s.lastIndex(of: "1") else { return nil }
+        let hrp = String(s[s.startIndex..<sepIndex])
+        let dataPart = String(s[s.index(after: sepIndex)...])
+        // HRP must be non-empty; data part must include the 6-char checksum.
+        guard !hrp.isEmpty, dataPart.count >= 6 else { return nil }
+        guard hrp.allSatisfy({ c in
+            guard let v = c.asciiValue else { return false }
+            return v >= 33 && v <= 126
+        }) else { return nil }
+
+        let charset = Array("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
+        var values: [UInt8] = []
+        values.reserveCapacity(dataPart.count)
+        for c in dataPart {
+            guard let idx = charset.firstIndex(of: c) else { return nil }
+            values.append(UInt8(idx))
+        }
+
+        guard bech32VerifyChecksum(hrp: hrp, values: values) else { return nil }
+
+        // Strip the 6-symbol checksum and regroup 5-bit -> 8-bit.
+        let payload5 = Array(values.dropLast(6))
+        guard let payload8 = convertBits(payload5, from: 5, to: 8, pad: false) else {
+            return nil
+        }
+        return (hrp, payload8)
+    }
+
+    private static func bech32HrpExpand(_ hrp: String) -> [UInt8] {
+        let bytes = Array(hrp.utf8)
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count * 2 + 1)
+        for b in bytes { out.append(b >> 5) }
+        out.append(0)
+        for b in bytes { out.append(b & 31) }
+        return out
+    }
+
+    private static func bech32Polymod(_ values: [UInt8]) -> UInt32 {
+        let gen: [UInt32] = [0x3b6a_57b2, 0x2650_8e6d, 0x1ea1_19fa, 0x3d42_33dd, 0x2a14_62b3]
+        var chk: UInt32 = 1
+        for v in values {
+            let top = chk >> 25
+            chk = ((chk & 0x1ff_ffff) << 5) ^ UInt32(v)
+            for i in 0..<5 where ((top >> UInt32(i)) & 1) == 1 {
+                chk ^= gen[i]
+            }
+        }
+        return chk
+    }
+
+    private static func bech32VerifyChecksum(hrp: String, values: [UInt8]) -> Bool {
+        // Classic bech32 constant is 1 (bech32m would be 0x2bc830a3).
+        bech32Polymod(bech32HrpExpand(hrp) + values) == 1
+    }
+
+    /// Regroup a base-2^`from` array into base-2^`to`. Mirrors the reference
+    /// bech32 `convertbits`. With `pad: false` any leftover bits must be zero.
+    private static func convertBits(
+        _ data: [UInt8],
+        from: UInt32,
+        to: UInt32,
+        pad: Bool
+    ) -> [UInt8]? {
+        var acc: UInt32 = 0
+        var bits: UInt32 = 0
+        var out: [UInt8] = []
+        let maxv: UInt32 = (1 << to) - 1
+        for value in data {
+            let v = UInt32(value)
+            if (v >> from) != 0 { return nil }
+            acc = (acc << from) | v
+            bits += from
+            while bits >= to {
+                bits -= to
+                out.append(UInt8((acc >> bits) & maxv))
+            }
+        }
+        if pad {
+            if bits > 0 {
+                out.append(UInt8((acc << (to - bits)) & maxv))
+            }
+        } else if bits >= from || ((acc << (to - bits)) & maxv) != 0 {
+            return nil
+        }
+        return out
     }
 
     private static func serializeConfigObject(

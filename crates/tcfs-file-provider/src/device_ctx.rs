@@ -87,34 +87,58 @@ fn wrap_mode_from_config(config: &serde_json::Value) -> tcfs_core::config::WrapM
 /// Under the macOS FileProvider sandbox the `.appex` cannot `fs`-read
 /// `~/.config/tcfs` (where the device registry lives); it receives its config
 /// from the shared Keychain instead. The Swift host therefore inlines the
-/// already-VERIFIED active recipients into the Keychain config copy under
-/// `device_recipients`, exactly mirroring how it inlines `master_key_base64`.
-/// When that key is present we trust it verbatim and never touch the filesystem;
-/// otherwise we fall back to loading `devices.json` (the non-sandboxed path used
-/// by the daemon/CLI and by tests).
+/// active recipients into the Keychain config copy under `device_recipients`,
+/// mirroring how it inlines `master_key_base64`. When that key is present we
+/// prefer it over the filesystem; otherwise we fall back to loading
+/// `devices.json` (the non-sandboxed path used by the daemon/CLI and by tests).
+///
+/// TRUST SCOPE (read this carefully — it is a security boundary):
+/// The inlined recipients are RE-VALIDATED here for age-key WELL-FORMEDNESS
+/// only — each `recipient` must parse as a real `age::x25519::Recipient` (via
+/// `is_real_age_public_key`) or it is dropped from the wrap set. We do NOT, and
+/// cannot, verify the AUTHENTICITY of the underlying registry: the registry the
+/// Swift host reads is not signature-verified, so a forged/tampered registry
+/// could still inline a well-formed-but-attacker-controlled recipient. Closing
+/// that gap is the job of the Ed25519-signed device registry (B4, separate and
+/// currently unmerged); it is explicitly OUT OF SCOPE for this inlining change,
+/// which only mirrors the existing (forgeable) trust posture into the sandbox.
 ///
 /// Returns `(recipients, all_capable)`. `all_capable` reflects whether every
-/// active device carries a real age recipient — for the inlined path it is
-/// supplied by the host under `device_recipients_all_capable` (the host runs the
-/// same roll-call against the verified registry); for the fs path it is derived
-/// from the loaded registry's `roll_call()`. It gates the PerDevice contract
-/// mode exactly as the daemon's roll-call gate does.
+/// active device carries a real age recipient. We RE-DERIVE it HERE on the Rust
+/// side from our own re-validated recipient set rather than trusting the host's
+/// `device_recipients_all_capable` boolean (the Swift `isRealAgePublicKey` is a
+/// prefix/length heuristic, so a host over-count must never be allowed to drop
+/// the master wrap and lock this device out — see the inlined branch below). For
+/// the fs path it is likewise derived from the loaded registry's `roll_call()`.
+/// It gates the PerDevice contract mode exactly as the daemon's roll-call gate
+/// does.
 #[cfg(feature = "grpc")]
 fn resolve_recipients(
     config: &serde_json::Value,
     requested: tcfs_core::config::WrapMode,
 ) -> Option<(Vec<tcfs_crypto::AgeFileKeyRecipient>, bool)> {
-    // Inlined-first: the Keychain-provided config copy carries the verified
-    // active recipients so the sandboxed FileProvider never reads devices.json.
+    // Inlined-first: the Keychain-provided config copy carries the active
+    // recipients so the sandboxed FileProvider never reads devices.json. These
+    // are re-validated for age-key WELL-FORMEDNESS below; their registry
+    // AUTHENTICITY is NOT verified here (out of scope — pending B4 signed
+    // registry).
     if let Some(arr) = config
         .get("device_recipients")
         .and_then(serde_json::Value::as_array)
     {
+        // Count every inlined entry the host *claims* is active so we can detect
+        // a host over-count: any entry that fails our own age-recipient parse
+        // means "not all active devices are per-device-capable" -> all_capable
+        // MUST be false regardless of what the host asserted.
+        let inlined_total = arr.len();
         let recipients: Vec<tcfs_crypto::AgeFileKeyRecipient> = arr
             .iter()
             .filter_map(|entry| {
                 let device_id = entry.get("device_id")?.as_str()?.to_string();
                 let recipient = entry.get("recipient")?.as_str()?.to_string();
+                // Re-validate WELL-FORMEDNESS only (real age::x25519::Recipient
+                // parse). A Swift false-positive cannot inject a malformed
+                // recipient into the wrap set.
                 if !tcfs_secrets::device::is_real_age_public_key(&recipient) {
                     return None;
                 }
@@ -131,12 +155,24 @@ fn resolve_recipients(
             );
             return None;
         }
-        // The host computes capability against the verified registry; default to
-        // false (no PerDevice drop) when the signal is absent.
-        let all_capable = config
-            .get("device_recipients_all_capable")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        // HARDENING (availability): RE-DERIVE all_capable in Rust from our own
+        // re-validated recipient set — do NOT trust the host-provided
+        // `device_recipients_all_capable` boolean. The Swift `isRealAgePublicKey`
+        // is only a prefix/length heuristic; if it over-counts (asserts a
+        // malformed key is real) and we trusted its boolean, Rust could enter
+        // PerDevice, drop the master wrap, and lock out a device that actually
+        // lacks a usable recipient. all_capable is true iff EVERY inlined entry
+        // the host listed as active also parsed as a real age recipient here.
+        let all_capable = recipients.len() == inlined_total;
+        if !all_capable {
+            tracing::warn!(
+                "wrap_mode={requested:?}: {} of {} inlined recipient(s) failed Rust age-key \
+                 re-validation; re-deriving all_capable=false (keeping master wrap) regardless \
+                 of host device_recipients_all_capable",
+                inlined_total - recipients.len(),
+                inlined_total
+            );
+        }
         return Some((recipients, all_capable));
     }
 
@@ -615,7 +651,7 @@ mod tests {
         assert_eq!(
             ctx.wrap_mode,
             tcfs_sync::engine::WrapMode::PerDevice,
-            "inlined all_capable=true should keep PerDevice"
+            "Rust-re-derived all_capable (1 of 1 well-formed) should keep PerDevice"
         );
         assert_eq!(
             ctx.device_recipients.len(),
@@ -634,11 +670,65 @@ mod tests {
         );
     }
 
-    /// The inlined `device_recipients_all_capable=false` signal trips the same
-    /// roll-call gate as the fs path: PerDevice downgrades to Dual (keeping the
-    /// master wrap) even though recipients + secret are present.
+    /// all_capable is RE-DERIVED in Rust, NOT trusted from the host boolean.
+    /// Here a single inlined recipient is malformed (would fail the real
+    /// `age::x25519::Recipient` parse) while a second is well-formed, and the
+    /// host asserts `device_recipients_all_capable=true` (a Swift over-count via
+    /// its prefix/length heuristic). Rust must drop the malformed recipient,
+    /// re-derive all_capable=FALSE (1 of 2 entries failed re-validation), and
+    /// therefore downgrade PerDevice -> Dual (keeping the master wrap) instead of
+    /// locking the device out. This is the core hardening guard.
     #[test]
-    fn inlined_not_all_capable_downgrades_per_device_to_dual() {
+    fn host_all_capable_true_with_malformed_recipient_redrives_false_in_rust() {
+        let good = tcfs_secrets::device::generate_local_device_key();
+        let secret = good.secret_key.expose_secret().to_string();
+        // Precondition: confirm the keys are what we expect — one real, one not.
+        assert!(tcfs_secrets::device::is_real_age_public_key(
+            &good.public_key
+        ));
+        let bogus = "age1-this-is-not-a-real-bech32-age-recipient-key-000000";
+        assert!(
+            !tcfs_secrets::device::is_real_age_public_key(bogus),
+            "bogus recipient must fail the real age parse"
+        );
+
+        let config = serde_json::json!({
+            "wrap_mode": "per_device",
+            "device_recipients": [
+                { "device_id": "device-a", "recipient": good.public_key },
+                { "device_id": "device-b", "recipient": bogus }
+            ],
+            // Host LIES (over-counts via its heuristic): claims all capable.
+            "device_recipients_all_capable": true,
+            "device_secret": secret,
+        });
+        let ctx = build_encryption_context(&config, "device-a", &master());
+        // The malformed recipient is dropped from the wrap set...
+        assert_eq!(
+            ctx.device_recipients.len(),
+            1,
+            "malformed inlined recipient must be dropped by Rust re-validation"
+        );
+        assert_eq!(ctx.device_recipients[0].device_id, "device-a");
+        // ...and all_capable is re-derived to false (1 of 2 failed), so despite
+        // the host's all_capable=true we must NOT drop the master wrap.
+        assert_eq!(
+            ctx.wrap_mode,
+            tcfs_sync::engine::WrapMode::Dual,
+            "host all_capable=true must be IGNORED; Rust re-derivation -> Dual, \
+             keeping the master wrap (no lockout)"
+        );
+        assert!(ctx.device_identity.is_some());
+    }
+
+    /// The inlined `device_recipients_all_capable=false` signal must NOT be able
+    /// to FORCE all_capable when Rust re-derivation says every inlined recipient
+    /// is well-formed. Re-derivation is authoritative: with a single valid
+    /// recipient (1 of 1 parsed) all_capable re-derives TRUE and PerDevice is
+    /// kept, even though the host asserted `false`. (The host boolean is not
+    /// trusted in EITHER direction.)
+    #[test]
+    fn host_all_capable_false_is_overridden_by_rust_when_recipients_well_formed() {
         let key = tcfs_secrets::device::generate_local_device_key();
         let secret = key.secret_key.expose_secret().to_string();
         let config = serde_json::json!({
@@ -646,14 +736,16 @@ mod tests {
             "device_recipients": [
                 { "device_id": "device-a", "recipient": key.public_key }
             ],
+            // Host asserts NOT all capable; Rust re-derivation disagrees.
             "device_recipients_all_capable": false,
             "device_secret": secret,
         });
         let ctx = build_encryption_context(&config, "device-a", &master());
         assert_eq!(
             ctx.wrap_mode,
-            tcfs_sync::engine::WrapMode::Dual,
-            "all_capable=false must downgrade PerDevice -> Dual"
+            tcfs_sync::engine::WrapMode::PerDevice,
+            "Rust re-derivation (1 of 1 well-formed) -> all_capable=true; host \
+             false is not trusted"
         );
         assert_eq!(ctx.device_recipients.len(), 1);
         assert!(ctx.device_identity.is_some());
