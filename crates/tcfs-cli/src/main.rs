@@ -505,6 +505,14 @@ enum KeyAction {
         /// effect without `--rotate-keys`.
         #[arg(long)]
         non_interactive: bool,
+        /// GC orphaned old chunks IMMEDIATELY (grace=0) instead of honoring the
+        /// configured `orphan_chunk_cleanup_grace_secs`. Reference-safe either
+        /// way (only chunks unreferenced by ANY live manifest are swept), but
+        /// the default grace protects a concurrent reader in a multi-writer
+        /// fleet that still holds an old chunk address. Use only when you are
+        /// certain no reader is mid-flight.
+        #[arg(long)]
+        gc_immediate: bool,
     },
 }
 
@@ -846,7 +854,18 @@ async fn main() -> Result<()> {
                 rotate_keys,
                 resume,
                 non_interactive,
-            } => cmd_key_rotate(&config, &prefix, rotate_keys, resume, non_interactive).await,
+                gc_immediate,
+            } => {
+                cmd_key_rotate(
+                    &config,
+                    &prefix,
+                    rotate_keys,
+                    resume,
+                    non_interactive,
+                    gc_immediate,
+                )
+                .await
+            }
         },
         Commands::Reconcile {
             path,
@@ -5950,12 +5969,58 @@ async fn list_scoped_manifests(
     Ok(paths)
 }
 
+/// Whether the closing message after a rotation may truthfully claim per-device
+/// forward secrecy.
+///
+/// Forward secrecy from re-keying only holds when the re-wrapped content carries
+/// NO path back to a shared, unchanged secret. That is exactly
+/// [`WrapMode::PerDevice`] with a non-empty recipient set (manifest v3, no master
+/// wrap). Under the DEFAULT [`WrapMode::Master`] (and [`WrapMode::Dual`]) the
+/// re-keyed FileKey is re-wrapped to the UNCHANGED shared master key, so a
+/// revoked master-key holder STILL decrypts the re-keyed content — claiming
+/// forward secrecy there would be false and dangerous.
+fn rotation_grants_forward_secrecy(ctx: &tcfs_sync::engine::EncryptionContext) -> bool {
+    use tcfs_sync::engine::WrapMode;
+    ctx.wrap_mode == WrapMode::PerDevice && !ctx.device_recipients.is_empty()
+}
+
+/// The closing forward-secrecy summary for a completed rotation, rendered as
+/// lines to print. Gated on [`rotation_grants_forward_secrecy`]: only the
+/// per-device path earns the reassurance; Master/Dual gets a LOUD warning that
+/// no per-device forward secrecy was gained.
+fn forward_secrecy_summary_lines(ctx: &tcfs_sync::engine::EncryptionContext) -> Vec<String> {
+    if rotation_grants_forward_secrecy(ctx) {
+        vec![
+            "Forward secrecy: devices absent from the current recipient set can no longer \
+             decrypt the re-keyed content (per-device wrap, no master wrap). (They may still \
+             hold content they previously pulled.)"
+                .to_string(),
+        ]
+    } else {
+        vec![
+            "WARNING: NO per-device forward secrecy was gained by this rotation.".to_string(),
+            format!(
+                "  wrap_mode={:?}: the re-keyed content was re-wrapped to the UNCHANGED shared \
+                 master key.",
+                ctx.wrap_mode
+            ),
+            "  A revoked device that still holds the master key can STILL decrypt the re-keyed \
+             content."
+                .to_string(),
+            "  Per-device forward secrecy requires wrap_mode=PerDevice (per-device-only wraps, \
+             no master wrap) with a real recipient set."
+                .to_string(),
+        ]
+    }
+}
+
 async fn cmd_key_rotate(
     config: &tcfs_core::config::TcfsConfig,
     scope: &str,
     rotate_keys: bool,
     resume: bool,
     non_interactive: bool,
+    gc_immediate: bool,
 ) -> Result<()> {
     let storage_prefix = config.storage.resolved_prefix().to_string();
     let scope_clean = scope.trim_matches('/');
@@ -6016,8 +6081,10 @@ async fn cmd_key_rotate(
     if !rotate_keys {
         println!();
         println!(
-            "Dry run -- no changes made. Re-run with --rotate-keys to perform the rotation \
-             (re-chunk + re-encrypt + re-wrap + GC)."
+            "Dry run -- no changes made. Re-run with --rotate-keys to perform the rotation. \
+             Content is re-encrypted under fresh FileKeys per the existing index (no \
+             re-chunking; file_hash/file_id stay valid), re-wrapped to the current recipient \
+             set, and the orphaned old chunks are GC'd."
         );
         return Ok(());
     }
@@ -6106,26 +6173,55 @@ async fn cmd_key_rotate(
     state.all_published = true;
     write_scoped_rotation_state(&state_path, &state)?;
 
+    // GC grace: default to the configured orphan_chunk_cleanup_grace_secs so a
+    // concurrent reader in a multi-writer fleet that still holds an old chunk
+    // address won't 404 mid-flight. `--gc-immediate` opts into grace=0 (the old
+    // hardcoded behavior). Either way GC is reference-safe: only chunks
+    // unreferenced by ANY live manifest are eligible.
+    let gc_grace = if gc_immediate {
+        Duration::from_secs(0)
+    } else {
+        Duration::from_secs(config.sync.orphan_chunk_cleanup_grace_secs)
+    };
     println!();
-    println!(
-        "GC: sweeping chunks no longer referenced by ANY live manifest under {remote_prefix} ..."
-    );
+    if gc_immediate {
+        println!(
+            "GC: sweeping chunks no longer referenced by ANY live manifest under {remote_prefix} \
+             (grace=0, immediate) ..."
+        );
+    } else {
+        println!(
+            "GC: sweeping chunks no longer referenced by ANY live manifest under {remote_prefix} \
+             (grace={}s; older orphans only — pass --gc-immediate for grace=0) ...",
+            config.sync.orphan_chunk_cleanup_grace_secs
+        );
+    }
     let cleanup = tcfs_sync::reconcile::cleanup_orphaned_chunks(
         &op,
         &remote_prefix,
-        Duration::from_secs(0),
+        gc_grace,
         SystemTime::now(),
     )
     .await
     .context("GC of orphaned chunks after rotation")?;
 
+    let deferred_orphans =
+        cleanup.skipped_within_grace.len() + cleanup.skipped_missing_last_modified.len();
     println!(
-        "  GC: {} orphaned, {} deleted, {} referenced (kept), {} errors",
+        "  GC: {} orphaned, {} deleted, {} deferred (within grace), {} referenced (kept), {} \
+         errors",
         cleanup.orphaned_chunks_found,
         cleanup.deleted_chunks.len(),
+        deferred_orphans,
         cleanup.referenced_chunks,
         cleanup.delete_errors.len()
     );
+    if deferred_orphans > 0 && !gc_immediate {
+        println!(
+            "       {deferred_orphans} orphaned chunk(s) are within the grace window and will be \
+             swept by a later GC (or now with --gc-immediate)."
+        );
+    }
     for (hash, err) in &cleanup.delete_errors {
         eprintln!("    GC error: {hash}: {err}");
     }
@@ -6157,10 +6253,9 @@ async fn cmd_key_rotate(
         cleanup.deleted_chunks.len()
     );
     println!();
-    println!(
-        "Forward secrecy: devices absent from the current recipient set can no longer decrypt the \
-         re-keyed content. (They may still hold content they previously pulled.)"
-    );
+    for line in forward_secrecy_summary_lines(&ctx) {
+        println!("{line}");
+    }
 
     Ok(())
 }
@@ -8792,5 +8887,142 @@ enabled = false
             "exactly one per-device-only manifest (NOT counted as plaintext)"
         );
         assert_eq!(state.rotated_manifests, 1, "the master-wrapped one rotated");
+    }
+
+    // ── TIN-1899 must-fix: forward-secrecy messaging is gated on wrap_mode ──
+
+    /// Build a DEFAULT Master-wrap context: this is what `cmd_key_rotate`
+    /// constructs via `build_encryption_context` when `crypto.wrap_mode` is the
+    /// default `Master`. Re-keyed content is re-wrapped to the unchanged shared
+    /// master key — NO per-device forward secrecy.
+    fn master_ctx(master: &tcfs_crypto::MasterKey) -> EncryptionContext {
+        EncryptionContext::new(master.clone())
+    }
+
+    /// Build a Dual context: master wrap + per-device wraps. The master wrap is
+    /// retained, so a revoked master-key holder still decrypts — also NO
+    /// per-device forward secrecy.
+    fn dual_ctx(
+        master: &tcfs_crypto::MasterKey,
+        recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
+        identity: DeviceUnwrapIdentity,
+    ) -> EncryptionContext {
+        EncryptionContext::new(master.clone()).with_wrap_mode(
+            EngWrapMode::Dual,
+            recipients,
+            Some(identity),
+        )
+    }
+
+    /// The must-fix: under DEFAULT Master wrap, `cmd_key_rotate`'s closing
+    /// summary must NOT claim forward secrecy. It must instead emit the LOUD
+    /// warning that re-keyed content was re-wrapped to the UNCHANGED shared
+    /// master key and a revoked master-key holder still decrypts. This drives the
+    /// exact decision logic `cmd_key_rotate` prints (see
+    /// `forward_secrecy_summary_lines`).
+    #[test]
+    fn master_wrap_rotation_warns_no_forward_secrecy() {
+        let master = master_key(0x42);
+        let ctx = master_ctx(&master);
+
+        assert!(
+            !rotation_grants_forward_secrecy(&ctx),
+            "Master wrap must NOT be reported as granting forward secrecy"
+        );
+
+        let summary = forward_secrecy_summary_lines(&ctx).join("\n");
+        // The LOUD warning is present...
+        assert!(
+            summary.contains("WARNING: NO per-device forward secrecy"),
+            "Master-mode summary must warn that NO forward secrecy was gained: {summary}"
+        );
+        assert!(
+            summary.contains("UNCHANGED shared master key"),
+            "Master-mode summary must name the unchanged shared master key: {summary}"
+        );
+        assert!(
+            summary.contains("can STILL decrypt"),
+            "Master-mode summary must state a revoked holder STILL decrypts: {summary}"
+        );
+        assert!(
+            summary.contains("wrap_mode=PerDevice"),
+            "Master-mode summary must point at PerDevice as the fix: {summary}"
+        );
+        // ...and the PerDevice reassurance is ABSENT.
+        assert!(
+            !summary.contains("can no longer decrypt the re-keyed content"),
+            "Master-mode summary must NOT print the PerDevice forward-secrecy reassurance: \
+             {summary}"
+        );
+    }
+
+    /// Dual wrap (master wrap retained alongside per-device wraps) is ALSO not
+    /// forward-secret: the master wrap is an unchanged shared-secret path back to
+    /// the FileKey. It must get the same warning as Master.
+    #[test]
+    fn dual_wrap_rotation_warns_no_forward_secrecy() {
+        let master = master_key(0x42);
+        let keep = test_device("device-keep");
+        let ctx = dual_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
+
+        assert!(
+            !rotation_grants_forward_secrecy(&ctx),
+            "Dual wrap retains the master wrap and must NOT be reported as forward-secret"
+        );
+        let summary = forward_secrecy_summary_lines(&ctx).join("\n");
+        assert!(
+            summary.contains("WARNING: NO per-device forward secrecy"),
+            "Dual-mode summary must warn that NO forward secrecy was gained: {summary}"
+        );
+        assert!(
+            !summary.contains("can no longer decrypt the re-keyed content"),
+            "Dual-mode summary must NOT print the PerDevice reassurance: {summary}"
+        );
+    }
+
+    /// The ONLY path that earns the reassurance: PerDevice with a real recipient
+    /// set (per-device-only wraps, no master wrap, manifest v3).
+    #[test]
+    fn per_device_wrap_rotation_reports_forward_secrecy() {
+        let master = master_key(0x42);
+        let keep = test_device("device-keep");
+        let ctx = per_device_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
+
+        assert!(
+            rotation_grants_forward_secrecy(&ctx),
+            "PerDevice wrap with recipients MUST be reported as granting forward secrecy"
+        );
+        let summary = forward_secrecy_summary_lines(&ctx).join("\n");
+        assert!(
+            summary.contains("can no longer decrypt the re-keyed content"),
+            "PerDevice summary must print the forward-secrecy reassurance: {summary}"
+        );
+        assert!(
+            !summary.contains("WARNING: NO per-device forward secrecy"),
+            "PerDevice summary must NOT print the no-forward-secrecy warning: {summary}"
+        );
+    }
+
+    /// Defense in depth: PerDevice with an EMPTY recipient set is not a real
+    /// forward-secrecy guarantee (no one is a recipient); it must NOT earn the
+    /// reassurance. (In practice the write path rejects an empty PerDevice set,
+    /// but the messaging gate must not depend on that.)
+    #[test]
+    fn per_device_wrap_without_recipients_does_not_claim_forward_secrecy() {
+        let master = master_key(0x42);
+        let ctx = EncryptionContext::new(master.clone()).with_wrap_mode(
+            EngWrapMode::PerDevice,
+            Vec::new(),
+            None,
+        );
+        assert!(
+            !rotation_grants_forward_secrecy(&ctx),
+            "PerDevice with no recipients must NOT be reported as forward-secret"
+        );
+        let summary = forward_secrecy_summary_lines(&ctx).join("\n");
+        assert!(
+            summary.contains("WARNING: NO per-device forward secrecy"),
+            "empty-recipient PerDevice must warn rather than reassure: {summary}"
+        );
     }
 }
