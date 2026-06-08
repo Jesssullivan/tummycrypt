@@ -1262,6 +1262,72 @@ fn unique_tmp_path(local_path: &Path, marker: &str) -> PathBuf {
     local_path.with_file_name(file_name)
 }
 
+/// Convert a `SystemTime` into `(unix_secs, subsec_nanos)` for manifest storage.
+///
+/// Times before the Unix epoch are represented with a negative seconds component
+/// and the matching positive sub-second remainder, mirroring `utimensat`'s
+/// `timespec` convention so the round-trip is lossless.
+fn systemtime_to_unix_parts(t: SystemTime) -> (i64, u32) {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+        Err(e) => {
+            // Pre-epoch: duration is how far *before* the epoch we are.
+            let d = e.duration();
+            let nanos = d.subsec_nanos();
+            if nanos == 0 {
+                (-(d.as_secs() as i64), 0)
+            } else {
+                // Borrow one second so the nanos component stays in [0, 1e9).
+                (-(d.as_secs() as i64) - 1, 1_000_000_000 - nanos)
+            }
+        }
+    }
+}
+
+/// Apply a previously captured `(unix_secs, subsec_nanos)` mtime to `path`.
+///
+/// Only the modification time is set; the access time is left to the kernel's
+/// default (`UTIME_OMIT`). On non-Unix targets this is a no-op — the manifest
+/// still carries the value, and a future port can honor it. Best-effort: a
+/// failure to restamp is logged but never aborts the restore, since the file
+/// content is already correctly written.
+#[cfg(unix)]
+fn apply_manifest_mtime(path: &Path, mtime: (i64, u32)) {
+    use std::os::unix::ffi::OsStrExt;
+    let (secs, nanos) = mtime;
+    let c_path = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+        Ok(p) => p,
+        Err(_) => {
+            warn!(path = %path.display(), "skipping mtime restore: path contains NUL");
+            return;
+        }
+    };
+    // mtime carries the captured value; atime is omitted so we don't perturb it.
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: secs as libc::time_t,
+            tv_nsec: nanos as _,
+        },
+    ];
+    // SAFETY: `c_path` is a valid NUL-terminated C string for the duration of
+    // the call, and `times` is a 2-element array of initialized `timespec`.
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        warn!(path = %path.display(), error = %err, "failed to restore mtime from manifest");
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_manifest_mtime(_path: &Path, _mtime: (i64, u32)) {
+    // No portable non-Unix mtime restore is wired yet; the value still round-trips
+    // through the manifest so a future port can honor it.
+}
+
 /// Upload a single file to SeaweedFS, chunking it via FastCDC.
 ///
 /// If the file is unchanged since the last sync (per state cache), the upload
@@ -1966,16 +2032,23 @@ async fn upload_file_with_device_with_state(
     #[cfg(not(feature = "crypto"))]
     let manifest_version: u32 = 2;
 
-    // Capture Unix file permissions for cross-device preservation
+    // Capture Unix file permissions and the source mtime for cross-device
+    // preservation, both from the SAME metadata read so they describe one stat
+    // of the file (no TOCTOU drift between the two). The mtime keeps a restored
+    // tree's timestamps intact so `git status` does not report spurious dirty
+    // (TIN-1620 T13-Z).
+    let source_metadata = std::fs::metadata(local_path).ok();
     #[cfg(unix)]
     let file_mode = {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(local_path)
-            .ok()
-            .map(|m| m.permissions().mode())
+        source_metadata.as_ref().map(|m| m.permissions().mode())
     };
     #[cfg(not(unix))]
     let file_mode: Option<u32> = None;
+    let file_mtime: Option<(i64, u32)> = source_metadata
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .map(systemtime_to_unix_parts);
 
     // Build and upload the manifest. Version is 2 for Master/Dual and 3 for
     // PerDevice (see the wrap-mode branch above) so pre-per-device binaries fail
@@ -1995,6 +2068,7 @@ async fn upload_file_with_device_with_state(
         written_at: now,
         rel_path: rel_path.map(|s| s.to_string()),
         mode: file_mode,
+        mtime: file_mtime,
         encrypted_file_key,
         wrapped_file_keys,
     };
@@ -2326,6 +2400,13 @@ pub async fn download_file_with_device(
                 .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
         }
 
+        // Restore the source mtime (TIN-1620 T13-Z) BEFORE re-stat below, so the
+        // state cache and `git status` see the original timestamp, not "now".
+        // Old manifests carry `mtime: None`, leaving current behavior unchanged.
+        if let Some(mtime) = manifest.mtime {
+            apply_manifest_mtime(local_path, mtime);
+        }
+
         let mut sync_state_for_result = None;
         if !_device_id.is_empty() {
             let mut local_vclock = state
@@ -2552,6 +2633,13 @@ pub async fn download_file_with_device(
         tokio::fs::set_permissions(local_path, perms)
             .await
             .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+    }
+
+    // Restore the source mtime (TIN-1620 T13-Z) BEFORE the re-stat below, so the
+    // state cache and `git status` see the original timestamp, not "now". Old
+    // manifests carry `mtime: None`, leaving current behavior unchanged.
+    if let Some(mtime) = manifest.mtime {
+        apply_manifest_mtime(local_path, mtime);
     }
 
     let mut sync_state_for_result = None;
@@ -4574,6 +4662,192 @@ mod tests {
         assert_eq!(content, "hello world");
     }
 
+    #[test]
+    fn systemtime_to_unix_parts_roundtrips_post_epoch() {
+        // A representative post-epoch instant with sub-second precision.
+        let t = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+        assert_eq!(systemtime_to_unix_parts(t), (1_700_000_000, 123_456_789));
+    }
+
+    #[test]
+    fn systemtime_to_unix_parts_handles_pre_epoch() {
+        // 0.5s before the epoch: seconds borrow down, nanos stay in [0, 1e9).
+        let t = UNIX_EPOCH - Duration::new(0, 500_000_000);
+        let (secs, nanos) = systemtime_to_unix_parts(t);
+        assert_eq!(secs, -1);
+        assert_eq!(nanos, 500_000_000);
+    }
+
+    #[cfg(unix)]
+    fn mtime_of(path: &Path) -> (i64, u32) {
+        let meta = std::fs::metadata(path).unwrap();
+        systemtime_to_unix_parts(meta.modified().unwrap())
+    }
+
+    /// (a) Chunked-file path: a file uploaded with a known source mtime restores
+    /// into a fresh dir with that exact mtime, not "now". This is the input to a
+    /// clean `git status` (TIN-1620 T13-Z).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mtime_round_trips_for_chunked_file() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let local = dir.path().join("src.txt");
+        // Larger than a chunk boundary is unnecessary; non-empty exercises the
+        // chunked restore path (empty is handled by a separate test).
+        std::fs::write(&local, b"content with a known timestamp").unwrap();
+
+        // Stamp a known, distinctly-old mtime on the source.
+        let known = (1_600_000_000_i64, 250_000_000_u32);
+        apply_manifest_mtime(&local, known);
+        assert_eq!(mtime_of(&local), known, "test setup: source mtime not set");
+
+        let up = upload_file_with_device(
+            &op,
+            &local,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("src.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Restore into a fresh location (no pre-existing file => fresh mtime risk).
+        let restore_dir = tempfile::tempdir().unwrap();
+        let dl_path = restore_dir.path().join("restored.txt");
+        let mut restore_state = StateCache::open(&restore_dir.path().join("s2.json")).unwrap();
+        download_file_with_device(
+            &op,
+            &up.remote_path,
+            &dl_path,
+            "data",
+            None,
+            "device-2",
+            Some(&mut restore_state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&dl_path).unwrap(),
+            b"content with a known timestamp"
+        );
+        let restored = mtime_of(&dl_path);
+        // Seconds must match exactly; nanos within filesystem precision (1us).
+        assert_eq!(restored.0, known.0, "restored mtime seconds drifted");
+        assert!(
+            (restored.1 as i64 - known.1 as i64).abs() <= 1_000,
+            "restored mtime nanos drifted: got {} want {}",
+            restored.1,
+            known.1
+        );
+    }
+
+    /// (a) Empty-file path: the zero-byte restore branch also restamps mtime.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mtime_round_trips_for_empty_file() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+
+        let local = dir.path().join("empty.txt");
+        std::fs::write(&local, b"").unwrap();
+        let known = (1_555_000_000_i64, 0_u32);
+        apply_manifest_mtime(&local, known);
+
+        let up = upload_file_with_device(
+            &op,
+            &local,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("empty.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(up.chunks, 0, "empty file must take the chunkless path");
+
+        let restore_dir = tempfile::tempdir().unwrap();
+        let dl_path = restore_dir.path().join("restored_empty.txt");
+        let mut restore_state = StateCache::open(&restore_dir.path().join("s2.json")).unwrap();
+        download_file_with_device(
+            &op,
+            &up.remote_path,
+            &dl_path,
+            "data",
+            None,
+            "device-2",
+            Some(&mut restore_state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::metadata(&dl_path).unwrap().len(), 0);
+        assert_eq!(
+            mtime_of(&dl_path).0,
+            known.0,
+            "empty-file mtime not restored"
+        );
+    }
+
+    /// (b) Back-compat: a manifest serialized WITHOUT an mtime field (old fleet)
+    /// deserializes to `mtime: None` and restores with today's behavior — no
+    /// panic, no addressing change, mtime left to "now".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn old_manifest_without_mtime_restores_with_current_behavior() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+
+        // A pre-mtime v2 manifest: note no `mtime` key at all.
+        let body = b"legacy body bytes";
+        let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(body));
+        let chunk_hash = file_hash.clone();
+        op.write(&format!("data/chunks/{chunk_hash}"), body.to_vec())
+            .await
+            .unwrap();
+        let legacy_json = format!(
+            r#"{{"version":2,"file_hash":"{file_hash}","file_size":{},"chunks":["{chunk_hash}"],"vclock":{{"clocks":{{}}}},"written_by":"old","written_at":1,"rel_path":"legacy.txt"}}"#,
+            body.len()
+        );
+        // Sanity: this JSON deserializes with mtime None and never panics.
+        let parsed = SyncManifest::from_bytes(legacy_json.as_bytes()).unwrap();
+        assert!(parsed.mtime.is_none(), "old manifest must yield mtime None");
+
+        let manifest_path = format!("data/manifests/{file_hash}");
+        op.write(&manifest_path, legacy_json.into_bytes())
+            .await
+            .unwrap();
+
+        let dl_path = dir.path().join("legacy_restored.txt");
+        let before = SystemTime::now();
+        let dl = download_file(&op, &manifest_path, &dl_path, "data", None)
+            .await
+            .unwrap();
+        assert_eq!(dl.bytes, body.len() as u64);
+        assert_eq!(std::fs::read(&dl_path).unwrap(), body);
+
+        // Current behavior: mtime is whatever the OS stamped at write (~now), not
+        // some restored value — we never errored and never set an old time.
+        let restored_secs = mtime_of(&dl_path).0;
+        let before_secs = systemtime_to_unix_parts(before).0;
+        assert!(
+            restored_secs + 5 >= before_secs,
+            "restore with no manifest mtime must keep fresh-write timestamp"
+        );
+    }
+
     #[tokio::test]
     async fn download_file_cleans_streaming_tmp_after_chunk_failure() {
         let op = memory_op();
@@ -4602,6 +4876,7 @@ mod tests {
             written_at: 0,
             rel_path: Some("large.bin".into()),
             mode: None,
+            mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
         };

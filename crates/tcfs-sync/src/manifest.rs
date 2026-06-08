@@ -47,6 +47,19 @@ pub struct SyncManifest {
     /// Backward-compatible: old manifests deserialize with `mode: None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
+    /// Source modification time as `(unix_secs, subsec_nanos)`, preserved across
+    /// sync so a restored tree keeps its original mtimes (TIN-1620 T13-Z).
+    ///
+    /// Without this, a fresh restore stamps "now" onto every file, which smudges
+    /// `.git/index`'s stat cache and makes `git status` report spurious dirty.
+    ///
+    /// Backward-compatible: old manifests deserialize with `mtime: None`, in
+    /// which case restore leaves the current behavior unchanged. This field is
+    /// purely metadata — manifests are content-addressed by the file's BLAKE3
+    /// hash (`manifests/{file_hash}`), so adding it never changes manifest
+    /// identity, dedup, or chunk addressing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<(i64, u32)>,
     /// Base64-encoded wrapped file key (present only when E2E encryption is enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_file_key: Option<String>,
@@ -153,6 +166,7 @@ impl SyncManifest {
             written_at: 0,
             rel_path: None,
             mode: None,
+            mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
         })
@@ -193,6 +207,7 @@ mod tests {
             written_at: 1000,
             rel_path: Some("docs/readme.md".into()),
             mode: Some(0o644),
+            mtime: Some((1_700_000_000, 123_456_789)),
             encrypted_file_key: None,
             wrapped_file_keys: vec![WrappedFileKey {
                 recipient_device_id: "device-a".into(),
@@ -229,6 +244,39 @@ mod tests {
     fn test_empty_manifest_fails() {
         let result = SyncManifest::from_bytes(b"");
         assert!(result.is_err());
+    }
+
+    /// (b) Back-compat: an `mtime: None` manifest must serialize byte-identically
+    /// to one written before the field existed (the key is omitted), so adding
+    /// the field never perturbs manifest identity/addressing for the existing
+    /// fleet. And a JSON blob with no `mtime` key must deserialize to None.
+    #[test]
+    fn mtime_none_is_omitted_and_back_compatible() {
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "deadbeef".into(),
+            file_size: 3,
+            chunks: vec!["c0".into()],
+            vclock: VectorClock::new(),
+            written_by: "neo".into(),
+            written_at: 7,
+            rel_path: Some("a.txt".into()),
+            mode: Some(0o644),
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        let json = String::from_utf8(manifest.to_bytes().unwrap()).unwrap();
+        assert!(
+            !json.contains("mtime"),
+            "mtime: None must not appear in serialized manifest, got: {json}"
+        );
+
+        // An old manifest blob (no mtime key at all) deserializes to None.
+        let old = r#"{"version":2,"file_hash":"deadbeef","file_size":3,"chunks":["c0"],"vclock":{"clocks":{}},"written_by":"neo","written_at":7,"rel_path":"a.txt","mode":420}"#;
+        let parsed = SyncManifest::from_bytes(old.as_bytes()).unwrap();
+        assert!(parsed.mtime.is_none());
+        assert_eq!(parsed.mode, Some(0o644));
     }
 
     #[test]
@@ -296,6 +344,7 @@ mod proptest_suite {
                 written_at,
                 rel_path: None,
                 mode: None,
+                mtime: None,
                 encrypted_file_key: None,
                 wrapped_file_keys: Vec::new(),
             };

@@ -7380,6 +7380,7 @@ mod tests {
             written_at: 0,
             rel_path: Some(rel_path.to_string()),
             mode: None,
+            mtime: None,
             encrypted_file_key: Some(base64::engine::general_purpose::STANDARD.encode(wrapped)),
             wrapped_file_keys: Vec::new(),
         }
@@ -8552,6 +8553,7 @@ enabled = false
             written_at: 0,
             rel_path: Some(rel_path.to_string()),
             mode: None,
+            mtime: None,
             encrypted_file_key,
             wrapped_file_keys,
         };
@@ -8835,6 +8837,7 @@ enabled = false
             written_at: 0,
             rel_path: Some("plain.txt".into()),
             mode: None,
+            mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
         };
