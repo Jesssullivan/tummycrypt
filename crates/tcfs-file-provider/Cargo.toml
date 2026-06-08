@@ -51,6 +51,9 @@ required-features = ["uniffi"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Used by device_ctx grpc-feature tests to expose generated age secrets when
+# constructing inlined-config JSON (TIN-1417 Keychain inlining read-side tests).
+secrecy = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.27"
