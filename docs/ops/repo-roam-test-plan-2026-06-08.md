@@ -82,7 +82,10 @@ a repo and compares two captures, failing on ANY difference:
 
 - `git status --porcelain=v2 --branch` (distinguishes index vs worktree, records
   the checked-out branch + ahead/behind)
-- HEAD + `symbolic-ref` (branch / detached-HEAD safe) + `write-tree` of the index
+- HEAD + `symbolic-ref` (branch / detached-HEAD safe). The staged/index identity
+  is captured below via `ls-files -s` blob shas + the `git diff --cached` hash —
+  capture deliberately does **not** run `git write-tree` (that would write tree
+  objects into `<repo>/.git`, breaking the read-only contract)
 - all refs (`show-ref`) and the branch set
 - staged vs unstaged content (`git diff --cached` / `git diff` hashes) and
   per-path staged blob shas (`ls-files -s`)
@@ -101,7 +104,10 @@ Self-test / regression: `task lazy:test-dev-env-fingerprint`.
 
 The single green signal is `dev-env-zero-diff=pass`, threaded into the packet's
 `result.env` / `parity-gates.env` next to the existing
-`scoped-project-tree-parity-evidence-complete` gate.
+`scoped-project-tree-parity-evidence-complete` gate. **A green `self-test` is NOT
+that signal** — see the [PR]/[LIVE] boundary callout in §6: the self-test only
+proves the assertion engine is consistent on one host; the gate-bearing
+`dev-env-zero-diff=pass` comes from the **[LIVE]** R2/R3 cross-host `compare`.
 
 ---
 
@@ -237,6 +243,24 @@ it records symlink targets, fsck verdict, and the full manifest, so a failing
 
 Legend: **[PR]** = exercised by this PR's harness/self-test (no fleet);
 **[LIVE]** = operator/agent-driven on the real neo<->honey fleet, NOT in this PR.
+
+> **[PR] vs [LIVE] boundary — read this before citing any green bar.**
+> A green `task lazy:test-dev-env-fingerprint` / `self-test` proves **only** that
+> the tool is internally consistent: it captures deterministically (same tree ->
+> identical fingerprint) and its negative control trips (a mutated tree ->
+> `compare` fails). It is run against a single disposable `/tmp` repo on **one
+> host**, so it is **NOT** proof of:
+> - **flip-flop zero-diff in either direction** (neo->honey **or** honey->neo) —
+>   that is delegated to the **[LIVE]** R2/R3 steps, which run `capture`/`compare`
+>   across two real hosts;
+> - **live `.git` corruption catching** — the self-test's repos are never torn
+>   mid-reconcile, so `fsck=clean` there proves nothing about concurrent-write
+>   corruption. That is delegated to the **[LIVE]** R2/R5 steps and the **Facet-6
+>   harness** (`scripts/git-dotgit-fsck-conflict-harness.sh`, PR #506; see §7),
+>   whose G5-git-5 row is *expected to fail* until `.git`-aware resolution lands.
+>
+> In short: **[PR] green == the assertion engine works; [LIVE] green == the fleet
+> actually roams with zero diff and no corruption.** Do not conflate the two.
 
 ### R0 — Inventory + seed (neo)  · rows: pre-gate, T13 inventory
 
@@ -379,7 +403,12 @@ diverge from the bundle-based R4 acceptance.**
 - READ-ONLY research + this docs/scripts PR only. No `reconcile --execute` against
   prod, no daemon/lab changes, no enrolling real repos in this PR.
 - The harness is safe by construction: `seed-canary` refuses `$HOME` / `~/git/*` /
-  filesystem root; `capture` is read-only; the self-test uses a disposable `/tmp`
-  repo. Real repos require an explicit `--source`/`REPO=` argument.
+  filesystem root; `capture` is **strictly read-only** — it runs only inspecting
+  plumbing (`fsck`/`status`/`diff`/`ls-files`/`show-ref`/`rev-parse`/`stash
+  list`/`reflog`) plus a plain-file sha256 walk, and never runs `git write-tree`
+  or any index/object-writing command, so it never mutates the target repo (this
+  matters because R0 points `capture` at real expendable repos); the self-test
+  uses a disposable `/tmp` repo. Real repos require an explicit `--source`/`REPO=`
+  argument.
 - All **[LIVE]** steps are operator/agent-driven on the fleet and are **out of
   scope for this PR**.

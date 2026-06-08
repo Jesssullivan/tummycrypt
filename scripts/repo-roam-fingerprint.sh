@@ -31,9 +31,13 @@
 #   self-test [<tmp>]          Seed -> capture -> capture -> compare round-trip in
 #                              a disposable temp dir. Never touches a real repo.
 #
-# Safety: capture is READ-ONLY (it runs `git fsck`/`git status`/`git diff` and a
-# plain-file sha256 walk; it never writes into <repo>). seed-canary refuses to
-# operate on $HOME, anything under ~/git, or a filesystem root.
+# Safety: capture is READ-ONLY. It runs only inspecting plumbing
+# (`git fsck`/`git status`/`git diff`/`git ls-files -s`/`git show-ref`/`git
+# rev-parse`/`git stash list`/`git reflog`) plus a plain-file sha256 walk. It does
+# NOT run `git write-tree`, `git add`, or any command that mutates the index or
+# writes objects into <repo>/.git — it never writes a single byte into <repo>.
+# seed-canary refuses to operate on $HOME, anything under ~/git, or a filesystem
+# root.
 #
 # Deny-set / noise control: the working-file manifest honors the SAME fail-closed
 # deny-set posture as the reconcile engine (Blacklist::from_sync_config:
@@ -169,11 +173,16 @@ cmd_capture() {
     | tr '\0' '\n' >"$out/status.txt" || true
 
   # HEAD + branch (detached-HEAD safe).
+  # NOTE: we deliberately do NOT run `git write-tree` here. write-tree writes new
+  # tree objects into <repo>/.git/objects and can touch the index, which would
+  # violate capture's read-only contract (the live R0 step points capture at real
+  # expendable repos). The staged/index identity is already fully captured below
+  # by `git ls-files -s` (mode-aware per-path blob shas -> index-blobs.txt) and the
+  # `git diff --cached` hash (diff-cached.sha256), so write-tree is redundant.
   {
     printf 'head=%s\n' "$("${g[@]}" rev-parse --verify HEAD 2>/dev/null || echo NONE)"
     printf 'symbolic_ref=%s\n' "$("${g[@]}" symbolic-ref -q HEAD 2>/dev/null || echo DETACHED)"
     printf 'branch=%s\n' "$("${g[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo NONE)"
-    printf 'write_tree=%s\n' "$("${g[@]}" write-tree 2>/dev/null || echo NONE)"
   } >"$out/head.env"
 
   # All refs + branch set (so HEAD/branch/refs round-trip is asserted).
@@ -198,10 +207,17 @@ cmd_capture() {
 
   # git fsck --full: the corruption gate. A mid-reconcile / torn .git must NOT
   # produce a clean fsck. We record the raw output AND a normalized verdict.
+  #
+  # Match GENUINE corruption signals only. `git fsck` emits benign informational
+  # notices ("dangling commit <sha>", "dangling blob", "missing blob" for gc'd /
+  # expired reflog tips) on perfectly healthy repos, so we deliberately do NOT
+  # match bare `missing` / `dangling.*commit`. Real corruption surfaces as a
+  # line-anchored `error:` / `fatal:`, an `invalid sha1 pointer`, or a
+  # `broken link` reference.
   local fsck_out="$out/fsck.txt"
   "${g[@]}" fsck --full 2>&1 | sort >"$fsck_out" || true
   local fsck_bad
-  fsck_bad="$(grep -ciE 'invalid sha1 pointer|missing|broken|dangling.*commit|error:|fatal:' "$fsck_out" || true)"
+  fsck_bad="$(grep -ciE '^error:|^fatal:|invalid sha1 pointer|broken link' "$fsck_out" || true)"
   if [[ "$fsck_bad" -eq 0 ]]; then
     printf 'fsck=clean\n' >"$out/fsck.env"
   else
