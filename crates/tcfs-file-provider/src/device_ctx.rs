@@ -37,7 +37,7 @@
 /// `encrypted_file_key`, so those backends would fall through to "no file key"
 /// and write encrypted chunk bytes verbatim. This guard turns that into a loud,
 /// explicit error instead.
-#[cfg(any(feature = "direct", feature = "grpc"))]
+#[cfg(any(feature = "direct", test))]
 pub(crate) fn ensure_master_decryptable(
     manifest: &tcfs_sync::manifest::SyncManifest,
 ) -> anyhow::Result<()> {
@@ -116,6 +116,7 @@ fn wrap_mode_from_config(config: &serde_json::Value) -> tcfs_core::config::WrapM
 fn resolve_recipients(
     config: &serde_json::Value,
     requested: tcfs_core::config::WrapMode,
+    master_key: &tcfs_crypto::MasterKey,
 ) -> Option<(Vec<tcfs_crypto::AgeFileKeyRecipient>, bool)> {
     // Inlined-first: the Keychain-provided config copy carries the active
     // recipients so the sandboxed FileProvider never reads devices.json. These
@@ -196,7 +197,7 @@ fn resolve_recipients(
                 "wrap_mode={requested:?}: device registry is UNSIGNED (legacy); refusing \
                  per-device recipients from an unverified registry — using master wrap."
             );
-            return base;
+            return None;
         }
         Err(e) => {
             tracing::warn!(
@@ -316,7 +317,7 @@ pub(crate) fn build_encryption_context(
         return base;
     }
 
-    let (recipients, all_capable) = match resolve_recipients(config, requested) {
+    let (recipients, all_capable) = match resolve_recipients(config, requested, master_key) {
         Some(v) => v,
         None => return base,
     };
