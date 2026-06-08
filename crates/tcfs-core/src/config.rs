@@ -307,9 +307,78 @@ pub struct FuseConfig {
     pub cache_max_mb: u64,
 }
 
+/// File-key wrapping mode (TIN-1417 tri-state).
+///
+/// Replaces the shipped-but-unused `crypto.per_device_wrapping: bool`
+/// (v0.12.14, default false, never flipped live) with an explicit
+/// expand/contract migration enum. The three modes map directly onto the
+/// migration phases:
+///
+/// - [`WrapMode::Master`] — DEFAULT. Today's master-only wrap: manifests carry
+///   `encrypted_file_key` only. This MUST stay byte-identical to the prior
+///   `per_device_wrapping=false` behavior. Manifests stay v2.
+/// - [`WrapMode::Dual`] — EXPAND / transitional. Manifests carry BOTH the
+///   master wrap (`encrypted_file_key`, for rollback + master/old-binary
+///   readers) AND per-device wraps (`wrapped_file_keys`). Back-compatible by
+///   construction; manifests stay v2.
+/// - [`WrapMode::PerDevice`] — CONTRACT. Manifests carry ONLY per-device
+///   `wrapped_file_keys` (the master wrap is dropped, enabling true
+///   revocation) and are bumped to manifest version 3 so pre-per-device
+///   binaries fail CLOSED rather than misreading a v2-with-no-`encrypted_file_key`
+///   as keyless. The daemon REFUSES to operate in this mode until a roll-call
+///   probe confirms every active device is per-device-capable; until then it
+///   falls back to `Dual` and warns loudly (never silently dropping the master
+///   wrap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WrapMode {
+    /// Master-only wrap (default; byte-identical to legacy single-wrap).
+    Master,
+    /// Dual wrap: master wrap + per-device wraps (expand / transitional).
+    Dual,
+    /// Per-device only: drop the master wrap, bump manifest to v3 (contract).
+    PerDevice,
+}
+
+impl Default for WrapMode {
+    fn default() -> Self {
+        WrapMode::Master
+    }
+}
+
+impl WrapMode {
+    /// True when this mode emits the master-wrapped `encrypted_file_key`.
+    /// Master and Dual do; PerDevice does not.
+    pub fn emits_master_wrap(self) -> bool {
+        matches!(self, WrapMode::Master | WrapMode::Dual)
+    }
+
+    /// True when this mode emits per-device `wrapped_file_keys`.
+    /// Dual and PerDevice do; Master does not.
+    pub fn emits_per_device_wraps(self) -> bool {
+        matches!(self, WrapMode::Dual | WrapMode::PerDevice)
+    }
+
+    /// True for the contract mode that drops the master wrap and bumps the
+    /// manifest version to 3 (fail-closed for pre-per-device readers).
+    pub fn is_contract(self) -> bool {
+        matches!(self, WrapMode::PerDevice)
+    }
+
+    /// `skip_serializing_if` predicate (takes `&WrapMode`) so the default
+    /// `master` mode is omitted from rendered JSON/TOML, keeping default output
+    /// byte-identical to the legacy master-only bootstrap.
+    pub fn is_master_ref(mode: &WrapMode) -> bool {
+        *mode == WrapMode::Master
+    }
+}
+
 /// E2E encryption configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+// NOTE: `Deserialize` is hand-implemented below (see `impl<'de> Deserialize`)
+// to reconcile the canonical `wrap_mode` with the legacy `per_device_wrapping`
+// bool. Defaults for absent fields are applied there, so no `#[serde(default)]`
+// is needed on this struct.
+#[derive(Debug, Clone, Serialize)]
 pub struct CryptoConfig {
     /// Enable client-side encryption (default: false until key is set up)
     pub enabled: bool,
@@ -329,12 +398,15 @@ pub struct CryptoConfig {
     /// Generated once per vault. If unset and passphrase_file is used, a random
     /// salt is generated and must be persisted by the caller.
     pub kdf_salt: Option<String>,
-    /// Wrap file keys per-device (age/X25519) for non-revoked devices instead of
-    /// under the shared master key (TIN-1417). When true, new manifests carry
-    /// `wrapped_file_keys` and omit `encrypted_file_key`, so a revoked device
-    /// cannot decrypt newly written content. Default false (legacy shared-master)
-    /// until a fleet has real per-device identities enrolled.
-    pub per_device_wrapping: bool,
+    /// File-key wrapping mode (TIN-1417). Canonical going forward. Default
+    /// [`WrapMode::Master`] (legacy shared-master, byte-identical to the prior
+    /// `per_device_wrapping=false`). See [`WrapMode`] for the full semantics and
+    /// the expand(`Dual`)->contract(`PerDevice`) migration mapping.
+    ///
+    /// Back-compat: a legacy `per_device_wrapping` field still deserializes
+    /// (`true` -> [`WrapMode::Dual`] so the master fallback is kept, `false`/
+    /// absent -> [`WrapMode::Master`]). When both are present, `wrap_mode` wins.
+    pub wrap_mode: WrapMode,
 }
 
 impl Default for CryptoConfig {
@@ -348,8 +420,65 @@ impl Default for CryptoConfig {
             device_identity: None,
             passphrase_file: None,
             kdf_salt: None,
-            per_device_wrapping: false,
+            wrap_mode: WrapMode::Master,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for CryptoConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Mirror of `CryptoConfig` with both the canonical `wrap_mode` and the
+        /// legacy `per_device_wrapping` bool present so we can reconcile them.
+        /// All fields `Option` so absent keys fall back to the struct default.
+        ///
+        /// Intentionally NOT `deny_unknown_fields`: the prior derived
+        /// `Deserialize` (with `#[serde(default)]`) silently tolerated unknown
+        /// keys, and configs in the wild may carry forward-compat keys; rejecting
+        /// them would be a back-compat regression.
+        #[derive(Deserialize)]
+        struct Raw {
+            enabled: Option<bool>,
+            argon2_mem_cost_kib: Option<u32>,
+            argon2_time_cost: Option<u32>,
+            argon2_parallelism: Option<u32>,
+            master_key_file: Option<PathBuf>,
+            device_identity: Option<PathBuf>,
+            passphrase_file: Option<PathBuf>,
+            kdf_salt: Option<String>,
+            /// Canonical going forward. Wins over `per_device_wrapping`.
+            wrap_mode: Option<WrapMode>,
+            /// Legacy back-compat field (TIN-1417 pre-tri-state). `true` maps to
+            /// `Dual` (keeps the master fallback — never silently drops it),
+            /// `false`/absent maps to `Master`.
+            per_device_wrapping: Option<bool>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let defaults = CryptoConfig::default();
+
+        // wrap_mode wins; otherwise map the legacy bool; otherwise default.
+        let wrap_mode = match raw.wrap_mode {
+            Some(mode) => mode,
+            None => match raw.per_device_wrapping {
+                Some(true) => WrapMode::Dual,
+                Some(false) | None => WrapMode::Master,
+            },
+        };
+
+        Ok(CryptoConfig {
+            enabled: raw.enabled.unwrap_or(defaults.enabled),
+            argon2_mem_cost_kib: raw.argon2_mem_cost_kib.unwrap_or(defaults.argon2_mem_cost_kib),
+            argon2_time_cost: raw.argon2_time_cost.unwrap_or(defaults.argon2_time_cost),
+            argon2_parallelism: raw.argon2_parallelism.unwrap_or(defaults.argon2_parallelism),
+            master_key_file: raw.master_key_file.or(defaults.master_key_file),
+            device_identity: raw.device_identity.or(defaults.device_identity),
+            passphrase_file: raw.passphrase_file.or(defaults.passphrase_file),
+            kdf_salt: raw.kdf_salt.or(defaults.kdf_salt),
+            wrap_mode,
+        })
     }
 }
 
@@ -631,5 +760,85 @@ require_session = false
     fn auth_defaults_when_omitted() {
         let config: TcfsConfig = toml::from_str("").unwrap();
         assert!(config.auth.require_session);
+    }
+
+    // ── TIN-1417 wrap_mode tri-state + back-compat ──────────────────────────
+
+    #[test]
+    fn wrap_mode_defaults_to_master_when_absent() {
+        let config: TcfsConfig = toml::from_str("[crypto]\nenabled = true\n").unwrap();
+        assert_eq!(config.crypto.wrap_mode, WrapMode::Master);
+        // Whole-config default also lands on Master.
+        assert_eq!(TcfsConfig::default().crypto.wrap_mode, WrapMode::Master);
+    }
+
+    #[test]
+    fn wrap_mode_parses_all_three_values() {
+        for (s, expected) in [
+            ("master", WrapMode::Master),
+            ("dual", WrapMode::Dual),
+            ("per_device", WrapMode::PerDevice),
+        ] {
+            let toml_str = format!("[crypto]\nwrap_mode = \"{s}\"\n");
+            let config: TcfsConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(config.crypto.wrap_mode, expected, "wrap_mode = {s:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_per_device_wrapping_true_maps_to_dual() {
+        // true -> Dual keeps the master fallback (never silently drops it).
+        let config: TcfsConfig =
+            toml::from_str("[crypto]\nper_device_wrapping = true\n").unwrap();
+        assert_eq!(config.crypto.wrap_mode, WrapMode::Dual);
+    }
+
+    #[test]
+    fn legacy_per_device_wrapping_false_maps_to_master() {
+        let config: TcfsConfig =
+            toml::from_str("[crypto]\nper_device_wrapping = false\n").unwrap();
+        assert_eq!(config.crypto.wrap_mode, WrapMode::Master);
+    }
+
+    #[test]
+    fn wrap_mode_wins_over_legacy_per_device_wrapping() {
+        // When both keys are present, the canonical wrap_mode is authoritative.
+        let config: TcfsConfig = toml::from_str(
+            "[crypto]\nwrap_mode = \"per_device\"\nper_device_wrapping = false\n",
+        )
+        .unwrap();
+        assert_eq!(config.crypto.wrap_mode, WrapMode::PerDevice);
+
+        let config2: TcfsConfig = toml::from_str(
+            "[crypto]\nwrap_mode = \"master\"\nper_device_wrapping = true\n",
+        )
+        .unwrap();
+        assert_eq!(config2.crypto.wrap_mode, WrapMode::Master);
+    }
+
+    #[test]
+    fn crypto_config_tolerates_unknown_keys() {
+        // Back-compat: the prior derived Deserialize silently ignored unknown
+        // keys; the hand-written one must too (no deny_unknown_fields).
+        let config: TcfsConfig =
+            toml::from_str("[crypto]\nwrap_mode = \"dual\"\nsome_future_key = 7\n").unwrap();
+        assert_eq!(config.crypto.wrap_mode, WrapMode::Dual);
+    }
+
+    #[test]
+    fn wrap_mode_serializes_as_snake_case() {
+        // toml serialization renders the enum via the snake_case rename.
+        let rendered = toml::to_string(&CryptoConfig::default()).unwrap();
+        assert!(
+            rendered.contains("wrap_mode = \"master\""),
+            "default must serialize wrap_mode as \"master\": {rendered}"
+        );
+        let mut dual = CryptoConfig::default();
+        dual.wrap_mode = WrapMode::PerDevice;
+        let rendered_pd = toml::to_string(&dual).unwrap();
+        assert!(
+            rendered_pd.contains("wrap_mode = \"per_device\""),
+            "PerDevice must serialize as \"per_device\": {rendered_pd}"
+        );
     }
 }

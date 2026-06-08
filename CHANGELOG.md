@@ -9,6 +9,24 @@ Current release-proof posture is tracked in `docs/release/evidence/` and
 `docs/ops/product-reality-and-priority.md`; older entries below may describe
 historical release intent rather than the current supported/proven surface.
 
+## [Unreleased]
+
+### Changed
+
+- **Tri-state `crypto.wrap_mode` replaces `crypto.per_device_wrapping`**
+  (TIN-1417): the boolean flag shipped in 0.12.14 (default off, never flipped
+  live) is replaced by an explicit `crypto.wrap_mode = master | dual |
+  per_device` enum (default `master`). `master` is byte-identical to the prior
+  `per_device_wrapping=false`; `dual` (EXPAND) emits BOTH the master wrap and
+  per-device wraps (v2, back-compatible); `per_device` (CONTRACT) emits only
+  per-device wraps, drops the master wrap, and bumps regular-file manifests to
+  v3 so pre-per-device readers fail closed. Back-compat: a legacy
+  `per_device_wrapping` config key still deserializes — `true` maps to `dual`
+  (keeps the master fallback), `false`/absent maps to `master`; `wrap_mode`
+  wins when both are present. The daemon/CLI/FileProvider refuse to operate in
+  `per_device` until a roll-call probe confirms every active device is
+  per-device-capable, otherwise falling back to `dual` with a loud warning.
+
 ## [0.12.14] - 2026-06-03
 
 First finalized release of the 0.12.13→0.12.14 line (0.12.13 shipped only as

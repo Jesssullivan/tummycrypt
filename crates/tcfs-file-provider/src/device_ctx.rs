@@ -17,13 +17,14 @@
 //! carry. See PR body for details.
 //!
 //! BEHAVIOR CONTRACT (must stay true):
-//! - When `per_device_wrapping` is absent/false in the config (the default),
-//!   `build_encryption_context` returns exactly `EncryptionContext::new(mk)` —
-//!   byte-identical to the prior master-only behavior. Master-only manifests
-//!   read unchanged.
-//! - When a per-device manifest is encountered without an available device
-//!   identity, the engine read switch fails CLOSED (clear error); we never
-//!   silently master-fall-back, and we never copy raw ciphertext to disk.
+//! - When `wrap_mode` is `master`/absent (the default; legacy
+//!   `per_device_wrapping: false` also maps here), `build_encryption_context`
+//!   returns exactly `EncryptionContext::new(mk)` — byte-identical to the prior
+//!   master-only behavior. Master-only manifests read unchanged.
+//! - When a per-device-only (v3) manifest is encountered without an available
+//!   device identity and no master wrap to fall back to, the engine read switch
+//!   fails CLOSED (clear error); we never silently master-fall-back where no
+//!   master wrap exists, and we never copy raw ciphertext to disk.
 
 /// Fail CLOSED when a manifest that this backend cannot decrypt would otherwise
 /// be copied to disk as raw ciphertext (silent corruption).
@@ -48,35 +49,69 @@ pub(crate) fn ensure_master_decryptable(
     Ok(())
 }
 
+/// Resolve the effective [`WrapMode`] from the FileProvider init-config JSON.
+///
+/// Canonical key going forward is `wrap_mode` (`"master"` | `"dual"` |
+/// `"per_device"`). For back-compat we also accept the legacy
+/// `per_device_wrapping` bool (`true` -> `Dual`, keeping the master fallback;
+/// `false`/absent -> `Master`). `wrap_mode` wins when both are present. This
+/// mirrors the `CryptoConfig` deserializer in `tcfs-core`.
+#[cfg(feature = "grpc")]
+fn wrap_mode_from_config(config: &serde_json::Value) -> tcfs_core::config::WrapMode {
+    use tcfs_core::config::WrapMode;
+    if let Some(raw) = config.get("wrap_mode").and_then(serde_json::Value::as_str) {
+        match raw {
+            "master" => return WrapMode::Master,
+            "dual" => return WrapMode::Dual,
+            "per_device" => return WrapMode::PerDevice,
+            other => {
+                tracing::warn!(
+                    "FileProvider config has unknown wrap_mode {other:?}; using master wrap"
+                );
+                return WrapMode::Master;
+            }
+        }
+    }
+    match config
+        .get("per_device_wrapping")
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(true) => WrapMode::Dual,
+        Some(false) | None => WrapMode::Master,
+    }
+}
+
 /// Build a DEVICE-AWARE `EncryptionContext` for the FileProvider read path,
 /// mirroring `tcfsd`'s `build_encryption_context`.
 ///
-/// Default-off invariant: returns `EncryptionContext::new(master_key)` verbatim
-/// unless the config explicitly sets `per_device_wrapping: true`. In that case
-/// it loads the device registry + this device's age secret and attaches them
-/// via `.with_device_wrapping`, exactly like the daemon.
+/// Default invariant: returns `EncryptionContext::new(master_key)` verbatim
+/// unless the config selects a per-device `wrap_mode` (`dual`/`per_device`, or
+/// the legacy `per_device_wrapping: true`). In that case it loads the device
+/// registry + this device's age secret and attaches them via
+/// `.with_device_wrapping`, exactly like the daemon, applying the same roll-call
+/// gate (contract `per_device` downgrades to `dual` unless every active device
+/// is per-device-capable).
 ///
 /// Like the daemon, this falls back to the master-only context (and logs why)
-/// only when per-device wrapping is enabled but the registry/recipients/secret
+/// only when a per-device mode is selected but the registry/recipients/secret
 /// are unavailable — it never produces a context that this device cannot read
 /// back. The engine's read switch independently fails CLOSED if it then meets a
-/// per-device manifest with no identity attached.
+/// per-device-only (v3) manifest with no identity attached and no master wrap.
 #[cfg(feature = "grpc")]
 pub(crate) fn build_encryption_context(
     config: &serde_json::Value,
     device_id: &str,
     master_key: &tcfs_crypto::MasterKey,
 ) -> tcfs_sync::engine::EncryptionContext {
+    use tcfs_core::config::WrapMode;
     use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext};
 
     let base = EncryptionContext::new(master_key.clone());
 
-    // Default-off: byte-identical master-only behavior unless explicitly enabled.
-    if !config
-        .get("per_device_wrapping")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    // Default: byte-identical master-only behavior unless a per-device mode is
+    // explicitly selected.
+    let requested = wrap_mode_from_config(config);
+    if requested == WrapMode::Master {
         return base;
     }
 
@@ -92,6 +127,29 @@ pub(crate) fn build_encryption_context(
             tracing::warn!("per-device wrapping: registry load failed ({e}); using master wrap");
             return base;
         }
+    };
+
+    // Roll-call gate (mirror of the daemon): refuse to contract (`per_device`)
+    // unless every active device is per-device-capable; otherwise downgrade to
+    // `dual` and warn loudly. On the read path this primarily affects writes the
+    // FileProvider performs through the engine.
+    let effective_mode = if requested == WrapMode::PerDevice {
+        if registry.per_device_roll_call_ready() {
+            WrapMode::PerDevice
+        } else {
+            let incapable = registry.per_device_incapable_active_devices();
+            tracing::warn!(
+                requested = ?WrapMode::PerDevice,
+                effective = ?WrapMode::Dual,
+                incapable_active_devices = ?incapable,
+                "ROLL-CALL GATE: per_device (contract) wrap_mode requested but not every \
+                 active device is per-device-capable (or registry is empty); refusing to \
+                 drop the master wrap. Falling back to DUAL (master wrap retained)."
+            );
+            WrapMode::Dual
+        }
+    } else {
+        requested
     };
 
     let recipients: Vec<tcfs_crypto::AgeFileKeyRecipient> = registry
@@ -124,6 +182,7 @@ pub(crate) fn build_encryption_context(
     };
 
     base.with_device_wrapping(recipients, Some(identity))
+        .with_wrap_mode(effective_mode)
 }
 
 #[cfg(all(test, feature = "grpc"))]
@@ -163,10 +222,11 @@ mod tests {
         key.public_key
     }
 
-    /// Default config (per_device_wrapping absent) yields a master-only context:
+    /// Default config (wrap_mode absent) yields a master-only context:
     /// no recipients, no identity — byte-identical to `EncryptionContext::new`.
     #[test]
     fn default_config_is_master_only_byte_identical() {
+        use tcfs_core::config::WrapMode;
         let config = serde_json::json!({});
         let ctx = build_encryption_context(&config, "device-a", &master());
         assert!(
@@ -177,26 +237,63 @@ mod tests {
             ctx.device_identity.is_none(),
             "default config must not attach a device identity"
         );
+        assert_eq!(ctx.wrap_mode, WrapMode::Master);
     }
 
-    /// Explicit per_device_wrapping=false also stays master-only.
+    /// Explicit wrap_mode=master (and legacy per_device_wrapping=false) stays
+    /// master-only.
     #[test]
     fn explicit_disabled_is_master_only() {
-        let config = serde_json::json!({ "per_device_wrapping": false });
-        let ctx = build_encryption_context(&config, "device-a", &master());
+        let ctx = build_encryption_context(
+            &serde_json::json!({ "wrap_mode": "master" }),
+            "device-a",
+            &master(),
+        );
         assert!(ctx.device_recipients.is_empty());
         assert!(ctx.device_identity.is_none());
+
+        // Legacy back-compat: per_device_wrapping=false also maps to master.
+        let legacy = build_encryption_context(
+            &serde_json::json!({ "per_device_wrapping": false }),
+            "device-a",
+            &master(),
+        );
+        assert!(legacy.device_recipients.is_empty());
+        assert!(legacy.device_identity.is_none());
     }
 
-    /// When enabled with a real registry + local secret, the context carries this
-    /// device's unwrap identity and the active-device recipient set.
+    /// Legacy `per_device_wrapping: true` maps to DUAL (master wrap retained),
+    /// never silently dropping the master fallback.
+    #[test]
+    fn legacy_per_device_wrapping_true_maps_to_dual() {
+        use tcfs_core::config::WrapMode;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _pub = provision_device(tmp.path(), "device-a");
+        let config = serde_json::json!({
+            "per_device_wrapping": true,
+            "device_registry_path": tmp.path().join("devices.json").to_str().unwrap(),
+        });
+        let ctx = build_encryption_context(&config, "device-a", &master());
+        assert_eq!(
+            ctx.wrap_mode,
+            WrapMode::Dual,
+            "legacy per_device_wrapping=true must map to Dual"
+        );
+        assert_eq!(ctx.device_recipients.len(), 1);
+        assert!(ctx.device_identity.is_some());
+    }
+
+    /// When a per-device mode is set with a real registry + local secret, the
+    /// context carries this device's unwrap identity and the active-device
+    /// recipient set.
     #[test]
     fn enabled_attaches_device_identity_and_recipients() {
+        use tcfs_core::config::WrapMode;
         let tmp = tempfile::TempDir::new().unwrap();
         let _pub = provision_device(tmp.path(), "device-a");
 
         let config = serde_json::json!({
-            "per_device_wrapping": true,
+            "wrap_mode": "per_device",
             "device_registry_path": tmp.path().join("devices.json").to_str().unwrap(),
         });
         let ctx = build_encryption_context(&config, "device-a", &master());
@@ -206,6 +303,8 @@ mod tests {
             1,
             "should pick up the single active device recipient"
         );
+        // Single device with a real age key => roll-call ready => PerDevice stays.
+        assert_eq!(ctx.wrap_mode, WrapMode::PerDevice);
         let identity = ctx
             .device_identity
             .as_ref()
@@ -237,7 +336,7 @@ mod tests {
         registry.save(&registry_path).unwrap();
 
         let config = serde_json::json!({
-            "per_device_wrapping": true,
+            "wrap_mode": "per_device",
             "device_registry_path": registry_path.to_str().unwrap(),
         });
         let ctx = build_encryption_context(&config, "device-a", &master());
@@ -261,15 +360,22 @@ mod tests {
         let prefix = "test/fp-per-device";
         let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
 
-        // Build the write context from the same registry the FP read context uses.
+        // Build the write context from the same registry the FP read context
+        // uses. `per_device` (contract) drops the master wrap; the single
+        // real-age device makes the roll-call gate green so it stays PerDevice.
         let enabled_config = serde_json::json!({
-            "per_device_wrapping": true,
+            "wrap_mode": "per_device",
             "device_registry_path": tmp.path().join("devices.json").to_str().unwrap(),
         });
         let write_ctx = build_encryption_context(&enabled_config, "device-a", &master());
         assert!(
             !write_ctx.device_recipients.is_empty(),
             "precondition: write context must have recipients"
+        );
+        assert_eq!(
+            write_ctx.wrap_mode,
+            tcfs_core::config::WrapMode::PerDevice,
+            "single real-age device must pass the roll-call gate"
         );
 
         let content = b"per-device payload read through the FileProvider context";

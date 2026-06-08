@@ -13,6 +13,7 @@ use opendal::Operator;
 use secrecy::ExposeSecret;
 use tempfile::TempDir;
 
+use tcfs_core::config::WrapMode;
 use tcfs_crypto::AgeFileKeyRecipient;
 use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext};
 
@@ -54,8 +55,11 @@ async fn per_device_wrap_roundtrip_and_manifest_shape() {
     let (rec_a, id_a) = device("device-a");
     let (rec_b, id_b) = device("device-b");
 
+    // PerDevice (contract) mode: emit only `wrapped_file_keys`, drop the master
+    // wrap, write a v3 manifest.
     let write_ctx = EncryptionContext::new(master())
-        .with_device_wrapping(vec![rec_a, rec_b], Some(id_a.clone()));
+        .with_device_wrapping(vec![rec_a, rec_b], Some(id_a.clone()))
+        .with_wrap_mode(WrapMode::PerDevice);
 
     let content = b"per-device wrapped payload that should round-trip exactly";
     let src = tmp.path().join("doc.txt");
@@ -86,6 +90,10 @@ async fn per_device_wrap_roundtrip_and_manifest_shape() {
     assert!(
         manifest.encrypted_file_key.is_none(),
         "per-device manifest must not carry the master-wrapped key (clean-cut)"
+    );
+    assert_eq!(
+        manifest.version, 3,
+        "per-device-only (contract) manifests must be v3 so pre-per-device readers fail closed"
     );
 
     // Both recipients hydrate exact bytes.
@@ -118,8 +126,10 @@ async fn revoked_device_cannot_decrypt_new_content() {
     let (_rec_b, id_b) = device("device-b");
 
     // New content is written for the active set [A] only — B has been revoked.
-    let write_ctx =
-        EncryptionContext::new(master()).with_device_wrapping(vec![rec_a], Some(id_a.clone()));
+    // PerDevice (contract) mode drops the master wrap so B has no fallback.
+    let write_ctx = EncryptionContext::new(master())
+        .with_device_wrapping(vec![rec_a], Some(id_a.clone()))
+        .with_wrap_mode(WrapMode::PerDevice);
 
     let content = b"content written after device-b was revoked";
     let src = tmp.path().join("after-revoke.txt");

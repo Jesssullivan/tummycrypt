@@ -1100,20 +1100,27 @@ fn resolve_sync_status_lookup_path(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).map_err(Into::into)
 }
 
-/// Build an `EncryptionContext`, attaching per-device wrapping (TIN-1417) when
-/// `crypto.per_device_wrapping` is enabled and the device registry has real age
-/// recipients. Falls back to legacy shared-master wrapping (logging why) if the
-/// registry can't be loaded, has no real recipients, or this device's age secret
-/// is missing — never producing content this device cannot read back.
+/// Build an `EncryptionContext` for the TIN-1417 tri-state `crypto.wrap_mode`.
+///
+/// Mirrors `tcfsd`'s `build_encryption_context` (`crates/tcfsd/src/grpc.rs`):
+/// `Master` (default) returns the legacy master-only context verbatim; `Dual`
+/// attaches per-device recipients while keeping the master wrap; `PerDevice`
+/// (contract) is GATED behind a roll-call probe and DOWNGRADES to `Dual` (with
+/// a loud warning) unless every active device is per-device-capable. In all
+/// per-device modes it falls back to master-only (logging why) when the
+/// registry/recipients/secret are unavailable — never producing content this
+/// device cannot read back.
 fn build_encryption_context(
     config: &tcfs_core::config::TcfsConfig,
     device_id: &str,
     master_key: &tcfs_crypto::MasterKey,
 ) -> tcfs_sync::engine::EncryptionContext {
+    use tcfs_core::config::WrapMode;
     use tcfs_sync::engine::{DeviceUnwrapIdentity, EncryptionContext};
 
     let base = EncryptionContext::new(master_key.clone());
-    if !config.crypto.per_device_wrapping {
+    let requested = config.crypto.wrap_mode;
+    if requested == WrapMode::Master {
         return base;
     }
     let registry_path = config
@@ -1128,6 +1135,29 @@ fn build_encryption_context(
             return base;
         }
     };
+
+    // Roll-call code gate (mirror of the daemon): refuse to contract
+    // (`PerDevice`, drops the master wrap) unless every active device is
+    // per-device-capable; otherwise downgrade to `Dual` and warn loudly.
+    let effective_mode = if requested == WrapMode::PerDevice {
+        if registry.per_device_roll_call_ready() {
+            WrapMode::PerDevice
+        } else {
+            let incapable = registry.per_device_incapable_active_devices();
+            tracing::warn!(
+                requested = ?WrapMode::PerDevice,
+                effective = ?WrapMode::Dual,
+                incapable_active_devices = ?incapable,
+                "ROLL-CALL GATE: per_device (contract) wrap_mode requested but not every \
+                 active device is per-device-capable (or registry is empty); refusing to \
+                 drop the master wrap. Falling back to DUAL (master wrap retained)."
+            );
+            WrapMode::Dual
+        }
+    } else {
+        requested
+    };
+
     let recipients: Vec<tcfs_crypto::AgeFileKeyRecipient> = registry
         .active_devices()
         .filter(|d| tcfs_secrets::device::is_real_age_public_key(&d.public_key))
@@ -1156,6 +1186,7 @@ fn build_encryption_context(
         }
     };
     base.with_device_wrapping(recipients, Some(identity))
+        .with_wrap_mode(effective_mode)
 }
 
 // ── `tcfs push` ───────────────────────────────────────────────────────────────
@@ -3896,27 +3927,21 @@ struct FileProviderInitConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     daemon_socket: Option<String>,
     master_key_file: String,
-    /// Per-device file-key wrapping (TIN-1417 / Track B1). Mirrors
-    /// `crypto.per_device_wrapping` from the active config. The FileProvider
-    /// extension reads this key to decide whether to build a device-aware
-    /// `EncryptionContext` (see `tcfs-file-provider` `device_ctx`). Omitted
-    /// from the rendered JSON when false so the default-off output stays
-    /// byte-identical to the legacy master-only bootstrap.
-    #[serde(skip_serializing_if = "is_false")]
-    per_device_wrapping: bool,
+    /// File-key wrap mode (TIN-1417 tri-state). Mirrors `crypto.wrap_mode` from
+    /// the active config. The FileProvider extension reads this to decide
+    /// whether to build a device-aware `EncryptionContext` (see
+    /// `tcfs-file-provider` `device_ctx`). Omitted from the rendered JSON when
+    /// `master` so the default output stays byte-identical to the legacy
+    /// master-only bootstrap.
+    #[serde(skip_serializing_if = "WrapMode::is_master_ref")]
+    wrap_mode: tcfs_core::config::WrapMode,
     /// Path to the device registry (`devices.json`) the FileProvider must read
     /// to resolve active age recipients + this device's secret
-    /// (`device-<id>.age` alongside it). Only emitted when
-    /// `per_device_wrapping` is true; the extension otherwise falls back to its
-    /// own default registry path.
+    /// (`device-<id>.age` alongside it). Only emitted when `wrap_mode` is a
+    /// per-device mode (`dual`/`per_device`); the extension otherwise falls back
+    /// to its own default registry path.
     #[serde(skip_serializing_if = "Option::is_none")]
     device_registry_path: Option<String>,
-}
-
-/// `skip_serializing_if` predicate so `per_device_wrapping` is omitted from the
-/// rendered FileProvider JSON when off, keeping default-off output unchanged.
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 fn build_fileprovider_init_config(
@@ -3925,17 +3950,19 @@ fn build_fileprovider_init_config(
     master_key_path: &Path,
     device_id: &str,
 ) -> FileProviderInitConfig {
-    let per_device_wrapping = config.crypto.per_device_wrapping;
-    // Only surface the device registry path when per-device wrapping is on, so
-    // the default-off rendered JSON is byte-identical to the legacy bootstrap.
-    let device_registry_path = if per_device_wrapping {
+    use tcfs_core::config::WrapMode;
+    let wrap_mode = config.crypto.wrap_mode;
+    // Only surface the device registry path when a per-device mode is active, so
+    // the default (master) rendered JSON is byte-identical to the legacy
+    // bootstrap.
+    let device_registry_path = if wrap_mode == WrapMode::Master {
+        None
+    } else {
         Some(
             resolve_fileprovider_registry_path(config)
                 .to_string_lossy()
                 .into_owned(),
         )
-    } else {
-        None
     };
     FileProviderInitConfig {
         s3_endpoint: config.storage.endpoint.clone(),
@@ -3951,7 +3978,7 @@ fn build_fileprovider_init_config(
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
         master_key_file: master_key_path.to_string_lossy().into_owned(),
-        per_device_wrapping,
+        wrap_mode,
         device_registry_path,
     }
 }
@@ -5911,12 +5938,13 @@ mod tests {
 
     #[test]
     fn build_fileprovider_init_config_omits_per_device_keys_when_disabled() {
-        // Default-off must stay byte-identical to the legacy master-only
+        // Default (master) must stay byte-identical to the legacy master-only
         // bootstrap: the per-device keys are absent from the rendered JSON.
+        use tcfs_core::config::WrapMode;
         let dir = tempfile::tempdir().unwrap();
         let mut config = test_config(dir.path());
-        assert!(!config.crypto.per_device_wrapping);
-        // Even with a registry path configured, off => not emitted.
+        assert_eq!(config.crypto.wrap_mode, WrapMode::Master);
+        // Even with a registry path configured, master => not emitted.
         config.sync.device_identity = Some(dir.path().join("devices.json"));
 
         let s3 = tcfs_secrets::S3Credentials {
@@ -5928,30 +5956,35 @@ mod tests {
         let master_key_path = dir.path().join("master.key");
         let rendered = build_fileprovider_init_config(&config, &s3, &master_key_path, "device-1");
 
-        assert!(!rendered.per_device_wrapping);
+        assert_eq!(rendered.wrap_mode, WrapMode::Master);
         assert_eq!(rendered.device_registry_path, None);
 
         let json = serde_json::to_value(&rendered).unwrap();
         let obj = json.as_object().unwrap();
         assert!(
+            !obj.contains_key("wrap_mode"),
+            "wrap_mode must be omitted when master (byte-identical default)"
+        );
+        assert!(
             !obj.contains_key("per_device_wrapping"),
-            "per_device_wrapping must be omitted when off (byte-identical default)"
+            "legacy per_device_wrapping must not be emitted"
         );
         assert!(
             !obj.contains_key("device_registry_path"),
-            "device_registry_path must be omitted when wrapping is off"
+            "device_registry_path must be omitted when wrapping is master"
         );
     }
 
     #[test]
     fn build_fileprovider_init_config_emits_per_device_keys_when_enabled() {
-        // When per-device wrapping is on, the rendered FileProvider config must
-        // carry the keys PR #492's read path consumes: `per_device_wrapping`
-        // (true) and `device_registry_path` (the configured registry).
+        // When a per-device mode is on, the rendered FileProvider config must
+        // carry the keys the FP read path consumes: `wrap_mode` and
+        // `device_registry_path` (the configured registry).
+        use tcfs_core::config::WrapMode;
         let dir = tempfile::tempdir().unwrap();
         let registry_path = dir.path().join("devices.json");
         let mut config = test_config(dir.path());
-        config.crypto.per_device_wrapping = true;
+        config.crypto.wrap_mode = WrapMode::Dual;
         config.sync.device_identity = Some(registry_path.clone());
 
         let s3 = tcfs_secrets::S3Credentials {
@@ -5963,14 +5996,14 @@ mod tests {
         let master_key_path = dir.path().join("master.key");
         let rendered = build_fileprovider_init_config(&config, &s3, &master_key_path, "device-1");
 
-        assert!(rendered.per_device_wrapping);
+        assert_eq!(rendered.wrap_mode, WrapMode::Dual);
         assert_eq!(
             rendered.device_registry_path.as_deref(),
             Some(registry_path.to_string_lossy().as_ref())
         );
 
         let json = serde_json::to_value(&rendered).unwrap();
-        assert_eq!(json["per_device_wrapping"], serde_json::Value::Bool(true));
+        assert_eq!(json["wrap_mode"], serde_json::Value::String("dual".into()));
         assert_eq!(
             json["device_registry_path"].as_str(),
             Some(registry_path.to_string_lossy().as_ref())
@@ -5979,11 +6012,12 @@ mod tests {
 
     #[test]
     fn build_fileprovider_init_config_falls_back_to_default_registry_when_enabled() {
-        // With wrapping on but no explicit registry, fall back to the shared
-        // default registry path (matching the extension's own fallback).
+        // With a per-device mode on but no explicit registry, fall back to the
+        // shared default registry path (matching the extension's own fallback).
+        use tcfs_core::config::WrapMode;
         let dir = tempfile::tempdir().unwrap();
         let mut config = test_config(dir.path());
-        config.crypto.per_device_wrapping = true;
+        config.crypto.wrap_mode = WrapMode::Dual;
         config.sync.device_identity = None;
 
         let s3 = tcfs_secrets::S3Credentials {
@@ -5995,7 +6029,7 @@ mod tests {
         let master_key_path = dir.path().join("master.key");
         let rendered = build_fileprovider_init_config(&config, &s3, &master_key_path, "device-1");
 
-        assert!(rendered.per_device_wrapping);
+        assert_eq!(rendered.wrap_mode, WrapMode::Dual);
         assert_eq!(
             rendered.device_registry_path,
             Some(

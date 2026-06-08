@@ -986,14 +986,30 @@ pub struct EncryptionContext {
     pub master_key: tcfs_crypto::MasterKey,
     /// Active-device recipients for per-device FileKey wrapping (TIN-1417).
     ///
-    /// When non-empty, writes emit per-device `wrapped_file_keys` and OMIT the
-    /// master-wrapped `encrypted_file_key`, so a device removed from this set
-    /// (revoked) cannot decrypt newly written content. Empty = legacy
-    /// shared-master behavior.
+    /// Populated for `Dual` and `PerDevice` modes. When non-empty, writes emit
+    /// per-device `wrapped_file_keys`. Whether the master wrap is ALSO emitted
+    /// is governed by [`EncryptionContext::wrap_mode`], not by emptiness of this
+    /// field. Empty = no per-device recipients available (master-only output
+    /// regardless of mode).
     pub device_recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
     /// This device's age identity, used to unwrap per-device manifests on read.
     /// `None` relies on the master-key fallback (legacy manifests).
     pub device_identity: Option<DeviceUnwrapIdentity>,
+    /// Wrap mode governing what the write path emits (TIN-1417 tri-state):
+    ///
+    /// - `Master`  — `encrypted_file_key` only (v2). DEFAULT, byte-identical to
+    ///   legacy single-wrap.
+    /// - `Dual`    — BOTH `encrypted_file_key` AND `wrapped_file_keys` (v2,
+    ///   back-compatible by construction).
+    /// - `PerDevice` — `wrapped_file_keys` only, manifest bumped to v3 so
+    ///   pre-per-device readers fail CLOSED.
+    ///
+    /// IMPORTANT: this is the effective mode AFTER the daemon's roll-call gate
+    /// has run. A caller that wants `PerDevice` but cannot prove every active
+    /// device is per-device-capable MUST downgrade this to `Dual` before
+    /// constructing the context — the engine trusts this field as authoritative
+    /// and does not re-run the roll-call.
+    pub wrap_mode: tcfs_core::config::WrapMode,
 }
 
 /// A local device's age X25519 identity for unwrapping per-device manifests.
@@ -1009,15 +1025,23 @@ pub struct DeviceUnwrapIdentity {
 #[cfg(feature = "crypto")]
 impl EncryptionContext {
     /// Legacy shared-master context: no per-device recipients or identity.
+    /// Mode defaults to [`WrapMode::Master`] — byte-identical single-wrap.
     pub fn new(master_key: tcfs_crypto::MasterKey) -> Self {
         Self {
             master_key,
             device_recipients: Vec::new(),
             device_identity: None,
+            wrap_mode: tcfs_core::config::WrapMode::Master,
         }
     }
 
     /// Attach per-device wrapping recipients and this device's unwrap identity.
+    ///
+    /// Leaves the wrap mode unchanged. Callers that want `Dual` or `PerDevice`
+    /// output set the mode explicitly via [`EncryptionContext::with_wrap_mode`]
+    /// AFTER (or alongside) this call. Note that on the WRITE path, master-only
+    /// `Master` output is still produced when `recipients` is empty even if a
+    /// non-`Master` mode is requested, because there is nobody to wrap for.
     pub fn with_device_wrapping(
         mut self,
         recipients: Vec<tcfs_crypto::AgeFileKeyRecipient>,
@@ -1025,6 +1049,14 @@ impl EncryptionContext {
     ) -> Self {
         self.device_recipients = recipients;
         self.device_identity = identity;
+        self
+    }
+
+    /// Set the effective wrap mode. This is the post-roll-call mode: a caller
+    /// that requested `PerDevice` but could not prove fleet capability must pass
+    /// `Dual` here instead. See [`EncryptionContext::wrap_mode`].
+    pub fn with_wrap_mode(mut self, mode: tcfs_core::config::WrapMode) -> Self {
+        self.wrap_mode = mode;
         self
     }
 }
@@ -1849,32 +1881,62 @@ async fn upload_file_with_device_with_state(
 
     ensure_source_matches_snapshot(local_path, &snapshot, "manifest publish")?;
 
-    // Wrap the file key for the manifest. With per-device recipients (TIN-1417)
-    // we emit only per-device `wrapped_file_keys` and OMIT the master-wrapped
-    // `encrypted_file_key`, so a revoked device (absent from the recipient set)
-    // cannot decrypt new content. Without recipients we keep the legacy
-    // shared-master wrap for backward compatibility.
+    // Wrap the file key for the manifest per the TIN-1417 tri-state wrap mode:
+    //
+    // - Master    — master-wrapped `encrypted_file_key` only (v2). DEFAULT,
+    //   byte-identical to legacy single-wrap.
+    // - Dual      — BOTH `encrypted_file_key` (master, rollback + old readers)
+    //   AND per-device `wrapped_file_keys` (v2, back-compatible).
+    // - PerDevice — per-device `wrapped_file_keys` only; the master wrap is
+    //   DROPPED so a revoked device cannot decrypt new content (v3).
+    //
+    // Safety floor: if a non-`Master` mode is requested but there are no
+    // per-device recipients (nobody to wrap for), we fall CLOSED to master-only
+    // output (v2) rather than emitting a keyless or unreadable manifest. The
+    // `manifest_version` we compute below reflects the wraps actually emitted,
+    // NOT the requested mode — so a v3 manifest is produced ONLY when per-device
+    // wraps are present and the master wrap is genuinely absent.
     #[cfg(feature = "crypto")]
     let (encrypted_file_key, wrapped_file_keys) = if let (Some(ctx), Some(ref fk)) =
         (encryption, &file_key)
     {
-        if ctx.device_recipients.is_empty() {
+        use tcfs_core::config::WrapMode;
+
+        let wrap_master = || -> Result<String> {
             let wrapped =
                 tcfs_crypto::wrap_key(&ctx.master_key, fk).context("wrapping file key")?;
-            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &wrapped);
-            (Some(b64), Vec::new())
+            Ok(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &wrapped,
+            ))
+        };
+        let wrap_per_device = || -> Result<Vec<crate::manifest::WrappedFileKey>> {
+            Ok(
+                tcfs_crypto::wrap_file_key_for_age_recipients(fk, &ctx.device_recipients)
+                    .context("wrapping file key for device recipients")?
+                    .into_iter()
+                    .map(|w| crate::manifest::WrappedFileKey {
+                        recipient_device_id: w.recipient_device_id,
+                        recipient: w.recipient,
+                        algorithm: w.algorithm,
+                        wrapped_key: w.wrapped_key,
+                    })
+                    .collect(),
+            )
+        };
+
+        // Effective mode: a non-Master mode with no recipients degrades to
+        // Master (we cannot wrap for an empty recipient set).
+        let effective = if ctx.device_recipients.is_empty() {
+            WrapMode::Master
         } else {
-            let wrapped = tcfs_crypto::wrap_file_key_for_age_recipients(fk, &ctx.device_recipients)
-                .context("wrapping file key for device recipients")?
-                .into_iter()
-                .map(|w| crate::manifest::WrappedFileKey {
-                    recipient_device_id: w.recipient_device_id,
-                    recipient: w.recipient,
-                    algorithm: w.algorithm,
-                    wrapped_key: w.wrapped_key,
-                })
-                .collect();
-            (None, wrapped)
+            ctx.wrap_mode
+        };
+
+        match effective {
+            WrapMode::Master => (Some(wrap_master()?), Vec::new()),
+            WrapMode::Dual => (Some(wrap_master()?), wrap_per_device()?),
+            WrapMode::PerDevice => (None, wrap_per_device()?),
         }
     } else {
         (None, Vec::new())
@@ -1884,6 +1946,18 @@ async fn upload_file_with_device_with_state(
     let encrypted_file_key: Option<String> = None;
     #[cfg(not(feature = "crypto"))]
     let wrapped_file_keys: Vec<crate::manifest::WrappedFileKey> = Vec::new();
+
+    // Manifest version reflects the wraps actually emitted. A per-device-only
+    // manifest (per-device wraps present, master wrap dropped) is v3 so a
+    // pre-per-device reader fails CLOSED instead of misreading a
+    // v2-with-no-encrypted_file_key as keyless. Master and Dual stay v2 (Dual is
+    // back-compatible by construction — it still carries the master wrap).
+    let manifest_version: u32 =
+        if encrypted_file_key.is_none() && !wrapped_file_keys.is_empty() {
+            3
+        } else {
+            2
+        };
 
     // Capture Unix file permissions for cross-device preservation
     #[cfg(unix)]
@@ -1903,7 +1977,7 @@ async fn upload_file_with_device_with_state(
         .as_secs();
 
     let manifest = SyncManifest {
-        version: 2,
+        version: manifest_version,
         file_hash: file_hash_hex.clone(),
         file_size,
         chunks: chunk_hashes,
@@ -2247,40 +2321,97 @@ pub async fn download_file_with_device(
         });
     }
 
-    // Unwrap the file key if the manifest is encrypted. Prefer per-device wraps
-    // (TIN-1417): when present, the file key is unwrapped with this device's age
-    // identity. Manifests carrying only the legacy master-wrapped key fall back
-    // to master-key unwrap.
+    // Unwrap the file key if the manifest is encrypted. The TIN-1417 read
+    // switch handles all three on-wire shapes:
+    //
+    // - v2 master-only (`encrypted_file_key`, no `wrapped_file_keys`):
+    //   master-key unwrap (legacy path, unchanged).
+    // - v2 dual (BOTH wraps present): prefer this device's per-device wrap when
+    //   it has an age identity; otherwise FALL BACK to the master wrap. The
+    //   master wrap is the whole point of dual — a master-only / old-binary
+    //   reader must still succeed.
+    // - v3 per-device-only (`wrapped_file_keys`, no `encrypted_file_key`):
+    //   per-device unwrap REQUIRED. With no encryption context or no age
+    //   identity we fail CLOSED — there is no master wrap to fall back to, and a
+    //   v3 manifest by construction means the writer intended true revocation.
+    //
+    // A v3 manifest reaching a reader with `feature = "crypto"` disabled is
+    // already rejected upstream (chunks cannot be decrypted); the
+    // `MAX_SUPPORTED_VERSION` gate in `SyncManifest::from_bytes` additionally
+    // fails closed for any version above v3.
     #[cfg(feature = "crypto")]
     let file_key = if !manifest.wrapped_file_keys.is_empty() {
-        let ctx = encryption.ok_or_else(|| {
-            anyhow::anyhow!(
-                "manifest is per-device encrypted but no encryption context provided for: {remote_manifest}"
-            )
-        })?;
-        let identity = ctx.device_identity.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "manifest is per-device encrypted but this device has no age identity for: {remote_manifest}"
-            )
-        })?;
-        let age_wraps: Vec<tcfs_crypto::AgeWrappedFileKey> = manifest
-            .wrapped_file_keys
-            .iter()
-            .map(|w| tcfs_crypto::AgeWrappedFileKey {
-                recipient_device_id: w.recipient_device_id.clone(),
-                recipient: w.recipient.clone(),
-                algorithm: w.algorithm.clone(),
-                wrapped_key: w.wrapped_key.clone(),
+        // Per-device wraps present (v2 dual or v3 per-device-only).
+        let has_master_fallback = manifest.encrypted_file_key.is_some();
+        let device_unwrap = encryption.and_then(|ctx| {
+            ctx.device_identity.as_ref().map(|identity| {
+                let age_wraps: Vec<tcfs_crypto::AgeWrappedFileKey> = manifest
+                    .wrapped_file_keys
+                    .iter()
+                    .map(|w| tcfs_crypto::AgeWrappedFileKey {
+                        recipient_device_id: w.recipient_device_id.clone(),
+                        recipient: w.recipient.clone(),
+                        algorithm: w.algorithm.clone(),
+                        wrapped_key: w.wrapped_key.clone(),
+                    })
+                    .collect();
+                tcfs_crypto::unwrap_file_key_with_age_identity(
+                    &age_wraps,
+                    &identity.secret,
+                    Some(&identity.device_id),
+                )
+                .context("unwrapping per-device file key from manifest")
             })
-            .collect();
-        Some(
-            tcfs_crypto::unwrap_file_key_with_age_identity(
-                &age_wraps,
-                &identity.secret,
-                Some(&identity.device_id),
-            )
-            .context("unwrapping per-device file key from manifest")?,
-        )
+        });
+
+        match device_unwrap {
+            // Successfully unwrapped with this device's identity.
+            Some(Ok(fk)) => Some(fk),
+            // Had an identity but the per-device unwrap failed. If a master wrap
+            // is present (dual), fall back to it below; otherwise (v3) the
+            // failure is terminal.
+            Some(Err(e)) if !has_master_fallback => {
+                return Err(e.context(format!(
+                    "per-device manifest unwrap failed and no master wrap to fall back to: {remote_manifest}"
+                )));
+            }
+            // No identity available. For v3 (no master fallback) this is
+            // fail-closed; for dual we fall through to the master wrap.
+            None if !has_master_fallback => {
+                let _ = encryption.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "manifest is per-device encrypted but no encryption context provided for: {remote_manifest}"
+                    )
+                })?;
+                anyhow::bail!(
+                    "manifest is per-device-only (v3) but this device has no age \
+                     identity and there is no master wrap to fall back to: {remote_manifest}"
+                );
+            }
+            // Dual manifest, no identity (or unwrap failed): fall back to the
+            // master wrap handled by the `encrypted_file_key` branch below.
+            _ => {
+                let wrapped_b64 = manifest.encrypted_file_key.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "internal: dual manifest lost its master wrap during read for: {remote_manifest}"
+                    )
+                })?;
+                let ctx = encryption.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "manifest is encrypted but no encryption context provided for: {remote_manifest}"
+                    )
+                })?;
+                let wrapped = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    wrapped_b64,
+                )
+                .context("decoding wrapped file key from manifest")?;
+                Some(
+                    tcfs_crypto::unwrap_key(&ctx.master_key, &wrapped)
+                        .context("unwrapping file key from manifest (dual master fallback)")?,
+                )
+            }
+        }
     } else if let Some(ref wrapped_b64) = manifest.encrypted_file_key {
         let ctx = encryption.ok_or_else(|| {
             anyhow::anyhow!(

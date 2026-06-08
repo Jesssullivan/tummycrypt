@@ -321,10 +321,12 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
         let direct_master_key = master_key_from_config(&config);
 
         // Build the DEVICE-AWARE read context once (TIN-1417). With the default
-        // config (`per_device_wrapping` absent/false) this yields an empty
-        // recipient set and no identity — byte-identical to the prior
-        // master-only behavior. When enabled, it loads this device's age secret
-        // so per-device (`wrapped_file_keys`) manifests become readable.
+        // config (`wrap_mode` master/absent) this yields an empty recipient set
+        // and no identity — byte-identical to the prior master-only behavior.
+        // When a per-device mode is set, it loads this device's age secret so
+        // per-device (`wrapped_file_keys`) manifests become readable. Only the
+        // recipients + identity are threaded onward (this is a read-only restore
+        // path); the write-side `wrap_mode` is not consulted on read.
         let (direct_device_recipients, direct_device_identity) = match &direct_master_key {
             Some(mk) => {
                 let ctx = crate::device_ctx::build_encryption_context(&config, &device_id, mk);

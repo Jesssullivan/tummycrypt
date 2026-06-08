@@ -91,6 +91,43 @@ impl DeviceRegistry {
         self.devices.iter().filter(|d| !d.revoked)
     }
 
+    /// Roll-call gate for the TIN-1417 per-device (contract) wrap mode.
+    ///
+    /// Returns the device IDs of every active (non-revoked) device that is NOT
+    /// per-device-capable — i.e. whose `public_key` is not a real, parseable age
+    /// recipient ([`is_real_age_public_key`]). An empty list means every active
+    /// device can be wrapped for, so it is safe to DROP the master wrap and emit
+    /// per-device-only (v3) manifests.
+    ///
+    /// The daemon MUST refuse to operate in `WrapMode::PerDevice` while this list
+    /// is non-empty (it would strand those devices), falling back to dual-write
+    /// instead. An empty registry (no active devices) also returns empty, but
+    /// callers should additionally require at least one recipient before
+    /// contracting — there is no point dropping the master wrap with nobody to
+    /// wrap for. See [`Self::per_device_roll_call_ready`].
+    pub fn per_device_incapable_active_devices(&self) -> Vec<String> {
+        self.active_devices()
+            .filter(|d| !is_real_age_public_key(&d.public_key))
+            .map(|d| d.device_id.clone())
+            .collect()
+    }
+
+    /// True when it is safe to operate in `WrapMode::PerDevice` (contract):
+    /// there is at least one active device AND every active device is
+    /// per-device-capable (has a real age recipient). When this is false the
+    /// daemon must fall back to `WrapMode::Dual` and warn — never silently drop
+    /// the master wrap.
+    pub fn per_device_roll_call_ready(&self) -> bool {
+        let mut any = false;
+        for device in self.active_devices() {
+            any = true;
+            if !is_real_age_public_key(&device.public_key) {
+                return false;
+            }
+        }
+        any
+    }
+
     /// Revoke a device by name
     pub fn revoke(&mut self, name: &str) -> bool {
         if let Some(device) = self.devices.iter_mut().find(|d| d.name == name) {
@@ -428,5 +465,81 @@ mod tests {
         let id = reg.enroll("xoxd-bates", "age1xoxd", Some("main server".into()));
         assert!(reg.find_by_id(&id).is_some());
         assert!(reg.find_by_id("nonexistent-uuid").is_none());
+    }
+
+    // ── TIN-1417 per-device roll-call gate ──────────────────────────────────
+
+    fn real_age_device(name: &str) -> DeviceIdentity {
+        let key = generate_local_device_key();
+        DeviceIdentity {
+            name: name.into(),
+            device_id: name.into(),
+            public_key: key.public_key,
+            signing_key_hash: String::new(),
+            description: None,
+            enrolled_at: 0,
+            revoked: false,
+            last_nats_seq: 0,
+        }
+    }
+
+    fn placeholder_device(name: &str) -> DeviceIdentity {
+        DeviceIdentity {
+            name: name.into(),
+            device_id: name.into(),
+            public_key: "age1placeholder-not-a-real-recipient".into(),
+            signing_key_hash: String::new(),
+            description: None,
+            enrolled_at: 0,
+            revoked: false,
+            last_nats_seq: 0,
+        }
+    }
+
+    #[test]
+    fn roll_call_empty_registry_is_not_ready() {
+        let reg = DeviceRegistry::default();
+        assert!(
+            !reg.per_device_roll_call_ready(),
+            "empty registry must not authorize contract mode (nobody to wrap for)"
+        );
+        assert!(reg.per_device_incapable_active_devices().is_empty());
+    }
+
+    #[test]
+    fn roll_call_ready_when_all_active_devices_are_real_age() {
+        let mut reg = DeviceRegistry::default();
+        reg.add(real_age_device("a"));
+        reg.add(real_age_device("b"));
+        assert!(reg.per_device_roll_call_ready());
+        assert!(reg.per_device_incapable_active_devices().is_empty());
+    }
+
+    #[test]
+    fn roll_call_blocked_by_a_placeholder_active_device() {
+        let mut reg = DeviceRegistry::default();
+        reg.add(real_age_device("a"));
+        reg.add(placeholder_device("b"));
+        assert!(
+            !reg.per_device_roll_call_ready(),
+            "a single non-per-device-capable active device must block the contract"
+        );
+        assert_eq!(
+            reg.per_device_incapable_active_devices(),
+            vec!["b".to_string()]
+        );
+    }
+
+    #[test]
+    fn roll_call_ignores_revoked_incapable_devices() {
+        // A revoked placeholder device must NOT block the contract — it is not
+        // an active recipient and will not be wrapped for.
+        let mut reg = DeviceRegistry::default();
+        reg.add(real_age_device("a"));
+        let mut revoked = placeholder_device("b");
+        revoked.revoked = true;
+        reg.add(revoked);
+        assert!(reg.per_device_roll_call_ready());
+        assert!(reg.per_device_incapable_active_devices().is_empty());
     }
 }

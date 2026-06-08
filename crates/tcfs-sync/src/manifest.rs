@@ -116,20 +116,46 @@ impl SymlinkManifest {
 }
 
 impl SyncManifest {
-    /// Parse manifest bytes, auto-detecting v1 (text) vs v2 (JSON).
+    /// Highest regular-file manifest version this binary understands.
+    ///
+    /// v2 = vclock-era (master and/or dual wrap). v3 = per-device-only
+    /// (TIN-1417 contract: `wrapped_file_keys` present, master wrap dropped).
+    /// A regular-file manifest carrying a version ABOVE this is rejected
+    /// fail-closed so a future writer cannot trick an older reader into
+    /// misinterpreting its schema.
+    pub const MAX_SUPPORTED_VERSION: u32 = 3;
+
+    /// Parse manifest bytes, auto-detecting v1 (text) vs v2/v3 (JSON).
     ///
     /// v1 format: newline-separated chunk hashes (no JSON)
-    /// v2 format: JSON object with version field
+    /// v2 format: JSON object with version field (master and/or dual wrap)
+    /// v3 format: JSON object, per-device-only wrap (master wrap dropped)
+    ///
+    /// Fails CLOSED on a regular-file JSON manifest whose `version` exceeds
+    /// [`Self::MAX_SUPPORTED_VERSION`] (TIN-1417): a pre-per-device reader must
+    /// refuse a per-device-only v3 manifest rather than silently treating a
+    /// v2-with-no-`encrypted_file_key` as keyless. Note that symlink manifests
+    /// (also `version: 3`, but carrying `kind: symlink`) are dispatched
+    /// separately via [`SymlinkManifest::from_bytes`] and never reach here.
     pub fn from_bytes(data: &[u8]) -> anyhow::Result<Self> {
         let text = String::from_utf8(data.to_vec())
             .map_err(|e| anyhow::anyhow!("manifest is not UTF-8: {e}"))?;
 
-        // Try JSON (v2) first. JSON-shaped manifests that do not match the
+        // Try JSON (v2/v3) first. JSON-shaped manifests that do not match the
         // regular-file schema must fail closed instead of being treated as v1
         // newline manifests.
         if text.trim_start().starts_with('{') {
-            return serde_json::from_str::<SyncManifest>(&text)
-                .map_err(|e| anyhow::anyhow!("parsing regular-file manifest JSON: {e}"));
+            let manifest: SyncManifest = serde_json::from_str(&text)
+                .map_err(|e| anyhow::anyhow!("parsing regular-file manifest JSON: {e}"))?;
+            if manifest.version > Self::MAX_SUPPORTED_VERSION {
+                anyhow::bail!(
+                    "unsupported regular-file manifest version {} (this binary supports \
+                     up to v{}); refusing to read fail-closed",
+                    manifest.version,
+                    Self::MAX_SUPPORTED_VERSION
+                );
+            }
+            return Ok(manifest);
         }
 
         // Fall back to v1 text format: newline-separated chunk hashes
