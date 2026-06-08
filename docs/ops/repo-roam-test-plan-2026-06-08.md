@@ -92,9 +92,11 @@ a repo and compares two captures, failing on ANY difference:
 - untracked set, `stash list` + `refs/stash`, reflog tip
 - **`git fsck --full`** — the corruption gate (clean vs dirty verdict)
 - a sorted `relpath<TAB>mode<TAB>sha256|symlink-target` manifest of tracked +
-  untracked working files, honoring the **same fail-closed deny-set** as the
-  reconcile engine (`.env*`/secret/live-WAL never hashed; recorded `DENIED`) plus
-  `target/ node_modules/ .direnv/` excludes for determinism.
+  untracked working files, honoring or exceeding the reconcile engine's
+  **fail-closed deny-set** (`.env*`, credential files such as `auth.json` /
+  `.credentials.json`, SSH/GPG/SOPS secret components, and live SQLite/DB/WAL
+  files are recorded `DENIED`, never hashed) plus `target/ node_modules/
+  .direnv/` excludes for determinism.
 
 Modes: `capture <repo> <out>`, `compare <a> <b>` (exit 1 on any diff),
 `seed-canary <dir>` (throwaway repo with feature branch + staged + unstaged +

@@ -134,16 +134,24 @@ default_excludes() {
 
 # Fail-closed deny-set patterns mirrored from Blacklist::from_sync_config so the
 # fingerprint manifest never records a secret/live-WAL path that the reconcile
-# engine itself refuses to push.
+# engine itself refuses to push. This intentionally errs on the side of denying
+# a little more than the engine, never less.
 is_denied_relpath() {
   local rel="$1"
   local base="${rel##*/}"
   case "$base" in
-    .env|.env.*|*.pem|*.key|id_rsa|id_ed25519|*.sqlite|*.sqlite-wal|*.sqlite-shm|*.db-wal|*.db-shm)
+    .credentials.json|auth.json|.netrc|.pgpass|\
+    .env|.env.*|*.env|\
+    *.pem|*.key|id_rsa|id_ed25519|\
+    *.sqlite|*.sqlite3|*.sqlite-wal|*.sqlite-shm|*.db|*.db-wal|*.db-shm)
       return 0 ;;
   esac
   case "$rel" in
-    .ssh/*|.gnupg/*|*/secrets/*) return 0 ;;
+    .ssh|.ssh/*|*/.ssh|*/.ssh/*|\
+    .gnupg|.gnupg/*|*/.gnupg|*/.gnupg/*|\
+    sops-nix|sops-nix/*|*/sops-nix|*/sops-nix/*|\
+    secrets|secrets/*|*/secrets|*/secrets/*)
+      return 0 ;;
   esac
   return 1
 }

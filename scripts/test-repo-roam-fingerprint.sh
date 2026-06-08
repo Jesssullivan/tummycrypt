@@ -71,20 +71,52 @@ assert_contains "$FP_A/working-manifest.tsv" "run.sh"
 # untracked file present.
 assert_contains "$FP_A/untracked.txt" "NOTES.txt"
 
-# --- deny-set posture: a planted secret is recorded DENIED, never hashed -----
-printf 'SECRET=should-not-appear\n' >"$REPO/.env"
-git -C "$REPO" add -f .env
+# --- deny-set posture: planted secrets are recorded DENIED, never hashed -----
+secret_paths=(
+  ".env"
+  ".env.local"
+  "service.env"
+  ".credentials.json"
+  "auth.json"
+  ".netrc"
+  ".pgpass"
+  "logs_2.sqlite"
+  "logs_2.sqlite3"
+  "logs_2.sqlite-wal"
+  "logs_2.sqlite-shm"
+  "opencode.db"
+  "opencode.db-wal"
+  "opencode.db-shm"
+  ".ssh/id_ed25519"
+  ".gnupg/private-keys-v1.d/key"
+  "sops-nix/secrets/example"
+  "nested/secrets/token"
+)
+for secret_path in "${secret_paths[@]}"; do
+  mkdir -p "$REPO/$(dirname "$secret_path")"
+  printf 'SECRET=should-not-appear:%s\n' "$secret_path" >"$REPO/$secret_path"
+  git -C "$REPO" add -f "$secret_path"
+done
 FP_DENY="$TMPDIR/fp-deny"
 bash "$SCRIPT" capture "$REPO" "$FP_DENY" >/dev/null
-assert_contains "$FP_DENY/working-manifest.tsv" ".env"
-assert_contains "$FP_DENY/working-manifest.tsv" "DENIED"
+for secret_path in "${secret_paths[@]}"; do
+  assert_contains "$FP_DENY/working-manifest.tsv" "$secret_path"
+  if ! awk -F '\t' -v path="$secret_path" '$1 == path && $2 == "DENIED" { found=1 } END { exit found ? 0 : 1 }' \
+      "$FP_DENY/working-manifest.tsv"; then
+    printf 'expected %s to be recorded as DENIED\n' "$secret_path" >&2
+    cat "$FP_DENY/working-manifest.tsv" >&2
+    exit 1
+  fi
+done
 if grep -F 'should-not-appear' "$FP_DENY"/* >/dev/null 2>&1; then
   printf 'secret content leaked into fingerprint evidence\n' >&2
   exit 1
 fi
-# reset the planted secret out of the way for the unchanged-compare below.
-git -C "$REPO" rm -q --cached .env
-rm -f "$REPO/.env"
+# reset the planted secrets out of the way for the unchanged-compare below.
+git -C "$REPO" rm -qr --cached -- "${secret_paths[@]}"
+for secret_path in "${secret_paths[@]}"; do
+  rm -f "$REPO/$secret_path"
+done
 
 # --- compare: identical re-capture passes ------------------------------------
 FP_B="$TMPDIR/fp-b"
