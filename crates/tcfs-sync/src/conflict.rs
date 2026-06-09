@@ -177,24 +177,9 @@ pub fn compare_clocks(
     match local.partial_cmp_vc(remote) {
         Some(Ordering::Greater) => SyncOutcome::LocalNewer,
         Some(Ordering::Less) => SyncOutcome::RemoteNewer,
-        Some(Ordering::Equal) => {
-            // Same clock but different content — treat as conflict
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            SyncOutcome::Conflict(ConflictInfo {
-                rel_path: rel_path.to_string(),
-                local_vclock: local.clone(),
-                remote_vclock: remote.clone(),
-                local_blake3: local_blake3.to_string(),
-                remote_blake3: remote_blake3.to_string(),
-                local_device: local_device.to_string(),
-                remote_device: remote_device.to_string(),
-                detected_at: now,
-            })
-        }
-        None => {
+        // Equal clock with differing content, or concurrent (incomparable)
+        // clocks — both are conflicts with identical ConflictInfo.
+        Some(Ordering::Equal) | None => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
