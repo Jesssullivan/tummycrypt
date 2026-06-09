@@ -827,6 +827,13 @@ fn manifest_path_prefix(remote_prefix: &str) -> String {
     format!("{}/manifests", remote_prefix.trim_end_matches('/'))
 }
 
+fn manifest_object_id(manifest_bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tcfs-sync-manifest-object-v1\0");
+    hasher.update(manifest_bytes);
+    tcfs_chunks::hash_to_hex(&hasher.finalize())
+}
+
 async fn publish_index_reference(
     op: &Operator,
     remote_prefix: &str,
@@ -1472,8 +1479,13 @@ async fn upload_file_with_device_with_state(
         "verified upload snapshot"
     );
 
-    // Build remote manifest path (using the file's content hash)
-    let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
+    // Direct uploads stay content-addressed for compatibility. Path-indexed
+    // uploads may carry path-specific metadata (mode, mtime, rel_path, vclock),
+    // so their final manifest object id is derived after the manifest is built.
+    let mut remote_manifest = format!(
+        "{}/manifests/{file_hash_hex}",
+        remote_prefix.trim_end_matches('/')
+    );
     let assume_fresh_prefix = runtime.assume_fresh_prefix;
 
     // Get the local vclock from state (or start fresh)
@@ -1495,7 +1507,7 @@ async fn upload_file_with_device_with_state(
     let mut outcome = None;
     let mut remote_vclock_snapshot: Option<crate::conflict::VectorClock> = None;
     if !device_id.is_empty() && !assume_fresh_prefix {
-        let remote_manifest_obj = if let Some(rp) = rel_path {
+        let (remote_manifest_obj, remote_manifest_path) = if let Some(rp) = rel_path {
             // Look up the index entry to find what manifest is currently stored
             let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
             let manifest_prefix = manifest_path_prefix(remote_prefix);
@@ -1505,7 +1517,7 @@ async fn upload_file_with_device_with_state(
                 .flatten()
                 .map(|entry| manifest_key(&manifest_prefix, &entry.manifest_hash));
             // Read the manifest pointed to by the index entry
-            if let Some(ref manifest_path) = idx_manifest {
+            let manifest_obj = if let Some(ref manifest_path) = idx_manifest {
                 if let Ok(remote_bytes) = op.read(manifest_path).await {
                     SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
                 } else {
@@ -1513,10 +1525,12 @@ async fn upload_file_with_device_with_state(
                 }
             } else {
                 None
-            }
+            };
+            (manifest_obj, idx_manifest)
         } else {
             // No rel_path — fall back to checking the same-hash manifest
-            if let Ok(true) = op.exists(&remote_manifest).await {
+            let manifest_path = remote_manifest.clone();
+            let manifest_obj = if let Ok(true) = op.exists(&manifest_path).await {
                 if let Ok(remote_bytes) = op.read(&remote_manifest).await {
                     SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
                 } else {
@@ -1524,11 +1538,13 @@ async fn upload_file_with_device_with_state(
                 }
             } else {
                 None
-            }
+            };
+            (manifest_obj, Some(manifest_path))
         };
 
         // Capture remote vclock for deferred merge (Issue #183)
         remote_vclock_snapshot = remote_manifest_obj.as_ref().map(|m| m.vclock.clone());
+        let current_remote_manifest_path = remote_manifest_path;
 
         if let Some(remote_manifest_obj) = remote_manifest_obj {
             let local_hash = &file_hash_hex;
@@ -1548,10 +1564,13 @@ async fn upload_file_with_device_with_state(
             match &sync_outcome {
                 SyncOutcome::RemoteNewer => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "remote-newer skip")?;
+                    let remote_manifest_path = current_remote_manifest_path
+                        .clone()
+                        .unwrap_or_else(|| remote_manifest.clone());
                     return Ok((
                         UploadResult {
                             path: local_path.to_path_buf(),
-                            remote_path: remote_manifest.clone(),
+                            remote_path: remote_manifest_path,
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
@@ -1563,12 +1582,15 @@ async fn upload_file_with_device_with_state(
                 }
                 SyncOutcome::Conflict(ref conflict_info) => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "conflict skip")?;
+                    let remote_manifest_path = current_remote_manifest_path
+                        .clone()
+                        .unwrap_or_else(|| remote_manifest.clone());
                     // Record local state with conflict info so `tcfs resolve` can find it
                     let mut sync_state = make_sync_state_full(
                         local_path,
                         file_hash_hex.clone(),
                         0,
-                        remote_manifest.clone(),
+                        remote_manifest_path.clone(),
                         local_vclock,
                         device_id.to_string(),
                     )?;
@@ -1577,7 +1599,7 @@ async fn upload_file_with_device_with_state(
                     return Ok((
                         UploadResult {
                             path: local_path.to_path_buf(),
-                            remote_path: remote_manifest.clone(),
+                            remote_path: remote_manifest_path,
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
@@ -1589,19 +1611,22 @@ async fn upload_file_with_device_with_state(
                 }
                 SyncOutcome::UpToDate => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "up-to-date skip")?;
+                    let remote_manifest_path = current_remote_manifest_path
+                        .clone()
+                        .unwrap_or_else(|| remote_manifest.clone());
                     // Content dedup — already up to date
                     let sync_state = make_sync_state_full(
                         local_path,
                         file_hash_hex.clone(),
                         0,
-                        remote_manifest.clone(),
+                        remote_manifest_path.clone(),
                         local_vclock,
                         device_id.to_string(),
                     )?;
                     return Ok((
                         UploadResult {
                             path: local_path.to_path_buf(),
-                            remote_path: remote_manifest,
+                            remote_path: remote_manifest_path,
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
@@ -1624,6 +1649,7 @@ async fn upload_file_with_device_with_state(
     // Only check when we haven't already done the remote manifest check above
     if !assume_fresh_prefix
         && outcome.is_none()
+        && rel_path.is_none()
         && op.exists(&remote_manifest).await.unwrap_or(false)
         && device_id.is_empty()
     {
@@ -2075,12 +2101,14 @@ async fn upload_file_with_device_with_state(
 
     let manifest_bytes = manifest.to_bytes()?;
     if let Some(rp) = rel_path {
+        let manifest_hash = manifest_object_id(&manifest_bytes);
+        remote_manifest = manifest_key(&manifest_path_prefix(remote_prefix), &manifest_hash);
         publish_manifest_for_rel_path_with_mode(
             op,
             remote_prefix,
             rp,
             manifest_bytes,
-            RemoteIndexEntry::new(file_hash_hex.clone(), file_size, num_chunks),
+            RemoteIndexEntry::new(manifest_hash, file_size, num_chunks),
             assume_fresh_prefix,
         )
         .await?;
@@ -4689,6 +4717,12 @@ mod tests {
         systemtime_to_unix_parts(meta.modified().unwrap())
     }
 
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     /// (a) Chunked-file path: a file uploaded with a known source mtime restores
     /// into a fresh dir with that exact mtime, not "now". This is the input to a
     /// clean `git status` (TIN-1620 T13-Z).
@@ -4753,6 +4787,122 @@ mod tests {
             restored.1,
             known.1
         );
+    }
+
+    /// Path-indexed manifests must not be keyed only by content hash. Two files
+    /// can have identical bytes but different git-relevant metadata.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_content_files_keep_distinct_path_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let body = b"same bytes, different metadata";
+        std::fs::write(&a, body).unwrap();
+        std::fs::write(&b, body).unwrap();
+
+        let a_mtime = (1_600_000_100_i64, 100_000_000_u32);
+        let b_mtime = (1_600_000_200_i64, 200_000_000_u32);
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        apply_manifest_mtime(&a, a_mtime);
+        apply_manifest_mtime(&b, b_mtime);
+
+        let up_a = upload_file_with_device(
+            &op,
+            &a,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("a.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+        let up_b = upload_file_with_device(
+            &op,
+            &b,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("b.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(up_a.hash, up_b.hash, "content hash should dedupe bytes");
+        assert_ne!(
+            up_a.remote_path, up_b.remote_path,
+            "path-specific metadata must not collide on a content-hash manifest"
+        );
+        let chunks = op.list("data/chunks/").await.unwrap();
+        assert_eq!(
+            chunks.len(),
+            up_a.chunks,
+            "same content should still dedupe chunk objects"
+        );
+
+        let index_a = op.read("data/index/a.txt").await.unwrap().to_vec();
+        let index_b = op.read("data/index/b.txt").await.unwrap().to_vec();
+        assert_eq!(
+            manifest_key(
+                &manifest_path_prefix("data"),
+                &committed_manifest_hash(&index_a)
+            ),
+            up_a.remote_path
+        );
+        assert_eq!(
+            manifest_key(
+                &manifest_path_prefix("data"),
+                &committed_manifest_hash(&index_b)
+            ),
+            up_b.remote_path
+        );
+
+        let restore_dir = tempfile::tempdir().unwrap();
+        let mut restore_state = StateCache::open(&restore_dir.path().join("restore.json")).unwrap();
+        let restore_a = restore_dir.path().join("a.txt");
+        let restore_b = restore_dir.path().join("b.txt");
+        download_file_with_device(
+            &op,
+            &up_a.remote_path,
+            &restore_a,
+            "data",
+            None,
+            "device-2",
+            Some(&mut restore_state),
+            None,
+        )
+        .await
+        .unwrap();
+        download_file_with_device(
+            &op,
+            &up_b.remote_path,
+            &restore_b,
+            "data",
+            None,
+            "device-2",
+            Some(&mut restore_state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&restore_a).unwrap(), body);
+        assert_eq!(std::fs::read(&restore_b).unwrap(), body);
+        assert_eq!(mode_of(&restore_a), 0o644);
+        assert_eq!(mode_of(&restore_b), 0o755);
+        assert_eq!(mtime_of(&restore_a).0, a_mtime.0);
+        assert_eq!(mtime_of(&restore_b).0, b_mtime.0);
     }
 
     /// (a) Empty-file path: the zero-byte restore branch also restamps mtime.
@@ -4942,9 +5092,14 @@ mod tests {
             crate::index_entry::ParsedIndexEntry::V2(entry) => {
                 assert_eq!(entry.state, crate::index_entry::IndexEntryState::Committed);
                 let current = entry.current.expect("current committed entry");
-                assert_eq!(current.manifest_hash, upload.hash);
                 assert_eq!(current.size, upload.bytes);
                 assert_eq!(current.chunks, upload.chunks);
+                let manifest_path =
+                    manifest_key(&manifest_path_prefix("data"), &current.manifest_hash);
+                assert_eq!(manifest_path, upload.remote_path);
+                let manifest_bytes = op.read(&manifest_path).await.unwrap().to_vec();
+                let manifest = SyncManifest::from_bytes(&manifest_bytes).unwrap();
+                assert_eq!(manifest.file_hash, upload.hash);
             }
         }
     }
@@ -5833,11 +5988,28 @@ mod tests {
         let b_raw = op.read("data/index/docs/b.txt").await.unwrap().to_vec();
         let a_hash = committed_manifest_hash(&a_raw);
         let b_hash = committed_manifest_hash(&b_raw);
-        assert_eq!(a_hash, b_hash);
-        assert!(op
-            .exists(&format!("data/manifests/{a_hash}"))
+        assert_ne!(
+            a_hash, b_hash,
+            "duplicate content at different paths must keep path-scoped manifests"
+        );
+        let a_manifest_raw = op
+            .read(&format!("data/manifests/{a_hash}"))
             .await
-            .unwrap());
+            .unwrap()
+            .to_vec();
+        let b_manifest_raw = op
+            .read(&format!("data/manifests/{b_hash}"))
+            .await
+            .unwrap()
+            .to_vec();
+        let a_manifest = SyncManifest::from_bytes(&a_manifest_raw).unwrap();
+        let b_manifest = SyncManifest::from_bytes(&b_manifest_raw).unwrap();
+        assert_eq!(
+            a_manifest.file_hash, b_manifest.file_hash,
+            "content hash should still dedupe identical bytes"
+        );
+        assert_eq!(a_manifest.rel_path.as_deref(), Some("docs/a.txt"));
+        assert_eq!(b_manifest.rel_path.as_deref(), Some("docs/b.txt"));
     }
 
     #[tokio::test]

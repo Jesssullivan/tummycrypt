@@ -20,6 +20,14 @@ fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf
     path
 }
 
+fn manifest_hash_from_remote_path(remote_path: &str) -> String {
+    remote_path
+        .rsplit('/')
+        .next()
+        .expect("remote manifest path should include file name")
+        .to_string()
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn roundtrip_symlink_preserves_link_target() {
@@ -667,7 +675,7 @@ async fn delete_removes_index_and_manifest() {
     // Write index entry (normally done by push_tree or cmd_push)
     let index_key = format!("{prefix}/index/to-delete.txt");
     let index_entry = tcfs_sync::index_entry::RemoteIndexEntry::new(
-        upload.hash.clone(),
+        manifest_hash_from_remote_path(&upload.remote_path),
         upload.bytes,
         upload.chunks,
     )
