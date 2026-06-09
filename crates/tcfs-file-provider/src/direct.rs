@@ -722,6 +722,7 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                 written_at,
                 rel_path: Some(remote_str.to_string()),
                 mode: None,
+                mtime: None,
                 encrypted_file_key,
                 wrapped_file_keys: Vec::new(),
             };
@@ -1467,6 +1468,7 @@ mod tests {
                 written_at: 0,
                 rel_path: Some(rel.to_string()),
                 mode: None,
+                mtime: None,
                 encrypted_file_key,
                 wrapped_file_keys,
             };

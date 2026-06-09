@@ -882,6 +882,7 @@ mod tests {
             written_at: 0,
             rel_path: None,
             mode: None,
+            mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
         };

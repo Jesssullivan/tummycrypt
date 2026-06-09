@@ -593,6 +593,7 @@ impl TcfsProviderHandle {
                 written_at,
                 rel_path: Some(remote_path.to_string()),
                 mode: None,
+                mtime: None,
                 encrypted_file_key,
                 wrapped_file_keys: Vec::new(),
             };
@@ -980,6 +981,7 @@ mod tests {
                 written_at: 0,
                 rel_path: Some(rel.to_string()),
                 mode: None,
+                mtime: None,
                 encrypted_file_key,
                 wrapped_file_keys,
             };
