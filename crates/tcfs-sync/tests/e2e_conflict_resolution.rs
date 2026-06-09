@@ -6,12 +6,12 @@
 //!   3. Resolution strategies: keep_local, keep_remote, keep_both
 //!   4. Final state is consistent after resolution
 //!
-//! NOTE: The sync engine uses content-addressed manifest paths
-//! (`{prefix}/manifests/{file_hash}`), so two devices writing different content
-//! produce different manifest paths. Conflict detection happens at the
-//! VectorClock/NATS layer, not within a single `upload_file_with_device` call.
-//! These tests exercise VectorClock conflict detection directly and test the
-//! resolution workflows (download remote, re-upload local, keep both).
+//! NOTE: Direct uploads can use content-addressed manifest paths, while
+//! path-indexed uploads use manifest-object ids so per-path metadata can differ
+//! even when file bytes match. Conflict detection happens at the VectorClock/NATS
+//! layer, not within a single `upload_file_with_device` call. These tests
+//! exercise VectorClock conflict detection directly and test the resolution
+//! workflows (download remote, re-upload local, keep both).
 
 use opendal::Operator;
 use std::path::Path;
