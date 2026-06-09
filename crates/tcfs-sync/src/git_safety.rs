@@ -159,7 +159,7 @@ pub fn restore_git_bundle_into(bundle: &Path, repo_root: &Path) -> anyhow::Resul
 
 /// Run a git command in `cwd`, returning an error with captured stderr on
 /// non-zero exit.
-fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
+pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
     let output = std::process::Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -170,6 +170,170 @@ fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
         anyhow::bail!("git {args:?} failed: {stderr}");
     }
     Ok(())
+}
+
+/// Result of a fast-forward ancestry probe between two commit SHAs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastForward {
+    /// `local` is strictly ahead: the remote tip is an ancestor of the local
+    /// tip. Pushing local wins without losing remote history.
+    LocalAhead,
+    /// `remote` is strictly ahead: the local tip is an ancestor of the remote
+    /// tip. Pulling remote wins without losing local history.
+    RemoteAhead,
+    /// Neither is an ancestor of the other (divergent), the tips are equal, or
+    /// ancestry could not be determined (e.g. a needed object is not present
+    /// locally yet). Callers MUST treat this as "not a clean fast-forward" and
+    /// fall back to leaving the conflict unresolved (fail-closed).
+    NotFastForward,
+}
+
+/// Classify the relationship between a `local` and `remote` commit SHA inside
+/// the repo rooted at `repo_root`, using only the local object store.
+///
+/// Both commit objects must already be present locally for the ancestry probe
+/// to succeed — `.git/objects/**` roam as a content-addressed union and are
+/// applied before refs, so by the time a ref conflict is reclassified the
+/// objects should be present. If `git merge-base --is-ancestor` cannot run
+/// (missing object, equal SHAs handled separately, or any git error) this
+/// returns `NotFastForward` so the caller defers / stays conflicted rather than
+/// half-applying a ref.
+pub fn classify_fast_forward(repo_root: &Path, local_sha: &str, remote_sha: &str) -> FastForward {
+    // Equal tips are not a fast-forward in either direction; the caller should
+    // already have short-circuited identical content, but be explicit.
+    if local_sha == remote_sha {
+        return FastForward::NotFastForward;
+    }
+
+    // remote is ancestor of local => local strictly ahead => push local.
+    if is_ancestor(repo_root, remote_sha, local_sha) {
+        return FastForward::LocalAhead;
+    }
+    // local is ancestor of remote => remote strictly ahead => pull remote.
+    if is_ancestor(repo_root, local_sha, remote_sha) {
+        return FastForward::RemoteAhead;
+    }
+    FastForward::NotFastForward
+}
+
+/// True iff `ancestor` is an ancestor of `descendant` in `repo_root`.
+///
+/// Uses `git -C <repo> merge-base --is-ancestor <ancestor> <descendant>`, which
+/// exits 0 when the ancestry holds, 1 when it does not, and a non-0/1 status
+/// (with an error) when an object is missing. Any non-zero/non-1 outcome is
+/// treated as "not an ancestor" so a missing object fails closed.
+fn is_ancestor(repo_root: &Path, ancestor: &str, descendant: &str) -> bool {
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        ])
+        .output();
+    match output {
+        Ok(out) => out.status.code() == Some(0),
+        Err(_) => false,
+    }
+}
+
+/// Read the commit SHA a packed/loose ref file points at, given the raw bytes of
+/// the ref file (the content of `.git/refs/heads/<branch>`).
+///
+/// A loose ref file is either a 40/64-hex SHA on a single line, or a symbolic
+/// `ref: refs/heads/<other>` redirect. Returns `None` for symbolic refs (the
+/// caller should resolve those against the concrete branch) or unparseable
+/// content.
+pub fn parse_ref_sha(ref_bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(ref_bytes).ok()?.trim();
+    if text.is_empty() || text.starts_with("ref:") {
+        return None;
+    }
+    let token = text.split_whitespace().next()?;
+    if is_hex_sha(token) {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+/// True for a 40-char (SHA-1) or 64-char (SHA-256) lowercase/uppercase hex SHA.
+fn is_hex_sha(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Find the enclosing git repository root for a path under a `.git` directory.
+///
+/// `rel_under_git` is a repo-relative path whose first `.git` component marks
+/// the repo. Returns the absolute repo root (the directory that contains
+/// `.git`) by walking up from `local_root.join(rel)` until a `.git` component is
+/// found. Returns `None` if the path is not under a `.git` directory.
+pub fn repo_root_for_git_path(local_root: &Path, rel_path: &str) -> Option<std::path::PathBuf> {
+    // Split the rel path on the first `.git` component. Everything before it is
+    // the repo subdir (possibly empty).
+    let mut prefix_components: Vec<&str> = Vec::new();
+    let mut found = false;
+    for comp in rel_path.split('/') {
+        if comp == ".git" {
+            found = true;
+            break;
+        }
+        prefix_components.push(comp);
+    }
+    if !found {
+        return None;
+    }
+    let mut root = local_root.to_path_buf();
+    for c in prefix_components {
+        if !c.is_empty() {
+            root.push(c);
+        }
+    }
+    Some(root)
+}
+
+/// Given a repo-relative `.git/...` path, return the branch ref name
+/// (`refs/heads/<branch>`) it belongs to, if it is a head ref under
+/// `.git/refs/heads/`. Returns `None` for non-head-ref paths (objects, index,
+/// logs, packed-refs, HEAD, etc.).
+pub fn head_ref_for_git_path(rel_path: &str) -> Option<String> {
+    // Locate the `.git/refs/heads/` segment and take the remainder as the
+    // branch name (which may itself contain slashes, e.g. `feature/x`).
+    let needle = ".git/refs/heads/";
+    let idx = rel_path.find(needle)?;
+    let branch = &rel_path[idx + needle.len()..];
+    if branch.is_empty() || branch.ends_with('/') {
+        return None;
+    }
+    Some(format!("refs/heads/{branch}"))
+}
+
+/// Read the local commit SHA for `ref_name` (e.g. `refs/heads/main`) in
+/// `repo_root`, consulting loose refs and packed-refs via `git rev-parse`.
+/// Returns `None` if the ref cannot be resolved.
+pub fn local_ref_sha(repo_root: &Path, ref_name: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            ref_name,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if is_hex_sha(&sha) {
+        Some(sha)
+    } else {
+        None
+    }
 }
 
 /// Resolve the bundle's default HEAD branch ref (e.g. `refs/heads/main`) by
@@ -207,11 +371,31 @@ fn bundle_head_branch(bundle: &Path) -> Option<String> {
     None
 }
 
-/// Acquire a cooperative lock on .git/tcfs.lock for raw sync mode.
+/// RAII guard for the cooperative `.git/tcfs.lock` lock used by the raw `.git`
+/// sync path. Holding this guard means no other TCFS sync is collecting or
+/// applying this repo's `.git`; dropping it removes the lock file so the next
+/// cycle can proceed.
+#[derive(Debug)]
+pub struct GitLockGuard {
+    lock_path: std::path::PathBuf,
+    _file: std::fs::File,
+}
+
+impl Drop for GitLockGuard {
+    fn drop(&mut self) {
+        // Best-effort cleanup; a leaked lock is recovered by the caller's
+        // staleness handling on the next acquire.
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+/// Acquire a cooperative lock on `.git/tcfs.lock` for raw sync mode.
 ///
-/// Uses `create_new` semantics: if the file already exists, another sync
-/// is in progress. The lock file is removed on drop via the caller.
-pub fn acquire_git_lock(git_dir: &Path) -> anyhow::Result<std::fs::File> {
+/// Uses `create_new` semantics: if the file already exists, another sync is in
+/// progress and this fails. The returned [`GitLockGuard`] removes the lock file
+/// when dropped, so callers hold it across the collect/apply window to make the
+/// `.git` snapshot atomic against a concurrent commit (TOCTOU guard).
+pub fn acquire_git_lock(git_dir: &Path) -> anyhow::Result<GitLockGuard> {
     use std::fs::OpenOptions;
 
     let lock_path = git_dir.join("tcfs.lock");
@@ -230,7 +414,10 @@ pub fn acquire_git_lock(git_dir: &Path) -> anyhow::Result<std::fs::File> {
         .open(&lock_path)
         .map_err(|e| anyhow::anyhow!("creating tcfs.lock: {e}"))?;
 
-    Ok(file)
+    Ok(GitLockGuard {
+        lock_path,
+        _file: file,
+    })
 }
 
 #[cfg(test)]

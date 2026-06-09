@@ -35,6 +35,7 @@ async fn reconcile_detects_up_to_date() {
         "test-device",
         &blacklist,
         &config,
+        None,
     )
     .await
     .unwrap();
@@ -71,6 +72,7 @@ async fn reconcile_detects_new_local_file() {
         "test-device",
         &blacklist,
         &config,
+        None,
     )
     .await
     .unwrap();
@@ -106,6 +108,7 @@ async fn reconcile_dry_run_no_side_effects() {
         "test-device",
         &blacklist,
         &config,
+        None,
     )
     .await
     .unwrap();
