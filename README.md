@@ -85,6 +85,75 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 - Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
 - Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
 - Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
+- Repo roam (dev-env zero-diff): forward `neo -> honey` roam of a real repo's full
+  in-progress state is PROVEN (2026-06-09), evidence
+  `docs/release/evidence/repo-roam-canary-20260609/`. See
+  [Roam an in-progress repo across machines](#roam-an-in-progress-repo-across-machines).
+
+## Roam an in-progress repo across machines
+
+The "machine doesn't matter" goal: enroll a `~/git` repo once, and your in-progress
+work — current branch, staged and unstaged edits, untracked files, stashes, and full
+history — follows you to every machine, encrypted end to end. `ssh` into any enrolled
+host, `cd` into the repo, and pick up exactly where you left off.
+
+**Proven, live, forward direction (2026-06-09).** On the two-machine `neo`/`honey`
+fleet, a real repo's complete dev-env state roamed `neo -> honey` byte- and
+semantically identical — `dev-env-zero-diff=pass`, `git fsck` clean on both sides —
+covering a feature branch, a staged change, an unstaged change, an untracked file,
+and a stash. Evidence: `docs/release/evidence/repo-roam-canary-20260609/`.
+
+**How it works.** A scheduled `tcfs reconcile --path <repo> --prefix <prefix>
+--execute` unit syncs the whole repo *including `.git`* as ordinary encrypted files
+(`[sync] sync_git_dirs = true`, `git_sync_mode = "raw"`) to object storage; the peer
+host pulls it on its own cycle or on demand. Only changed chunks move, and the
+fail-closed deny-set keeps secrets, `.env`, and live database/WAL files out. The repo
+files land directly in `~/git/<repo>` on each host — no mount required for the repo
+itself (distinct from the lazy on-open hydration of the `~/tcfs` view).
+
+**Prove it yourself (`neo -> honey`).** With a repo enrolled at `~/git/<repo>` (point
+the unit at any small, expendable repo):
+
+```bash
+# 1) Source host: leave some in-progress work
+cd ~/git/<repo>
+git switch -c wip/roam-demo
+printf 'scratch\n' > NOTES.scratch          # untracked
+"$EDITOR" path/to/tracked-file              # unstaged edit
+git add path/to/other-file                  # staged edit
+git stash push -m demo -- path/to/third     # a stash
+
+# 2) Push now, or just wait for the ~5-minute scheduled cycle.
+#    macOS source host:
+launchctl kickstart -k "gui/$(id -u)/dev.tinyland.tcfsd-reconcile-<unit>"
+#    Linux source host:
+systemctl --user start tcfsd-reconcile-<unit>.service
+
+# 3) Other host: pick the work up over ssh and traverse into the repo
+ssh <other-host>
+cd ~/git/<repo>
+git update-index --refresh -q   # settle the stat cache after the pull
+git status                      # SAME branch + staged + unstaged + untracked
+git stash list                  # SAME stash
+git log --oneline -1            # SAME HEAD; full history present
+git fsck                        # clean
+```
+
+Turn the eyeball check into a hard pass/fail gate — capture a fingerprint on each
+host and compare; identical fingerprints mean a true zero-diff dev environment:
+
+```bash
+scripts/repo-roam-fingerprint.sh capture ~/git/<repo> /tmp/fp-source   # on source
+scripts/repo-roam-fingerprint.sh capture ~/git/<repo> /tmp/fp-peer     # on peer
+scripts/repo-roam-fingerprint.sh compare /tmp/fp-source /tmp/fp-peer    # exit 0 = zero-diff
+```
+
+Runbook: [docs/ops/repo-roam-test-plan-2026-06-08.md](docs/ops/repo-roam-test-plan-2026-06-08.md).
+
+**Boundary (not yet).** Two hosts editing the *same* repo concurrently do not
+auto-converge: divergent `.git` refs/index trip vector-clock conflict detection that
+is not yet `.git`-aware. Until that lands, use a one-writer-at-a-time handoff —
+quiesce one side before the other writes.
 
 ## Features
 
