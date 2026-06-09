@@ -54,10 +54,10 @@ pub struct SyncManifest {
     /// `.git/index`'s stat cache and makes `git status` report spurious dirty.
     ///
     /// Backward-compatible: old manifests deserialize with `mtime: None`, in
-    /// which case restore leaves the current behavior unchanged. This field is
-    /// purely metadata — manifests are content-addressed by the file's BLAKE3
-    /// hash (`manifests/{file_hash}`), so adding it never changes manifest
-    /// identity, dedup, or chunk addressing.
+    /// which case restore leaves the current behavior unchanged. Path-indexed
+    /// uploads address manifests by a manifest-object id so duplicate-content
+    /// files can keep distinct metadata; chunk addressing and `file_hash` remain
+    /// content-addressed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime: Option<(i64, u32)>,
     /// Base64-encoded wrapped file key (present only when E2E encryption is enabled)

@@ -373,7 +373,15 @@ async fn live_storage_outage_leaves_no_remote_index_and_recovers() {
     let visible = remote_index
         .get(rel_path)
         .expect("recovered upload should publish remote index");
-    assert_eq!(visible.manifest_hash, recovered.hash);
+    let manifest_path = format!("{prefix}/manifests/{}", visible.manifest_hash);
+    let manifest_bytes = good_op
+        .read(&manifest_path)
+        .await
+        .expect("read recovered manifest from index")
+        .to_vec();
+    let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes)
+        .expect("parse recovered manifest");
+    assert_eq!(manifest.file_hash, recovered.hash);
 
     cleanup_upload_objects(&good_op, &prefix, &recovered).await;
 }
