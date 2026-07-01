@@ -3346,7 +3346,10 @@ fn collect_files_inner(
         let ft = entry.file_type().context("file_type dir entry")?;
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if let Some(reason) = blacklist.check_name(name, ft.is_dir()) {
+            // Full-path check (not just the name): the fail-closed
+            // `.git/worktrees/` fence needs path context so the per-worktree
+            // admin area is never collected even in raw mode (G5 / TIN-1620).
+            if let Some(reason) = blacklist.check(&path, ft.is_dir()) {
                 match &reason {
                     BlacklistReason::Security(_) => warn!(
                         path = %path.display(),
@@ -4307,6 +4310,82 @@ mod tests {
                 ".claude/projects/demo/notes.md".to_string(),
                 ".claude/projects/demo/session.jsonl".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn collect_raw_git_fences_worktree_admin_and_gitfile_pointers() {
+        // G5 / TIN-1620 worktree fence: raw .git roam must never collect the
+        // per-worktree admin area or gitfile pointers, while regular .git
+        // internals still roam.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Main repo with a linked-worktree admin area.
+        std::fs::create_dir_all(root.join("repo/.git/objects/ab")).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git/refs/heads")).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git/worktrees/wt-fence")).unwrap();
+        std::fs::write(root.join("repo/.git/HEAD"), b"ref: refs/heads/main").unwrap();
+        std::fs::write(root.join("repo/.git/objects/ab/cdef"), b"obj").unwrap();
+        std::fs::write(root.join("repo/.git/refs/heads/main"), b"abc").unwrap();
+        std::fs::write(
+            root.join("repo/.git/worktrees/wt-fence/gitdir"),
+            b"/abs/path/wt-linked/.git\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("repo/.git/worktrees/wt-fence/HEAD"),
+            b"ref: refs/heads/fence",
+        )
+        .unwrap();
+        std::fs::write(root.join("repo/src.rs"), b"fn main() {}").unwrap();
+
+        // Linked worktree: `.git` is a FILE containing `gitdir: <abs path>`.
+        std::fs::create_dir_all(root.join("wt-linked")).unwrap();
+        std::fs::write(
+            root.join("wt-linked/.git"),
+            b"gitdir: /abs/path/repo/.git/worktrees/wt-fence\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("wt-linked/notes.md"), b"work").unwrap();
+
+        // Submodule-shaped gitfile pointer in a subdir.
+        std::fs::create_dir_all(root.join("repo/vendor/dep")).unwrap();
+        std::fs::write(
+            root.join("repo/vendor/dep/.git"),
+            b"gitdir: ../../.git/modules/dep\n",
+        )
+        .unwrap();
+
+        let result = collect_files(
+            root,
+            &CollectConfig {
+                sync_hidden_dirs: true,
+                sync_git_dirs: true,
+                git_sync_mode: "raw".into(),
+                sync_empty_dirs: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let files = rel_names(&result.files, root);
+        // Regular .git internals + working files still roam (no raw regression).
+        assert!(files.contains(&"repo/.git/HEAD".to_string()), "{files:?}");
+        assert!(files.contains(&"repo/.git/objects/ab/cdef".to_string()));
+        assert!(files.contains(&"repo/.git/refs/heads/main".to_string()));
+        assert!(files.contains(&"repo/src.rs".to_string()));
+        assert!(files.contains(&"wt-linked/notes.md".to_string()));
+        // Fenced: nothing under .git/worktrees/, and no gitfile pointers.
+        assert!(
+            files.iter().all(|f| !f.contains(".git/worktrees")),
+            "worktrees admin area must never be collected: {files:?}"
+        );
+        assert!(
+            files
+                .iter()
+                .all(|f| f != "wt-linked/.git" && f != "repo/vendor/dep/.git"),
+            "gitfile pointers must never be collected: {files:?}"
         );
     }
 
