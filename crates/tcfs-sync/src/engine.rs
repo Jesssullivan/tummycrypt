@@ -1401,6 +1401,49 @@ pub async fn upload_file_with_device(
     Ok(result)
 }
 
+/// Upload a file that a reconcile plan has ALREADY classified as needing a
+/// push, bypassing the `needs_sync` stat quick-check.
+///
+/// `needs_sync` compares `(size, mtime-seconds)` against the cached state, so
+/// it cannot see a same-second rewrite that keeps the size constant — exactly
+/// what `git commit` does to a branch head ref (always 40-hex + newline). The
+/// reconcile classifier content-hashes the local file before planning a
+/// `Push`, so execution must honor that stronger decision rather than
+/// re-derive staleness from stat and silently skip the push (which would leave
+/// the remote head behind and break `.git` fast-forward convergence).
+#[allow(clippy::too_many_arguments)]
+pub async fn upload_planned_push_with_device(
+    op: &Operator,
+    local_path: &Path,
+    remote_prefix: &str,
+    state: &mut StateCache,
+    progress: Option<&ProgressFn>,
+    device_id: &str,
+    rel_path: Option<&str>,
+    encryption: OptionalEncryption<'_>,
+) -> Result<UploadResult> {
+    let tracked_state = state.get(local_path).cloned();
+    let (result, state_update) = upload_file_with_device_with_state(
+        op,
+        local_path,
+        remote_prefix,
+        progress,
+        device_id,
+        rel_path,
+        encryption,
+        tracked_state,
+        Some("planned push (reconcile classified change)".into()),
+        UploadRuntimeOptions::from_env(),
+    )
+    .await?;
+
+    if let Some(sync_state) = state_update {
+        state.set(local_path, sync_state);
+    }
+
+    Ok(result)
+}
+
 #[allow(unused_variables)]
 #[allow(clippy::too_many_arguments)]
 async fn upload_file_with_device_with_state(

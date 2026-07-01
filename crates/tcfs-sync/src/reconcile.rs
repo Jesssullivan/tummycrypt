@@ -1388,7 +1388,13 @@ pub async fn execute_plan(
                     )
                     .await
                 } else {
-                    engine::upload_file_with_device(
+                    // The plan classified this path by CONTENT HASH; execute
+                    // must not re-derive staleness from the `(size,
+                    // mtime-seconds)` stat quick-check, which is blind to a
+                    // same-second same-size rewrite (e.g. `git commit`
+                    // rewriting a 41-byte branch head ref) and would silently
+                    // skip the push.
+                    engine::upload_planned_push_with_device(
                         op,
                         local_path,
                         remote_prefix,

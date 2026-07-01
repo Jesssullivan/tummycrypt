@@ -107,6 +107,27 @@ fn git_available() -> bool {
     Command::new("git").arg("--version").output().is_ok()
 }
 
+/// Deterministically reproduce the same-second stat race that a fast CI runner
+/// hits naturally: `git commit` rewrites the (fixed 41-byte) head ref within
+/// the same wall-clock second as the sync that recorded its state, so the
+/// `(size, mtime-seconds)` pair matches the cache and a stat-based quick check
+/// alone cannot see the change. Pin the file's mtime to the cached second so
+/// the race is exercised on every run, on every platform — the planned push
+/// must still land (execute must trust the plan's content hash, not re-derive
+/// staleness from stat).
+fn pin_mtime_to_cached_second(state: &StateCache, repo: &Path, rel_path: &str) {
+    let (_, cached) = state
+        .get_by_rel_path(rel_path)
+        .unwrap_or_else(|| panic!("no tracked state for {rel_path}"));
+    let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(cached.mtime);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(repo.join(rel_path))
+        .expect("open ref file to pin mtime");
+    file.set_times(std::fs::FileTimes::new().set_modified(mtime))
+        .expect("pin ref mtime to cached second");
+}
+
 fn fsck_clean(dir: &Path) {
     let out = Command::new("git")
         .args(["fsck", "--full"])
@@ -224,6 +245,10 @@ async fn git_ff_converges_push_then_pull() {
     // ── Device B commits C1 (a strict fast-forward over C0). ──────────────────
     let c1 = commit(&b_repo, "feature.txt", b"c1\n", "C1");
     assert_ne!(c1, c0);
+    // The head ref is 41 bytes at C0 and at C1; force the same-second rewrite
+    // (what CI's speed produces naturally) so the push cannot be silently
+    // skipped by a stat-granularity quick check.
+    pin_mtime_to_cached_second(&b_state, &b_repo, ".git/refs/heads/main");
 
     // B reconciles: the .git/* paths each "conflict" on raw vclock, but the FF
     // reclassifier must turn them into PUSH (B is strictly ahead).
@@ -339,6 +364,9 @@ async fn commit_and_sync(
     msg: &str,
 ) -> tcfs_sync::reconcile::ReconcilePlan {
     commit(repo, file, content, msg);
+    // Same-second rewrite of the fixed-size head ref (see
+    // `pin_mtime_to_cached_second`): the push must land regardless.
+    pin_mtime_to_cached_second(state, repo, ".git/refs/heads/main");
     let plan = reconcile(op, repo, prefix, state, device, blacklist, cfg, None)
         .await
         .expect("post-commit plan");
