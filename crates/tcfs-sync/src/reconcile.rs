@@ -195,7 +195,7 @@ pub async fn list_remote_index(
         if rel_path.is_empty()
             || rel_path.ends_with('/')
             || rel_path == DIR_MARKER
-            || rel_path.ends_with("/.tcfs_dir")
+            || rel_path.ends_with(DIR_MARKER_SUFFIX)
         {
             continue;
         }
@@ -697,9 +697,6 @@ async fn classify_path(
         (None, None, None) => ReconcileAction::UpToDate {
             rel_path: rel_path.to_string(),
         },
-        // Local exists, not remote, but was tracked — local is newer
-        // (This case is covered above, but the compiler needs exhaustive matching
-        //  for the tracked_opt variations. The (Some, None, None) case above handles it.)
     }
 }
 
@@ -790,6 +787,20 @@ async fn compare_both_exist(
         remote_device,
     );
 
+    outcome_to_action(outcome, rel_path, local_path, remote_entry)
+}
+
+/// Map a `SyncOutcome` to the corresponding `ReconcileAction`.
+///
+/// Shared tail for `compare_both_exist` and `compare_both_exist_symlink`: both
+/// resolve the same vector-clock decision into the same push/pull/conflict
+/// action, so the mapping lives here to keep the two sites in lockstep.
+fn outcome_to_action(
+    outcome: crate::conflict::SyncOutcome,
+    rel_path: &str,
+    local_path: &Path,
+    remote_entry: &RemoteIndexEntry,
+) -> ReconcileAction {
     match outcome {
         crate::conflict::SyncOutcome::UpToDate => ReconcileAction::UpToDate {
             rel_path: rel_path.to_string(),
@@ -889,26 +900,7 @@ async fn compare_both_exist_symlink(
         remote_device,
     );
 
-    match outcome {
-        crate::conflict::SyncOutcome::UpToDate => ReconcileAction::UpToDate {
-            rel_path: rel_path.to_string(),
-        },
-        crate::conflict::SyncOutcome::LocalNewer => ReconcileAction::Push {
-            local_path: local_path.to_path_buf(),
-            rel_path: rel_path.to_string(),
-            reason: PushReason::LocalNewer,
-        },
-        crate::conflict::SyncOutcome::RemoteNewer => ReconcileAction::Pull {
-            rel_path: rel_path.to_string(),
-            manifest_hash: remote_entry.manifest_hash.clone(),
-            size: remote_entry.size,
-            reason: PullReason::RemoteNewer,
-        },
-        crate::conflict::SyncOutcome::Conflict(info) => ReconcileAction::Conflict {
-            rel_path: rel_path.to_string(),
-            info,
-        },
-    }
+    outcome_to_action(outcome, rel_path, local_path, remote_entry)
 }
 
 // ── Execution ────────────────────────────────────────────────────────────────
