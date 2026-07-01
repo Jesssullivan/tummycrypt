@@ -19,6 +19,18 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local file="$1"
+  local unexpected="$2"
+
+  if grep -Fq -- "$unexpected" "$file"; then
+    printf 'expected not to find %s in %s\n' "$unexpected" "$file" >&2
+    printf '%s\n' '--- output ---' >&2
+    cat "$file" >&2
+    exit 1
+  fi
+}
+
 assert_not_exists() {
   local path="$1"
   if [[ -e "$path" ]]; then
@@ -125,11 +137,20 @@ fi
 EOF
 cat >"$FAKE_BIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
-printf 'service = dev.tinyland.tcfsd\n'
+case "${1:-}" in
+  list)
+    printf '123\t0\tdev.tinyland.tcfsd\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
 EOF
 cat >"$FAKE_BIN/pluginkit" <<'EOF'
 #!/usr/bin/env bash
 printf '+    io.tinyland.tcfs.fileprovider(0.2.0)\n'
+printf '            Path = %s/Contents/Extensions/TCFSFileProvider.appex\n' "${TCFS_FAKE_PLUGIN_APP_PATH:-$TCFS_APP_PATH}"
+printf '   Parent Bundle = %s\n' "${TCFS_FAKE_PLUGIN_APP_PATH:-$TCFS_APP_PATH}"
 EOF
 cat >"$FAKE_BIN/spctl" <<'EOF'
 #!/usr/bin/env bash
@@ -138,8 +159,8 @@ EOF
 cat >"$FAKE_BIN/PlistBuddy" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
-  *"ProgramArguments:2"*)
-    printf '/bin/wait4path /nix/store && exec $TMPDIR/fake-tcfsd-daemon-darwin\n'
+  *"ProgramArguments:0"*)
+    printf '/bin/sh\n'
     ;;
   *"CFBundleShortVersionString"*"TCFSFileProvider.appex"*)
     printf '0.2.0\n'
@@ -173,7 +194,9 @@ env "${COMMON_ENV[@]}" \
 
 assert_contains "$PASS_OUT" "lab tummycrypt rev: f22f36ca7307e1db32f2ed4b7b0e69e3b7cea04e"
 assert_contains "$PASS_OUT" "tcfs version: tcfs 0.12.14"
-assert_contains "$PASS_OUT" "launch agent command inspection: not executed"
+assert_contains "$PASS_OUT" "launch agent command: configured (argv0: /bin/sh)"
+assert_contains "$PASS_OUT" "launch agent command inspection: redacted"
+assert_not_contains "$PASS_OUT" "fake-tcfsd-daemon-darwin"
 assert_contains "$PASS_OUT" "tcfs status: returned within 2s"
 assert_contains "$PASS_OUT" "rollout-readiness=pass"
 assert_not_exists "$WRAPPER_SENTINEL"
@@ -184,5 +207,10 @@ assert_fails_contains \
 
 assert_contains "$TMPDIR/failure.combined" "rollout-readiness=fail"
 assert_not_exists "$WRAPPER_SENTINEL"
+
+assert_fails_contains \
+  "FileProvider plugin registration does not point at expected app path" \
+  env "${COMMON_ENV[@]}" TCFS_FAKE_PLUGIN_APP_PATH="$TMPDIR/shadow/TCFSProvider.app" "$SCRIPT"
+assert_contains "$TMPDIR/failure.combined" "rollout-readiness=fail"
 
 printf 'macOS TCFS rollout readiness tests passed\n'
