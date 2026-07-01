@@ -261,3 +261,9 @@ A live repo can become a candidate only after a shadow packet proves all of:
    that repo into TCFS.
 9. source symlinks are not skipped during push and rehydrate as symlinks with
    exact matching targets
+
+The broader "machine does not matter" claim has an additional acceptance matrix:
+[git-roam-daily-driver-acceptance-2026-06-08.md](git-roam-daily-driver-acceptance-2026-06-08.md).
+That matrix must pass for dirty WIP, Git metadata, agent context, unsync,
+conflict behavior, and reverse-origin flow before citing any repo canary as
+daily-driver `~/git` readiness.

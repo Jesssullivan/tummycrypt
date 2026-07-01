@@ -1603,6 +1603,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     written_at: tcfs_sync::StateEvent::now(),
                     rel_path: Some(req.path.clone()),
                     mode: None,
+                    mtime: None,
                     encrypted_file_key: None,
                     wrapped_file_keys: Vec::new(),
                 };

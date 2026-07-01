@@ -157,27 +157,6 @@ pub fn restore_git_bundle_into(bundle: &Path, repo_root: &Path) -> anyhow::Resul
     Ok(())
 }
 
-/// Backwards-compatible clone-based restore (creates a fresh checkout at
-/// `target`). Retained for callers that want a standalone clone rather than an
-/// in-place working-tree restore.
-pub fn restore_git_from_bundle(bundle: &Path, target: &Path) -> anyhow::Result<()> {
-    let output = std::process::Command::new("git")
-        .args([
-            "clone",
-            &bundle.to_string_lossy(),
-            &target.to_string_lossy(),
-        ])
-        .output()
-        .map_err(|e| anyhow::anyhow!("running git clone from bundle: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git clone from bundle failed: {stderr}");
-    }
-
-    Ok(())
-}
-
 /// Run a git command in `cwd`, returning an error with captured stderr on
 /// non-zero exit.
 fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {

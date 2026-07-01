@@ -827,6 +827,13 @@ fn manifest_path_prefix(remote_prefix: &str) -> String {
     format!("{}/manifests", remote_prefix.trim_end_matches('/'))
 }
 
+fn manifest_object_id(manifest_bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tcfs-sync-manifest-object-v1\0");
+    hasher.update(manifest_bytes);
+    tcfs_chunks::hash_to_hex(&hasher.finalize())
+}
+
 async fn publish_index_reference(
     op: &Operator,
     remote_prefix: &str,
@@ -1262,6 +1269,72 @@ fn unique_tmp_path(local_path: &Path, marker: &str) -> PathBuf {
     local_path.with_file_name(file_name)
 }
 
+/// Convert a `SystemTime` into `(unix_secs, subsec_nanos)` for manifest storage.
+///
+/// Times before the Unix epoch are represented with a negative seconds component
+/// and the matching positive sub-second remainder, mirroring `utimensat`'s
+/// `timespec` convention so the round-trip is lossless.
+fn systemtime_to_unix_parts(t: SystemTime) -> (i64, u32) {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+        Err(e) => {
+            // Pre-epoch: duration is how far *before* the epoch we are.
+            let d = e.duration();
+            let nanos = d.subsec_nanos();
+            if nanos == 0 {
+                (-(d.as_secs() as i64), 0)
+            } else {
+                // Borrow one second so the nanos component stays in [0, 1e9).
+                (-(d.as_secs() as i64) - 1, 1_000_000_000 - nanos)
+            }
+        }
+    }
+}
+
+/// Apply a previously captured `(unix_secs, subsec_nanos)` mtime to `path`.
+///
+/// Only the modification time is set; the access time is left to the kernel's
+/// default (`UTIME_OMIT`). On non-Unix targets this is a no-op — the manifest
+/// still carries the value, and a future port can honor it. Best-effort: a
+/// failure to restamp is logged but never aborts the restore, since the file
+/// content is already correctly written.
+#[cfg(unix)]
+fn apply_manifest_mtime(path: &Path, mtime: (i64, u32)) {
+    use std::os::unix::ffi::OsStrExt;
+    let (secs, nanos) = mtime;
+    let c_path = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+        Ok(p) => p,
+        Err(_) => {
+            warn!(path = %path.display(), "skipping mtime restore: path contains NUL");
+            return;
+        }
+    };
+    // mtime carries the captured value; atime is omitted so we don't perturb it.
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: secs as libc::time_t,
+            tv_nsec: nanos as _,
+        },
+    ];
+    // SAFETY: `c_path` is a valid NUL-terminated C string for the duration of
+    // the call, and `times` is a 2-element array of initialized `timespec`.
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        warn!(path = %path.display(), error = %err, "failed to restore mtime from manifest");
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_manifest_mtime(_path: &Path, _mtime: (i64, u32)) {
+    // No portable non-Unix mtime restore is wired yet; the value still round-trips
+    // through the manifest so a future port can honor it.
+}
+
 /// Upload a single file to SeaweedFS, chunking it via FastCDC.
 ///
 /// If the file is unchanged since the last sync (per state cache), the upload
@@ -1406,8 +1479,13 @@ async fn upload_file_with_device_with_state(
         "verified upload snapshot"
     );
 
-    // Build remote manifest path (using the file's content hash)
-    let remote_manifest = format!("{remote_prefix}/manifests/{file_hash_hex}");
+    // Direct uploads stay content-addressed for compatibility. Path-indexed
+    // uploads may carry path-specific metadata (mode, mtime, rel_path, vclock),
+    // so their final manifest object id is derived after the manifest is built.
+    let mut remote_manifest = format!(
+        "{}/manifests/{file_hash_hex}",
+        remote_prefix.trim_end_matches('/')
+    );
     let assume_fresh_prefix = runtime.assume_fresh_prefix;
 
     // Get the local vclock from state (or start fresh)
@@ -1429,7 +1507,7 @@ async fn upload_file_with_device_with_state(
     let mut outcome = None;
     let mut remote_vclock_snapshot: Option<crate::conflict::VectorClock> = None;
     if !device_id.is_empty() && !assume_fresh_prefix {
-        let remote_manifest_obj = if let Some(rp) = rel_path {
+        let (remote_manifest_obj, remote_manifest_path) = if let Some(rp) = rel_path {
             // Look up the index entry to find what manifest is currently stored
             let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
             let manifest_prefix = manifest_path_prefix(remote_prefix);
@@ -1439,7 +1517,7 @@ async fn upload_file_with_device_with_state(
                 .flatten()
                 .map(|entry| manifest_key(&manifest_prefix, &entry.manifest_hash));
             // Read the manifest pointed to by the index entry
-            if let Some(ref manifest_path) = idx_manifest {
+            let manifest_obj = if let Some(ref manifest_path) = idx_manifest {
                 if let Ok(remote_bytes) = op.read(manifest_path).await {
                     SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
                 } else {
@@ -1447,10 +1525,12 @@ async fn upload_file_with_device_with_state(
                 }
             } else {
                 None
-            }
+            };
+            (manifest_obj, idx_manifest)
         } else {
             // No rel_path — fall back to checking the same-hash manifest
-            if let Ok(true) = op.exists(&remote_manifest).await {
+            let manifest_path = remote_manifest.clone();
+            let manifest_obj = if let Ok(true) = op.exists(&manifest_path).await {
                 if let Ok(remote_bytes) = op.read(&remote_manifest).await {
                     SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
                 } else {
@@ -1458,11 +1538,13 @@ async fn upload_file_with_device_with_state(
                 }
             } else {
                 None
-            }
+            };
+            (manifest_obj, Some(manifest_path))
         };
 
         // Capture remote vclock for deferred merge (Issue #183)
         remote_vclock_snapshot = remote_manifest_obj.as_ref().map(|m| m.vclock.clone());
+        let current_remote_manifest_path = remote_manifest_path;
 
         if let Some(remote_manifest_obj) = remote_manifest_obj {
             let local_hash = &file_hash_hex;
@@ -1482,10 +1564,13 @@ async fn upload_file_with_device_with_state(
             match &sync_outcome {
                 SyncOutcome::RemoteNewer => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "remote-newer skip")?;
+                    let remote_manifest_path = current_remote_manifest_path
+                        .clone()
+                        .unwrap_or_else(|| remote_manifest.clone());
                     return Ok((
                         UploadResult {
                             path: local_path.to_path_buf(),
-                            remote_path: remote_manifest.clone(),
+                            remote_path: remote_manifest_path,
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
@@ -1497,12 +1582,15 @@ async fn upload_file_with_device_with_state(
                 }
                 SyncOutcome::Conflict(ref conflict_info) => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "conflict skip")?;
+                    let remote_manifest_path = current_remote_manifest_path
+                        .clone()
+                        .unwrap_or_else(|| remote_manifest.clone());
                     // Record local state with conflict info so `tcfs resolve` can find it
                     let mut sync_state = make_sync_state_full(
                         local_path,
                         file_hash_hex.clone(),
                         0,
-                        remote_manifest.clone(),
+                        remote_manifest_path.clone(),
                         local_vclock,
                         device_id.to_string(),
                     )?;
@@ -1511,7 +1599,7 @@ async fn upload_file_with_device_with_state(
                     return Ok((
                         UploadResult {
                             path: local_path.to_path_buf(),
-                            remote_path: remote_manifest.clone(),
+                            remote_path: remote_manifest_path,
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
@@ -1523,19 +1611,22 @@ async fn upload_file_with_device_with_state(
                 }
                 SyncOutcome::UpToDate => {
                     ensure_source_matches_snapshot(local_path, &snapshot, "up-to-date skip")?;
+                    let remote_manifest_path = current_remote_manifest_path
+                        .clone()
+                        .unwrap_or_else(|| remote_manifest.clone());
                     // Content dedup — already up to date
                     let sync_state = make_sync_state_full(
                         local_path,
                         file_hash_hex.clone(),
                         0,
-                        remote_manifest.clone(),
+                        remote_manifest_path.clone(),
                         local_vclock,
                         device_id.to_string(),
                     )?;
                     return Ok((
                         UploadResult {
                             path: local_path.to_path_buf(),
-                            remote_path: remote_manifest,
+                            remote_path: remote_manifest_path,
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
@@ -1558,6 +1649,7 @@ async fn upload_file_with_device_with_state(
     // Only check when we haven't already done the remote manifest check above
     if !assume_fresh_prefix
         && outcome.is_none()
+        && rel_path.is_none()
         && op.exists(&remote_manifest).await.unwrap_or(false)
         && device_id.is_empty()
     {
@@ -1966,16 +2058,23 @@ async fn upload_file_with_device_with_state(
     #[cfg(not(feature = "crypto"))]
     let manifest_version: u32 = 2;
 
-    // Capture Unix file permissions for cross-device preservation
+    // Capture Unix file permissions and the source mtime for cross-device
+    // preservation, both from the SAME metadata read so they describe one stat
+    // of the file (no TOCTOU drift between the two). The mtime keeps a restored
+    // tree's timestamps intact so `git status` does not report spurious dirty
+    // (TIN-1620 T13-Z).
+    let source_metadata = std::fs::metadata(local_path).ok();
     #[cfg(unix)]
     let file_mode = {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(local_path)
-            .ok()
-            .map(|m| m.permissions().mode())
+        source_metadata.as_ref().map(|m| m.permissions().mode())
     };
     #[cfg(not(unix))]
     let file_mode: Option<u32> = None;
+    let file_mtime: Option<(i64, u32)> = source_metadata
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .map(systemtime_to_unix_parts);
 
     // Build and upload the manifest. Version is 2 for Master/Dual and 3 for
     // PerDevice (see the wrap-mode branch above) so pre-per-device binaries fail
@@ -1995,18 +2094,21 @@ async fn upload_file_with_device_with_state(
         written_at: now,
         rel_path: rel_path.map(|s| s.to_string()),
         mode: file_mode,
+        mtime: file_mtime,
         encrypted_file_key,
         wrapped_file_keys,
     };
 
     let manifest_bytes = manifest.to_bytes()?;
     if let Some(rp) = rel_path {
+        let manifest_hash = manifest_object_id(&manifest_bytes);
+        remote_manifest = manifest_key(&manifest_path_prefix(remote_prefix), &manifest_hash);
         publish_manifest_for_rel_path_with_mode(
             op,
             remote_prefix,
             rp,
             manifest_bytes,
-            RemoteIndexEntry::new(file_hash_hex.clone(), file_size, num_chunks),
+            RemoteIndexEntry::new(manifest_hash, file_size, num_chunks),
             assume_fresh_prefix,
         )
         .await?;
@@ -2153,7 +2255,7 @@ pub async fn upload_symlink_with_device(
     })
 }
 
-fn read_symlink_target_text(path: &Path) -> Result<String> {
+pub(crate) fn read_symlink_target_text(path: &Path) -> Result<String> {
     let target = std::fs::read_link(path)
         .with_context(|| format!("reading symlink target: {}", path.display()))?;
     target
@@ -2162,7 +2264,12 @@ fn read_symlink_target_text(path: &Path) -> Result<String> {
         .with_context(|| format!("symlink target is not valid UTF-8: {}", path.display()))
 }
 
-fn symlink_manifest_hash(target: &str) -> String {
+/// Stable identity hash for a symlink, keyed only on its target text.
+///
+/// This is the single source of truth shared by the symlink push path
+/// (`upload_symlink_with_device`), the pull path, and the reconcile compare
+/// path so that all three agree on when two symlinks are "the same".
+pub(crate) fn symlink_manifest_hash(target: &str) -> String {
     let mut data = b"tcfs-symlink-v1\0".to_vec();
     data.extend_from_slice(target.as_bytes());
     tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data))
@@ -2324,6 +2431,13 @@ pub async fn download_file_with_device(
             tokio::fs::set_permissions(local_path, perms)
                 .await
                 .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+        }
+
+        // Restore the source mtime (TIN-1620 T13-Z) BEFORE re-stat below, so the
+        // state cache and `git status` see the original timestamp, not "now".
+        // Old manifests carry `mtime: None`, leaving current behavior unchanged.
+        if let Some(mtime) = manifest.mtime {
+            apply_manifest_mtime(local_path, mtime);
         }
 
         let mut sync_state_for_result = None;
@@ -2552,6 +2666,13 @@ pub async fn download_file_with_device(
         tokio::fs::set_permissions(local_path, perms)
             .await
             .with_context(|| format!("restoring permissions on: {}", local_path.display()))?;
+    }
+
+    // Restore the source mtime (TIN-1620 T13-Z) BEFORE the re-stat below, so the
+    // state cache and `git status` see the original timestamp, not "now". Old
+    // manifests carry `mtime: None`, leaving current behavior unchanged.
+    if let Some(mtime) = manifest.mtime {
+        apply_manifest_mtime(local_path, mtime);
     }
 
     let mut sync_state_for_result = None;
@@ -4574,6 +4695,314 @@ mod tests {
         assert_eq!(content, "hello world");
     }
 
+    #[test]
+    fn systemtime_to_unix_parts_roundtrips_post_epoch() {
+        // A representative post-epoch instant with sub-second precision.
+        let t = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+        assert_eq!(systemtime_to_unix_parts(t), (1_700_000_000, 123_456_789));
+    }
+
+    #[test]
+    fn systemtime_to_unix_parts_handles_pre_epoch() {
+        // 0.5s before the epoch: seconds borrow down, nanos stay in [0, 1e9).
+        let t = UNIX_EPOCH - Duration::new(0, 500_000_000);
+        let (secs, nanos) = systemtime_to_unix_parts(t);
+        assert_eq!(secs, -1);
+        assert_eq!(nanos, 500_000_000);
+    }
+
+    #[cfg(unix)]
+    fn mtime_of(path: &Path) -> (i64, u32) {
+        let meta = std::fs::metadata(path).unwrap();
+        systemtime_to_unix_parts(meta.modified().unwrap())
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// (a) Chunked-file path: a file uploaded with a known source mtime restores
+    /// into a fresh dir with that exact mtime, not "now". This is the input to a
+    /// clean `git status` (TIN-1620 T13-Z).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mtime_round_trips_for_chunked_file() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let local = dir.path().join("src.txt");
+        // Larger than a chunk boundary is unnecessary; non-empty exercises the
+        // chunked restore path (empty is handled by a separate test).
+        std::fs::write(&local, b"content with a known timestamp").unwrap();
+
+        // Stamp a known, distinctly-old mtime on the source.
+        let known = (1_600_000_000_i64, 250_000_000_u32);
+        apply_manifest_mtime(&local, known);
+        assert_eq!(mtime_of(&local), known, "test setup: source mtime not set");
+
+        let up = upload_file_with_device(
+            &op,
+            &local,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("src.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Restore into a fresh location (no pre-existing file => fresh mtime risk).
+        let restore_dir = tempfile::tempdir().unwrap();
+        let dl_path = restore_dir.path().join("restored.txt");
+        let mut restore_state = StateCache::open(&restore_dir.path().join("s2.json")).unwrap();
+        download_file_with_device(
+            &op,
+            &up.remote_path,
+            &dl_path,
+            "data",
+            None,
+            "device-2",
+            Some(&mut restore_state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&dl_path).unwrap(),
+            b"content with a known timestamp"
+        );
+        let restored = mtime_of(&dl_path);
+        // Seconds must match exactly; nanos within filesystem precision (1us).
+        assert_eq!(restored.0, known.0, "restored mtime seconds drifted");
+        assert!(
+            (restored.1 as i64 - known.1 as i64).abs() <= 1_000,
+            "restored mtime nanos drifted: got {} want {}",
+            restored.1,
+            known.1
+        );
+    }
+
+    /// Path-indexed manifests must not be keyed only by content hash. Two files
+    /// can have identical bytes but different git-relevant metadata.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_content_files_keep_distinct_path_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let body = b"same bytes, different metadata";
+        std::fs::write(&a, body).unwrap();
+        std::fs::write(&b, body).unwrap();
+
+        let a_mtime = (1_600_000_100_i64, 100_000_000_u32);
+        let b_mtime = (1_600_000_200_i64, 200_000_000_u32);
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        apply_manifest_mtime(&a, a_mtime);
+        apply_manifest_mtime(&b, b_mtime);
+
+        let up_a = upload_file_with_device(
+            &op,
+            &a,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("a.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+        let up_b = upload_file_with_device(
+            &op,
+            &b,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("b.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(up_a.hash, up_b.hash, "content hash should dedupe bytes");
+        assert_ne!(
+            up_a.remote_path, up_b.remote_path,
+            "path-specific metadata must not collide on a content-hash manifest"
+        );
+        let chunks = op.list("data/chunks/").await.unwrap();
+        assert_eq!(
+            chunks.len(),
+            up_a.chunks,
+            "same content should still dedupe chunk objects"
+        );
+
+        let index_a = op.read("data/index/a.txt").await.unwrap().to_vec();
+        let index_b = op.read("data/index/b.txt").await.unwrap().to_vec();
+        assert_eq!(
+            manifest_key(
+                &manifest_path_prefix("data"),
+                &committed_manifest_hash(&index_a)
+            ),
+            up_a.remote_path
+        );
+        assert_eq!(
+            manifest_key(
+                &manifest_path_prefix("data"),
+                &committed_manifest_hash(&index_b)
+            ),
+            up_b.remote_path
+        );
+
+        let restore_dir = tempfile::tempdir().unwrap();
+        let mut restore_state = StateCache::open(&restore_dir.path().join("restore.json")).unwrap();
+        let restore_a = restore_dir.path().join("a.txt");
+        let restore_b = restore_dir.path().join("b.txt");
+        download_file_with_device(
+            &op,
+            &up_a.remote_path,
+            &restore_a,
+            "data",
+            None,
+            "device-2",
+            Some(&mut restore_state),
+            None,
+        )
+        .await
+        .unwrap();
+        download_file_with_device(
+            &op,
+            &up_b.remote_path,
+            &restore_b,
+            "data",
+            None,
+            "device-2",
+            Some(&mut restore_state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&restore_a).unwrap(), body);
+        assert_eq!(std::fs::read(&restore_b).unwrap(), body);
+        assert_eq!(mode_of(&restore_a), 0o644);
+        assert_eq!(mode_of(&restore_b), 0o755);
+        assert_eq!(mtime_of(&restore_a).0, a_mtime.0);
+        assert_eq!(mtime_of(&restore_b).0, b_mtime.0);
+    }
+
+    /// (a) Empty-file path: the zero-byte restore branch also restamps mtime.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mtime_round_trips_for_empty_file() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+
+        let local = dir.path().join("empty.txt");
+        std::fs::write(&local, b"").unwrap();
+        let known = (1_555_000_000_i64, 0_u32);
+        apply_manifest_mtime(&local, known);
+
+        let up = upload_file_with_device(
+            &op,
+            &local,
+            "data",
+            &mut state,
+            None,
+            "device-1",
+            Some("empty.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(up.chunks, 0, "empty file must take the chunkless path");
+
+        let restore_dir = tempfile::tempdir().unwrap();
+        let dl_path = restore_dir.path().join("restored_empty.txt");
+        let mut restore_state = StateCache::open(&restore_dir.path().join("s2.json")).unwrap();
+        download_file_with_device(
+            &op,
+            &up.remote_path,
+            &dl_path,
+            "data",
+            None,
+            "device-2",
+            Some(&mut restore_state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::metadata(&dl_path).unwrap().len(), 0);
+        assert_eq!(
+            mtime_of(&dl_path).0,
+            known.0,
+            "empty-file mtime not restored"
+        );
+    }
+
+    /// (b) Back-compat: a manifest serialized WITHOUT an mtime field (old fleet)
+    /// deserializes to `mtime: None` and restores with today's behavior — no
+    /// panic, no addressing change, mtime left to "now".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn old_manifest_without_mtime_restores_with_current_behavior() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+
+        // A pre-mtime v2 manifest: note no `mtime` key at all.
+        let body = b"legacy body bytes";
+        let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(body));
+        let chunk_hash = file_hash.clone();
+        op.write(&format!("data/chunks/{chunk_hash}"), body.to_vec())
+            .await
+            .unwrap();
+        let legacy_json = format!(
+            r#"{{"version":2,"file_hash":"{file_hash}","file_size":{},"chunks":["{chunk_hash}"],"vclock":{{"clocks":{{}}}},"written_by":"old","written_at":1,"rel_path":"legacy.txt"}}"#,
+            body.len()
+        );
+        // Sanity: this JSON deserializes with mtime None and never panics.
+        let parsed = SyncManifest::from_bytes(legacy_json.as_bytes()).unwrap();
+        assert!(parsed.mtime.is_none(), "old manifest must yield mtime None");
+
+        let manifest_path = format!("data/manifests/{file_hash}");
+        op.write(&manifest_path, legacy_json.into_bytes())
+            .await
+            .unwrap();
+
+        let dl_path = dir.path().join("legacy_restored.txt");
+        let before = SystemTime::now();
+        let dl = download_file(&op, &manifest_path, &dl_path, "data", None)
+            .await
+            .unwrap();
+        assert_eq!(dl.bytes, body.len() as u64);
+        assert_eq!(std::fs::read(&dl_path).unwrap(), body);
+
+        // Current behavior: mtime is whatever the OS stamped at write (~now), not
+        // some restored value — we never errored and never set an old time.
+        let restored_secs = mtime_of(&dl_path).0;
+        let before_secs = systemtime_to_unix_parts(before).0;
+        assert!(
+            restored_secs + 5 >= before_secs,
+            "restore with no manifest mtime must keep fresh-write timestamp"
+        );
+    }
+
     #[tokio::test]
     async fn download_file_cleans_streaming_tmp_after_chunk_failure() {
         let op = memory_op();
@@ -4602,6 +5031,7 @@ mod tests {
             written_at: 0,
             rel_path: Some("large.bin".into()),
             mode: None,
+            mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
         };
@@ -4662,9 +5092,14 @@ mod tests {
             crate::index_entry::ParsedIndexEntry::V2(entry) => {
                 assert_eq!(entry.state, crate::index_entry::IndexEntryState::Committed);
                 let current = entry.current.expect("current committed entry");
-                assert_eq!(current.manifest_hash, upload.hash);
                 assert_eq!(current.size, upload.bytes);
                 assert_eq!(current.chunks, upload.chunks);
+                let manifest_path =
+                    manifest_key(&manifest_path_prefix("data"), &current.manifest_hash);
+                assert_eq!(manifest_path, upload.remote_path);
+                let manifest_bytes = op.read(&manifest_path).await.unwrap().to_vec();
+                let manifest = SyncManifest::from_bytes(&manifest_bytes).unwrap();
+                assert_eq!(manifest.file_hash, upload.hash);
             }
         }
     }
@@ -5553,11 +5988,28 @@ mod tests {
         let b_raw = op.read("data/index/docs/b.txt").await.unwrap().to_vec();
         let a_hash = committed_manifest_hash(&a_raw);
         let b_hash = committed_manifest_hash(&b_raw);
-        assert_eq!(a_hash, b_hash);
-        assert!(op
-            .exists(&format!("data/manifests/{a_hash}"))
+        assert_ne!(
+            a_hash, b_hash,
+            "duplicate content at different paths must keep path-scoped manifests"
+        );
+        let a_manifest_raw = op
+            .read(&format!("data/manifests/{a_hash}"))
             .await
-            .unwrap());
+            .unwrap()
+            .to_vec();
+        let b_manifest_raw = op
+            .read(&format!("data/manifests/{b_hash}"))
+            .await
+            .unwrap()
+            .to_vec();
+        let a_manifest = SyncManifest::from_bytes(&a_manifest_raw).unwrap();
+        let b_manifest = SyncManifest::from_bytes(&b_manifest_raw).unwrap();
+        assert_eq!(
+            a_manifest.file_hash, b_manifest.file_hash,
+            "content hash should still dedupe identical bytes"
+        );
+        assert_eq!(a_manifest.rel_path.as_deref(), Some("docs/a.txt"));
+        assert_eq!(b_manifest.rel_path.as_deref(), Some("docs/b.txt"));
     }
 
     #[tokio::test]

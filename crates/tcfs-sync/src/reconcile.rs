@@ -23,7 +23,7 @@ use crate::engine::{self, OptionalEncryption, ProgressFn};
 use crate::index_entry::{
     manifest_key, parse_index_entry_record, resolve_visible_index_entry, RemoteIndexEntry,
 };
-use crate::manifest::SyncManifest;
+use crate::manifest::{SymlinkManifest, SyncManifest};
 use crate::state::{StateCache, StateCacheBackend, SyncState};
 
 const REMOTE_INDEX_READ_CONCURRENCY: usize = 32;
@@ -195,7 +195,7 @@ pub async fn list_remote_index(
         if rel_path.is_empty()
             || rel_path.ends_with('/')
             || rel_path == DIR_MARKER
-            || rel_path.ends_with("/.tcfs_dir")
+            || rel_path.ends_with(DIR_MARKER_SUFFIX)
         {
             continue;
         }
@@ -697,9 +697,6 @@ async fn classify_path(
         (None, None, None) => ReconcileAction::UpToDate {
             rel_path: rel_path.to_string(),
         },
-        // Local exists, not remote, but was tracked — local is newer
-        // (This case is covered above, but the compiler needs exhaustive matching
-        //  for the tracked_opt variations. The (Some, None, None) case above handles it.)
     }
 }
 
@@ -713,6 +710,28 @@ async fn compare_both_exist(
     remote_prefix: &str,
     device_id: &str,
 ) -> ReconcileAction {
+    // Symlinks are first-class entries: they must NOT be dereferenced and hashed
+    // like regular files (that would hash the *target's* content and then fail to
+    // parse the stored SymlinkManifest as a SyncManifest, re-pushing every cycle).
+    // Detect a local symlink with symlink_metadata (does not follow the link) and
+    // compare on symlink identity instead. Mirrors the push path
+    // (`upload_symlink_with_device`) and `collect_local_set` (preserve_symlinks).
+    let local_is_symlink = std::fs::symlink_metadata(local_path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if local_is_symlink {
+        return compare_both_exist_symlink(
+            rel_path,
+            local_path,
+            remote_entry,
+            tracked,
+            op,
+            remote_prefix,
+            device_id,
+        )
+        .await;
+    }
+
     // Get local hash
     let local_hash = match tcfs_chunks::hash_file(local_path) {
         Ok(h) => tcfs_chunks::hash_to_hex(&h),
@@ -768,6 +787,20 @@ async fn compare_both_exist(
         remote_device,
     );
 
+    outcome_to_action(outcome, rel_path, local_path, remote_entry)
+}
+
+/// Map a `SyncOutcome` to the corresponding `ReconcileAction`.
+///
+/// Shared tail for `compare_both_exist` and `compare_both_exist_symlink`: both
+/// resolve the same vector-clock decision into the same push/pull/conflict
+/// action, so the mapping lives here to keep the two sites in lockstep.
+fn outcome_to_action(
+    outcome: crate::conflict::SyncOutcome,
+    rel_path: &str,
+    local_path: &Path,
+    remote_entry: &RemoteIndexEntry,
+) -> ReconcileAction {
     match outcome {
         crate::conflict::SyncOutcome::UpToDate => ReconcileAction::UpToDate {
             rel_path: rel_path.to_string(),
@@ -788,6 +821,86 @@ async fn compare_both_exist(
             info,
         },
     }
+}
+
+/// Compare when both sides exist and the local entry is a symbolic link.
+///
+/// Symlink identity is the link target text, hashed via
+/// `engine::symlink_manifest_hash` — the SAME identity the push path
+/// (`upload_symlink_with_device`) writes into the manifest hash, the remote
+/// index entry, and the local sync-state `blake3`. Comparing those identities
+/// through `compare_clocks` reuses the regular-file conflict/pull/push logic:
+/// identical targets short-circuit to UpToDate, divergent targets fall through
+/// to the vector-clock decision (Push / Pull / Conflict). This fixes the
+/// steady-state defect where a tracked symlink was re-pushed every cycle.
+async fn compare_both_exist_symlink(
+    rel_path: &str,
+    local_path: &Path,
+    remote_entry: &RemoteIndexEntry,
+    tracked: Option<&SyncState>,
+    op: &Operator,
+    remote_prefix: &str,
+    device_id: &str,
+) -> ReconcileAction {
+    // Read the local link target without following it.
+    let local_target = match crate::engine::read_symlink_target_text(local_path) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(path = %local_path.display(), error = %e, "failed to read local symlink target");
+            return ReconcileAction::UpToDate {
+                rel_path: rel_path.to_string(),
+            };
+        }
+    };
+    let local_hash = crate::engine::symlink_manifest_hash(&local_target);
+    let local_vclock = tracked.map(|s| s.vclock.clone()).unwrap_or_default();
+
+    // Fetch and parse the remote manifest as a SymlinkManifest — the exact type
+    // the push path serialized. Failing closed: if the remote entry is not a
+    // symlink manifest (kind/version mismatch or unreadable), fall back to the
+    // conservative re-push so we never silently treat a mismatched remote as
+    // up-to-date.
+    let manifest_path = format!(
+        "{}/manifests/{}",
+        remote_prefix.trim_end_matches('/'),
+        &remote_entry.manifest_hash
+    );
+    let remote_manifest = match op.read(&manifest_path).await {
+        Ok(data) => match SymlinkManifest::from_bytes(&data.to_vec()) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(path = manifest_path, error = %e, "failed to parse remote symlink manifest");
+                return ReconcileAction::Push {
+                    local_path: local_path.to_path_buf(),
+                    rel_path: rel_path.to_string(),
+                    reason: PushReason::NewLocal,
+                };
+            }
+        },
+        Err(e) => {
+            warn!(path = manifest_path, error = %e, "failed to read remote symlink manifest");
+            return ReconcileAction::Push {
+                local_path: local_path.to_path_buf(),
+                rel_path: rel_path.to_string(),
+                reason: PushReason::NewLocal,
+            };
+        }
+    };
+
+    let remote_hash = crate::engine::symlink_manifest_hash(&remote_manifest.symlink_target);
+    let remote_device = remote_manifest.written_by.as_str();
+
+    let outcome = compare_clocks(
+        &local_vclock,
+        &remote_manifest.vclock,
+        &local_hash,
+        &remote_hash,
+        rel_path,
+        device_id,
+        remote_device,
+    );
+
+    outcome_to_action(outcome, rel_path, local_path, remote_entry)
 }
 
 // ── Execution ────────────────────────────────────────────────────────────────
@@ -856,30 +969,52 @@ pub async fn execute_plan(
                 local_path,
                 rel_path,
                 ..
-            } => match engine::upload_file_with_device(
-                op,
-                local_path,
-                remote_prefix,
-                state,
-                progress,
-                device_id,
-                Some(rel_path.as_str()),
-                encryption,
-            )
-            .await
-            {
-                Ok(upload) => {
-                    if !upload.skipped {
-                        result.pushed += 1;
-                        result.bytes_uploaded += upload.bytes;
+            } => {
+                // Symlinks (TIN-1620 T13-Z) are published as first-class link
+                // manifests, not run through the chunked-file uploader, which
+                // would otherwise dereference or fail on them. `symlink_metadata`
+                // does not follow the link, so we detect it without touching the
+                // target.
+                let is_symlink = std::fs::symlink_metadata(local_path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                let upload = if is_symlink {
+                    engine::upload_symlink_with_device(
+                        op,
+                        local_path,
+                        remote_prefix,
+                        state,
+                        device_id,
+                        rel_path.as_str(),
+                    )
+                    .await
+                } else {
+                    engine::upload_file_with_device(
+                        op,
+                        local_path,
+                        remote_prefix,
+                        state,
+                        progress,
+                        device_id,
+                        Some(rel_path.as_str()),
+                        encryption,
+                    )
+                    .await
+                };
+                match upload {
+                    Ok(upload) => {
+                        if !upload.skipped {
+                            result.pushed += 1;
+                            result.bytes_uploaded += upload.bytes;
+                        }
+                    }
+                    Err(e) => {
+                        result
+                            .errors
+                            .push((rel_path.clone(), format!("push failed: {e:#}")));
                     }
                 }
-                Err(e) => {
-                    result
-                        .errors
-                        .push((rel_path.clone(), format!("push failed: {e:#}")));
-                }
-            },
+            }
 
             ReconcileAction::Pull {
                 rel_path,
@@ -1110,6 +1245,14 @@ async fn execute_new_remote_pulls_concurrent(
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Collect local files into a `rel_path → PathBuf` map, applying the blacklist.
+///
+/// Tracked symlinks (git mode `120000`) are collected as links rather than
+/// dropped or dereferenced (TIN-1620 T13-Z): `preserve_symlinks: true` keeps
+/// them in their own `CollectResult::symlinks` bucket, which we fold into the
+/// same `rel_path → PathBuf` map so reconcile sees them. `follow_symlinks`
+/// stays `false` so we never walk *through* a link. The fail-closed deny-set
+/// guard in the collector still screens link targets before they reach here,
+/// and the push/restore paths below are symlink-aware.
 fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap<String, PathBuf>> {
     let config = crate::engine::CollectConfig {
         sync_git_dirs: blacklist.allows_git_dirs(),
@@ -1117,16 +1260,16 @@ fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap
         sync_hidden_dirs: blacklist.allows_hidden_dirs(),
         exclude_patterns: blacklist.glob_patterns(),
         follow_symlinks: false,
-        preserve_symlinks: false,
+        preserve_symlinks: true,
         sync_empty_dirs: false, // reconcile only cares about files
     };
     let result = crate::engine::collect_files(local_root, &config)?;
 
     let mut map = HashMap::new();
-    for file in result.files {
-        if let Ok(rel) = file.strip_prefix(local_root) {
+    for entry in result.files.into_iter().chain(result.symlinks) {
+        if let Ok(rel) = entry.strip_prefix(local_root) {
             let rel_str = crate::engine::normalize_rel_path_text(&rel.to_string_lossy());
-            map.insert(rel_str, file);
+            map.insert(rel_str, entry);
         }
     }
     Ok(map)
@@ -1264,6 +1407,7 @@ mod tests {
             written_at: 0,
             rel_path: Some("doc.txt".into()),
             mode: None,
+            mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
         };
@@ -1294,6 +1438,7 @@ mod tests {
             written_at: 0,
             rel_path: Some("doc.txt".into()),
             mode: None,
+            mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
         };
@@ -1384,6 +1529,7 @@ mod tests {
             written_at: 0,
             rel_path: Some("doc.txt".into()),
             mode: None,
+            mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
         };
@@ -1741,6 +1887,126 @@ mod tests {
         assert_eq!(link_state.device_id, "honey");
     }
 
+    /// (c) Symlink round-trips through reconcile's *push* path: a local-only
+    /// symlink is collected as a link (not dropped, not dereferenced), pushed as
+    /// a first-class symlink manifest, then restored on a fresh peer with its
+    /// target intact (TIN-1620 T13-Z). This exercises the new
+    /// `preserve_symlinks: true` collection plus the symlink-aware push dispatch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconcile_push_then_restore_round_trips_symlink() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        let restore_root = dir.path().join("restore");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&restore_root).unwrap();
+
+        // Source has a regular file plus a tracked symlink pointing at it.
+        std::fs::write(source_root.join("target.txt"), b"target body").unwrap();
+        std::os::unix::fs::symlink("target.txt", source_root.join("link.txt")).unwrap();
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        // 1. The source side reconciles: the symlink must surface as a Push, not
+        //    be silently dropped by collection.
+        let mut source_state =
+            crate::state::StateCache::open(&dir.path().join("source-state.json")).unwrap();
+        let push_plan = reconcile(
+            &op,
+            &source_root,
+            "data",
+            &source_state,
+            "neo",
+            &blacklist,
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(
+            push_plan.actions.iter().any(|a| matches!(
+                a,
+                ReconcileAction::Push { rel_path, .. } if rel_path == "link.txt"
+            )),
+            "symlink must be collected and planned as a push, got {:?}",
+            push_plan.summary
+        );
+
+        let push_result = execute_plan(
+            &push_plan,
+            &op,
+            &source_root,
+            "data",
+            &mut source_state,
+            "neo",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(push_result.errors.is_empty(), "{:?}", push_result.errors);
+
+        // The published manifest must be a symlink manifest, not a regular-file
+        // one that dereferenced the link into target bytes.
+        let manifest_bytes = op.read("data/index/link.txt").await.unwrap().to_vec();
+        let entry = crate::index_entry::parse_index_entry_record(&manifest_bytes).unwrap();
+        let manifest_hash = match entry {
+            crate::index_entry::ParsedIndexEntry::Legacy(e) => e.manifest_hash,
+            crate::index_entry::ParsedIndexEntry::V2(e) => e.current.unwrap().manifest_hash,
+        };
+        let published = op
+            .read(&format!("data/manifests/{manifest_hash}"))
+            .await
+            .unwrap()
+            .to_vec();
+        let sym = crate::manifest::SymlinkManifest::from_bytes(&published)
+            .expect("published manifest must be a symlink manifest, not dereferenced content");
+        assert_eq!(sym.symlink_target, "target.txt");
+
+        // 2. A fresh peer restores: the link comes back as a link with the same
+        //    target, never dereferenced into a copy of the file.
+        let mut restore_state =
+            crate::state::StateCache::open(&dir.path().join("restore-state.json")).unwrap();
+        let pull_plan = reconcile(
+            &op,
+            &restore_root,
+            "data",
+            &restore_state,
+            "honey",
+            &blacklist,
+            &config,
+        )
+        .await
+        .unwrap();
+        let pull_result = execute_plan(
+            &pull_plan,
+            &op,
+            &restore_root,
+            "data",
+            &mut restore_state,
+            "honey",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(pull_result.errors.is_empty(), "{:?}", pull_result.errors);
+
+        let restored_link = restore_root.join("link.txt");
+        assert!(
+            std::fs::symlink_metadata(&restored_link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "restored entry must be a symlink, not a dereferenced regular file"
+        );
+        assert_eq!(
+            std::fs::read_link(&restored_link).unwrap(),
+            PathBuf::from("target.txt")
+        );
+    }
+
     // ── reconcile plan: both exist, up-to-date ───────────────────────────
 
     #[tokio::test]
@@ -1869,6 +2135,121 @@ mod tests {
         assert_eq!(plan.summary.pushes, 0);
         assert_eq!(plan.summary.pulls, 0);
         assert_eq!(plan.summary.conflicts, 0);
+    }
+
+    // ── reconcile plan: tracked symlink converges (steady state) ─────────
+    //
+    // Regression for the symlink steady-state convergence defect: a tracked
+    // symlink present on BOTH local and remote must reconcile to UpToDate on
+    // every subsequent cycle, not re-Push forever. The remote here is written
+    // by `upload_symlink_with_device`, the same primitive `push_tree` uses, so
+    // the index entry, manifest, and local sync state match production exactly.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconcile_tracked_symlink_converges_up_to_date() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path().join("repo");
+        std::fs::create_dir_all(&local_root).unwrap();
+
+        // A real regular file plus a tracked symlink that points at it.
+        std::fs::write(local_root.join("target.txt"), b"target").unwrap();
+        let link = local_root.join("link.txt");
+        std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+        // First reconcile cycle: push the symlink to the remote, recording the
+        // symlink sync state (blake3 = symlink_manifest_hash(target)) keyed on
+        // the live local path. This stands in for the prior successful push.
+        let state_path = dir.path().join("state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        crate::engine::upload_symlink_with_device(
+            &op, &link, "data", &mut state, "neo", "link.txt",
+        )
+        .await
+        .unwrap();
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        // Second reconcile cycle against the SAME local tree + remote: the
+        // symlink exists on both sides and is tracked, so it must converge.
+        let plan = reconcile(&op, &local_root, "data", &state, "neo", &blacklist, &config)
+            .await
+            .unwrap();
+
+        let link_action = plan.actions.iter().find(|a| match a {
+            ReconcileAction::UpToDate { rel_path }
+            | ReconcileAction::Push { rel_path, .. }
+            | ReconcileAction::Pull { rel_path, .. }
+            | ReconcileAction::Conflict { rel_path, .. } => rel_path == "link.txt",
+            _ => false,
+        });
+        assert!(
+            matches!(link_action, Some(ReconcileAction::UpToDate { .. })),
+            "tracked unchanged symlink must converge to UpToDate, got {link_action:?}"
+        );
+        assert!(
+            !plan.actions.iter().any(
+                |a| matches!(a, ReconcileAction::Push { rel_path, .. } if rel_path == "link.txt")
+            ),
+            "tracked unchanged symlink must not re-push on a steady-state cycle"
+        );
+    }
+
+    // A *changed* symlink target must still be detected as a divergence so the
+    // fix is not a vacuous "always UpToDate".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconcile_changed_symlink_target_is_not_up_to_date() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path().join("repo");
+        std::fs::create_dir_all(&local_root).unwrap();
+
+        std::fs::write(local_root.join("a.txt"), b"a").unwrap();
+        std::fs::write(local_root.join("b.txt"), b"b").unwrap();
+        let link = local_root.join("link.txt");
+        std::os::unix::fs::symlink("a.txt", &link).unwrap();
+
+        // Push the symlink pointing at a.txt, recording its sync state.
+        let state_path = dir.path().join("state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        crate::engine::upload_symlink_with_device(
+            &op, &link, "data", &mut state, "neo", "link.txt",
+        )
+        .await
+        .unwrap();
+
+        // Repoint the local symlink at b.txt without re-syncing: local diverges
+        // from the tracked + remote target.
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("b.txt", &link).unwrap();
+
+        let blacklist = Blacklist::default();
+        let config = ReconcileConfig::default();
+
+        let plan = reconcile(&op, &local_root, "data", &state, "neo", &blacklist, &config)
+            .await
+            .unwrap();
+
+        let link_action = plan.actions.iter().find(|a| match a {
+            ReconcileAction::UpToDate { rel_path }
+            | ReconcileAction::Push { rel_path, .. }
+            | ReconcileAction::Pull { rel_path, .. }
+            | ReconcileAction::Conflict { rel_path, .. } => rel_path == "link.txt",
+            _ => false,
+        });
+        assert!(
+            !matches!(link_action, Some(ReconcileAction::UpToDate { .. })),
+            "a changed symlink target must not be classified UpToDate, got {link_action:?}"
+        );
+        assert!(
+            matches!(
+                link_action,
+                Some(ReconcileAction::Push { .. }) | Some(ReconcileAction::Conflict { .. })
+            ),
+            "a changed symlink target must surface as Push/Conflict, got {link_action:?}"
+        );
     }
     // ── original tests ───────────────────────────────────────────────────
 

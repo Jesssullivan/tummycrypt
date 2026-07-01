@@ -347,6 +347,7 @@ impl TcfsVfs {
             written_at: now,
             rel_path: Some(vpath.to_string()),
             mode: None,
+            mtime: None,
             encrypted_file_key,
             wrapped_file_keys: Vec::new(),
         };

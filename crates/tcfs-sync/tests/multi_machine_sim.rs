@@ -179,6 +179,7 @@ fn execute_op(
                 written_at: 0,
                 rel_path: Some(path.clone()),
                 mode: None,
+                mtime: None,
                 encrypted_file_key: None,
                 wrapped_file_keys: Vec::new(),
             };
@@ -916,6 +917,7 @@ fn test_manifest_serialization_in_sim() {
         written_at: 1000,
         rel_path: Some("src/main.rs".into()),
         mode: None,
+        mtime: None,
         encrypted_file_key: None,
         wrapped_file_keys: Vec::new(),
     };

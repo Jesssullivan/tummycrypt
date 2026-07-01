@@ -25,6 +25,14 @@ fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf
     path
 }
 
+fn manifest_hash_from_remote_path(remote_path: &str) -> String {
+    remote_path
+        .rsplit('/')
+        .next()
+        .expect("remote manifest path should include file name")
+        .to_string()
+}
+
 /// Two devices push to the same rel_path — second device detects conflict.
 #[tokio::test]
 async fn two_device_conflict_via_index() {
@@ -55,8 +63,12 @@ async fn two_device_conflict_via_index() {
 
     // Write index entry (simulating what the CLI does after push)
     let index_key = format!("{}/index/hello.txt", prefix);
-    let index_entry = RemoteIndexEntry::new(upload_a.hash.clone(), upload_a.bytes, upload_a.chunks)
-        .to_legacy_bytes();
+    let index_entry = RemoteIndexEntry::new(
+        manifest_hash_from_remote_path(&upload_a.remote_path),
+        upload_a.bytes,
+        upload_a.chunks,
+    )
+    .to_legacy_bytes();
     op.write(&index_key, index_entry)
         .await
         .expect("write index entry");
@@ -134,8 +146,12 @@ async fn sequential_push_no_conflict() {
 
     // Write index entry
     let index_key = format!("{}/index/doc.txt", prefix);
-    let index_entry = RemoteIndexEntry::new(upload_a.hash.clone(), upload_a.bytes, upload_a.chunks)
-        .to_legacy_bytes();
+    let index_entry = RemoteIndexEntry::new(
+        manifest_hash_from_remote_path(&upload_a.remote_path),
+        upload_a.bytes,
+        upload_a.chunks,
+    )
+    .to_legacy_bytes();
     op.write(&index_key, index_entry)
         .await
         .expect("write index entry");
@@ -214,8 +230,12 @@ async fn conflict_records_state() {
 
     // Write index
     let index_key = format!("{}/index/data.bin", prefix);
-    let index_entry = RemoteIndexEntry::new(upload_a.hash.clone(), upload_a.bytes, upload_a.chunks)
-        .to_legacy_bytes();
+    let index_entry = RemoteIndexEntry::new(
+        manifest_hash_from_remote_path(&upload_a.remote_path),
+        upload_a.bytes,
+        upload_a.chunks,
+    )
+    .to_legacy_bytes();
     op.write(&index_key, index_entry).await.unwrap();
 
     // Device B: write old content, record state, then write new content
