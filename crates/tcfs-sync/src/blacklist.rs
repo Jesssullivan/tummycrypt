@@ -4,6 +4,7 @@
 //! into a single `Blacklist` type with a unified `check()` method.
 
 use std::path::Path;
+use tracing::debug;
 
 /// Why a path was excluded — useful for debug logging and diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +22,17 @@ pub enum BlacklistReason {
     HiddenDir,
     /// .git directory when `sync_git_dirs` is false.
     GitDir,
+    /// Fail-closed worktree fence: a non-directory named `.git` is a linked
+    /// worktree's (or submodule's) gitfile pointer (`gitdir: <path>`). It
+    /// dangles on any other host, and a roamed deletion of the admin area it
+    /// points at would destroy the origin host's live worktree. Always denied
+    /// regardless of `sync_git_dirs` / `git_sync_mode` (G5 / TIN-1620).
+    GitFilePointer,
+    /// Fail-closed worktree fence: any path containing a `.git/worktrees/`
+    /// segment — the per-worktree admin area (`HEAD`, `index`, `gitdir` with
+    /// absolute host paths). Always denied, even under `sync_git_dirs=true`
+    /// with `git_sync_mode="raw"` (G5 / TIN-1620).
+    GitWorktreesAdmin,
     /// VFS internal directory marker (.tcfs_dir).
     VfsMarker,
 }
@@ -34,6 +46,8 @@ impl std::fmt::Display for BlacklistReason {
             BlacklistReason::StubExtension => write!(f, "stub extension"),
             BlacklistReason::HiddenDir => write!(f, "hidden directory"),
             BlacklistReason::GitDir => write!(f, ".git directory"),
+            BlacklistReason::GitFilePointer => write!(f, "gitfile pointer (linked worktree)"),
+            BlacklistReason::GitWorktreesAdmin => write!(f, ".git/worktrees admin area"),
             BlacklistReason::VfsMarker => write!(f, "VFS marker"),
         }
     }
@@ -94,6 +108,28 @@ fn security_file_reason(name: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// True when `path` contains a `.git/worktrees/` segment — the per-worktree
+/// admin area git maintains for linked worktrees (`HEAD`, `index`, `gitdir`
+/// files that embed absolute host paths). Roamed raw these dangle, and a
+/// roamed `git worktree prune` deletion would sync back and destroy the
+/// origin host's live worktree. Fail-closed: fenced regardless of config
+/// (G5 / TIN-1620).
+fn has_git_worktrees_segment(path: &Path) -> bool {
+    let mut prev_was_dot_git = false;
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(name) => {
+                if prev_was_dot_git && name == "worktrees" {
+                    return true;
+                }
+                prev_was_dot_git = name == ".git";
+            }
+            _ => prev_was_dot_git = false,
+        }
+    }
+    false
 }
 
 /// Centralized exclusion filter for the sync pipeline.
@@ -214,8 +250,17 @@ impl Blacklist {
             }
         }
 
-        // .git directory — check before hidden dir rule
-        if is_dir && name == ".git" {
+        // .git — worktree fence first, then the config-gated dir rule (before
+        // the hidden dir rule).
+        if name == ".git" {
+            // Fail-closed worktree fence: a non-directory named `.git` is a
+            // linked worktree's (or submodule's) gitfile pointer. Never roam
+            // it, regardless of `sync_git_dirs` / `git_sync_mode`
+            // (G5 / TIN-1620).
+            if !is_dir {
+                debug!("fencing gitfile pointer: non-directory .git never roams");
+                return Some(BlacklistReason::GitFilePointer);
+            }
             if !self.sync_git_dirs {
                 return Some(BlacklistReason::GitDir);
             }
@@ -233,9 +278,17 @@ impl Blacklist {
 
     /// Check a full path against the blacklist. Returns first matching reason or None.
     ///
-    /// Checks the final component name against `check_name()`. For the watcher's
-    /// component-walk behavior, use `check_path_components()` instead.
+    /// Applies the fail-closed `.git/worktrees/` fence across the whole path,
+    /// then checks the final component name against `check_name()`. For the
+    /// watcher's component-walk behavior, use `check_path_components()` instead.
     pub fn check(&self, path: &Path, is_dir: bool) -> Option<BlacklistReason> {
+        if has_git_worktrees_segment(path) {
+            debug!(
+                path = %path.display(),
+                "fencing .git/worktrees admin area: never roams"
+            );
+            return Some(BlacklistReason::GitWorktreesAdmin);
+        }
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             self.check_name(name, is_dir)
         } else {
@@ -256,7 +309,16 @@ impl Blacklist {
     /// Check every component of a path (for watcher-style full-path filtering).
     ///
     /// Returns the reason for the first matching component, or None if all pass.
+    /// Also applies the fail-closed `.git/worktrees/` fence across the whole
+    /// path (G5 / TIN-1620).
     pub fn check_path_components(&self, path: &Path) -> Option<BlacklistReason> {
+        if has_git_worktrees_segment(path) {
+            debug!(
+                path = %path.display(),
+                "fencing .git/worktrees admin area: never roams"
+            );
+            return Some(BlacklistReason::GitWorktreesAdmin);
+        }
         for component in path.components() {
             if let std::path::Component::Normal(name) = component {
                 if let Some(name_str) = name.to_str() {
@@ -270,12 +332,20 @@ impl Blacklist {
         None
     }
 
-    /// Check only the fail-closed security deny-set across every path component.
+    /// Check only the fail-closed deny-sets across every path component: the
+    /// security deny-set plus the config-independent `.git/worktrees/` fence.
     ///
     /// This is for cases where a caller intentionally starts from a hidden root
     /// such as `~/.claude/projects`, but must still refuse credential stores,
     /// dotenv files, and live databases anywhere under that root.
     pub fn check_security_path_components(&self, path: &Path) -> Option<BlacklistReason> {
+        if has_git_worktrees_segment(path) {
+            debug!(
+                path = %path.display(),
+                "fencing .git/worktrees admin area: never roams"
+            );
+            return Some(BlacklistReason::GitWorktreesAdmin);
+        }
         for component in path.components() {
             if let std::path::Component::Normal(name) = component {
                 if let Some(name_str) = name.to_str() {
@@ -542,6 +612,94 @@ mod tests {
             bl.check_security_path_components(Path::new("home/jess/.config/sops-nix/secrets/key")),
             Some(BlacklistReason::Security("sops-nix"))
         ));
+    }
+
+    // --- G5 / TIN-1620: linked-worktree fence (gitfile pointers + .git/worktrees) ---
+
+    #[test]
+    fn test_worktree_gitfile_pointer_denied_at_repo_root() {
+        // (a) A non-directory `.git` — a linked worktree's gitfile pointer —
+        // is fenced even under the most permissive config.
+        let bl = Blacklist::new(&[], true, true, "raw");
+        assert_eq!(
+            bl.check_name(".git", false),
+            Some(BlacklistReason::GitFilePointer)
+        );
+        assert_eq!(
+            bl.check(Path::new("wt-linked/.git"), false),
+            Some(BlacklistReason::GitFilePointer)
+        );
+        // Default (git sync off) is denied too — fail closed either way.
+        let bl = Blacklist::default();
+        assert_eq!(
+            bl.check_name(".git", false),
+            Some(BlacklistReason::GitFilePointer)
+        );
+    }
+
+    #[test]
+    fn test_worktrees_admin_area_denied_under_raw() {
+        // (b) `.git/worktrees/**` never roams, even with sync_git_dirs=true
+        // and git_sync_mode="raw".
+        let bl = Blacklist::new(&[], true, true, "raw");
+        for p in [
+            "repo/.git/worktrees",
+            "repo/.git/worktrees/wt-fence/gitdir",
+            "repo/.git/worktrees/wt-fence/HEAD",
+            "repo/.git/worktrees/wt-fence/index",
+        ] {
+            assert_eq!(
+                bl.check(Path::new(p), false),
+                Some(BlacklistReason::GitWorktreesAdmin),
+                "expected {p} to be fenced via check()"
+            );
+            assert_eq!(
+                bl.check_path_components(Path::new(p)),
+                Some(BlacklistReason::GitWorktreesAdmin),
+                "expected {p} to be fenced via component walk"
+            );
+        }
+        // The security-only walk fences it too (config-independent).
+        assert_eq!(
+            bl.check_security_path_components(Path::new("repo/.git/worktrees/wt/HEAD")),
+            Some(BlacklistReason::GitWorktreesAdmin)
+        );
+    }
+
+    #[test]
+    fn test_raw_git_dir_internals_still_roam() {
+        // (c) Regular .git internals are unaffected — the proven raw forward
+        // roam must not regress.
+        let bl = Blacklist::new(&[], true, true, "raw");
+        assert_eq!(bl.check_name(".git", true), None);
+        for p in [
+            "repo/.git/objects/ab/cdef0123456789",
+            "repo/.git/refs/heads/main",
+            "repo/.git/HEAD",
+            "repo/.git/config",
+        ] {
+            assert_eq!(bl.check(Path::new(p), false), None, "{p} should pass");
+            assert_eq!(
+                bl.check_path_components(Path::new(p)),
+                None,
+                "{p} should pass component walk"
+            );
+        }
+        // A directory named `worktrees` NOT under `.git` is a normal dir.
+        assert_eq!(bl.check(Path::new("repo/worktrees/notes.md"), false), None);
+    }
+
+    #[test]
+    fn test_nested_gitfile_pointer_denied_fail_closed() {
+        // (d) A non-directory named `.git` anywhere in the tree (submodule
+        // pointer shape) is fenced — fail closed.
+        let bl = Blacklist::new(&[], true, true, "raw");
+        assert_eq!(
+            bl.check(Path::new("repo/vendor/dep/.git"), false),
+            Some(BlacklistReason::GitFilePointer)
+        );
+        // As a directory it follows the normal .git-dir policy instead.
+        assert_eq!(bl.check(Path::new("repo/vendor/dep/.git"), true), None);
     }
 
     #[test]
