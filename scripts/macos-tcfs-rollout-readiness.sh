@@ -22,7 +22,7 @@ Options:
                                  (default: ~/Library/LaunchAgents/dev.tinyland.tcfsd.plist)
   --launch-label <label>         launchd label (default: dev.tinyland.tcfsd)
   --app-path <path>              TCFSProvider.app path
-                                 (default: ~/Applications/TCFSProvider.app)
+                                 (default: /Applications/TCFSProvider.app)
   --plugin-id <id>               FileProvider extension id
                                  (default: io.tinyland.tcfs.fileprovider)
   --status-timeout <seconds>     Bound tcfs status (default: 8)
@@ -38,7 +38,7 @@ EXPECTED_TUMMYCRYPT_REV="${TCFS_EXPECTED_TUMMYCRYPT_REV:-}"
 LAB_ROOT="${TCFS_LAB_ROOT:-$HOME/git/lab}"
 LAUNCH_AGENT="${TCFS_LAUNCH_AGENT:-$HOME/Library/LaunchAgents/dev.tinyland.tcfsd.plist}"
 LAUNCH_LABEL="${TCFS_LAUNCH_LABEL:-dev.tinyland.tcfsd}"
-APP_PATH="${TCFS_APP_PATH:-$HOME/Applications/TCFSProvider.app}"
+APP_PATH="${TCFS_APP_PATH:-/Applications/TCFSProvider.app}"
 PLUGIN_ID="${TCFS_PLUGIN_ID:-io.tinyland.tcfs.fileprovider}"
 STATUS_TIMEOUT="${TCFS_STATUS_TIMEOUT:-8}"
 SKIP_STATUS="${TCFS_SKIP_STATUS:-0}"
@@ -210,8 +210,7 @@ plist_value() {
 }
 
 check_launch_agent() {
-  local program=""
-  local status=""
+  local argv0=""
 
   if [[ ! -f "$LAUNCH_AGENT" ]]; then
     fail "LaunchAgent plist not found: $LAUNCH_AGENT"
@@ -222,23 +221,23 @@ check_launch_agent() {
   note "launch label: $LAUNCH_LABEL"
 
   if [[ -x "$PLISTBUDDY_BIN" ]]; then
-    program="$(plist_value "ProgramArguments:2" "$LAUNCH_AGENT" || true)"
-    if [[ -n "$program" ]]; then
-      note "launch agent command: $program"
-      note "launch agent command inspection: not executed"
+    argv0="$(plist_value "ProgramArguments:0" "$LAUNCH_AGENT" || true)"
+    if [[ -n "$argv0" ]]; then
+      note "launch agent command: configured (argv0: $argv0)"
+      note "launch agent command inspection: redacted"
     else
-      warn "could not read ProgramArguments:2 from LaunchAgent"
+      warn "could not read ProgramArguments:0 from LaunchAgent"
     fi
   else
     warn "PlistBuddy not executable: $PLISTBUDDY_BIN"
   fi
 
   if command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1; then
-    status="$("$LAUNCHCTL_BIN" print "gui/$(id -u)/$LAUNCH_LABEL" 2>&1 || true)"
-    if grep -Fq "Could not find service" <<<"$status"; then
-      fail "launchd service not found: $LAUNCH_LABEL"
-    else
+    if "$LAUNCHCTL_BIN" list 2>/dev/null \
+      | awk -v label="$LAUNCH_LABEL" '$3 == label { found = 1 } END { exit found ? 0 : 1 }'; then
       note "launchd service: present ($LAUNCH_LABEL)"
+    else
+      fail "launchd service not found: $LAUNCH_LABEL"
     fi
   else
     warn "launchctl not found"
@@ -280,14 +279,16 @@ check_app_bundle() {
 check_pluginkit() {
   local output
   local count
+  local expected_extension
 
   if ! command -v "$PLUGINKIT_BIN" >/dev/null 2>&1; then
     warn "pluginkit not found"
     return
   fi
 
-  output="$("$PLUGINKIT_BIN" -m -A -p com.apple.fileprovider-nonui 2>&1 || true)"
+  output="$("$PLUGINKIT_BIN" -m -A -D -vvv -p com.apple.fileprovider-nonui 2>&1 || true)"
   count="$(grep -F -c "$PLUGIN_ID" <<<"$output" || true)"
+  expected_extension="$APP_PATH/Contents/Extensions/TCFSFileProvider.appex"
 
   note "FileProvider plugin registrations for $PLUGIN_ID: $count"
   case "$count" in
@@ -295,6 +296,15 @@ check_pluginkit() {
     1) ;;
     *) fail "multiple FileProvider plugin registrations for $PLUGIN_ID: $count" ;;
   esac
+
+  if [[ "$count" == "1" ]]; then
+    if grep -Fq "Path = $expected_extension" <<<"$output" \
+      || grep -Fq "Parent Bundle = $APP_PATH" <<<"$output"; then
+      note "FileProvider plugin registration path: matches app path"
+    else
+      fail "FileProvider plugin registration does not point at expected app path: $APP_PATH"
+    fi
+  fi
 }
 
 check_status() {
