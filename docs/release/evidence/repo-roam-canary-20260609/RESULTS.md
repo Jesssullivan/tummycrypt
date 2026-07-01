@@ -38,3 +38,15 @@ or a one-writer-at-a-time unsync/rehydrate handoff.
 See the README section "Roam an in-progress repo across machines" and
 `docs/ops/repo-roam-test-plan-2026-06-08.md`. The pass/fail gate is
 `scripts/repo-roam-fingerprint.sh` (`capture` / `compare`).
+
+## Raw run record (2026-06-09, as captured on neo)
+
+Verbatim operator run log; raw fingerprint artifacts are committed alongside in
+`neo-source-fingerprint/`.
+
+> Deployed: B1 reconcile units (raw .git-as-files) on current tcfs 0.12.14, hm gen 386 (neo).
+>
+> R0 source fingerprint (neo): 5b24b9f95065576e4f664141fe837e8e1d9e4586c2a5765720b34ed8b05ee0b3 (branch roam-canary-wip + staged AGENTS.md + unstaged README.md + untracked scratch + 1 stash, fsck=clean)
+> R1 neo PUSH: 126 pushed, 0 errors (raw .git incl objects/index/refs/logs+stash + working tree)
+> R2 honey PULL + compare: honey fingerprint = 5b24b9f9... IDENTICAL → dev-env-zero-diff=PASS (T13-Z), fsck clean both sides. Branch/staged/unstaged/untracked/stash all roamed exact.
+> R3 bidirectional (honey commit→neo): honey reconcile = 5 conflicts, 0 pushed → G5-git-5 concurrent-.git gate CONFIRMED expected-fail (AutoResolver not .git-aware). Forward roam clean; concurrent bidirectional needs .git-aware conflict resolution (future work) or unsync/rehydrate safe-handoff.
