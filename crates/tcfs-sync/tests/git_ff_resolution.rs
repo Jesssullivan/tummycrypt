@@ -1735,3 +1735,309 @@ async fn git_ff_pull_skips_when_local_ref_moves_after_plan() {
     drop(b_state);
     drop(s_state);
 }
+
+/// BLOCKER-3 (PR #513): a genuinely FF-ahead SUPERPROJECT head ref does NOT
+/// license force-syncing a DIVERGENT submodule branch ref that shares the outer
+/// repo's conflict group. `repo_root_for_git_path` splits on the FIRST `.git`,
+/// so every `.git/modules/<name>/**` conflict groups under the OUTER repo and
+/// would ride its FF dominance — but the head-only ancestry proof never covers
+/// submodule refs. Any ref-class path with no provable top-level head must veto
+/// the whole `.git` group (fail-closed, zero writes) so a divergent submodule
+/// pointer (branch/tag/stash/packed-refs) can never be silently clobbered.
+#[tokio::test]
+async fn git_ff_divergent_submodule_ref_vetoes_whole_group() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/git-ff-submodule-veto";
+    let blacklist = raw_blacklist();
+    let cfg = ff_config();
+
+    // Seed S at C0; A and B pull C0.
+    let s_tmp = TempDir::new().unwrap();
+    let s_repo = s_tmp.path().join("repo");
+    std::fs::create_dir_all(&s_repo).unwrap();
+    init_repo_c0(&s_repo);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_repo,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed raw push");
+    s_state.flush().unwrap();
+
+    let a_tmp = TempDir::new().unwrap();
+    let a_repo = a_tmp.path().join("repo");
+    std::fs::create_dir_all(&a_repo).unwrap();
+    let mut a_state = pull_into(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &a_tmp.path().join("a.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    let b_tmp = TempDir::new().unwrap();
+    let b_repo = b_tmp.path().join("repo");
+    std::fs::create_dir_all(&b_repo).unwrap();
+    let mut b_state = pull_into(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &b_tmp.path().join("b.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    // A submodule's real gitdir lives at `<super>/.git/modules/dep/`. We model
+    // its head ref as a raw-roamed pointer file — raw mode syncs all `.git/**`,
+    // so a real functioning submodule is unnecessary: the fix is purely about
+    // how `.git/modules/**` ref-class paths are CLASSIFIED by the FF veto.
+    let dep_ref = ".git/modules/dep/refs/heads/main";
+
+    // B seeds the submodule head ref → S0 and PUSHES it (B now tracks a clock
+    // for it that matches the remote copy).
+    std::fs::create_dir_all(b_repo.join(".git/modules/dep/refs/heads")).unwrap();
+    std::fs::write(b_repo.join(dep_ref), format!("{}\n", "a".repeat(40))).unwrap();
+    let b_seed_plan = reconcile(
+        &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("B submodule-ref seed plan");
+    assert!(
+        b_seed_plan.actions.iter().any(|a| matches!(
+            a,
+            ReconcileAction::Push { rel_path, .. } if rel_path == dep_ref
+        )),
+        "setup: the submodule head ref must roam as a raw push, got {:?}",
+        b_seed_plan.actions
+    );
+    execute_plan(
+        &b_seed_plan,
+        &op,
+        &b_repo,
+        prefix,
+        &mut b_state,
+        "device-b",
+        None,
+        None,
+    )
+    .await
+    .expect("B submodule-ref seed execute");
+    b_state.flush().unwrap();
+
+    // A commits C1 and pushes (remote head clock now carries a device-a tick;
+    // the head conflict FF-reclassifies and dominates).
+    commit_and_sync(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &mut a_state,
+        &blacklist,
+        &cfg,
+        "from_a.txt",
+        b"a-c1\n",
+        "C1 on A",
+    )
+    .await;
+    let c1 = head_sha(&a_repo);
+
+    // B fast-forwards main PAST C1 (a strict descendant, C2) with a concurrent
+    // clock, and RE-POINTS the submodule head ref → a DIVERGENT value WITHOUT
+    // re-syncing. Its tracked submodule-ref clock is unchanged, so the new
+    // content vs the remote's S0 is an equal-clock DIVERGENT conflict — a
+    // ref-class group member that groups under the OUTER repo root. A different
+    // length guarantees the change is detected (never skipped by a same-size /
+    // same-second quick check).
+    git(
+        &b_repo,
+        &[
+            "fetch",
+            "--quiet",
+            &a_repo.join(".git").to_string_lossy(),
+            &format!("{c1}:refs/remotes/peer/main"),
+        ],
+    );
+    git(&b_repo, &["reset", "-q", "--hard", &c1]);
+    let _c2 = commit(&b_repo, "from_b.txt", b"b-c2\n", "C2 on B");
+    std::fs::write(b_repo.join(dep_ref), format!("{}\n", "b".repeat(64))).unwrap();
+    tick_tracked_vclock(&mut b_state, ".git/refs/heads/main", "device-b");
+
+    let b_plan = reconcile(
+        &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("B plan");
+
+    let conflicts = git_conflicts(&b_plan);
+    assert!(
+        conflicts.iter().any(|c| c.ends_with(".git/refs/heads/main")),
+        "BLOCKER-3: the outer head ref must STAY Conflict (group vetoed by the divergent submodule ref), got {conflicts:?}"
+    );
+    assert!(
+        conflicts.iter().any(|c| c == dep_ref),
+        "BLOCKER-3: the divergent submodule head ref must STAY Conflict, got {conflicts:?}"
+    );
+    // Neither the outer head nor the submodule ref may reclassify to push/pull —
+    // the whole group is fail-closed.
+    assert!(
+        !git_ref_push(&b_plan) && !git_ref_pull(&b_plan),
+        "BLOCKER-3: the outer head must not reclassify to push/pull"
+    );
+    assert!(
+        !b_plan.actions.iter().any(|a| matches!(
+            a,
+            ReconcileAction::Push { rel_path, .. } | ReconcileAction::Pull { rel_path, .. }
+                if rel_path == dep_ref
+        )),
+        "BLOCKER-3: the divergent submodule ref must not be force-synced under group dominance"
+    );
+
+    drop(a_state);
+    drop(s_state);
+}
+
+/// Detached-`.git/HEAD` variant of BLOCKER-3 (PR #513): a divergent, detached
+/// top-level `.git/HEAD` (a raw commit SHA) sharing the group with an FF-ahead
+/// branch ref must ALSO veto the whole group. `.git/HEAD` is ref-class but
+/// `head_ref_for_git_path` never proves it (it matches only `.git/refs/heads/*`),
+/// so the same fail-closed veto covers it for free.
+#[tokio::test]
+async fn git_ff_divergent_detached_head_vetoes_whole_group() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/git-ff-detached-head-veto";
+    let blacklist = raw_blacklist();
+    let cfg = ff_config();
+
+    // Seed S at C0; A and B pull.
+    let s_tmp = TempDir::new().unwrap();
+    let s_repo = s_tmp.path().join("repo");
+    std::fs::create_dir_all(&s_repo).unwrap();
+    init_repo_c0(&s_repo);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_repo,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed raw push");
+    s_state.flush().unwrap();
+
+    let a_tmp = TempDir::new().unwrap();
+    let a_repo = a_tmp.path().join("repo");
+    std::fs::create_dir_all(&a_repo).unwrap();
+    let mut a_state = pull_into(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &a_tmp.path().join("a.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    let b_tmp = TempDir::new().unwrap();
+    let b_repo = b_tmp.path().join("repo");
+    std::fs::create_dir_all(&b_repo).unwrap();
+    let mut b_state = pull_into(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &b_tmp.path().join("b.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    // A commits C1 and pushes → remote head advances to C1.
+    commit_and_sync(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &mut a_state,
+        &blacklist,
+        &cfg,
+        "from_a.txt",
+        b"a-c1\n",
+        "C1 on A",
+    )
+    .await;
+    let c1 = head_sha(&a_repo);
+
+    // B fast-forwards main PAST C1 to C2 (strict descendant) with a concurrent
+    // clock → the branch head ref is genuinely FF-ahead + reclassify-eligible.
+    git(
+        &b_repo,
+        &[
+            "fetch",
+            "--quiet",
+            &a_repo.join(".git").to_string_lossy(),
+            &format!("{c1}:refs/remotes/peer/main"),
+        ],
+    );
+    git(&b_repo, &["reset", "-q", "--hard", &c1]);
+    let _c2 = commit(&b_repo, "from_b.txt", b"b-c2\n", "C2 on B");
+    tick_tracked_vclock(&mut b_state, ".git/refs/heads/main", "device-b");
+
+    // DETACH B's HEAD to a divergent raw SHA WITHOUT re-syncing. While on a
+    // branch, commits never rewrite `.git/HEAD` (it stays `ref: refs/heads/main`
+    // — a 21-byte symref), so its tracked clock still matches the remote copy.
+    // Overwriting it with a 41-byte raw SHA makes it an equal-clock DIVERGENT
+    // ref-class conflict; the different length guarantees detection.
+    std::fs::write(b_repo.join(".git/HEAD"), format!("{}\n", "d".repeat(40))).unwrap();
+
+    let b_plan = reconcile(
+        &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("B plan");
+
+    let conflicts = git_conflicts(&b_plan);
+    assert!(
+        conflicts.iter().any(|c| c.ends_with(".git/refs/heads/main")),
+        "detached-HEAD: the FF-ahead branch ref must STAY Conflict (group vetoed by the divergent HEAD), got {conflicts:?}"
+    );
+    assert!(
+        conflicts.iter().any(|c| c == ".git/HEAD"),
+        "detached-HEAD: the divergent detached HEAD must STAY Conflict, got {conflicts:?}"
+    );
+    assert!(
+        !git_ref_push(&b_plan) && !git_ref_pull(&b_plan),
+        "detached-HEAD: the whole group is fail-closed — no branch-ref push/pull"
+    );
+
+    drop(a_state);
+    drop(s_state);
+}

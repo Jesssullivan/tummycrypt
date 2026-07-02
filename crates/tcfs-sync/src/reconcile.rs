@@ -782,31 +782,6 @@ fn is_git_modules_ref_class(rel: &str) -> bool {
     }
 }
 
-/// True for `.git` paths that store a ref VALUE the fast-forward ancestry proof
-/// does NOT cover: `.git/packed-refs`, or anything under `.git/refs/` that is
-/// not under `.git/refs/heads/` (tags, stash, remotes, notes, ...). The proof
-/// only examines branch-head refs (`head_ref_for_git_path`), so if any such
-/// path is in a conflict group the FF decision must fail closed — force-syncing
-/// these pointer files under group dominance with no ancestry proof would be a
-/// silent clobber (BLOCKER-1, PR #513). `.git/index` and `.git/logs/**` are
-/// workdir / reflog state, not ref values, so they are excluded (they may keep
-/// riding the group decision).
-fn is_ref_valued_non_head_path(rel: &str) -> bool {
-    if !is_git_internal_path(rel) {
-        return false;
-    }
-    if rel.ends_with(".git/packed-refs") {
-        return true;
-    }
-    match rel.find(".git/refs/") {
-        Some(pos) => {
-            let after = &rel[pos + ".git/refs/".len()..];
-            !after.starts_with("heads/")
-        }
-        None => false,
-    }
-}
-
 /// Record a failed `.git/objects/**` action: inserts the enclosing repo root
 /// into the per-run barred set consulted by [`git_ref_barrier_hit`].
 fn mark_git_object_failure(rel_path: &str, local_root: &Path, barred: &mut BTreeSet<PathBuf>) {
@@ -1275,20 +1250,27 @@ async fn decide_repo_fast_forward(
     remote_index: &HashMap<String, RemoteIndexEntry>,
     encryption: OptionalEncryption<'_>,
 ) -> Option<(git_safety::FastForward, Vec<GitRefPin>)> {
-    // BLOCKER-1 (fail-closed, PR #513): the ancestry proof below covers ONLY
-    // branch-head refs (`.git/refs/heads/*`). If this conflict group contains
-    // any OTHER ref-valued path — `packed-refs`, tags, stash, remotes, notes —
-    // a fast-forward decision would force-sync that pointer state under group
-    // dominance with NO ancestry proof, a deterministic silent clobber. Veto
-    // the whole repo: every conflict stays Conflict, zero writes. (Index and
-    // `logs/**` are workdir/reflog state, not ref values, so they keep riding.)
+    // BLOCKER-1 + BLOCKER-3 (fail-closed, PR #513): the ancestry proof below
+    // covers ONLY provable top-level branch-head refs (`.git/refs/heads/*`, via
+    // `head_ref_for_git_path`). If this conflict group contains ANY OTHER
+    // ref-class path — `packed-refs`, tags, stash, remotes, notes, a
+    // detached/divergent `.git/HEAD`, OR any submodule ref-class path under
+    // `.git/modules/<name>/**` (which `repo_root_for_git_path` groups under this
+    // outer repo) — a fast-forward decision would force-sync that pointer state
+    // under group dominance with NO ancestry proof, a deterministic silent
+    // clobber. Fail closed on every ref-class path that is not a provable
+    // top-level head: veto the whole repo, every conflict stays Conflict, zero
+    // writes. (`.git/index` and head-following `.git/logs/**` are NOT ref-class,
+    // so they keep riding the group decision.)
     for &idx in indices {
         if let ReconcileAction::Conflict { rel_path, .. } = &actions[idx] {
-            if is_ref_valued_non_head_path(rel_path) {
+            if is_git_ref_class_path(rel_path)
+                && git_safety::head_ref_for_git_path(rel_path).is_none()
+            {
                 debug!(
                     repo = %repo_root.display(),
                     path = %rel_path,
-                    "git ff: ref-valued non-head path in conflict group; fail-closed (stays Conflict)"
+                    "git ff: ref-class path with no provable top-level head in conflict group; fail-closed (stays Conflict)"
                 );
                 return None;
             }
@@ -3044,32 +3026,55 @@ mod tests {
         assert!(!is_git_object_class_path("repo/dep/src/main.rs"));
     }
 
-    // ── BLOCKER-1 (PR #513): ref-valued non-head classifier ──────────────────
+    // ── BLOCKER-1 + BLOCKER-3 (PR #513): fast-forward veto predicate ──────────
+
+    /// The exact predicate `decide_repo_fast_forward` fails closed on: any
+    /// ref-class `.git` path that is NOT a provable top-level branch head. This
+    /// mirrors the veto call site (`is_git_ref_class_path(p) &&
+    /// head_ref_for_git_path(p).is_none()`), so a group containing any such path
+    /// stays Conflict with zero writes.
+    fn ff_group_vetoes(rel: &str) -> bool {
+        is_git_ref_class_path(rel) && git_safety::head_ref_for_git_path(rel).is_none()
+    }
 
     #[test]
-    fn test_ref_valued_non_head_classifier() {
-        // Non-head ref-valued paths → true (would veto an FF group).
-        assert!(is_ref_valued_non_head_path("repo/.git/packed-refs"));
-        assert!(is_ref_valued_non_head_path("repo/.git/refs/tags/v1"));
-        assert!(is_ref_valued_non_head_path("repo/.git/refs/stash"));
-        assert!(is_ref_valued_non_head_path(
-            "repo/.git/refs/remotes/origin/main"
+    fn test_ff_veto_ref_class_predicate() {
+        // Top-level non-head ref-class paths → veto (no ancestry proof covers
+        // them): packed-refs, tags, stash, remotes.
+        assert!(ff_group_vetoes("repo/.git/packed-refs"));
+        assert!(ff_group_vetoes("repo/.git/refs/tags/v1"));
+        assert!(ff_group_vetoes("repo/.git/refs/stash"));
+        assert!(ff_group_vetoes("repo/.git/refs/remotes/origin/main"));
+        // A detached / divergent top-level HEAD (raw SHA) → veto (closes the
+        // detached-HEAD clobber variant).
+        assert!(ff_group_vetoes("repo/.git/HEAD"));
+
+        // BLOCKER-3: EVERY submodule ref-class path under `.git/modules/<name>/`
+        // → veto. `repo_root_for_git_path` groups these under the outer repo, so
+        // without this they would ride the outer head's FF dominance unproven.
+        assert!(ff_group_vetoes("repo/.git/modules/dep/refs/heads/main"));
+        assert!(ff_group_vetoes("repo/.git/modules/dep/refs/tags/v1"));
+        assert!(ff_group_vetoes("repo/.git/modules/dep/packed-refs"));
+        assert!(ff_group_vetoes("repo/.git/modules/dep/refs/stash"));
+        assert!(ff_group_vetoes("repo/.git/modules/dep/HEAD"));
+        // Submodule reflogs are ref-class here too → over-veto, but fail-closed
+        // and safe (the divergent submodule pointer already vetoes the group).
+        assert!(ff_group_vetoes(
+            "repo/.git/modules/a/modules/b/refs/heads/main"
         ));
-        // Branch-head refs → false (the ancestry proof covers these).
-        assert!(!is_ref_valued_non_head_path("repo/.git/refs/heads/main"));
-        assert!(!is_ref_valued_non_head_path(
-            "repo/.git/refs/heads/feature/x"
-        ));
-        // Workdir / reflog / HEAD state → false (may keep riding).
-        assert!(!is_ref_valued_non_head_path("repo/.git/index"));
-        assert!(!is_ref_valued_non_head_path("repo/.git/logs/HEAD"));
-        assert!(!is_ref_valued_non_head_path(
-            "repo/.git/logs/refs/heads/main"
-        ));
-        assert!(!is_ref_valued_non_head_path("repo/.git/HEAD"));
-        // Object data → false.
-        assert!(!is_ref_valued_non_head_path("repo/.git/objects/ab/cdef"));
-        // Non-git path → false.
-        assert!(!is_ref_valued_non_head_path("repo/src/refs.rs"));
+
+        // Provable top-level branch heads → do NOT veto (the ancestry proof
+        // covers exactly these).
+        assert!(!ff_group_vetoes("repo/.git/refs/heads/main"));
+        assert!(!ff_group_vetoes("repo/.git/refs/heads/feature/x"));
+
+        // Workdir / index / head-following reflog state → NOT ref-class, so they
+        // keep riding the group decision (never veto).
+        assert!(!ff_group_vetoes("repo/.git/index"));
+        assert!(!ff_group_vetoes("repo/.git/logs/HEAD"));
+        assert!(!ff_group_vetoes("repo/.git/logs/refs/heads/main"));
+        // Object data and non-git paths → never veto.
+        assert!(!ff_group_vetoes("repo/.git/objects/ab/cdef"));
+        assert!(!ff_group_vetoes("repo/src/refs.rs"));
     }
 }
