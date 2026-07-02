@@ -1,0 +1,5 @@
+c2f5dfa719c683efaac4a88404fc33d62165550f checkout: moving from main to roam-canary-wip
+c2f5dfa719c683efaac4a88404fc33d62165550f checkout: moving from jess/bootstrap-tool-daemon to main
+c2f5dfa719c683efaac4a88404fc33d62165550f checkout: moving from main to jess/bootstrap-tool-daemon
+c2f5dfa719c683efaac4a88404fc33d62165550f commit: Add reference tool daemon CLI scaffold
+cdb5baf7e61fd7f277c9c5a57c4b4363cc0b25b0 commit (initial): Seed tool daemon spec

@@ -2,6 +2,9 @@
 
 > Under active development. Not yet stable. Expect breaking changes.
 
+Current release: `v0.12.14` (tagged); `v0.12.15` is pending on `main`. The
+Homebrew tap is stale at `0.12.12` and that formula skips symlinks.
+
 Self-hosted encrypted file sync with on-demand hydration. The Linux FUSE mounted
 view is host-proven for clean-name traversal, hydrate-on-open, mounted
 write/readback, cache clear/rehydrate, and recursive safe-unsync; offline or
@@ -185,6 +188,8 @@ task check
 
 ```bash
 # macOS (Homebrew, current manual tap flow)
+# NOTE: the tap is stale at 0.12.12 and that formula skips symlinks;
+# prefer the Nix tagged install below for the current release.
 brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt.git
 git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin homebrew-tap
 git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
@@ -196,12 +201,12 @@ sudo dpkg -i tcfsd-*.deb tcfs-*.deb
 # RPM (Fedora 42 x86_64 proven; RHEL/Rocky pending, daemon-only today)
 sudo rpm -i tcfsd-*.rpm
 
-# Container (K8s worker mode; rc1 image build/signature proven,
-# runtime smoke pending)
-podman pull ghcr.io/jesssullivan/tcfsd:v0.12.13-rc1
+# Container (K8s worker mode; image build/signature published through
+# v0.12.14, runtime smoke pending)
+podman pull ghcr.io/jesssullivan/tcfsd:v0.12.14
 
 # Nix tagged profile install
-TAG=v0.12.13-rc1
+TAG=v0.12.14
 nix profile install \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfsd" \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfs-cli"

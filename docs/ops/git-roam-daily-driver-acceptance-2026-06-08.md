@@ -83,6 +83,31 @@ is not the default daily-driver claim and must prove index/mtime, lockfile,
 symlink, mode, and concurrent-operation safety before it can replace the
 bundle/restore path.
 
+### Linked Worktrees
+
+`git worktree` metadata is fail-closed fenced by the blacklist
+(`crates/tcfs-sync/src/blacklist.rs`), independent of `sync_git_dirs` and
+`git_sync_mode`:
+
+- A non-directory named `.git` — a linked worktree's (or submodule's) gitfile
+  pointer containing `gitdir: <absolute path>` — is never collected or roamed
+  (`BlacklistReason::GitFilePointer`).
+- Any path containing a `.git/worktrees/` segment — the per-worktree admin
+  area holding `HEAD`, `index`, and `gitdir` files with absolute host paths —
+  is never collected or roamed (`BlacklistReason::GitWorktreesAdmin`), even
+  under `sync_git_dirs = true` with `git_sync_mode = "raw"`.
+
+Why: roamed raw, both shapes dangle on the destination host, and under
+bidirectional roam a roamed `git worktree prune` deletion would sync back and
+destroy the origin host's live worktree. The fence trades pointer fidelity for
+safety: a roamed copy of a linked worktree (or a submodule checkout) arrives
+without its `.git` pointer and reads as a plain directory. Real worktree roam
+is design-first work, tracked as an expected-red gate:
+
+| Gate | Scenario | Expected |
+| --- | --- | --- |
+| G5-wt-1 | Real linked-worktree roam: pointer + admin area re-established on the destination host | red (future, design-first, H3) |
+
 ## Acceptance Gates
 
 ### R0 - Policy And Inventory

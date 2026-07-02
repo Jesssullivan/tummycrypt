@@ -5120,7 +5120,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-auth"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5148,7 +5148,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-chunks"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5167,7 +5167,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-cli"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5206,7 +5206,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-cloudfilter"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "opendal",
@@ -5226,7 +5226,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-core"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "prost",
@@ -5243,7 +5243,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-crypto"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "aes-siv",
  "age",
@@ -5269,7 +5269,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-dbus"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "hyper-util",
@@ -5284,7 +5284,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-e2e"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -5304,7 +5304,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-file-provider"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5334,7 +5334,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-fuse"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5350,7 +5350,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-mcp"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "hyper-util",
@@ -5372,7 +5372,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-nfs"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5389,7 +5389,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-secrets"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "aes-gcm",
  "age",
@@ -5422,7 +5422,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-sops"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5441,7 +5441,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-storage"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "opendal",
@@ -5457,7 +5457,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-sync"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "age",
  "anyhow",
@@ -5491,7 +5491,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-tui"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -5510,7 +5510,7 @@ dependencies = [
 
 [[package]]
 name = "tcfs-vfs"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5534,7 +5534,7 @@ dependencies = [
 
 [[package]]
 name = "tcfsd"
-version = "0.12.14"
+version = "0.12.15"
 dependencies = [
  "age",
  "anyhow",
