@@ -6,7 +6,7 @@
 //!
 //! This separation enables dry-run mode, TUI preview, and deterministic testing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,6 +20,7 @@ use tracing::{debug, info, warn};
 use crate::blacklist::Blacklist;
 use crate::conflict::{compare_clocks, ConflictInfo};
 use crate::engine::{self, OptionalEncryption, ProgressFn};
+use crate::git_safety;
 use crate::index_entry::{
     manifest_key, parse_index_entry_record, resolve_visible_index_entry, RemoteIndexEntry,
 };
@@ -33,6 +34,20 @@ const DIR_MARKER_SUFFIX: &str = "/.tcfs_dir";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/// A branch-head ref pinned by the `.git` fast-forward ancestry proof at plan
+/// time. Execution re-reads the live ref file and refuses to dominate (push) or
+/// overwrite (pull) unless it still resolves to exactly this SHA — closing the
+/// plan-time-proof / execute-time-state race (a mid-cycle commit / reset /
+/// amend on the losing device would otherwise publish an unproven rewind, or
+/// have its fresh ref + reflog silently clobbered). See BLOCKER-2 on PR #513.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRefPin {
+    /// Repo-relative path of the head ref file (e.g. `.git/refs/heads/main`).
+    pub rel_path: String,
+    /// The local SHA the ancestry proof was computed against at plan time.
+    pub sha: String,
+}
+
 /// Why a file needs to be pushed.
 #[derive(Debug, Clone)]
 pub enum PushReason {
@@ -40,6 +55,21 @@ pub enum PushReason {
     NewLocal,
     /// Vector clock indicates local is ahead of remote.
     LocalNewer,
+    /// Reclassified from a `.git` conflict by the fast-forward resolver: the
+    /// local git tip is a strict descendant of the remote tip, so pushing
+    /// local cannot lose remote history even though the vector clocks are
+    /// concurrent. Carries the remote manifest hash the ancestry proof was
+    /// computed against so execution can verify the remote has not moved
+    /// before letting this push dominate the remote clock.
+    GitFastForward {
+        /// Manifest hash of this path's remote index entry at plan time.
+        expected_remote_manifest: String,
+        /// Branch-head refs the ancestry proof pinned at plan time. Execution
+        /// re-reads each live ref file and refuses to dominate the remote clock
+        /// unless every pin still matches — a mid-cycle local ref move
+        /// (commit/reset/amend) makes the whole group DEFER, never dominate.
+        ref_pins: Vec<GitRefPin>,
+    },
 }
 
 /// Why a file needs to be pulled.
@@ -49,6 +79,16 @@ pub enum PullReason {
     NewRemote,
     /// Vector clock indicates remote is ahead of local.
     RemoteNewer,
+    /// Reclassified from a `.git` conflict by the fast-forward resolver: the
+    /// remote git tip is a strict descendant of the local tip. Carries the
+    /// branch-head refs the proof pinned at plan time; execution re-reads each
+    /// live ref file and refuses to OVERWRITE local state unless every pin
+    /// still matches — a mid-cycle local commit must not be silently clobbered
+    /// (its ref + reflog would otherwise dangle with no pointer).
+    GitFastForward {
+        /// Branch-head refs the ancestry proof pinned at plan time.
+        ref_pins: Vec<GitRefPin>,
+    },
 }
 
 /// A single reconciliation action — pure data describing what to do.
@@ -112,6 +152,17 @@ pub struct ReconcileConfig {
     pub delete_local_orphans: bool,
     /// Delete remote files that were synced but no longer exist locally.
     pub delete_remote_orphans: bool,
+    /// Enable `.git`-aware fast-forward conflict resolution. When set (and
+    /// `git_sync_mode` is `"raw"`), a post-classification pass reclassifies a
+    /// repo's conflicting `.git/*` paths to Push/Pull when the local and remote
+    /// branch tips are in a strict fast-forward (ancestor) relationship. Any
+    /// `.git` conflict that is NOT a clean fast-forward is left as a `Conflict`
+    /// (fail-closed). See `reclassify_git_ff_conflicts`.
+    pub git_ff_resolution: bool,
+    /// The git sync mode this reconcile is operating under (`"bundle"` or
+    /// `"raw"`). The FF reclassifier only engages in `"raw"` mode, where the
+    /// raw `.git/*` internals roam as ordinary files.
+    pub git_sync_mode: String,
 }
 
 /// Result of executing a reconciliation plan.
@@ -126,6 +177,11 @@ pub struct ExecutionResult {
     pub errors: Vec<(String, String)>,
     pub bytes_uploaded: u64,
     pub bytes_downloaded: u64,
+    /// Ref-class `.git` actions (`refs/**`, `packed-refs`, `HEAD`) that were
+    /// deferred this run because an object action for the same repo failed
+    /// (objects-before-refs barrier). These are not errors: the next reconcile
+    /// cycle re-plans them once the objects land.
+    pub deferred_git_refs: Vec<String>,
 }
 
 /// Visibility report for chunk objects that are no longer referenced by any
@@ -505,8 +561,14 @@ fn plan_orphaned_chunk_cleanup(
 
 /// Generate a reconciliation plan by diffing local tree against remote index.
 ///
-/// This is a **pure function** — it reads state and remote index but performs
-/// no writes. The returned plan can be inspected, displayed, or executed.
+/// Planning performs **no writes under `local_root` and no writes to the
+/// remote** — it reads state and the remote index, and the returned plan can
+/// be inspected, displayed, or executed. One planning-only side effect exists:
+/// when `.git` fast-forward reclassification is enabled, conflicting
+/// branch-head ref blobs are downloaded to an ephemeral temp directory
+/// OUTSIDE any sync root (see `read_remote_ref_sha`) to resolve the remote
+/// tips; that directory is removed again before planning returns.
+#[allow(clippy::too_many_arguments)]
 pub async fn reconcile(
     op: &Operator,
     local_root: &Path,
@@ -515,6 +577,7 @@ pub async fn reconcile(
     device_id: &str,
     blacklist: &Blacklist,
     config: &ReconcileConfig,
+    encryption: OptionalEncryption<'_>,
 ) -> Result<ReconcilePlan> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -579,6 +642,25 @@ pub async fn reconcile(
         actions.push(action);
     }
 
+    // 4b. `.git`-aware fast-forward reclassification. In raw git-sync mode, a
+    // repo whose `.git/*` paths all conflict purely because each device ticked
+    // its own clock can still be a clean fast-forward (one tip is an ancestor of
+    // the other). Reclassify those conflicts to Push/Pull atomically per repo;
+    // divergent / indeterminate repos are left untouched (fail-closed). The
+    // summary is recomputed afterward so counts reflect the reclassification.
+    if config.git_ff_resolution && config.git_sync_mode == "raw" {
+        reclassify_git_ff_conflicts(
+            &mut actions,
+            local_root,
+            op,
+            remote_prefix,
+            &remote_index,
+            encryption,
+        )
+        .await;
+        summary = recompute_summary(&actions);
+    }
+
     let mut remote_empty_dirs = remote_empty_dirs.into_iter().collect::<Vec<_>>();
     remote_empty_dirs.sort();
     for rel_path in &remote_empty_dirs {
@@ -591,15 +673,16 @@ pub async fn reconcile(
         });
     }
 
-    // 5. Sort: conflicts first, then pulls, pushes, deletes, up-to-date last
-    actions.sort_by_key(|a| match a {
-        ReconcileAction::Conflict { .. } => 0,
-        ReconcileAction::CreateDirectory { .. } => 1,
-        ReconcileAction::Pull { .. } => 2,
-        ReconcileAction::Push { .. } => 3,
-        ReconcileAction::DeleteLocal { .. } => 4,
-        ReconcileAction::DeleteRemote { .. } => 5,
-        ReconcileAction::UpToDate { .. } => 6,
+    // 5. Sort: conflicts first, then pulls, pushes, deletes, up-to-date last.
+    //    Within each kind, order `.git` paths so objects/packs apply before
+    //    refs/packed-refs/HEAD (a ref must never advance to an object not yet
+    //    present locally — that would corrupt the repo). `git_apply_rank` is 0
+    //    for objects (and all non-`.git` paths) and 1 for refs, so the stable
+    //    sort keeps objects ahead of refs in both the pull and push buckets.
+    actions.sort_by(|a, b| {
+        kind_rank(a)
+            .cmp(&kind_rank(b))
+            .then_with(|| git_apply_rank(a).cmp(&git_apply_rank(b)))
     });
 
     info!(
@@ -617,6 +700,192 @@ pub async fn reconcile(
         device_id: device_id.to_string(),
         generated_at: now,
     })
+}
+
+/// Coarse ordering rank by action kind for the plan sort.
+fn kind_rank(a: &ReconcileAction) -> u8 {
+    match a {
+        ReconcileAction::Conflict { .. } => 0,
+        ReconcileAction::CreateDirectory { .. } => 1,
+        ReconcileAction::Pull { .. } => 2,
+        ReconcileAction::Push { .. } => 3,
+        ReconcileAction::DeleteLocal { .. } => 4,
+        ReconcileAction::DeleteRemote { .. } => 5,
+        ReconcileAction::UpToDate { .. } => 6,
+    }
+}
+
+/// Intra-kind ordering rank ensuring `.git` objects/packs apply before refs.
+///
+/// Returns 0 for object/pack paths and every non-`.git` path, and 1 for the
+/// ref-class paths (`.git/refs/**`, `packed-refs`, `HEAD`). A stable sort with
+/// this as a secondary key keeps objects ahead of refs so a ref never advances
+/// to an object that has not yet been written locally.
+fn git_apply_rank(a: &ReconcileAction) -> u8 {
+    let rel = match a {
+        ReconcileAction::Pull { rel_path, .. } => rel_path.as_str(),
+        ReconcileAction::Push { rel_path, .. } => rel_path.as_str(),
+        _ => return 0,
+    };
+    if is_git_ref_class_path(rel) {
+        1
+    } else {
+        0
+    }
+}
+
+/// True for the `.git` paths that publish a ref and therefore must be applied
+/// AFTER objects: `.git/refs/**`, `.git/packed-refs`, and `.git/HEAD` — plus the
+/// same layout inside a submodule's real gitdir at `.git/modules/<name>/**`
+/// (M-4, PR #513) so raw-roamed submodule internals get the ordering + barrier.
+fn is_git_ref_class_path(rel: &str) -> bool {
+    if !is_git_internal_path(rel) {
+        return false;
+    }
+    rel.contains(".git/refs/")
+        || rel.ends_with(".git/packed-refs")
+        || rel.ends_with(".git/HEAD")
+        || is_git_modules_ref_class(rel)
+}
+
+/// True for `.git` paths that carry object data (`.git/objects/**`, loose or
+/// pack) — including a submodule's own object store at
+/// `.git/modules/<name>/objects/**` (M-4, PR #513). A failed object action for
+/// a repo bars that repo's ref-class actions for the rest of the run
+/// (objects-before-refs barrier): a ref must never be published or applied when
+/// the objects it needs may not have landed.
+fn is_git_object_class_path(rel: &str) -> bool {
+    if !is_git_internal_path(rel) {
+        return false;
+    }
+    rel.contains(".git/objects/") || is_git_modules_object_class(rel)
+}
+
+/// Submodule object-store paths: anything under a `.git/modules/<name>/objects/`
+/// tail (the `<name>` may itself contain slashes / nested `modules/`).
+fn is_git_modules_object_class(rel: &str) -> bool {
+    match rel.find(".git/modules/") {
+        Some(pos) => rel[pos..].contains("/objects/"),
+        None => false,
+    }
+}
+
+/// Submodule ref-class paths: `refs/**`, `packed-refs`, or `HEAD` inside a
+/// `.git/modules/<name>/` gitdir.
+fn is_git_modules_ref_class(rel: &str) -> bool {
+    match rel.find(".git/modules/") {
+        Some(pos) => {
+            let tail = &rel[pos..];
+            tail.contains("/refs/") || tail.ends_with("/packed-refs") || tail.ends_with("/HEAD")
+        }
+        None => false,
+    }
+}
+
+/// Record a failed `.git/objects/**` action: inserts the enclosing repo root
+/// into the per-run barred set consulted by [`git_ref_barrier_hit`].
+fn mark_git_object_failure(rel_path: &str, local_root: &Path, barred: &mut BTreeSet<PathBuf>) {
+    if !is_git_object_class_path(rel_path) {
+        return;
+    }
+    if let Some(root) = git_safety::repo_root_for_git_path(local_root, rel_path) {
+        barred.insert(root);
+    }
+}
+
+/// True when `rel_path` is a ref-class `.git` path whose enclosing repo had an
+/// object-class failure earlier in this run — the action must be deferred
+/// (objects-before-refs barrier, both push and pull directions).
+fn git_ref_barrier_hit(rel_path: &str, local_root: &Path, barred: &BTreeSet<PathBuf>) -> bool {
+    if barred.is_empty() || !is_git_ref_class_path(rel_path) {
+        return false;
+    }
+    git_safety::repo_root_for_git_path(local_root, rel_path)
+        .is_some_and(|root| barred.contains(&root))
+}
+
+/// Extract the plan-time head-ref pins carried by a `.git` fast-forward action
+/// (push or pull). Ordinary actions carry no pins and yield `None`.
+fn git_ff_ref_pins(action: &ReconcileAction) -> Option<&[GitRefPin]> {
+    match action {
+        ReconcileAction::Push {
+            reason: PushReason::GitFastForward { ref_pins, .. },
+            ..
+        } => Some(ref_pins),
+        ReconcileAction::Pull {
+            reason: PullReason::GitFastForward { ref_pins },
+            ..
+        } => Some(ref_pins),
+        _ => None,
+    }
+}
+
+/// Re-read every pinned head ref from the live working tree and confirm it
+/// still resolves to exactly the SHA the fast-forward proof pinned at plan
+/// time. Any mismatch — a mid-cycle commit / reset / amend on this device, or a
+/// vanished ref file — means the ancestry proof is stale, so the caller must
+/// DEFER, never dominate (push) or overwrite (pull). Fail-closed (BLOCKER-2,
+/// PR #513).
+fn git_ff_pins_still_valid(local_root: &Path, pins: &[GitRefPin]) -> bool {
+    pins.iter().all(|pin| {
+        match std::fs::read(local_root.join(&pin.rel_path)) {
+            Ok(bytes) => git_safety::parse_ref_sha(&bytes).as_deref() == Some(pin.sha.as_str()),
+            Err(_) => false, // ref file gone → stale, defer
+        }
+    })
+}
+
+/// Acquire cooperative `.git/tcfs.lock` guards for every repo that has a
+/// `.git/*` Push or Pull action in `plan`. Returns the held guards; dropping the
+/// returned vec releases all locks. Repos whose `.git` is mid-operation or whose
+/// lock is already held are skipped (logged), so a busy repo does not abort the
+/// whole plan — it simply re-reconciles next cycle.
+fn acquire_git_locks_for_plan(
+    plan: &ReconcilePlan,
+    local_root: &Path,
+) -> Vec<git_safety::GitLockGuard> {
+    let mut repos: BTreeSet<PathBuf> = BTreeSet::new();
+    for action in &plan.actions {
+        let rel = match action {
+            ReconcileAction::Push { rel_path, .. } => rel_path.as_str(),
+            ReconcileAction::Pull { rel_path, .. } => rel_path.as_str(),
+            _ => continue,
+        };
+        if !is_git_internal_path(rel) {
+            continue;
+        }
+        if let Some(root) = git_safety::repo_root_for_git_path(local_root, rel) {
+            repos.insert(root);
+        }
+    }
+
+    let mut guards = Vec::new();
+    for repo_root in repos {
+        let git_dir = repo_root.join(".git");
+        if !git_dir.is_dir() {
+            continue;
+        }
+        let safety = git_safety::git_is_safe(&git_dir);
+        if !safety.blocking.is_empty() {
+            warn!(
+                repo = %repo_root.display(),
+                blocking = ?safety.blocking,
+                "git ff: repo busy, skipping tcfs.lock acquire this cycle"
+            );
+            continue;
+        }
+        match git_safety::acquire_git_lock(&git_dir) {
+            Ok(guard) => guards.push(guard),
+            Err(e) => {
+                warn!(
+                    repo = %repo_root.display(),
+                    error = %format!("{e:#}"),
+                    "git ff: could not acquire tcfs.lock; proceeding without lock"
+                );
+            }
+        }
+    }
+    guards
 }
 
 /// Classify a single path into a reconciliation action.
@@ -823,6 +1092,310 @@ fn outcome_to_action(
     }
 }
 
+/// Recompute the plan summary from a finalized action list.
+///
+/// Used after the `.git` fast-forward reclassification mutates conflict actions
+/// into Push/Pull, so the reported counts stay consistent with the actions.
+fn recompute_summary(actions: &[ReconcileAction]) -> ReconcileSummary {
+    let mut summary = ReconcileSummary::default();
+    for action in actions {
+        match action {
+            ReconcileAction::Push { .. } => summary.pushes += 1,
+            ReconcileAction::Pull { .. } => summary.pulls += 1,
+            ReconcileAction::DeleteLocal { .. } => summary.local_deletes += 1,
+            ReconcileAction::DeleteRemote { .. } => summary.remote_deletes += 1,
+            ReconcileAction::Conflict { .. } => summary.conflicts += 1,
+            ReconcileAction::CreateDirectory { .. } => summary.directories += 1,
+            ReconcileAction::UpToDate { .. } => summary.up_to_date += 1,
+        }
+    }
+    summary
+}
+
+/// `.git`-aware fast-forward conflict reclassification (raw git-sync mode only).
+///
+/// Walks the action list for `Conflict` actions whose path is under a repo's
+/// `.git/` directory, groups them by enclosing repo root, and for each repo with
+/// a conflicting branch-head ref determines whether the local and remote tips
+/// are in a strict fast-forward relationship:
+///
+/// * remote tip is an ancestor of local tip (local strictly ahead) → the repo's
+///   `.git/*` conflicts are reclassified to `Push` (LocalNewer);
+/// * local tip is an ancestor of remote tip (remote strictly ahead) → they are
+///   reclassified to `Pull` (RemoteNewer).
+///
+/// Anything else — divergent tips, equal-but-different content, an unresolvable
+/// remote ref, or a missing object needed for the ancestry probe — leaves the
+/// repo's conflicts untouched (fail-closed: stays `Conflict`). The whole repo is
+/// moved toward a single winner; a repo is never split half push / half pull.
+#[allow(clippy::too_many_arguments)]
+async fn reclassify_git_ff_conflicts(
+    actions: &mut [ReconcileAction],
+    local_root: &Path,
+    op: &Operator,
+    remote_prefix: &str,
+    remote_index: &HashMap<String, RemoteIndexEntry>,
+    encryption: OptionalEncryption<'_>,
+) {
+    use std::collections::BTreeMap;
+
+    // Group conflicting `.git/*` action indices by enclosing repo root.
+    let mut by_repo: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
+    for (idx, action) in actions.iter().enumerate() {
+        let ReconcileAction::Conflict { rel_path, .. } = action else {
+            continue;
+        };
+        if !is_git_internal_path(rel_path) {
+            continue;
+        }
+        let Some(repo_root) = git_safety::repo_root_for_git_path(local_root, rel_path) else {
+            continue;
+        };
+        by_repo.entry(repo_root).or_default().push(idx);
+    }
+
+    for (repo_root, indices) in by_repo {
+        let decision = decide_repo_fast_forward(
+            &repo_root,
+            &indices,
+            actions,
+            op,
+            remote_prefix,
+            remote_index,
+            encryption,
+        )
+        .await;
+        let Some((direction, ref_pins)) = decision else {
+            // Indeterminate / divergent: leave every conflict as-is.
+            continue;
+        };
+        // Apply atomically: rewrite ALL of this repo's `.git/*` conflicts toward
+        // the single winning direction. Every rewritten action carries the same
+        // plan-time head-ref pins (BLOCKER-2): execution re-verifies them before
+        // dominating/overwriting, so a mid-cycle local ref move defers the whole
+        // group — reflog and index included.
+        for &idx in &indices {
+            let ReconcileAction::Conflict { rel_path, .. } = &actions[idx] else {
+                continue;
+            };
+            let rel_path = rel_path.clone();
+            actions[idx] = match direction {
+                git_safety::FastForward::LocalAhead => {
+                    // Carry the remote manifest hash the ancestry proof was
+                    // computed against: at execute time the upload path only
+                    // lets this push dominate a concurrent remote clock if the
+                    // remote entry is still exactly this manifest (if the
+                    // remote moved since planning, the ordinary conflict veto
+                    // applies and the repo re-plans next cycle).
+                    match remote_index.get(&rel_path) {
+                        Some(entry) => ReconcileAction::Push {
+                            local_path: local_root.join(&rel_path),
+                            rel_path: rel_path.clone(),
+                            reason: PushReason::GitFastForward {
+                                expected_remote_manifest: entry.manifest_hash.clone(),
+                                ref_pins: ref_pins.clone(),
+                            },
+                        },
+                        // No remote entry: fail closed, keep the conflict.
+                        None => continue,
+                    }
+                }
+                git_safety::FastForward::RemoteAhead => {
+                    // The remote index entry for this exact path carries the
+                    // manifest hash + size needed to pull it.
+                    match remote_index.get(&rel_path) {
+                        Some(entry) => ReconcileAction::Pull {
+                            rel_path: rel_path.clone(),
+                            manifest_hash: entry.manifest_hash.clone(),
+                            size: entry.size,
+                            reason: PullReason::GitFastForward {
+                                ref_pins: ref_pins.clone(),
+                            },
+                        },
+                        // No remote entry: fail closed, keep the conflict.
+                        None => continue,
+                    }
+                }
+                git_safety::FastForward::NotFastForward => continue,
+            };
+        }
+        match direction {
+            git_safety::FastForward::LocalAhead => info!(
+                repo = %repo_root.display(),
+                "git fast-forward: local ahead, pushing .git"
+            ),
+            git_safety::FastForward::RemoteAhead => info!(
+                repo = %repo_root.display(),
+                "git fast-forward: remote ahead, pulling .git"
+            ),
+            git_safety::FastForward::NotFastForward => {}
+        }
+    }
+}
+
+/// Decide the fast-forward direction for one repo's conflicting `.git/*` paths.
+///
+/// Finds a conflicting branch-head ref (`.git/refs/heads/<branch>`) among the
+/// repo's conflicts, resolves the local tip (from the live repo) and the remote
+/// tip (from the remote ref blob), and probes ancestry with both objects local.
+/// Returns `None` when no branch-head ref is among the conflicts, when either
+/// tip is unresolvable, or when the relationship is not a clean fast-forward.
+#[allow(clippy::too_many_arguments)]
+async fn decide_repo_fast_forward(
+    repo_root: &Path,
+    indices: &[usize],
+    actions: &[ReconcileAction],
+    op: &Operator,
+    remote_prefix: &str,
+    remote_index: &HashMap<String, RemoteIndexEntry>,
+    encryption: OptionalEncryption<'_>,
+) -> Option<(git_safety::FastForward, Vec<GitRefPin>)> {
+    // BLOCKER-1 + BLOCKER-3 (fail-closed, PR #513): the ancestry proof below
+    // covers ONLY provable top-level branch-head refs (`.git/refs/heads/*`, via
+    // `head_ref_for_git_path`). If this conflict group contains ANY OTHER
+    // ref-class path — `packed-refs`, tags, stash, remotes, notes, a
+    // detached/divergent `.git/HEAD`, OR any submodule ref-class path under
+    // `.git/modules/<name>/**` (which `repo_root_for_git_path` groups under this
+    // outer repo) — a fast-forward decision would force-sync that pointer state
+    // under group dominance with NO ancestry proof, a deterministic silent
+    // clobber. Fail closed on every ref-class path that is not a provable
+    // top-level head: veto the whole repo, every conflict stays Conflict, zero
+    // writes. (`.git/index` and head-following `.git/logs/**` are NOT ref-class,
+    // so they keep riding the group decision.)
+    for &idx in indices {
+        if let ReconcileAction::Conflict { rel_path, .. } = &actions[idx] {
+            if is_git_ref_class_path(rel_path)
+                && git_safety::head_ref_for_git_path(rel_path).is_none()
+            {
+                debug!(
+                    repo = %repo_root.display(),
+                    path = %rel_path,
+                    "git ff: ref-class path with no provable top-level head in conflict group; fail-closed (stays Conflict)"
+                );
+                return None;
+            }
+        }
+    }
+
+    // Find the branch-head ref path(s) among this repo's conflicts. There may be
+    // several (multiple branches advanced); a clean fast-forward requires EVERY
+    // conflicting head ref to agree on the same direction, otherwise fail closed.
+    let mut direction: Option<git_safety::FastForward> = None;
+    let mut saw_ref = false;
+    // Plan-time head-ref pins for the execute-time re-verify (BLOCKER-2).
+    let mut ref_pins: Vec<GitRefPin> = Vec::new();
+
+    for &idx in indices {
+        let ReconcileAction::Conflict { rel_path, .. } = &actions[idx] else {
+            continue;
+        };
+        let Some(ref_name) = git_safety::head_ref_for_git_path(rel_path) else {
+            continue;
+        };
+        saw_ref = true;
+
+        // Local tip from the live repo (loose refs + packed-refs).
+        let Some(local_sha) = git_safety::local_ref_sha(repo_root, &ref_name) else {
+            return None; // unresolvable local ref → fail closed
+        };
+
+        // Remote tip: read the remote ref blob content for this exact path.
+        let Some(remote_sha) =
+            read_remote_ref_sha(op, remote_prefix, rel_path, remote_index, encryption).await
+        else {
+            return None; // unresolvable / missing remote ref → fail closed
+        };
+
+        let ff = git_safety::classify_fast_forward(repo_root, &local_sha, &remote_sha);
+        if ff == git_safety::FastForward::NotFastForward {
+            return None; // divergent / indeterminate → fail closed
+        }
+        match direction {
+            None => direction = Some(ff),
+            Some(prev) if prev == ff => {}
+            Some(_) => return None, // refs disagree on direction → fail closed
+        }
+        // Pin the exact local SHA this ref was proven against.
+        ref_pins.push(GitRefPin {
+            rel_path: rel_path.clone(),
+            sha: local_sha,
+        });
+    }
+
+    if !saw_ref {
+        // Conflicts under `.git` but no branch-head ref among them (e.g. only
+        // index/logs). Without a ref tip to compare we cannot prove a clean FF,
+        // so stay conflicted.
+        return None;
+    }
+    direction.map(|d| (d, ref_pins))
+}
+
+/// Read the remote commit SHA stored at a `.git/refs/heads/<branch>` path by
+/// downloading the (tiny) ref blob from the remote and parsing its content.
+///
+/// The blob is downloaded into an ephemeral, per-call temp directory under
+/// [`std::env::temp_dir`] — never under the sync root (planning must not
+/// fabricate files a raw-mode collector could then roam) and never inside the
+/// repo's live `.git`. The directory is removed again before returning,
+/// success or failure.
+///
+/// Returns `None` if the remote has no entry for this path, the download fails,
+/// or the content is not a concrete SHA (e.g. a symbolic ref).
+async fn read_remote_ref_sha(
+    op: &Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    remote_index: &HashMap<String, RemoteIndexEntry>,
+    encryption: OptionalEncryption<'_>,
+) -> Option<String> {
+    let entry = remote_index.get(rel_path)?;
+    let manifest_path = format!(
+        "{}/manifests/{}",
+        remote_prefix.trim_end_matches('/'),
+        &entry.manifest_hash
+    );
+    // Unique per call (pid + process-wide sequence) so concurrent reconciles
+    // in one or many processes never collide on the same path.
+    static FF_REF_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = FF_REF_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir().join(format!("tcfs-ff-{}-{seq}", std::process::id()));
+    if std::fs::create_dir_all(&tmp_dir).is_err() {
+        return None;
+    }
+    let tmp_path = tmp_dir.join("ref");
+    let download = engine::download_file_with_device(
+        op,
+        &manifest_path,
+        &tmp_path,
+        remote_prefix,
+        None,
+        "",
+        None,
+        encryption,
+    )
+    .await;
+    let sha = match download {
+        Ok(_) => std::fs::read(&tmp_path)
+            .ok()
+            .and_then(|bytes| git_safety::parse_ref_sha(&bytes)),
+        Err(e) => {
+            warn!(path = rel_path, error = %format!("{e:#}"), "git ff: remote ref download failed");
+            None
+        }
+    };
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    sha
+}
+
+/// True if a repo-relative path lies inside a `.git` directory.
+fn is_git_internal_path(rel_path: &str) -> bool {
+    rel_path == ".git"
+        || rel_path.starts_with(".git/")
+        || rel_path.contains("/.git/")
+        || rel_path.ends_with("/.git")
+}
+
 /// Compare when both sides exist and the local entry is a symbolic link.
 ///
 /// Symlink identity is the link target text, hashed via
@@ -963,12 +1536,59 @@ pub async fn execute_plan(
 
     let mut result = ExecutionResult::default();
 
+    // TOCTOU guard for raw `.git` sync: hold a cooperative `.git/tcfs.lock` for
+    // every repo that has a `.git/*` action in this plan, for the whole execute
+    // window. This stops a concurrent commit (which rewrites refs/index mid-run)
+    // from tearing the push. Best-effort: if a repo's lock cannot be acquired
+    // (another sync in progress) or the `.git` is mid-operation, we still run —
+    // the FF reclassifier only ever moves toward a fast-forward winner, and a
+    // failed/locked repo simply re-reconciles next cycle. Guards live for the
+    // duration of this function and drop (release) on return.
+    let _git_locks = acquire_git_locks_for_plan(plan, local_root);
+
+    // Objects-before-refs BARRIER (per repo, both directions): the plan orders
+    // `.git/objects/**` ahead of ref-class paths, but ordering alone is not a
+    // barrier — if an object action FAILS, applying or publishing the ref
+    // anyway could point it at an object that never landed (repo corruption).
+    // Any repo with a failed object-class action this run gets its ref-class
+    // actions deferred (recorded, not errored); the next cycle re-plans them.
+    let mut git_object_failed_repos: BTreeSet<PathBuf> = BTreeSet::new();
+
     for action in &plan.actions {
+        if let ReconcileAction::Push { rel_path, .. } | ReconcileAction::Pull { rel_path, .. } =
+            action
+        {
+            if git_ref_barrier_hit(rel_path, local_root, &git_object_failed_repos) {
+                info!(
+                    path = %rel_path,
+                    "git barrier: object action failed this run; deferring ref action"
+                );
+                result.deferred_git_refs.push(rel_path.clone());
+                continue;
+            }
+            // BLOCKER-2 (PR #513): a `.git` fast-forward push/pull earned its
+            // right to dominate/overwrite from the plan-time head-ref SHA. Right
+            // before applying it, re-read the live local ref(s): if any moved
+            // since planning (a mid-cycle commit/reset/amend on this device),
+            // the proof is stale — DEFER the whole group (reflog + index
+            // included) instead of dominating the remote clock (push) or
+            // clobbering the fresh local commit (pull).
+            if let Some(pins) = git_ff_ref_pins(action) {
+                if !git_ff_pins_still_valid(local_root, pins) {
+                    warn!(
+                        path = %rel_path,
+                        "git ff: local ref moved between plan and execute; deferring (no dominate/overwrite)"
+                    );
+                    result.deferred_git_refs.push(rel_path.clone());
+                    continue;
+                }
+            }
+        }
         match action {
             ReconcileAction::Push {
                 local_path,
                 rel_path,
-                ..
+                reason,
             } => {
                 // Symlinks (TIN-1620 T13-Z) are published as first-class link
                 // manifests, not run through the chunked-file uploader, which
@@ -989,7 +1609,26 @@ pub async fn execute_plan(
                     )
                     .await
                 } else {
-                    engine::upload_file_with_device(
+                    // The plan classified this path by CONTENT HASH; execute
+                    // must not re-derive staleness from the `(size,
+                    // mtime-seconds)` stat quick-check, which is blind to a
+                    // same-second same-size rewrite (e.g. `git commit`
+                    // rewriting a 41-byte branch head ref) and would silently
+                    // skip the push.
+                    //
+                    // Reclassified `.git` fast-forward pushes additionally
+                    // carry the plan-time remote manifest hash: the upload
+                    // path uses it to let the ancestry-proven push dominate a
+                    // concurrent remote clock (merge + tick) instead of being
+                    // veto-skipped forever — see HIGH-2 on PR #513.
+                    let git_ff_expected = match reason {
+                        PushReason::GitFastForward {
+                            expected_remote_manifest,
+                            ..
+                        } => Some(expected_remote_manifest.as_str()),
+                        _ => None,
+                    };
+                    engine::upload_planned_push_with_device(
                         op,
                         local_path,
                         remote_prefix,
@@ -998,6 +1637,7 @@ pub async fn execute_plan(
                         device_id,
                         Some(rel_path.as_str()),
                         encryption,
+                        git_ff_expected,
                     )
                     .await
                 };
@@ -1009,6 +1649,7 @@ pub async fn execute_plan(
                         }
                     }
                     Err(e) => {
+                        mark_git_object_failure(rel_path, local_root, &mut git_object_failed_repos);
                         result
                             .errors
                             .push((rel_path.clone(), format!("push failed: {e:#}")));
@@ -1031,6 +1672,7 @@ pub async fn execute_plan(
                 // Ensure parent directory exists
                 if let Some(parent) = local_path.parent() {
                     if let Err(e) = std::fs::create_dir_all(parent) {
+                        mark_git_object_failure(rel_path, local_root, &mut git_object_failed_repos);
                         result
                             .errors
                             .push((rel_path.clone(), format!("mkdir failed: {e}")));
@@ -1055,6 +1697,7 @@ pub async fn execute_plan(
                         result.bytes_downloaded += download.bytes;
                     }
                     Err(e) => {
+                        mark_git_object_failure(rel_path, local_root, &mut git_object_failed_repos);
                         result
                             .errors
                             .push((rel_path.clone(), format!("pull failed: {e:#}")));
@@ -1130,6 +1773,7 @@ pub async fn execute_plan(
         pushed = result.pushed,
         pulled = result.pulled,
         conflicts = result.conflicts_recorded,
+        deferred_git_refs = result.deferred_git_refs.len(),
         errors = result.errors.len(),
         "plan execution complete"
     );
@@ -1146,9 +1790,13 @@ async fn execute_new_remote_pulls_concurrent(
     device_id: &str,
 ) -> Result<ExecutionResult> {
     let read_permits = Arc::new(Semaphore::new(REMOTE_PULL_CONCURRENCY));
-    let mut tasks = JoinSet::new();
     let mut result = ExecutionResult::default();
 
+    // Directories first so pulled files have their parents. Ref-class `.git`
+    // pulls (`.git/refs/**`, packed-refs, HEAD) are deferred to a second wave so
+    // they land only AFTER objects/packs from the first wave are written — a ref
+    // must never point at an object not yet present locally (corruption). All
+    // other paths (objects included) run in the first wave.
     for action in &plan.actions {
         if let ReconcileAction::CreateDirectory { rel_path } = action {
             let local_path = local_root.join(rel_path);
@@ -1162,79 +1810,114 @@ async fn execute_new_remote_pulls_concurrent(
                         .push((rel_path.clone(), format!("create directory failed: {e}")));
                 }
             }
-            continue;
         }
-
-        let ReconcileAction::Pull {
-            rel_path,
-            manifest_hash,
-            reason: PullReason::NewRemote,
-            ..
-        } = action
-        else {
-            continue;
-        };
-
-        let op = op.clone();
-        let rel_path = rel_path.clone();
-        let local_path = local_root.join(&rel_path);
-        let remote_prefix = remote_prefix.to_string();
-        let manifest_path = format!(
-            "{}/manifests/{}",
-            remote_prefix.trim_end_matches('/'),
-            manifest_hash
-        );
-        let device_id = device_id.to_string();
-        let read_permits = Arc::clone(&read_permits);
-
-        tasks.spawn(async move {
-            let pull_result = async {
-                let _permit = read_permits
-                    .acquire_owned()
-                    .await
-                    .context("acquiring remote pull permit")?;
-
-                if let Some(parent) = local_path.parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .with_context(|| format!("creating dir: {}", parent.display()))?;
-                }
-
-                engine::download_file_with_device(
-                    &op,
-                    &manifest_path,
-                    &local_path,
-                    &remote_prefix,
-                    None,
-                    &device_id,
-                    None,
-                    None,
-                )
-                .await
-                .with_context(|| format!("pull failed: {rel_path}"))
-            }
-            .await;
-
-            (rel_path, pull_result)
-        });
     }
 
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok((_, Ok(download))) => {
-                result.pulled += 1;
-                result.bytes_downloaded += download.bytes;
-                if let Some(sync_state) = download.sync_state {
-                    state.set(&download.local_path, sync_state);
+    // Objects-before-refs BARRIER: a repo whose wave-0 `.git` pulls had any
+    // failure must not have its wave-1 ref-class pulls applied this run — a
+    // ref pointing at an object that never landed corrupts the repo. Deferred
+    // refs are recorded (not errored) and re-planned next cycle.
+    let mut wave0_failed_git_repos: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for wave in [false, true] {
+        let mut tasks = JoinSet::new();
+        for action in &plan.actions {
+            let ReconcileAction::Pull {
+                rel_path,
+                manifest_hash,
+                reason: PullReason::NewRemote,
+                ..
+            } = action
+            else {
+                continue;
+            };
+
+            // Wave 0 = objects + everything non-ref; wave 1 = ref-class paths.
+            if is_git_ref_class_path(rel_path) != wave {
+                continue;
+            }
+
+            if wave && !wave0_failed_git_repos.is_empty() {
+                if let Some(root) = git_safety::repo_root_for_git_path(local_root, rel_path) {
+                    if wave0_failed_git_repos.contains(&root) {
+                        info!(
+                            path = %rel_path,
+                            "git barrier: wave-0 pull failed in this repo; deferring ref pull"
+                        );
+                        result.deferred_git_refs.push(rel_path.clone());
+                        continue;
+                    }
                 }
             }
-            Ok((rel_path, Err(e))) => {
-                result.errors.push((rel_path, format!("{e:#}")));
-            }
-            Err(e) => {
-                result
-                    .errors
-                    .push(("<concurrent-pull-task>".into(), format!("{e:#}")));
+
+            let op = op.clone();
+            let rel_path = rel_path.clone();
+            let local_path = local_root.join(&rel_path);
+            let remote_prefix = remote_prefix.to_string();
+            let manifest_path = format!(
+                "{}/manifests/{}",
+                remote_prefix.trim_end_matches('/'),
+                manifest_hash
+            );
+            let device_id = device_id.to_string();
+            let read_permits = Arc::clone(&read_permits);
+
+            tasks.spawn(async move {
+                let pull_result = async {
+                    let _permit = read_permits
+                        .acquire_owned()
+                        .await
+                        .context("acquiring remote pull permit")?;
+
+                    if let Some(parent) = local_path.parent() {
+                        tokio::fs::create_dir_all(parent)
+                            .await
+                            .with_context(|| format!("creating dir: {}", parent.display()))?;
+                    }
+
+                    engine::download_file_with_device(
+                        &op,
+                        &manifest_path,
+                        &local_path,
+                        &remote_prefix,
+                        None,
+                        &device_id,
+                        None,
+                        None,
+                    )
+                    .await
+                    .with_context(|| format!("pull failed: {rel_path}"))
+                }
+                .await;
+
+                (rel_path, pull_result)
+            });
+        }
+
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((_, Ok(download))) => {
+                    result.pulled += 1;
+                    result.bytes_downloaded += download.bytes;
+                    if let Some(sync_state) = download.sync_state {
+                        state.set(&download.local_path, sync_state);
+                    }
+                }
+                Ok((rel_path, Err(e))) => {
+                    if !wave && is_git_internal_path(&rel_path) {
+                        if let Some(root) =
+                            git_safety::repo_root_for_git_path(local_root, &rel_path)
+                        {
+                            wave0_failed_git_repos.insert(root);
+                        }
+                    }
+                    result.errors.push((rel_path, format!("{e:#}")));
+                }
+                Err(e) => {
+                    result
+                        .errors
+                        .push(("<concurrent-pull-task>".into(), format!("{e:#}")));
+                }
             }
         }
     }
@@ -1574,9 +2257,11 @@ mod tests {
         let blacklist = Blacklist::default();
         let config = ReconcileConfig::default();
 
-        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
-            .await
-            .unwrap();
+        let plan = reconcile(
+            &op, local_root, "data", &state, "neo", &blacklist, &config, None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             plan.summary.pushes, 1,
@@ -1616,9 +2301,11 @@ mod tests {
         let blacklist = Blacklist::default();
         let config = ReconcileConfig::default();
 
-        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
-            .await
-            .unwrap();
+        let plan = reconcile(
+            &op, local_root, "data", &state, "neo", &blacklist, &config, None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             plan.summary.pulls, 1,
@@ -1645,9 +2332,11 @@ mod tests {
         let blacklist = Blacklist::default();
         let config = ReconcileConfig::default();
 
-        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
-            .await
-            .unwrap();
+        let plan = reconcile(
+            &op, local_root, "data", &state, "neo", &blacklist, &config, None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(plan.summary.directories, 1);
         assert!(
@@ -1712,6 +2401,7 @@ mod tests {
             "honey",
             &blacklist,
             &config,
+            None,
         )
         .await
         .unwrap();
@@ -1791,6 +2481,7 @@ mod tests {
             "honey",
             &blacklist,
             &config,
+            None,
         )
         .await
         .unwrap();
@@ -1856,6 +2547,7 @@ mod tests {
             "honey",
             &blacklist,
             &config,
+            None,
         )
         .await
         .unwrap();
@@ -1921,6 +2613,7 @@ mod tests {
             "neo",
             &blacklist,
             &config,
+            None,
         )
         .await
         .unwrap();
@@ -1976,6 +2669,7 @@ mod tests {
             "honey",
             &blacklist,
             &config,
+            None,
         )
         .await
         .unwrap();
@@ -2062,9 +2756,11 @@ mod tests {
         let blacklist = Blacklist::default();
         let config = ReconcileConfig::default();
 
-        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
-            .await
-            .unwrap();
+        let plan = reconcile(
+            &op, local_root, "data", &state, "neo", &blacklist, &config, None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             plan.summary.up_to_date, 1,
@@ -2127,9 +2823,11 @@ mod tests {
         let blacklist = Blacklist::default();
         let config = ReconcileConfig::default();
 
-        let plan = reconcile(&op, local_root, "data", &state, "neo", &blacklist, &config)
-            .await
-            .unwrap();
+        let plan = reconcile(
+            &op, local_root, "data", &state, "neo", &blacklist, &config, None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(plan.summary.up_to_date, 1);
         assert_eq!(plan.summary.pushes, 0);
@@ -2173,9 +2871,18 @@ mod tests {
 
         // Second reconcile cycle against the SAME local tree + remote: the
         // symlink exists on both sides and is tracked, so it must converge.
-        let plan = reconcile(&op, &local_root, "data", &state, "neo", &blacklist, &config)
-            .await
-            .unwrap();
+        let plan = reconcile(
+            &op,
+            &local_root,
+            "data",
+            &state,
+            "neo",
+            &blacklist,
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         let link_action = plan.actions.iter().find(|a| match a {
             ReconcileAction::UpToDate { rel_path }
@@ -2228,9 +2935,18 @@ mod tests {
         let blacklist = Blacklist::default();
         let config = ReconcileConfig::default();
 
-        let plan = reconcile(&op, &local_root, "data", &state, "neo", &blacklist, &config)
-            .await
-            .unwrap();
+        let plan = reconcile(
+            &op,
+            &local_root,
+            "data",
+            &state,
+            "neo",
+            &blacklist,
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
 
         let link_action = plan.actions.iter().find(|a| match a {
             ReconcileAction::UpToDate { rel_path }
@@ -2266,5 +2982,99 @@ mod tests {
         let config = ReconcileConfig::default();
         assert!(!config.delete_local_orphans);
         assert!(!config.delete_remote_orphans);
+    }
+
+    // ── M-4 (PR #513): submodule gitdir class ordering ───────────────────────
+
+    #[test]
+    fn test_submodule_gitdir_paths_classify() {
+        // Submodule internals live under `.git/modules/<name>/**`. They must get
+        // the same object/ref class treatment as a top-level gitdir so the
+        // objects-before-refs ordering + barrier apply to raw-roamed submodules.
+        assert!(is_git_ref_class_path(
+            "repo/.git/modules/dep/refs/heads/main"
+        ));
+        assert!(is_git_ref_class_path("repo/.git/modules/dep/refs/tags/v1"));
+        assert!(is_git_ref_class_path("repo/.git/modules/dep/packed-refs"));
+        assert!(is_git_ref_class_path("repo/.git/modules/dep/HEAD"));
+        // Nested submodule (`<name>` contains a further `modules/` segment).
+        assert!(is_git_ref_class_path(
+            "repo/.git/modules/a/modules/b/refs/heads/main"
+        ));
+
+        assert!(is_git_object_class_path(
+            "repo/.git/modules/dep/objects/ab/cdef0123456789"
+        ));
+        assert!(is_git_object_class_path(
+            "repo/.git/modules/dep/objects/pack/pack-abc.pack"
+        ));
+
+        // A submodule ref is NOT object-class, and a submodule object is NOT
+        // ref-class (the two axes stay distinct).
+        assert!(!is_git_object_class_path(
+            "repo/.git/modules/dep/refs/heads/main"
+        ));
+        assert!(!is_git_ref_class_path(
+            "repo/.git/modules/dep/objects/ab/cdef"
+        ));
+
+        // Top-level gitdir classification is unchanged.
+        assert!(is_git_ref_class_path("repo/.git/refs/heads/main"));
+        assert!(is_git_object_class_path("repo/.git/objects/ab/cdef"));
+        // A submodule working-tree source file is neither class.
+        assert!(!is_git_ref_class_path("repo/dep/src/main.rs"));
+        assert!(!is_git_object_class_path("repo/dep/src/main.rs"));
+    }
+
+    // ── BLOCKER-1 + BLOCKER-3 (PR #513): fast-forward veto predicate ──────────
+
+    /// The exact predicate `decide_repo_fast_forward` fails closed on: any
+    /// ref-class `.git` path that is NOT a provable top-level branch head. This
+    /// mirrors the veto call site (`is_git_ref_class_path(p) &&
+    /// head_ref_for_git_path(p).is_none()`), so a group containing any such path
+    /// stays Conflict with zero writes.
+    fn ff_group_vetoes(rel: &str) -> bool {
+        is_git_ref_class_path(rel) && git_safety::head_ref_for_git_path(rel).is_none()
+    }
+
+    #[test]
+    fn test_ff_veto_ref_class_predicate() {
+        // Top-level non-head ref-class paths → veto (no ancestry proof covers
+        // them): packed-refs, tags, stash, remotes.
+        assert!(ff_group_vetoes("repo/.git/packed-refs"));
+        assert!(ff_group_vetoes("repo/.git/refs/tags/v1"));
+        assert!(ff_group_vetoes("repo/.git/refs/stash"));
+        assert!(ff_group_vetoes("repo/.git/refs/remotes/origin/main"));
+        // A detached / divergent top-level HEAD (raw SHA) → veto (closes the
+        // detached-HEAD clobber variant).
+        assert!(ff_group_vetoes("repo/.git/HEAD"));
+
+        // BLOCKER-3: EVERY submodule ref-class path under `.git/modules/<name>/`
+        // → veto. `repo_root_for_git_path` groups these under the outer repo, so
+        // without this they would ride the outer head's FF dominance unproven.
+        assert!(ff_group_vetoes("repo/.git/modules/dep/refs/heads/main"));
+        assert!(ff_group_vetoes("repo/.git/modules/dep/refs/tags/v1"));
+        assert!(ff_group_vetoes("repo/.git/modules/dep/packed-refs"));
+        assert!(ff_group_vetoes("repo/.git/modules/dep/refs/stash"));
+        assert!(ff_group_vetoes("repo/.git/modules/dep/HEAD"));
+        // Submodule reflogs are ref-class here too → over-veto, but fail-closed
+        // and safe (the divergent submodule pointer already vetoes the group).
+        assert!(ff_group_vetoes(
+            "repo/.git/modules/a/modules/b/refs/heads/main"
+        ));
+
+        // Provable top-level branch heads → do NOT veto (the ancestry proof
+        // covers exactly these).
+        assert!(!ff_group_vetoes("repo/.git/refs/heads/main"));
+        assert!(!ff_group_vetoes("repo/.git/refs/heads/feature/x"));
+
+        // Workdir / index / head-following reflog state → NOT ref-class, so they
+        // keep riding the group decision (never veto).
+        assert!(!ff_group_vetoes("repo/.git/index"));
+        assert!(!ff_group_vetoes("repo/.git/logs/HEAD"));
+        assert!(!ff_group_vetoes("repo/.git/logs/refs/heads/main"));
+        // Object data and non-git paths → never veto.
+        assert!(!ff_group_vetoes("repo/.git/objects/ab/cdef"));
+        assert!(!ff_group_vetoes("repo/src/refs.rs"));
     }
 }

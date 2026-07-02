@@ -1101,7 +1101,28 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     };
                     drop(op_guard);
 
-                    let recon_config = tcfs_sync::reconcile::ReconcileConfig::default();
+                    // Enable `.git`-aware fast-forward conflict resolution when
+                    // syncing raw `.git` dirs. Other knobs keep their defaults.
+                    let recon_config = tcfs_sync::reconcile::ReconcileConfig {
+                        git_sync_mode: recon_blacklist.git_sync_mode().to_string(),
+                        git_ff_resolution: recon_blacklist.allows_git_dirs()
+                            && recon_blacklist.git_sync_mode() == "raw",
+                        ..Default::default()
+                    };
+
+                    // Build the encryption context (if a master key is loaded)
+                    // up-front: the reconcile pass needs it to read remote `.git`
+                    // ref blobs for the fast-forward ancestry check.
+                    let recon_enc = {
+                        let mk_guard = recon_master_key.lock().await;
+                        mk_guard.as_ref().map(|k| {
+                            crate::grpc::build_encryption_context(
+                                &recon_tcfs_config,
+                                &recon_device,
+                                k,
+                            )
+                        })
+                    };
 
                     let cache = recon_state.lock().await;
                     let plan = match tcfs_sync::reconcile::reconcile(
@@ -1112,6 +1133,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         &recon_device,
                         &recon_blacklist,
                         &recon_config,
+                        recon_enc.as_ref(),
                     )
                     .await
                     {
@@ -1135,16 +1157,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                             "reconcile: executing plan"
                         );
 
-                        // Build encryption context from master key (if loaded)
-                        let mk_guard = recon_master_key.lock().await;
-                        let enc_ctx = mk_guard.as_ref().map(|k| {
-                            crate::grpc::build_encryption_context(
-                                &recon_tcfs_config,
-                                &recon_device,
-                                k,
-                            )
-                        });
-                        drop(mk_guard);
+                        // Reuse the encryption context built before the plan
+                        // (same master key, same device/config).
+                        let enc_ctx = &recon_enc;
 
                         let mut cache = recon_state.lock().await;
                         match tcfs_sync::reconcile::execute_plan(
@@ -1164,6 +1179,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     pushed = result.pushed,
                                     pulled = result.pulled,
                                     errors = result.errors.len(),
+                                    deferred_git_refs = result.deferred_git_refs.len(),
                                     bytes_up = result.bytes_uploaded,
                                     bytes_down = result.bytes_downloaded,
                                     "reconcile: plan executed"

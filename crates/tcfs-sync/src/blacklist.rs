@@ -33,6 +33,15 @@ pub enum BlacklistReason {
     /// absolute host paths). Always denied, even under `sync_git_dirs=true`
     /// with `git_sync_mode="raw"` (G5 / TIN-1620).
     GitWorktreesAdmin,
+    /// Fail-closed lockfile fence: a transient git lockfile under a `.git/`
+    /// directory — the TCFS cooperative `.git/tcfs.lock`, or git's own
+    /// `index.lock` / `HEAD.lock` / `<ref>.lock` / `packed-refs.lock`. Roaming
+    /// a leaked lock would make it join `.git` conflict groups and, probed
+    /// against a foreign PID table, could wedge peers into permanent
+    /// proceed-without-lock. Always denied, even under `sync_git_dirs=true`
+    /// with `git_sync_mode="raw"` (M-3 / PR #513). `Cargo.lock` / `flake.lock`
+    /// live OUTSIDE `.git`, so they are unaffected.
+    GitLockFile,
     /// VFS internal directory marker (.tcfs_dir).
     VfsMarker,
 }
@@ -48,6 +57,7 @@ impl std::fmt::Display for BlacklistReason {
             BlacklistReason::GitDir => write!(f, ".git directory"),
             BlacklistReason::GitFilePointer => write!(f, "gitfile pointer (linked worktree)"),
             BlacklistReason::GitWorktreesAdmin => write!(f, ".git/worktrees admin area"),
+            BlacklistReason::GitLockFile => write!(f, "git lockfile"),
             BlacklistReason::VfsMarker => write!(f, "VFS marker"),
         }
     }
@@ -130,6 +140,27 @@ fn has_git_worktrees_segment(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// True when `path` is a transient git lockfile that must never roam: the TCFS
+/// cooperative `.git/tcfs.lock`, or any git lockfile (`index.lock`,
+/// `HEAD.lock`, `<ref>.lock`, `packed-refs.lock`, ...) — i.e. a `*.lock` file
+/// anywhere INSIDE a `.git/` directory. A leaked/roamed lock joins `.git`
+/// conflict groups and, probed against a foreign PID table, can wedge peers
+/// into permanent proceed-without-lock. Scoped to `.git` so `Cargo.lock` /
+/// `flake.lock` (which live outside `.git`) still roam. Fail-closed regardless
+/// of config (M-3 / PR #513).
+fn is_git_lockfile_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !name.ends_with(".lock") {
+        return false;
+    }
+    // The lockfile must be strictly inside a `.git` directory: some component
+    // before the final one is named `.git`.
+    path.components()
+        .any(|c| matches!(c, std::path::Component::Normal(n) if n == ".git"))
 }
 
 /// Centralized exclusion filter for the sync pipeline.
@@ -289,6 +320,10 @@ impl Blacklist {
             );
             return Some(BlacklistReason::GitWorktreesAdmin);
         }
+        if is_git_lockfile_path(path) {
+            debug!(path = %path.display(), "fencing git lockfile: never roams");
+            return Some(BlacklistReason::GitLockFile);
+        }
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             self.check_name(name, is_dir)
         } else {
@@ -318,6 +353,10 @@ impl Blacklist {
                 "fencing .git/worktrees admin area: never roams"
             );
             return Some(BlacklistReason::GitWorktreesAdmin);
+        }
+        if is_git_lockfile_path(path) {
+            debug!(path = %path.display(), "fencing git lockfile: never roams");
+            return Some(BlacklistReason::GitLockFile);
         }
         for component in path.components() {
             if let std::path::Component::Normal(name) = component {
@@ -687,6 +726,43 @@ mod tests {
         }
         // A directory named `worktrees` NOT under `.git` is a normal dir.
         assert_eq!(bl.check(Path::new("repo/worktrees/notes.md"), false), None);
+    }
+
+    // --- M-3 / PR #513: transient git lockfiles never roam ---
+    #[test]
+    fn test_git_lockfiles_denied_even_under_raw() {
+        // sync_git_dirs=true + git_sync_mode="raw" lets `.git/**` through, but
+        // transient lockfiles (tcfs.lock, index.lock, <ref>.lock, ...) must be
+        // fenced fail-closed — both via check() and the component walk.
+        let bl = Blacklist::new(&[], true, true, "raw");
+        for p in [
+            "repo/.git/tcfs.lock",
+            "repo/.git/index.lock",
+            "repo/.git/HEAD.lock",
+            "repo/.git/refs/heads/main.lock",
+            "repo/.git/packed-refs.lock",
+            "repo/vendor/dep/.git/index.lock",
+        ] {
+            assert_eq!(
+                bl.check(Path::new(p), false),
+                Some(BlacklistReason::GitLockFile),
+                "{p} must be lockfile-fenced via check()"
+            );
+            assert_eq!(
+                bl.check_path_components(Path::new(p)),
+                Some(BlacklistReason::GitLockFile),
+                "{p} must be lockfile-fenced via component walk"
+            );
+        }
+        // A real ref file (not a lock) under raw still roams.
+        assert_eq!(
+            bl.check(Path::new("repo/.git/refs/heads/main"), false),
+            None
+        );
+        // `Cargo.lock` / `flake.lock` live OUTSIDE `.git` and must still roam.
+        assert_eq!(bl.check(Path::new("repo/Cargo.lock"), false), None);
+        assert_eq!(bl.check(Path::new("repo/flake.lock"), false), None);
+        assert_eq!(bl.check_name("Cargo.lock", false), None);
     }
 
     #[test]

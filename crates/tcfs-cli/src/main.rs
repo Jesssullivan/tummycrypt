@@ -6450,9 +6450,32 @@ async fn cmd_reconcile(
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
     let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&config.sync);
-    let reconcile_config = tcfs_sync::reconcile::ReconcileConfig::default();
+    // Enable `.git`-aware fast-forward conflict resolution for raw git-dir sync.
+    let reconcile_config = tcfs_sync::reconcile::ReconcileConfig {
+        git_sync_mode: blacklist.git_sync_mode().to_string(),
+        git_ff_resolution: blacklist.allows_git_dirs() && blacklist.git_sync_mode() == "raw",
+        ..Default::default()
+    };
     let orphan_chunk_cleanup_grace =
         Duration::from_secs(config.sync.orphan_chunk_cleanup_grace_secs);
+
+    // Build the encryption context (if a master key is configured) before the
+    // reconcile pass: the `.git` fast-forward check reads remote ref blobs, which
+    // are encrypted when a master key is set.
+    let master_key = config
+        .crypto
+        .master_key_file
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .filter(|k| k.len() == 32)
+        .map(|bytes| {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            tcfs_crypto::MasterKey::from_bytes(key)
+        });
+    let enc_ctx = master_key
+        .as_ref()
+        .map(|mk| build_encryption_context(config, &device_id, mk));
 
     println!(
         "Reconciling {} ↔ {}:{}/",
@@ -6469,6 +6492,7 @@ async fn cmd_reconcile(
         &device_id,
         &blacklist,
         &reconcile_config,
+        enc_ctx.as_ref(),
     )
     .await
     .context("reconciliation failed")?;
@@ -6546,21 +6570,6 @@ async fn cmd_reconcile(
 
         let mut state = tcfs_sync::state::StateCache::open(&state_path)?;
 
-        let master_key = config
-            .crypto
-            .master_key_file
-            .as_ref()
-            .and_then(|p| std::fs::read(p).ok())
-            .filter(|k| k.len() == 32)
-            .map(|bytes| {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&bytes);
-                tcfs_crypto::MasterKey::from_bytes(key)
-            });
-        let enc_ctx = master_key
-            .as_ref()
-            .map(|mk| build_encryption_context(config, &device_id, mk));
-
         let result = tcfs_sync::reconcile::execute_plan(
             &plan,
             &op,
@@ -6588,6 +6597,17 @@ async fn cmd_reconcile(
 
         for (path, err) in &result.errors {
             eprintln!("  error: {path}: {err}");
+        }
+
+        if !result.deferred_git_refs.is_empty() {
+            println!(
+                "  {} git ref action(s) deferred (objects-before-refs barrier); \
+                 they will re-plan next cycle:",
+                result.deferred_git_refs.len()
+            );
+            for path in &result.deferred_git_refs {
+                println!("    deferred: {path}");
+            }
         }
     }
 
@@ -6634,7 +6654,8 @@ fn plan_may_orphan_remote_chunks(plan: &tcfs_sync::reconcile::ReconcilePlan) -> 
         matches!(
             action,
             tcfs_sync::reconcile::ReconcileAction::Push {
-                reason: tcfs_sync::reconcile::PushReason::LocalNewer,
+                reason: tcfs_sync::reconcile::PushReason::LocalNewer
+                    | tcfs_sync::reconcile::PushReason::GitFastForward { .. },
                 ..
             } | tcfs_sync::reconcile::ReconcileAction::DeleteRemote { .. }
         )
