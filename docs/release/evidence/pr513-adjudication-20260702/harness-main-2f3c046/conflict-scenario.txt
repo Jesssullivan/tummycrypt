@@ -1,0 +1,8 @@
+scenario: same repo .git diverged on two devices; conflict_mode=auto
+tie-break: per-file lexicographic device id, applied per .git/* PATH
+interleave: aaa wins loose refs/heads/main=5ca1d5a0964693e2b713462c0423ca1d9306199f; zzz wins
+            packed-refs + index + object store (which lacks that commit)
+expected hazard: HEAD->refs/heads/main points at an object the merged
+                 object store does not contain (a dangling/half-applied ref)
+CORRUPTION-RISK CONFIRMED: per-file .git tie-break left a half-applied ref
+see conflict-fsck.txt / conflict-status.txt / conflict-headobj.txt

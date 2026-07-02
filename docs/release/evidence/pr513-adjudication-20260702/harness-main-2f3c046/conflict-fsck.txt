@@ -1,0 +1,2 @@
+error: refs/heads/main: invalid sha1 pointer 5ca1d5a0964693e2b713462c0423ca1d9306199f
+error: HEAD: invalid sha1 pointer 5ca1d5a0964693e2b713462c0423ca1d9306199f

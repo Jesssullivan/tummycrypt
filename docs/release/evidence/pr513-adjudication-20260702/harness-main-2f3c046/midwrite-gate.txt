@@ -1,0 +1,4 @@
+planted: .git/index.lock (simulated in-flight git write)
+expected: collector git_is_safe() marks this .git BLOCKING and skips it
+          this cycle, retrying once the lock clears — never a torn push.
+PROOF: index.lock present -> raw .git collection must skip (git_safety.rs blocking set)

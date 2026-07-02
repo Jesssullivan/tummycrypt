@@ -1,0 +1,30 @@
+   Compiling x25519-dalek v2.0.1
+   Compiling zstd v0.13.3
+   Compiling unicode-normalization v0.1.25
+   Compiling rand v0.9.3
+   Compiling tcfs-chunks v0.12.15 (/private/tmp/claude-501/-Users-jess-git-rockies/98ec16e4-f3d6-40b0-ac51-a3976a42f565/scratchpad/wt-513-head/crates/tcfs-chunks)
+   Compiling rand_chacha v0.9.0
+   Compiling rand_xorshift v0.4.0
+   Compiling unarray v0.1.4
+   Compiling lazy_static v1.5.0
+   Compiling glob v0.3.3
+   Compiling bech32 v0.9.1
+   Compiling tokio-test v0.4.5
+   Compiling age v0.11.2
+   Compiling proptest v1.11.0
+   Compiling tcfs-storage v0.12.15 (/private/tmp/claude-501/-Users-jess-git-rockies/98ec16e4-f3d6-40b0-ac51-a3976a42f565/scratchpad/wt-513-head/crates/tcfs-storage)
+   Compiling tcfs-sync v0.12.15 (/private/tmp/claude-501/-Users-jess-git-rockies/98ec16e4-f3d6-40b0-ac51-a3976a42f565/scratchpad/wt-513-head/crates/tcfs-sync)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 54s
+     Running tests/git_ff_resolution.rs (target/debug/deps/git_ff_resolution-bc25405eeccae561)
+
+running 7 tests
+test git_object_failure_bars_ref_actions_sequential ... ok
+test git_object_failure_bars_ref_pull_concurrent ... ok
+test git_ff_planning_fabricates_nothing_under_root ... ok
+test git_ff_converges_push_then_pull ... ok
+test git_ff_remote_ahead_concurrent_clocks_reclassifies_to_pull ... ok
+test git_divergent_stays_conflict ... ok
+test git_ff_concurrent_clocks_push_uploads_and_converges ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.89s
+
