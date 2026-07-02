@@ -1,0 +1,34 @@
+[daemon]
+socket = "/Users/jess/git/tummycrypt/docs/release/evidence/large-workdir-20260526T002332Z/state/no-daemon.sock"
+
+[storage]
+endpoint = "http://localhost:8333"
+region = "us-east-1"
+bucket = "tcfs"
+remote_prefix = "large-workdir-20260526T002332Z"
+enforce_tls = false
+max_concurrent_ops = 0
+s3_connect_timeout_secs = 0
+s3_pool_idle_timeout_secs = 0
+s3_pool_max_idle_per_host = 0
+s3_http1_only = false
+
+
+[sync]
+state_db = "/Users/jess/git/tummycrypt/docs/release/evidence/large-workdir-20260526T002332Z/state/state.db"
+sync_root = "/Users/jess/TCFS Pilot/real-canaries/linux-xr-fast-shadow-20260526T002332Z"
+nats_url = "nats://localhost:4222"
+nats_tls = false
+sync_git_dirs = true
+git_sync_mode = "raw"
+sync_hidden_dirs = true
+sync_symlinks = true
+sync_empty_dirs = true
+
+[fuse]
+cache_dir = "/Users/jess/git/tummycrypt/docs/release/evidence/large-workdir-20260526T002332Z/state/cache"
+cache_max_mb = 512
+negative_cache_ttl_secs = 1
+
+[crypto]
+enabled = false
