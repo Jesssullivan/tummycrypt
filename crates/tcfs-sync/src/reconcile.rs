@@ -34,6 +34,20 @@ const DIR_MARKER_SUFFIX: &str = "/.tcfs_dir";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/// A branch-head ref pinned by the `.git` fast-forward ancestry proof at plan
+/// time. Execution re-reads the live ref file and refuses to dominate (push) or
+/// overwrite (pull) unless it still resolves to exactly this SHA — closing the
+/// plan-time-proof / execute-time-state race (a mid-cycle commit / reset /
+/// amend on the losing device would otherwise publish an unproven rewind, or
+/// have its fresh ref + reflog silently clobbered). See BLOCKER-2 on PR #513.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRefPin {
+    /// Repo-relative path of the head ref file (e.g. `.git/refs/heads/main`).
+    pub rel_path: String,
+    /// The local SHA the ancestry proof was computed against at plan time.
+    pub sha: String,
+}
+
 /// Why a file needs to be pushed.
 #[derive(Debug, Clone)]
 pub enum PushReason {
@@ -50,6 +64,11 @@ pub enum PushReason {
     GitFastForward {
         /// Manifest hash of this path's remote index entry at plan time.
         expected_remote_manifest: String,
+        /// Branch-head refs the ancestry proof pinned at plan time. Execution
+        /// re-reads each live ref file and refuses to dominate the remote clock
+        /// unless every pin still matches — a mid-cycle local ref move
+        /// (commit/reset/amend) makes the whole group DEFER, never dominate.
+        ref_pins: Vec<GitRefPin>,
     },
 }
 
@@ -60,6 +79,16 @@ pub enum PullReason {
     NewRemote,
     /// Vector clock indicates remote is ahead of local.
     RemoteNewer,
+    /// Reclassified from a `.git` conflict by the fast-forward resolver: the
+    /// remote git tip is a strict descendant of the local tip. Carries the
+    /// branch-head refs the proof pinned at plan time; execution re-reads each
+    /// live ref file and refuses to OVERWRITE local state unless every pin
+    /// still matches — a mid-cycle local commit must not be silently clobbered
+    /// (its ref + reflog would otherwise dangle with no pointer).
+    GitFastForward {
+        /// Branch-head refs the ancestry proof pinned at plan time.
+        ref_pins: Vec<GitRefPin>,
+    },
 }
 
 /// A single reconciliation action — pure data describing what to do.
@@ -706,20 +735,76 @@ fn git_apply_rank(a: &ReconcileAction) -> u8 {
 }
 
 /// True for the `.git` paths that publish a ref and therefore must be applied
-/// AFTER objects: `.git/refs/**`, `.git/packed-refs`, and `.git/HEAD`.
+/// AFTER objects: `.git/refs/**`, `.git/packed-refs`, and `.git/HEAD` — plus the
+/// same layout inside a submodule's real gitdir at `.git/modules/<name>/**`
+/// (M-4, PR #513) so raw-roamed submodule internals get the ordering + barrier.
 fn is_git_ref_class_path(rel: &str) -> bool {
     if !is_git_internal_path(rel) {
         return false;
     }
-    rel.contains(".git/refs/") || rel.ends_with(".git/packed-refs") || rel.ends_with(".git/HEAD")
+    rel.contains(".git/refs/")
+        || rel.ends_with(".git/packed-refs")
+        || rel.ends_with(".git/HEAD")
+        || is_git_modules_ref_class(rel)
 }
 
 /// True for `.git` paths that carry object data (`.git/objects/**`, loose or
-/// pack). A failed object action for a repo bars that repo's ref-class actions
-/// for the rest of the run (objects-before-refs barrier): a ref must never be
-/// published or applied when the objects it needs may not have landed.
+/// pack) — including a submodule's own object store at
+/// `.git/modules/<name>/objects/**` (M-4, PR #513). A failed object action for
+/// a repo bars that repo's ref-class actions for the rest of the run
+/// (objects-before-refs barrier): a ref must never be published or applied when
+/// the objects it needs may not have landed.
 fn is_git_object_class_path(rel: &str) -> bool {
-    is_git_internal_path(rel) && rel.contains(".git/objects/")
+    if !is_git_internal_path(rel) {
+        return false;
+    }
+    rel.contains(".git/objects/") || is_git_modules_object_class(rel)
+}
+
+/// Submodule object-store paths: anything under a `.git/modules/<name>/objects/`
+/// tail (the `<name>` may itself contain slashes / nested `modules/`).
+fn is_git_modules_object_class(rel: &str) -> bool {
+    match rel.find(".git/modules/") {
+        Some(pos) => rel[pos..].contains("/objects/"),
+        None => false,
+    }
+}
+
+/// Submodule ref-class paths: `refs/**`, `packed-refs`, or `HEAD` inside a
+/// `.git/modules/<name>/` gitdir.
+fn is_git_modules_ref_class(rel: &str) -> bool {
+    match rel.find(".git/modules/") {
+        Some(pos) => {
+            let tail = &rel[pos..];
+            tail.contains("/refs/") || tail.ends_with("/packed-refs") || tail.ends_with("/HEAD")
+        }
+        None => false,
+    }
+}
+
+/// True for `.git` paths that store a ref VALUE the fast-forward ancestry proof
+/// does NOT cover: `.git/packed-refs`, or anything under `.git/refs/` that is
+/// not under `.git/refs/heads/` (tags, stash, remotes, notes, ...). The proof
+/// only examines branch-head refs (`head_ref_for_git_path`), so if any such
+/// path is in a conflict group the FF decision must fail closed — force-syncing
+/// these pointer files under group dominance with no ancestry proof would be a
+/// silent clobber (BLOCKER-1, PR #513). `.git/index` and `.git/logs/**` are
+/// workdir / reflog state, not ref values, so they are excluded (they may keep
+/// riding the group decision).
+fn is_ref_valued_non_head_path(rel: &str) -> bool {
+    if !is_git_internal_path(rel) {
+        return false;
+    }
+    if rel.ends_with(".git/packed-refs") {
+        return true;
+    }
+    match rel.find(".git/refs/") {
+        Some(pos) => {
+            let after = &rel[pos + ".git/refs/".len()..];
+            !after.starts_with("heads/")
+        }
+        None => false,
+    }
 }
 
 /// Record a failed `.git/objects/**` action: inserts the enclosing repo root
@@ -742,6 +827,37 @@ fn git_ref_barrier_hit(rel_path: &str, local_root: &Path, barred: &BTreeSet<Path
     }
     git_safety::repo_root_for_git_path(local_root, rel_path)
         .is_some_and(|root| barred.contains(&root))
+}
+
+/// Extract the plan-time head-ref pins carried by a `.git` fast-forward action
+/// (push or pull). Ordinary actions carry no pins and yield `None`.
+fn git_ff_ref_pins(action: &ReconcileAction) -> Option<&[GitRefPin]> {
+    match action {
+        ReconcileAction::Push {
+            reason: PushReason::GitFastForward { ref_pins, .. },
+            ..
+        } => Some(ref_pins),
+        ReconcileAction::Pull {
+            reason: PullReason::GitFastForward { ref_pins },
+            ..
+        } => Some(ref_pins),
+        _ => None,
+    }
+}
+
+/// Re-read every pinned head ref from the live working tree and confirm it
+/// still resolves to exactly the SHA the fast-forward proof pinned at plan
+/// time. Any mismatch — a mid-cycle commit / reset / amend on this device, or a
+/// vanished ref file — means the ancestry proof is stale, so the caller must
+/// DEFER, never dominate (push) or overwrite (pull). Fail-closed (BLOCKER-2,
+/// PR #513).
+fn git_ff_pins_still_valid(local_root: &Path, pins: &[GitRefPin]) -> bool {
+    pins.iter().all(|pin| {
+        match std::fs::read(local_root.join(&pin.rel_path)) {
+            Ok(bytes) => git_safety::parse_ref_sha(&bytes).as_deref() == Some(pin.sha.as_str()),
+            Err(_) => false, // ref file gone → stale, defer
+        }
+    })
 }
 
 /// Acquire cooperative `.git/tcfs.lock` guards for every repo that has a
@@ -1074,12 +1190,15 @@ async fn reclassify_git_ff_conflicts(
             encryption,
         )
         .await;
-        let Some(direction) = decision else {
+        let Some((direction, ref_pins)) = decision else {
             // Indeterminate / divergent: leave every conflict as-is.
             continue;
         };
         // Apply atomically: rewrite ALL of this repo's `.git/*` conflicts toward
-        // the single winning direction.
+        // the single winning direction. Every rewritten action carries the same
+        // plan-time head-ref pins (BLOCKER-2): execution re-verifies them before
+        // dominating/overwriting, so a mid-cycle local ref move defers the whole
+        // group — reflog and index included.
         for &idx in &indices {
             let ReconcileAction::Conflict { rel_path, .. } = &actions[idx] else {
                 continue;
@@ -1099,6 +1218,7 @@ async fn reclassify_git_ff_conflicts(
                             rel_path: rel_path.clone(),
                             reason: PushReason::GitFastForward {
                                 expected_remote_manifest: entry.manifest_hash.clone(),
+                                ref_pins: ref_pins.clone(),
                             },
                         },
                         // No remote entry: fail closed, keep the conflict.
@@ -1113,7 +1233,9 @@ async fn reclassify_git_ff_conflicts(
                             rel_path: rel_path.clone(),
                             manifest_hash: entry.manifest_hash.clone(),
                             size: entry.size,
-                            reason: PullReason::RemoteNewer,
+                            reason: PullReason::GitFastForward {
+                                ref_pins: ref_pins.clone(),
+                            },
                         },
                         // No remote entry: fail closed, keep the conflict.
                         None => continue,
@@ -1152,12 +1274,34 @@ async fn decide_repo_fast_forward(
     remote_prefix: &str,
     remote_index: &HashMap<String, RemoteIndexEntry>,
     encryption: OptionalEncryption<'_>,
-) -> Option<git_safety::FastForward> {
+) -> Option<(git_safety::FastForward, Vec<GitRefPin>)> {
+    // BLOCKER-1 (fail-closed, PR #513): the ancestry proof below covers ONLY
+    // branch-head refs (`.git/refs/heads/*`). If this conflict group contains
+    // any OTHER ref-valued path — `packed-refs`, tags, stash, remotes, notes —
+    // a fast-forward decision would force-sync that pointer state under group
+    // dominance with NO ancestry proof, a deterministic silent clobber. Veto
+    // the whole repo: every conflict stays Conflict, zero writes. (Index and
+    // `logs/**` are workdir/reflog state, not ref values, so they keep riding.)
+    for &idx in indices {
+        if let ReconcileAction::Conflict { rel_path, .. } = &actions[idx] {
+            if is_ref_valued_non_head_path(rel_path) {
+                debug!(
+                    repo = %repo_root.display(),
+                    path = %rel_path,
+                    "git ff: ref-valued non-head path in conflict group; fail-closed (stays Conflict)"
+                );
+                return None;
+            }
+        }
+    }
+
     // Find the branch-head ref path(s) among this repo's conflicts. There may be
     // several (multiple branches advanced); a clean fast-forward requires EVERY
     // conflicting head ref to agree on the same direction, otherwise fail closed.
     let mut direction: Option<git_safety::FastForward> = None;
     let mut saw_ref = false;
+    // Plan-time head-ref pins for the execute-time re-verify (BLOCKER-2).
+    let mut ref_pins: Vec<GitRefPin> = Vec::new();
 
     for &idx in indices {
         let ReconcileAction::Conflict { rel_path, .. } = &actions[idx] else {
@@ -1189,6 +1333,11 @@ async fn decide_repo_fast_forward(
             Some(prev) if prev == ff => {}
             Some(_) => return None, // refs disagree on direction → fail closed
         }
+        // Pin the exact local SHA this ref was proven against.
+        ref_pins.push(GitRefPin {
+            rel_path: rel_path.clone(),
+            sha: local_sha,
+        });
     }
 
     if !saw_ref {
@@ -1197,7 +1346,7 @@ async fn decide_repo_fast_forward(
         // so stay conflicted.
         return None;
     }
-    direction
+    direction.map(|d| (d, ref_pins))
 }
 
 /// Read the remote commit SHA stored at a `.git/refs/heads/<branch>` path by
@@ -1435,6 +1584,23 @@ pub async fn execute_plan(
                 result.deferred_git_refs.push(rel_path.clone());
                 continue;
             }
+            // BLOCKER-2 (PR #513): a `.git` fast-forward push/pull earned its
+            // right to dominate/overwrite from the plan-time head-ref SHA. Right
+            // before applying it, re-read the live local ref(s): if any moved
+            // since planning (a mid-cycle commit/reset/amend on this device),
+            // the proof is stale — DEFER the whole group (reflog + index
+            // included) instead of dominating the remote clock (push) or
+            // clobbering the fresh local commit (pull).
+            if let Some(pins) = git_ff_ref_pins(action) {
+                if !git_ff_pins_still_valid(local_root, pins) {
+                    warn!(
+                        path = %rel_path,
+                        "git ff: local ref moved between plan and execute; deferring (no dominate/overwrite)"
+                    );
+                    result.deferred_git_refs.push(rel_path.clone());
+                    continue;
+                }
+            }
         }
         match action {
             ReconcileAction::Push {
@@ -1476,6 +1642,7 @@ pub async fn execute_plan(
                     let git_ff_expected = match reason {
                         PushReason::GitFastForward {
                             expected_remote_manifest,
+                            ..
                         } => Some(expected_remote_manifest.as_str()),
                         _ => None,
                     };
@@ -2833,5 +3000,76 @@ mod tests {
         let config = ReconcileConfig::default();
         assert!(!config.delete_local_orphans);
         assert!(!config.delete_remote_orphans);
+    }
+
+    // ── M-4 (PR #513): submodule gitdir class ordering ───────────────────────
+
+    #[test]
+    fn test_submodule_gitdir_paths_classify() {
+        // Submodule internals live under `.git/modules/<name>/**`. They must get
+        // the same object/ref class treatment as a top-level gitdir so the
+        // objects-before-refs ordering + barrier apply to raw-roamed submodules.
+        assert!(is_git_ref_class_path(
+            "repo/.git/modules/dep/refs/heads/main"
+        ));
+        assert!(is_git_ref_class_path("repo/.git/modules/dep/refs/tags/v1"));
+        assert!(is_git_ref_class_path("repo/.git/modules/dep/packed-refs"));
+        assert!(is_git_ref_class_path("repo/.git/modules/dep/HEAD"));
+        // Nested submodule (`<name>` contains a further `modules/` segment).
+        assert!(is_git_ref_class_path(
+            "repo/.git/modules/a/modules/b/refs/heads/main"
+        ));
+
+        assert!(is_git_object_class_path(
+            "repo/.git/modules/dep/objects/ab/cdef0123456789"
+        ));
+        assert!(is_git_object_class_path(
+            "repo/.git/modules/dep/objects/pack/pack-abc.pack"
+        ));
+
+        // A submodule ref is NOT object-class, and a submodule object is NOT
+        // ref-class (the two axes stay distinct).
+        assert!(!is_git_object_class_path(
+            "repo/.git/modules/dep/refs/heads/main"
+        ));
+        assert!(!is_git_ref_class_path(
+            "repo/.git/modules/dep/objects/ab/cdef"
+        ));
+
+        // Top-level gitdir classification is unchanged.
+        assert!(is_git_ref_class_path("repo/.git/refs/heads/main"));
+        assert!(is_git_object_class_path("repo/.git/objects/ab/cdef"));
+        // A submodule working-tree source file is neither class.
+        assert!(!is_git_ref_class_path("repo/dep/src/main.rs"));
+        assert!(!is_git_object_class_path("repo/dep/src/main.rs"));
+    }
+
+    // ── BLOCKER-1 (PR #513): ref-valued non-head classifier ──────────────────
+
+    #[test]
+    fn test_ref_valued_non_head_classifier() {
+        // Non-head ref-valued paths → true (would veto an FF group).
+        assert!(is_ref_valued_non_head_path("repo/.git/packed-refs"));
+        assert!(is_ref_valued_non_head_path("repo/.git/refs/tags/v1"));
+        assert!(is_ref_valued_non_head_path("repo/.git/refs/stash"));
+        assert!(is_ref_valued_non_head_path(
+            "repo/.git/refs/remotes/origin/main"
+        ));
+        // Branch-head refs → false (the ancestry proof covers these).
+        assert!(!is_ref_valued_non_head_path("repo/.git/refs/heads/main"));
+        assert!(!is_ref_valued_non_head_path(
+            "repo/.git/refs/heads/feature/x"
+        ));
+        // Workdir / reflog / HEAD state → false (may keep riding).
+        assert!(!is_ref_valued_non_head_path("repo/.git/index"));
+        assert!(!is_ref_valued_non_head_path("repo/.git/logs/HEAD"));
+        assert!(!is_ref_valued_non_head_path(
+            "repo/.git/logs/refs/heads/main"
+        ));
+        assert!(!is_ref_valued_non_head_path("repo/.git/HEAD"));
+        // Object data → false.
+        assert!(!is_ref_valued_non_head_path("repo/.git/objects/ab/cdef"));
+        // Non-git path → false.
+        assert!(!is_ref_valued_non_head_path("repo/src/refs.rs"));
     }
 }

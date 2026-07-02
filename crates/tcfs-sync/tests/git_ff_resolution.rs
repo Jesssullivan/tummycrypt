@@ -1267,3 +1267,471 @@ async fn git_ff_planning_fabricates_nothing_under_root() {
 
     drop(b_state);
 }
+
+/// BLOCKER-1 (PR #513): a genuinely FF-ahead head ref does NOT license
+/// force-syncing a DIVERGENT non-head ref (a tag) that shares the repo's
+/// conflict group. The head-only ancestry proof never covers tags/stash/
+/// packed-refs/remotes, so if ANY such ref-valued path is in the group the
+/// whole `.git` group must stay Conflict (fail-closed, zero writes).
+#[tokio::test]
+async fn git_ff_divergent_tag_vetoes_whole_group() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/git-ff-tag-veto";
+    let blacklist = raw_blacklist();
+    let cfg = ff_config();
+
+    // Seed S at C0 (no tag yet); raw-push everything. A and B pull C0.
+    let s_tmp = TempDir::new().unwrap();
+    let s_repo = s_tmp.path().join("repo");
+    std::fs::create_dir_all(&s_repo).unwrap();
+    init_repo_c0(&s_repo);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_repo,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed raw push");
+    s_state.flush().unwrap();
+
+    let a_tmp = TempDir::new().unwrap();
+    let a_repo = a_tmp.path().join("repo");
+    std::fs::create_dir_all(&a_repo).unwrap();
+    let mut a_state = pull_into(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &a_tmp.path().join("a.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    let b_tmp = TempDir::new().unwrap();
+    let b_repo = b_tmp.path().join("repo");
+    std::fs::create_dir_all(&b_repo).unwrap();
+    let mut b_state = pull_into(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &b_tmp.path().join("b.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    // B creates a fresh lightweight tag v1 → C0 and PUSHES it, so B now has
+    // tracked sync-state for the tag (clock {device-b}). (update-ref bypasses
+    // global git config that may force annotated/signed tags.)
+    git(&b_repo, &["update-ref", "refs/tags/v1", "HEAD"]);
+    let b_tag_plan = reconcile(
+        &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("B tag seed plan");
+    execute_plan(
+        &b_tag_plan,
+        &op,
+        &b_repo,
+        prefix,
+        &mut b_state,
+        "device-b",
+        None,
+        None,
+    )
+    .await
+    .expect("B tag seed execute");
+    b_state.flush().unwrap();
+
+    // A commits C1 and pushes (remote head clock now carries a device-a tick;
+    // the head conflict FF-reclassifies and dominates).
+    commit_and_sync(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &mut a_state,
+        &blacklist,
+        &cfg,
+        "from_a.txt",
+        b"a-c1\n",
+        "C1 on A",
+    )
+    .await;
+    let c1 = head_sha(&a_repo);
+
+    // B fast-forwards main PAST C1 (a strict descendant, C2) with a concurrent
+    // clock, and RE-POINTS its own synced tag v1 → C2 WITHOUT re-syncing. Its
+    // tracked tag clock is unchanged, so the new tag content vs the remote's C0
+    // is an equal-clock DIVERGENT conflict — a ref-valued non-head member of the
+    // repo's group.
+    git(
+        &b_repo,
+        &[
+            "fetch",
+            "--quiet",
+            &a_repo.join(".git").to_string_lossy(),
+            &format!("{c1}:refs/remotes/peer/main"),
+        ],
+    );
+    git(&b_repo, &["reset", "-q", "--hard", &c1]);
+    let c2 = commit(&b_repo, "from_b.txt", b"b-c2\n", "C2 on B");
+    git(&b_repo, &["update-ref", "refs/tags/v1", &c2]);
+    tick_tracked_vclock(&mut b_state, ".git/refs/heads/main", "device-b");
+
+    let b_plan = reconcile(
+        &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("B plan");
+
+    let conflicts = git_conflicts(&b_plan);
+    assert!(
+        conflicts.iter().any(|c| c.ends_with(".git/refs/heads/main")),
+        "BLOCKER-1: the head ref must STAY Conflict (group vetoed by the divergent tag), got {conflicts:?}"
+    );
+    assert!(
+        conflicts.iter().any(|c| c.ends_with(".git/refs/tags/v1")),
+        "BLOCKER-1: the divergent tag must STAY Conflict, got {conflicts:?}"
+    );
+    // Even though the head alone is FF-ahead, the group must NOT reclassify.
+    assert!(
+        !git_ref_push(&b_plan) && !git_ref_pull(&b_plan),
+        "BLOCKER-1: the whole group is fail-closed — no head-ref push/pull"
+    );
+
+    drop(a_state);
+}
+
+/// BLOCKER-2 (PR #513), PUSH side: an FF push earns its right to dominate the
+/// remote clock from the plan-time LOCAL ref SHA. If the local ref MOVES
+/// between plan and execute (a mid-cycle commit on this device), the push must
+/// DEFER — it must never publish an unproven state under a dominating clock.
+/// The remote head ref stays exactly as planned.
+#[tokio::test]
+async fn git_ff_push_defers_when_local_ref_moves_after_plan() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/git-ff-push-defer";
+    let blacklist = raw_blacklist();
+    let cfg = ff_config();
+
+    // Seed S at C0; A and B pull.
+    let s_tmp = TempDir::new().unwrap();
+    let s_repo = s_tmp.path().join("repo");
+    std::fs::create_dir_all(&s_repo).unwrap();
+    init_repo_c0(&s_repo);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_repo,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed raw push");
+    s_state.flush().unwrap();
+
+    let a_tmp = TempDir::new().unwrap();
+    let a_repo = a_tmp.path().join("repo");
+    std::fs::create_dir_all(&a_repo).unwrap();
+    let mut a_state = pull_into(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &a_tmp.path().join("a.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    let b_tmp = TempDir::new().unwrap();
+    let b_repo = b_tmp.path().join("repo");
+    std::fs::create_dir_all(&b_repo).unwrap();
+    let mut b_state = pull_into(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &b_tmp.path().join("b.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    // A commits C1 and pushes (remote head clock now carries a device-a tick).
+    commit_and_sync(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &mut a_state,
+        &blacklist,
+        &cfg,
+        "from_a.txt",
+        b"a-c1\n",
+        "C1 on A",
+    )
+    .await;
+    let c1 = head_sha(&a_repo);
+
+    // B advances PAST C1 to C2 (strict descendant) with a concurrent clock.
+    git(
+        &b_repo,
+        &[
+            "fetch",
+            "--quiet",
+            &a_repo.join(".git").to_string_lossy(),
+            &format!("{c1}:refs/remotes/peer/main"),
+        ],
+    );
+    git(&b_repo, &["reset", "-q", "--hard", &c1]);
+    let c2 = commit(&b_repo, "from_b.txt", b"b-c2\n", "C2 on B");
+    tick_tracked_vclock(&mut b_state, ".git/refs/heads/main", "device-b");
+
+    let head_manifest_before = list_remote_index(&op, prefix)
+        .await
+        .expect("remote index before")
+        .get(".git/refs/heads/main")
+        .expect("remote head ref entry")
+        .manifest_hash
+        .clone();
+
+    // Plan: the concurrent head-ref conflict reclassifies to a GitFastForward
+    // push (local strictly ahead, pinned at C2).
+    let b_plan = reconcile(
+        &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("B FF push plan");
+    assert!(
+        b_plan.actions.iter().any(|a| matches!(
+            a,
+            ReconcileAction::Push {
+                rel_path,
+                reason: PushReason::GitFastForward { .. },
+                ..
+            } if rel_path == ".git/refs/heads/main"
+        )),
+        "setup: head ref must plan as a GitFastForward push"
+    );
+
+    // MUTATE between plan and execute: a mid-cycle commit moves the local head
+    // ref OFF the pinned C2. The proof is now stale.
+    let c3 = commit(&b_repo, "from_b2.txt", b"b-c3\n", "C3 on B (mid-cycle)");
+    assert_ne!(c3, c2);
+
+    // Execute the STALE plan: the FF push must DEFER, not dominate.
+    let b_exec = execute_plan(
+        &b_plan,
+        &op,
+        &b_repo,
+        prefix,
+        &mut b_state,
+        "device-b",
+        None,
+        None,
+    )
+    .await
+    .expect("B stale FF push execute");
+    assert!(
+        b_exec
+            .deferred_git_refs
+            .iter()
+            .any(|p| p.ends_with(".git/refs/heads/main")),
+        "BLOCKER-2 push: the head-ref push must DEFER when the local ref moved, got deferred={:?}",
+        b_exec.deferred_git_refs
+    );
+
+    // Remote head ref UNCHANGED — no dominating publish of the stale state.
+    let head_manifest_after = list_remote_index(&op, prefix)
+        .await
+        .expect("remote index after")
+        .get(".git/refs/heads/main")
+        .expect("remote head ref entry after")
+        .manifest_hash
+        .clone();
+    assert_eq!(
+        head_manifest_before, head_manifest_after,
+        "BLOCKER-2 push: the remote head ref must be untouched when the FF push defers"
+    );
+}
+
+/// BLOCKER-2 (PR #513), PULL side: a reclassified FF pull overwrites the local
+/// ref only while it still matches the plan-time SHA. If a mid-cycle local
+/// commit moves the ref between plan and execute, the pull must SKIP — the
+/// fresh local commit (and its pointer) must not be silently clobbered.
+#[tokio::test]
+async fn git_ff_pull_skips_when_local_ref_moves_after_plan() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/git-ff-pull-skip";
+    let blacklist = raw_blacklist();
+    let cfg = ff_config();
+
+    // Seed S at C0; A and B pull.
+    let s_tmp = TempDir::new().unwrap();
+    let s_repo = s_tmp.path().join("repo");
+    std::fs::create_dir_all(&s_repo).unwrap();
+    init_repo_c0(&s_repo);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_repo,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed raw push");
+    s_state.flush().unwrap();
+
+    let a_tmp = TempDir::new().unwrap();
+    let a_repo = a_tmp.path().join("repo");
+    std::fs::create_dir_all(&a_repo).unwrap();
+    let mut a_state = pull_into(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &a_tmp.path().join("a.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    let b_tmp = TempDir::new().unwrap();
+    let b_repo = b_tmp.path().join("repo");
+    std::fs::create_dir_all(&b_repo).unwrap();
+    let mut b_state = pull_into(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &b_tmp.path().join("b.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    // B commits C1 and pushes: remote head is now C1 with a device-b tick.
+    commit_and_sync(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &mut b_state,
+        &blacklist,
+        &cfg,
+        "from_b.txt",
+        b"b-c1\n",
+        "C1 on B",
+    )
+    .await;
+    let c1 = head_sha(&b_repo);
+
+    // A stays at C0 but fetches C1's objects so the ancestry probe is
+    // computable; A's tracked head-ref clock gets an independent device-a tick
+    // → genuinely CONCURRENT with the remote clock.
+    git(
+        &a_repo,
+        &[
+            "fetch",
+            "--quiet",
+            &b_repo.join(".git").to_string_lossy(),
+            &format!("{c1}:refs/remotes/peer/main"),
+        ],
+    );
+    tick_tracked_vclock(&mut a_state, ".git/refs/heads/main", "device-a");
+
+    // Plan: the concurrent head-ref conflict reclassifies to a Pull (remote
+    // strictly ahead), pinned at A's plan-time C0 local SHA.
+    let a_plan = reconcile(
+        &op, &a_repo, prefix, &a_state, "device-a", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("A FF pull plan");
+    assert!(
+        git_ref_pull(&a_plan),
+        "setup: the concurrent head ref must reclassify to Pull"
+    );
+
+    // MUTATE between plan and execute: a mid-cycle LOCAL commit on A moves the
+    // head ref OFF the pinned C0 — the fresh work that must NOT be clobbered.
+    let c_local = commit(
+        &a_repo,
+        "a_local.txt",
+        b"a-local\n",
+        "local mid-cycle commit on A",
+    );
+    assert_ne!(c_local, c1);
+
+    // Execute the STALE pull plan: the FF pull must SKIP/defer, not overwrite.
+    let a_exec = execute_plan(
+        &a_plan,
+        &op,
+        &a_repo,
+        prefix,
+        &mut a_state,
+        "device-a",
+        None,
+        None,
+    )
+    .await
+    .expect("A stale FF pull execute");
+    assert!(
+        a_exec
+            .deferred_git_refs
+            .iter()
+            .any(|p| p.ends_with(".git/refs/heads/main")),
+        "BLOCKER-2 pull: the head-ref pull must DEFER when the local ref moved, got deferred={:?}",
+        a_exec.deferred_git_refs
+    );
+
+    // Local ref preserved at the fresh commit — NOT clobbered to the remote tip.
+    assert_eq!(
+        head_sha(&a_repo),
+        c_local,
+        "BLOCKER-2 pull: the fresh local commit must survive"
+    );
+    assert_ne!(
+        head_sha(&a_repo),
+        c1,
+        "BLOCKER-2 pull: the local ref must NOT be overwritten to the remote tip"
+    );
+
+    drop(b_state);
+    drop(s_state);
+}
