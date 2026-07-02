@@ -22,8 +22,11 @@ use opendal::Operator;
 use tempfile::TempDir;
 
 use tcfs_sync::blacklist::Blacklist;
-use tcfs_sync::engine::{push_tree_with_device, CollectConfig};
-use tcfs_sync::reconcile::{execute_plan, reconcile, ReconcileAction, ReconcileConfig};
+use tcfs_sync::engine::{push_tree_with_device, upload_file_with_device, CollectConfig};
+use tcfs_sync::reconcile::{
+    execute_plan, list_remote_index, reconcile, PullReason, PushReason, ReconcileAction,
+    ReconcileConfig, ReconcilePlan, ReconcileSummary,
+};
 use tcfs_sync::state::StateCache;
 
 fn memory_operator() -> Operator {
@@ -550,4 +553,717 @@ async fn git_divergent_stays_conflict() {
     );
 
     drop(a_state);
+}
+
+/// Raw git-sync mode with the FF reclassifier turned OFF — used to prove that
+/// a Pull/Push seen under `ff_config()` really came from the reclassifier (the
+/// plain vclock path yields Conflict for the same state).
+fn raw_no_ff_config() -> ReconcileConfig {
+    ReconcileConfig {
+        git_sync_mode: "raw".into(),
+        git_ff_resolution: false,
+        ..Default::default()
+    }
+}
+
+/// Wrap raw actions in a `ReconcilePlan` for driving `execute_plan` directly.
+fn plan_with(actions: Vec<ReconcileAction>) -> ReconcilePlan {
+    ReconcilePlan {
+        actions,
+        summary: ReconcileSummary::default(),
+        device_id: "test-device".into(),
+        generated_at: 0,
+    }
+}
+
+/// Recursively collect paths under `root` whose file name contains `needle`.
+fn paths_containing(root: &Path, needle: &str) -> Vec<std::path::PathBuf> {
+    let mut hits = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.file_name()
+                .is_some_and(|n| n.to_string_lossy().contains(needle))
+            {
+                hits.push(p.clone());
+            }
+            if p.is_dir() {
+                stack.push(p);
+            }
+        }
+    }
+    hits
+}
+
+/// HIGH-2 (PR #513): genuinely CONCURRENT clocks on the head ref with the
+/// local repo FF-ahead. Plan-time reclassification alone is not enough — the
+/// upload-time conflict veto used to re-derive Conflict from the concurrent
+/// clocks and silently skip (`skipped=true`), replanning the same push every
+/// cycle forever. The reclassified FF push must dominate the remote clock
+/// (merge + tick, justified by the ancestry proof) and actually UPLOAD, and
+/// the peer must converge.
+#[tokio::test]
+async fn git_ff_concurrent_clocks_push_uploads_and_converges() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/git-ff-concurrent-push";
+    let blacklist = raw_blacklist();
+    let cfg = ff_config();
+
+    // Seed S at C0.
+    let s_tmp = TempDir::new().unwrap();
+    let s_repo = s_tmp.path().join("repo");
+    std::fs::create_dir_all(&s_repo).unwrap();
+    init_repo_c0(&s_repo);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_repo,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed raw push");
+    s_state.flush().unwrap();
+
+    // A and B both pull C0.
+    let a_tmp = TempDir::new().unwrap();
+    let a_repo = a_tmp.path().join("repo");
+    std::fs::create_dir_all(&a_repo).unwrap();
+    let mut a_state = pull_into(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &a_tmp.path().join("a.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    let b_tmp = TempDir::new().unwrap();
+    let b_repo = b_tmp.path().join("repo");
+    std::fs::create_dir_all(&b_repo).unwrap();
+    let mut b_state = pull_into(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &b_tmp.path().join("b.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    // A commits C1 and pushes: the remote head-ref clock now carries a
+    // device-a tick B has never observed.
+    commit_and_sync(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &mut a_state,
+        &blacklist,
+        &cfg,
+        "from_a.txt",
+        b"a-c1\n",
+        "C1 on A",
+    )
+    .await;
+    let c1 = head_sha(&a_repo);
+
+    // B advances PAST C1 via git (fetch + ff), then commits C2 on top — B's
+    // local tip is a strict descendant of the remote tip (C1). B's TRACKED
+    // clock for the head ref never saw device-a's tick, and the extra
+    // device-b tick models B's own local ref writes — so the plan-time
+    // comparison is genuinely CONCURRENT (not Equal).
+    git(
+        &b_repo,
+        &[
+            "fetch",
+            "--quiet",
+            &a_repo.join(".git").to_string_lossy(),
+            &format!("{c1}:refs/remotes/peer/main"),
+        ],
+    );
+    git(&b_repo, &["reset", "-q", "--hard", &c1]);
+    let c2 = commit(&b_repo, "from_b.txt", b"b-c2\n", "C2 on B");
+    tick_tracked_vclock(&mut b_state, ".git/refs/heads/main", "device-b");
+
+    let head_manifest_before = list_remote_index(&op, prefix)
+        .await
+        .expect("remote index before")
+        .get(".git/refs/heads/main")
+        .expect("remote head ref entry")
+        .manifest_hash
+        .clone();
+
+    // Plan: the concurrent head-ref conflict must reclassify to a
+    // GitFastForward push (local strictly ahead).
+    let b_plan = reconcile(
+        &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("B concurrent FF plan");
+    assert!(
+        git_conflicts(&b_plan).is_empty(),
+        "concurrent FF: no .git conflicts expected on B, got {:?}",
+        git_conflicts(&b_plan)
+    );
+    assert!(
+        b_plan.actions.iter().any(|a| matches!(
+            a,
+            ReconcileAction::Push {
+                rel_path,
+                reason: PushReason::GitFastForward { .. },
+                ..
+            } if rel_path == ".git/refs/heads/main"
+        )),
+        "concurrent FF: head ref must be a GitFastForward push"
+    );
+
+    // Execute: the push must actually UPLOAD (not veto-skip).
+    let b_exec = execute_plan(
+        &b_plan,
+        &op,
+        &b_repo,
+        prefix,
+        &mut b_state,
+        "device-b",
+        None,
+        None,
+    )
+    .await
+    .expect("B concurrent FF execute");
+    b_state.flush().unwrap();
+    assert!(
+        b_exec.errors.is_empty(),
+        "concurrent FF execute errors: {:?}",
+        b_exec.errors
+    );
+
+    let head_manifest_after = list_remote_index(&op, prefix)
+        .await
+        .expect("remote index after")
+        .get(".git/refs/heads/main")
+        .expect("remote head ref entry after")
+        .manifest_hash
+        .clone();
+    assert_ne!(
+        head_manifest_before, head_manifest_after,
+        "HIGH-2: the reclassified FF push must actually upload the head ref \
+         (upload-time veto must not silently skip it)"
+    );
+
+    // No livelock: replanning B must not produce the same head-ref push again.
+    let b_replan = reconcile(
+        &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("B replan");
+    assert!(
+        !git_ref_push(&b_replan) && git_conflicts(&b_replan).is_empty(),
+        "HIGH-2 livelock: the head-ref push must not be re-planned after a successful upload"
+    );
+
+    // Peer converges: A pulls and lands on C2.
+    let a_plan = reconcile(
+        &op, &a_repo, prefix, &a_state, "device-a", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("A convergence plan");
+    execute_plan(
+        &a_plan,
+        &op,
+        &a_repo,
+        prefix,
+        &mut a_state,
+        "device-a",
+        None,
+        None,
+    )
+    .await
+    .expect("A convergence execute");
+    a_state.flush().unwrap();
+    assert_eq!(head_sha(&a_repo), c2, "peer A must converge on C2");
+    assert_eq!(head_sha(&b_repo), c2, "B stays at C2");
+    fsck_clean(&a_repo);
+    fsck_clean(&b_repo);
+}
+
+/// The RemoteAhead→Pull reclassifier arm: remote FF-ahead with CONCURRENT
+/// clocks. With the reclassifier disabled the head ref is a plain vclock
+/// Conflict (proving provenance); enabling it must produce a Pull that
+/// converges the local repo onto the remote tip.
+#[tokio::test]
+async fn git_ff_remote_ahead_concurrent_clocks_reclassifies_to_pull() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/git-ff-remote-ahead";
+    let blacklist = raw_blacklist();
+    let cfg = ff_config();
+
+    // Seed S at C0; A and B pull.
+    let s_tmp = TempDir::new().unwrap();
+    let s_repo = s_tmp.path().join("repo");
+    std::fs::create_dir_all(&s_repo).unwrap();
+    init_repo_c0(&s_repo);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_repo,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed raw push");
+    s_state.flush().unwrap();
+
+    let a_tmp = TempDir::new().unwrap();
+    let a_repo = a_tmp.path().join("repo");
+    std::fs::create_dir_all(&a_repo).unwrap();
+    let mut a_state = pull_into(
+        &op,
+        &a_repo,
+        prefix,
+        "device-a",
+        &a_tmp.path().join("a.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    let b_tmp = TempDir::new().unwrap();
+    let b_repo = b_tmp.path().join("repo");
+    std::fs::create_dir_all(&b_repo).unwrap();
+    let mut b_state = pull_into(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &b_tmp.path().join("b.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+
+    // B commits C1 and pushes: remote head is now C1 with a device-b tick.
+    commit_and_sync(
+        &op,
+        &b_repo,
+        prefix,
+        "device-b",
+        &mut b_state,
+        &blacklist,
+        &cfg,
+        "from_b.txt",
+        b"b-c1\n",
+        "C1 on B",
+    )
+    .await;
+    let c1 = head_sha(&b_repo);
+
+    // A stays at C0 but fetches C1's OBJECTS via git (its main ref does not
+    // move), so the plan-time ancestry probe can run with both tips present.
+    // A's tracked head-ref clock gets an independent device-a tick, making it
+    // genuinely CONCURRENT with the remote clock.
+    git(
+        &a_repo,
+        &[
+            "fetch",
+            "--quiet",
+            &b_repo.join(".git").to_string_lossy(),
+            &format!("{c1}:refs/remotes/peer/main"),
+        ],
+    );
+    tick_tracked_vclock(&mut a_state, ".git/refs/heads/main", "device-a");
+
+    // Provenance: with the reclassifier OFF this exact state is a Conflict…
+    let no_ff = raw_no_ff_config();
+    let a_plain_plan = reconcile(
+        &op, &a_repo, prefix, &a_state, "device-a", &blacklist, &no_ff, None,
+    )
+    .await
+    .expect("A plain (no-ff) plan");
+    assert!(
+        git_conflicts(&a_plain_plan)
+            .iter()
+            .any(|c| c.ends_with(".git/refs/heads/main")),
+        "provenance: without the reclassifier the concurrent head ref must be a Conflict"
+    );
+    assert!(
+        !git_ref_pull(&a_plain_plan),
+        "provenance: without the reclassifier there must be no head-ref pull"
+    );
+
+    // …so the Pull under ff_config can only come from the RemoteAhead arm.
+    let a_ff_plan = reconcile(
+        &op, &a_repo, prefix, &a_state, "device-a", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("A FF plan");
+    assert!(
+        git_ref_pull(&a_ff_plan),
+        "RemoteAhead arm: the concurrent head ref must reclassify to Pull"
+    );
+    assert!(
+        git_conflicts(&a_ff_plan).is_empty(),
+        "RemoteAhead arm: no .git conflicts expected, got {:?}",
+        git_conflicts(&a_ff_plan)
+    );
+
+    let a_exec = execute_plan(
+        &a_ff_plan,
+        &op,
+        &a_repo,
+        prefix,
+        &mut a_state,
+        "device-a",
+        None,
+        None,
+    )
+    .await
+    .expect("A FF pull execute");
+    a_state.flush().unwrap();
+    assert!(
+        a_exec.errors.is_empty(),
+        "FF pull execute errors: {:?}",
+        a_exec.errors
+    );
+    assert_eq!(
+        head_sha(&a_repo),
+        c1,
+        "A must fast-forward to C1 via the reclassified pull"
+    );
+    fsck_clean(&a_repo);
+}
+
+/// MEDIUM-1 (PR #513), sequential executor: objects-before-refs must be a real
+/// BARRIER, not just an ordering. A failed `.git/objects/**` action bars the
+/// repo's ref-class actions for the rest of the run — in BOTH directions.
+#[tokio::test]
+async fn git_object_failure_bars_ref_actions_sequential() {
+    let op = memory_operator();
+
+    // ── Pull direction ────────────────────────────────────────────────────
+    let prefix = "test/git-barrier-seq-pull";
+    // Seed a real remote manifest for the ref path so an un-barred execution
+    // WOULD apply it (making the absence assertion meaningful).
+    let seed_tmp = TempDir::new().unwrap();
+    let seed_ref = seed_tmp.path().join("main-ref");
+    std::fs::write(&seed_ref, format!("{}\n", "a".repeat(40))).unwrap();
+    let mut seed_state = StateCache::open(&seed_tmp.path().join("seed.db")).unwrap();
+    upload_file_with_device(
+        &op,
+        &seed_ref,
+        prefix,
+        &mut seed_state,
+        None,
+        "device-s",
+        Some("r/.git/refs/heads/main"),
+        None,
+    )
+    .await
+    .expect("seed ref upload");
+    let ref_manifest = list_remote_index(&op, prefix)
+        .await
+        .expect("seeded index")
+        .get("r/.git/refs/heads/main")
+        .expect("seeded ref entry")
+        .manifest_hash
+        .clone();
+
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir_all(root.path().join("r/.git/objects")).unwrap();
+    let plan = plan_with(vec![
+        // Object pull that FAILS (manifest does not exist on the remote).
+        ReconcileAction::Pull {
+            rel_path: "r/.git/objects/ab/feedface".into(),
+            manifest_hash: "0".repeat(64),
+            size: 1,
+            reason: PullReason::RemoteNewer,
+        },
+        // Ref pull that WOULD succeed — the barrier must defer it.
+        ReconcileAction::Pull {
+            rel_path: "r/.git/refs/heads/main".into(),
+            manifest_hash: ref_manifest,
+            size: 41,
+            reason: PullReason::RemoteNewer,
+        },
+    ]);
+    let mut state = StateCache::open(&root.path().join("l.db")).unwrap();
+    let res = execute_plan(
+        &plan,
+        &op,
+        root.path(),
+        prefix,
+        &mut state,
+        "device-l",
+        None,
+        None,
+    )
+    .await
+    .expect("barrier pull execute");
+    assert_eq!(
+        res.errors.len(),
+        1,
+        "only the object pull may error: {:?}",
+        res.errors
+    );
+    assert!(res.errors[0].0.contains(".git/objects/"));
+    assert_eq!(
+        res.deferred_git_refs,
+        vec!["r/.git/refs/heads/main".to_string()],
+        "the ref pull must be recorded as deferred, not errored"
+    );
+    assert!(
+        !root.path().join("r/.git/refs/heads/main").exists(),
+        "BARRIER: the ref must NOT be applied after an object pull failure"
+    );
+
+    // ── Push direction ────────────────────────────────────────────────────
+    let prefix2 = "test/git-barrier-seq-push";
+    let root2 = TempDir::new().unwrap();
+    std::fs::create_dir_all(root2.path().join("r/.git/refs/heads")).unwrap();
+    std::fs::create_dir_all(root2.path().join("r/.git/objects/ab")).unwrap();
+    std::fs::write(
+        root2.path().join("r/.git/refs/heads/main"),
+        format!("{}\n", "b".repeat(40)),
+    )
+    .unwrap();
+    let plan2 = plan_with(vec![
+        // Object push that FAILS (local file does not exist).
+        ReconcileAction::Push {
+            local_path: root2.path().join("r/.git/objects/ab/missing"),
+            rel_path: "r/.git/objects/ab/missing".into(),
+            reason: PushReason::NewLocal,
+        },
+        // Ref push that WOULD succeed — the barrier must defer it.
+        ReconcileAction::Push {
+            local_path: root2.path().join("r/.git/refs/heads/main"),
+            rel_path: "r/.git/refs/heads/main".into(),
+            reason: PushReason::NewLocal,
+        },
+    ]);
+    let mut state2 = StateCache::open(&root2.path().join("l2.db")).unwrap();
+    let res2 = execute_plan(
+        &plan2,
+        &op,
+        root2.path(),
+        prefix2,
+        &mut state2,
+        "device-l",
+        None,
+        None,
+    )
+    .await
+    .expect("barrier push execute");
+    assert_eq!(
+        res2.errors.len(),
+        1,
+        "only the object push may error: {:?}",
+        res2.errors
+    );
+    assert_eq!(
+        res2.deferred_git_refs,
+        vec!["r/.git/refs/heads/main".to_string()],
+        "the ref push must be recorded as deferred, not errored"
+    );
+    let idx2 = list_remote_index(&op, prefix2).await.expect("push index");
+    assert!(
+        !idx2.contains_key("r/.git/refs/heads/main"),
+        "BARRIER: the ref must NOT be published after an object push failure"
+    );
+}
+
+/// MEDIUM-1 (PR #513), concurrent fast path: a wave-0 `.git` pull failure must
+/// skip that repo's wave-1 ref-class pulls (deferred, not errored).
+#[tokio::test]
+async fn git_object_failure_bars_ref_pull_concurrent() {
+    let op = memory_operator();
+    let prefix = "test/git-barrier-concurrent";
+
+    let seed_tmp = TempDir::new().unwrap();
+    let seed_ref = seed_tmp.path().join("main-ref");
+    std::fs::write(&seed_ref, format!("{}\n", "c".repeat(40))).unwrap();
+    let mut seed_state = StateCache::open(&seed_tmp.path().join("seed.db")).unwrap();
+    upload_file_with_device(
+        &op,
+        &seed_ref,
+        prefix,
+        &mut seed_state,
+        None,
+        "device-s",
+        Some("r/.git/refs/heads/main"),
+        None,
+    )
+    .await
+    .expect("seed ref upload");
+    let ref_manifest = list_remote_index(&op, prefix)
+        .await
+        .expect("seeded index")
+        .get("r/.git/refs/heads/main")
+        .expect("seeded ref entry")
+        .manifest_hash
+        .clone();
+
+    let root = TempDir::new().unwrap();
+    // All-NewRemote pull plan with no encryption/progress → the concurrent
+    // fast path executes it (wave 0 = objects, wave 1 = refs).
+    let plan = plan_with(vec![
+        ReconcileAction::Pull {
+            rel_path: "r/.git/objects/ab/feedface".into(),
+            manifest_hash: "0".repeat(64),
+            size: 1,
+            reason: PullReason::NewRemote,
+        },
+        ReconcileAction::Pull {
+            rel_path: "r/.git/refs/heads/main".into(),
+            manifest_hash: ref_manifest,
+            size: 41,
+            reason: PullReason::NewRemote,
+        },
+    ]);
+    let mut state = StateCache::open(&root.path().join("l.db")).unwrap();
+    let res = execute_plan(
+        &plan,
+        &op,
+        root.path(),
+        prefix,
+        &mut state,
+        "device-l",
+        None,
+        None,
+    )
+    .await
+    .expect("concurrent barrier execute");
+    assert_eq!(
+        res.errors.len(),
+        1,
+        "only the wave-0 object pull may error: {:?}",
+        res.errors
+    );
+    assert!(res.errors[0].0.contains(".git/objects/"));
+    assert_eq!(
+        res.deferred_git_refs,
+        vec!["r/.git/refs/heads/main".to_string()],
+        "the wave-1 ref pull must be recorded as deferred, not errored"
+    );
+    assert!(
+        !root.path().join("r/.git/refs/heads/main").exists(),
+        "BARRIER: wave-1 ref must NOT be applied after a wave-0 object failure"
+    );
+}
+
+/// HIGH-1 (PR #513): plan computation against a multi-repo-style root (the
+/// git repo lives in a subdirectory; the sync root itself has NO `.git`) must
+/// not fabricate a `.git` directory at the root and must leave no
+/// `tcfs-ff*` temp residue under the root or the repo's live `.git`. The
+/// remote ref blob needed by the FF reclassifier is downloaded to an
+/// ephemeral temp dir outside the sync root and removed before planning
+/// returns.
+#[tokio::test]
+async fn git_ff_planning_fabricates_nothing_under_root() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/git-ff-multirepo";
+    let blacklist = raw_blacklist();
+    let cfg = ff_config();
+
+    // Seed S: sync root containing the repo under `proj/`.
+    let s_tmp = TempDir::new().unwrap();
+    let s_root = s_tmp.path().join("root");
+    let s_proj = s_root.join("proj");
+    std::fs::create_dir_all(&s_proj).unwrap();
+    init_repo_c0(&s_proj);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_root,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed multi-repo raw push");
+    s_state.flush().unwrap();
+
+    // B pulls the whole root, then commits C1 inside proj → the next plan has
+    // a head-ref conflict that engages the FF reclassifier (which must
+    // download the remote ref blob somewhere to resolve the remote tip).
+    let b_tmp = TempDir::new().unwrap();
+    let b_root = b_tmp.path().join("root");
+    std::fs::create_dir_all(&b_root).unwrap();
+    let b_state = pull_into(
+        &op,
+        &b_root,
+        prefix,
+        "device-b",
+        &b_tmp.path().join("b.db"),
+        &blacklist,
+        &cfg,
+    )
+    .await;
+    commit(&b_root.join("proj"), "feature.txt", b"c1\n", "C1");
+
+    let plan = reconcile(
+        &op, &b_root, prefix, &b_state, "device-b", &blacklist, &cfg, None,
+    )
+    .await
+    .expect("multi-repo FF plan");
+
+    // The reclassifier really engaged (remote ref blob was read successfully
+    // through the temp path): the nested head ref is planned as a push.
+    assert!(
+        plan.actions.iter().any(|a| matches!(
+            a,
+            ReconcileAction::Push { rel_path, .. } if rel_path == "proj/.git/refs/heads/main"
+        )),
+        "the nested repo's head ref must reclassify to Push"
+    );
+
+    // HIGH-1: no fabricated `.git` at the sync root…
+    assert!(
+        !b_root.join(".git").exists(),
+        "planning must not fabricate {}/.git",
+        b_root.display()
+    );
+    // …and no temp residue anywhere under the root (including proj/.git).
+    let residue = paths_containing(&b_root, "tcfs-ff");
+    assert!(
+        residue.is_empty(),
+        "planning left tcfs-ff temp residue under the sync root: {residue:?}"
+    );
+
+    drop(b_state);
 }

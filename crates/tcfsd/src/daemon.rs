@@ -1179,6 +1179,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     pushed = result.pushed,
                                     pulled = result.pulled,
                                     errors = result.errors.len(),
+                                    deferred_git_refs = result.deferred_git_refs.len(),
                                     bytes_up = result.bytes_uploaded,
                                     bytes_down = result.bytes_downloaded,
                                     "reconcile: plan executed"

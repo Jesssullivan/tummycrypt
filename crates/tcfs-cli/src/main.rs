@@ -6598,6 +6598,17 @@ async fn cmd_reconcile(
         for (path, err) in &result.errors {
             eprintln!("  error: {path}: {err}");
         }
+
+        if !result.deferred_git_refs.is_empty() {
+            println!(
+                "  {} git ref action(s) deferred (objects-before-refs barrier); \
+                 they will re-plan next cycle:",
+                result.deferred_git_refs.len()
+            );
+            for path in &result.deferred_git_refs {
+                println!("    deferred: {path}");
+            }
+        }
     }
 
     if !orphan_chunk_cleanup_grace.is_zero() && plan_may_orphan_remote_chunks(&plan) {
@@ -6643,7 +6654,8 @@ fn plan_may_orphan_remote_chunks(plan: &tcfs_sync::reconcile::ReconcilePlan) -> 
         matches!(
             action,
             tcfs_sync::reconcile::ReconcileAction::Push {
-                reason: tcfs_sync::reconcile::PushReason::LocalNewer,
+                reason: tcfs_sync::reconcile::PushReason::LocalNewer
+                    | tcfs_sync::reconcile::PushReason::GitFastForward { .. },
                 ..
             } | tcfs_sync::reconcile::ReconcileAction::DeleteRemote { .. }
         )

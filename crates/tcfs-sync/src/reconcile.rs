@@ -6,7 +6,7 @@
 //!
 //! This separation enables dry-run mode, TUI preview, and deterministic testing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -41,6 +41,16 @@ pub enum PushReason {
     NewLocal,
     /// Vector clock indicates local is ahead of remote.
     LocalNewer,
+    /// Reclassified from a `.git` conflict by the fast-forward resolver: the
+    /// local git tip is a strict descendant of the remote tip, so pushing
+    /// local cannot lose remote history even though the vector clocks are
+    /// concurrent. Carries the remote manifest hash the ancestry proof was
+    /// computed against so execution can verify the remote has not moved
+    /// before letting this push dominate the remote clock.
+    GitFastForward {
+        /// Manifest hash of this path's remote index entry at plan time.
+        expected_remote_manifest: String,
+    },
 }
 
 /// Why a file needs to be pulled.
@@ -138,6 +148,11 @@ pub struct ExecutionResult {
     pub errors: Vec<(String, String)>,
     pub bytes_uploaded: u64,
     pub bytes_downloaded: u64,
+    /// Ref-class `.git` actions (`refs/**`, `packed-refs`, `HEAD`) that were
+    /// deferred this run because an object action for the same repo failed
+    /// (objects-before-refs barrier). These are not errors: the next reconcile
+    /// cycle re-plans them once the objects land.
+    pub deferred_git_refs: Vec<String>,
 }
 
 /// Visibility report for chunk objects that are no longer referenced by any
@@ -517,8 +532,13 @@ fn plan_orphaned_chunk_cleanup(
 
 /// Generate a reconciliation plan by diffing local tree against remote index.
 ///
-/// This is a **pure function** — it reads state and remote index but performs
-/// no writes. The returned plan can be inspected, displayed, or executed.
+/// Planning performs **no writes under `local_root` and no writes to the
+/// remote** — it reads state and the remote index, and the returned plan can
+/// be inspected, displayed, or executed. One planning-only side effect exists:
+/// when `.git` fast-forward reclassification is enabled, conflicting
+/// branch-head ref blobs are downloaded to an ephemeral temp directory
+/// OUTSIDE any sync root (see `read_remote_ref_sha`) to resolve the remote
+/// tips; that directory is removed again before planning returns.
 #[allow(clippy::too_many_arguments)]
 pub async fn reconcile(
     op: &Operator,
@@ -694,6 +714,36 @@ fn is_git_ref_class_path(rel: &str) -> bool {
     rel.contains(".git/refs/") || rel.ends_with(".git/packed-refs") || rel.ends_with(".git/HEAD")
 }
 
+/// True for `.git` paths that carry object data (`.git/objects/**`, loose or
+/// pack). A failed object action for a repo bars that repo's ref-class actions
+/// for the rest of the run (objects-before-refs barrier): a ref must never be
+/// published or applied when the objects it needs may not have landed.
+fn is_git_object_class_path(rel: &str) -> bool {
+    is_git_internal_path(rel) && rel.contains(".git/objects/")
+}
+
+/// Record a failed `.git/objects/**` action: inserts the enclosing repo root
+/// into the per-run barred set consulted by [`git_ref_barrier_hit`].
+fn mark_git_object_failure(rel_path: &str, local_root: &Path, barred: &mut BTreeSet<PathBuf>) {
+    if !is_git_object_class_path(rel_path) {
+        return;
+    }
+    if let Some(root) = git_safety::repo_root_for_git_path(local_root, rel_path) {
+        barred.insert(root);
+    }
+}
+
+/// True when `rel_path` is a ref-class `.git` path whose enclosing repo had an
+/// object-class failure earlier in this run — the action must be deferred
+/// (objects-before-refs barrier, both push and pull directions).
+fn git_ref_barrier_hit(rel_path: &str, local_root: &Path, barred: &BTreeSet<PathBuf>) -> bool {
+    if barred.is_empty() || !is_git_ref_class_path(rel_path) {
+        return false;
+    }
+    git_safety::repo_root_for_git_path(local_root, rel_path)
+        .is_some_and(|root| barred.contains(&root))
+}
+
 /// Acquire cooperative `.git/tcfs.lock` guards for every repo that has a
 /// `.git/*` Push or Pull action in `plan`. Returns the held guards; dropping the
 /// returned vec releases all locks. Repos whose `.git` is mid-operation or whose
@@ -703,8 +753,6 @@ fn acquire_git_locks_for_plan(
     plan: &ReconcilePlan,
     local_root: &Path,
 ) -> Vec<git_safety::GitLockGuard> {
-    use std::collections::BTreeSet;
-
     let mut repos: BTreeSet<PathBuf> = BTreeSet::new();
     for action in &plan.actions {
         let rel = match action {
@@ -1018,7 +1066,6 @@ async fn reclassify_git_ff_conflicts(
     for (repo_root, indices) in by_repo {
         let decision = decide_repo_fast_forward(
             &repo_root,
-            local_root,
             &indices,
             actions,
             op,
@@ -1039,11 +1086,25 @@ async fn reclassify_git_ff_conflicts(
             };
             let rel_path = rel_path.clone();
             actions[idx] = match direction {
-                git_safety::FastForward::LocalAhead => ReconcileAction::Push {
-                    local_path: local_root.join(&rel_path),
-                    rel_path: rel_path.clone(),
-                    reason: PushReason::LocalNewer,
-                },
+                git_safety::FastForward::LocalAhead => {
+                    // Carry the remote manifest hash the ancestry proof was
+                    // computed against: at execute time the upload path only
+                    // lets this push dominate a concurrent remote clock if the
+                    // remote entry is still exactly this manifest (if the
+                    // remote moved since planning, the ordinary conflict veto
+                    // applies and the repo re-plans next cycle).
+                    match remote_index.get(&rel_path) {
+                        Some(entry) => ReconcileAction::Push {
+                            local_path: local_root.join(&rel_path),
+                            rel_path: rel_path.clone(),
+                            reason: PushReason::GitFastForward {
+                                expected_remote_manifest: entry.manifest_hash.clone(),
+                            },
+                        },
+                        // No remote entry: fail closed, keep the conflict.
+                        None => continue,
+                    }
+                }
                 git_safety::FastForward::RemoteAhead => {
                     // The remote index entry for this exact path carries the
                     // manifest hash + size needed to pull it.
@@ -1085,7 +1146,6 @@ async fn reclassify_git_ff_conflicts(
 #[allow(clippy::too_many_arguments)]
 async fn decide_repo_fast_forward(
     repo_root: &Path,
-    local_root: &Path,
     indices: &[usize],
     actions: &[ReconcileAction],
     op: &Operator,
@@ -1114,15 +1174,8 @@ async fn decide_repo_fast_forward(
         };
 
         // Remote tip: read the remote ref blob content for this exact path.
-        let Some(remote_sha) = read_remote_ref_sha(
-            op,
-            remote_prefix,
-            rel_path,
-            local_root,
-            remote_index,
-            encryption,
-        )
-        .await
+        let Some(remote_sha) =
+            read_remote_ref_sha(op, remote_prefix, rel_path, remote_index, encryption).await
         else {
             return None; // unresolvable / missing remote ref → fail closed
         };
@@ -1150,14 +1203,18 @@ async fn decide_repo_fast_forward(
 /// Read the remote commit SHA stored at a `.git/refs/heads/<branch>` path by
 /// downloading the (tiny) ref blob from the remote and parsing its content.
 ///
+/// The blob is downloaded into an ephemeral, per-call temp directory under
+/// [`std::env::temp_dir`] — never under the sync root (planning must not
+/// fabricate files a raw-mode collector could then roam) and never inside the
+/// repo's live `.git`. The directory is removed again before returning,
+/// success or failure.
+///
 /// Returns `None` if the remote has no entry for this path, the download fails,
 /// or the content is not a concrete SHA (e.g. a symbolic ref).
-#[allow(clippy::too_many_arguments)]
 async fn read_remote_ref_sha(
     op: &Operator,
     remote_prefix: &str,
     rel_path: &str,
-    local_root: &Path,
     remote_index: &HashMap<String, RemoteIndexEntry>,
     encryption: OptionalEncryption<'_>,
 ) -> Option<String> {
@@ -1167,19 +1224,15 @@ async fn read_remote_ref_sha(
         remote_prefix.trim_end_matches('/'),
         &entry.manifest_hash
     );
-    // Download into a unique temp file, then read + parse.
-    let tmp_dir = local_root.join(".git").join("tcfs-ff-tmp");
+    // Unique per call (pid + process-wide sequence) so concurrent reconciles
+    // in one or many processes never collide on the same path.
+    static FF_REF_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = FF_REF_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir().join(format!("tcfs-ff-{}-{seq}", std::process::id()));
     if std::fs::create_dir_all(&tmp_dir).is_err() {
         return None;
     }
-    let tmp_path = tmp_dir.join(format!(
-        "ref-{}",
-        rel_path
-            .rsplit('/')
-            .next()
-            .unwrap_or("ref")
-            .replace(['/', '\\'], "_")
-    ));
+    let tmp_path = tmp_dir.join("ref");
     let download = engine::download_file_with_device(
         op,
         &manifest_path,
@@ -1200,7 +1253,7 @@ async fn read_remote_ref_sha(
             None
         }
     };
-    let _ = std::fs::remove_file(&tmp_path);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
     sha
 }
 
@@ -1362,12 +1415,32 @@ pub async fn execute_plan(
     // duration of this function and drop (release) on return.
     let _git_locks = acquire_git_locks_for_plan(plan, local_root);
 
+    // Objects-before-refs BARRIER (per repo, both directions): the plan orders
+    // `.git/objects/**` ahead of ref-class paths, but ordering alone is not a
+    // barrier — if an object action FAILS, applying or publishing the ref
+    // anyway could point it at an object that never landed (repo corruption).
+    // Any repo with a failed object-class action this run gets its ref-class
+    // actions deferred (recorded, not errored); the next cycle re-plans them.
+    let mut git_object_failed_repos: BTreeSet<PathBuf> = BTreeSet::new();
+
     for action in &plan.actions {
+        if let ReconcileAction::Push { rel_path, .. } | ReconcileAction::Pull { rel_path, .. } =
+            action
+        {
+            if git_ref_barrier_hit(rel_path, local_root, &git_object_failed_repos) {
+                info!(
+                    path = %rel_path,
+                    "git barrier: object action failed this run; deferring ref action"
+                );
+                result.deferred_git_refs.push(rel_path.clone());
+                continue;
+            }
+        }
         match action {
             ReconcileAction::Push {
                 local_path,
                 rel_path,
-                ..
+                reason,
             } => {
                 // Symlinks (TIN-1620 T13-Z) are published as first-class link
                 // manifests, not run through the chunked-file uploader, which
@@ -1394,6 +1467,18 @@ pub async fn execute_plan(
                     // same-second same-size rewrite (e.g. `git commit`
                     // rewriting a 41-byte branch head ref) and would silently
                     // skip the push.
+                    //
+                    // Reclassified `.git` fast-forward pushes additionally
+                    // carry the plan-time remote manifest hash: the upload
+                    // path uses it to let the ancestry-proven push dominate a
+                    // concurrent remote clock (merge + tick) instead of being
+                    // veto-skipped forever — see HIGH-2 on PR #513.
+                    let git_ff_expected = match reason {
+                        PushReason::GitFastForward {
+                            expected_remote_manifest,
+                        } => Some(expected_remote_manifest.as_str()),
+                        _ => None,
+                    };
                     engine::upload_planned_push_with_device(
                         op,
                         local_path,
@@ -1403,6 +1488,7 @@ pub async fn execute_plan(
                         device_id,
                         Some(rel_path.as_str()),
                         encryption,
+                        git_ff_expected,
                     )
                     .await
                 };
@@ -1414,6 +1500,7 @@ pub async fn execute_plan(
                         }
                     }
                     Err(e) => {
+                        mark_git_object_failure(rel_path, local_root, &mut git_object_failed_repos);
                         result
                             .errors
                             .push((rel_path.clone(), format!("push failed: {e:#}")));
@@ -1436,6 +1523,7 @@ pub async fn execute_plan(
                 // Ensure parent directory exists
                 if let Some(parent) = local_path.parent() {
                     if let Err(e) = std::fs::create_dir_all(parent) {
+                        mark_git_object_failure(rel_path, local_root, &mut git_object_failed_repos);
                         result
                             .errors
                             .push((rel_path.clone(), format!("mkdir failed: {e}")));
@@ -1460,6 +1548,7 @@ pub async fn execute_plan(
                         result.bytes_downloaded += download.bytes;
                     }
                     Err(e) => {
+                        mark_git_object_failure(rel_path, local_root, &mut git_object_failed_repos);
                         result
                             .errors
                             .push((rel_path.clone(), format!("pull failed: {e:#}")));
@@ -1535,6 +1624,7 @@ pub async fn execute_plan(
         pushed = result.pushed,
         pulled = result.pulled,
         conflicts = result.conflicts_recorded,
+        deferred_git_refs = result.deferred_git_refs.len(),
         errors = result.errors.len(),
         "plan execution complete"
     );
@@ -1574,6 +1664,12 @@ async fn execute_new_remote_pulls_concurrent(
         }
     }
 
+    // Objects-before-refs BARRIER: a repo whose wave-0 `.git` pulls had any
+    // failure must not have its wave-1 ref-class pulls applied this run — a
+    // ref pointing at an object that never landed corrupts the repo. Deferred
+    // refs are recorded (not errored) and re-planned next cycle.
+    let mut wave0_failed_git_repos: BTreeSet<PathBuf> = BTreeSet::new();
+
     for wave in [false, true] {
         let mut tasks = JoinSet::new();
         for action in &plan.actions {
@@ -1590,6 +1686,19 @@ async fn execute_new_remote_pulls_concurrent(
             // Wave 0 = objects + everything non-ref; wave 1 = ref-class paths.
             if is_git_ref_class_path(rel_path) != wave {
                 continue;
+            }
+
+            if wave && !wave0_failed_git_repos.is_empty() {
+                if let Some(root) = git_safety::repo_root_for_git_path(local_root, rel_path) {
+                    if wave0_failed_git_repos.contains(&root) {
+                        info!(
+                            path = %rel_path,
+                            "git barrier: wave-0 pull failed in this repo; deferring ref pull"
+                        );
+                        result.deferred_git_refs.push(rel_path.clone());
+                        continue;
+                    }
+                }
             }
 
             let op = op.clone();
@@ -1646,6 +1755,13 @@ async fn execute_new_remote_pulls_concurrent(
                     }
                 }
                 Ok((rel_path, Err(e))) => {
+                    if !wave && is_git_internal_path(&rel_path) {
+                        if let Some(root) =
+                            git_safety::repo_root_for_git_path(local_root, &rel_path)
+                        {
+                            wave0_failed_git_repos.insert(root);
+                        }
+                    }
                     result.errors.push((rel_path, format!("{e:#}")));
                 }
                 Err(e) => {

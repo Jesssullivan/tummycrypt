@@ -1391,6 +1391,7 @@ pub async fn upload_file_with_device(
         tracked_state,
         sync_reason,
         UploadRuntimeOptions::from_env(),
+        None,
     )
     .await?;
 
@@ -1411,6 +1412,14 @@ pub async fn upload_file_with_device(
 /// `Push`, so execution must honor that stronger decision rather than
 /// re-derive staleness from stat and silently skip the push (which would leave
 /// the remote head behind and break `.git` fast-forward convergence).
+///
+/// `git_ff_expected_manifest` marks a push that was reclassified from a `.git`
+/// conflict by the fast-forward resolver: the plan proved the local git tip is
+/// a strict descendant of the remote tip, so this push may dominate a
+/// concurrent remote vector clock (merge + tick) instead of being veto-skipped
+/// — but only while the remote index entry still carries exactly this manifest
+/// hash (the one the ancestry proof was computed against). Ordinary pushes
+/// pass `None` and keep the standard conflict-veto semantics.
 #[allow(clippy::too_many_arguments)]
 pub async fn upload_planned_push_with_device(
     op: &Operator,
@@ -1421,6 +1430,7 @@ pub async fn upload_planned_push_with_device(
     device_id: &str,
     rel_path: Option<&str>,
     encryption: OptionalEncryption<'_>,
+    git_ff_expected_manifest: Option<&str>,
 ) -> Result<UploadResult> {
     let tracked_state = state.get(local_path).cloned();
     let (result, state_update) = upload_file_with_device_with_state(
@@ -1434,6 +1444,7 @@ pub async fn upload_planned_push_with_device(
         tracked_state,
         Some("planned push (reconcile classified change)".into()),
         UploadRuntimeOptions::from_env(),
+        git_ff_expected_manifest,
     )
     .await?;
 
@@ -1457,6 +1468,7 @@ async fn upload_file_with_device_with_state(
     tracked_state: Option<SyncState>,
     sync_reason: Option<String>,
     runtime: UploadRuntimeOptions,
+    git_ff_expected_manifest: Option<&str>,
 ) -> Result<(UploadResult, Option<SyncState>)> {
     // Fast-path: check if file is already up-to-date
     match sync_reason.as_deref() {
@@ -1550,40 +1562,43 @@ async fn upload_file_with_device_with_state(
     let mut outcome = None;
     let mut remote_vclock_snapshot: Option<crate::conflict::VectorClock> = None;
     if !device_id.is_empty() && !assume_fresh_prefix {
-        let (remote_manifest_obj, remote_manifest_path) = if let Some(rp) = rel_path {
-            // Look up the index entry to find what manifest is currently stored
-            let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
-            let manifest_prefix = manifest_path_prefix(remote_prefix);
-            let idx_manifest = resolve_visible_index_entry(op, &index_key, &manifest_prefix)
-                .await
-                .ok()
-                .flatten()
-                .map(|entry| manifest_key(&manifest_prefix, &entry.manifest_hash));
-            // Read the manifest pointed to by the index entry
-            let manifest_obj = if let Some(ref manifest_path) = idx_manifest {
-                if let Ok(remote_bytes) = op.read(manifest_path).await {
-                    SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
+        let (remote_manifest_obj, remote_manifest_path, remote_index_manifest_hash) =
+            if let Some(rp) = rel_path {
+                // Look up the index entry to find what manifest is currently stored
+                let index_key = format!("{}/index/{}", remote_prefix.trim_end_matches('/'), rp);
+                let manifest_prefix = manifest_path_prefix(remote_prefix);
+                let idx_entry = resolve_visible_index_entry(op, &index_key, &manifest_prefix)
+                    .await
+                    .ok()
+                    .flatten();
+                let idx_manifest_hash = idx_entry.as_ref().map(|e| e.manifest_hash.clone());
+                let idx_manifest =
+                    idx_entry.map(|entry| manifest_key(&manifest_prefix, &entry.manifest_hash));
+                // Read the manifest pointed to by the index entry
+                let manifest_obj = if let Some(ref manifest_path) = idx_manifest {
+                    if let Ok(remote_bytes) = op.read(manifest_path).await {
+                        SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
+                };
+                (manifest_obj, idx_manifest, idx_manifest_hash)
             } else {
-                None
-            };
-            (manifest_obj, idx_manifest)
-        } else {
-            // No rel_path — fall back to checking the same-hash manifest
-            let manifest_path = remote_manifest.clone();
-            let manifest_obj = if let Ok(true) = op.exists(&manifest_path).await {
-                if let Ok(remote_bytes) = op.read(&remote_manifest).await {
-                    SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
+                // No rel_path — fall back to checking the same-hash manifest
+                let manifest_path = remote_manifest.clone();
+                let manifest_obj = if let Ok(true) = op.exists(&manifest_path).await {
+                    if let Ok(remote_bytes) = op.read(&remote_manifest).await {
+                        SyncManifest::from_bytes(&remote_bytes.to_bytes()).ok()
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
+                };
+                (manifest_obj, Some(manifest_path), None)
             };
-            (manifest_obj, Some(manifest_path))
-        };
 
         // Capture remote vclock for deferred merge (Issue #183)
         remote_vclock_snapshot = remote_manifest_obj.as_ref().map(|m| m.vclock.clone());
@@ -1594,7 +1609,7 @@ async fn upload_file_with_device_with_state(
             let remote_hash = &remote_manifest_obj.file_hash;
             let rp = rel_path.unwrap_or("");
 
-            let sync_outcome = compare_clocks(
+            let mut sync_outcome = compare_clocks(
                 &local_vclock,
                 &remote_manifest_obj.vclock,
                 local_hash,
@@ -1603,6 +1618,36 @@ async fn upload_file_with_device_with_state(
                 device_id,
                 &remote_manifest_obj.written_by,
             );
+
+            // `.git` fast-forward push (reclassified by the reconcile plan):
+            // the plan proved the local git tip is a strict descendant of the
+            // remote tip, so pushing local cannot lose remote history even
+            // though the vector clocks are concurrent (each device ticked its
+            // own component — the bidirectional roam field case). Dominate the
+            // remote clock — merge(local, remote) + tick(device) — and proceed
+            // as LocalNewer instead of veto-skipping (which would replan the
+            // same push forever). Guard: only while the remote index entry is
+            // still exactly the manifest the ancestry proof was computed
+            // against; if the remote moved since planning, keep the ordinary
+            // conflict veto (fail closed, re-plan next cycle).
+            if let (SyncOutcome::Conflict(_), Some(expected)) =
+                (&sync_outcome, git_ff_expected_manifest)
+            {
+                if remote_index_manifest_hash.as_deref() == Some(expected) {
+                    local_vclock.merge(&remote_manifest_obj.vclock);
+                    local_vclock.tick(device_id);
+                    info!(
+                        path = %local_path.display(),
+                        "git ff: ancestry-proven push dominating concurrent remote clock"
+                    );
+                    sync_outcome = SyncOutcome::LocalNewer;
+                } else {
+                    warn!(
+                        path = %local_path.display(),
+                        "git ff: remote manifest changed since plan; keeping conflict veto"
+                    );
+                }
+            }
 
             match &sync_outcome {
                 SyncOutcome::RemoteNewer => {
@@ -3107,6 +3152,7 @@ async fn push_tree_with_device_with_runtime(
                 tracked_state,
                 sync_reason,
                 runtime,
+                None,
             )
             .await
             {
@@ -3280,6 +3326,7 @@ async fn push_regular_files_concurrently(
                 tracked_state,
                 sync_reason,
                 runtime,
+                None,
             )
             .await;
             (path, result)

@@ -191,13 +191,15 @@ pub enum FastForward {
 /// Classify the relationship between a `local` and `remote` commit SHA inside
 /// the repo rooted at `repo_root`, using only the local object store.
 ///
-/// Both commit objects must already be present locally for the ancestry probe
-/// to succeed — `.git/objects/**` roam as a content-addressed union and are
-/// applied before refs, so by the time a ref conflict is reclassified the
-/// objects should be present. If `git merge-base --is-ancestor` cannot run
-/// (missing object, equal SHAs handled separately, or any git error) this
-/// returns `NotFastForward` so the caller defers / stays conflicted rather than
-/// half-applying a ref.
+/// This runs at PLAN time (see `reclassify_git_ff_conflicts`), before any of
+/// the current cycle's pulls have executed, so the remote tip's commit may not
+/// be present in the local object store yet. In that case `git merge-base
+/// --is-ancestor` fails and this returns `NotFastForward` — an implicit DEFER:
+/// the repo stays conflicted this cycle while its `.git/objects/**` (which are
+/// content-addressed and non-conflicting) still roam, and a later cycle
+/// re-probes with the objects present. Equal SHAs and any other git error also
+/// return `NotFastForward`, so the caller never half-applies a ref
+/// (fail-closed).
 pub fn classify_fast_forward(repo_root: &Path, local_sha: &str, remote_sha: &str) -> FastForward {
     // Equal tips are not a fast-forward in either direction; the caller should
     // already have short-circuited identical content, but be explicit.
@@ -383,41 +385,133 @@ pub struct GitLockGuard {
 
 impl Drop for GitLockGuard {
     fn drop(&mut self) {
-        // Best-effort cleanup; a leaked lock is recovered by the caller's
-        // staleness handling on the next acquire.
+        // Best-effort cleanup. If this never runs (SIGKILL, power loss), the
+        // leaked lock is recovered by `acquire_git_lock`'s staleness check: a
+        // lock older than `GIT_LOCK_STALE_SECS` whose recorded owner PID is no
+        // longer alive is removed and the acquire retried once.
         let _ = std::fs::remove_file(&self.lock_path);
     }
 }
 
+/// Age past which a `tcfs.lock` becomes eligible for the dead-owner staleness
+/// check in [`acquire_git_lock`].
+const GIT_LOCK_STALE_SECS: u64 = 600; // 10 minutes
+
 /// Acquire a cooperative lock on `.git/tcfs.lock` for raw sync mode.
 ///
 /// Uses `create_new` semantics: if the file already exists, another sync is in
-/// progress and this fails. The returned [`GitLockGuard`] removes the lock file
-/// when dropped, so callers hold it across the collect/apply window to make the
-/// `.git` snapshot atomic against a concurrent commit (TOCTOU guard).
+/// progress and this fails — unless the existing lock is STALE (older than
+/// [`GIT_LOCK_STALE_SECS`] AND its recorded owner PID is no longer alive, e.g.
+/// the holder was SIGKILLed before its Drop ran), in which case the stale file
+/// is removed and the acquire retried once. The lock file records
+/// `<pid> <unix-secs>` on acquire to make that check possible. The returned
+/// [`GitLockGuard`] removes the lock file when dropped, so callers hold it
+/// across the collect/apply window to make the `.git` snapshot atomic against
+/// a concurrent commit (TOCTOU guard).
 pub fn acquire_git_lock(git_dir: &Path) -> anyhow::Result<GitLockGuard> {
-    use std::fs::OpenOptions;
-
     let lock_path = git_dir.join("tcfs.lock");
 
-    // Fail if lock already exists (another sync in progress)
-    if lock_path.exists() {
-        anyhow::bail!(
-            "could not acquire tcfs.lock in {} (another sync in progress?)",
-            git_dir.display()
-        );
+    match try_create_git_lock(&lock_path) {
+        Ok(guard) => Ok(guard),
+        Err(first_err) => {
+            if remove_stale_git_lock(&lock_path) {
+                // Retry once after clearing a stale lock.
+                try_create_git_lock(&lock_path)
+            } else {
+                Err(first_err)
+            }
+        }
     }
+}
 
-    let file = OpenOptions::new()
+/// One `create_new` attempt on the lock file, recording owner PID + acquire
+/// time so a leaked lock can later be detected as stale.
+fn try_create_git_lock(lock_path: &Path) -> anyhow::Result<GitLockGuard> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&lock_path)
-        .map_err(|e| anyhow::anyhow!("creating tcfs.lock: {e}"))?;
+        .open(lock_path)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not acquire tcfs.lock at {} (another sync in progress?): {e}",
+                lock_path.display()
+            )
+        })?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let _ = writeln!(file, "{} {now}", std::process::id());
 
     Ok(GitLockGuard {
-        lock_path,
+        lock_path: lock_path.to_path_buf(),
         _file: file,
     })
+}
+
+/// Remove `lock_path` iff it is stale: older than [`GIT_LOCK_STALE_SECS`] AND
+/// its recorded owner PID is no longer alive. Returns `true` only when the
+/// stale file was actually removed. Any ambiguity (unreadable, unparseable,
+/// young, owner alive or unprobeable) leaves the lock in place (fail-closed:
+/// never steal a lock that might be held).
+fn remove_stale_git_lock(lock_path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(lock_path) else {
+        return false;
+    };
+    let old_enough = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .map(|age| age.as_secs() > GIT_LOCK_STALE_SECS)
+        .unwrap_or(false);
+    if !old_enough {
+        return false;
+    }
+    let Some(owner_pid) = std::fs::read_to_string(lock_path)
+        .ok()
+        .and_then(|s| s.split_whitespace().next().map(str::to_string))
+        .and_then(|t| t.parse::<i32>().ok())
+    else {
+        return false;
+    };
+    if pid_alive(owner_pid) {
+        return false;
+    }
+    if std::fs::remove_file(lock_path).is_ok() {
+        tracing::warn!(
+            lock = %lock_path.display(),
+            owner_pid,
+            "removed stale tcfs.lock (owner dead, older than 10min)"
+        );
+        true
+    } else {
+        false
+    }
+}
+
+/// True if a process with `pid` exists. Probes with `kill(pid, 0)`, which
+/// signals nothing: success or `EPERM` (exists but not ours) both mean alive.
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Non-unix fallback: report every PID as alive so a lock is never stolen on
+/// platforms where liveness cannot be probed (fail-closed).
+#[cfg(not(unix))]
+fn pid_alive(_pid: i32) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -456,6 +550,68 @@ mod tests {
         let check = git_is_safe(&git_dir);
         assert!(!check.blocking.is_empty());
         assert!(check.blocking[0].contains("rebase"));
+    }
+
+    #[test]
+    fn test_git_lock_stale_dead_owner_is_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().to_path_buf();
+        let lock_path = git_dir.join("tcfs.lock");
+
+        // Leaked lock: dead owner PID (way past any real pid space), mtime
+        // pinned older than the staleness threshold.
+        std::fs::write(&lock_path, "999999999 0\n").unwrap();
+        let old =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(GIT_LOCK_STALE_SECS + 60);
+        let f = std::fs::File::options()
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        drop(f);
+
+        let guard = acquire_git_lock(&git_dir).expect("stale dead-owner lock must be recovered");
+        drop(guard);
+        assert!(!lock_path.exists(), "guard drop must remove the lock");
+    }
+
+    #[test]
+    fn test_git_lock_live_owner_still_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().to_path_buf();
+        let lock_path = git_dir.join("tcfs.lock");
+
+        // Lock held by THIS (alive) process, but with an old mtime: age alone
+        // must never be grounds to steal a lock whose owner is alive.
+        std::fs::write(&lock_path, format!("{} 0\n", std::process::id())).unwrap();
+        let old =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(GIT_LOCK_STALE_SECS + 60);
+        let f = std::fs::File::options()
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        drop(f);
+
+        assert!(
+            acquire_git_lock(&git_dir).is_err(),
+            "live-owner lock must not be stolen"
+        );
+        assert!(lock_path.exists());
+    }
+
+    #[test]
+    fn test_git_lock_fresh_lock_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().to_path_buf();
+
+        let _guard = acquire_git_lock(&git_dir).expect("first acquire");
+        assert!(
+            acquire_git_lock(&git_dir).is_err(),
+            "second acquire must fail while the lock is held"
+        );
     }
 
     #[test]
