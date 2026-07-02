@@ -135,6 +135,7 @@ Build locally: `task docs:pdf` (outputs to `dist/docs/`)
 - [Changelog](../CHANGELOG.md) — release history
 
 ### Ops Runbooks
+- [Operator Decision Record 2026-07-01](ops/operator-decision-record-2026-07-01.md) — ratified 2026-07-01 operator decisions: PerDevice wrap commitment, PR #513 adjudication protocol, blahaj enrollment ban, daily-driver dogfooding mandate
 - [Product Reality and Priority](ops/product-reality-and-priority.md) — current proof surface, honest product posture, and prioritized backlog
 - [TCFS Alpha/Beta QA Readiness](ops/tcfs-alpha-beta-qa-readiness-2026-05-19.md) — current alpha/beta claim boundary, Linear gate map, and daily-driver stop rules
 - [TCFS Feature and Objective Matrix](ops/feature-objective-matrix-2026-05-09.md) — cross-linked feature readiness, GitHub/Linear tracker map, and next-workstream todo list
