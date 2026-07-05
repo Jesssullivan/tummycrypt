@@ -322,16 +322,19 @@ enum Commands {
         state: Option<PathBuf>,
     },
 
-    /// Resolve a sync conflict for a file
+    /// Resolve a sync conflict for a file or git repo group
     ///
     /// When two devices modify the same file without syncing, a conflict is
     /// detected. Use this command to pick a resolution strategy.
     Resolve {
-        /// Path to the conflicted file
+        /// Path to the conflicted file, or a git repo root for repo-group keep-both
         path: PathBuf,
         /// Resolution strategy: keep-local, keep-remote, keep-both, or defer
         #[arg(long, short = 's', value_parser = ["keep-local", "keep-remote", "keep-both", "defer"])]
         strategy: Option<String>,
+        /// Execute repo-group git keep-both. Without this flag, repo mode is a dry-run.
+        #[arg(long)]
+        execute: bool,
     },
 
     /// List recorded sync conflicts (read-only)
@@ -906,14 +909,18 @@ async fn main() -> Result<()> {
         } => cmd_rm(&config, &path, prefix.as_deref(), state.as_deref()).await,
         Commands::Trash { action } => cmd_trash(&config, action).await,
         Commands::MigratePrefix { dry_run } => cmd_migrate_prefix(&config, dry_run).await,
-        Commands::Resolve { path, strategy } => {
+        Commands::Resolve {
+            path,
+            strategy,
+            execute,
+        } => {
             #[cfg(unix)]
             {
-                cmd_resolve(&config, &path, strategy.as_deref()).await
+                cmd_resolve(&config, &path, strategy.as_deref(), execute).await
             }
             #[cfg(not(unix))]
             {
-                let _ = (path, strategy);
+                let _ = (path, strategy, execute);
                 anyhow::bail!(
                     "resolve command requires the daemon (not available on this platform)"
                 )
@@ -6686,10 +6693,30 @@ async fn cmd_resolve(
     config: &tcfs_core::config::TcfsConfig,
     path: &Path,
     strategy: Option<&str>,
+    execute: bool,
 ) -> Result<()> {
-    let resolution = match strategy {
-        Some(s) => s.replace('-', "_"),
-        None => {
+    let is_git_repo = path.join(".git").is_dir();
+    let requested = strategy.map(|s| s.replace('-', "_"));
+
+    let resolution = match (is_git_repo, requested.as_deref()) {
+        (true, None) | (true, Some("keep_both")) => {
+            if execute {
+                "git_keep_both_execute".to_string()
+            } else {
+                "git_keep_both_dry_run".to_string()
+            }
+        }
+        (true, Some(other)) => {
+            anyhow::bail!(
+                "repo-group conflict resolution for {} supports keep-both only, got {other}",
+                path.display()
+            );
+        }
+        (false, Some(_)) if execute => {
+            anyhow::bail!("--execute is only valid for repo-group git keep-both resolution");
+        }
+        (false, Some(s)) => s.to_string(),
+        (false, None) => {
             // Interactive mode: reuse the existing interactive resolver.
             //
             // keep-both PR-1: fetch the REAL recorded ConflictInfo for this
@@ -6735,6 +6762,10 @@ async fn cmd_resolve(
             tcfs_core::proto::ResolveConflictRequest {
                 path: path.to_string_lossy().to_string(),
                 resolution: resolution.clone(),
+                // Operator provenance: this is the human-driven `tcfs resolve`
+                // CLI. It is the ONLY caller allowed to reach the repo-group
+                // git keep-both write path (grpc gates git_keep_both_* on this).
+                operator_cli: true,
             },
         ))
         .await
@@ -6742,8 +6773,21 @@ async fn cmd_resolve(
         .into_inner();
 
     if resp.success {
-        println!("Conflict resolved ({}): {}", resolution, path.display());
-        if !resp.resolved_path.is_empty() && resp.resolved_path != path.to_string_lossy() {
+        let is_repo_mode = resolution.starts_with("git_keep_both_");
+        if is_repo_mode {
+            if !resp.error.is_empty() {
+                println!("{}", resp.error);
+            }
+            if !execute {
+                println!("Dry-run only. Re-run with --execute to mutate refs and clear conflicts.");
+            }
+        } else {
+            println!("Conflict resolved ({}): {}", resolution, path.display());
+        }
+        if !is_repo_mode
+            && !resp.resolved_path.is_empty()
+            && resp.resolved_path != path.to_string_lossy()
+        {
             println!("  Conflict copy: {}", resp.resolved_path);
         }
     } else {
@@ -7013,7 +7057,7 @@ async fn cmd_conflicts(
                     );
                 }
                 println!(
-                    "  resolve: tcfs resolve {} --keep-both   (repo-group; not yet available in this build)",
+                    "  resolve: tcfs resolve {} --strategy keep-both --execute   (repo-group)",
                     root
                 );
             }

@@ -74,10 +74,44 @@ fn resolve_conflict_git_fence_error(
         format!(
             "'{}' is a git-internal path; per-file resolution ({resolution}) would corrupt the \
              repository object store. Resolve the whole repo group instead \
-             (future: `tcfs resolve <repo> --keep-both`). Inspect with `tcfs conflicts`.",
+             (`tcfs resolve <repo> --strategy keep-both --execute`). Inspect with `tcfs conflicts`.",
             path.display()
         )
     })
+}
+
+fn repo_keep_both_mode(resolution: &str) -> Option<tcfs_sync::conflict_git::GitKeepBothMode> {
+    match resolution {
+        "git_keep_both_dry_run" => Some(tcfs_sync::conflict_git::GitKeepBothMode::DryRun),
+        "git_keep_both_execute" => Some(tcfs_sync::conflict_git::GitKeepBothMode::Execute),
+        _ => None,
+    }
+}
+
+/// Machine-local directory for the keep-both undo bundle. It MUST be outside any
+/// sync root, so anchor it to the daemon state DB's directory (the same
+/// machine-local location the state cache uses; see `worker.rs`/`daemon.rs`).
+/// Expands a leading `~/` and falls back to the platform data dir (BLOCKING 2).
+fn undo_bundle_state_dir(config: &TcfsConfig) -> PathBuf {
+    config
+        .sync
+        .state_db
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(expand_home_prefix)
+        .unwrap_or_else(|| dirs::data_dir().unwrap_or_default().join("tcfsd"))
+}
+
+/// Expand a leading `~/` against the current user's home directory. Leaves any
+/// other path untouched.
+fn expand_home_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Build an `EncryptionContext` honoring `crypto.wrap_mode` (TIN-1417).
@@ -384,6 +418,65 @@ impl TcfsDaemonImpl {
             totp_provider,
             webauthn_provider,
             rate_limiter,
+        }
+    }
+
+    async fn resolve_git_keep_both_repo(
+        &self,
+        path: &Path,
+        mode: tcfs_sync::conflict_git::GitKeepBothMode,
+    ) -> Result<tonic::Response<ResolveConflictResponse>, tonic::Status> {
+        let op = {
+            let op_guard = self.operator.lock().await;
+            op_guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+        };
+        let prefix = self.config.storage.resolved_prefix().to_string();
+        let undo_state_dir = undo_bundle_state_dir(&self.config);
+        let enc_ctx = {
+            let mk_guard = self.master_key.lock().await;
+            mk_guard
+                .as_ref()
+                .map(|mk| build_encryption_context(&self.config, &self.device_id, mk))
+        };
+
+        let result = {
+            let mut cache = self.state_cache.lock().await;
+            if let Err(e) = cache.reload_from_disk() {
+                tracing::warn!("failed to reload state cache: {e}");
+            }
+            tcfs_sync::conflict_git::resolve_repo_keep_both(
+                &op,
+                &mut cache,
+                path,
+                &prefix,
+                &self.device_id,
+                &undo_state_dir,
+                mode,
+                enc_ctx.as_ref(),
+            )
+            .await
+        };
+
+        match result {
+            Ok(result) => {
+                if mode.is_execute() {
+                    self.publish_conflict_resolved(&path.to_string_lossy(), "git_keep_both")
+                        .await;
+                }
+                Ok(tonic::Response::new(ResolveConflictResponse {
+                    success: true,
+                    resolved_path: result.repo_root.display().to_string(),
+                    error: result.summary(),
+                }))
+            }
+            Err(e) => Ok(tonic::Response::new(ResolveConflictResponse {
+                success: false,
+                resolved_path: String::new(),
+                error: format!("{e:#}"),
+            })),
         }
     }
 
@@ -1588,7 +1681,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let req = request.into_inner();
 
         let resolution = match req.resolution.as_str() {
-            "keep_local" | "keep_remote" | "keep_both" | "defer" => req.resolution.clone(),
+            "keep_local"
+            | "keep_remote"
+            | "keep_both"
+            | "defer"
+            | "git_keep_both_dry_run"
+            | "git_keep_both_execute" => req.resolution.clone(),
             other => {
                 return Ok(tonic::Response::new(ResolveConflictResponse {
                     success: false,
@@ -1614,6 +1712,36 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }
             cache.get(&path).cloned()
         };
+
+        if let Some(mode) = repo_keep_both_mode(&resolution) {
+            // Operator-deliberate invariant: repo-group git keep-both is a live
+            // `.git` WRITE path (parks peer branch heads, ticks the local clock
+            // to dominate the fleet). It is reachable ONLY through the human
+            // `tcfs resolve` CLI, which sets `operator_cli=true`. MCP's tool
+            // input cannot set that flag (and MCP also rejects git_keep_both_*
+            // before reaching this RPC), and no auto/NATS path sets it — so an
+            // agent / generic client can never trigger committed-work loss.
+            // Fail closed. This dispatch stays ahead of the per-file `.git`
+            // fence below because the repo-group path targets the repo ROOT
+            // (not a `.git`-internal path); the fence is for per-file
+            // keep_local/keep_remote/keep_both and does not apply here.
+            if !req.operator_cli {
+                tracing::warn!(
+                    path = %req.path,
+                    resolution = %resolution,
+                    "refusing repo-group git keep-both: missing operator CLI provenance"
+                );
+                return Ok(tonic::Response::new(ResolveConflictResponse {
+                    success: false,
+                    resolved_path: String::new(),
+                    error: "repo-group git keep-both is operator-only: run it deliberately from \
+                            the CLI (`tcfs resolve <repo> --strategy keep-both [--execute]`), not \
+                            through MCP or an automated client"
+                        .to_string(),
+                }));
+            }
+            return self.resolve_git_keep_both_repo(&path, mode).await;
+        }
 
         // keep-both PR-1 (safety invariant S1): per-file conflict resolution
         // must NEVER touch `.git` internals. keep_local rewrites the manifest,
@@ -3948,6 +4076,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_conflict_repo_git_keep_both_requires_operator_cli() {
+        // BLOCKING 1b: repo-group git keep-both must be refused (fail-closed)
+        // when operator-CLI provenance is absent — i.e. for MCP / automated /
+        // generic clients that cannot set `operator_cli`. Both dry-run and
+        // execute are gated BEFORE any storage/ref work happens.
+        let daemon = test_daemon();
+        for resolution in ["git_keep_both_dry_run", "git_keep_both_execute"] {
+            let resp = daemon
+                .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                    path: "myrepo".into(),
+                    resolution: resolution.into(),
+                    operator_cli: false,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(
+                !resp.success,
+                "{resolution} must be refused without operator provenance"
+            );
+            assert!(
+                resp.error.contains("operator-only"),
+                "{resolution} error must direct to the CLI, got: {}",
+                resp.error
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn resolve_conflict_refuses_git_internal_path() {
         // keep-both PR-1 (S1): keep_remote on a `.git`-internal ref must be
         // refused with repo-group guidance and ZERO side effects.
@@ -3956,6 +4113,7 @@ mod tests {
             .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
                 path: "myrepo/.git/refs/heads/main".into(),
                 resolution: "keep_remote".into(),
+                ..Default::default()
             }))
             .await
             .unwrap()
@@ -3974,6 +4132,7 @@ mod tests {
                 .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
                     path: "myrepo/.git/index".into(),
                     resolution: strat.into(),
+                    ..Default::default()
                 }))
                 .await
                 .unwrap()
@@ -4026,6 +4185,7 @@ mod tests {
             .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
                 path: alias_path.display().to_string(),
                 resolution: "keep_remote".into(),
+                ..Default::default()
             }))
             .await
             .unwrap()
@@ -4072,6 +4232,7 @@ mod tests {
             .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
                 path: request_path.display().to_string(),
                 resolution: "keep_remote".into(),
+                ..Default::default()
             }))
             .await
             .unwrap()
@@ -4091,6 +4252,7 @@ mod tests {
             .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
                 path: "myrepo/.git/refs/heads/main".into(),
                 resolution: "defer".into(),
+                ..Default::default()
             }))
             .await
             .unwrap()
@@ -4109,6 +4271,7 @@ mod tests {
             .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
                 path: "notes/todo.txt".into(),
                 resolution: "keep_remote".into(),
+                ..Default::default()
             }))
             .await
             .unwrap()

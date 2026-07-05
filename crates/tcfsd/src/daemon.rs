@@ -1837,9 +1837,10 @@ async fn handle_auto_pull(
             // over this device's object store with zero `.git` awareness — the
             // G5-git-5 interleave vector. Defer `.git`-internal conflicts
             // unconditionally; the operator resolves the repo group deliberately
-            // (future: `tcfs resolve <repo> --keep-both`; inspect with
-            // `tcfs conflicts`). The conflict stays recorded by the reconcile
-            // engine's Conflict arm, so it remains visible and re-tried.
+            // (`tcfs resolve <repo> --strategy keep-both --execute`; inspect
+            // with `tcfs conflicts`). The conflict stays recorded by the
+            // reconcile engine's Conflict arm, so it remains visible and
+            // re-tried.
             if auto_conflict_must_defer(rel_path) {
                 {
                     let mut cache = state_cache.lock().await;

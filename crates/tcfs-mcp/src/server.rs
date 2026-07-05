@@ -241,12 +241,31 @@ impl TcfsMcp {
         &self,
         Parameters(input): Parameters<ResolveConflictInput>,
     ) -> String {
+        // Repo-group git keep-both (`git_keep_both_dry_run` /
+        // `git_keep_both_execute`) is a live `.git` WRITE path that parks peer
+        // branch heads and ticks the local clock to dominate the fleet. It MUST
+        // be operator-deliberate and reachable ONLY from the `tcfs resolve`
+        // CLI — never an MCP agent. Refuse it here (layer 1); the daemon also
+        // refuses it without operator-CLI provenance (layer 2), and this tool's
+        // input intentionally cannot set that provenance flag.
+        if input.resolution.trim_start().starts_with("git_keep_both") {
+            return serde_json::json!({
+                "error": "repo-group git keep-both is operator-only and cannot be run through \
+                          MCP: it is a live .git write path that parks peer branch heads. Run it \
+                          deliberately from the CLI: `tcfs resolve <repo> --strategy keep-both \
+                          [--execute]`.",
+            })
+            .to_string();
+        }
         match self.connect().await {
             Ok(mut client) => {
                 match client
                     .resolve_conflict(ResolveConflictRequest {
                         path: input.rel_path.clone(),
                         resolution: input.resolution.clone(),
+                        // MCP is never operator-CLI provenance. The daemon
+                        // refuses git_keep_both_* without this being true.
+                        operator_cli: false,
                     })
                     .await
                 {
@@ -835,10 +854,41 @@ mod tests {
             vec![ResolveConflictRequest {
                 path: "docs/report.md".into(),
                 resolution: "keep_both".into(),
+                operator_cli: false,
             }]
         );
 
         harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_rejects_repo_git_keep_both() {
+        // BLOCKING 1a: the repo-group git keep-both write path must be
+        // unreachable from MCP. Both dry-run and execute must be refused BEFORE
+        // any RPC / connection is attempted. Point the client at a bogus socket
+        // that no daemon serves: if the guard short-circuited correctly we get
+        // the operator-only refusal; a "failed to connect" error would instead
+        // prove the request leaked toward the daemon.
+        let bogus = std::path::PathBuf::from("/nonexistent/tcfs-keep-both-guard.sock");
+        let mcp = TcfsMcp::new(bogus, None);
+        for resolution in ["git_keep_both_dry_run", "git_keep_both_execute"] {
+            let value = parse_json(
+                mcp.resolve_conflict(Parameters(ResolveConflictInput {
+                    rel_path: "myrepo".into(),
+                    resolution: resolution.into(),
+                }))
+                .await,
+            );
+            let err = value["error"].as_str().unwrap_or_default();
+            assert!(
+                err.contains("operator-only"),
+                "{resolution} must be refused with operator-only guidance, got: {value}"
+            );
+            assert!(
+                !err.contains("connect"),
+                "{resolution} must be refused BEFORE any daemon connection, got: {value}"
+            );
+        }
     }
 
     #[test]
