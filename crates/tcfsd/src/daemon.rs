@@ -1828,7 +1828,9 @@ async fn handle_auto_pull(
             )
             .await
         }
-        tcfs_sync::conflict::SyncOutcome::Conflict(ref conflict_info) => {
+        tcfs_sync::conflict::SyncOutcome::Conflict(conflict_info) => {
+            let mut conflict_info = conflict_info;
+            conflict_info.remote_manifest_key = Some(manifest_path.to_string());
             // keep-both PR-1 (safety invariant S2): automatic per-file
             // resolution must NEVER touch `.git` internals. AutoResolver's
             // lexicographic KeepRemote would auto-download the remote ref/index
@@ -1860,7 +1862,7 @@ async fn handle_auto_pull(
                 "conflict detected, applying AutoResolver"
             );
             let resolver = tcfs_sync::conflict::AutoResolver;
-            match resolver.resolve(conflict_info) {
+            match resolver.resolve(&conflict_info) {
                 Some(tcfs_sync::conflict::Resolution::KeepLocal) => {
                     info!(path = %rel_path, "AutoResolver: keeping local");
                 }
