@@ -275,6 +275,7 @@ fn is_hex_sha(s: &str) -> bool {
 pub fn repo_root_for_git_path(local_root: &Path, rel_path: &str) -> Option<std::path::PathBuf> {
     // Split the rel path on the first `.git` component. Everything before it is
     // the repo subdir (possibly empty).
+    let rel_path = rel_path.replace('\\', "/");
     let mut prefix_components: Vec<&str> = Vec::new();
     let mut found = false;
     for comp in rel_path.split('/') {
@@ -303,6 +304,7 @@ pub fn repo_root_for_git_path(local_root: &Path, rel_path: &str) -> Option<std::
 pub fn head_ref_for_git_path(rel_path: &str) -> Option<String> {
     // Locate the `.git/refs/heads/` segment and take the remainder as the
     // branch name (which may itself contain slashes, e.g. `feature/x`).
+    let rel_path = rel_path.replace('\\', "/");
     let needle = ".git/refs/heads/";
     let idx = rel_path.find(needle)?;
     let branch = &rel_path[idx + needle.len()..];
