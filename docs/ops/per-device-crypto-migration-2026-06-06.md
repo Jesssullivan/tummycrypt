@@ -9,6 +9,15 @@ should be read as the operator-facing companion to that design recon.
 
 Date: 2026-06-06.
 
+2026-07-05 truth update: the forward-secrecy rotation action described here is
+not currently accepted as a usable implementation surface. Linear `TIN-2551`
+supersedes the old `TIN-1899` completion claim for `tcfs key rotate <prefix>`:
+the WIP rotation path was adversarially reviewed and found to have
+revocation-defeating defects. Keep the expand/contract migration sequencing
+below as the current per-device wrapping plan, but treat `tcfs key rotate
+<prefix>` as a rebuild gate, not an available operator remedy, until `TIN-2551`
+lands with fresh tests and review.
+
 Grounding: every primitive, phase, and revocation claim here derives from
 `docs/ops/per-device-crypto-identity-design-2026-05-18.md` (the "design doc"
 below). Where this plan adds operational structure not in the design doc — an
@@ -255,14 +264,16 @@ under this plan:
   180) and anything still carrying a wrap it can open.
 - Critically: content that is already-pulled, OR still carries a master wrap
   (any v2 master/dual manifest), OR is not-yet-rekeyed, stays master-decryptable
-  until `tcfs key rotate <prefix>` re-chunks and rewraps it as `per_device` (v3).
-  Revocation alone does NOT rewrite historical manifests (design doc lines
-  151–162). Forward secrecy is a SEPARATE, explicit, expensive operator action.
+  until a rebuilt-and-reviewed `tcfs key rotate <prefix>` re-chunks and rewraps
+  it as `per_device` (v3). Revocation alone does NOT rewrite historical
+  manifests (design doc lines 151–162). Forward secrecy is a SEPARATE, explicit,
+  expensive operator action, and as of 2026-07-05 the accepted implementation is
+  still gated on `TIN-2551`.
 
 State this plainly in operator and CHANGELOG messaging: "Revoking a device stops
 it from reading newly written content. It does not retroactively lock the device
 out of content it already synced, and it does not lock it out of unchanged files
-until you run `tcfs key rotate`."
+until a reviewed `tcfs key rotate` rebuild has rotated that prefix."
 
 ## Ratified Seven Questions (design doc lines 280–312)
 
@@ -285,9 +296,11 @@ until you run `tcfs key rotate`."
 ## Residual Risks
 
 - **Manual / partial forward secrecy**: revocation is not forward-secret by
-  itself; the operator must run `tcfs key rotate <prefix>` per affected prefix,
-  and any prefix not rotated stays master-decryptable (it is still a v2
-  master/dual manifest) to the revoked device.
+  itself; the operator must run an accepted `tcfs key rotate <prefix>` per
+  affected prefix, and any prefix not rotated stays master-decryptable (it is
+  still a v2 master/dual manifest) to the revoked device. As of 2026-07-05 that
+  rotation implementation is explicitly not accepted; track the rebuild in
+  `TIN-2551`.
 - **Deferred NATS advisory leg**: sub-second revocation propagation is out of
   scope; the fleet accepts S3 eventual-consistency timing and must document the
   propagation window.
