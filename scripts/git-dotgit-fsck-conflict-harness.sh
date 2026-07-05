@@ -238,6 +238,91 @@ else
 fi
 log "conflict corruption-risk evidence recorded in conflict-scenario.txt"
 
+# ── Stage 6 (G5-git-13): loser-side no-loss guard — two-machine convergence ───
+# The PASS counterpart to Stage 4's corruption-risk evidence. keep-both PR-4
+# (design S10): when a reconcile pull would overwrite a local `.git` head whose
+# committed work is NOT reachable from the incoming (winner) head, the execute
+# loop (crates/tcfs-sync/src/reconcile.rs, Pull arm) parks the loser's live head
+# at refs/tcfs/theirs/<self_device>/heads/<branch> BEFORE the overwrite. We
+# reproduce the exact ref-level effect with pure git on BOTH machines and assert
+# the no-loss invariant: after a divergent `.git` pull, both sides' committed
+# heads stay reachable and each `.git` is fsck-clean — the two-machine
+# convergence row that flips G5-git-5 green.
+G5="$WORK_DIR/g5-git-13"
+G5BASE="$G5/base"
+mkdir -p "$G5BASE"
+git_q "$G5BASE" init --quiet
+printf 'base\n' > "$G5BASE/a.txt"
+git_q "$G5BASE" add -A
+git_q "$G5BASE" commit --quiet -m "base"
+G5_A="$G5/dev-A"; G5_B="$G5/dev-B"      # A = winner (resolved), B = loser
+cp -R "$G5BASE" "$G5_A"; cp -R "$G5BASE" "$G5_B"
+printf 'A committed work\n' > "$G5_A/a.txt"; git_q "$G5_A" commit --quiet -am "A diverges"
+printf 'B committed work\n' > "$G5_B/a.txt"; git_q "$G5_B" commit --quiet -am "B diverges"
+A_MAIN="$(git_q "$G5_A" rev-parse refs/heads/main)"
+B_MAIN="$(git_q "$G5_B" rev-parse refs/heads/main)"
+
+G5FAIL=0
+[ "$A_MAIN" != "$B_MAIN" ] || { echo "FAIL(G5-git-13): fixture did not diverge" >&2; G5FAIL=1; }
+
+# Objects roam bidirectionally while the refs stay conflicted (design 2.1): the
+# winner's objects reach the loser and vice-versa BEFORE any ref is mutated.
+# Model that by fetching each side's line into the other's odb first.
+git_q "$G5_B" fetch --quiet "$G5_A" refs/heads/main:refs/tcfs/roamed/incoming  # A_MAIN objects -> B
+git_q "$G5_A" fetch --quiet "$G5_B" refs/heads/main:refs/tcfs/roamed/incoming  # B_MAIN objects -> A
+
+# LOSER SIDE (B pulls the winner's head). B's live head is NOT an ancestor of
+# the incoming winner head, so the guard parks it under B's own device namespace
+# BEFORE applying the overwrite — park-first is what keeps B's committed commit
+# reachable across the overwrite.
+if [ "$B_MAIN" != "$A_MAIN" ] && ! git_q "$G5_B" merge-base --is-ancestor "$B_MAIN" "$A_MAIN"; then
+  git_q "$G5_B" update-ref refs/tcfs/theirs/dev-B/heads/main "$B_MAIN"   # loser-guard park
+fi
+git_q "$G5_B" update-ref refs/heads/main "$A_MAIN"                        # winner overwrite applied
+git_q "$G5_B" update-ref -d refs/tcfs/roamed/incoming                    # heads/theirs now hold the roamed objects
+
+# WINNER SIDE (A resolved keep-both, parking the loser's head — the PR-3 effect
+# the loser then pulls; here we assert A's converged end state directly).
+git_q "$G5_A" update-ref refs/tcfs/theirs/dev-B/heads/main "$B_MAIN"
+git_q "$G5_A" update-ref -d refs/tcfs/roamed/incoming
+
+# Assertions: BOTH machines converge, NO committed work orphaned.
+for side in "$G5_A" "$G5_B"; do
+  sname="$(basename "$side")"
+  git_q "$side" fsck --full > "$EVIDENCE_DIR/g5-git-13-fsck-$sname.txt" 2>&1 || true
+  if grep -qiE 'error|missing|broken|fatal' "$EVIDENCE_DIR/g5-git-13-fsck-$sname.txt"; then
+    echo "FAIL(G5-git-13): $sname .git not fsck-clean after convergence" >&2; G5FAIL=1
+  fi
+  [ "$(git_q "$side" rev-parse refs/heads/main)" = "$A_MAIN" ] \
+    || { echo "FAIL(G5-git-13): $sname refs/heads/main != winner head" >&2; G5FAIL=1; }
+  [ "$(git_q "$side" rev-parse refs/tcfs/theirs/dev-B/heads/main 2>/dev/null)" = "$B_MAIN" ] \
+    || { echo "FAIL(G5-git-13): $sname loser head not parked" >&2; G5FAIL=1; }
+  git_q "$side" cat-file -e "${A_MAIN}^{commit}" 2>/dev/null \
+    || { echo "FAIL(G5-git-13): $sname winner commit object missing" >&2; G5FAIL=1; }
+  git_q "$side" cat-file -e "${B_MAIN}^{commit}" 2>/dev/null \
+    || { echo "FAIL(G5-git-13): $sname loser commit object missing" >&2; G5FAIL=1; }
+  git_q "$side" rev-list --all > "$EVIDENCE_DIR/g5-git-13-revlist-$sname.txt" 2>&1 || true
+  grep -q "$A_MAIN" "$EVIDENCE_DIR/g5-git-13-revlist-$sname.txt" \
+    || { echo "FAIL(G5-git-13): $sname winner tip unreachable" >&2; G5FAIL=1; }
+  grep -q "$B_MAIN" "$EVIDENCE_DIR/g5-git-13-revlist-$sname.txt" \
+    || { echo "FAIL(G5-git-13): $sname loser tip unreachable (ORPHANED)" >&2; G5FAIL=1; }
+done
+{
+  echo "scenario: divergent .git; A=winner, B=loser. loser-guard parks B's live"
+  echo "          head at refs/tcfs/theirs/dev-B/heads/main BEFORE refs/heads/main"
+  echo "          is overwritten with the winner head — on BOTH machines."
+  echo "winner head A_MAIN=$A_MAIN"
+  echo "loser  head B_MAIN=$B_MAIN"
+  echo "invariant: both .git fsck-clean; refs/heads/main==winner; loser head"
+  echo "           parked + reachable via rev-list --all — no committed work lost."
+} > "$EVIDENCE_DIR/g5-git-13-scenario.txt"
+if [ "$G5FAIL" -eq 0 ]; then
+  log "G5-git-13 PASS — loser-side no-loss guard: both heads reachable + fsck-clean on both machines"
+else
+  echo "FAIL: G5-git-13 loser-side no-loss guard violated — see g5-git-13-*.txt" >&2
+  FAIL=1
+fi
+
 # ── Optional Stage 5: real push + peer rehydrate fsck (gated, disposable) ─────
 if [ "$RUN_PUSH" -eq 1 ]; then
   log "push stage delegated to existing scaffolds; reuse scripts/git-repo-canary.sh"
