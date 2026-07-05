@@ -2,6 +2,12 @@
 
 Created: 2026-05-26T00:25:03Z
 
+Status: rescued pending evidence. This packet preserves a second
+large-workdir shadow run that was not present on `main`; it does not claim
+project parity. The run's own gates currently report
+`full-project-parity-not-claimed`, and `push.log` records an eventual local
+`No space left on device` failure.
+
 This bundle inventories the live source read-only, copies it to an isolated
 shadow, and roots TCFS state/config at that shadow. It does not mutate the live
 `/Users/jess/git/linux-xr` tree and does not claim `~/Documents`, `~/.local`,
