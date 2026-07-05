@@ -1,0 +1,5 @@
+https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git	
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git	
+https://github.com/gregkh/linux.git	
+origin	git@github.com:tinyland-inc/linux-xr.git (fetch) [blob:none]
+origin	git@github.com:tinyland-inc/linux-xr.git (push)
