@@ -519,3 +519,23 @@ ordinary files.
 3. Increments: PR-1 fence+`tcfs conflicts` (ships alone, kills the splice vector) → PR-2 hard lock respect + ConflictInfo manifest pin (prerequisite) → PR-3 the verb (winner side, submodule veto inherited from #513's shape) → PR-4 loser guard (flips G5-git-5/T10/T11 green, harness row G5-git-13); parallel: plain-file keep-both crash-ordering rework (M5-D2).
 4. Acceptance: T10/T11 + repo-tightened R5 bar ("BOTH `.git` states preserved and each fsck-clean", repo-roam-test-plan `:127`) via new harness rows G5-git-6..14 on the #506 harness pattern.
 5. Open operator questions before PR-3: parking namespace default, whether bare keep-local/keep-remote ship at all, dirty-tree policy, bundle retention, escalation cadence, ticket routing (TIN-1549 vs new).
+
+---
+
+## Implementation status (updated 2026-07-05)
+
+This design is now the design-of-record; PR-1 through PR-3 are merged, PR-4 remains.
+
+| Rung | PR | Merge commit | Status |
+|------|----|--------------|--------|
+| **PR-1** — fence per-file `.git` resolution (CLI+MCP) + `tcfs conflicts` read verb | #526 | `afd84b2` | ✅ merged |
+| (hardening) — fence paths + persistence | #527 | `449846e` | ✅ merged |
+| **PR-2** — executor hard-respects a foreign `.git/tcfs.lock`; `ConflictInfo.remote_manifest_key` | #528 | `1e41a23` | ✅ merged |
+| **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, **operator-CLI-only** (MCP/auto excluded via the `operator_cli` provenance gate) | #529 | `831d363b` | ✅ merged |
+| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live) | — | — | ⏸ **deploy-gated** |
+
+**PR-4 is the only remaining rung** and it is gated on the fleet reaching a common tcfs version end-to-end (both hosts must run the resolver for the loser-side convergence to be exercised live) — currently blocked on the neo `v0.12.16` deploy, itself blocked on the PZM aarch64-darwin builder (hardware). Until PR-4 lands + the live canary runs, the honest claim is: **divergent `.git` conflicts are safely fenced, visible (`tcfs conflicts`), and operator-resolvable (`tcfs resolve … --execute`), but the two-machine live-convergence proof (G5-git-5 T10/T11 green) is pending the deploy.**
+
+**Ratified operator §6 answers (2026-07-05):** parking namespace default = `refs/tcfs/theirs/**` (not real branches); bare `keep-local`/`keep-remote` = omitted (park-first only); dirty-tree = hard refuse; ticket routing = new ticket for the verb + TIN-1549 keeps the `tcfs conflicts`/banner UX surface. Bundle retention and escalation cadence remain open (non-blocking; PR-4-adjacent).
+
+**Security note (from the PR-3 adversarial review, #529):** the repo-group execute path is reachable **only** via the operator CLI (`operator_cli` proto flag); MCP rejects `git_keep_both*` before connect and the daemon refuses the dispatch without the flag — the agent/auto/NATS threat is closed. The undo bundle is written to the machine-local state dir (never in-tree), with `.git/tcfs-undo/**` fail-closed in the blacklist as belt-and-suspenders.
