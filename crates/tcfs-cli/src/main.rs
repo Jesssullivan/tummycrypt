@@ -8092,6 +8092,7 @@ enabled = false
         let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
 
         let ordinary_path = sync_root.join("notes.txt");
+        std::fs::write(&ordinary_path, b"local ordinary").unwrap();
         let mut ordinary = tcfs_sync::state::make_sync_state(
             &ordinary_path,
             "ordinary".to_string(),
@@ -8113,6 +8114,7 @@ enabled = false
         state.set(&ordinary_path, ordinary);
 
         let git_path = git_parent.join("main");
+        std::fs::write(&git_path, b"0123456789012345678901234567890123456789\n").unwrap();
         let mut git_entry = tcfs_sync::state::make_sync_state(
             &git_path,
             "git".to_string(),
