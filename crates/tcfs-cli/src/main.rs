@@ -6814,11 +6814,13 @@ struct ConflictGroup {
 /// [`repo_root_for_git_path`](tcfs_sync::git_safety::repo_root_for_git_path)
 /// locates the `.git` boundary.
 fn conflict_repo_root(cache_key: &str, rel_path: &str) -> Option<PathBuf> {
+    let rel_path = rel_path.replace('\\', "/");
+    let cache_key = cache_key.replace('\\', "/");
     let local_root = cache_key
-        .strip_suffix(rel_path)
+        .strip_suffix(&rel_path)
         .map(|s| s.trim_end_matches('/'))
         .unwrap_or("");
-    tcfs_sync::git_safety::repo_root_for_git_path(Path::new(local_root), rel_path)
+    tcfs_sync::git_safety::repo_root_for_git_path(Path::new(local_root), &rel_path)
 }
 
 /// Group recorded conflicts by their enclosing git repo (for `.git`-internal
@@ -7134,6 +7136,10 @@ mod tests {
                 mk_conflict("repoB/.git/HEAD"),
             ),
             (
+                "/sync/repoC/.git/refs/heads/main".to_string(),
+                mk_conflict("repoC\\.git\\refs\\heads\\main"),
+            ),
+            (
                 "/sync/notes/todo.txt".to_string(),
                 mk_conflict("notes/todo.txt"),
             ),
@@ -7141,8 +7147,12 @@ mod tests {
 
         let groups = group_conflicts(&items);
 
-        // Two git repo groups + one flat non-git bucket.
-        assert_eq!(groups.len(), 3, "expected repoA, repoB, and a flat bucket");
+        // Three git repo groups + one flat non-git bucket.
+        assert_eq!(
+            groups.len(),
+            4,
+            "expected repoA, repoB, repoC, and a flat bucket"
+        );
 
         let repo_a = groups
             .iter()
@@ -7172,6 +7182,14 @@ mod tests {
             .find(|g| g.repo_root.as_deref() == Some("/sync/repoB"))
             .expect("repoB group present");
         assert_eq!(repo_b.paths.len(), 1);
+
+        let repo_c = groups
+            .iter()
+            .find(|g| g.repo_root.as_deref() == Some("/sync/repoC"))
+            .expect("repoC group present");
+        assert_eq!(repo_c.paths.len(), 1);
+        assert!(repo_c.paths[0].git_internal);
+        assert_eq!(repo_c.paths[0].head_ref.as_deref(), Some("refs/heads/main"));
 
         // The non-git conflict is flat (no repo_root), and not git-internal.
         let flat = groups

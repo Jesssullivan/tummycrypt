@@ -1138,6 +1138,8 @@ pub struct UploadResult {
     pub hash: String,
     pub chunks: usize,
     pub bytes: u64,
+    /// Vector clock committed in the uploaded manifest/state entry.
+    pub vclock: VectorClock,
     /// true if file was already up-to-date (skipped)
     pub skipped: bool,
     /// Sync outcome if conflict detection was performed
@@ -1485,6 +1487,7 @@ async fn upload_file_with_device_with_state(
                 hash: cached.blake3.clone(),
                 chunks: cached.chunk_count,
                 bytes: cached.size,
+                vclock: cached.vclock.clone(),
                 skipped: true,
                 outcome: Some(SyncOutcome::UpToDate),
             };
@@ -1662,6 +1665,7 @@ async fn upload_file_with_device_with_state(
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
+                            vclock: remote_manifest_obj.vclock.clone(),
                             skipped: true,
                             outcome: Some(sync_outcome),
                         },
@@ -1691,6 +1695,7 @@ async fn upload_file_with_device_with_state(
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
+                            vclock: sync_state.vclock.clone(),
                             skipped: true,
                             outcome: Some(sync_outcome),
                         },
@@ -1718,6 +1723,7 @@ async fn upload_file_with_device_with_state(
                             hash: file_hash_hex,
                             chunks: 0,
                             bytes: file_size,
+                            vclock: sync_state.vclock.clone(),
                             skipped: true,
                             outcome: Some(sync_outcome),
                         },
@@ -1777,6 +1783,7 @@ async fn upload_file_with_device_with_state(
                 hash: file_hash_hex,
                 chunks: chunk_count,
                 bytes: file_size,
+                vclock: sync_state.vclock.clone(),
                 skipped: false,
                 outcome: None,
             },
@@ -2249,6 +2256,7 @@ async fn upload_file_with_device_with_state(
             hash: file_hash_hex,
             chunks: num_chunks,
             bytes: file_size,
+            vclock: sync_state.vclock.clone(),
             skipped: false,
             outcome,
         },
@@ -2321,6 +2329,7 @@ pub async fn upload_symlink_with_device(
         device_id.to_string(),
         target.len() as u64,
     )?;
+    let result_vclock = sync_state.vclock.clone();
     state.set(local_path, sync_state);
 
     let assume_fresh_prefix = upload_assume_fresh_prefix();
@@ -2338,6 +2347,7 @@ pub async fn upload_symlink_with_device(
         hash: symlink_hash,
         chunks: 0,
         bytes: target.len() as u64,
+        vclock: result_vclock,
         skipped: false,
         outcome: None,
     })
@@ -4862,6 +4872,39 @@ mod tests {
         // Verify content matches
         let content = std::fs::read_to_string(&dl_path).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn upload_result_vclock_matches_committed_manifest_and_state() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+
+        let local = dir.path().join("todo.txt");
+        std::fs::write(&local, b"ship the watcher event clock").unwrap();
+
+        let up = upload_file_with_device(
+            &op,
+            &local,
+            "data",
+            &mut state,
+            None,
+            "neo",
+            Some("notes/todo.txt"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!up.skipped);
+        assert_eq!(up.vclock.get("neo"), 1);
+
+        let manifest_bytes = op.read(&up.remote_path).await.unwrap();
+        let manifest = SyncManifest::from_bytes(&manifest_bytes.to_bytes()).unwrap();
+        let cached = state.get(&local).unwrap();
+
+        assert_eq!(up.vclock, manifest.vclock);
+        assert_eq!(up.vclock, cached.vclock);
     }
 
     #[test]

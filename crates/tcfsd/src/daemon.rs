@@ -653,6 +653,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                     let nats_device = device.clone();
                                                     let nats_hash = upload_result.hash.clone();
                                                     let nats_size = upload_result.bytes;
+                                                    let nats_vclock = upload_result.vclock.clone();
                                                     let nats_remote = upload_result.remote_path.clone();
                                                     let nats_handle = nats.clone();
                                                     let pub_metrics = metrics.clone();
@@ -663,7 +664,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                                                 rel_path,
                                                                 blake3: nats_hash,
                                                                 size: nats_size,
-                                                                vclock: Default::default(),
+                                                                vclock: nats_vclock,
                                                                 manifest_path: nats_remote,
                                                                 timestamp: tcfs_sync::StateEvent::now(),
                                                             };
@@ -1553,11 +1554,12 @@ async fn spawn_state_sync_loop(
                                     // OnDemand mode (under threshold): conditional auto-pull
                                     match conflict_mode.as_str() {
                                         "auto" => {
-                                            handle_auto_pull(
+                                            let should_ack = handle_auto_pull(
                                                 &device_id,
                                                 &event_device,
                                                 rel_path,
                                                 blake3,
+                                                *size,
                                                 remote_vclock,
                                                 manifest_path,
                                                 &operator,
@@ -1567,6 +1569,9 @@ async fn spawn_state_sync_loop(
                                                 &storage_prefix,
                                             )
                                             .await;
+                                            if !should_ack {
+                                                continue;
+                                            }
 
                                             // Invalidate FUSE negative cache so the
                                             // new file appears in readdir immediately
@@ -1725,6 +1730,7 @@ async fn handle_auto_pull(
     remote_device: &str,
     rel_path: &str,
     remote_blake3: &str,
+    remote_size: u64,
     remote_vclock: &tcfs_sync::conflict::VectorClock,
     manifest_path: &str,
     operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
@@ -1732,7 +1738,7 @@ async fn handle_auto_pull(
     path_locks: &tcfs_sync::state::PathLocks,
     sync_root: Option<&std::path::Path>,
     storage_prefix: &str,
-) {
+) -> bool {
     // Determine local path for this rel_path
     let local_path = match sync_root {
         Some(root) => root.join(rel_path),
@@ -1746,7 +1752,7 @@ async fn handle_auto_pull(
                         path = %rel_path,
                         "no sync_root configured and file not in state cache, skipping auto-pull"
                     );
-                    return;
+                    return true;
                 }
             }
         }
@@ -1762,8 +1768,11 @@ async fn handle_auto_pull(
                 // New file from remote — download it
                 info!(path = %rel_path, from = %remote_device, "new file from remote, pulling");
                 drop(cache);
-                do_auto_download(
+                return do_auto_download(
                     device_id,
+                    remote_blake3,
+                    remote_size,
+                    remote_vclock,
                     manifest_path,
                     &local_path,
                     operator,
@@ -1771,7 +1780,6 @@ async fn handle_auto_pull(
                     storage_prefix,
                 )
                 .await;
-                return;
             }
         }
     };
@@ -1789,9 +1797,11 @@ async fn handle_auto_pull(
     match outcome {
         tcfs_sync::conflict::SyncOutcome::UpToDate => {
             info!(path = %rel_path, "already up to date");
+            true
         }
         tcfs_sync::conflict::SyncOutcome::LocalNewer => {
             info!(path = %rel_path, "local is newer, skipping pull");
+            true
         }
         tcfs_sync::conflict::SyncOutcome::RemoteNewer => {
             // Guard: defer auto-pull if file is actively being modified
@@ -1800,20 +1810,23 @@ async fn handle_auto_pull(
                 if let Some(entry) = cache.get(&local_path) {
                     if entry.status == tcfs_sync::state::FileSyncStatus::Active {
                         info!(path = %rel_path, "deferring auto-pull: file is actively being modified");
-                        return;
+                        return true;
                     }
                 }
             }
             info!(path = %rel_path, from = %remote_device, "remote is newer, auto-pulling");
             do_auto_download(
                 device_id,
+                remote_blake3,
+                remote_size,
+                remote_vclock,
                 manifest_path,
                 &local_path,
                 operator,
                 state_cache,
                 storage_prefix,
             )
-            .await;
+            .await
         }
         tcfs_sync::conflict::SyncOutcome::Conflict(ref conflict_info) => {
             // keep-both PR-1 (safety invariant S2): automatic per-file
@@ -1826,11 +1839,19 @@ async fn handle_auto_pull(
             // `tcfs conflicts`). The conflict stays recorded by the reconcile
             // engine's Conflict arm, so it remains visible and re-tried.
             if auto_conflict_must_defer(rel_path) {
+                {
+                    let mut cache = state_cache.lock().await;
+                    watcher_record_conflict(&mut cache, &local_path, conflict_info.clone());
+                    if let Err(e) = cache.flush() {
+                        warn!(path = %rel_path, "failed to persist deferred git conflict: {e}");
+                        return false;
+                    }
+                }
                 info!(
                     path = %rel_path,
                     "AutoResolver: deferring .git-internal conflict (repo-group resolution required)"
                 );
-                return;
+                return true;
             }
             info!(
                 path = %rel_path,
@@ -1845,8 +1866,11 @@ async fn handle_auto_pull(
                 }
                 Some(tcfs_sync::conflict::Resolution::KeepRemote) => {
                     info!(path = %rel_path, "AutoResolver: keeping remote");
-                    do_auto_download(
+                    return do_auto_download(
                         device_id,
+                        remote_blake3,
+                        remote_size,
+                        remote_vclock,
                         manifest_path,
                         &local_path,
                         operator,
@@ -1859,6 +1883,7 @@ async fn handle_auto_pull(
                     info!(path = %rel_path, "AutoResolver: deferred");
                 }
             }
+            true
         }
     }
 }
@@ -1876,12 +1901,15 @@ async fn handle_auto_pull(
 /// We only update the state cache so vector clocks stay in sync.
 async fn do_auto_download(
     _device_id: &str,
+    expected_blake3: &str,
+    expected_size: u64,
+    expected_vclock: &tcfs_sync::conflict::VectorClock,
     manifest_path: &str,
     local_path: &std::path::Path,
     operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
     state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
     _storage_prefix: &str,
-) {
+) -> bool {
     // Verify the manifest exists in S3 (confirms push completed)
     let op = {
         let guard = operator.lock().await;
@@ -1889,7 +1917,7 @@ async fn do_auto_download(
             Some(op) => op.clone(),
             None => {
                 warn!("no storage operator for auto-pull verification");
-                return;
+                return false;
             }
         }
     };
@@ -1900,6 +1928,21 @@ async fn do_auto_download(
             let manifest_bytes = manifest_data.to_bytes();
             match tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes) {
                 Ok(manifest) => {
+                    if manifest.file_hash != expected_blake3
+                        || manifest.file_size != expected_size
+                        || manifest.vclock != *expected_vclock
+                    {
+                        warn!(
+                            path = %local_path.display(),
+                            manifest = %manifest_path,
+                            event_hash = %expected_blake3,
+                            manifest_hash = %manifest.file_hash,
+                            event_size = expected_size,
+                            manifest_size = manifest.file_size,
+                            "auto-pull: manifest does not match state event; withholding ack"
+                        );
+                        return false;
+                    }
                     info!(
                         path = %local_path.display(),
                         manifest = %manifest_path,
@@ -1914,6 +1957,7 @@ async fn do_auto_download(
                         .unwrap_or_default()
                         .as_secs();
                     let mut cache = state_cache.lock().await;
+                    let previous = cache.get(local_path).cloned();
                     cache.set(
                         local_path,
                         tcfs_sync::state::SyncState {
@@ -1931,23 +1975,25 @@ async fn do_auto_download(
                     );
                     if let Err(e) = cache.flush() {
                         warn!(error = %e, "state cache flush failed");
+                        match previous {
+                            Some(previous) => cache.set(local_path, previous),
+                            None => cache.remove(local_path),
+                        }
+                        return false;
                     }
                     debug!(
                         key = %local_path.display(),
                         hash = %manifest.file_hash,
                         "auto-pull: state cache updated with remote metadata"
                     );
+                    true
                 }
                 Err(e) => {
                     warn!(
                         manifest = %manifest_path,
                         "auto-pull: failed to parse manifest: {e}"
                     );
-                    // Still mark as verified even if parse fails
-                    let mut cache = state_cache.lock().await;
-                    if let Err(e) = cache.flush() {
-                        warn!(error = %e, "state cache flush failed");
-                    }
+                    false
                 }
             }
         }
@@ -1957,6 +2003,7 @@ async fn do_auto_download(
                 manifest = %manifest_path,
                 "auto-pull: manifest not found in S3: {e}"
             );
+            false
         }
     }
 }
@@ -2023,7 +2070,9 @@ fn ensure_dirs(config: &TcfsConfig) {
 
 #[cfg(test)]
 mod keep_both_pr1_tests {
-    use super::auto_conflict_must_defer;
+    use super::{auto_conflict_must_defer, handle_auto_pull};
+    use opendal::services::Memory;
+    use opendal::Operator;
 
     #[test]
     fn auto_defers_git_internal_conflicts() {
@@ -2041,5 +2090,215 @@ mod keep_both_pr1_tests {
         assert!(!auto_conflict_must_defer("src/main.rs"));
         // A file merely named like git but not under a `.git` dir is not fenced.
         assert!(!auto_conflict_must_defer("docs/gitignore-notes.md"));
+    }
+
+    #[tokio::test]
+    async fn git_conflict_flush_failure_withholds_ack_signal() {
+        // If a deferred `.git` conflict cannot be persisted, the auto-pull
+        // handler must return false so the NATS caller skips ack and lets
+        // JetStream redeliver. This is the event-loss guard for PR-1.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        let rel_path = "repo/.git/refs/heads/main";
+        let local_path = sync_root.join(rel_path);
+
+        let blocked_parent = dir.path().join("state-parent-is-file");
+        std::fs::write(&blocked_parent, b"not a directory").unwrap();
+        let mut state_cache =
+            tcfs_sync::state::StateCache::open(&blocked_parent.join("state.json")).unwrap();
+        state_cache.set(
+            &local_path,
+            tcfs_sync::state::SyncState {
+                blake3: "local".into(),
+                size: 0,
+                mtime: 0,
+                chunk_count: 0,
+                remote_path: rel_path.into(),
+                last_synced: 0,
+                vclock: tcfs_sync::conflict::VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: None,
+                status: tcfs_sync::state::FileSyncStatus::Synced,
+            },
+        );
+
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(state_cache));
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let remote_vclock = tcfs_sync::conflict::VectorClock::new();
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            rel_path,
+            "remote",
+            0,
+            &remote_vclock,
+            "data/manifests/git",
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            Some(&sync_root),
+            "data",
+        )
+        .await;
+
+        assert!(
+            !should_ack,
+            "failed deferred-conflict persistence must withhold ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_download_failure_withholds_ack_signal() {
+        // Once handle_auto_pull owns the ack/no-ack decision, ordinary
+        // auto-download verification failures must also return false. Otherwise
+        // a missing operator/bad manifest/missing manifest would ack and drop
+        // the event before the remote file is represented in state.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        let state_path = dir.path().join("state.json");
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&state_path).unwrap(),
+        ));
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let remote_vclock = tcfs_sync::conflict::VectorClock::new();
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            "notes/todo.txt",
+            "remote",
+            0,
+            &remote_vclock,
+            "data/manifests/notes/todo.txt",
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            Some(&sync_root),
+            "data",
+        )
+        .await;
+
+        assert!(
+            !should_ack,
+            "failed auto-download verification must withhold ack"
+        );
+    }
+
+    fn memory_operator() -> Operator {
+        Operator::new(Memory::default()).unwrap().finish()
+    }
+
+    fn test_manifest(
+        file_hash: &str,
+        file_size: u64,
+        vclock: tcfs_sync::conflict::VectorClock,
+    ) -> tcfs_sync::manifest::SyncManifest {
+        tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: file_hash.into(),
+            file_size,
+            chunks: Vec::new(),
+            vclock,
+            written_by: "honey".into(),
+            written_at: 1_700_000_000,
+            rel_path: Some("notes/todo.txt".into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_download_flush_failure_rolls_back_in_memory_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        let rel_path = "notes/todo.txt";
+        let local_path = sync_root.join(rel_path);
+        let blocked_parent = dir.path().join("state-parent-is-file");
+        std::fs::write(&blocked_parent, b"not a directory").unwrap();
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&blocked_parent.join("state.json")).unwrap(),
+        ));
+
+        let mut remote_vclock = tcfs_sync::conflict::VectorClock::new();
+        remote_vclock.tick("honey");
+        let manifest = test_manifest("remote", 5, remote_vclock.clone());
+        let op = memory_operator();
+        op.write(
+            "data/manifests/notes/todo.txt",
+            manifest.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        for attempt in 0..2 {
+            let should_ack = handle_auto_pull(
+                "neo",
+                "honey",
+                rel_path,
+                "remote",
+                5,
+                &remote_vclock,
+                "data/manifests/notes/todo.txt",
+                &operator,
+                &state_cache,
+                &tcfs_sync::state::PathLocks::new(),
+                Some(&sync_root),
+                "data",
+            )
+            .await;
+            assert!(
+                !should_ack,
+                "attempt {attempt}: failed flush must keep withholding ack"
+            );
+            let cache = state_cache.lock().await;
+            assert!(
+                cache.get(&local_path).is_none(),
+                "attempt {attempt}: failed flush must not leave remote state in memory"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_download_manifest_mismatch_withholds_ack_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        let state_path = dir.path().join("state.json");
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&state_path).unwrap(),
+        ));
+
+        let mut remote_vclock = tcfs_sync::conflict::VectorClock::new();
+        remote_vclock.tick("honey");
+        let manifest = test_manifest("stale", 5, remote_vclock.clone());
+        let op = memory_operator();
+        op.write(
+            "data/manifests/notes/todo.txt",
+            manifest.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            "notes/todo.txt",
+            "remote",
+            5,
+            &remote_vclock,
+            "data/manifests/notes/todo.txt",
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            Some(&sync_root),
+            "data",
+        )
+        .await;
+
+        assert!(!should_ack, "manifest/event mismatch must withhold ack");
     }
 }
