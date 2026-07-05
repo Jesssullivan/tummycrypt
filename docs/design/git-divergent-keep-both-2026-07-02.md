@@ -533,7 +533,7 @@ is in remote-CI validation.
 | (hardening) — fence paths + persistence | #527 | `449846e` | ✅ merged |
 | **PR-2** — executor hard-respects a foreign `.git/tcfs.lock`; `ConflictInfo.remote_manifest_key` | #528 | `1e41a23` | ✅ merged |
 | **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, **operator-CLI-only** (MCP/auto excluded via the `operator_cli` provenance gate) | #529 | `831d363b` | ✅ merged |
-| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live) | #534 | `04d3aca` | 🟡 draft PR / remote CI |
+| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live) | #534 | draft branch | 🟡 draft PR / remote CI + G5-git-13 harness |
 
 **PR-4 is the only remaining rung** and is no longer blocked on PZM hardware:
 the PZM SSD/RWX path recovered and the tactical legacy-SSH remote builder is

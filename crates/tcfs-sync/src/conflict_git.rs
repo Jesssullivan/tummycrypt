@@ -176,8 +176,7 @@ pub async fn resolve_repo_keep_both(
                 head_ref
             );
         }
-        let park_ref = park_ref_for(remote_device, head_ref)?;
-        ensure_park_ref_available(&repo_root, &park_ref, &remote_sha)?;
+        let park_ref = park_ref_for_available(&repo_root, remote_device, head_ref, &remote_sha)?;
         parked_refs.push(GitKeepBothParkedRef {
             conflict_rel_path: candidate.rel_path.clone(),
             head_ref: head_ref.clone(),
@@ -212,7 +211,7 @@ pub async fn resolve_repo_keep_both(
 
     for parked in &parked_refs {
         ensure_local_ref_still_pinned(&repo_root, parked)?;
-        ensure_park_ref_available(&repo_root, &parked.park_ref, &parked.remote_sha)?;
+        ensure_selected_park_ref_available(&repo_root, &parked.park_ref, &parked.remote_sha)?;
     }
 
     // The undo bundle captures `--all` refs before we park anything. It is only
@@ -416,6 +415,16 @@ fn park_ref_for(remote_device: &str, head_ref: &str) -> Result<String> {
     Ok(format!("refs/tcfs/theirs/{safe_device}/heads/{branch}"))
 }
 
+fn park_ref_for_available(
+    repo_root: &Path,
+    remote_device: &str,
+    head_ref: &str,
+    sha: &str,
+) -> Result<String> {
+    let base = park_ref_for(remote_device, head_ref)?;
+    available_park_ref(repo_root, &base, sha)
+}
+
 /// Namespace a ref under `refs/tcfs/theirs/<device>/**` so its target objects
 /// become fsck-reachable on this machine and the ref never collides across
 /// devices. Reuses `park_ref_for` for branch heads (`refs/heads/<b>` →
@@ -443,17 +452,19 @@ pub(crate) fn theirs_ref_name(device: &str, ref_name: &str) -> Option<String> {
 }
 
 /// Create-only park of `sha` at `park_ref` in `repo_root` using the same
-/// zero-OID compare-and-swap the winner-side resolver uses: refuse if the ref
-/// already exists at a DIFFERENT sha, no-op if it already points at `sha`
-/// (idempotent re-run), otherwise `update-ref <park_ref> <sha> <zero-oid>`.
-pub(crate) fn park_ref_create_only(repo_root: &Path, park_ref: &str, sha: &str) -> Result<()> {
-    ensure_park_ref_available(repo_root, park_ref, sha)?;
-    if git_safety::local_ref_sha(repo_root, park_ref).as_deref() == Some(sha) {
-        return Ok(());
+/// zero-OID compare-and-swap the winner-side resolver uses: if the base ref
+/// already exists at a different sha, choose the documented `-<sha12>` suffix;
+/// no-op if the selected ref already points at `sha` (idempotent re-run),
+/// otherwise `update-ref <selected_ref> <sha> <zero-oid>`.
+pub(crate) fn park_ref_create_only(repo_root: &Path, park_ref: &str, sha: &str) -> Result<String> {
+    let park_ref = available_park_ref(repo_root, park_ref, sha)?;
+    if git_safety::local_ref_sha(repo_root, &park_ref).as_deref() == Some(sha) {
+        return Ok(park_ref);
     }
     let zero = zero_oid_like(sha);
-    run_git(repo_root, &["update-ref", park_ref, sha, zero.as_str()])
-        .with_context(|| format!("parking {sha} at {park_ref}"))
+    run_git(repo_root, &["update-ref", &park_ref, sha, zero.as_str()])
+        .with_context(|| format!("parking {sha} at {park_ref}"))?;
+    Ok(park_ref)
 }
 
 fn ensure_clean_worktree(repo_root: &Path) -> Result<()> {
@@ -494,7 +505,24 @@ fn ensure_local_ref_still_pinned(repo_root: &Path, parked: &GitKeepBothParkedRef
     Ok(())
 }
 
-fn ensure_park_ref_available(repo_root: &Path, park_ref: &str, remote_sha: &str) -> Result<()> {
+fn available_park_ref(repo_root: &Path, park_ref: &str, remote_sha: &str) -> Result<String> {
+    if let Some(existing) = git_safety::local_ref_sha(repo_root, park_ref) {
+        if existing == remote_sha {
+            return Ok(park_ref.to_string());
+        }
+        let suffix_len = remote_sha.len().min(12);
+        let suffixed = format!("{park_ref}-{}", &remote_sha[..suffix_len]);
+        ensure_selected_park_ref_available(repo_root, &suffixed, remote_sha)?;
+        return Ok(suffixed);
+    }
+    Ok(park_ref.to_string())
+}
+
+fn ensure_selected_park_ref_available(
+    repo_root: &Path,
+    park_ref: &str,
+    remote_sha: &str,
+) -> Result<()> {
     if let Some(existing) = git_safety::local_ref_sha(repo_root, park_ref) {
         if existing != remote_sha {
             bail!(
@@ -695,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_refuses_to_overwrite_different_parked_ref() {
+    fn occupied_park_ref_gets_sha_suffix() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -714,8 +742,17 @@ mod tests {
         let park_ref = "refs/tcfs/theirs/honey/heads/main";
         git_safety::run_git(&repo, &["update-ref", park_ref, &first]).unwrap();
 
-        let err = ensure_park_ref_available(&repo, park_ref, &second).unwrap_err();
-        assert!(err.to_string().contains("refusing to overwrite"));
+        let selected = available_park_ref(&repo, park_ref, &second).unwrap();
+        assert_eq!(
+            selected,
+            format!("refs/tcfs/theirs/honey/heads/main-{}", &second[..12])
+        );
+        assert_eq!(
+            park_ref_create_only(&repo, park_ref, &second).unwrap(),
+            selected
+        );
+        assert_eq!(git_safety::local_ref_sha(&repo, park_ref), Some(first));
+        assert_eq!(git_safety::local_ref_sha(&repo, &selected), Some(second));
     }
 
     #[test]
