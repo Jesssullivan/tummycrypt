@@ -6762,6 +6762,10 @@ async fn cmd_resolve(
             tcfs_core::proto::ResolveConflictRequest {
                 path: path.to_string_lossy().to_string(),
                 resolution: resolution.clone(),
+                // Operator provenance: this is the human-driven `tcfs resolve`
+                // CLI. It is the ONLY caller allowed to reach the repo-group
+                // git keep-both write path (grpc gates git_keep_both_* on this).
+                operator_cli: true,
             },
         ))
         .await

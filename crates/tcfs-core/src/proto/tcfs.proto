@@ -170,6 +170,12 @@ message CredentialStatusResponse {
 message ResolveConflictRequest {
   string path = 1;
   string resolution = 2;
+  // Operator provenance marker. Set ONLY by the `tcfs resolve` CLI. It gates
+  // the live `.git` WRITE path (repo-group git keep-both): the daemon refuses
+  // `git_keep_both_dry_run` / `git_keep_both_execute` unless this is true. The
+  // MCP `resolve_conflict` tool's input does NOT expose this field, so an MCP /
+  // automated / NATS client can never forge operator deliberation.
+  bool operator_cli = 3;
 }
 message ResolveConflictResponse {
   bool success = 1;

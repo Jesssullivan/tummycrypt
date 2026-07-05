@@ -67,13 +67,28 @@ impl GitKeepBothResult {
 }
 
 #[derive(Debug, Clone)]
+enum GitConflictKind {
+    /// A branch-head ref (`.git/refs/heads/**`). Park the peer's head under
+    /// `refs/tcfs/theirs/<device>/heads/**` and keep the local head.
+    Park {
+        head_ref: String,
+        remote_manifest_key: String,
+        remote_device: String,
+    },
+    /// A non-ref-class `.git` workdir/reflog path (`.git/index`,
+    /// `.git/logs/**`, `.git/COMMIT_EDITMSG`, ...). Design steps 7/9 keep the
+    /// winner's local version and clear the conflict; the loser's commits are
+    /// preserved by the parked theirs-ref, so the loser's index/reflog need not
+    /// be materialized. No ref is touched for these.
+    KeepLocal,
+}
+
+#[derive(Debug, Clone)]
 struct GitConflictCandidate {
     cache_key: String,
     rel_path: String,
-    head_ref: String,
-    remote_manifest_key: String,
-    remote_device: String,
     resolved_vclock: crate::conflict::VectorClock,
+    kind: GitConflictKind,
 }
 
 #[derive(Debug, Clone)]
@@ -89,12 +104,14 @@ struct AppliedParkRef {
 /// merge commits, push to remote storage, or claim broad daily-driver safety.
 /// A later reconcile/upload cycle publishes the updated refs through the normal
 /// object-before-ref path.
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve_repo_keep_both(
     op: &Operator,
     state: &mut StateCache,
     repo_root: &Path,
     remote_prefix: &str,
     device_id: &str,
+    undo_state_dir: &Path,
     mode: GitKeepBothMode,
     encryption: OptionalEncryption<'_>,
 ) -> Result<GitKeepBothResult> {
@@ -123,11 +140,22 @@ pub async fn resolve_repo_keep_both(
     ensure_clean_worktree(&repo_root)?;
     run_git(&repo_root, &["fsck", "--full"]).context("pre-resolution git fsck")?;
 
-    let mut parked_refs = Vec::with_capacity(candidates.len());
+    let mut parked_refs = Vec::new();
     for candidate in &candidates {
+        // KeepLocal candidates (index/logs/COMMIT_EDITMSG) park nothing; the
+        // winner's version stays and the conflict clears in the state loop
+        // below.
+        let GitConflictKind::Park {
+            head_ref,
+            remote_manifest_key,
+            remote_device,
+        } = &candidate.kind
+        else {
+            continue;
+        };
         let remote_sha = read_remote_ref_sha(
             op,
-            &candidate.remote_manifest_key,
+            remote_manifest_key,
             remote_prefix,
             device_id,
             encryption,
@@ -136,23 +164,23 @@ pub async fn resolve_repo_keep_both(
         .with_context(|| {
             format!(
                 "reading remote ref for {} from {}",
-                candidate.rel_path, candidate.remote_manifest_key
+                candidate.rel_path, remote_manifest_key
             )
         })?;
         ensure_commit_present(&repo_root, &remote_sha)?;
-        let local_sha = git_safety::local_ref_sha(&repo_root, &candidate.head_ref)
-            .ok_or_else(|| anyhow!("local ref is missing: {}", candidate.head_ref))?;
+        let local_sha = git_safety::local_ref_sha(&repo_root, head_ref)
+            .ok_or_else(|| anyhow!("local ref is missing: {}", head_ref))?;
         if local_sha == remote_sha {
             bail!(
                 "{} is no longer divergent; rerun reconcile before keep-both",
-                candidate.head_ref
+                head_ref
             );
         }
-        let park_ref = park_ref_for(&candidate.remote_device, &candidate.head_ref)?;
+        let park_ref = park_ref_for(remote_device, head_ref)?;
         ensure_park_ref_available(&repo_root, &park_ref, &remote_sha)?;
         parked_refs.push(GitKeepBothParkedRef {
             conflict_rel_path: candidate.rel_path.clone(),
-            head_ref: candidate.head_ref.clone(),
+            head_ref: head_ref.clone(),
             park_ref,
             local_sha,
             remote_sha,
@@ -187,7 +215,15 @@ pub async fn resolve_repo_keep_both(
         ensure_park_ref_available(&repo_root, &parked.park_ref, &parked.remote_sha)?;
     }
 
-    let undo_bundle = write_undo_bundle(&repo_root)?;
+    // The undo bundle captures `--all` refs before we park anything. It is only
+    // meaningful when refs actually change, so skip it for a pure keep-local
+    // group (no write-only cost). It is written under the machine-local state
+    // dir, never in-tree (BLOCKING 2 / design S6).
+    let undo_bundle = if parked_refs.is_empty() {
+        None
+    } else {
+        Some(write_undo_bundle(&repo_root, undo_state_dir)?)
+    };
     let mut applied = Vec::new();
     for parked in &parked_refs {
         if git_safety::local_ref_sha(&repo_root, &parked.park_ref).as_deref()
@@ -248,7 +284,7 @@ pub async fn resolve_repo_keep_both(
         repo_root,
         mode,
         parked_refs,
-        undo_bundle: Some(undo_bundle),
+        undo_bundle,
     })
 }
 
@@ -272,30 +308,53 @@ fn collect_repo_conflicts(
         if root.canonicalize().ok().as_deref() != Some(repo_root) {
             continue;
         }
-        let Some(head_ref) = git_safety::head_ref_for_git_path(&rel_path) else {
-            bail!(
-                "unparkable .git conflict {}; only branch-head refs are supported in PR-3",
-                rel_path
-            );
-        };
-        let Some(remote_manifest_key) = conflict.remote_manifest_key.clone() else {
-            bail!(
-                "{} has no remote_manifest_key; rerun reconcile with a PR-2 binary first",
-                rel_path
-            );
-        };
         let mut resolved_vclock = conflict.local_vclock.clone();
         resolved_vclock.merge(&conflict.remote_vclock);
+
+        let kind = match git_safety::head_ref_for_git_path(&rel_path) {
+            // Branch-head ref under `.git/refs/heads/**`: parkable. It needs a
+            // PR-2 remote manifest key so we can read the peer's head SHA.
+            Some(head_ref) => {
+                let Some(remote_manifest_key) = conflict.remote_manifest_key.clone() else {
+                    bail!(
+                        "{} has no remote_manifest_key; rerun reconcile with a PR-2 binary first",
+                        rel_path
+                    );
+                };
+                GitConflictKind::Park {
+                    head_ref,
+                    remote_manifest_key,
+                    remote_device: conflict.remote_device.clone(),
+                }
+            }
+            // Not a branch head. Only GENUINELY UNPARKABLE ref-valued paths veto
+            // the whole group: `packed-refs`, `refs/**` outside `refs/heads/`,
+            // detached/symbolic `HEAD`, and submodule refs — parking those
+            // safely is out of scope for PR-3 and dropping them would lose refs.
+            // Non-ref-class workdir/reflog state (`.git/index`, `.git/logs/**`,
+            // `.git/COMMIT_EDITMSG`) is design-intended kept-local (steps 7/9),
+            // which is what makes the verb usable on real divergent repos where
+            // those paths almost always differ.
+            None => {
+                if crate::reconcile::is_git_ref_class_path(&rel_path) {
+                    bail!(
+                        "unparkable ref-class .git conflict {}; only branch-head refs \
+                         (.git/refs/heads/**) are parkable in PR-3",
+                        rel_path
+                    );
+                }
+                GitConflictKind::KeepLocal
+            }
+        };
+
         out.push(GitConflictCandidate {
             cache_key: cache_key.to_string(),
             rel_path,
-            head_ref,
-            remote_manifest_key,
-            remote_device: conflict.remote_device.clone(),
             resolved_vclock,
+            kind,
         });
     }
-    out.sort_by(|a, b| a.head_ref.cmp(&b.head_ref));
+    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(out)
 }
 
@@ -410,8 +469,19 @@ fn zero_oid_like(oid: &str) -> String {
     "0".repeat(oid.len())
 }
 
-fn write_undo_bundle(repo_root: &Path) -> Result<PathBuf> {
-    let undo_dir = repo_root.join(".git/tcfs-undo");
+/// Write the pre-resolution `git bundle --all` escape hatch under the
+/// machine-local state dir — NEVER in-tree.
+///
+/// The bundle used to live at `repo_root/.git/tcfs-undo/**`, but that is a
+/// plain `.git/**` file that raw-mode `.git` collection roams: it grew a
+/// full-history bundle (fresh uuid, never GC'd) on every execute across the
+/// fleet. Anchoring it to the state dir (outside any sync root), keyed by a
+/// hash of the repo root, keeps it a genuine local-only rollback aid
+/// (BLOCKING 2 / design S6). `blacklist.rs` also fail-closed denies
+/// `.git/tcfs-undo/**` so any pre-existing in-tree bundle can never roam.
+fn write_undo_bundle(repo_root: &Path, state_dir: &Path) -> Result<PathBuf> {
+    let repo_hex = blake3::hash(repo_root.to_string_lossy().as_bytes()).to_hex();
+    let undo_dir = state_dir.join("keep-both-undo").join(&repo_hex[..16]);
     std::fs::create_dir_all(&undo_dir)
         .with_context(|| format!("creating undo dir {}", undo_dir.display()))?;
     let bundle = undo_dir.join(format!("keep-both-{}.bundle", Uuid::new_v4()));
@@ -527,6 +597,7 @@ mod tests {
             &repo,
             "data",
             "neo",
+            dir.path(),
             GitKeepBothMode::DryRun,
             None,
         )
@@ -635,5 +706,245 @@ mod tests {
         );
 
         assert_eq!(git_safety::local_ref_sha(&repo, park_ref), Some(first));
+    }
+
+    fn init_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        git_safety::run_git(path, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(path, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(path, &["config", "user.name", "TCFS Test"]).unwrap();
+    }
+
+    fn commit(path: &Path, file: &str, body: &str, msg: &str) -> String {
+        std::fs::write(path.join(file), body.as_bytes()).unwrap();
+        git_safety::run_git(path, &["add", file]).unwrap();
+        git_safety::run_git(path, &["commit", "-m", msg, "--quiet"]).unwrap();
+        git_safety::local_ref_sha(path, "HEAD").unwrap()
+    }
+
+    fn conflict_state(
+        rel_path: &str,
+        remote_manifest_key: Option<String>,
+        local: &crate::conflict::VectorClock,
+        remote: &crate::conflict::VectorClock,
+    ) -> crate::state::SyncState {
+        crate::state::SyncState {
+            blake3: "local".into(),
+            size: 41,
+            mtime: 0,
+            chunk_count: 1,
+            remote_path: "data/manifests/head".into(),
+            last_synced: 0,
+            vclock: local.clone(),
+            device_id: "winner".into(),
+            conflict: Some(crate::conflict::ConflictInfo {
+                rel_path: rel_path.into(),
+                local_vclock: local.clone(),
+                remote_vclock: remote.clone(),
+                local_blake3: "local".into(),
+                remote_blake3: "remote".into(),
+                local_device: "winner".into(),
+                remote_device: "loser".into(),
+                detected_at: 1,
+                times_recorded: 1,
+                remote_manifest_key,
+            }),
+            status: FileSyncStatus::Conflict,
+        }
+    }
+
+    /// End-to-end Execute over two genuinely divergent `.git` repos (winner +
+    /// loser, sharing a base, neither a fast-forward of the other). Exercises
+    /// the real resolver — a no-op/stub resolver would leave the theirs-ref
+    /// absent and fail invariant (i). Also drives the veto reconciliation
+    /// (CHANGES-NEEDED 4) by including a divergent `.git/index` that must ride
+    /// kept-local, and asserts idempotency (CHANGES-NEEDED 3).
+    #[tokio::test]
+    async fn execute_parks_theirs_keeps_local_and_is_idempotent() {
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state-dir");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Shared base, then two divergent commits (no FF direction).
+        let base = dir.path().join("base");
+        init_repo(&base);
+        commit(&base, "file.txt", "base", "base");
+        let winner = dir.path().join("winner");
+        let loser = dir.path().join("loser");
+        git_safety::run_git(
+            dir.path(),
+            &[
+                "clone",
+                "--quiet",
+                &base.to_string_lossy(),
+                &winner.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        git_safety::run_git(
+            dir.path(),
+            &[
+                "clone",
+                "--quiet",
+                &base.to_string_lossy(),
+                &loser.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        init_repo(&winner); // re-assert identity (clone copies base config, but be explicit)
+        init_repo(&loser);
+        let head_w = commit(&winner, "file.txt", "winner work", "winner");
+        let head_l = commit(&loser, "file.txt", "loser work", "loser");
+        assert_ne!(head_w, head_l);
+
+        // Objects-before-refs: the loser's commit is present in the winner's
+        // object store (a prior reconcile would have roamed the objects). Fetch
+        // brings the objects in without moving any winner ref.
+        git_safety::run_git(
+            &winner,
+            &[
+                "fetch",
+                "--quiet",
+                &loser.to_string_lossy(),
+                "refs/heads/main",
+            ],
+        )
+        .unwrap();
+        ensure_commit_present(&winner, &head_l).unwrap();
+
+        // Publish the loser's branch-head ref content as a PR-2 remote manifest
+        // so read_remote_ref_sha can recover the peer head SHA.
+        let ref_blob = dir.path().join("loser-ref-blob");
+        std::fs::write(&ref_blob, format!("{head_l}\n")).unwrap();
+        let mut up_state = StateCache::open(&dir.path().join("upload-state.json")).unwrap();
+        let up = engine::upload_file_with_device(
+            &op,
+            &ref_blob,
+            "data",
+            &mut up_state,
+            None,
+            "loser",
+            Some("loser/.git/refs/heads/main"),
+            None,
+        )
+        .await
+        .unwrap();
+        let manifest_key = up.remote_path.clone();
+
+        let state_path = dir.path().join("state.json");
+        let ref_key = winner.join(".git/refs/heads/main");
+        let index_key = winner.join(".git/index");
+        let mut local = crate::conflict::VectorClock::new();
+        local.tick("winner");
+        let mut remote = crate::conflict::VectorClock::new();
+        remote.tick("loser");
+
+        let inject = |state: &mut StateCache| {
+            state.set(
+                &ref_key,
+                conflict_state(
+                    "winner/.git/refs/heads/main",
+                    Some(manifest_key.clone()),
+                    &local,
+                    &remote,
+                ),
+            );
+            // Divergent non-ref-class path: must ride kept-local, not veto.
+            state.set(
+                &index_key,
+                conflict_state("winner/.git/index", None, &local, &remote),
+            );
+        };
+
+        let mut state = StateCache::open(&state_path).unwrap();
+        inject(&mut state);
+
+        let result = resolve_repo_keep_both(
+            &op,
+            &mut state,
+            &winner,
+            "data",
+            "winner",
+            &state_dir,
+            GitKeepBothMode::Execute,
+            None,
+        )
+        .await
+        .expect("execute should succeed on genuinely divergent repos");
+
+        let park_ref = "refs/tcfs/theirs/loser/heads/main";
+        // (i) loser head parked at the CORRECT remote SHA.
+        assert_eq!(result.parked_refs.len(), 1, "one branch head parked");
+        assert_eq!(
+            git_safety::local_ref_sha(&winner, park_ref).as_deref(),
+            Some(head_l.as_str()),
+            "theirs-ref must point at the loser's head SHA"
+        );
+        // (ii) winner's local head + HEAD untouched, winner's commit intact.
+        assert_eq!(
+            git_safety::local_ref_sha(&winner, "refs/heads/main").as_deref(),
+            Some(head_w.as_str()),
+            "winner head must be untouched"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&winner, "HEAD").as_deref(),
+            Some(head_w.as_str())
+        );
+        ensure_commit_present(&winner, &head_w).unwrap();
+        // (iii) repository verifies clean.
+        run_git(&winner, &["fsck", "--full"]).expect("fsck clean after execute");
+        // (iv) BOTH heads reachable, no lost commits.
+        let rev_list = std::process::Command::new("git")
+            .args(["rev-list", "--all"])
+            .current_dir(&winner)
+            .output()
+            .unwrap();
+        let reachable = String::from_utf8_lossy(&rev_list.stdout);
+        assert!(reachable.contains(&head_w), "winner head reachable");
+        assert!(reachable.contains(&head_l), "parked loser head reachable");
+        // KeepLocal + parked conflicts both cleared.
+        assert!(
+            state.conflicts().is_empty(),
+            "all conflicts (ref + index) cleared after execute"
+        );
+        // Undo bundle lives under the state dir, NEVER in-tree.
+        let bundle = result.undo_bundle.expect("undo bundle written");
+        assert!(
+            bundle.starts_with(&state_dir),
+            "undo bundle under state dir"
+        );
+        assert!(
+            !bundle.starts_with(winner.join(".git")),
+            "undo bundle must NOT be under the repo .git"
+        );
+
+        // (v) a second Execute is idempotent: re-inject the (re-detected)
+        // conflict and re-run. No error, no double-park, refs unchanged.
+        inject(&mut state);
+        let again = resolve_repo_keep_both(
+            &op,
+            &mut state,
+            &winner,
+            "data",
+            "winner",
+            &state_dir,
+            GitKeepBothMode::Execute,
+            None,
+        )
+        .await
+        .expect("second execute idempotent");
+        assert_eq!(again.parked_refs.len(), 1);
+        assert_eq!(
+            git_safety::local_ref_sha(&winner, park_ref).as_deref(),
+            Some(head_l.as_str()),
+            "theirs-ref still at loser head (no double-park)"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&winner, "refs/heads/main").as_deref(),
+            Some(head_w.as_str()),
+            "winner head still untouched on re-run"
+        );
+        run_git(&winner, &["fsck", "--full"]).expect("fsck clean after idempotent re-run");
     }
 }

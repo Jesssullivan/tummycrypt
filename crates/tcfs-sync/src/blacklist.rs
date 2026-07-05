@@ -42,6 +42,14 @@ pub enum BlacklistReason {
     /// with `git_sync_mode="raw"` (M-3 / PR #513). `Cargo.lock` / `flake.lock`
     /// live OUTSIDE `.git`, so they are unaffected.
     GitLockFile,
+    /// Fail-closed undo-bundle fence: any path containing a `.git/tcfs-undo/`
+    /// segment — the legacy in-tree location of the keep-both undo bundle. The
+    /// bundle now lives under the machine-local state dir (see
+    /// `conflict_git::write_undo_bundle`), but a pre-existing in-tree bundle
+    /// (full-history `git bundle --all`, fresh uuid, never GC'd) must never
+    /// roam. Always denied, even under `sync_git_dirs=true` /
+    /// `git_sync_mode="raw"` (BLOCKING 2 / #529).
+    GitTcfsUndo,
     /// VFS internal directory marker (.tcfs_dir).
     VfsMarker,
 }
@@ -58,6 +66,7 @@ impl std::fmt::Display for BlacklistReason {
             BlacklistReason::GitFilePointer => write!(f, "gitfile pointer (linked worktree)"),
             BlacklistReason::GitWorktreesAdmin => write!(f, ".git/worktrees admin area"),
             BlacklistReason::GitLockFile => write!(f, "git lockfile"),
+            BlacklistReason::GitTcfsUndo => write!(f, ".git/tcfs-undo bundle"),
             BlacklistReason::VfsMarker => write!(f, "VFS marker"),
         }
     }
@@ -132,6 +141,27 @@ fn has_git_worktrees_segment(path: &Path) -> bool {
         match component {
             std::path::Component::Normal(name) => {
                 if prev_was_dot_git && name == "worktrees" {
+                    return true;
+                }
+                prev_was_dot_git = name == ".git";
+            }
+            _ => prev_was_dot_git = false,
+        }
+    }
+    false
+}
+
+/// True when `path` contains a `.git/tcfs-undo/` segment — the legacy in-tree
+/// location of the keep-both undo bundle (a full-history `git bundle --all`
+/// with a fresh uuid, never GC'd). The bundle now lives under the machine-local
+/// state dir, but a pre-existing in-tree bundle must never roam as an ordinary
+/// `.git/**` file. Fail-closed regardless of config (BLOCKING 2 / #529).
+fn has_git_tcfs_undo_segment(path: &Path) -> bool {
+    let mut prev_was_dot_git = false;
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(name) => {
+                if prev_was_dot_git && name == "tcfs-undo" {
                     return true;
                 }
                 prev_was_dot_git = name == ".git";
@@ -324,6 +354,10 @@ impl Blacklist {
             debug!(path = %path.display(), "fencing git lockfile: never roams");
             return Some(BlacklistReason::GitLockFile);
         }
+        if has_git_tcfs_undo_segment(path) {
+            debug!(path = %path.display(), "fencing .git/tcfs-undo bundle: never roams");
+            return Some(BlacklistReason::GitTcfsUndo);
+        }
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             self.check_name(name, is_dir)
         } else {
@@ -357,6 +391,10 @@ impl Blacklist {
         if is_git_lockfile_path(path) {
             debug!(path = %path.display(), "fencing git lockfile: never roams");
             return Some(BlacklistReason::GitLockFile);
+        }
+        if has_git_tcfs_undo_segment(path) {
+            debug!(path = %path.display(), "fencing .git/tcfs-undo bundle: never roams");
+            return Some(BlacklistReason::GitTcfsUndo);
         }
         for component in path.components() {
             if let std::path::Component::Normal(name) = component {
@@ -763,6 +801,32 @@ mod tests {
         assert_eq!(bl.check(Path::new("repo/Cargo.lock"), false), None);
         assert_eq!(bl.check(Path::new("repo/flake.lock"), false), None);
         assert_eq!(bl.check_name("Cargo.lock", false), None);
+    }
+
+    // --- BLOCKING 2 / #529: in-tree keep-both undo bundle never roams ---
+    #[test]
+    fn test_git_tcfs_undo_denied_even_under_raw() {
+        // The undo bundle now lives under the state dir, but a pre-existing
+        // in-tree `.git/tcfs-undo/**` bundle must be fenced fail-closed even
+        // with sync_git_dirs=true + git_sync_mode="raw".
+        let bl = Blacklist::new(&[], true, true, "raw");
+        for p in [
+            "repo/.git/tcfs-undo/keep-both-abc.bundle",
+            "repo/vendor/dep/.git/tcfs-undo/keep-both-xyz.bundle",
+        ] {
+            assert_eq!(
+                bl.check(Path::new(p), false),
+                Some(BlacklistReason::GitTcfsUndo),
+                "{p} must be undo-fenced via check()"
+            );
+            assert_eq!(
+                bl.check_path_components(Path::new(p)),
+                Some(BlacklistReason::GitTcfsUndo),
+                "{p} must be undo-fenced via component walk"
+            );
+        }
+        // A dir named `tcfs-undo` NOT under `.git` is a normal dir.
+        assert_eq!(bl.check(Path::new("repo/tcfs-undo/notes.md"), false), None);
     }
 
     #[test]

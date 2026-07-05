@@ -740,7 +740,7 @@ fn git_apply_rank(a: &ReconcileAction) -> u8 {
 /// AFTER objects: `.git/refs/**`, `.git/packed-refs`, and `.git/HEAD` — plus the
 /// same layout inside a submodule's real gitdir at `.git/modules/<name>/**`
 /// (M-4, PR #513) so raw-roamed submodule internals get the ordering + barrier.
-fn is_git_ref_class_path(rel: &str) -> bool {
+pub(crate) fn is_git_ref_class_path(rel: &str) -> bool {
     if !is_git_internal_path(rel) {
         return false;
     }
