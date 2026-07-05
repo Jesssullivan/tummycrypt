@@ -1557,7 +1557,7 @@ async fn spawn_state_sync_loop(
                                     // OnDemand mode (under threshold): conditional auto-pull
                                     match conflict_mode.as_str() {
                                         "auto" => {
-                                            handle_auto_pull(
+                                            let should_ack = handle_auto_pull(
                                                 &device_id,
                                                 &event_device,
                                                 rel_path,
@@ -1571,6 +1571,9 @@ async fn spawn_state_sync_loop(
                                                 &storage_prefix,
                                             )
                                             .await;
+                                            if !should_ack {
+                                                continue;
+                                            }
 
                                             // Invalidate FUSE negative cache so the
                                             // new file appears in readdir immediately
@@ -1726,7 +1729,7 @@ async fn handle_auto_pull(
     path_locks: &tcfs_sync::state::PathLocks,
     sync_root: Option<&std::path::Path>,
     storage_prefix: &str,
-) {
+) -> bool {
     // Determine local path for this rel_path
     let local_path = match sync_root {
         Some(root) => root.join(rel_path),
@@ -1740,7 +1743,7 @@ async fn handle_auto_pull(
                         path = %rel_path,
                         "no sync_root configured and file not in state cache, skipping auto-pull"
                     );
-                    return;
+                    return true;
                 }
             }
         }
@@ -1765,7 +1768,7 @@ async fn handle_auto_pull(
                     storage_prefix,
                 )
                 .await;
-                return;
+                return true;
             }
         }
     };
@@ -1783,9 +1786,11 @@ async fn handle_auto_pull(
     match outcome {
         tcfs_sync::conflict::SyncOutcome::UpToDate => {
             info!(path = %rel_path, "already up to date");
+            true
         }
         tcfs_sync::conflict::SyncOutcome::LocalNewer => {
             info!(path = %rel_path, "local is newer, skipping pull");
+            true
         }
         tcfs_sync::conflict::SyncOutcome::RemoteNewer => {
             // Guard: defer auto-pull if file is actively being modified
@@ -1794,7 +1799,7 @@ async fn handle_auto_pull(
                 if let Some(entry) = cache.get(&local_path) {
                     if entry.status == tcfs_sync::state::FileSyncStatus::Active {
                         info!(path = %rel_path, "deferring auto-pull: file is actively being modified");
-                        return;
+                        return true;
                     }
                 }
             }
@@ -1808,6 +1813,7 @@ async fn handle_auto_pull(
                 storage_prefix,
             )
             .await;
+            true
         }
         tcfs_sync::conflict::SyncOutcome::Conflict(ref conflict_info) => {
             if should_defer_auto_resolution(rel_path) {
@@ -1816,6 +1822,7 @@ async fn handle_auto_pull(
                     watcher_record_conflict(&mut cache, &local_path, conflict_info.clone());
                     if let Err(e) = cache.flush() {
                         warn!(path = %rel_path, "failed to persist deferred git conflict: {e}");
+                        return false;
                     }
                 }
                 info!(
@@ -1824,7 +1831,7 @@ async fn handle_auto_pull(
                     remote_device = %conflict_info.remote_device,
                     "git-internal conflict detected, deferring auto-resolution"
                 );
-                return;
+                return true;
             }
 
             info!(
@@ -1854,6 +1861,7 @@ async fn handle_auto_pull(
                     info!(path = %rel_path, "AutoResolver: deferred");
                 }
             }
+            true
         }
     }
 }

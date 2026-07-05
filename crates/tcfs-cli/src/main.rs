@@ -1699,7 +1699,9 @@ fn build_conflicts_report(
         let conflict = entry.conflict.as_ref();
         let rel_path = conflict
             .map(|info| info.rel_path.clone())
-            .unwrap_or_else(|| path.clone());
+            .unwrap_or_else(|| {
+                state_key_to_display_rel_path(&path, config.sync.sync_root.as_deref())
+            });
         let row = ConflictListEntry {
             rel_path: rel_path.clone(),
             local_device: conflict
@@ -1737,13 +1739,37 @@ fn git_conflict_group_label(rel_path: &str) -> Option<String> {
     if !tcfs_sync::git_safety::is_git_internal_path(rel_path) {
         return None;
     }
-    let repo_root = tcfs_sync::git_safety::repo_root_for_git_path(Path::new(""), rel_path)?;
+    let normalized = rel_path.replace('\\', "/");
+    let repo_root = tcfs_sync::git_safety::repo_root_for_git_path(Path::new(""), &normalized)?;
     let label = repo_root.to_string_lossy();
     if label.is_empty() {
         Some(".".to_string())
     } else {
         Some(label.into_owned())
     }
+}
+
+fn state_key_to_display_rel_path(path: &str, sync_root: Option<&Path>) -> String {
+    let path_buf = Path::new(path);
+    if let Some(root) = sync_root {
+        if let Ok(rel) = path_buf.strip_prefix(root) {
+            return path_to_slash_string(rel);
+        }
+        if let (Ok(path), Ok(root)) = (std::fs::canonicalize(path_buf), std::fs::canonicalize(root))
+        {
+            if let Ok(rel) = path.strip_prefix(root) {
+                return path_to_slash_string(rel);
+            }
+        }
+    }
+    path.replace('\\', "/")
+}
+
+fn path_to_slash_string(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// If the pulled file is a TCFS git bundle (`.git-tcfs-bundle`), reconstruct
@@ -8123,16 +8149,6 @@ enabled = false
         )
         .unwrap();
         git_entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
-        git_entry.conflict = Some(tcfs_sync::conflict::ConflictInfo {
-            rel_path: "repo/.git/refs/heads/main".into(),
-            local_vclock: tcfs_sync::conflict::VectorClock::new(),
-            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
-            local_blake3: "local-git".into(),
-            remote_blake3: "remote-git".into(),
-            local_device: "neo".into(),
-            remote_device: "honey".into(),
-            detected_at: 43,
-        });
         state.set(&git_path, git_entry);
         state.flush().unwrap();
 
@@ -8145,6 +8161,10 @@ enabled = false
         assert_eq!(
             report.git_groups[0].entries[0].rel_path,
             "repo/.git/refs/heads/main"
+        );
+        assert_eq!(
+            git_conflict_group_label("repo\\.git\\refs\\heads\\main").as_deref(),
+            Some("repo")
         );
     }
 
