@@ -1735,11 +1735,25 @@ pub async fn execute_plan(
             }
 
             ReconcileAction::Conflict { rel_path, info } => {
-                // Record conflict in state cache for later resolution
+                // Record conflict in state cache for later resolution.
+                //
+                // keep-both PR-1: this arm re-records the same conflict every
+                // reconcile cycle (the record-only, never-converges arm for
+                // diverged `.git` groups). Bump `times_recorded` and preserve
+                // the original `detected_at` across cycles instead of
+                // overwriting them, so `tcfs conflicts` can surface how long /
+                // how many cycles a conflict has persisted.
                 if let Some((key, existing)) = state.get_by_rel_path(rel_path) {
                     let key_owned = key.to_string();
                     let mut updated = existing.clone();
-                    updated.conflict = Some(info.clone());
+                    let mut info = info.clone();
+                    if let Some(prior) = updated.conflict.as_ref() {
+                        info.times_recorded = prior.times_recorded.saturating_add(1);
+                        info.detected_at = prior.detected_at;
+                    } else {
+                        info.times_recorded = 1;
+                    }
+                    updated.conflict = Some(info);
                     state.set(Path::new(&key_owned), updated);
                 }
                 result.conflicts_recorded += 1;

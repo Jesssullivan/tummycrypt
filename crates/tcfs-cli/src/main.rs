@@ -334,6 +334,22 @@ enum Commands {
         strategy: Option<String>,
     },
 
+    /// List recorded sync conflicts (read-only)
+    ///
+    /// Reads conflicts straight from the sync state cache — no daemon RPC, no
+    /// writes, no resolution. `.git`-internal conflicts are grouped by their
+    /// enclosing repository so a diverged repo shows as one entry with both
+    /// sides' HEADs (honest "objects not local yet" degradation when the remote
+    /// object has not roamed in); non-`.git` conflicts are listed flat.
+    Conflicts {
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+        /// Path to the sync state cache JSON file (overrides config)
+        #[arg(long, env = "TCFS_STATE_PATH")]
+        state: Option<PathBuf>,
+    },
+
     /// Manage the sync trash (staged deletes)
     ///
     /// When trash is enabled, deleted files are moved to a .tcfs-trash/ prefix
@@ -903,6 +919,7 @@ async fn main() -> Result<()> {
                 )
             }
         }
+        Commands::Conflicts { json, state } => cmd_conflicts(&config, json, state.as_deref()).await,
     }
 }
 
@@ -6673,18 +6690,32 @@ async fn cmd_resolve(
     let resolution = match strategy {
         Some(s) => s.replace('-', "_"),
         None => {
-            // Interactive mode: reuse the existing interactive resolver
-            let dummy_info = tcfs_sync::conflict::ConflictInfo {
-                rel_path: path.to_string_lossy().to_string(),
-                local_blake3: String::new(),
-                remote_blake3: String::new(),
-                local_device: "local".to_string(),
-                remote_device: "remote".to_string(),
-                local_vclock: tcfs_sync::conflict::VectorClock::new(),
-                remote_vclock: tcfs_sync::conflict::VectorClock::new(),
-                detected_at: 0,
-            };
-            match resolve_conflict_interactive(&dummy_info) {
+            // Interactive mode: reuse the existing interactive resolver.
+            //
+            // keep-both PR-1: fetch the REAL recorded ConflictInfo for this
+            // path from the state cache (device names, content hashes, clocks)
+            // instead of the previous dummy placeholder, so the prompt shows
+            // the actual divergence. If no conflict is recorded for the path we
+            // fall back to a minimal record and say so, rather than lying with
+            // empty hashes.
+            let info = load_conflict_info(config, path).unwrap_or_else(|| {
+                println!(
+                    "No conflict recorded for {} in the state cache — prompting with minimal info.",
+                    path.display()
+                );
+                tcfs_sync::conflict::ConflictInfo {
+                    rel_path: path.to_string_lossy().to_string(),
+                    local_blake3: String::new(),
+                    remote_blake3: String::new(),
+                    local_device: "local".to_string(),
+                    remote_device: "remote".to_string(),
+                    local_vclock: tcfs_sync::conflict::VectorClock::new(),
+                    remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+                    detected_at: 0,
+                    times_recorded: 0,
+                }
+            });
+            match resolve_conflict_interactive(&info) {
                 tcfs_sync::conflict::Resolution::KeepLocal => "keep_local".to_string(),
                 tcfs_sync::conflict::Resolution::KeepRemote => "keep_remote".to_string(),
                 tcfs_sync::conflict::Resolution::KeepBoth => "keep_both".to_string(),
@@ -6716,6 +6747,288 @@ async fn cmd_resolve(
         }
     } else {
         anyhow::bail!("resolution failed: {}", resp.error);
+    }
+
+    Ok(())
+}
+
+/// Load the recorded [`ConflictInfo`] for `path` from the state cache, if any.
+///
+/// keep-both PR-1 (piece 5): the interactive `tcfs resolve` prompt used to feed
+/// a dummy placeholder; this reads the real record (device names, hashes,
+/// clocks) directly from the state cache — no daemon RPC.
+fn load_conflict_info(
+    config: &tcfs_core::config::TcfsConfig,
+    path: &Path,
+) -> Option<tcfs_sync::conflict::ConflictInfo> {
+    let state_path = resolve_state_path(config, None);
+    let state = tcfs_sync::state::StateCache::open(&state_path).ok()?;
+    // Prefer an exact key match; fall back to a repo-relative suffix match so
+    // both absolute and relative paths resolve.
+    if let Some(info) = state.get(path).and_then(|s| s.conflict.clone()) {
+        return Some(info);
+    }
+    let key = path.to_string_lossy();
+    state
+        .get_by_rel_path(&key)
+        .and_then(|(_, s)| s.conflict.clone())
+}
+
+// ── `tcfs conflicts` (read-only) ────────────────────────────────────────────
+
+/// One conflicting path inside a group, as rendered for `tcfs conflicts`.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConflictPathReport {
+    /// Repo-relative path of the conflicting file.
+    rel_path: String,
+    /// True when the path is `.git`-internal.
+    git_internal: bool,
+    /// The head ref (`refs/heads/<branch>`) when this is a head-ref conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_ref: Option<String>,
+    local_device: String,
+    remote_device: String,
+    /// Unix timestamp of first detection (preserved across re-records).
+    detected_at: u64,
+    /// Number of reconcile cycles that re-recorded this conflict.
+    times_recorded: u64,
+}
+
+/// A group of conflicts sharing one enclosing `.git` repo, or the flat bucket
+/// of non-`.git` conflicts (`repo_root == None`).
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConflictGroup {
+    /// Absolute repo root for a `.git` group; `None` for the non-git bucket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_root: Option<String>,
+    /// True for a `.git`-internal repo group.
+    is_git: bool,
+    paths: Vec<ConflictPathReport>,
+}
+
+/// Derive the absolute enclosing `.git` repo root for a conflicted cache entry,
+/// or `None` when the path is not git-internal.
+///
+/// The cache key is `<canonical local root>/<rel_path>`; stripping the
+/// repo-relative suffix recovers the sync root, then
+/// [`repo_root_for_git_path`](tcfs_sync::git_safety::repo_root_for_git_path)
+/// locates the `.git` boundary.
+fn conflict_repo_root(cache_key: &str, rel_path: &str) -> Option<PathBuf> {
+    let local_root = cache_key
+        .strip_suffix(rel_path)
+        .map(|s| s.trim_end_matches('/'))
+        .unwrap_or("");
+    tcfs_sync::git_safety::repo_root_for_git_path(Path::new(local_root), rel_path)
+}
+
+/// Group recorded conflicts by their enclosing git repo (for `.git`-internal
+/// paths) or into a single flat bucket (non-`.git`). Pure — no disk or network,
+/// so it is directly unit-testable. Git groups are ordered by repo root; the
+/// flat non-git bucket (if any) sorts last.
+fn group_conflicts(items: &[(String, tcfs_sync::conflict::ConflictInfo)]) -> Vec<ConflictGroup> {
+    use std::collections::BTreeMap;
+    let mut git_groups: BTreeMap<String, ConflictGroup> = BTreeMap::new();
+    let mut flat: Vec<ConflictPathReport> = Vec::new();
+
+    for (key, info) in items {
+        let rel = info.rel_path.as_str();
+        let repo_root = conflict_repo_root(key, rel);
+        let report = ConflictPathReport {
+            rel_path: rel.to_string(),
+            git_internal: repo_root.is_some(),
+            head_ref: tcfs_sync::git_safety::head_ref_for_git_path(rel),
+            local_device: info.local_device.clone(),
+            remote_device: info.remote_device.clone(),
+            detected_at: info.detected_at,
+            times_recorded: info.times_recorded,
+        };
+        match repo_root {
+            Some(root) => {
+                let root_str = root.to_string_lossy().to_string();
+                git_groups
+                    .entry(root_str.clone())
+                    .or_insert_with(|| ConflictGroup {
+                        repo_root: Some(root_str),
+                        is_git: true,
+                        paths: Vec::new(),
+                    })
+                    .paths
+                    .push(report);
+            }
+            None => flat.push(report),
+        }
+    }
+
+    let mut out: Vec<ConflictGroup> = git_groups.into_values().collect();
+    if !flat.is_empty() {
+        out.push(ConflictGroup {
+            repo_root: None,
+            is_git: false,
+            paths: flat,
+        });
+    }
+    out
+}
+
+/// Resolve a repo's current HEAD to `<shortsha> <summary>` via
+/// `git log --oneline -1`, or `None` when the repo/HEAD cannot be read.
+fn git_head_oneline(repo_root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &repo_root.to_string_lossy(), "log", "--oneline", "-1"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Age of a conflict as a coarse human string ("3d", "5h", "12m", "<1m").
+fn conflict_age(detected_at: u64) -> String {
+    if detected_at == 0 {
+        return "unknown".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let secs = now.saturating_sub(detected_at);
+    if secs >= 86_400 {
+        format!("{}d", secs / 86_400)
+    } else if secs >= 3_600 {
+        format!("{}h", secs / 3_600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        "<1m".to_string()
+    }
+}
+
+/// `tcfs conflicts` — list recorded conflicts from the state cache, grouped by
+/// repo for `.git`-internal paths. Read-only: no daemon RPC, no writes.
+async fn cmd_conflicts(
+    config: &tcfs_core::config::TcfsConfig,
+    json: bool,
+    state_override: Option<&Path>,
+) -> Result<()> {
+    let state_path = resolve_state_path(config, state_override);
+    let state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+
+    let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = state
+        .conflicts()
+        .into_iter()
+        .filter_map(|(k, s)| s.conflict.as_ref().map(|c| (k.to_string(), c.clone())))
+        .collect();
+
+    let groups = group_conflicts(&items);
+
+    if json {
+        // Render each group with resolvable HEAD evidence for `.git` groups.
+        // The remote HEAD commit SHA is NOT carried in the offline state cache
+        // (only a content hash + device); we surface honest degradation rather
+        // than fetch it here — the resolve verb (PR-3) performs that fetch.
+        let rendered: Vec<serde_json::Value> = groups
+            .iter()
+            .map(|g| {
+                let local_head = g
+                    .repo_root
+                    .as_deref()
+                    .map(Path::new)
+                    .and_then(git_head_oneline);
+                serde_json::json!({
+                    "repo_root": g.repo_root,
+                    "is_git": g.is_git,
+                    "local_head": local_head,
+                    "remote_head": serde_json::Value::Null,
+                    "remote_head_note": if g.is_git {
+                        Some("remote commit SHA not in offline state cache (objects not local yet / requires resolve-verb ref fetch)")
+                    } else {
+                        None
+                    },
+                    "paths": g.paths,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "state_path": state_path.to_string_lossy(),
+                "conflict_count": items.len(),
+                "groups": rendered,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if items.is_empty() {
+        println!("No recorded conflicts.");
+        return Ok(());
+    }
+
+    println!(
+        "{} conflict(s) across {} group(s):",
+        items.len(),
+        groups.len()
+    );
+    for g in &groups {
+        println!();
+        match &g.repo_root {
+            Some(root) => {
+                println!("repo: {}", root);
+                match git_head_oneline(Path::new(root)) {
+                    Some(head) => println!("  local HEAD:  {}", head),
+                    None => println!("  local HEAD:  <unreadable> ({})", root),
+                }
+                // Remote HEAD is not available offline (state cache carries a
+                // content hash + device, not the remote commit SHA).
+                let remote_device = g
+                    .paths
+                    .first()
+                    .map(|p| p.remote_device.as_str())
+                    .unwrap_or("?");
+                println!(
+                    "  remote HEAD: <objects not local yet> (from {}; resolve to fetch)",
+                    remote_device
+                );
+                for p in &g.paths {
+                    let kind = match &p.head_ref {
+                        Some(r) => format!("head {}", r),
+                        None => "git-internal".to_string(),
+                    };
+                    println!(
+                        "  - {} [{}] age={} recorded={}x",
+                        p.rel_path,
+                        kind,
+                        conflict_age(p.detected_at),
+                        p.times_recorded
+                    );
+                }
+                println!(
+                    "  resolve: tcfs resolve {} --keep-both   (repo-group; not yet available in this build)",
+                    root
+                );
+            }
+            None => {
+                println!("non-git conflicts:");
+                for p in &g.paths {
+                    println!(
+                        "  - {} age={} recorded={}x (local={} remote={})",
+                        p.rel_path,
+                        conflict_age(p.detected_at),
+                        p.times_recorded,
+                        p.local_device,
+                        p.remote_device
+                    );
+                    println!("    resolve: tcfs resolve {}", p.rel_path);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -6786,6 +7099,89 @@ mod tests {
 
     fn master_key(fill: u8) -> tcfs_crypto::MasterKey {
         tcfs_crypto::MasterKey::from_bytes([fill; tcfs_crypto::KEY_SIZE])
+    }
+
+    fn mk_conflict(rel: &str) -> tcfs_sync::conflict::ConflictInfo {
+        tcfs_sync::conflict::ConflictInfo {
+            rel_path: rel.to_string(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            local_blake3: "aaaa".into(),
+            remote_blake3: "bbbb".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            detected_at: 1_700_000_000,
+            times_recorded: 3,
+        }
+    }
+
+    #[test]
+    fn conflicts_group_by_repo_and_classify_git_paths() {
+        // keep-both PR-1 (piece 3): `.git`-internal conflicts group by their
+        // enclosing repo; non-`.git` conflicts fall into a flat bucket.
+        // Cache keys are `<sync root>/<rel_path>`.
+        let items = vec![
+            (
+                "/sync/repoA/.git/refs/heads/main".to_string(),
+                mk_conflict("repoA/.git/refs/heads/main"),
+            ),
+            (
+                "/sync/repoA/.git/index".to_string(),
+                mk_conflict("repoA/.git/index"),
+            ),
+            (
+                "/sync/repoB/.git/HEAD".to_string(),
+                mk_conflict("repoB/.git/HEAD"),
+            ),
+            (
+                "/sync/notes/todo.txt".to_string(),
+                mk_conflict("notes/todo.txt"),
+            ),
+        ];
+
+        let groups = group_conflicts(&items);
+
+        // Two git repo groups + one flat non-git bucket.
+        assert_eq!(groups.len(), 3, "expected repoA, repoB, and a flat bucket");
+
+        let repo_a = groups
+            .iter()
+            .find(|g| g.repo_root.as_deref() == Some("/sync/repoA"))
+            .expect("repoA group present");
+        assert!(repo_a.is_git);
+        assert_eq!(repo_a.paths.len(), 2, "both repoA paths in one group");
+        // The head-ref path is classified with its ref name; index is not.
+        let head = repo_a
+            .paths
+            .iter()
+            .find(|p| p.rel_path.ends_with("refs/heads/main"))
+            .unwrap();
+        assert_eq!(head.head_ref.as_deref(), Some("refs/heads/main"));
+        assert!(head.git_internal);
+        assert_eq!(head.times_recorded, 3);
+        let index = repo_a
+            .paths
+            .iter()
+            .find(|p| p.rel_path.ends_with(".git/index"))
+            .unwrap();
+        assert!(index.head_ref.is_none());
+        assert!(index.git_internal);
+
+        let repo_b = groups
+            .iter()
+            .find(|g| g.repo_root.as_deref() == Some("/sync/repoB"))
+            .expect("repoB group present");
+        assert_eq!(repo_b.paths.len(), 1);
+
+        // The non-git conflict is flat (no repo_root), and not git-internal.
+        let flat = groups
+            .iter()
+            .find(|g| g.repo_root.is_none())
+            .expect("flat bucket present");
+        assert!(!flat.is_git);
+        assert_eq!(flat.paths.len(), 1);
+        assert!(!flat.paths[0].git_internal);
+        assert_eq!(flat.paths[0].rel_path, "notes/todo.txt");
     }
 
     fn test_config(sync_root: &Path) -> tcfs_core::config::TcfsConfig {

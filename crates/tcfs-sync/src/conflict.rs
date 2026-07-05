@@ -120,6 +120,14 @@ pub struct ConflictInfo {
     pub remote_device: String,
     /// Unix timestamp when conflict was detected
     pub detected_at: u64,
+    /// Number of reconcile cycles that have re-recorded this conflict.
+    ///
+    /// Bumped at the reconcile record site instead of being overwritten each
+    /// cycle, so `tcfs conflicts` can surface a forever-Conflict repo (the
+    /// record-only arm that never converges). `serde(default)` keeps older
+    /// state caches — written before this field existed — deserializing to 0.
+    #[serde(default)]
+    pub times_recorded: u64,
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
@@ -193,6 +201,7 @@ pub fn compare_clocks(
                 local_device: local_device.to_string(),
                 remote_device: remote_device.to_string(),
                 detected_at: now,
+                times_recorded: 0,
             })
         }
     }
@@ -378,6 +387,7 @@ mod tests {
             local_device: "alpha".into(),
             remote_device: "beta".into(),
             detected_at: 0,
+            times_recorded: 0,
         };
         // "alpha" < "beta" → keep local
         assert_eq!(resolver.resolve(&info), Some(Resolution::KeepLocal));
@@ -410,8 +420,36 @@ mod tests {
         match compare_clocks(&a, &b, "hash_a", "hash_b", "f.txt", "d1", "d2") {
             SyncOutcome::Conflict(info) => {
                 assert_eq!(info.rel_path, "f.txt");
+                // A freshly recorded conflict starts at zero cycles.
+                assert_eq!(info.times_recorded, 0);
             }
             other => panic!("expected Conflict, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn conflict_info_deserializes_without_times_recorded_field() {
+        // A state cache written before `times_recorded` existed must still
+        // deserialize (serde default → 0), and round-trip cleanly afterwards.
+        let legacy = r#"{
+            "rel_path": "repo/.git/refs/heads/main",
+            "local_vclock": {"clocks": {}},
+            "remote_vclock": {"clocks": {}},
+            "local_blake3": "aaa",
+            "remote_blake3": "bbb",
+            "local_device": "neo",
+            "remote_device": "honey",
+            "detected_at": 1700000000
+        }"#;
+        let info: ConflictInfo =
+            serde_json::from_str(legacy).expect("legacy ConflictInfo must deserialize");
+        assert_eq!(info.times_recorded, 0, "missing field must default to 0");
+        assert_eq!(info.detected_at, 1_700_000_000);
+
+        // Round-trip: serialize then re-parse preserves the (defaulted) value.
+        let bytes = serde_json::to_string(&info).unwrap();
+        let reparsed: ConflictInfo = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(reparsed.times_recorded, 0);
+        assert_eq!(reparsed.rel_path, "repo/.git/refs/heads/main");
     }
 }
