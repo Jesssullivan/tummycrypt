@@ -3612,7 +3612,7 @@ mod tests {
         let ref_blob = root.join(file_name);
         std::fs::write(&ref_blob, bytes).unwrap();
         let mut state = crate::state::StateCache::open(&root.join("upload-state.json")).unwrap();
-        let upload = engine::upload_file_with_device(
+        engine::upload_file_with_device(
             op,
             &ref_blob,
             "data",
@@ -3624,7 +3624,18 @@ mod tests {
         )
         .await
         .unwrap();
-        upload.hash
+        // The pull's manifest_hash is the remote index's content-addressed
+        // manifest key (NOT UploadResult.hash, which is the file-content hash);
+        // the guard downloads the ref blob by exactly this key. Look it up by
+        // the uploaded `rel_path` so callers uploading under non-head paths
+        // (packed-refs, module refs) get their own entry, not a hardcoded one.
+        list_remote_index(op, "data")
+            .await
+            .unwrap()
+            .get(rel_path)
+            .expect("uploaded ref index entry")
+            .manifest_hash
+            .clone()
     }
 
     #[test]
