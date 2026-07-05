@@ -97,6 +97,10 @@ jobs:
     name: Build macOS aarch64
     runs-on: macos-14
     needs: flake-check
+    # id-token: write is required for FlakeHub Cache OIDC push (below).
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v5
 
@@ -106,6 +110,17 @@ jobs:
           extra_nix_config: |
             extra-substituters = https://nix-cache.tinyland.dev/main
             extra-trusted-public-keys = main:eaUydxuDu7xBoy5cCo3MdknYAkVyTIASQ7DGuwxa+XA=
+
+      # FlakeHub Cache is the canonical nix cache the fleet substitutes from
+      # (lab nix/home-manager/nix.nix: "Attic replaced by FlakeHub"; macbook-neo
+      # trusts cache.flakehub.com). This action sets up a post-build push hook so
+      # EVERY darwin store path built below is published to FlakeHub Cache — which
+      # is what lets neo `nix-switch` SUBSTITUTE the aarch64-darwin closure
+      # (incl. tcfsd) instead of ever compiling locally. Requires this repo to be
+      # enrolled in FlakeHub Cache; no-ops with a warning if not yet enrolled.
+      - name: Set up FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@main
+        continue-on-error: true
 
       - name: Configure Attic
         run: |
@@ -119,6 +134,12 @@ jobs:
             echo "ATTIC_CONFIGURED=false" >> "$GITHUB_ENV"
           fi
 
+      # NOTE: the aarch64-darwin DAEMON closure (tcfsd/tcfsd-app/staticlib) was
+      # previously NOT built here — only cli/tui/mcp — so macbook-neo could not
+      # substitute a new tcfsd and silently fell back to a LOCAL compile
+      # (2026-07-04 incident: a full day of neo compilation). Build the full set
+      # here on the GitHub macos-14 runner (off-neo, off-PZM) so the whole
+      # darwin closure lands in the caches and neo only ever substitutes.
       - name: Build tcfs-cli (no FUSE on macOS)
         run: nix build --accept-flake-config --fallback .#tcfs-cli
 
@@ -128,10 +149,19 @@ jobs:
       - name: Build tcfs-mcp
         run: nix build --accept-flake-config --fallback .#tcfs-mcp
 
+      - name: Build tcfsd (daemon)
+        run: nix build --accept-flake-config --fallback .#tcfsd
+
+      - name: Build tcfsd-app (FileProvider app bundle)
+        run: nix build --accept-flake-config --fallback .#tcfsd-app
+
+      - name: Build tcfs-file-provider-staticlib
+        run: nix build --accept-flake-config --fallback .#tcfs-file-provider-staticlib
+
       - name: Push to Attic
         if: env.ATTIC_CONFIGURED == 'true' && github.event_name == 'push'
         run: |
-          for pkg in tcfs-cli tcfs-tui tcfs-mcp; do
+          for pkg in tcfs-cli tcfs-tui tcfs-mcp tcfsd tcfsd-app tcfs-file-provider-staticlib; do
             nix build --accept-flake-config --fallback ".#${pkg}" -o "result-${pkg}"
             attic push "${{ env.ATTIC_CACHE }}" "result-${pkg}" || echo "::warning::Failed to push ${pkg} to Attic"
           done
