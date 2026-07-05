@@ -74,10 +74,18 @@ fn resolve_conflict_git_fence_error(
         format!(
             "'{}' is a git-internal path; per-file resolution ({resolution}) would corrupt the \
              repository object store. Resolve the whole repo group instead \
-             (future: `tcfs resolve <repo> --keep-both`). Inspect with `tcfs conflicts`.",
+             (`tcfs resolve <repo> --strategy keep-both --execute`). Inspect with `tcfs conflicts`.",
             path.display()
         )
     })
+}
+
+fn repo_keep_both_mode(resolution: &str) -> Option<tcfs_sync::conflict_git::GitKeepBothMode> {
+    match resolution {
+        "git_keep_both_dry_run" => Some(tcfs_sync::conflict_git::GitKeepBothMode::DryRun),
+        "git_keep_both_execute" => Some(tcfs_sync::conflict_git::GitKeepBothMode::Execute),
+        _ => None,
+    }
 }
 
 /// Build an `EncryptionContext` honoring `crypto.wrap_mode` (TIN-1417).
@@ -384,6 +392,63 @@ impl TcfsDaemonImpl {
             totp_provider,
             webauthn_provider,
             rate_limiter,
+        }
+    }
+
+    async fn resolve_git_keep_both_repo(
+        &self,
+        path: &Path,
+        mode: tcfs_sync::conflict_git::GitKeepBothMode,
+    ) -> Result<tonic::Response<ResolveConflictResponse>, tonic::Status> {
+        let op = {
+            let op_guard = self.operator.lock().await;
+            op_guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+        };
+        let prefix = self.config.storage.resolved_prefix().to_string();
+        let enc_ctx = {
+            let mk_guard = self.master_key.lock().await;
+            mk_guard
+                .as_ref()
+                .map(|mk| build_encryption_context(&self.config, &self.device_id, mk))
+        };
+
+        let result = {
+            let mut cache = self.state_cache.lock().await;
+            if let Err(e) = cache.reload_from_disk() {
+                tracing::warn!("failed to reload state cache: {e}");
+            }
+            tcfs_sync::conflict_git::resolve_repo_keep_both(
+                &op,
+                &mut cache,
+                path,
+                &prefix,
+                &self.device_id,
+                mode,
+                enc_ctx.as_ref(),
+            )
+            .await
+        };
+
+        match result {
+            Ok(result) => {
+                if mode.is_execute() {
+                    self.publish_conflict_resolved(&path.to_string_lossy(), "git_keep_both")
+                        .await;
+                }
+                Ok(tonic::Response::new(ResolveConflictResponse {
+                    success: true,
+                    resolved_path: result.repo_root.display().to_string(),
+                    error: result.summary(),
+                }))
+            }
+            Err(e) => Ok(tonic::Response::new(ResolveConflictResponse {
+                success: false,
+                resolved_path: String::new(),
+                error: format!("{e:#}"),
+            })),
         }
     }
 
@@ -1588,7 +1653,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let req = request.into_inner();
 
         let resolution = match req.resolution.as_str() {
-            "keep_local" | "keep_remote" | "keep_both" | "defer" => req.resolution.clone(),
+            "keep_local"
+            | "keep_remote"
+            | "keep_both"
+            | "defer"
+            | "git_keep_both_dry_run"
+            | "git_keep_both_execute" => req.resolution.clone(),
             other => {
                 return Ok(tonic::Response::new(ResolveConflictResponse {
                     success: false,
@@ -1614,6 +1684,10 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }
             cache.get(&path).cloned()
         };
+
+        if let Some(mode) = repo_keep_both_mode(&resolution) {
+            return self.resolve_git_keep_both_repo(&path, mode).await;
+        }
 
         // keep-both PR-1 (safety invariant S1): per-file conflict resolution
         // must NEVER touch `.git` internals. keep_local rewrites the manifest,

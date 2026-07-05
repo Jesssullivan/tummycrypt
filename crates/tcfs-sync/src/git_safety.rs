@@ -34,7 +34,6 @@ pub fn git_is_safe(git_dir: &Path) -> GitSafetyCheck {
         "index.lock",
         "HEAD.lock",
         "gc.pid",
-        "refs/heads/*.lock",
         "shallow.lock",
         "packed-refs.lock",
     ];
@@ -45,6 +44,7 @@ pub fn git_is_safe(git_dir: &Path) -> GitSafetyCheck {
             check.blocking.push(format!("lock file exists: {}", lock));
         }
     }
+    collect_ref_head_locks(&git_dir.join("refs/heads"), "refs/heads", &mut check);
 
     // In-progress operations
     let in_progress = [
@@ -76,6 +76,24 @@ pub fn git_is_safe(git_dir: &Path) -> GitSafetyCheck {
     }
 
     check
+}
+
+fn collect_ref_head_locks(dir: &Path, rel: &str, check: &mut GitSafetyCheck) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let child_rel = format!("{rel}/{name}");
+        if path.is_dir() {
+            collect_ref_head_locks(&path, &child_rel, check);
+        } else if name.ends_with(".lock") {
+            check
+                .blocking
+                .push(format!("lock file exists: {child_rel}"));
+        }
+    }
 }
 
 /// Create a git bundle for atomic .git snapshot.
@@ -540,6 +558,25 @@ mod tests {
         let check = git_is_safe(&git_dir);
         assert!(!check.blocking.is_empty());
         assert!(check.blocking[0].contains("index.lock"));
+    }
+
+    #[test]
+    fn test_unsafe_with_nested_branch_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        let branch_dir = git_dir.join("refs/heads/feature");
+        std::fs::create_dir_all(&branch_dir).unwrap();
+        std::fs::write(branch_dir.join("x.lock"), b"").unwrap();
+
+        let check = git_is_safe(&git_dir);
+        assert!(
+            check
+                .blocking
+                .iter()
+                .any(|entry| entry.contains("refs/heads/feature/x.lock")),
+            "nested branch lock must block: {:?}",
+            check.blocking
+        );
     }
 
     #[test]

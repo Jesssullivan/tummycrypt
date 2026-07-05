@@ -3,6 +3,7 @@
 pub mod auto_unsync;
 pub mod blacklist;
 pub mod conflict;
+pub mod conflict_git;
 pub mod engine;
 pub mod git_safety;
 pub mod index_entry;
