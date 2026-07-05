@@ -235,7 +235,7 @@ impl TcfsMcp {
     }
 
     #[tool(
-        description = "Resolve a sync conflict by choosing a resolution strategy. Valid resolutions: keep_local, keep_remote, keep_both, defer"
+        description = "Resolve a non-git sync conflict by choosing a resolution strategy. Valid resolutions: keep_local, keep_remote, keep_both, defer. Git-internal .git paths only support defer; repo-level git resolution must handle those conflicts."
     )]
     async fn resolve_conflict(
         &self,

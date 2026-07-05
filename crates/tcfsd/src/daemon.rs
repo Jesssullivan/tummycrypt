@@ -61,6 +61,10 @@ pub fn watcher_record_conflict(
     cache.set(path, synthetic);
 }
 
+fn should_defer_auto_resolution(rel_path: &str) -> bool {
+    tcfs_sync::git_safety::is_git_internal_path(rel_path)
+}
+
 /// Re-export of watcher helpers intended for tests.
 ///
 /// Integration tests under `crates/tcfsd/tests/` compile as external crates
@@ -1806,6 +1810,23 @@ async fn handle_auto_pull(
             .await;
         }
         tcfs_sync::conflict::SyncOutcome::Conflict(ref conflict_info) => {
+            if should_defer_auto_resolution(rel_path) {
+                {
+                    let mut cache = state_cache.lock().await;
+                    watcher_record_conflict(&mut cache, &local_path, conflict_info.clone());
+                    if let Err(e) = cache.flush() {
+                        warn!(path = %rel_path, "failed to persist deferred git conflict: {e}");
+                    }
+                }
+                info!(
+                    path = %rel_path,
+                    local_device = %conflict_info.local_device,
+                    remote_device = %conflict_info.remote_device,
+                    "git-internal conflict detected, deferring auto-resolution"
+                );
+                return;
+            }
+
             info!(
                 path = %rel_path,
                 local_device = %conflict_info.local_device,
@@ -1833,6 +1854,26 @@ async fn handle_auto_pull(
                     info!(path = %rel_path, "AutoResolver: deferred");
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_resolution_defers_git_internal_paths_only() {
+        for path in [
+            ".git/HEAD",
+            "repo/.git/refs/heads/main",
+            "repo/.git/modules/dep/refs/heads/main",
+        ] {
+            assert!(should_defer_auto_resolution(path), "{path}");
+        }
+
+        for path in ["README.md", "repo/.gitignore", "repo/src/main.rs"] {
+            assert!(!should_defer_auto_resolution(path), "{path}");
         }
     }
 }

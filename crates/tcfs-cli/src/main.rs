@@ -9,6 +9,7 @@
 //!   push <local> [<prefix>]      - upload file or directory tree to SeaweedFS
 //!   pull <manifest> [<local>]    - download file from manifest path
 //!   sync-status [<path>]         - show local sync state for a file/dir
+//!   conflicts                    - list recorded sync conflicts
 //!   index inspect <path>         - inspect one remote index entry read-only
 
 use anyhow::{Context, Result};
@@ -17,6 +18,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use secrecy::ExposeSecret;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -146,6 +148,13 @@ enum Commands {
     SyncStatus {
         /// Path to check (default: current directory)
         path: Option<PathBuf>,
+        /// Path to the sync state cache JSON file (overrides config)
+        #[arg(long, env = "TCFS_STATE_PATH")]
+        state: Option<PathBuf>,
+    },
+
+    /// List recorded sync conflicts from the local state cache
+    Conflicts {
         /// Path to the sync state cache JSON file (overrides config)
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
@@ -322,10 +331,12 @@ enum Commands {
         state: Option<PathBuf>,
     },
 
-    /// Resolve a sync conflict for a file
+    /// Resolve a sync conflict for a non-git file
     ///
     /// When two devices modify the same file without syncing, a conflict is
-    /// detected. Use this command to pick a resolution strategy.
+    /// detected. Use this command to pick a resolution strategy. Per-file
+    /// resolution of `.git` internals is refused by the daemon; those conflicts
+    /// must stay deferred until repo-level git resolution handles them.
     Resolve {
         /// Path to the conflicted file
         path: PathBuf,
@@ -744,6 +755,7 @@ async fn main() -> Result<()> {
         Commands::SyncStatus { path, state } => {
             cmd_sync_status(&config, path.as_deref(), state.as_deref())
         }
+        Commands::Conflicts { state } => cmd_conflicts(&config, state.as_deref()),
         Commands::Index { action } => cmd_index(&config, action).await,
         Commands::Storage { action } => cmd_storage(&config, action).await,
         Commands::Cache { action } => match action {
@@ -1112,6 +1124,37 @@ enum SyncStatusPathReport {
     Untracked {
         canonical: PathBuf,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConflictListReport {
+    state_path: PathBuf,
+    git_groups: Vec<GitConflictGroup>,
+    ordinary: Vec<ConflictListEntry>,
+}
+
+impl ConflictListReport {
+    fn total(&self) -> usize {
+        self.ordinary.len()
+            + self
+                .git_groups
+                .iter()
+                .map(|group| group.entries.len())
+                .sum::<usize>()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitConflictGroup {
+    repo: String,
+    entries: Vec<ConflictListEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConflictListEntry {
+    rel_path: String,
+    local_device: String,
+    remote_device: String,
 }
 
 fn build_sync_status_report(
@@ -1637,6 +1680,72 @@ async fn remove_adjacent_stub_after_pull(local_path: &Path) -> Result<()> {
     }
 }
 
+fn build_conflicts_report(
+    config: &tcfs_core::config::TcfsConfig,
+    state_override: Option<&Path>,
+) -> Result<ConflictListReport> {
+    let state_path = resolve_state_path(config, state_override);
+    let state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+
+    let mut ordinary = Vec::new();
+    let mut grouped: BTreeMap<String, Vec<ConflictListEntry>> = BTreeMap::new();
+
+    for (path, entry) in tcfs_sync::state::StateCacheBackend::all_entries(&state) {
+        if entry.status != tcfs_sync::state::FileSyncStatus::Conflict && entry.conflict.is_none() {
+            continue;
+        }
+
+        let conflict = entry.conflict.as_ref();
+        let rel_path = conflict
+            .map(|info| info.rel_path.clone())
+            .unwrap_or_else(|| path.clone());
+        let row = ConflictListEntry {
+            rel_path: rel_path.clone(),
+            local_device: conflict
+                .map(|info| info.local_device.clone())
+                .unwrap_or_else(|| entry.device_id.clone()),
+            remote_device: conflict
+                .map(|info| info.remote_device.clone())
+                .unwrap_or_default(),
+        };
+
+        if let Some(repo) = git_conflict_group_label(&rel_path) {
+            grouped.entry(repo).or_default().push(row);
+        } else {
+            ordinary.push(row);
+        }
+    }
+
+    ordinary.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    let git_groups = grouped
+        .into_iter()
+        .map(|(repo, mut entries)| {
+            entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+            GitConflictGroup { repo, entries }
+        })
+        .collect();
+
+    Ok(ConflictListReport {
+        state_path,
+        git_groups,
+        ordinary,
+    })
+}
+
+fn git_conflict_group_label(rel_path: &str) -> Option<String> {
+    if !tcfs_sync::git_safety::is_git_internal_path(rel_path) {
+        return None;
+    }
+    let repo_root = tcfs_sync::git_safety::repo_root_for_git_path(Path::new(""), rel_path)?;
+    let label = repo_root.to_string_lossy();
+    if label.is_empty() {
+        Some(".".to_string())
+    } else {
+        Some(label.into_owned())
+    }
+}
+
 /// If the pulled file is a TCFS git bundle (`.git-tcfs-bundle`), reconstruct
 /// the repo's `.git` metadata in place so the rehydrated working tree has
 /// working history (`git log` / `git status` / `git fetch`).
@@ -1743,6 +1852,60 @@ fn cmd_sync_status(
     }
 
     Ok(())
+}
+
+fn cmd_conflicts(
+    config: &tcfs_core::config::TcfsConfig,
+    state_override: Option<&Path>,
+) -> Result<()> {
+    let report = build_conflicts_report(config, state_override)?;
+
+    println!("State cache: {}", report.state_path.display());
+    println!("Conflicts: {}", report.total());
+
+    if report.total() == 0 {
+        println!("No conflicts recorded.");
+        return Ok(());
+    }
+
+    if !report.git_groups.is_empty() {
+        println!();
+        println!("Git conflict groups:");
+        for group in &report.git_groups {
+            println!("  {} ({} path(s))", group.repo, group.entries.len());
+            for entry in &group.entries {
+                println!(
+                    "    {}  local={} remote={}",
+                    entry.rel_path,
+                    empty_dash(&entry.local_device),
+                    empty_dash(&entry.remote_device)
+                );
+            }
+        }
+    }
+
+    if !report.ordinary.is_empty() {
+        println!();
+        println!("File conflicts:");
+        for entry in &report.ordinary {
+            println!(
+                "  {}  local={} remote={}",
+                entry.rel_path,
+                empty_dash(&entry.local_device),
+                empty_dash(&entry.remote_device)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn empty_dash(value: &str) -> &str {
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
 }
 
 // ── `tcfs index` ─────────────────────────────────────────────────────────────
@@ -7914,6 +8077,73 @@ enabled = false
             }
             other => panic!("expected tracked status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_conflicts_groups_git_internal_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        let git_parent = sync_root.join("repo/.git/refs/heads");
+        std::fs::create_dir_all(&git_parent).unwrap();
+        std::fs::create_dir_all(&sync_root).unwrap();
+
+        let state_path = dir.path().join("state.json");
+        let config = test_config(&sync_root);
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+
+        let ordinary_path = sync_root.join("notes.txt");
+        let mut ordinary = tcfs_sync::state::make_sync_state(
+            &ordinary_path,
+            "ordinary".to_string(),
+            1,
+            "data/manifests/ordinary".to_string(),
+        )
+        .unwrap();
+        ordinary.status = tcfs_sync::state::FileSyncStatus::Conflict;
+        ordinary.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+            rel_path: "notes.txt".into(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            local_blake3: "local".into(),
+            remote_blake3: "remote".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            detected_at: 42,
+        });
+        state.set(&ordinary_path, ordinary);
+
+        let git_path = git_parent.join("main");
+        let mut git_entry = tcfs_sync::state::make_sync_state(
+            &git_path,
+            "git".to_string(),
+            1,
+            "data/manifests/git".to_string(),
+        )
+        .unwrap();
+        git_entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
+        git_entry.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+            rel_path: "repo/.git/refs/heads/main".into(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            local_blake3: "local-git".into(),
+            remote_blake3: "remote-git".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            detected_at: 43,
+        });
+        state.set(&git_path, git_entry);
+        state.flush().unwrap();
+
+        let report = build_conflicts_report(&config, Some(&state_path)).unwrap();
+        assert_eq!(report.total(), 2);
+        assert_eq!(report.ordinary.len(), 1);
+        assert_eq!(report.ordinary[0].rel_path, "notes.txt");
+        assert_eq!(report.git_groups.len(), 1);
+        assert_eq!(report.git_groups[0].repo, "repo");
+        assert_eq!(
+            report.git_groups[0].entries[0].rel_path,
+            "repo/.git/refs/heads/main"
+        );
     }
 
     #[tokio::test]

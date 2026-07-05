@@ -24,6 +24,18 @@ use tcfs_core::proto::{
 };
 use tcfs_sync::state::StateCacheBackend;
 
+fn git_internal_resolution_error(path: &str, resolution: &str) -> Option<String> {
+    if resolution == "defer" || !tcfs_sync::git_safety::is_git_internal_path(path) {
+        return None;
+    }
+
+    Some(
+        "git-internal path; per-file conflict resolution is refused for .git metadata. \
+         Use defer to leave this conflict unresolved until repo-group git resolution handles it."
+            .to_string(),
+    )
+}
+
 /// Build an `EncryptionContext` honoring `crypto.wrap_mode` (TIN-1417).
 ///
 /// - `Master` (default): legacy shared-master wrap. Byte-identical to the prior
@@ -1545,14 +1557,27 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }
         };
 
+        let path = std::path::PathBuf::from(&req.path);
+        if let Some(error) = git_internal_resolution_error(&req.path, &resolution) {
+            warn!(
+                path = %req.path,
+                resolution = %resolution,
+                device = %self.device_id,
+                "refusing per-file resolution for git-internal path"
+            );
+            return Ok(tonic::Response::new(ResolveConflictResponse {
+                success: false,
+                resolved_path: String::new(),
+                error,
+            }));
+        }
+
         info!(
             path = %req.path,
             resolution = %resolution,
             device = %self.device_id,
             "conflict resolution requested"
         );
-
-        let path = std::path::PathBuf::from(&req.path);
 
         // Reload state from disk in case the CLI wrote new entries
         {
@@ -3860,6 +3885,44 @@ mod tests {
 
         assert!(!resp.success);
         assert!(resp.error.contains("invalid resolution"));
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_refuses_git_internal_keep_strategies() {
+        let daemon = test_daemon();
+
+        for resolution in ["keep_local", "keep_remote", "keep_both"] {
+            let resp = daemon
+                .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                    path: "repo/.git/refs/heads/main".into(),
+                    resolution: resolution.into(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+
+            assert!(!resp.success, "{resolution}");
+            assert!(resp.resolved_path.is_empty(), "{resolution}");
+            assert!(resp.error.contains("git-internal path"), "{resolution}");
+            assert!(resp.error.contains("per-file"), "{resolution}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_conflict_allows_git_internal_defer_noop() {
+        let daemon = test_daemon();
+        let resp = daemon
+            .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                path: "repo/.git/refs/heads/main".into(),
+                resolution: "defer".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.success);
+        assert_eq!(resp.resolved_path, "repo/.git/refs/heads/main");
+        assert!(resp.error.is_empty());
     }
 
     #[tokio::test]

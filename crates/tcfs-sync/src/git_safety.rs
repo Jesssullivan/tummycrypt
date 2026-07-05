@@ -12,6 +12,20 @@ use std::path::Path;
 /// internals are skipped by the collector in bundle mode.
 pub const GIT_BUNDLE_REL_PATH: &str = ".git-tcfs-bundle";
 
+/// True if a path lies inside a Git administrative directory.
+///
+/// Accepts repo-relative or absolute paths and treats `.git` as a path
+/// component, not a substring. This intentionally matches raw `.git` sync
+/// surfaces, including nested repos and submodule gitdirs under
+/// `.git/modules/**`.
+pub fn is_git_internal_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    path == ".git"
+        || path.starts_with(".git/")
+        || path.contains("/.git/")
+        || path.ends_with("/.git")
+}
+
 /// Result of checking whether a .git directory is safe to sync.
 #[derive(Debug, Clone, Default)]
 pub struct GitSafetyCheck {
@@ -624,5 +638,29 @@ mod tests {
         let check = git_is_safe(&git_dir);
         assert!(!check.blocking.is_empty());
         assert!(check.blocking[0].contains("merge"));
+    }
+
+    #[test]
+    fn classifies_git_internal_paths_by_component() {
+        for path in [
+            ".git",
+            ".git/HEAD",
+            "repo/.git/refs/heads/main",
+            "/tmp/repo/.git/objects/ab/cdef",
+            "repo/.git/modules/dep/refs/heads/main",
+            "repo\\.git\\refs\\heads\\main",
+        ] {
+            assert!(is_git_internal_path(path), "{path}");
+        }
+
+        for path in [
+            ".gitignore",
+            "repo/.gitignore",
+            "repo/git/HEAD",
+            "repo/dot.git/HEAD",
+            "repo/.gitmodules",
+        ] {
+            assert!(!is_git_internal_path(path), "{path}");
+        }
     }
 }

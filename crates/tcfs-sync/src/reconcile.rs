@@ -1390,10 +1390,7 @@ async fn read_remote_ref_sha(
 
 /// True if a repo-relative path lies inside a `.git` directory.
 fn is_git_internal_path(rel_path: &str) -> bool {
-    rel_path == ".git"
-        || rel_path.starts_with(".git/")
-        || rel_path.contains("/.git/")
-        || rel_path.ends_with("/.git")
+    git_safety::is_git_internal_path(rel_path)
 }
 
 /// Compare when both sides exist and the local entry is a symbolic link.
