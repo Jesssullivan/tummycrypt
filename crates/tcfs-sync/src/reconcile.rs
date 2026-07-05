@@ -861,10 +861,10 @@ fn git_ff_pins_still_valid(local_root: &Path, pins: &[GitRefPin]) -> bool {
 /// A `.git` ref-class HEAD file a pull is about to overwrite that the
 /// loser-side no-loss guard (PR-4, S10) must vet: a top-level branch head
 /// (`.git/refs/heads/**`), the stash tip (`.git/refs/stash`), or a submodule
-/// module-gitdir branch head (`.git/modules/<name>/refs/heads/**`). Carries the
-/// git-dir to run `rev-parse`/`merge-base` against (the submodule's real gitdir
-/// for module refs) and whether the head is PARKABLE on this device (top-level
-/// heads/stash yes; module heads are future work → defer, never park).
+/// module-gitdir ref (`.git/modules/<name>/refs/**`). Carries the git-dir to run
+/// `rev-parse`/`merge-base` against (the submodule's real gitdir for module
+/// refs) and whether the ref is PARKABLE on this device (top-level heads/stash
+/// yes; tags/remotes/module refs are future work → defer, never park).
 struct LoserGuardTarget {
     /// Git dir the ref lives in (`<repo>/.git` or `<repo>/.git/modules/<name>`).
     git_dir: PathBuf,
@@ -891,19 +891,19 @@ fn loser_guard_ref_target(local_root: &Path, rel_path: &str) -> Option<LoserGuar
     let after = &rel[pos + needle.len()..];
 
     if let Some(module_tail) = after.strip_prefix("modules/") {
-        // `.git/modules/<name...>/refs/heads/<branch>`. `<name>` may contain
-        // slashes / nested `modules/`, so split on the LAST `/refs/heads/`.
-        let marker = "/refs/heads/";
+        // `.git/modules/<name...>/refs/<kind>/<name>`. `<name>` may contain
+        // slashes / nested `modules/`, so split on the LAST `/refs/`.
+        let marker = "/refs/";
         if let Some(idx) = module_tail.rfind(marker) {
-            let branch = &module_tail[idx + marker.len()..];
-            if branch.is_empty() || branch.ends_with('/') {
+            let ref_suffix = &module_tail[idx + 1..];
+            if ref_suffix == "refs/" || ref_suffix.ends_with('/') {
                 return None;
             }
             let module_subpath = &module_tail[..idx];
             return Some(LoserGuardTarget {
                 git_dir: git_root.join("modules").join(module_subpath),
                 repo_root,
-                ref_name: format!("refs/heads/{branch}"),
+                ref_name: ref_suffix.to_string(),
                 parkable: false,
             });
         }
@@ -942,6 +942,14 @@ fn loser_guard_ref_target(local_root: &Path, rel_path: &str) -> Option<LoserGuar
             repo_root,
             ref_name: format!("refs/heads/{branch}"),
             parkable: true,
+        });
+    }
+    if after.starts_with("refs/") && !after.starts_with("refs/tcfs/") && !after.ends_with('/') {
+        return Some(LoserGuardTarget {
+            git_dir: git_root,
+            repo_root,
+            ref_name: after.to_string(),
+            parkable: false,
         });
     }
     if after == "HEAD"
@@ -3608,6 +3616,45 @@ mod tests {
         );
         assert_eq!(
             git_dir_ref_sha(&module_git, "refs/heads/main").as_deref(),
+            Some(current.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn loser_guard_defers_divergent_non_head_ref_pull() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let current = commit_file(&repo, "file.txt", "tagged work", "tagged");
+        git_safety::run_git(&repo, &["tag", "v1", &current]).unwrap();
+
+        let incoming = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let manifest_hash = upload_ref_blob(&op, local_root, incoming).await;
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let rel_path = "repo/.git/refs/tags/v1";
+        let plan = plan_of(vec![ReconcileAction::Pull {
+            rel_path: rel_path.to_string(),
+            manifest_hash,
+            size: 41,
+            reason: PullReason::RemoteNewer,
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.deferred_git_refs,
+            vec![rel_path.to_string()],
+            "non-head refs that point at local-only commits must defer, not overwrite"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&repo, "refs/tags/v1").as_deref(),
             Some(current.as_str())
         );
     }
