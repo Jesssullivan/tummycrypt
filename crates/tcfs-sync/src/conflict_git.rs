@@ -416,6 +416,46 @@ fn park_ref_for(remote_device: &str, head_ref: &str) -> Result<String> {
     Ok(format!("refs/tcfs/theirs/{safe_device}/heads/{branch}"))
 }
 
+/// Namespace a ref under `refs/tcfs/theirs/<device>/**` so its target objects
+/// become fsck-reachable on this machine and the ref never collides across
+/// devices. Reuses `park_ref_for` for branch heads (`refs/heads/<b>` →
+/// `.../heads/<b>`) and adds `refs/stash` (`→ .../stash`). Returns `None` for
+/// any other ref name (callers must not silently park it).
+///
+/// Used by the winner-side resolver's park_ref_for path AND by the reconcile
+/// loser-side no-loss guard (PR-4, S10), which parks the LOCAL head under its
+/// OWN device id before a divergent pull overwrites it.
+pub(crate) fn theirs_ref_name(device: &str, ref_name: &str) -> Option<String> {
+    if ref_name == "refs/stash" {
+        let safe_device = device
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        return Some(format!("refs/tcfs/theirs/{safe_device}/stash"));
+    }
+    park_ref_for(device, ref_name).ok()
+}
+
+/// Create-only park of `sha` at `park_ref` in `repo_root` using the same
+/// zero-OID compare-and-swap the winner-side resolver uses: refuse if the ref
+/// already exists at a DIFFERENT sha, no-op if it already points at `sha`
+/// (idempotent re-run), otherwise `update-ref <park_ref> <sha> <zero-oid>`.
+pub(crate) fn park_ref_create_only(repo_root: &Path, park_ref: &str, sha: &str) -> Result<()> {
+    ensure_park_ref_available(repo_root, park_ref, sha)?;
+    if git_safety::local_ref_sha(repo_root, park_ref).as_deref() == Some(sha) {
+        return Ok(());
+    }
+    let zero = zero_oid_like(sha);
+    run_git(repo_root, &["update-ref", park_ref, sha, zero.as_str()])
+        .with_context(|| format!("parking {sha} at {park_ref}"))
+}
+
 fn ensure_clean_worktree(repo_root: &Path) -> Result<()> {
     let out = Command::new("git")
         .args(["status", "--porcelain=v1", "--untracked-files=normal"])
@@ -479,7 +519,7 @@ fn zero_oid_like(oid: &str) -> String {
 /// hash of the repo root, keeps it a genuine local-only rollback aid
 /// (BLOCKING 2 / design S6). `blacklist.rs` also fail-closed denies
 /// `.git/tcfs-undo/**` so any pre-existing in-tree bundle can never roam.
-fn write_undo_bundle(repo_root: &Path, state_dir: &Path) -> Result<PathBuf> {
+pub(crate) fn write_undo_bundle(repo_root: &Path, state_dir: &Path) -> Result<PathBuf> {
     let repo_hex = blake3::hash(repo_root.to_string_lossy().as_bytes()).to_hex();
     let undo_dir = state_dir.join("keep-both-undo").join(&repo_hex[..16]);
     std::fs::create_dir_all(&undo_dir)

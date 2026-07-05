@@ -19,6 +19,7 @@ use tracing::{debug, info, warn};
 
 use crate::blacklist::Blacklist;
 use crate::conflict::{compare_clocks, ConflictInfo};
+use crate::conflict_git;
 use crate::engine::{self, OptionalEncryption, ProgressFn};
 use crate::git_safety;
 use crate::index_entry::{
@@ -181,8 +182,10 @@ pub struct ExecutionResult {
     /// deferred this run rather than applied. Two causes, both fail-closed and
     /// non-error: an object action for the same repo failed
     /// (objects-before-refs barrier), or the repo's `.git/tcfs.lock` is held by
-    /// a live foreign holder (keep-both PR-2, S3). The next reconcile cycle
-    /// re-plans them once the objects land / the holder releases.
+    /// a live foreign holder (keep-both PR-2, S3), or the PR-4 loser-side
+    /// no-loss guard could not park a locally divergent head before overwrite.
+    /// The next reconcile cycle re-plans them once the objects land / the holder
+    /// releases / parking succeeds.
     pub deferred_git_refs: Vec<String>,
 }
 
@@ -855,6 +858,145 @@ fn git_ff_pins_still_valid(local_root: &Path, pins: &[GitRefPin]) -> bool {
     })
 }
 
+/// A `.git` ref-class HEAD file a pull is about to overwrite that the
+/// loser-side no-loss guard (PR-4, S10) must vet: a top-level branch head
+/// (`.git/refs/heads/**`), the stash tip (`.git/refs/stash`), or a submodule
+/// module-gitdir branch head (`.git/modules/<name>/refs/heads/**`). Carries the
+/// git-dir to run `rev-parse`/`merge-base` against (the submodule's real gitdir
+/// for module refs) and whether the head is PARKABLE on this device (top-level
+/// heads/stash yes; module heads are future work → defer, never park).
+struct LoserGuardTarget {
+    /// Git dir the ref lives in (`<repo>/.git` or `<repo>/.git/modules/<name>`).
+    git_dir: PathBuf,
+    /// Repo root — where a parkable head is parked (top-level refs only).
+    repo_root: PathBuf,
+    /// Fully-qualified ref name (`refs/heads/<b>` or `refs/stash`).
+    ref_name: String,
+    /// True for top-level heads/stash (parkable via `refs/tcfs/theirs/<self>/**`).
+    /// False for module-gitdir heads (defer-only; module parking is future work).
+    parkable: bool,
+}
+
+/// Classify a pull's `rel_path` as a loser-guard HEAD target, or `None` if the
+/// guard does not apply (objects, index, logs, packed-refs, tags,
+/// remote-tracking refs, `refs/tcfs/**`, non-`.git` files — none of which carry
+/// a directly-overwritten committed tip that this guard can safely park).
+fn loser_guard_ref_target(local_root: &Path, rel_path: &str) -> Option<LoserGuardTarget> {
+    let rel = rel_path.replace('\\', "/");
+    let repo_root = git_safety::repo_root_for_git_path(local_root, &rel)?;
+    let git_root = repo_root.join(".git");
+    // Portion after the FIRST `.git/` component (the top-level repo git dir).
+    let needle = ".git/";
+    let pos = rel.find(needle)?;
+    let after = &rel[pos + needle.len()..];
+
+    if let Some(module_tail) = after.strip_prefix("modules/") {
+        // `.git/modules/<name...>/refs/heads/<branch>`. `<name>` may contain
+        // slashes / nested `modules/`, so split on the LAST `/refs/heads/`.
+        let marker = "/refs/heads/";
+        if let Some(idx) = module_tail.rfind(marker) {
+            let branch = &module_tail[idx + marker.len()..];
+            if branch.is_empty() || branch.ends_with('/') {
+                return None;
+            }
+            let module_subpath = &module_tail[..idx];
+            return Some(LoserGuardTarget {
+                git_dir: git_root.join("modules").join(module_subpath),
+                repo_root,
+                ref_name: format!("refs/heads/{branch}"),
+                parkable: false,
+            });
+        }
+        if let Some(module_subpath) = module_tail_raw_head(module_tail) {
+            let git_dir = git_root.join("modules").join(module_subpath);
+            if std::fs::read(git_dir.join("HEAD"))
+                .ok()
+                .and_then(|bytes| git_safety::parse_ref_sha(&bytes))
+                .is_some()
+            {
+                return Some(LoserGuardTarget {
+                    git_dir,
+                    repo_root,
+                    ref_name: "HEAD".to_string(),
+                    parkable: false,
+                });
+            }
+        }
+        return None;
+    }
+
+    if after == "refs/stash" {
+        return Some(LoserGuardTarget {
+            git_dir: git_root,
+            repo_root,
+            ref_name: "refs/stash".to_string(),
+            parkable: true,
+        });
+    }
+    if let Some(branch) = after.strip_prefix("refs/heads/") {
+        if branch.is_empty() || branch.ends_with('/') {
+            return None;
+        }
+        return Some(LoserGuardTarget {
+            git_dir: git_root,
+            repo_root,
+            ref_name: format!("refs/heads/{branch}"),
+            parkable: true,
+        });
+    }
+    if after == "HEAD"
+        && std::fs::read(git_root.join("HEAD"))
+            .ok()
+            .and_then(|bytes| git_safety::parse_ref_sha(&bytes))
+            .is_some()
+    {
+        return Some(LoserGuardTarget {
+            git_dir: git_root,
+            repo_root,
+            ref_name: "HEAD".to_string(),
+            parkable: false,
+        });
+    }
+    None
+}
+
+fn module_tail_raw_head(module_tail: &str) -> Option<&str> {
+    module_tail
+        .strip_suffix("/HEAD")
+        .filter(|module_subpath| !module_subpath.is_empty())
+}
+
+/// Read the SHA `ref_name` resolves to in an explicit git dir (`--git-dir`),
+/// consulting loose refs and packed-refs. `--git-dir` (not `-C`) so a
+/// submodule's bare-style module gitdir resolves correctly. `None` if the ref
+/// is absent or not a concrete SHA.
+fn git_dir_ref_sha(git_dir: &Path, ref_name: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["rev-parse", "--verify", "--quiet", ref_name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    git_safety::parse_ref_sha(&output.stdout)
+}
+
+/// True iff `ancestor` is an ancestor of `descendant` in an explicit git dir.
+/// Mirrors `git_safety::is_ancestor` but targets a `--git-dir` so submodule
+/// module-gitdirs work. A missing object (exit != 0/1) is treated as "not an
+/// ancestor" so the guard fails closed toward parking/deferring.
+fn git_dir_is_ancestor(git_dir: &Path, ancestor: &str, descendant: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .output()
+        .map(|out| out.status.code() == Some(0))
+        .unwrap_or(false)
+}
+
 /// Outcome of acquiring cooperative `.git/tcfs.lock` guards for a plan.
 ///
 /// keep-both PR-2 (S3): the executor no longer proceeds unconditionally when a
@@ -1413,10 +1555,27 @@ async fn read_remote_ref_sha(
     encryption: OptionalEncryption<'_>,
 ) -> Option<String> {
     let entry = remote_index.get(rel_path)?;
+    download_ref_sha_from_manifest(op, remote_prefix, &entry.manifest_hash, encryption).await
+}
+
+/// Download the tiny ref blob addressed by `manifest_hash` into an ephemeral,
+/// per-call temp dir (never under a sync root, never inside a live `.git`) and
+/// parse it as a concrete SHA. Shared by `read_remote_ref_sha` (plan-time) and
+/// the execute-loop loser-side no-loss guard (PR-4), which needs the INCOMING
+/// ref SHA a pull is about to write before deciding whether the overwrite would
+/// orphan committed local work. Returns `None` on download failure or a
+/// non-concrete (symbolic) ref — callers MUST treat `None` as "cannot prove
+/// safe" and fail closed.
+async fn download_ref_sha_from_manifest(
+    op: &Operator,
+    remote_prefix: &str,
+    manifest_hash: &str,
+    encryption: OptionalEncryption<'_>,
+) -> Option<String> {
     let manifest_path = format!(
         "{}/manifests/{}",
         remote_prefix.trim_end_matches('/'),
-        &entry.manifest_hash
+        manifest_hash
     );
     // Unique per call (pid + process-wide sequence) so concurrent reconciles
     // in one or many processes never collide on the same path.
@@ -1443,7 +1602,7 @@ async fn read_remote_ref_sha(
             .ok()
             .and_then(|bytes| git_safety::parse_ref_sha(&bytes)),
         Err(e) => {
-            warn!(path = rel_path, error = %format!("{e:#}"), "git ff: remote ref download failed");
+            warn!(manifest = manifest_hash, error = %format!("{e:#}"), "git ff: remote ref download failed");
             None
         }
     };
@@ -1627,6 +1786,14 @@ pub async fn execute_plan(
     // actions deferred (recorded, not errored); the next cycle re-plans them.
     let mut git_object_failed_repos: BTreeSet<PathBuf> = BTreeSet::new();
 
+    // keep-both PR-4 (S10): where the loser-side no-loss guard writes its
+    // pre-overwrite `.git` undo bundle. The state cache lives in the
+    // machine-local state dir, so its parent is that dir — OUTSIDE any sync root
+    // (the bundle must never roam and re-conflict). A parent-less db path (bare
+    // filename, e.g. in-memory tests) falls back to the temp dir; still
+    // out-of-tree.
+    let undo_state_dir = state.state_dir();
+
     for action in &plan.actions {
         let git_write_rel_path = match action {
             ReconcileAction::Push { rel_path, .. }
@@ -1770,6 +1937,115 @@ pub async fn execute_plan(
                             .push((rel_path.clone(), format!("mkdir failed: {e}")));
                         continue;
                     }
+                }
+
+                // keep-both PR-4 (S10): loser-side no-loss guard. This pull is
+                // about to OVERWRITE a local `.git` ref-class HEAD file. If that
+                // head currently holds committed work UNREACHABLE from the
+                // incoming SHA (not equal, not an ancestor of it), overwriting
+                // would orphan it. Before overwriting, park the current SHA at
+                // `refs/tcfs/theirs/<self_device>/**` (keeping the loser's line
+                // reachable + fsck-clean) and bundle-snapshot the pre-overwrite
+                // `.git` to the state dir. Park OR bundle failure — or a
+                // non-parkable module-gitdir head — DEFERS the pull (fail
+                // closed: never overwrite without a durable escape hatch). The
+                // FF / equal / new-ref fast paths take no parking, no bundle.
+                if let Some(target) = loser_guard_ref_target(local_root, rel_path) {
+                    if let Some(current) = git_dir_ref_sha(&target.git_dir, &target.ref_name) {
+                        match download_ref_sha_from_manifest(
+                            op,
+                            remote_prefix,
+                            manifest_hash,
+                            encryption,
+                        )
+                        .await
+                        {
+                            Some(incoming)
+                                if current != incoming
+                                    && !git_dir_is_ancestor(
+                                        &target.git_dir,
+                                        &current,
+                                        &incoming,
+                                    ) =>
+                            {
+                                // Non-ancestor overwrite: committed work at
+                                // `current` is not reachable from `incoming`.
+                                if !target.parkable {
+                                    warn!(
+                                        path = %rel_path,
+                                        r#ref = %target.ref_name,
+                                        "loser-guard: non-parkable module head would be orphaned; deferring pull"
+                                    );
+                                    result.deferred_git_refs.push(rel_path.clone());
+                                    continue;
+                                }
+                                let Some(park_ref) =
+                                    conflict_git::theirs_ref_name(device_id, &target.ref_name)
+                                else {
+                                    warn!(
+                                        path = %rel_path,
+                                        r#ref = %target.ref_name,
+                                        "loser-guard: no safe park ref namespace; deferring pull"
+                                    );
+                                    result.deferred_git_refs.push(rel_path.clone());
+                                    continue;
+                                };
+                                let bundle = match conflict_git::write_undo_bundle(
+                                    &target.repo_root,
+                                    &undo_state_dir,
+                                ) {
+                                    Ok(bundle) => bundle,
+                                    Err(e) => {
+                                        warn!(
+                                            path = %rel_path,
+                                            error = %format!("{e:#}"),
+                                            "loser-guard: pre-overwrite bundle failed; deferring pull"
+                                        );
+                                        result.deferred_git_refs.push(rel_path.clone());
+                                        continue;
+                                    }
+                                };
+                                if let Err(e) = conflict_git::park_ref_create_only(
+                                    &target.repo_root,
+                                    &park_ref,
+                                    &current,
+                                ) {
+                                    warn!(
+                                        path = %rel_path,
+                                        error = %format!("{e:#}"),
+                                        "loser-guard: park failed; deferring pull"
+                                    );
+                                    result.deferred_git_refs.push(rel_path.clone());
+                                    continue;
+                                }
+                                info!(
+                                    path = %rel_path,
+                                    r#ref = %target.ref_name,
+                                    parked = %park_ref,
+                                    orphaned_sha = %current,
+                                    bundle = %bundle.display(),
+                                    "loser-guard: bundled pre-overwrite .git + parked local head; applying pull"
+                                );
+                                // fall through: overwrite is now no-loss.
+                            }
+                            Some(_) => {
+                                // Equal or fast-forward: no committed work lost.
+                            }
+                            None => {
+                                // Incoming SHA unreadable (download failed /
+                                // symbolic ref): cannot prove the overwrite is
+                                // safe, so DEFER (fail closed).
+                                warn!(
+                                    path = %rel_path,
+                                    "loser-guard: incoming ref SHA unreadable; deferring pull"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            }
+                        }
+                    }
+                    // current == None: the local ref does not exist yet, so
+                    // there is no committed work to orphan — apply normally.
                 }
 
                 match engine::download_file_with_device(
@@ -3187,6 +3463,153 @@ mod tests {
         // Object data and non-git paths → never veto.
         assert!(!ff_group_vetoes("repo/.git/objects/ab/cdef"));
         assert!(!ff_group_vetoes("repo/src/refs.rs"));
+    }
+
+    // ── keep-both PR-4 (S10): loser-side no-loss guard ─────────────────────
+
+    fn init_git_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        git_safety::run_git(path, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(path, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(path, &["config", "user.name", "TCFS Test"]).unwrap();
+    }
+
+    fn commit_file(path: &Path, file: &str, body: &str, msg: &str) -> String {
+        std::fs::write(path.join(file), body.as_bytes()).unwrap();
+        git_safety::run_git(path, &["add", file]).unwrap();
+        git_safety::run_git(path, &["commit", "-m", msg, "--quiet"]).unwrap();
+        git_safety::local_ref_sha(path, "HEAD").unwrap()
+    }
+
+    async fn upload_ref_blob(op: &Operator, root: &Path, sha: &str) -> String {
+        let ref_blob = root.join("remote-ref");
+        std::fs::write(&ref_blob, format!("{sha}\n")).unwrap();
+        let mut state = crate::state::StateCache::open(&root.join("upload-state.json")).unwrap();
+        let upload = engine::upload_file_with_device(
+            op,
+            &ref_blob,
+            "data",
+            &mut state,
+            None,
+            "remote",
+            Some("repo/.git/refs/heads/main"),
+            None,
+        )
+        .await
+        .unwrap();
+        upload.hash
+    }
+
+    #[test]
+    fn loser_guard_target_ignores_symbolic_head_but_catches_detached_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let head = commit_file(&repo, "file.txt", "base", "base");
+
+        assert!(
+            loser_guard_ref_target(local_root, "repo/.git/HEAD").is_none(),
+            "symbolic HEAD is not a directly parkable committed tip"
+        );
+
+        git_safety::run_git(&repo, &["checkout", "--quiet", "--detach", &head]).unwrap();
+        let target = loser_guard_ref_target(local_root, "repo/.git/HEAD")
+            .expect("detached HEAD must be guarded");
+        assert_eq!(target.ref_name, "HEAD");
+        assert!(!target.parkable, "detached HEAD is defer-only");
+    }
+
+    #[tokio::test]
+    async fn loser_guard_parks_divergent_local_head_before_ref_pull() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let base = commit_file(&repo, "file.txt", "base", "base");
+        let local_head = commit_file(&repo, "file.txt", "local work", "local");
+        assert_ne!(base, local_head);
+
+        let manifest_hash = upload_ref_blob(&op, local_root, &base).await;
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let plan = plan_of(vec![ReconcileAction::Pull {
+            rel_path: "repo/.git/refs/heads/main".to_string(),
+            manifest_hash,
+            size: 41,
+            reason: PullReason::RemoteNewer,
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.deferred_git_refs.is_empty(), "{result:?}");
+        assert_eq!(result.pulled, 1);
+        assert_eq!(
+            git_safety::local_ref_sha(&repo, "refs/heads/main").as_deref(),
+            Some(base.as_str()),
+            "remote pull overwrites the live branch only after parking"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&repo, "refs/tcfs/theirs/neo/heads/main").as_deref(),
+            Some(local_head.as_str()),
+            "loser's previous head remains reachable under its own device namespace"
+        );
+        assert!(
+            state_path.parent().unwrap().join("keep-both-undo").exists(),
+            "pre-overwrite undo bundle lives under the state dir"
+        );
+        git_safety::run_git(&repo, &["fsck", "--full"]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn loser_guard_defers_divergent_submodule_head_pull() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let current = commit_file(&repo, "file.txt", "local work", "local");
+
+        let module_git = repo.join(".git/modules/dep");
+        std::fs::create_dir_all(repo.join(".git/modules")).unwrap();
+        git_safety::run_git(
+            &repo,
+            &["clone", "--quiet", "--bare", ".", ".git/modules/dep"],
+        )
+        .unwrap();
+
+        let incoming = "0123456789012345678901234567890123456789";
+        let manifest_hash = upload_ref_blob(&op, local_root, incoming).await;
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let rel_path = "repo/.git/modules/dep/refs/heads/main";
+        let plan = plan_of(vec![ReconcileAction::Pull {
+            rel_path: rel_path.to_string(),
+            manifest_hash,
+            size: 41,
+            reason: PullReason::RemoteNewer,
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.deferred_git_refs,
+            vec![rel_path.to_string()],
+            "module-gitdir heads are not silently overwritten until module parking exists"
+        );
+        assert_eq!(
+            git_dir_ref_sha(&module_git, "refs/heads/main").as_deref(),
+            Some(current.as_str())
+        );
     }
 
     // ── keep-both PR-2 (S3): executor hard-respects a foreign `.git/tcfs.lock` ──
