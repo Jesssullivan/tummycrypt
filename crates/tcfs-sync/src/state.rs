@@ -396,6 +396,21 @@ impl StateCache {
             .map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Read-only view of every entry that currently carries a recorded
+    /// conflict, as `(cache key, state)` pairs.
+    ///
+    /// The cache key is the normalized (canonical-parent) local path; the
+    /// recorded `ConflictInfo` (with its repo-relative `rel_path`) lives on the
+    /// returned [`SyncState`]. Used by `tcfs conflicts` to enumerate and group
+    /// conflicts without any daemon RPC. Order is unspecified (HashMap).
+    pub fn conflicts(&self) -> Vec<(&str, &SyncState)> {
+        self.entries
+            .iter()
+            .filter(|(_, s)| s.conflict.is_some())
+            .map(|(k, v)| (k.as_str(), v))
+            .collect()
+    }
+
     /// Flush dirty changes to disk using an atomic write (write then rename).
     ///
     /// Persists cache metadata alongside entries so restart recovery does not
@@ -1465,6 +1480,7 @@ mod tests {
             local_device: "neo".into(),
             remote_device: "honey".into(),
             detected_at: 1700000000,
+            times_recorded: 0,
         };
 
         cache.set(
@@ -1542,6 +1558,7 @@ mod tests {
                     local_device: "neo".into(),
                     remote_device: "honey".into(),
                     detected_at: 0,
+                    times_recorded: 0,
                 }),
                 status: FileSyncStatus::Conflict,
             },
@@ -1595,6 +1612,7 @@ mod tests {
                         local_device: "neo".into(),
                         remote_device: "honey".into(),
                         detected_at: 0,
+                        times_recorded: 0,
                     }),
                     status: FileSyncStatus::Conflict,
                 },
@@ -1663,6 +1681,7 @@ mod tests {
             local_device: "neo".into(),
             remote_device: "honey".into(),
             detected_at: 0,
+            times_recorded: 0,
         };
 
         assert!(cache.mark_conflict(&file_path, conflict.clone()));

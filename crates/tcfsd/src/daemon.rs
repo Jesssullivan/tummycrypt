@@ -1708,6 +1708,16 @@ async fn spawn_state_sync_loop(
     }
 }
 
+/// keep-both PR-1 (S2): true when an auto-resolvable conflict path is
+/// `.git`-internal and must be deferred rather than resolved per file.
+///
+/// Automatic per-file resolution over `.git` internals is the G5-git-5
+/// corruption vector; the daemon's NATS auto path defers these so the operator
+/// resolves the repo group deliberately.
+fn auto_conflict_must_defer(rel_path: &str) -> bool {
+    tcfs_sync::git_safety::repo_root_for_git_path(std::path::Path::new(""), rel_path).is_some()
+}
+
 /// Handle auto-pull logic for a remote FileSynced event.
 #[allow(clippy::too_many_arguments)]
 async fn handle_auto_pull(
@@ -1806,6 +1816,22 @@ async fn handle_auto_pull(
             .await;
         }
         tcfs_sync::conflict::SyncOutcome::Conflict(ref conflict_info) => {
+            // keep-both PR-1 (safety invariant S2): automatic per-file
+            // resolution must NEVER touch `.git` internals. AutoResolver's
+            // lexicographic KeepRemote would auto-download the remote ref/index
+            // over this device's object store with zero `.git` awareness — the
+            // G5-git-5 interleave vector. Defer `.git`-internal conflicts
+            // unconditionally; the operator resolves the repo group deliberately
+            // (future: `tcfs resolve <repo> --keep-both`; inspect with
+            // `tcfs conflicts`). The conflict stays recorded by the reconcile
+            // engine's Conflict arm, so it remains visible and re-tried.
+            if auto_conflict_must_defer(rel_path) {
+                info!(
+                    path = %rel_path,
+                    "AutoResolver: deferring .git-internal conflict (repo-group resolution required)"
+                );
+                return;
+            }
             info!(
                 path = %rel_path,
                 local_device = %conflict_info.local_device,
@@ -1992,5 +2018,28 @@ fn ensure_dirs(config: &TcfsConfig) {
                 warn!(path = %parent.display(), "failed to create FileProvider socket dir: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod keep_both_pr1_tests {
+    use super::auto_conflict_must_defer;
+
+    #[test]
+    fn auto_defers_git_internal_conflicts() {
+        // keep-both PR-1 (S2): the NATS auto path defers `.git`-internal
+        // conflicts instead of auto-downloading them per file.
+        assert!(auto_conflict_must_defer("myrepo/.git/refs/heads/main"));
+        assert!(auto_conflict_must_defer("myrepo/.git/index"));
+        assert!(auto_conflict_must_defer("nested/dir/proj/.git/HEAD"));
+    }
+
+    #[test]
+    fn auto_resolves_normal_files() {
+        // Ordinary (non-`.git`) file conflicts keep today's auto behavior.
+        assert!(!auto_conflict_must_defer("notes/todo.txt"));
+        assert!(!auto_conflict_must_defer("src/main.rs"));
+        // A file merely named like git but not under a `.git` dir is not fenced.
+        assert!(!auto_conflict_must_defer("docs/gitignore-notes.md"));
     }
 }
