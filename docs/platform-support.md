@@ -30,15 +30,22 @@ coverage and the clearest end-to-end validation story.
   target for the current shipped `.deb` assets because the packages require
   newer glibc/OpenSSL ABI floors than bookworm provides.
 
-## macOS (Experimental Desktop Surface)
+## macOS (Proven Package Lane, Hardening Surface)
 
-macOS has real release artifacts and desktop integration code, but the current
-evidence is weaker than Linux. Treat it as an experimental surface rather than
-as a production-proven platform.
+macOS has real release artifacts and a production Developer ID FileProvider
+proof lane, but the desktop surface is still behind Linux for continuous
+release-day and daily-driver acceptance. Treat package install, basic
+FileProvider lifecycle, and exact hydration/mutation as proven where the cited
+PZM evidence applies; treat first-run UX, badges/progress, recovery, and soak as
+open hardening work.
 
 - **CLI**: Builds and ships for Apple Silicon and Intel
 - **Daemon**: Launchd-oriented runtime exists, but user-facing acceptance coverage is still limited
-- **FileProvider**: Packaged macOS FileProvider app exists in releases; the PZM testing-mode lab proves enumerate, hydrate, evict, rehydrate, mutation upload/readback, and CLI conflict/status content preservation, but production Finder claims remain experimental
+- **FileProvider**: Packaged macOS FileProvider app exists in releases. The PZM
+  production Developer ID lane proves install/signing preflight, domain rebuild,
+  user-visible root enumeration, exact hydrate, evict/rehydrate, mutation
+  upload/readback, rename, and conflict/status preservation without
+  `fileprovider_testing_mode=true`
 - **Finder badges / progress**: Implemented in code and observed only as evidence; not yet a reliable release gate
 - **Filesystem surface**: Experimental; Linux remains the better-proven mount/runtime path
 - **Fleet sync**: Core sync engine and NATS path are shared with Linux, but macOS-specific acceptance coverage is not yet at the same bar
@@ -50,28 +57,20 @@ as a production-proven platform.
   gates.
 - **Homebrew**: manual tap flow required today because the formula is published on the `homebrew-tap` branch, not the default branch
 - **Current proof**: CI covers the Rust FileProvider staticlib/header and iOS
-  Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts;
-  PZM testing-mode lab proof is green beyond read/hydrate; production
-  clean-host Finder proof is still pending. The latest neo inventory confirms
-  the canonical `/Applications/TCFSProvider.app` install is absent and the
-  existing `~/Applications/TCFSProvider.app` fails strict production signing
-  preflight because Keychain access-group entitlements and embedded
-  provisioning profiles are missing. A source-built Developer ID app on neo now
-  passes strict signing-only preflight with compatible local profiles embedded,
-  and a local candidate `.pkg` structure/signature proof wraps it with
-  source-built `tcfs`/`tcfsd`. Remote run `25973109986` proves the current
-  source package can be notarized, stapled, accepted by Gatekeeper install
-  assessment, and pass strict package smoke with stapled-ticket enforcement.
-  That proof is a workflow artifact, not a published release install, and it
-  has not been installed or exercised through Finder.
+  Swift type-check; release workflow cuts `.pkg` and FileProvider artifacts.
+  PZM production Developer ID runs prove the installed-host FileProvider lane
+  through storage `[ok]`, domain add/rebuild, CloudStorage enumeration,
+  HostApp request/download, exact hydrate, evict/rehydrate, mutation
+  upload/readback, rename, and conflict/status preservation. See
+  [macOS Finder and FileProvider Reality](ops/macos-fileprovider-reality.md) for
+  the run numbers and evidence packets.
 - **Current posture**: see [Apple Surface Status](ops/apple-surface-status.md)
   and [Distribution Smoke Matrix](ops/distribution-smoke-matrix.md)
 
 ### Not Yet Proven
 
-- Production Developer ID clean-host Finder/FileProvider acceptance from
-  install through user enablement, register, enumerate, hydrate, mutate, and
-  conflict handling
+- First-run setup from package install to valid config/status without manual
+  operator repair
 - Finder badges, progress UI, or notification behavior as release gates
 - Every published macOS artifact on day zero without explicit post-cut smoke
 
