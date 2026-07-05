@@ -155,6 +155,7 @@ fn resolution_variants_exhaustive() {
         remote_device: "device-b".into(),
         detected_at: 1700000000,
         times_recorded: 0,
+        remote_manifest_key: None,
     };
 
     // KeepLocal: local_device < remote_device => AutoResolver picks KeepLocal
@@ -400,6 +401,7 @@ fn auto_resolver_deterministic() {
         remote_device: "device-a".into(),
         detected_at: 0,
         times_recorded: 0,
+        remote_manifest_key: None,
     };
 
     let resolver = AutoResolver;

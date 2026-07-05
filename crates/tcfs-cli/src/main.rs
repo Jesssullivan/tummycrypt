@@ -6713,6 +6713,7 @@ async fn cmd_resolve(
                     remote_vclock: tcfs_sync::conflict::VectorClock::new(),
                     detected_at: 0,
                     times_recorded: 0,
+                    remote_manifest_key: None,
                 }
             });
             match resolve_conflict_interactive(&info) {
@@ -7114,6 +7115,7 @@ mod tests {
             remote_device: "honey".into(),
             detected_at: 1_700_000_000,
             times_recorded: 3,
+            remote_manifest_key: None,
         }
     }
 

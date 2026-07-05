@@ -1677,6 +1677,8 @@ async fn upload_file_with_device_with_state(
                     let remote_manifest_path = current_remote_manifest_path
                         .clone()
                         .unwrap_or_else(|| remote_manifest.clone());
+                    let mut conflict_info = conflict_info.clone();
+                    conflict_info.remote_manifest_key = Some(remote_manifest_path.clone());
                     // Record local state with conflict info so `tcfs resolve` can find it
                     let mut sync_state = make_sync_state_full(
                         local_path,
@@ -1697,7 +1699,7 @@ async fn upload_file_with_device_with_state(
                             bytes: file_size,
                             vclock: sync_state.vclock.clone(),
                             skipped: true,
-                            outcome: Some(sync_outcome),
+                            outcome: Some(SyncOutcome::Conflict(conflict_info)),
                         },
                         Some(sync_state),
                     ));
@@ -5375,13 +5377,25 @@ mod tests {
         .unwrap();
 
         assert!(result.skipped);
-        assert!(matches!(result.outcome, Some(SyncOutcome::Conflict(_))));
+        let result_conflict = match result.outcome {
+            Some(SyncOutcome::Conflict(info)) => info,
+            other => panic!("expected conflict outcome, got: {other:?}"),
+        };
+        assert_eq!(
+            result_conflict.remote_manifest_key.as_deref(),
+            Some("data/manifests/remotehash123")
+        );
 
         let entry = state.get(&local).expect("conflicted state entry");
         assert_eq!(entry.status, FileSyncStatus::Conflict);
-        assert!(
-            entry.conflict.is_some(),
-            "conflict payload should be preserved"
+        assert_eq!(
+            entry
+                .conflict
+                .as_ref()
+                .expect("conflict payload should be preserved")
+                .remote_manifest_key
+                .as_deref(),
+            Some("data/manifests/remotehash123")
         );
     }
 

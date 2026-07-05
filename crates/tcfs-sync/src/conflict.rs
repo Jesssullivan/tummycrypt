@@ -89,7 +89,17 @@ impl VectorClock {
 // ── Sync Outcome ──────────────────────────────────────────────────────────────
 
 /// Result of comparing a local file's state against a remote version.
+///
+/// This is a short-lived decision value: `compare_clocks` returns it and the
+/// caller immediately matches it into a `ReconcileAction`. It is never held in
+/// bulk collections, so the size gap between the data-carrying `Conflict`
+/// variant and the unit variants is immaterial — boxing `ConflictInfo` here
+/// would add an allocation per classification for no benefit and ripple through
+/// ~20 match sites across crates. keep-both PR-2 grew `ConflictInfo` by one
+/// `Option<String>` (`remote_manifest_key`), nudging it just past clippy's
+/// 200-byte `large_enum_variant` threshold; allow it for this transient enum.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum SyncOutcome {
     /// Local version is newer — safe to push.
     LocalNewer,
@@ -128,6 +138,20 @@ pub struct ConflictInfo {
     /// state caches — written before this field existed — deserializing to 0.
     #[serde(default)]
     pub times_recorded: u64,
+    /// Storage key (S3/prefix path) of the remote side's manifest for this
+    /// path, captured when the conflict is classified.
+    ///
+    /// keep-both PR-2 data-model graft: the remote ref blob's manifest key is
+    /// only in scope at classification time (`reconcile::outcome_to_action`,
+    /// where the remote manifest path is already computed) — NOT at the later
+    /// record site, which holds only the local state entry. A future PR-3
+    /// resolve verb needs this key to fetch the remote ref SHA directly instead
+    /// of depending on the incidental, unversioned `SyncState.remote_path`.
+    /// `None` for conflicts recorded before this field existed (old state
+    /// caches) and for any path where the key was not captured. `serde(default)`
+    /// keeps those older caches deserializing.
+    #[serde(default)]
+    pub remote_manifest_key: Option<String>,
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
@@ -202,6 +226,11 @@ pub fn compare_clocks(
                 remote_device: remote_device.to_string(),
                 detected_at: now,
                 times_recorded: 0,
+                // Not in scope here: `compare_clocks` sees only hashes/clocks,
+                // not the remote manifest storage key. Populated later at
+                // `reconcile::outcome_to_action`, where the remote manifest
+                // path is already computed. (keep-both PR-2)
+                remote_manifest_key: None,
             })
         }
     }
@@ -388,6 +417,7 @@ mod tests {
             remote_device: "beta".into(),
             detected_at: 0,
             times_recorded: 0,
+            remote_manifest_key: None,
         };
         // "alpha" < "beta" → keep local
         assert_eq!(resolver.resolve(&info), Some(Resolution::KeepLocal));
@@ -451,5 +481,41 @@ mod tests {
         let reparsed: ConflictInfo = serde_json::from_str(&bytes).unwrap();
         assert_eq!(reparsed.times_recorded, 0);
         assert_eq!(reparsed.rel_path, "repo/.git/refs/heads/main");
+    }
+
+    #[test]
+    fn conflict_info_serde_roundtrips_without_remote_manifest_key() {
+        // keep-both PR-2 back-compat (test c): a state cache written before
+        // `remote_manifest_key` existed has no such field. `#[serde(default)]`
+        // must deserialize it to None so old caches load unchanged.
+        let legacy = r#"{
+            "rel_path": "repo/.git/refs/heads/main",
+            "local_vclock": {"clocks": {}},
+            "remote_vclock": {"clocks": {}},
+            "local_blake3": "aaa",
+            "remote_blake3": "bbb",
+            "local_device": "neo",
+            "remote_device": "honey",
+            "detected_at": 1700000000,
+            "times_recorded": 2
+        }"#;
+        let info: ConflictInfo =
+            serde_json::from_str(legacy).expect("legacy ConflictInfo must deserialize");
+        assert_eq!(
+            info.remote_manifest_key, None,
+            "missing remote_manifest_key must default to None"
+        );
+        // Unrelated fields still parse correctly.
+        assert_eq!(info.times_recorded, 2);
+
+        // A populated key round-trips losslessly.
+        let mut with_key = info.clone();
+        with_key.remote_manifest_key = Some("data/manifests/deadbeef".to_string());
+        let bytes = serde_json::to_string(&with_key).unwrap();
+        let reparsed: ConflictInfo = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(
+            reparsed.remote_manifest_key.as_deref(),
+            Some("data/manifests/deadbeef")
+        );
     }
 }

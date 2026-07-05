@@ -488,6 +488,12 @@ impl StateCache {
     ) -> bool {
         let key = path_key(local_path);
         if let Some(entry) = self.entries.get_mut(&key) {
+            let mut conflict = conflict;
+            if conflict.remote_manifest_key.is_none() {
+                if let Some(existing) = entry.conflict.as_ref() {
+                    conflict.remote_manifest_key = existing.remote_manifest_key.clone();
+                }
+            }
             entry.conflict = Some(conflict);
             entry.status = FileSyncStatus::Conflict;
             self.dirty = true;
@@ -1481,6 +1487,7 @@ mod tests {
             remote_device: "honey".into(),
             detected_at: 1700000000,
             times_recorded: 0,
+            remote_manifest_key: None,
         };
 
         cache.set(
@@ -1559,6 +1566,7 @@ mod tests {
                     remote_device: "honey".into(),
                     detected_at: 0,
                     times_recorded: 0,
+                    remote_manifest_key: None,
                 }),
                 status: FileSyncStatus::Conflict,
             },
@@ -1613,6 +1621,7 @@ mod tests {
                         remote_device: "honey".into(),
                         detected_at: 0,
                         times_recorded: 0,
+                        remote_manifest_key: None,
                     }),
                     status: FileSyncStatus::Conflict,
                 },
@@ -1682,6 +1691,7 @@ mod tests {
             remote_device: "honey".into(),
             detected_at: 0,
             times_recorded: 0,
+            remote_manifest_key: None,
         };
 
         assert!(cache.mark_conflict(&file_path, conflict.clone()));
@@ -1692,6 +1702,83 @@ mod tests {
         assert_eq!(stored.rel_path, conflict.rel_path);
         assert_eq!(stored.local_device, conflict.local_device);
         assert_eq!(stored.remote_device, conflict.remote_device);
+    }
+
+    #[test]
+    fn mark_conflict_preserves_existing_remote_manifest_key_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        let file_path = dir.path().join("conflicted.txt");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        cache.set(
+            &file_path,
+            SyncState {
+                blake3: "abc".into(),
+                size: 4,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "data/index/conflicted.txt".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+
+        let mut conflict = crate::conflict::ConflictInfo {
+            rel_path: "conflicted.txt".into(),
+            local_vclock: VectorClock::new(),
+            remote_vclock: VectorClock::new(),
+            local_blake3: "abc".into(),
+            remote_blake3: "def".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            detected_at: 0,
+            times_recorded: 0,
+            remote_manifest_key: Some("data/manifests/first".into()),
+        };
+        assert!(cache.mark_conflict(&file_path, conflict.clone()));
+
+        conflict.remote_manifest_key = None;
+        assert!(cache.mark_conflict(&file_path, conflict));
+        assert_eq!(
+            cache
+                .get(&file_path)
+                .unwrap()
+                .conflict
+                .as_ref()
+                .unwrap()
+                .remote_manifest_key
+                .as_deref(),
+            Some("data/manifests/first")
+        );
+
+        let replacement = crate::conflict::ConflictInfo {
+            remote_manifest_key: Some("data/manifests/replacement".into()),
+            ..cache
+                .get(&file_path)
+                .unwrap()
+                .conflict
+                .as_ref()
+                .unwrap()
+                .clone()
+        };
+        assert!(cache.mark_conflict(&file_path, replacement));
+        assert_eq!(
+            cache
+                .get(&file_path)
+                .unwrap()
+                .conflict
+                .as_ref()
+                .unwrap()
+                .remote_manifest_key
+                .as_deref(),
+            Some("data/manifests/replacement")
+        );
     }
 
     #[test]

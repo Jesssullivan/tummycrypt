@@ -4013,6 +4013,7 @@ mod tests {
             remote_device: "honey".into(),
             detected_at: 43,
             times_recorded: 1,
+            remote_manifest_key: None,
         });
 
         {
@@ -4058,6 +4059,7 @@ mod tests {
             remote_device: "honey".into(),
             detected_at: 44,
             times_recorded: 1,
+            remote_manifest_key: None,
         });
 
         {
