@@ -290,6 +290,18 @@ impl StateCache {
         })
     }
 
+    /// Machine-local directory that owns this state cache.
+    ///
+    /// Git recovery artifacts such as keep-both / loser-guard undo bundles must
+    /// live here, not under a sync root.
+    pub fn state_dir(&self) -> PathBuf {
+        self.db_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     fn load_from_file(path: &Path) -> Result<(HashMap<String, SyncState>, u64, String)> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("reading: {}", path.display()))?;

@@ -524,7 +524,8 @@ ordinary files.
 
 ## Implementation status (updated 2026-07-05)
 
-This design is now the design-of-record; PR-1 through PR-3 are merged, PR-4 remains.
+This design is now the design-of-record; PR-1 through PR-3 are merged, and PR-4
+is in remote-CI validation.
 
 | Rung | PR | Merge commit | Status |
 |------|----|--------------|--------|
@@ -532,9 +533,18 @@ This design is now the design-of-record; PR-1 through PR-3 are merged, PR-4 rema
 | (hardening) — fence paths + persistence | #527 | `449846e` | ✅ merged |
 | **PR-2** — executor hard-respects a foreign `.git/tcfs.lock`; `ConflictInfo.remote_manifest_key` | #528 | `1e41a23` | ✅ merged |
 | **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, **operator-CLI-only** (MCP/auto excluded via the `operator_cli` provenance gate) | #529 | `831d363b` | ✅ merged |
-| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live) | — | — | ⏸ **deploy-gated** |
+| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live) | #534 | draft branch | 🟡 draft PR / remote CI + G5-git-13 harness |
 
-**PR-4 is the only remaining rung** and it is gated on the fleet reaching a common tcfs version end-to-end (both hosts must run the resolver for the loser-side convergence to be exercised live) — currently blocked on the neo `v0.12.16` deploy, itself blocked on the PZM aarch64-darwin builder (hardware). Until PR-4 lands + the live canary runs, the honest claim is: **divergent `.git` conflicts are safely fenced, visible (`tcfs conflicts`), and operator-resolvable (`tcfs resolve … --execute`), but the two-machine live-convergence proof (G5-git-5 T10/T11 green) is pending the deploy.**
+**PR-4 is the only remaining rung** and is no longer framed as blocked on PZM
+hardware: the PZM SSD/RWX path re-enumerated and verified clean. Builder
+transport hardening (`ssh-ng://` Determinate Nix vs `ssh://`/serve-style or
+GF/remote-cache execution) remains a separate TIN-1620/#524 operational lane.
+The remaining PR-4 gate is ordinary code validation + fleet deploy: #534 must
+pass remote CI, land, deploy to both hosts, then run the two-machine live
+convergence canary. Until that lands + canary runs, the honest claim is:
+**divergent `.git` conflicts are safely fenced, visible (`tcfs conflicts`), and
+operator-resolvable (`tcfs resolve … --execute`), but the two-machine
+live-convergence proof (G5-git-5 T10/T11 green) is pending PR-4 deployment.**
 
 **Ratified operator §6 answers (2026-07-05):** parking namespace default = `refs/tcfs/theirs/**` (not real branches); bare `keep-local`/`keep-remote` = omitted (park-first only); dirty-tree = hard refuse; ticket routing = new ticket for the verb + TIN-1549 keeps the `tcfs conflicts`/banner UX surface. Bundle retention and escalation cadence remain open (non-blocking; PR-4-adjacent).
 
