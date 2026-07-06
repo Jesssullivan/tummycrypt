@@ -23,6 +23,8 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 ## Reality And Wayfinding
 
 - Current proof posture: [docs/ops/product-reality-and-priority.md](docs/ops/product-reality-and-priority.md)
+- Current workstream truth:
+  [docs/ops/current-workstream-truth-2026-07-06.md](docs/ops/current-workstream-truth-2026-07-06.md)
 - Feature/objective matrix: [docs/ops/feature-objective-matrix-2026-05-09.md](docs/ops/feature-objective-matrix-2026-05-09.md)
 - Next fleet parity sprint: [docs/ops/fleet-parity-sprint-plan-2026-05-09.md](docs/ops/fleet-parity-sprint-plan-2026-05-09.md)
 - Lazy traversal QA matrix: [docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md](docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md)
@@ -92,6 +94,9 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
   in-progress state is PROVEN (2026-06-09), evidence
   `docs/release/evidence/repo-roam-canary-20260609/`. See
   [Roam an in-progress repo across machines](#roam-an-in-progress-repo-across-machines).
+- Build substrate rule: do not use `neo` for heavy local builds. Use remote CI
+  or the fleet build substrate; PZM/Nix offload is tactical, while the durable
+  direction is the GloriousFlywheel/RBE/Darwin substrate lane.
 
 ## Roam an in-progress repo across machines
 
