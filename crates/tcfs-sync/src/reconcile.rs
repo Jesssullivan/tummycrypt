@@ -921,11 +921,7 @@ fn loser_guard_ref_target(local_root: &Path, rel_path: &str) -> Option<LoserGuar
         }
         if let Some(module_subpath) = module_tail_raw_head(module_tail) {
             let git_dir = git_root.join("modules").join(module_subpath);
-            if std::fs::read(git_dir.join("HEAD"))
-                .ok()
-                .and_then(|bytes| git_safety::parse_ref_sha(&bytes))
-                .is_some()
-            {
+            if git_dir.join("HEAD").exists() {
                 return Some(LoserGuardTarget::Ref {
                     git_dir,
                     repo_root,
@@ -4600,6 +4596,50 @@ mod tests {
                 .unwrap()
                 .starts_with("ref:"),
             "symbolic HEAD must not be raw-overwritten into detached HEAD"
+        );
+    }
+
+    #[tokio::test]
+    async fn loser_guard_defers_symbolic_submodule_head_to_detached_head_pull() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let incoming = commit_file(&repo, "file.txt", "base", "base");
+        let submodule_git_dir = repo.join(".git/modules/dep");
+        std::fs::create_dir_all(submodule_git_dir.join("objects")).unwrap();
+        std::fs::write(submodule_git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+
+        let rel_path = "repo/.git/modules/dep/HEAD";
+        let manifest_hash = upload_blob(
+            &op,
+            local_root,
+            "remote-submodule-detached-head",
+            format!("{incoming}\n").as_bytes(),
+            rel_path,
+        )
+        .await;
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let plan = plan_of(vec![ReconcileAction::Pull {
+            rel_path: rel_path.to_string(),
+            manifest_hash,
+            size: 41,
+            reason: PullReason::RemoteNewer,
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deferred_git_refs, vec![rel_path.to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(submodule_git_dir.join("HEAD")).unwrap(),
+            "ref: refs/heads/main\n",
+            "symbolic submodule HEAD must not be raw-overwritten into detached HEAD"
         );
     }
 
