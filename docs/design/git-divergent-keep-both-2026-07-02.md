@@ -1,6 +1,7 @@
 # Divergent `.git` keep-both: operator resolution for genuinely diverged repos
 
-- **Status:** DRAFT — pending operator review
+- **Status:** Design-of-record — PR-1 through PR-4 are merged; live divergent
+  fleet canary pending deploy
 - **Date:** 2026-07-02
 - **Code baseline:** all `file:line` references verified at `origin/main` `c40f075` (#513 merged)
 - **Predecessors:** #513 (`.git`-aware FF conflict resolution), #506 harness
@@ -524,8 +525,8 @@ ordinary files.
 
 ## Implementation status (updated 2026-07-05)
 
-This design is now the design-of-record; PR-1 through PR-3 are merged, and PR-4
-is in remote-CI validation.
+This design is now the design-of-record; PR-1 through PR-4 are merged. The
+remaining work is fleet deploy plus the live divergent keep-both canary.
 
 | Rung | PR | Merge commit | Status |
 |------|----|--------------|--------|
@@ -533,18 +534,15 @@ is in remote-CI validation.
 | (hardening) — fence paths + persistence | #527 | `449846e` | ✅ merged |
 | **PR-2** — executor hard-respects a foreign `.git/tcfs.lock`; `ConflictInfo.remote_manifest_key` | #528 | `1e41a23` | ✅ merged |
 | **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, **operator-CLI-only** (MCP/auto excluded via the `operator_cli` provenance gate) | #529 | `831d363b` | ✅ merged |
-| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live) | #534 | draft branch | 🟡 draft PR / remote CI + G5-git-13 harness |
+| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live after deploy/canary) | #534 | `4c61da4` | ✅ merged |
 
-**PR-4 is the only remaining rung** and is no longer framed as blocked on PZM
-hardware: the PZM SSD/RWX path re-enumerated and verified clean. Builder
-transport hardening (`ssh-ng://` Determinate Nix vs `ssh://`/serve-style or
-GF/remote-cache execution) remains a separate TIN-1620/#524 operational lane.
-The remaining PR-4 gate is ordinary code validation + fleet deploy: #534 must
-pass remote CI, land, deploy to both hosts, then run the two-machine live
-convergence canary. Until that lands + canary runs, the honest claim is:
+**PR-4 is merged, not live-proven.** The remaining gate is deploy + canary:
+builds must not run locally on neo, and PZM cannot be used for TCFS offload
+until lab's PZM directory-health/Nix-context/denial-log/remote-builder verifier
+passes again. Until deploy + canary run, the honest claim is:
 **divergent `.git` conflicts are safely fenced, visible (`tcfs conflicts`), and
 operator-resolvable (`tcfs resolve … --execute`), but the two-machine
-live-convergence proof (G5-git-5 T10/T11 green) is pending PR-4 deployment.**
+live-convergence proof (G5-git-5 T10/T11 green) is pending.**
 
 **Ratified operator §6 answers (2026-07-05):** parking namespace default = `refs/tcfs/theirs/**` (not real branches); bare `keep-local`/`keep-remote` = omitted (park-first only); dirty-tree = hard refuse; ticket routing = new ticket for the verb + TIN-1549 keeps the `tcfs conflicts`/banner UX surface. Bundle retention and escalation cadence remain open (non-blocking; PR-4-adjacent).
 

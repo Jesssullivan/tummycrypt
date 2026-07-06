@@ -2,8 +2,10 @@
 
 > Under active development. Not yet stable. Expect breaking changes.
 
-Current release: `v0.12.14` (tagged); `v0.12.15` is pending on `main`. The
-Homebrew tap is stale at `0.12.12` and that formula skips symlinks.
+Current release: `v0.12.14` (tagged); workspace `main` is `0.12.16` and carries
+the merged `.git` fast-forward and divergent keep-both code paths, but the
+post-PR-4 divergent keep-both fleet deploy/canary is still pending. The Homebrew
+tap is stale at `0.12.12` and that formula skips symlinks.
 
 Self-hosted encrypted file sync with on-demand hydration. The Linux FUSE mounted
 view is host-proven for clean-name traversal, hydrate-on-open, mounted
