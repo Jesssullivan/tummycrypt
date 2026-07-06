@@ -2186,19 +2186,122 @@ pub async fn execute_plan(
             ReconcileAction::DeleteLocal {
                 local_path,
                 rel_path,
-            } => match tokio::fs::remove_file(local_path).await {
-                Ok(()) => {
-                    state.remove(local_path);
-                    result.deleted_local += 1;
+            } => {
+                if is_git_ref_class_path(rel_path) {
+                    match loser_guard_ref_target(local_root, rel_path) {
+                        Some(LoserGuardTarget::PackedRefs { .. }) => {
+                            warn!(
+                                path = %rel_path,
+                                "loser-guard: packed-refs delete is opaque; deferring local delete"
+                            );
+                            result.deferred_git_refs.push(rel_path.clone());
+                            continue;
+                        }
+                        Some(LoserGuardTarget::Ref {
+                            git_dir,
+                            repo_root,
+                            ref_name,
+                            parkable,
+                        }) => {
+                            if !parkable {
+                                warn!(
+                                    path = %rel_path,
+                                    r#ref = %ref_name,
+                                    "loser-guard: non-parkable ref delete would orphan committed work; deferring local delete"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            }
+                            let Some(current) = git_dir_ref_sha(&git_dir, &ref_name) else {
+                                warn!(
+                                    path = %rel_path,
+                                    r#ref = %ref_name,
+                                    "loser-guard: local ref delete target is unresolved; deferring local delete"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            };
+                            let Some(park_ref) =
+                                conflict_git::theirs_ref_name(device_id, &ref_name)
+                            else {
+                                warn!(
+                                    path = %rel_path,
+                                    r#ref = %ref_name,
+                                    "loser-guard: no safe park ref namespace; deferring local delete"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            };
+                            let bundle = match conflict_git::write_undo_bundle(
+                                &repo_root,
+                                &undo_state_dir,
+                            ) {
+                                Ok(bundle) => bundle,
+                                Err(e) => {
+                                    warn!(
+                                        path = %rel_path,
+                                        error = %format!("{e:#}"),
+                                        "loser-guard: pre-delete bundle failed; deferring local delete"
+                                    );
+                                    result.deferred_git_refs.push(rel_path.clone());
+                                    continue;
+                                }
+                            };
+                            let parked_ref = match conflict_git::park_ref_create_only(
+                                &repo_root, &park_ref, &current,
+                            ) {
+                                Ok(parked_ref) => parked_ref,
+                                Err(e) => {
+                                    warn!(
+                                        path = %rel_path,
+                                        error = %format!("{e:#}"),
+                                        "loser-guard: pre-delete park failed; deferring local delete"
+                                    );
+                                    result.deferred_git_refs.push(rel_path.clone());
+                                    continue;
+                                }
+                            };
+                            info!(
+                                path = %rel_path,
+                                r#ref = %ref_name,
+                                parked = %parked_ref,
+                                orphaned_sha = %current,
+                                bundle = %bundle.display(),
+                                "loser-guard: bundled pre-delete .git + parked local ref; applying local delete"
+                            );
+                        }
+                        None => {
+                            warn!(
+                                path = %rel_path,
+                                "loser-guard: unclassified ref-class delete; deferring local delete"
+                            );
+                            result.deferred_git_refs.push(rel_path.clone());
+                            continue;
+                        }
+                    }
                 }
-                Err(e) => {
-                    result
-                        .errors
-                        .push((rel_path.clone(), format!("local delete failed: {e}")));
+                match tokio::fs::remove_file(local_path).await {
+                    Ok(()) => {
+                        state.remove(local_path);
+                        result.deleted_local += 1;
+                    }
+                    Err(e) => {
+                        result
+                            .errors
+                            .push((rel_path.clone(), format!("local delete failed: {e}")));
+                    }
                 }
-            },
+            }
 
             ReconcileAction::DeleteRemote { rel_path } => {
+                if is_git_ref_class_path(rel_path) {
+                    warn!(
+                        path = %rel_path,
+                        "git guard: remote ref-class delete cannot be parked locally; deferring remote delete"
+                    );
+                    result.deferred_git_refs.push(rel_path.clone());
+                    continue;
+                }
                 if let Err(e) =
                     engine::delete_remote_file(op, rel_path, remote_prefix, state, Some(local_root))
                         .await
@@ -3923,6 +4026,133 @@ mod tests {
             "submodule packed-refs is opaque and must defer on byte differences"
         );
         assert_eq!(std::fs::read(&packed).unwrap(), local_bytes.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn loser_guard_parks_branch_before_local_delete() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let side = commit_file(&repo, "file.txt", "side work", "side");
+        git_safety::run_git(&repo, &["branch", "side", &side]).unwrap();
+
+        let rel_path = "repo/.git/refs/heads/side";
+        let local_path = local_root.join(rel_path);
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let plan = plan_of(vec![ReconcileAction::DeleteLocal {
+            local_path: local_path.clone(),
+            rel_path: rel_path.to_string(),
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.deferred_git_refs.is_empty(), "{result:?}");
+        assert_eq!(result.deleted_local, 1);
+        assert!(!local_path.exists(), "the loose branch ref was deleted");
+        assert_eq!(
+            git_safety::local_ref_sha(&repo, "refs/tcfs/theirs/neo/heads/side").as_deref(),
+            Some(side.as_str()),
+            "local branch tip remains reachable before delete"
+        );
+        assert!(
+            state_path.parent().unwrap().join("keep-both-undo").exists(),
+            "pre-delete undo bundle lives under the state dir"
+        );
+        git_safety::run_git(&repo, &["fsck", "--full"]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn loser_guard_defers_non_head_ref_local_delete() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let tagged = commit_file(&repo, "file.txt", "tagged work", "tagged");
+        git_safety::run_git(&repo, &["tag", "v1", &tagged]).unwrap();
+
+        let rel_path = "repo/.git/refs/tags/v1";
+        let local_path = local_root.join(rel_path);
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let plan = plan_of(vec![ReconcileAction::DeleteLocal {
+            local_path: local_path.clone(),
+            rel_path: rel_path.to_string(),
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deferred_git_refs, vec![rel_path.to_string()]);
+        assert_eq!(
+            git_safety::local_ref_sha(&repo, "refs/tags/v1").as_deref(),
+            Some(tagged.as_str())
+        );
+        assert!(local_path.exists(), "non-parkable ref delete must defer");
+    }
+
+    #[tokio::test]
+    async fn loser_guard_defers_packed_refs_local_delete() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let head = commit_file(&repo, "file.txt", "base", "base");
+        let rel_path = "repo/.git/packed-refs";
+        let local_path = local_root.join(rel_path);
+        let packed_bytes =
+            format!("# pack-refs with: peeled fully-peeled sorted\n{head} refs/heads/main\n");
+        std::fs::write(&local_path, packed_bytes.as_bytes()).unwrap();
+
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let plan = plan_of(vec![ReconcileAction::DeleteLocal {
+            local_path: local_path.clone(),
+            rel_path: rel_path.to_string(),
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deferred_git_refs, vec![rel_path.to_string()]);
+        assert_eq!(std::fs::read(&local_path).unwrap(), packed_bytes.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn git_ref_class_remote_delete_defers() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let plan = plan_of(vec![ReconcileAction::DeleteRemote {
+            rel_path: rel_path.to_string(),
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deferred_git_refs, vec![rel_path.to_string()]);
+        assert_eq!(result.deleted_remote, 0);
+        assert!(result.errors.is_empty(), "{result:?}");
     }
 
     // ── keep-both PR-2 (S3): executor hard-respects a foreign `.git/tcfs.lock` ──

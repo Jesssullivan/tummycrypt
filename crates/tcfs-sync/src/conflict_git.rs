@@ -510,10 +510,18 @@ fn available_park_ref(repo_root: &Path, park_ref: &str, remote_sha: &str) -> Res
         if existing == remote_sha {
             return Ok(park_ref.to_string());
         }
-        let suffix_len = remote_sha.len().min(12);
-        let suffixed = format!("{park_ref}-{}", &remote_sha[..suffix_len]);
-        ensure_selected_park_ref_available(repo_root, &suffixed, remote_sha)?;
-        return Ok(suffixed);
+        let min_suffix_len = remote_sha.len().min(12);
+        for suffix_len in min_suffix_len..=remote_sha.len() {
+            let suffixed = format!("{park_ref}-{}", &remote_sha[..suffix_len]);
+            match git_safety::local_ref_sha(repo_root, &suffixed) {
+                Some(existing) if existing == remote_sha => return Ok(suffixed),
+                Some(_) => continue,
+                None => return Ok(suffixed),
+            }
+        }
+        bail!(
+            "no available park ref for {remote_sha}: base {park_ref} and every SHA-prefixed suffix are occupied"
+        );
     }
     Ok(park_ref.to_string())
 }
@@ -752,6 +760,46 @@ mod tests {
             selected
         );
         assert_eq!(git_safety::local_ref_sha(&repo, park_ref), Some(first));
+        assert_eq!(git_safety::local_ref_sha(&repo, &selected), Some(second));
+    }
+
+    #[test]
+    fn occupied_sha12_suffix_widens_until_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_safety::run_git(&repo, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.name", "TCFS Test"]).unwrap();
+        std::fs::write(repo.join("file.txt"), b"one").unwrap();
+        git_safety::run_git(&repo, &["add", "file.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "one", "--quiet"]).unwrap();
+        let first = git_safety::local_ref_sha(&repo, "HEAD").unwrap();
+        std::fs::write(repo.join("file.txt"), b"two").unwrap();
+        git_safety::run_git(&repo, &["add", "file.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "two", "--quiet"]).unwrap();
+        let second = git_safety::local_ref_sha(&repo, "HEAD").unwrap();
+        std::fs::write(repo.join("file.txt"), b"three").unwrap();
+        git_safety::run_git(&repo, &["add", "file.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "three", "--quiet"]).unwrap();
+        let third = git_safety::local_ref_sha(&repo, "HEAD").unwrap();
+
+        let park_ref = "refs/tcfs/theirs/honey/heads/main";
+        let sha12_ref = format!("{park_ref}-{}", &second[..12]);
+        git_safety::run_git(&repo, &["update-ref", park_ref, &first]).unwrap();
+        git_safety::run_git(&repo, &["update-ref", &sha12_ref, &third]).unwrap();
+
+        let selected = available_park_ref(&repo, park_ref, &second).unwrap();
+        assert_eq!(
+            selected,
+            format!("refs/tcfs/theirs/honey/heads/main-{}", &second[..13])
+        );
+        assert_eq!(
+            park_ref_create_only(&repo, park_ref, &second).unwrap(),
+            selected
+        );
+        assert_eq!(git_safety::local_ref_sha(&repo, park_ref), Some(first));
+        assert_eq!(git_safety::local_ref_sha(&repo, &sha12_ref), Some(third));
         assert_eq!(git_safety::local_ref_sha(&repo, &selected), Some(second));
     }
 
