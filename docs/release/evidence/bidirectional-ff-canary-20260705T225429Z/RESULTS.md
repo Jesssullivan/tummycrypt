@@ -8,7 +8,10 @@ via #513's fast-forward resolver where the 2026-06-09 canary stalled at 5 confli
 - neo: macOS, tcfs 0.12.16 (hm gen 417), reconcile invokes tcfs-cli-0.12.16 (lab pin 19ae294 ⊇ #513/c40f075)
 - honey: Rocky 10, tcfs 0.12.16
 - Both hosts on #513 FF resolution; raw `.git`-as-files (sync_git_dirs=true, git_sync_mode=raw); disposable prefix `git-roam/bidi-ff-*`
-- PZM aarch64-darwin builder recovered same day (TCC-prompt clear + reboot restored SSH-context /nix access; forced offload build verified).
+- PZM aarch64-darwin builder evidence from this day is superseded by later
+  2026-07-06 lab probes: Finder/APFS can look healthy while SSH directory
+  health still times out and System Policy/FDA denies shell/Nix-store paths.
+  Do not use this packet as current PZM builder acceptance.
 
 ## Result — both directions converge, zero conflicts
 | Step | Action | Outcome |
@@ -30,5 +33,7 @@ here in BOTH directions on the deployed fleet: **"the machine doesn't matter" �
 commit on either host, resume on the other, byte-exact + fsck-clean, zero manual
 intervention.**
 
-Remaining: divergent (non-FF) keep-both = PR-3 (#529) merged, PR-4 (loser-guard)
-is the last rung. This canary is the FF acceptance (harness G5-git-9/-11 class).
+Remaining: divergent (non-FF) keep-both code is merged through PR-4 (#534), but
+the post-PR-4 fleet deploy and divergent live canary are still pending. This
+packet remains the FF acceptance (harness G5-git-9/-11 class), not the divergent
+T10/T11 proof.

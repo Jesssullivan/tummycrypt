@@ -11,8 +11,9 @@ Nix, or Darwin validation, use remote CI or the repo/fleet build substrate.
 
 `petting-zoo-mini` may be useful as a bounded Darwin lab endpoint, but it is
 not the durable answer to `neo` build pressure. The durable direction is the
-GloriousFlywheel/RBE/Darwin substrate lane. Nix offload to PZM is tactical and
-must fail loud when unavailable.
+GloriousFlywheel/RBE/Darwin substrate lane. Nix offload to PZM is tactical, must
+fail loud when unavailable, and is currently not accepted for TCFS deploy work
+until the lab verifier says it is healthy again.
 
 ## Keep-Both / Repo Roam
 
@@ -39,19 +40,17 @@ divergent two-machine G5-git-13/T10/T11 convergence row green.
 
 ## PZM / TCC / SSD
 
-The PZM external SSD is not the current proof blocker when directory-health and
-transport checks are green. Recent observed healthy shape:
+The PZM external SSD is healthy at the block/APFS/Finder layer, but that is not
+enough for TCFS offload. Current lab probes show SSH child enumeration still
+times out under `/nix` and `/Volumes/TinylandSSD/tinyland`, and denial logs show
+System Policy/FDA decisions involving shell and Nix-store paths. Finder access
+is useful evidence, but it does not prove launchd, SSH, Nix/dyld, runner,
+daemon, or remote-builder contexts.
 
-- TinylandSSD and `/nix` are APFS volumes on the external SSD container.
-- Directory traversal over SSH completes for `/Volumes/TinylandSSD` and the
-  Tinyland-owned subtree.
-- The ASM236X enclosure enumerates at 10Gbps.
-
-The remaining PZM risk is context-specific macOS policy, not basic SSD
-enumeration: TCC/PPPC/FDA, launchd execution, Nix/profile/dyld reads, code
-identity, and the exposed become password rotation. Finder access is useful
-evidence, but it does not prove launchd, SSH, or Nix-store dynamic execution
-contexts.
+Before any TCFS deploy uses PZM again, lab must pass the read-only recovery
+gate: directory-health, Nix execution-context probes, denial-log check, and
+`just nix-remote-builder-verify --live --strict`. Keep `TIN-2521`
+become-password rotation separate and required.
 
 ## Per-Device Crypto
 
