@@ -18,7 +18,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::blacklist::Blacklist;
-use crate::conflict::{compare_clocks, ConflictInfo};
+use crate::conflict::{compare_clocks, ConflictInfo, VectorClock};
 use crate::conflict_git;
 use crate::engine::{self, OptionalEncryption, ProgressFn};
 use crate::git_safety;
@@ -1031,6 +1031,50 @@ fn git_dir_commit_present(git_dir: &Path, sha: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn zero_oid_like(oid: &str) -> String {
+    "0".repeat(oid.len())
+}
+
+fn git_dir_update_ref_cas(
+    git_dir: &Path,
+    ref_name: &str,
+    new_sha: &str,
+    expected_old: Option<&str>,
+) -> Result<()> {
+    let expected = expected_old
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| zero_oid_like(new_sha));
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["update-ref", ref_name, new_sha, &expected])
+        .output()
+        .with_context(|| format!("running git update-ref for {ref_name}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git update-ref CAS failed for {ref_name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn git_dir_delete_ref_cas(git_dir: &Path, ref_name: &str, expected_old: &str) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["update-ref", "-d", ref_name, expected_old])
+        .output()
+        .with_context(|| format!("running git update-ref -d for {ref_name}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git update-ref delete CAS failed for {ref_name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
 /// Outcome of acquiring cooperative `.git/tcfs.lock` guards for a plan.
 ///
 /// keep-both PR-2 (S3): the executor no longer proceeds unconditionally when a
@@ -1655,6 +1699,52 @@ async fn download_bytes_from_manifest(
     bytes
 }
 
+async fn read_sync_manifest_for_state(
+    op: &Operator,
+    remote_prefix: &str,
+    manifest_hash: &str,
+) -> Option<(String, SyncManifest)> {
+    let manifest_path = format!(
+        "{}/manifests/{}",
+        remote_prefix.trim_end_matches('/'),
+        manifest_hash
+    );
+    let manifest_bytes = op.read(&manifest_path).await.ok()?;
+    SyncManifest::from_bytes(&manifest_bytes.to_vec())
+        .ok()
+        .map(|manifest| (manifest_path, manifest))
+}
+
+async fn record_guarded_ref_pull_state(
+    op: &Operator,
+    remote_prefix: &str,
+    manifest_hash: &str,
+    local_path: &Path,
+    incoming_bytes: &[u8],
+    state: &mut StateCache,
+    device_id: &str,
+) -> Result<()> {
+    let (manifest_path, manifest) = read_sync_manifest_for_state(op, remote_prefix, manifest_hash)
+        .await
+        .context("reading pulled ref manifest for state")?;
+    let mut local_vclock = state
+        .get(local_path)
+        .map(|s| s.vclock.clone())
+        .unwrap_or_else(VectorClock::new);
+    local_vclock.merge(&manifest.vclock);
+    let hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(incoming_bytes));
+    let sync_state = crate::state::make_sync_state_full(
+        local_path,
+        hash,
+        manifest.chunk_hashes().len(),
+        manifest_path,
+        local_vclock,
+        device_id.to_string(),
+    )?;
+    state.set(local_path, sync_state);
+    Ok(())
+}
+
 /// True if a repo-relative path lies inside a `.git` directory.
 fn is_git_internal_path(rel_path: &str) -> bool {
     rel_path == ".git"
@@ -2047,113 +2137,151 @@ pub async fn execute_plan(
                             ref_name,
                             parkable,
                         } => {
-                            if let Some(current) = git_dir_ref_sha(&git_dir, &ref_name) {
-                                match download_ref_sha_from_manifest(
-                                    op,
-                                    remote_prefix,
-                                    manifest_hash,
-                                    encryption,
-                                )
-                                .await
+                            let incoming_bytes = match download_bytes_from_manifest(
+                                op,
+                                remote_prefix,
+                                manifest_hash,
+                                encryption,
+                            )
+                            .await
+                            {
+                                Some(bytes) => bytes,
+                                None => {
+                                    warn!(
+                                        path = %rel_path,
+                                        "loser-guard: incoming ref blob unreadable; deferring pull"
+                                    );
+                                    result.deferred_git_refs.push(rel_path.clone());
+                                    continue;
+                                }
+                            };
+                            let Some(incoming) = git_safety::parse_ref_sha(&incoming_bytes) else {
+                                warn!(
+                                    path = %rel_path,
+                                    "loser-guard: incoming ref SHA unreadable; deferring pull"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            };
+                            if !git_dir_commit_present(&git_dir, &incoming) {
+                                warn!(
+                                    path = %rel_path,
+                                    incoming = %incoming,
+                                    "loser-guard: incoming ref object missing; deferring pull"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            }
+
+                            let current = git_dir_ref_sha(&git_dir, &ref_name);
+                            let mut parked: Option<(String, String, PathBuf)> = None;
+                            if let Some(current_sha) = current.as_deref() {
+                                if current_sha != incoming
+                                    && !git_dir_is_ancestor(&git_dir, current_sha, &incoming)
                                 {
-                                    Some(incoming)
-                                        if !git_dir_commit_present(&git_dir, &incoming) =>
-                                    {
+                                    // Non-ancestor overwrite: committed work at
+                                    // `current_sha` is not reachable from
+                                    // `incoming`.
+                                    if !parkable {
                                         warn!(
                                             path = %rel_path,
-                                            incoming = %incoming,
-                                            "loser-guard: incoming ref object missing; deferring pull"
+                                            r#ref = %ref_name,
+                                            "loser-guard: non-parkable module head would be orphaned; deferring pull"
                                         );
                                         result.deferred_git_refs.push(rel_path.clone());
                                         continue;
                                     }
-                                    Some(incoming)
-                                        if current != incoming
-                                            && !git_dir_is_ancestor(
-                                                &git_dir, &current, &incoming,
-                                            ) =>
-                                    {
-                                        // Non-ancestor overwrite: committed
-                                        // work at `current` is not reachable
-                                        // from `incoming`.
-                                        if !parkable {
+                                    let Some(park_ref) =
+                                        conflict_git::theirs_ref_name(device_id, &ref_name)
+                                    else {
+                                        warn!(
+                                            path = %rel_path,
+                                            r#ref = %ref_name,
+                                            "loser-guard: no safe park ref namespace; deferring pull"
+                                        );
+                                        result.deferred_git_refs.push(rel_path.clone());
+                                        continue;
+                                    };
+                                    let bundle = match conflict_git::write_undo_bundle(
+                                        &repo_root,
+                                        &undo_state_dir,
+                                    ) {
+                                        Ok(bundle) => bundle,
+                                        Err(e) => {
                                             warn!(
                                                 path = %rel_path,
-                                                r#ref = %ref_name,
-                                                "loser-guard: non-parkable module head would be orphaned; deferring pull"
+                                                error = %format!("{e:#}"),
+                                                "loser-guard: pre-overwrite bundle failed; deferring pull"
                                             );
                                             result.deferred_git_refs.push(rel_path.clone());
                                             continue;
                                         }
-                                        let Some(park_ref) =
-                                            conflict_git::theirs_ref_name(device_id, &ref_name)
-                                        else {
+                                    };
+                                    let parked_ref = match conflict_git::park_ref_create_only(
+                                        &repo_root,
+                                        &park_ref,
+                                        current_sha,
+                                    ) {
+                                        Ok(parked_ref) => parked_ref,
+                                        Err(e) => {
                                             warn!(
                                                 path = %rel_path,
-                                                r#ref = %ref_name,
-                                                "loser-guard: no safe park ref namespace; deferring pull"
+                                                error = %format!("{e:#}"),
+                                                "loser-guard: park failed; deferring pull"
                                             );
                                             result.deferred_git_refs.push(rel_path.clone());
                                             continue;
-                                        };
-                                        let bundle = match conflict_git::write_undo_bundle(
-                                            &repo_root,
-                                            &undo_state_dir,
-                                        ) {
-                                            Ok(bundle) => bundle,
-                                            Err(e) => {
-                                                warn!(
-                                                    path = %rel_path,
-                                                    error = %format!("{e:#}"),
-                                                    "loser-guard: pre-overwrite bundle failed; deferring pull"
-                                                );
-                                                result.deferred_git_refs.push(rel_path.clone());
-                                                continue;
-                                            }
-                                        };
-                                        let parked_ref = match conflict_git::park_ref_create_only(
-                                            &repo_root, &park_ref, &current,
-                                        ) {
-                                            Ok(parked_ref) => parked_ref,
-                                            Err(e) => {
-                                                warn!(
-                                                    path = %rel_path,
-                                                    error = %format!("{e:#}"),
-                                                    "loser-guard: park failed; deferring pull"
-                                                );
-                                                result.deferred_git_refs.push(rel_path.clone());
-                                                continue;
-                                            }
-                                        };
-                                        info!(
-                                            path = %rel_path,
-                                            r#ref = %ref_name,
-                                            parked = %parked_ref,
-                                            orphaned_sha = %current,
-                                            bundle = %bundle.display(),
-                                            "loser-guard: bundled pre-overwrite .git + parked local head; applying pull"
-                                        );
-                                        // fall through: overwrite is now no-loss.
-                                    }
-                                    Some(_) => {
-                                        // Equal or fast-forward: no committed
-                                        // work lost.
-                                    }
-                                    None => {
-                                        // Incoming SHA unreadable (download
-                                        // failed / symbolic ref): cannot prove
-                                        // the overwrite is safe, so DEFER.
-                                        warn!(
-                                            path = %rel_path,
-                                            "loser-guard: incoming ref SHA unreadable; deferring pull"
-                                        );
-                                        result.deferred_git_refs.push(rel_path.clone());
-                                        continue;
-                                    }
+                                        }
+                                    };
+                                    parked = Some((parked_ref, current_sha.to_string(), bundle));
                                 }
                             }
-                            // current == None: the local ref does not exist
-                            // yet, so there is no committed work to orphan.
+
+                            if let Err(e) = git_dir_update_ref_cas(
+                                &git_dir,
+                                &ref_name,
+                                &incoming,
+                                current.as_deref(),
+                            ) {
+                                warn!(
+                                    path = %rel_path,
+                                    r#ref = %ref_name,
+                                    error = %format!("{e:#}"),
+                                    "loser-guard: ref moved before CAS update; deferring pull"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            }
+                            if let Err(e) = record_guarded_ref_pull_state(
+                                op,
+                                remote_prefix,
+                                manifest_hash,
+                                &local_path,
+                                &incoming_bytes,
+                                state,
+                                device_id,
+                            )
+                            .await
+                            {
+                                result.errors.push((
+                                    rel_path.clone(),
+                                    format!("guarded ref pull state update failed: {e:#}"),
+                                ));
+                                continue;
+                            }
+                            if let Some((parked_ref, orphaned_sha, bundle)) = parked {
+                                info!(
+                                    path = %rel_path,
+                                    r#ref = %ref_name,
+                                    parked = %parked_ref,
+                                    orphaned_sha = %orphaned_sha,
+                                    bundle = %bundle.display(),
+                                    "loser-guard: bundled pre-overwrite .git + parked local head; applied CAS ref pull"
+                                );
+                            }
+                            result.pulled += 1;
+                            result.bytes_downloaded += incoming_bytes.len() as u64;
+                            continue;
                         }
                     }
                 }
@@ -2267,8 +2395,21 @@ pub async fn execute_plan(
                                 parked = %parked_ref,
                                 orphaned_sha = %current,
                                 bundle = %bundle.display(),
-                                "loser-guard: bundled pre-delete .git + parked local ref; applying local delete"
+                                "loser-guard: bundled pre-delete .git + parked local ref; applying CAS local delete"
                             );
+                            if let Err(e) = git_dir_delete_ref_cas(&git_dir, &ref_name, &current) {
+                                warn!(
+                                    path = %rel_path,
+                                    r#ref = %ref_name,
+                                    error = %format!("{e:#}"),
+                                    "loser-guard: ref moved before CAS delete; deferring local delete"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            }
+                            state.remove(local_path);
+                            result.deleted_local += 1;
+                            continue;
                         }
                         None => {
                             warn!(
@@ -4130,6 +4271,92 @@ mod tests {
 
         assert_eq!(result.deferred_git_refs, vec![rel_path.to_string()]);
         assert_eq!(std::fs::read(&local_path).unwrap(), packed_bytes.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn loser_guard_defers_new_ref_when_incoming_object_missing() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        commit_file(&repo, "file.txt", "base", "base");
+
+        let missing = "0123456789abcdef0123456789abcdef01234567";
+        let rel_path = "repo/.git/refs/heads/missing";
+        let manifest_hash = upload_blob(
+            &op,
+            local_root,
+            "remote-missing-ref",
+            format!("{missing}\n").as_bytes(),
+            rel_path,
+        )
+        .await;
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let plan = plan_of(vec![ReconcileAction::Pull {
+            rel_path: rel_path.to_string(),
+            manifest_hash,
+            size: 41,
+            reason: PullReason::NewRemote,
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.deferred_git_refs,
+            vec![rel_path.to_string()],
+            "new local refs still need a present incoming commit object"
+        );
+        assert_eq!(result.pulled, 0);
+        assert!(git_safety::local_ref_sha(&repo, "refs/heads/missing").is_none());
+    }
+
+    #[test]
+    fn guarded_ref_pull_cas_rejects_moved_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let base = commit_file(&repo, "file.txt", "base", "base");
+        git_safety::run_git(&repo, &["checkout", "--quiet", "-b", "incoming", &base]).unwrap();
+        let incoming = commit_file(&repo, "file.txt", "incoming", "incoming");
+        git_safety::run_git(&repo, &["checkout", "--quiet", "main"]).unwrap();
+        let local = commit_file(&repo, "file.txt", "local", "local");
+
+        let err = git_dir_update_ref_cas(
+            &repo.join(".git"),
+            "refs/heads/main",
+            &incoming,
+            Some(&base),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("CAS failed"));
+        assert_eq!(
+            git_safety::local_ref_sha(&repo, "refs/heads/main").as_deref(),
+            Some(local.as_str())
+        );
+    }
+
+    #[test]
+    fn guarded_ref_delete_cas_rejects_moved_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let base = commit_file(&repo, "file.txt", "base", "base");
+        git_safety::run_git(&repo, &["branch", "side", &base]).unwrap();
+        let local = commit_file(&repo, "file.txt", "local", "local");
+        git_safety::run_git(&repo, &["branch", "-f", "side", &local]).unwrap();
+
+        let err = git_dir_delete_ref_cas(&repo.join(".git"), "refs/heads/side", &base).unwrap_err();
+        assert!(err.to_string().contains("delete CAS failed"));
+        assert_eq!(
+            git_safety::local_ref_sha(&repo, "refs/heads/side").as_deref(),
+            Some(local.as_str())
+        );
     }
 
     #[tokio::test]
