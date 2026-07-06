@@ -1045,26 +1045,45 @@ fn git_dir_head_is_symbolic(git_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn packed_refs_shas(bytes: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+fn git_ref_name_valid(ref_name: &str) -> bool {
+    ref_name.starts_with("refs/")
+        && std::process::Command::new("git")
+            .args(["check-ref-format", ref_name])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+}
+
+fn packed_refs_valid_shas(bytes: &[u8]) -> Option<Vec<String>> {
+    let mut shas = Vec::new();
+    for line in String::from_utf8_lossy(bytes).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(peeled) = trimmed.strip_prefix('^') {
+            if peeled.split_whitespace().count() != 1 {
                 return None;
             }
-            let token = trimmed
-                .strip_prefix('^')
-                .unwrap_or(trimmed)
-                .split_whitespace()
-                .next()?;
-            git_safety::parse_ref_sha(token.as_bytes())
-        })
-        .collect()
+            shas.push(git_safety::parse_ref_sha(peeled.as_bytes())?);
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let sha = git_safety::parse_ref_sha(parts.next()?.as_bytes())?;
+        let ref_name = parts.next()?;
+        if parts.next().is_some() || !git_ref_name_valid(ref_name) {
+            return None;
+        }
+        shas.push(sha);
+    }
+    Some(shas)
 }
 
 fn packed_refs_objects_present(git_dir: &Path, bytes: &[u8]) -> bool {
-    let shas = packed_refs_shas(bytes);
+    let Some(shas) = packed_refs_valid_shas(bytes) else {
+        return false;
+    };
     !shas.is_empty() && shas.iter().all(|sha| git_dir_object_present(git_dir, sha))
 }
 
@@ -4683,6 +4702,47 @@ mod tests {
         assert!(
             !local_root.join(rel_path).exists(),
             "new packed-refs must not materialize before its objects are present"
+        );
+    }
+
+    #[tokio::test]
+    async fn loser_guard_defers_new_malformed_packed_refs_even_when_object_exists() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let head = commit_file(&repo, "file.txt", "base", "base");
+
+        let rel_path = "repo/.git/packed-refs";
+        let packed_bytes = format!("# pack-refs with: peeled fully-peeled sorted\n{head} HEAD\n");
+        let manifest_hash = upload_blob(
+            &op,
+            local_root,
+            "remote-packed-malformed",
+            packed_bytes.as_bytes(),
+            rel_path,
+        )
+        .await;
+        let state_path = dir.path().join("state/state.json");
+        let mut state = crate::state::StateCache::open(&state_path).unwrap();
+        let plan = plan_of(vec![ReconcileAction::Pull {
+            rel_path: rel_path.to_string(),
+            manifest_hash,
+            size: packed_bytes.len() as u64,
+            reason: PullReason::NewRemote,
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deferred_git_refs, vec![rel_path.to_string()]);
+        assert!(
+            !local_root.join(rel_path).exists(),
+            "new packed-refs must not materialize malformed refnames even when the object exists"
         );
     }
 
