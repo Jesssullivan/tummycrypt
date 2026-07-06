@@ -356,11 +356,11 @@ The live-repo packet must add five raw-mode `.git` rows (these are the
   fsck-clean, byte-exact repo (the R3 fingerprint compare proves this).
 - **G5-git-4 DIRTY-CHILD REFUSAL** — `tcfs unsync` with a dirty `.git` child
   refuses without `--force`; no partial dehydration (row T6).
-- **G5-git-5 CONCURRENT-WRITE CORRUPTION** — the per-file `.git` conflict interleave
-  under `conflict_mode=auto` MUST be detected by `git fsck` (invalid sha1 pointer).
-  **Until conflict resolution is made `.git`-aware, G5-git-5 is EXPECTED TO FAIL**
-  and stands as the corruption gate that must close before G5 can claim
-  concurrent-edit safety.
+- **G5-git-5 CONCURRENT-WRITE CORRUPTION** — historical red row for per-file
+  `.git` conflict interleaves under `conflict_mode=auto`. This row has been
+  superseded by the merged `.git`-aware FF and divergent keep-both stack (#513,
+  #529, #534). It is not green for fleet acceptance until a post-#534 deploy and
+  the live divergent keep-both canary prove no-loss behavior on two hosts.
 
 **Safe handoff rule:** the `tcfs unsync <repo>` flip-flop is the correct primitive —
 do not let two machines hold the same `.git` hydrated+writable at once. Quiesce git

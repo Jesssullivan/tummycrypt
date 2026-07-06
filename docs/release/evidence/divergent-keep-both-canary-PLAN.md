@@ -9,13 +9,9 @@
 
 ## 0. Grounding — what is actually true right now (read this first)
 
-This plan was drafted from a working tree on `facet6/dotgit-conflict-corruption-harness`,
-which is **70 commits behind `origin/main`** (merge-base `f9fb683`). Several source
-files this runbook depends on (the design doc, the harness script's Stage 6, the
-`tcfs conflicts`/`resolve` CLI surface, the loser-guard in `reconcile.rs`) only exist
-on `origin/main` — they were read via `git show origin/main:<path>`, not the local
-worktree. **Fetch/rebase this branch onto current `origin/main` before running any
-step below**, or run everything from a fresh `origin/main` checkout.
+This plan is maintained from current `origin/main`. Run it only from a fresh
+checkout that contains #513, #529, and #534, and after the lab/fleet deploy has
+installed a build newer than merge commit `4c61da4`.
 
 ### Surprises vs. the task brief
 
@@ -24,24 +20,20 @@ step below**, or run everything from a fresh `origin/main` checkout.
    (`tcfs: loser-side no-loss guard for git keep-both (TIN-2552)`). The brief's
    premise ("once merged...") is already satisfied on `origin/main` — what is
    **not** yet true is fleet deployment (see below).
-2. **`docs/ops/repo-roam-test-plan-2026-06-08.md` does not exist in this branch's
-   working tree** (only on `origin/main`, added at `f295748`). Its §7/T10/T11 rows
-   are quoted from `origin/main`'s copy in §1 below.
-3. **The FF canary evidence is not named `bidirectional-ff-canary-*` in the local
-   tree** — it's at `docs/release/evidence/bidirectional-ff-canary-20260705T225429Z/RESULTS.md`
-   on `origin/main` (not yet present locally). Its structure is mirrored in §5/§6.
-4. **`docs/ops/current-workstream-truth-2026-07-06.md` (origin/main, added same day
-   as #534 in PR #535) still describes PR-4 as "the active loser-side no-loss guard
-   work"** — i.e. the docs commit that's supposed to be the current operator
-   checkpoint is already one PR stale relative to `origin/main`'s own history. Trust
-   `gh pr view 534` over that prose.
-5. **Neither `tcfs resolve` nor `tcfs conflicts --json`'s CLI surface has the
+2. **The repo-roam test plan and FF canary evidence are now present on main.** Use
+   `docs/ops/repo-roam-test-plan-2026-06-08.md` for the G5/T10/T11 rows and
+   `docs/release/evidence/bidirectional-ff-canary-20260705T225429Z/RESULTS.md`
+   as the fast-forward baseline.
+3. **`docs/ops/current-workstream-truth-2026-07-06.md` is the current operator
+   checkpoint.** It says #534 is merged, but the fleet deployment and divergent
+   live canary are still pending.
+4. **Neither `tcfs resolve` nor `tcfs conflicts --json`'s CLI surface has the
    `--theirs-as-branch`, `--allow-dirty`, or `--restore-undo` flags** that
    `docs/design/git-divergent-keep-both-2026-07-02.md` describes as UX skin (§2.2,
    §2.3 step 10). Only `tcfs resolve <path> --strategy keep-both [--execute]` and
    `tcfs conflicts [--json] [--state <path>]` shipped. Undo restoration is a manual
    `git bundle` operation (§8 below), not a CLI flag.
-6. **Architectural gotcha (verified live, not in any doc): `tcfs resolve` talks
+5. **Architectural gotcha (verified live, not in any doc): `tcfs resolve` talks
    only to the running daemon over gRPC, and the daemon's `ResolveConflict`
    handler resolves against the daemon's OWN configured `sync.state_db`** — it does
    **not** accept a `--state` override (unlike `tcfs conflicts`, which does). The
@@ -57,14 +49,14 @@ step below**, or run everything from a fresh `origin/main` checkout.
    `sync.state_db` path** (§2), not an isolated file, or `tcfs resolve` will see
    zero conflicts and the whole canary silently no-ops. Verify this live with the
    dry-run sanity check in §4 before trusting `--execute`.
-7. **Fleet is on tcfs 0.12.16 on both hosts** (verified live: `tcfs --version` on
+6. **Fleet is on tcfs 0.12.16 on both hosts** (verified live: `tcfs --version` on
    neo and `ssh jess@honey 'tcfs --version'` both return `tcfs 0.12.16`) — matching
    the FF canary's fleet line. `Cargo.toml` on `origin/main` is **still** `0.12.16`
    (unreleased, no version bump yet for #534/#535), and the binary has no embedded
    build SHA (`tcfs --version` prints only the semver). **A version number alone
    cannot distinguish pre-#534 from post-#534 fleet builds** — see §0.1 for the
    actual check.
-8. Both hosts' deployed `config.toml` already have `sync.sync_git_dirs = true` and
+7. Both hosts' deployed `config.toml` already have `sync.sync_git_dirs = true` and
    `sync.git_sync_mode = "raw"` **globally** (verified: `cat ~/.config/tcfs/config.toml`
    on neo, `ssh jess@honey cat ~/.config/tcfs/config.toml` on honey). No config
    change is needed for raw `.git`-as-files mode.

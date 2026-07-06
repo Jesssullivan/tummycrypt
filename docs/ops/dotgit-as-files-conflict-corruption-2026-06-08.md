@@ -125,12 +125,11 @@ For `TIN-1620` / G5 the live-repo conflict and rollback proof must add, for
 - **G5-git-4 (dirty-child refusal incl. `.git`):** `tcfs unsync <repo>` with a
   dirty `.git` child (e.g. a fresh commit not yet synced) **refuses** without
   `--force`. No silent loss, no partial dehydration.
-- **G5-git-5 (concurrent-write corruption row):** the per-file `.git` conflict
-  interleave under `conflict_mode=auto` must be **detected** — `git fsck` reports
-  the half-applied ref. Until resolution is made `.git`-aware (resolve a repo's
-  `.git/*` as one unit, or fall back to bundle on `.git` conflict), this row is
-  expected to FAIL and stands as the corruption-risk gate that must be closed
-  before G5 can claim concurrent-edit safety.
+- **G5-git-5 (concurrent-write corruption row):** historical red row for per-file
+  `.git` conflict interleaves under `conflict_mode=auto`. The row is superseded
+  by the merged `.git`-aware FF and divergent keep-both stack (#513, #529, #534),
+  but fleet acceptance still requires a post-#534 deploy and live divergent
+  keep-both canary before claiming two-host concurrent-edit safety.
 
 ## Harness
 

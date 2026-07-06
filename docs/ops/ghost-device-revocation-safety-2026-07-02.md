@@ -39,7 +39,7 @@ FileProvider bring-up lanes and have no corresponding physical device.
 |---|---|
 | `master` (current fleet state) | **No cryptographic effect.** Content carries only the master wrap; every holder of the master key decrypts regardless of registry state. Revocation here is registry hygiene. |
 | `dual` (EXPAND) | Ghosts are dropped from every recipient set built after the local revoke (`active_devices()` filter); new `wrapped_file_keys` exclude them. Master wrap still present, so no read denial yet. |
-| `per_device` (CONTRACT) | True denial of NEW content. Historical content stays readable to any holder of previously-wrapped keys until `tcfs key rotate <prefix> --rotate-keys` (TIN-1899, landed). |
+| `per_device` (CONTRACT) | True denial of NEW content. Historical content stays readable to any holder of previously-wrapped keys until the fresh `tcfs key rotate <prefix> --rotate-keys` rebuild is implemented and proven under TIN-2551. Do not treat the closed #517 / TIN-1899 branch as landed production truth. |
 
 ## Why this is on the critical path anyway (the roll-call coupling)
 
