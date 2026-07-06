@@ -23,12 +23,18 @@ keep-both ladder is split:
   respects foreign `.git/tcfs.lock`, `tcfs conflicts` exists, and the
   operator-only repo keep-both resolver parks the peer side under
   `refs/tcfs/theirs/**`.
-- PR-4 is the active loser-side no-loss guard work: before a ref pull can
-  overwrite a divergent local branch, TCFS must park the old local head and keep
-  an undo bundle in the machine-local state dir. This is tracked by TIN-2552
-  and PR #534.
+- PR-4 (loser-side no-loss guard) is merged: #534 / commit 4c61da4, TIN-2552,
+  merged 2026-07-06. Before a ref pull overwrites a divergent local branch,
+  TCFS parks the old local head under `refs/tcfs/theirs/**` and keeps an undo
+  bundle in the machine-local state dir; the final overwrite is CAS-protected
+  via `git update-ref`. A 4-lens post-merge adversarial audit of the final
+  delta passed (no correctness defects; tests strengthened; three minor
+  follow-ups tracked in Linear).
 
-Until PR-4 is merged, deployed, and live-canary proven, do not claim the
+PR-4 is merged but NOT yet deployed (fleet runs v0.12.16, which predates it)
+and NOT live-canary proven. Until a post-4c61da4 build is deployed and the
+divergent canary passes (runbook:
+`docs/release/evidence/divergent-keep-both-canary-PLAN.md`), do not claim the
 divergent two-machine G5-git-13/T10/T11 convergence row green.
 
 ## PZM / TCC / SSD
