@@ -535,11 +535,13 @@ is in remote-CI validation.
 | **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, **operator-CLI-only** (MCP/auto excluded via the `operator_cli` provenance gate) | #529 | `831d363b` | ✅ merged |
 | **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live) | #534 | draft branch | 🟡 draft PR / remote CI + G5-git-13 harness |
 
-**PR-4 is the only remaining rung** and is no longer blocked on PZM hardware:
-the PZM SSD/RWX path recovered and the tactical legacy-SSH remote builder is
-usable again. The remaining gate is ordinary code validation + fleet deploy:
-#534 must pass remote CI, land, deploy to both hosts, then run the two-machine
-live convergence canary. Until that lands + canary runs, the honest claim is:
+**PR-4 is the only remaining rung** and is no longer framed as blocked on PZM
+hardware: the PZM SSD/RWX path re-enumerated and verified clean. Builder
+transport hardening (`ssh-ng://` Determinate Nix vs `ssh://`/serve-style or
+GF/remote-cache execution) remains a separate TIN-1620/#524 operational lane.
+The remaining PR-4 gate is ordinary code validation + fleet deploy: #534 must
+pass remote CI, land, deploy to both hosts, then run the two-machine live
+convergence canary. Until that lands + canary runs, the honest claim is:
 **divergent `.git` conflicts are safely fenced, visible (`tcfs conflicts`), and
 operator-resolvable (`tcfs resolve … --execute`), but the two-machine
 live-convergence proof (G5-git-5 T10/T11 green) is pending PR-4 deployment.**
