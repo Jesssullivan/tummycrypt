@@ -10,11 +10,11 @@ Tracker: `TIN-1617` (epic). New sub-issues: `TIN-1736`, `TIN-1737`,
 not the current frontier. Since it was written, the neo↔honey live repo path has
 advanced materially: fast-forward `.git` conflict resolution landed, the
 bidirectional FF handoff canary has live evidence under `TIN-1620`, and the
-divergent keep-both ladder has PR-1/PR-2/PR-3 merged with PR-4 still
-deploy-gated. The current stop rule is no broad `~/git` or home takeover until
-two small repos clear R0-R5 both directions and the remaining divergent no-loss
-guard is deployed and proven. Per-device forward secrecy remains gated on the
-fresh `tcfs key rotate` rebuild tracked by `TIN-2551`.
+divergent keep-both ladder has PR-1/PR-2/PR-3 plus PR-4/#534 merged. The current
+stop rule is no broad `~/git` or home takeover until two small repos clear R0-R5
+both directions and the merged divergent no-loss stack is deployed and proven by
+the live canary. Per-device forward secrecy remains gated on the fresh
+`tcfs key rotate` rebuild tracked by `TIN-2551`.
 
 This document does not replace
 [large-workdir-onboarding-design-2026-05-25.md](large-workdir-onboarding-design-2026-05-25.md);

@@ -40,12 +40,13 @@ divergent two-machine G5-git-13/T10/T11 convergence row green.
 
 ## PZM / TCC / SSD
 
-The PZM external SSD is healthy at the block/APFS/Finder layer, but that is not
-enough for TCFS offload. Current lab probes show SSH child enumeration still
-times out under `/nix` and `/Volumes/TinylandSSD/tinyland`, and denial logs show
-System Policy/FDA decisions involving shell and Nix-store paths. Finder access
-is useful evidence, but it does not prove launchd, SSH, Nix/dyld, runner,
-daemon, or remote-builder contexts.
+The PZM external SSD can be visible and browsable at the block/APFS/Finder
+layer, but that is not enough for TCFS offload. Current lab probes show SSH
+child enumeration still times out under `/nix` and
+`/Volumes/TinylandSSD/tinyland`, and denial logs show System Policy/FDA
+decisions involving shell and Nix-store paths. Finder access is useful evidence,
+but it does not prove launchd, SSH, Nix/dyld, runner, daemon, or remote-builder
+contexts.
 
 Before any TCFS deploy uses PZM again, lab must pass the read-only recovery
 gate: directory-health, Nix execution-context probes, denial-log check, and

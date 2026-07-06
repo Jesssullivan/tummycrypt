@@ -22,7 +22,7 @@ Use only hosts that are operationally real today.
 | --- | --- | --- | --- |
 | `honey` | canonical Linux control point | high-volume push/pull, daemon/service checks, conflict and stress lanes, Linux-first operator truth | none beyond normal fleet drift |
 | `neo` | canonical release-adjacent Darwin lane | package upgrade proof, live `neo-honey` smoke, regression reproduction on the maintainer workstation | not a good target for destructive “fresh machine” cleanup |
-| `petting-zoo-mini` | canonical headless Darwin endpoint | FileProvider packaging presence, Darwin daemon parity, Linux-to-Darwin and Darwin-to-Linux operator acceptance, end-user-ish desktop surface checks | preflight TCC/PPPC/FDA, launchd/Nix/profile/dyld execution context, SSD directory health, and password-rotation state first |
+| `petting-zoo-mini` | bounded Darwin/FileProvider lab endpoint | FileProvider packaging presence, Darwin daemon parity, and targeted end-user-ish desktop surface checks after health gates pass | not accepted as TCFS offload or broad operator-acceptance host until TCC/PPPC/FDA, launchd/Nix/profile/dyld execution context, SSD directory health, strict remote-builder verification, and password-rotation state pass |
 | `sting` | none yet | none until it is real | blocked on lab-side hardware stabilization and onboarding; do not treat it as an acceptance target |
 
 ## Lane Map
