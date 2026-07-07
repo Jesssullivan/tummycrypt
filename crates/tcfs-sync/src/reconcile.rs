@@ -5329,8 +5329,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let local_path = dir.path().join("main");
         std::fs::write(&local_path, b"unchanged\n").unwrap();
-        let local_hash =
-            tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap());
+        let local_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap());
         let tracked = tin2584_state(&local_hash, tin2584_vclock(&[("neo", 1)]));
 
         let config = ReconcileConfig::default();
