@@ -2041,3 +2041,168 @@ async fn git_ff_divergent_detached_head_vetoes_whole_group() {
     drop(a_state);
     drop(s_state);
 }
+
+/// TIN-2584 (canary shape): a head ref rewritten out-of-band on `honey` carries
+/// a stale vclock that the remote (advanced by `neo`) STRICTLY DOMINATES. Before
+/// the fix, `compare_clocks` reads `{neo:1}` vs `{neo:2}` as `RemoteNewer` and
+/// the incoming pull path silently parks the divergence — `tcfs conflicts` stays
+/// empty. The divergence tick must instead classify it as a `Conflict` that the
+/// record arm surfaces, with ZERO writes to the diverged ref.
+///
+/// `raw_no_ff_config()` keeps the FF reclassifier OFF so the Conflict can ONLY
+/// originate at the vclock layer (the divergence tick) — not a reclassification.
+#[tokio::test]
+async fn git_out_of_band_dominated_ref_records_conflict() {
+    if !git_available() {
+        eprintln!("git not available; skipping git_out_of_band_dominated_ref_records_conflict");
+        return;
+    }
+
+    let op = memory_operator();
+    let prefix = "test/tin2584-canary";
+    let blacklist = raw_blacklist();
+    let ff = ff_config();
+
+    // Seed S at C0; raw-push the whole tree.
+    let s_tmp = TempDir::new().unwrap();
+    let s_repo = s_tmp.path().join("repo");
+    std::fs::create_dir_all(&s_repo).unwrap();
+    init_repo_c0(&s_repo);
+    let mut s_state = StateCache::open(&s_tmp.path().join("s.db")).unwrap();
+    let collect = raw_collect_config();
+    push_tree_with_device(
+        &op,
+        &s_repo,
+        prefix,
+        &mut s_state,
+        None,
+        "device-s",
+        Some(&collect),
+        None,
+    )
+    .await
+    .expect("seed raw push");
+    s_state.flush().unwrap();
+
+    // honey and neo both pull C0 (each adopts the remote head clock).
+    let honey_tmp = TempDir::new().unwrap();
+    let honey_repo = honey_tmp.path().join("repo");
+    std::fs::create_dir_all(&honey_repo).unwrap();
+    let mut honey_state = pull_into(
+        &op,
+        &honey_repo,
+        prefix,
+        "device-honey",
+        &honey_tmp.path().join("honey.db"),
+        &blacklist,
+        &ff,
+    )
+    .await;
+
+    let neo_tmp = TempDir::new().unwrap();
+    let neo_repo = neo_tmp.path().join("repo");
+    std::fs::create_dir_all(&neo_repo).unwrap();
+    let mut neo_state = pull_into(
+        &op,
+        &neo_repo,
+        prefix,
+        "device-neo",
+        &neo_tmp.path().join("neo.db"),
+        &blacklist,
+        &ff,
+    )
+    .await;
+
+    // neo commits C1 and pushes (FF over C0) — the remote head clock advances to
+    // strictly dominate honey's still-{...s:1} tracked clock.
+    commit_and_sync(
+        &op,
+        &neo_repo,
+        prefix,
+        "device-neo",
+        &mut neo_state,
+        &blacklist,
+        &ff,
+        "from_neo.txt",
+        b"neo-c1\n",
+        "C1 on neo",
+    )
+    .await;
+
+    // honey commits its OWN divergent sibling out-of-band (never resyncs), so
+    // its tracked head clock stays dominated while the ref content diverges.
+    commit(&honey_repo, "from_honey.txt", b"honey-c1\n", "C1 on honey");
+    // Force the same-second, same-size (41-byte) ref rewrite the canary hit, so
+    // classification must trust the content hash, not stat granularity.
+    pin_mtime_to_cached_second(&honey_state, &honey_repo, ".git/refs/heads/main");
+
+    let head_manifest_before = list_remote_index(&op, prefix)
+        .await
+        .expect("remote index before")
+        .get(".git/refs/heads/main")
+        .expect("remote head ref entry")
+        .manifest_hash
+        .clone();
+
+    // honey reconciles with the FF reclassifier OFF: the only route to a Conflict
+    // is the divergence tick.
+    let no_ff = raw_no_ff_config();
+    let honey_plan = reconcile(
+        &op,
+        &honey_repo,
+        prefix,
+        &honey_state,
+        "device-honey",
+        &blacklist,
+        &no_ff,
+        None,
+    )
+    .await
+    .expect("honey reconcile plan");
+
+    assert!(
+        git_conflicts(&honey_plan)
+            .iter()
+            .any(|c| c.ends_with(".git/refs/heads/main")),
+        "TIN-2584: the dominated out-of-band divergence must record a head-ref Conflict, got {:?}",
+        git_conflicts(&honey_plan)
+    );
+    assert!(
+        !git_ref_pull(&honey_plan),
+        "TIN-2584: the divergence must NOT be classified as a silent RemoteNewer pull"
+    );
+
+    // Execute: the conflict is recorded and the remote head ref is untouched.
+    let honey_exec = execute_plan(
+        &honey_plan,
+        &op,
+        &honey_repo,
+        prefix,
+        &mut honey_state,
+        "device-honey",
+        None,
+        None,
+    )
+    .await
+    .expect("honey execute");
+    honey_state.flush().unwrap();
+    assert!(
+        honey_exec.conflicts_recorded >= 1,
+        "TIN-2584: the head-ref conflict must be recorded so keep-both can act"
+    );
+
+    let head_manifest_after = list_remote_index(&op, prefix)
+        .await
+        .expect("remote index after")
+        .get(".git/refs/heads/main")
+        .expect("remote head ref entry after")
+        .manifest_hash
+        .clone();
+    assert_eq!(
+        head_manifest_before, head_manifest_after,
+        "TIN-2584: recording the conflict must not write the diverged head ref"
+    );
+
+    drop(s_state);
+    drop(neo_state);
+}
