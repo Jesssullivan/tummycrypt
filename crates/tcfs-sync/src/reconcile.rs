@@ -1271,7 +1271,39 @@ async fn classify_path(
         },
 
         // Was synced, now deleted from remote — delete locally if configured
-        (Some(local_path), None, Some(_tracked_state)) => {
+        (Some(local_path), None, Some(tracked_state)) => {
+            // TIN-2584 (race): a peer's freshly-pushed ref index entry may not
+            // yet be visible in the bulk remote LIST that fed `remote` (S3
+            // read-after-write LIST lag — observed live at +0.5s after a push).
+            // A ref that also diverged locally then lands here and, with the
+            // default `delete_local_orphans = false`, is classified `UpToDate`:
+            // a SILENT no-op that freezes the divergence (conflicts stays 0).
+            //
+            // If a ref-class path's live content differs from its tracked hash,
+            // do NOT no-op it: route it through the engine's conflict-aware push
+            // instead. The push path re-resolves this exact remote index key via
+            // a direct GET (stronger read-after-write than the bulk LIST that
+            // missed it) and either records a Conflict (remote concurrently
+            // ahead) or uploads (remote genuinely dropped the ref) — never a
+            // silent freeze, never a blind clobber. The hash-equal case keeps
+            // the existing orphan behavior below.
+            if is_git_ref_class_path(rel_path) {
+                let diverged = tcfs_chunks::hash_file(local_path)
+                    .map(|h| tcfs_chunks::hash_to_hex(&h) != tracked_state.blake3)
+                    .unwrap_or(false);
+                if diverged {
+                    warn!(
+                        path = %rel_path,
+                        "TIN-2584: divergent git ref with remote index entry momentarily \
+                         absent; routing to conflict-aware push instead of a silent no-op"
+                    );
+                    return ReconcileAction::Push {
+                        local_path: local_path.clone(),
+                        rel_path: rel_path.to_string(),
+                        reason: PushReason::LocalNewer,
+                    };
+                }
+            }
             if config.delete_local_orphans {
                 ReconcileAction::DeleteLocal {
                     local_path: local_path.clone(),
@@ -1354,7 +1386,7 @@ async fn compare_both_exist(
     };
 
     // Get local vector clock from tracked state
-    let local_vclock = tracked.map(|s| s.vclock.clone()).unwrap_or_default();
+    let mut local_vclock = tracked.map(|s| s.vclock.clone()).unwrap_or_default();
 
     // Fetch remote manifest for its vector clock and hash
     let manifest_path = format!(
@@ -1386,6 +1418,39 @@ async fn compare_both_exist(
     };
 
     let remote_device = remote_manifest.written_by.as_str();
+
+    // TIN-2584: reconcile against an out-of-band local divergence. A ref file
+    // rewritten by `git commit` (e.g. `.git/refs/heads/main`) never ticks the
+    // TCFS vclock, so a diverged local file carries its stale, last-synced clock
+    // into classification. When the remote has since advanced, that stale clock
+    // is strictly dominated by the remote's — so `compare_clocks` reads the
+    // divergence as `RemoteNewer` and the incoming pull path silently parks it
+    // with NO `ConflictInfo` recorded (`tcfs conflicts` stays empty, keep-both
+    // has nothing to act on). Model the local divergence as an independent edit
+    // by ticking a CLONE of the clock (mirrors `engine.rs`
+    // `local_edit_inferred -> tick`): {neo:1} vs remote {neo:2} becomes
+    // {neo:1,honey:1} vs {neo:2} — incomparable — which classifies as a Conflict
+    // that the record arm surfaces.
+    //
+    // Narrowed to the strictly-dominated (`Ordering::Less`) case on purpose:
+    //  * Equal-clock divergence already classifies as Conflict, and ticking it
+    //    would promote the local side to LocalNewer — which for a divergent
+    //    NON-head ref (tag / submodule head / detached HEAD) would defeat the
+    //    fail-closed fast-forward veto (git_ff_resolution BLOCKER-1/3).
+    //  * Greater/None already classify correctly (LocalNewer / Conflict); a tick
+    //    there only drifts the clock.
+    // The tick lands only on the comparison clone; the state entry's stored
+    // clock is untouched, so re-recording the conflict each cycle stays
+    // idempotent (no per-cycle clock growth). `reclassify_git_ff_conflicts` is
+    // unaffected — it decides on git SHA ancestry, not on these clocks.
+    if let Some(tracked_state) = tracked {
+        if tracked_state.blake3 != local_hash
+            && local_vclock.partial_cmp_vc(&remote_manifest.vclock)
+                == Some(std::cmp::Ordering::Less)
+        {
+            local_vclock.tick(device_id);
+        }
+    }
 
     let outcome = compare_clocks(
         &local_vclock,
@@ -5033,6 +5098,256 @@ mod tests {
                 &acq.foreign_locked_repos
             ),
             "ref-class writes proceed once the stale lock is stolen"
+        );
+    }
+
+    // ── TIN-2584: out-of-band divergent ref classification ───────────────────
+
+    /// Write a v2 manifest with an explicit vclock + file_hash so a classifier
+    /// test can pin the remote side's clock exactly, with no push/pull round
+    /// trip. `hash` is the manifest storage key the `RemoteIndexEntry` points at.
+    async fn seed_manifest_vclock(
+        op: &Operator,
+        prefix: &str,
+        hash: &str,
+        file_hash: &str,
+        vclock_json: &str,
+        written_by: &str,
+    ) {
+        let body = format!(
+            r#"{{"version":2,"file_hash":"{file_hash}","file_size":41,"chunks":[],"vclock":{vclock_json},"written_by":"{written_by}","written_at":0}}"#
+        );
+        op.write(&format!("{prefix}/manifests/{hash}"), body.into_bytes())
+            .await
+            .unwrap();
+    }
+
+    fn tin2584_state(blake3: &str, vclock: VectorClock) -> SyncState {
+        SyncState {
+            blake3: blake3.to_string(),
+            size: 41,
+            mtime: 0,
+            chunk_count: 1,
+            remote_path: String::new(),
+            last_synced: 0,
+            vclock,
+            device_id: String::new(),
+            conflict: None,
+            status: crate::state::FileSyncStatus::default(),
+        }
+    }
+
+    fn tin2584_vclock(pairs: &[(&str, u64)]) -> VectorClock {
+        let mut vc = VectorClock::new();
+        for (dev, n) in pairs {
+            for _ in 0..*n {
+                vc.tick(dev);
+            }
+        }
+        vc
+    }
+
+    /// ROOT + AMPLIFIER: a ref rewritten out-of-band carries a stale clock the
+    /// remote strictly dominates. Left untouched it classifies as `RemoteNewer`
+    /// (silent park, no ConflictInfo); the divergence tick must instead make it
+    /// a recorded `Conflict`.
+    #[tokio::test]
+    async fn tin2584_dominated_out_of_band_divergence_records_conflict() {
+        let op = memory_op();
+        let prefix = "data";
+        let rel = "repo/.git/refs/heads/main";
+
+        // Remote head has advanced to {neo:2} with fresh content.
+        seed_manifest_vclock(
+            &op,
+            prefix,
+            "remotehash",
+            "remotecontenthash",
+            r#"{"clocks":{"neo":2}}"#,
+            "neo",
+        )
+        .await;
+        let remote_entry = RemoteIndexEntry::new("remotehash", 41, 1);
+
+        // Local ref diverged out-of-band; tracked clock is the stale {neo:1}
+        // (strictly dominated by {neo:2}) and its blake3 no longer matches.
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("main");
+        std::fs::write(&local_path, b"honey-divergent\n").unwrap();
+        let tracked = tin2584_state("baselinehash", tin2584_vclock(&[("neo", 1)]));
+
+        let config = ReconcileConfig::default();
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            prefix,
+            "honey",
+            &config,
+        )
+        .await;
+
+        assert!(
+            matches!(action, ReconcileAction::Conflict { .. }),
+            "dominated out-of-band divergence must record a Conflict (not RemoteNewer), got {action:?}"
+        );
+    }
+
+    /// Narrowing guard: an EQUAL-clock divergence is already a `Conflict` (the
+    /// fail-closed FF-veto precondition). The divergence tick must NOT promote
+    /// it to `LocalNewer`, or a divergent non-head ref would be force-pushed.
+    #[tokio::test]
+    async fn tin2584_equal_clock_divergence_stays_conflict() {
+        let op = memory_op();
+        let prefix = "data";
+        let rel = "repo/.git/refs/tags/v1";
+
+        seed_manifest_vclock(
+            &op,
+            prefix,
+            "rh",
+            "remotecontenthash",
+            r#"{"clocks":{"neo":1}}"#,
+            "neo",
+        )
+        .await;
+        let remote_entry = RemoteIndexEntry::new("rh", 41, 1);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("v1");
+        std::fs::write(&local_path, b"local-divergent-tag\n").unwrap();
+        let tracked = tin2584_state("baselinehash", tin2584_vclock(&[("neo", 1)]));
+
+        let config = ReconcileConfig::default();
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            prefix,
+            "honey",
+            &config,
+        )
+        .await;
+
+        assert!(
+            matches!(action, ReconcileAction::Conflict { .. }),
+            "equal-clock divergence must stay Conflict (never promoted to LocalNewer), got {action:?}"
+        );
+    }
+
+    /// A ref whose tracked clock STRICTLY DOMINATES the remote is genuinely
+    /// local-newer and must still `Push` (the tick never fires here — no clock
+    /// drift, no spurious conflict).
+    #[tokio::test]
+    async fn tin2584_local_clock_ahead_ref_stays_push() {
+        let op = memory_op();
+        let prefix = "data";
+        let rel = "repo/.git/refs/heads/main";
+
+        seed_manifest_vclock(
+            &op,
+            prefix,
+            "rh",
+            "remotecontenthash",
+            r#"{"clocks":{"neo":1}}"#,
+            "neo",
+        )
+        .await;
+        let remote_entry = RemoteIndexEntry::new("rh", 41, 1);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("main");
+        std::fs::write(&local_path, b"local-ahead\n").unwrap();
+        let tracked = tin2584_state("baselinehash", tin2584_vclock(&[("neo", 2)]));
+
+        let config = ReconcileConfig::default();
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            Some(&remote_entry),
+            Some(&tracked),
+            &op,
+            prefix,
+            "honey",
+            &config,
+        )
+        .await;
+
+        assert!(
+            matches!(action, ReconcileAction::Push { .. }),
+            "a ref whose tracked clock strictly dominates remote must Push, got {action:?}"
+        );
+    }
+
+    /// RACE arm `(Some, None, Some)`: the peer's freshly-pushed index entry is
+    /// momentarily absent from the LIST. A ref that ALSO diverged locally must
+    /// not become a silent `UpToDate` no-op — it routes to a conflict-aware
+    /// `Push` instead.
+    #[tokio::test]
+    async fn tin2584_divergent_ref_remote_index_absent_is_not_uptodate() {
+        let op = memory_op();
+        let rel = "repo/.git/refs/heads/main";
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("main");
+        std::fs::write(&local_path, b"diverged\n").unwrap();
+        let tracked = tin2584_state("baselinehash", tin2584_vclock(&[("neo", 1)]));
+
+        // delete_local_orphans = false — the pre-fix silent-no-op path.
+        let config = ReconcileConfig::default();
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            None,
+            Some(&tracked),
+            &op,
+            "data",
+            "honey",
+            &config,
+        )
+        .await;
+
+        assert!(
+            matches!(action, ReconcileAction::Push { .. }),
+            "a divergent ref with a momentarily-absent remote entry must not be a silent \
+             UpToDate no-op, got {action:?}"
+        );
+    }
+
+    /// Companion to the race arm: an UNCHANGED ref (live hash == tracked) whose
+    /// remote entry is momentarily absent must stay `UpToDate` — no re-push
+    /// churn for a file that did not diverge.
+    #[tokio::test]
+    async fn tin2584_unchanged_ref_remote_index_absent_stays_uptodate() {
+        let op = memory_op();
+        let rel = "repo/.git/refs/heads/main";
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join("main");
+        std::fs::write(&local_path, b"unchanged\n").unwrap();
+        let local_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap());
+        let tracked = tin2584_state(&local_hash, tin2584_vclock(&[("neo", 1)]));
+
+        let config = ReconcileConfig::default();
+        let action = classify_path(
+            rel,
+            Some(&local_path),
+            None,
+            Some(&tracked),
+            &op,
+            "data",
+            "honey",
+            &config,
+        )
+        .await;
+
+        assert!(
+            matches!(action, ReconcileAction::UpToDate { .. }),
+            "an unchanged ref with a momentarily-absent remote entry must stay UpToDate, got {action:?}"
         );
     }
 }
