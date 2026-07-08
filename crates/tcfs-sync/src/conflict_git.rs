@@ -1072,4 +1072,98 @@ mod tests {
         );
         run_git(&winner, &["fsck", "--full"]).expect("fsck clean after idempotent re-run");
     }
+
+    /// TIN-2652 seam regression: the test that was missing and would have caught
+    /// the live no-op. Record a divergent head-ref conflict through the REAL plan
+    /// path (`reconcile::execute_plan`'s `Conflict` arm), then assert
+    /// `collect_repo_conflicts` — the keep-both resolver's candidate scan — yields
+    /// exactly one `Park` candidate for `refs/heads/main`. Before the status flip,
+    /// the plan-recorded entry stayed `Synced`; `collect_repo_conflicts` skipped
+    /// it (`status != Conflict`) and keep-both silently resolved nothing.
+    #[tokio::test]
+    async fn tin2652_plan_recorded_conflict_is_a_keep_both_park_candidate() {
+        use crate::conflict::{ConflictInfo, VectorClock};
+        use crate::reconcile::{execute_plan, ReconcileAction, ReconcilePlan, ReconcileSummary};
+
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_repo(&repo);
+        commit(&repo, "file.txt", "base", "base");
+        let ref_path = repo.join(".git/refs/heads/main");
+        assert!(
+            ref_path.exists(),
+            "base commit must create the loose head ref"
+        );
+
+        // Tracked head ref starts fully Synced — the live canary shape.
+        let rel = "repo/.git/refs/heads/main";
+        let mut local = VectorClock::new();
+        local.tick("honey");
+        let mut remote = VectorClock::new();
+        remote.tick("neo");
+        remote.tick("neo");
+        let mut state = StateCache::open(&local_root.join("state.json")).unwrap();
+        state.set(
+            &ref_path,
+            crate::state::SyncState {
+                blake3: "baselinehash".into(),
+                size: 41,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "data/manifests/head".into(),
+                last_synced: 0,
+                vclock: local.clone(),
+                device_id: "honey".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+
+        // Record the conflict through the real plan-execution path.
+        let plan = ReconcilePlan {
+            actions: vec![ReconcileAction::Conflict {
+                rel_path: rel.into(),
+                info: ConflictInfo {
+                    rel_path: rel.into(),
+                    local_vclock: local.clone(),
+                    remote_vclock: remote,
+                    local_blake3: "baselinehash".into(),
+                    remote_blake3: "remotehash".into(),
+                    local_device: "honey".into(),
+                    remote_device: "neo".into(),
+                    detected_at: 1,
+                    times_recorded: 0,
+                    // Park candidates REQUIRE the remote manifest key.
+                    remote_manifest_key: Some("data/manifests/remotehead".into()),
+                },
+            }],
+            summary: ReconcileSummary::default(),
+            device_id: "honey".into(),
+            generated_at: 0,
+        };
+        let exec = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "honey", None, None,
+        )
+        .await
+        .expect("execute plan");
+        assert_eq!(exec.conflicts_recorded, 1, "one conflict must be recorded");
+
+        // The seam: the keep-both resolver's candidate scan must see it.
+        let repo_root = repo.canonicalize().unwrap();
+        let candidates = collect_repo_conflicts(&state, &repo_root).expect("collect candidates");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "TIN-2652: exactly one keep-both candidate for the plan-recorded head-ref conflict, \
+             got {candidates:?}"
+        );
+        match &candidates[0].kind {
+            GitConflictKind::Park { head_ref, .. } => {
+                assert_eq!(head_ref, "refs/heads/main");
+            }
+            other => panic!("head ref must be a Park candidate, got {other:?}"),
+        }
+    }
 }

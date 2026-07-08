@@ -27,7 +27,7 @@ use crate::index_entry::{
     manifest_key, parse_index_entry_record, resolve_visible_index_entry, RemoteIndexEntry,
 };
 use crate::manifest::{SymlinkManifest, SyncManifest};
-use crate::state::{StateCache, StateCacheBackend, SyncState};
+use crate::state::{FileSyncStatus, StateCache, StateCacheBackend, SyncState};
 
 const REMOTE_INDEX_READ_CONCURRENCY: usize = 32;
 const REMOTE_PULL_CONCURRENCY: usize = 16;
@@ -2751,6 +2751,16 @@ pub async fn execute_plan(
                     // unchanged so the recorded conflict carries the key a future
                     // PR-3 resolve verb needs to fetch the remote ref SHA.
                     updated.conflict = Some(info);
+                    // TIN-2652: the conflict payload and the entry status must
+                    // move together. Recording only the `ConflictInfo` left the
+                    // entry at its prior `Synced` status, so `tcfs conflicts`
+                    // (which scans `.conflict` presence via `StateCache::conflicts`)
+                    // surfaced it while `collect_repo_conflicts`
+                    // (conflict_git.rs, filters on `status == Conflict`) skipped
+                    // it -> `tcfs resolve --strategy keep-both` silently no-oped.
+                    // Mirror the engine push path (engine.rs) and
+                    // `StateCache::mark_conflict`, both of which flip status here.
+                    updated.status = FileSyncStatus::Conflict;
                     state.set(Path::new(&key_owned), updated);
                 }
                 result.conflicts_recorded += 1;
@@ -5348,6 +5358,98 @@ mod tests {
         assert!(
             matches!(action, ReconcileAction::UpToDate { .. }),
             "an unchanged ref with a momentarily-absent remote entry must stay UpToDate, got {action:?}"
+        );
+    }
+
+    /// TIN-2652 (fix seam): the plan-path `ReconcileAction::Conflict` arm records
+    /// the `ConflictInfo` but MUST also flip `entry.status` to `Conflict`. The
+    /// live canary shipped 5 head-ref conflicts whose `.conflict` payload was
+    /// complete yet whose `status` was still `synced`, so `collect_repo_conflicts`
+    /// (which filters on `status == Conflict`) skipped them and
+    /// `tcfs resolve --strategy keep-both` silently no-oped. Drive the real
+    /// `execute_plan` Conflict arm (the TIN-2584 divergent-ref shape) and assert
+    /// BOTH fields move together — payload present AND status == Conflict.
+    #[tokio::test]
+    async fn tin2652_plan_conflict_record_flips_status_to_conflict() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        // A base commit materializes `.git/refs/heads/main` on disk so the state
+        // key canonicalizes against a real parent, matching the daemon.
+        commit_file(&repo, "file.txt", "base", "base");
+        let ref_path = repo.join(".git/refs/heads/main");
+        assert!(
+            ref_path.exists(),
+            "base commit must create the loose head ref"
+        );
+
+        // Seed the tracked entry exactly as the live canary carried it: a fully
+        // `Synced` head ref, no conflict recorded yet.
+        let rel = "repo/.git/refs/heads/main";
+        let mut local = VectorClock::new();
+        local.tick("honey");
+        let mut remote = VectorClock::new();
+        remote.tick("neo");
+        remote.tick("neo");
+        let mut state = crate::state::StateCache::open(&local_root.join("state.json")).unwrap();
+        state.set(
+            &ref_path,
+            SyncState {
+                blake3: "baselinehash".into(),
+                size: 41,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "data/manifests/head".into(),
+                last_synced: 0,
+                vclock: local.clone(),
+                device_id: "honey".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+
+        let info = ConflictInfo {
+            rel_path: rel.into(),
+            local_vclock: local,
+            remote_vclock: remote,
+            local_blake3: "baselinehash".into(),
+            remote_blake3: "remotehash".into(),
+            local_device: "honey".into(),
+            remote_device: "neo".into(),
+            detected_at: 1,
+            times_recorded: 0,
+            remote_manifest_key: Some("data/manifests/remotehead".into()),
+        };
+        let plan = plan_of(vec![ReconcileAction::Conflict {
+            rel_path: rel.into(),
+            info,
+        }]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "honey", None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.conflicts_recorded, 1,
+            "the plan must record exactly one conflict"
+        );
+
+        let (_, entry) = state
+            .get_by_rel_path(rel)
+            .expect("the recorded conflict entry must be present");
+        assert!(
+            entry.conflict.is_some(),
+            "TIN-2652: the ConflictInfo payload must be recorded"
+        );
+        assert_eq!(
+            entry.status,
+            FileSyncStatus::Conflict,
+            "TIN-2652: recording a plan-path conflict must flip status to Conflict \
+             (payload + status move together), got {:?}",
+            entry.status
         );
     }
 }
