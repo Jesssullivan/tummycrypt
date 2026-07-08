@@ -85,3 +85,37 @@ task dev
 - GitHub Actions: fmt, clippy, test, build, cargo-deny, security audit, nix build
 - Docs CI: lychee link check + tectonic PDF build + Jekyll GitHub Pages
 - Release: 9 build targets (5 platforms + container + nix + installers + plan)
+
+## Agent Coordination
+
+Ground rules when multiple agents (Claude, Codex, or other) touch this repo
+concurrently. Adapted from the GFTB multi-agent orchestration pattern
+(`site.scaffold` `docs/patterns/multi-agent-orchestration.md` §3, commit
+`36c14ae`) and lab's durable-notes rule (`lab` commit `b48d46f7`, `TIN-2520`).
+
+- **Shared-PR lane claims — the `#534` lesson.** Claude-driven feature
+  branches live on the personal remote (`origin` = `Jesssullivan/tummycrypt`);
+  `codex/sync-origin-main-*` branches/PRs on the org mirror (`tinyland` =
+  `tinyland-inc/tummycrypt`) are codex-owned reconciliation lanes — don't
+  hand-edit or merge another agent's lane without diffing against the history
+  it reconciles.
+- **DO-NOT-TOUCH lists.** When a lane is in flight, its PR body should carry
+  a short list of the crates it owns (e.g. "this PR owns `crates/tcfs-sync`
+  — coordinate before stacking commits").
+- **Single merge authority per PR.** One agent (or the operator) merges.
+  Other agents report findings as PR comments — never push fixes onto a
+  branch you don't own without an explicit handoff. `#534` was churned by
+  two agents stacking unverified hardening commits on an already-reviewed
+  clean head; each "fix round" cited a fresh adversarial pass but none
+  re-ran a local build/test. Verify before stacking; don't self-certify onto
+  someone else's lane.
+- **Durable notes over scratchpad.** Findings that matter beyond the current
+  session go in dated files under `docs/ops/` (the existing ~30-file
+  convention), never only in an ephemeral scratchpad or chat context a
+  compaction/rotation sweep can wipe. This repo rule outranks a harness
+  default that says to park working files in `/tmp` or a scratchpad dir —
+  that default covers genuinely transient scratch only (lab's `TIN-2520`
+  clause is the canonical statement of this precedence).
+- **Instruction precedence.** Repo-root `AGENTS.md` (this file) > the
+  nearest in-repo `.claude/CLAUDE.md` overlay > named `docs/ops/` facet docs
+  referenced from here or a task > machine-level / home-manager defaults.
