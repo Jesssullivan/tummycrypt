@@ -32,11 +32,39 @@ keep-both ladder is split:
   delta passed (no correctness defects; tests strengthened; three minor
   follow-ups tracked in Linear).
 
-PR-4 is merged but NOT yet deployed (fleet runs v0.12.16, which predates it)
-and NOT live-canary proven. Until a post-4c61da4 build is deployed and the
-divergent canary passes (runbook:
-`docs/release/evidence/divergent-keep-both-canary-PLAN.md`), do not claim the
-divergent two-machine G5-git-13/T10/T11 convergence row green.
+PR-4 is deployed (daemons post-#534 `4c61da4`) and **LIVE-PROVEN 2026-07-08**.
+A two-host neo ⇄ honey divergent keep-both canary converged both hosts with no
+committed work lost: the loser-side no-loss guard fired in production, parked
+honey's head at `refs/tcfs/theirs/<device>/heads/main`, wrote a verified undo
+bundle, roamed the parked ref to neo, and recorded zero conflicts on the next
+cycle both sides. **G5-git-13 divergent two-machine convergence is PROVEN live
+(loser-guard path); G5-git-5 is CLOSED end-to-end** — FF half 2026-07-05
+(`docs/release/evidence/bidirectional-ff-canary-20260705T225429Z/RESULTS.md`) +
+divergent half 2026-07-08
+(`docs/release/evidence/divergent-keep-both-canary-20260707T071335Z/RESULTS.md`).
+
+The run drove out four product defects before it could pass — this ledger is
+part of the truth:
+
+- **TIN-2584 — FIXED (#540):** the first divergent reconcile silently absorbed
+  the divergence (out-of-band commit never ticks the vclock; the dominated clock
+  is structurally conflict-unreachable; the LIST race returns `UpToDate`). Fix
+  proven live — honey then recorded the 5-conflict repo group.
+- **TIN-2652 — FIXED (#541):** plan-path conflicts were recorded with
+  `status=synced`, invisible to the resolver. Fix proven at the state layer —
+  the five conflict-entry statuses flipped `synced → conflict`.
+- **TIN-2653 — OPEN:** headless session token is write-only (TOTP provenance
+  unusable over ssh). Resolve was exercised via the repo-precedent
+  `require_session=false` bypass window, re-locked immediately after.
+- **TIN-2657 — OPEN:** the daemon remaps `sync.state_db` → `state.json`
+  (`crates/tcfs-daemon/src/daemon.rs:315`), so the CLI and daemon act on
+  different files — this is why the operator resolve VERB returned 0 refs even
+  post-#541.
+
+The convergence proof is via the **automatic loser-guard**; the **operator
+resolve VERB** (`tcfs resolve … --execute`) is honestly NOT yet claimed and is
+blocked by the two open tickets above. Harness Stage 6 (G5-git-13) carries a
+LIVE-PROVEN marker citing the evidence dir.
 
 ## PZM / TCC / SSD
 

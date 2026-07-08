@@ -1,0 +1,3 @@
+bundle: /home/jess/.local/share/tcfsd/keep-both-undo/584df06defdb84b1/keep-both-1160f3ad-0627-443c-a2e9-976d45b230a1.bundle
+The bundle uses this hash algorithm: sha1
+fsck-rc=0

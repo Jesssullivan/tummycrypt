@@ -248,6 +248,16 @@ log "conflict corruption-risk evidence recorded in conflict-scenario.txt"
 # the no-loss invariant: after a divergent `.git` pull, both sides' committed
 # heads stay reachable and each `.git` is fsck-clean — the two-machine
 # convergence row that flips G5-git-5 green.
+#
+# LIVE-PROVEN 2026-07-08: this local-fixture reproduction is now backed by a
+# two-host (neo macOS ⇄ honey Rocky) fleet canary in which the deployed #534
+# loser-side no-loss guard fired IN PRODUCTION — parked the loser's head at
+# refs/tcfs/theirs/<device>/heads/main before overwriting refs/heads/main to the
+# winner SHA, wrote a verified undo bundle, and converged both hosts to zero
+# conflicts on the next cycle with no committed work lost. Evidence:
+#   docs/release/evidence/divergent-keep-both-canary-20260707T071335Z/RESULTS.md
+# G5-git-13 is therefore green here AND live-proven; G5-git-5 is closed
+# end-to-end (FF half 2026-07-05, divergent half 2026-07-08).
 G5="$WORK_DIR/g5-git-13"
 G5BASE="$G5/base"
 mkdir -p "$G5BASE"
@@ -318,6 +328,7 @@ done
 } > "$EVIDENCE_DIR/g5-git-13-scenario.txt"
 if [ "$G5FAIL" -eq 0 ]; then
   log "G5-git-13 PASS — loser-side no-loss guard: both heads reachable + fsck-clean on both machines"
+  log "G5-git-13 LIVE-PROVEN 2026-07-08 (neo⇄honey fleet canary) — evidence: docs/release/evidence/divergent-keep-both-canary-20260707T071335Z/RESULTS.md — closes G5-git-5 divergent half"
 else
   echo "FAIL: G5-git-13 loser-side no-loss guard violated — see g5-git-13-*.txt" >&2
   FAIL=1

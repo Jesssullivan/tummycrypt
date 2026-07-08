@@ -1,0 +1,5 @@
+=== IMMEDIATE dry-run (fresh daemon memory) ===
+git keep-both dry-run: 0 ref(s) for /home/jess/git/divergent-kb-20260707T071335Z
+Dry-run only. Re-run with --execute to mutate refs and clear conflicts.
+STILL 0 — stale-memory theory refuted
+active

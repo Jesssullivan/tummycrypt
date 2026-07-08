@@ -1,0 +1,30 @@
+/home/jess/git/divergent-kb-20260707T071335Z/.git/refs/heads/main
+{
+ "blake3": "bc0807b88e07690063891ab2e2b7ae9dcc89b463eed85aa6498439e7a835773d",
+ "size": 41,
+ "mtime": 1783408561,
+ "chunk_count": 1,
+ "remote_path": "git-roam/divergent-kb-20260707T071335Z/manifests/952748697d62e67353f475687a730442af63fdc087325394cbaf7311ad943892",
+ "last_synced": 1783408561,
+ "vclock": {
+  "clocks": {
+   "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 1
+  }
+ },
+ "device_id": "d1176e5d-8baa-413e-8d50-68c1dbd36506",
+ "conflict": {
+  "rel_path": ".git/refs/heads/main",
+  "local_vclock": {
+   "clocks": {
+    "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 1,
+    "d1176e5d-8baa-413e-8d50-68c1dbd36506": 1
+   }
+  },
+  "remote_vclock": {
+   "clocks": {
+    "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 2
+   }
+  },
+  "local_blake3": "c37838ec4fcff9735c3c4398deb19a56bfaa260600f146fed85a784383c8252b",
+  "remote_blake3": "a193247def47f4b74f61ea4a3a9ed10fadeb4b594f259be8d6e511ffc7a3ecac",
+  "local_devic

@@ -534,15 +534,26 @@ remaining work is fleet deploy plus the live divergent keep-both canary.
 | (hardening) — fence paths + persistence | #527 | `449846e` | ✅ merged |
 | **PR-2** — executor hard-respects a foreign `.git/tcfs.lock`; `ConflictInfo.remote_manifest_key` | #528 | `1e41a23` | ✅ merged |
 | **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, **operator-CLI-only** (MCP/auto excluded via the `operator_cli` provenance gate) | #529 | `831d363b` | ✅ merged |
-| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live after deploy/canary) | #534 | `4c61da4` | ✅ merged |
+| **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live after deploy/canary) | #534 | `4c61da4` | ✅ merged + LIVE-PROVEN 2026-07-08 |
 
-**PR-4 is merged, not live-proven.** The remaining gate is deploy + canary:
-builds must not run locally on neo, and PZM cannot be used for TCFS offload
-until lab's PZM directory-health/Nix-context/denial-log/remote-builder verifier
-passes again. Until deploy + canary run, the honest claim is:
-**divergent `.git` conflicts are safely fenced, visible (`tcfs conflicts`), and
-operator-resolvable (`tcfs resolve … --execute`), but the two-machine
-live-convergence proof (G5-git-5 T10/T11 green) is pending.**
+**PR-4 is merged AND live-proven.** The two-machine live-convergence proof
+(harness row **G5-git-13**, T10/T11) landed 2026-07-08 on a neo ⇄ honey fleet
+canary: the deployed #534 loser-side no-loss guard fired in production, parked
+the loser head at `refs/tcfs/theirs/<device>/heads/main`, wrote a verified undo
+bundle, and converged both hosts to zero conflicts with no committed work lost
+(`docs/release/evidence/divergent-keep-both-canary-20260707T071335Z/RESULTS.md`).
+**G5-git-5 is closed end-to-end** (FF half 2026-07-05, divergent half 2026-07-08).
+
+The run drove out four product defects first: **TIN-2584** (divergence silently
+absorbed — dominated clock structurally conflict-unreachable; **FIXED #540**) and
+**TIN-2652** (plan-path conflicts recorded `status=synced`, invisible to the
+resolver; **FIXED #541**) both had to land to make the conflict recordable and
+resolver-visible; **TIN-2653** (headless session token write-only) and
+**TIN-2657** (daemon remaps `sync.state_db` → `state.json`, so `tcfs resolve`
+reads a different file than the CLI) remain **OPEN** and block the operator
+resolve VERB — but not the automatic loser-guard convergence path the canary
+accepts on. The convergence is therefore proven via the guard; the operator VERB
+(`tcfs resolve … --execute`) is honestly not yet claimed.
 
 **Ratified operator §6 answers (2026-07-05):** parking namespace default = `refs/tcfs/theirs/**` (not real branches); bare `keep-local`/`keep-remote` = omitted (park-first only); dirty-tree = hard refuse; ticket routing = new ticket for the verb + TIN-1549 keeps the `tcfs conflicts`/banner UX surface. Bundle retention and escalation cadence remain open (non-blocking; PR-4-adjacent).
 

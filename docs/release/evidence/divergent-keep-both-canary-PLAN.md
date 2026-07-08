@@ -1,8 +1,14 @@
 # LIVE Divergent Keep-Both Canary — Runbook (neo ⇄ honey)
 
-**Status:** ready to execute once fleet is redeployed (see §0).
-**Flips:** harness row `G5-git-13` red→green; closes gate `G5-git-5` end-to-end
-(T10/T11, `docs/ops/repo-roam-test-plan-2026-06-08.md:127`, §6 R5 `:328-333`).
+**Status:** EXECUTED 2026-07-08 — PASS. Results:
+`docs/release/evidence/divergent-keep-both-canary-20260707T071335Z/RESULTS.md`.
+Convergence proven via the automatic loser-guard (see §6); the operator resolve
+VERB (§5) is NOT claimed — blocked by TIN-2657 (daemon `sync.state_db` →
+`state.json` remap) and TIN-2653 (headless session token). The run also fixed
+TIN-2584 (#540) and TIN-2652 (#541) as prerequisites.
+**Flips:** harness row `G5-git-13` red→green (LIVE-PROVEN); closes gate
+`G5-git-5` end-to-end (T10/T11, `docs/ops/repo-roam-test-plan-2026-06-08.md:127`,
+§6 R5 `:328-333`).
 **Ticket:** TIN-2552 / PR #534 (loser-side no-loss guard).
 
 ---

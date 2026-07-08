@@ -1,0 +1,5 @@
+honey: 88b217fac981132f729ca52c01d24c854be5f699 reachable
+honey: df41b6933c74d6038c79d70cf482bc7e9ace5d9b reachable
+honey rev-list --all: 3
+=== rehydration proof: worktree from theirs-ref ===
+honey work

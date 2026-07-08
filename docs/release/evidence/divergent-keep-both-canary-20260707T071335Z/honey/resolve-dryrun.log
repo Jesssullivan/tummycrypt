@@ -1,0 +1,4 @@
+Error: resolve_conflict RPC failed
+
+Caused by:
+    code: 'The request does not have valid authentication credentials', message: "session token required — run 'tcfs auth verify' first"
