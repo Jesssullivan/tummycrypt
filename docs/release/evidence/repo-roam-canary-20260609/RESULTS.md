@@ -13,3 +13,11 @@ closed by #513 and live-proven in
 The divergent keep-both code path is merged through #534, but still needs fleet
 deploy and the live divergent canary before this historical expected-fail can be
 treated as fully green.
+
+2026-07-08 update: the divergent (non-FF) half is now CLOSED. A two-host
+neo ⇄ honey fleet canary live-proved the #534 loser-side no-loss guard — loser
+head parked, both hosts converged to zero conflicts, no committed work lost
+(`docs/release/evidence/divergent-keep-both-canary-20260707T071335Z/RESULTS.md`,
+harness row G5-git-13). This historical expected-fail (G5-git-5) is now green
+end-to-end. Two operator-VERB defects remain open (TIN-2653, TIN-2657) but do
+not affect the automatic convergence proven here.

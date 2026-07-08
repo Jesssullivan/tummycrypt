@@ -1,0 +1,12 @@
+/Users/jess/git/divergent-kb-20260707T071335Z/.git/logs/refs/heads/main
+{"blake3": "dd083cbda345ca94bf55c72e1e3fa08a3be674530753d16455a23b06948de4cc", "size": 312, "mtime": 1783408576, "chunk_count": 1, "remote_path": "git-roam/divergent-kb-20260707T071335Z/manifests/394a81a09c6bb95bd5d12efdf0bd48e15776416e203de94f5fc085014468407e", "last_synced": 1783408599, "vclock": {"clocks": {"03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 2}}, "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a", "status": "synced"}
+
+/Users/jess/git/divergent-kb-20260707T071335Z/.git/HEAD
+{"blake3": "fe290f1e844d70e47e1a7bb695d33b7de29b9993de7151c78496c72912eff2dd", "size": 21, "mtime": 1783408427, "chunk_count": 1, "remote_path": "git-roam/divergent-kb-20260707T071335Z/manifests/8edfb0550830493366436fc854ce1f45ba533d5cccbaf961590b0f9cf5e57c5b", "last_synced": 1783408548, "vclock": {"clocks": {"03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 1}}, "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a", "status": "synced"}
+
+/Users/jess/git/divergent-kb-20260707T071335Z/.git/logs/HEAD
+{"blake3": "dd083cbda345ca94bf55c72e1e3fa08a3be674530753d16455a23b06948de4cc", "size": 312, "mtime": 1783408576, "chunk_count": 1, "remote_path": "git-roam/divergent-kb-20260707T071335Z/manifests/bb11c0ee9b0ae7ae85a1b48b29829ec0ddce3e0e2579139dbd21e1af69a98627", "last_synced": 1783408599, "vclock": {"clocks": {"03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 2}}, "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a", "status": "synced"}
+
+/Users/jess/git/divergent-kb-20260707T071335Z/.git/refs/heads/main
+{"blake3": "a193247def47f4b74f61ea4a3a9ed10fadeb4b594f259be8d6e511ffc7a3ecac", "size": 41, "mtime": 1783408576, "chunk_count": 1, "remote_path": "git-roam/divergent-kb-20260707T071335Z/manifests/04ff2f856568496db4b5a34400e0dbb5189698ab3ff185af305c7106876e3905", "last_synced": 1783408599, "vclock": {"clocks": {"03d8a0bd-36de-4df8-9b88-a923a9dd2c7a": 2}}, "device_id": "03d8a0bd-36de-4df8-9b88-a923a9dd2c7a", "status": "synced"}
+

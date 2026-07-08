@@ -1,0 +1,9 @@
+[2m2026-07-07T07:17:46.613911Z[0m [33m WARN[0m [2mtcfs_secrets[0m[2m:[0m S3 credentials loaded from AWS_ACCESS_KEY_ID env var. Prefer SOPS file, TCFS_S3_ACCESS, or ~/.aws/credentials for production.
+[2m2026-07-07T07:17:46.615779Z[0m [32m INFO[0m [2mtcfs[0m[2m:[0m CLI credentials loaded [3msource[0m[2m=[0menv:AWS_ACCESS_KEY_ID
+[2m2026-07-07T07:17:46.616342Z[0m [33m WARN[0m [2mtcfs_storage::operator[0m[2m:[0m S3 endpoint uses plaintext HTTP — credentials are transmitted unencrypted. Set storage.enforce_tls = true and use HTTPS in production. [3mendpoint[0m[2m=[0mhttp://seaweedfs-tcfs:8333
+Reconciling /Users/jess/git/divergent-kb-20260707T071335Z ↔ http://seaweedfs-tcfs:8333:git-roam/divergent-kb-20260707T071335Z/
+[2m2026-07-07T07:17:46.881539Z[0m [32m INFO[0m [2mtcfs_sync::reconcile[0m[2m:[0m reconciliation plan generated [3mpushes[0m[2m=[0m0 [3mpulls[0m[2m=[0m1 [3mdirectories[0m[2m=[0m0 [3mconflicts[0m[2m=[0m0 [3mup_to_date[0m[2m=[0m31
+
+  ← pull  honey-work.txt  (NewRemote, 11 bytes)
+
+Dry run — no changes made. Use --execute to apply.

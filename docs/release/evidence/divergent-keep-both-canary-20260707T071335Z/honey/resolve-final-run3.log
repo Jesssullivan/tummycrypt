@@ -1,0 +1,7 @@
+=== 1. record conflicts into the daemon REAL file (state.json) ===
+Done: 0 pushed, 5 pulled, 0 dirs-created, 0 deleted, 0 conflicts, 0 errors
+=== 2. bypass window; daemon boots WITH conflicts; guarded resolve ===
+git keep-both dry-run: 0 ref(s) for /home/jess/git/divergent-kb-20260707T071335Z
+Dry-run only. Re-run with --execute to mutate refs and clear conflicts.
+GUARD FAILED AGAIN — stopping
+active

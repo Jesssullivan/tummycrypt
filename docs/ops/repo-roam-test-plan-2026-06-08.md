@@ -357,10 +357,18 @@ The live-repo packet must add five raw-mode `.git` rows (these are the
 - **G5-git-4 DIRTY-CHILD REFUSAL** — `tcfs unsync` with a dirty `.git` child
   refuses without `--force`; no partial dehydration (row T6).
 - **G5-git-5 CONCURRENT-WRITE CORRUPTION** — historical red row for per-file
-  `.git` conflict interleaves under `conflict_mode=auto`. This row has been
-  superseded by the merged `.git`-aware FF and divergent keep-both stack (#513,
-  #529, #534). It is not green for fleet acceptance until a post-#534 deploy and
-  the live divergent keep-both canary prove no-loss behavior on two hosts.
+  `.git` conflict interleaves under `conflict_mode=auto`. **CLOSED end-to-end**
+  by the merged `.git`-aware FF and divergent keep-both stack (#513, #529, #534):
+  the FF half was live-proven 2026-07-05
+  (`docs/release/evidence/bidirectional-ff-canary-20260705T225429Z/RESULTS.md`),
+  and the divergent (non-FF) half was live-proven 2026-07-08 on a two-host
+  (neo ⇄ honey) fleet canary where the deployed #534 loser-side no-loss guard
+  parked the loser head and converged both hosts to zero conflicts with no
+  committed work lost
+  (`docs/release/evidence/divergent-keep-both-canary-20260707T071335Z/RESULTS.md`,
+  harness row **G5-git-13**). Two operator-VERB defects remain open (TIN-2653
+  headless session token, TIN-2657 daemon state-file remap) but do not affect the
+  automatic loser-guard convergence proven here.
 
 **Safe handoff rule:** the `tcfs unsync <repo>` flip-flop is the correct primitive —
 do not let two machines hold the same `.git` hydrated+writable at once. Quiesce git

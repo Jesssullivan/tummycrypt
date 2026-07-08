@@ -1,0 +1,2 @@
+[2m2026-07-07T07:16:40.069523Z[0m [32m INFO[0m [2mtcfs_sync::reconcile[0m[2m:[0m plan execution complete [3mpushed[0m[2m=[0m1 [3mpulled[0m[2m=[0m4 [3mconflicts[0m[2m=[0m0 [3mdeferred_git_refs[0m[2m=[0m0 [3merrors[0m[2m=[0m0
+Done: 1 pushed, 4 pulled, 0 dirs-created, 0 deleted, 0 conflicts, 0 errors

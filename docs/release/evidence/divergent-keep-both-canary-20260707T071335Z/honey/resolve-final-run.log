@@ -1,0 +1,9 @@
+=== 1. re-reconcile with 541 CLI (status flips) ===
+Done: 0 pushed, 0 pulled, 0 dirs-created, 0 deleted, 5 conflicts, 0 errors
+conflict-entry statuses: ['conflict', 'conflict', 'conflict', 'conflict', 'conflict']
+=== 2. bypass window + guarded resolve ===
+git keep-both dry-run: 0 ref(s) for /home/jess/git/divergent-kb-20260707T071335Z
+Dry-run only. Re-run with --execute to mutate refs and clear conflicts.
+GUARD FAILED — not executing
+=== re-lock ===
+active

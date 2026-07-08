@@ -1,0 +1,15 @@
+  = up-to-date  .git/hooks/pre-rebase.sample
+  = up-to-date  .git/hooks/prepare-commit-msg.sample
+  = up-to-date  .git/objects/88/b217fac981132f729ca52c01d24c854be5f699
+  = up-to-date  .git/objects/df/967b96a579e45a18b8251732d16804b2e56a55
+  = up-to-date  .git/hooks/commit-msg.sample
+  = up-to-date  .git/hooks/pre-push.sample
+  = up-to-date  .git/HEAD
+  = up-to-date  .git/hooks/update.sample
+  = up-to-date  .git/logs/refs/heads/main
+  = up-to-date  .git/hooks/pre-commit.sample
+  = up-to-date  .git/objects/4b/36dfd79db36d8c59d1fb032de66b57f0457b65
+  = up-to-date  honey-work.txt
+  = up-to-date  .git/description
+
+Dry run — no changes made. Use --execute to apply.

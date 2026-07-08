@@ -1,0 +1,5 @@
+[2m2026-07-07T07:13:49.503582Z[0m [32m INFO[0m [2mtcfs_sync::engine[0m[2m:[0m uploaded [3mpath[0m[2m=[0m/Users/jess/git/divergent-kb-20260707T071335Z/base.txt [3mhash[0m[2m=[0mb9af5f26c46534d25add40a12c3f0b1ae926e39a2e669162664295040943f54a [3mchunks[0m[2m=[0m1 [3mbytes[0m[2m=[0m5 [3muploaded_bytes[0m[2m=[0m5 [3mupload_elapsed_ms[0m[2m=[0m63 [3mupload_chunks_per_sec[0m[2m=[0m15.843006201554662 [3mupload_bytes_per_sec[0m[2m=[0m79.2150310077733 [3mstreaming[0m[2m=[0mfalse [3mfresh_prefix_publish[0m[2m=[0mfalse [3mremote_conflict_check[0m[2m=[0mtrue [3mchunk_upload_concurrency[0m[2m=[0m4 [3mchunk_exists_check[0m[2m=[0mtrue [3mchunk_write_timeout_secs[0m[2m=[0m300
+[2m2026-07-07T07:13:49.503939Z[0m [32m INFO[0m [2mtcfs_sync::reconcile[0m[2m:[0m plan execution complete [3mpushed[0m[2m=[0m1 [3mpulled[0m[2m=[0m0 [3mconflicts[0m[2m=[0m0 [3mdeferred_git_refs[0m[2m=[0m0 [3merrors[0m[2m=[0m0
+Done: 1 pushed, 0 pulled, 0 dirs-created, 0 deleted, 0 conflicts, 0 errors
+
+Skipping orphan chunk cleanup; this plan did not overwrite or delete remote data.
