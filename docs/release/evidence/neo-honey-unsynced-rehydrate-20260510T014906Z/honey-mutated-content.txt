@@ -1,4 +1,0 @@
-# Shared TCFS note
-
-version: honey-mutated
-body: honey edited this while neo had only the .tc stub.

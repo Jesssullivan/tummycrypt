@@ -24,7 +24,7 @@ Divergence points:
   tinyland PR #60 on 2026-04-17, but canonical `origin/main` has since moved
   141 commits ahead. The remaining 21 tinyland-only commits are the 19 pre-sync
   historical commits recorded in
-  [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
+  [Tinyland-Unique Commit Disposition](../archive/tinyland-upstream-disposition-2026-04-17.md)
   plus the sync merge pair (`6f7841f`, `987a6b4`).
 - `origin/main` ↔ `yoga/main`: there is no current merge base in this checkout;
   yoga represents a `v0.9.x`-era tcfs snapshot and is not a current development
@@ -167,7 +167,7 @@ list:
 
 - **Disposition of tinyland-unique history**: #311 is closed. The 19
   pre-sync tinyland-only commits were audited in
-  [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md)
+  [Tinyland-Unique Commit Disposition](../archive/tinyland-upstream-disposition-2026-04-17.md)
   and all were classified as superseded or bookkeeping; zero upstream
   cherry-picks are required. The 2026-04-17 audited 21-commit lead on
   `tinyland/main` was therefore 19 historical commits plus the 2 sync-merge
@@ -178,7 +178,7 @@ list:
   `41` `fix/*`, `14` `feat/*`, `4` `test/*`, `3` `chore/*`, `1`
   `refactor/*`, `1` `homebrew-tap`, and `1` `main`. The tracker issue now
   has a concrete non-destructive prune proposal:
-  [Tinyland Branch Prune Proposal - 2026-05-09](tinyland-branch-prune-proposal-2026-05-09.md).
+  [Tinyland Branch Prune Proposal - 2026-05-09](../archive/tinyland-branch-prune-proposal-2026-05-09.md).
   As of May 9, 2026, no remote branches were deleted during the TCFS parity
   proof push; the next action should be an explicit operator-approved prune
   tranche, not opportunistic cleanup.
@@ -200,9 +200,9 @@ list:
   declaration; this document makes it operational
 - [Contributing](../CONTRIBUTING.md) — the PR-based workflow that all
   `origin`-targeted work follows
-- [Tinyland-Unique Commit Disposition](tinyland-upstream-disposition-2026-04-17.md) —
+- [Tinyland-Unique Commit Disposition](../archive/tinyland-upstream-disposition-2026-04-17.md) —
   audited disposition of the pre-sync tinyland-only commits
-- [Tinyland Branch Prune Proposal - 2026-05-09](tinyland-branch-prune-proposal-2026-05-09.md) —
+- [Tinyland Branch Prune Proposal - 2026-05-09](../archive/tinyland-branch-prune-proposal-2026-05-09.md) —
   non-destructive branch audit and explicit prune tranches
 - [v0.12.2 Evidence Matrix](../release/v0.12.2-evidence-matrix.md) —
   release-surface consequences of tinyland-hosted infrastructure

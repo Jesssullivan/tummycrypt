@@ -1,3 +1,0 @@
-honey peer-delete verify ok: Projects/shared/delete-me.md
-delete_old_pull=failed_as_expected
-delete_stub_after_failed_pull=present

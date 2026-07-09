@@ -1,4 +1,0 @@
-# Shared TCFS note
-
-version: neo-initial
-body: this file starts on neo and will be removed locally before honey edits it.
