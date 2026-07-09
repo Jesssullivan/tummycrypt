@@ -11,6 +11,43 @@ historical release intent rather than the current supported/proven surface.
 
 ## [Unreleased]
 
+## [0.12.17] - 2026-07-09
+
+> **Version-truth note (TIN-2684):** the version strings `0.12.15` and
+> `0.12.16` were deployed to fleet hosts from untagged main builds but were
+> never released or tagged; their changes are folded into this release. This
+> is the first tagged release since `v0.12.14`.
+
+### Added
+
+- **`.git`-as-files bidirectional conflict safety (G5-git-5, TIN-1620) is
+  proven end-to-end**: worktree/gitfile fence (#526), foreign-lock respect +
+  `remote_manifest_key` (#528), keep-both resolver parking losing refs under
+  `refs/tcfs/theirs/<device>/**` (#529), and the loser-side no-loss guard with
+  verified undo bundles (#534). Divergent convergence proven live on a
+  two-host canary — all six G5-git-13 criteria (#542).
+- **Off-neo darwin closure CI** (#524): every push to main builds and
+  publishes the full aarch64-darwin closure (including `tcfsd`) from hosted
+  macOS CI (~40 min) for fleet substitution.
+- One-time **legacy state absorb**: a `.db`-only host migrates its state file
+  to the canonical `state.json` atomically (temp + parse-validate + rename)
+  at daemon boot (#545).
+
+### Fixed
+
+- **Out-of-band `git commit` never ticked the vector clock**, making real
+  divergence structurally unreachable as a conflict (TIN-2584, #540).
+- **Plan-path conflicts were recorded with `status="synced"`**, leaving the
+  keep-both resolver blind to them (TIN-2652, #541).
+- **CLI `--state` overrides and the daemon now converge on one state file**:
+  overrides are tilde-expanded and normalized to the `.json` sibling the
+  daemon actually reads; boot-time `purge_stale` never drops entries with
+  unresolved conflicts (TIN-2657, #545).
+- FileProvider backends read Dual/v2 manifests via master-wrap fallback
+  (TIN-1898).
+- Zero-diff roam fidelity: mtime preservation and opt-in symlink convergence
+  (#508 lineage).
+
 ### Changed
 
 - **Per-device file-key wrapping is now a tri-state `crypto.wrap_mode`**
