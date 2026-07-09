@@ -13,6 +13,12 @@ write/readback, cache clear/rehydrate, and recursive safe-unsync; offline or
 dehydrated sync-root copies can be represented by small `.tc`/`.tcf` stubs. FOSS
 odrive/Dropbox-style alternative under active development.
 
+**Vision:** TCFS is being built to become the remote-first userspace filesystem
+for the tinyland fleet and the rockies Rocky-10 workstation program — `ssh` into
+any machine and your git repos, agent dotdirs, and in-progress files are
+byte-exact and E2E-encrypted, hydratable on demand. See
+[docs/VISION.md](docs/VISION.md) for the north star and its claim-tiered status.
+
 ## Canonical Home
 
 `Jesssullivan/tummycrypt` is the canonical source repository for tcfs.
@@ -24,6 +30,7 @@ Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance
 
 ## Reality And Wayfinding
 
+- Vision / north star (claim-tiered): [docs/VISION.md](docs/VISION.md)
 - Current proof posture: [docs/ops/product-reality-and-priority.md](docs/ops/product-reality-and-priority.md)
 - Current workstream truth:
   [docs/ops/current-workstream-truth-2026-07-06.md](docs/ops/current-workstream-truth-2026-07-06.md)

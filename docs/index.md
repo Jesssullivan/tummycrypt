@@ -4,6 +4,8 @@
 
 tcfs is a self-hosted encrypted file sync system backed by [SeaweedFS](https://github.com/seaweedfs/seaweedfs) with core file-content XChaCha20-Poly1305 encryption, SOPS/age-managed credentials, content-defined chunking, Linux FUSE clean-name on-demand hydration, physical `.tc`/`.tcf` stubs for offline/dehydrated paths, and multi-machine fleet sync with vector clocks. Linux is the best-supported runtime today; Apple desktop and mobile surfaces exist but are still experimental.
 
+**North star:** TCFS is being built to become the remote-first userspace filesystem for the tinyland fleet and the rockies Rocky-10 workstation program. See [VISION.md](VISION.md) for the vision and its claim-tiered status.
+
 ## Installation
 
 ### Binary Releases
