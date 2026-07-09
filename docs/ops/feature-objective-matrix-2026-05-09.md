@@ -43,7 +43,7 @@ GitHub issues, and Linear mirrors. It should answer two questions quickly:
 | CI/test coverage | Keep code and docs claims defensible. | Strong for Rust, docs, Nix, staticlib, and iOS typecheck. | PR green matrices and local focused tests. | Do not imply CI proves production Finder, iOS device, K8s apply, or badge/progress UX. |
 | iOS FileProvider | Maintain experimental Files.app direction. | Proof-of-concept only. | `docs/ops/ios-surface-status.md`, simulator typecheck. | Keep compile/typecheck green; do not claim write/device/TestFlight readiness. |
 | Windows / Cloud Files | Future Explorer placeholder path. | Planned/skeleton. | README/platform support docs. | Keep out of release claims until a real CLI/daemon/Explorer lane exists. |
-| Remote governance | Keep canonical source and branch hygiene understandable. | Grounded. | `remote-governance.md`, `tinyland-branch-prune-proposal-2026-05-09.md`. | Decide `#312` Tranche A; do not delete without approval. |
+| Remote governance | Keep canonical source and branch hygiene understandable. | Grounded. | `remote-governance.md`, `../archive/tinyland-branch-prune-proposal-2026-05-09.md`. | Decide `#312` Tranche A; do not delete without approval. |
 
 ## Next Workstream Todo List
 
@@ -135,7 +135,7 @@ GitHub issues, and Linear mirrors. It should answer two questions quickly:
 - [TCFS Fleet Parity Sprint Plan - 2026-05-09](fleet-parity-sprint-plan-2026-05-09.md)
 - [TCFS Large Workdir Onboarding Design - 2026-05-25](large-workdir-onboarding-design-2026-05-25.md)
 - [TCFS Lazy Traversal QA Permutation Matrix - 2026-05-09](lazy-traversal-qa-permutation-matrix-2026-05-09.md)
-- [TCFS Workstream Reality Check - 2026-05-09](workstream-reality-check-2026-05-09.md)
+- [TCFS Workstream Reality Check - 2026-05-09](../archive/workstream-reality-check-2026-05-09.md)
 - [Lazy Hydration Demo Acceptance](lazy-hydration-demo.md)
 - [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md)
 - [Distribution Smoke Matrix](distribution-smoke-matrix.md)

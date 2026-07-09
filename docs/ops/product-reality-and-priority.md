@@ -165,7 +165,7 @@ Canonical docs:
 
 - [Apple Surface Status](apple-surface-status.md)
 - [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md)
-- [TCFS Usage Reality Sprint Plan](usage-reality-sprint-plan-2026-05-06.md)
+- [TCFS Usage Reality Sprint Plan](../archive/usage-reality-sprint-plan-2026-05-06.md)
 
 ### Lazy Traversal And Hydration Demo
 
@@ -481,6 +481,6 @@ Linear hygiene decision on April 29, 2026:
 - [Apple Surface Status](apple-surface-status.md)
 - [macOS Finder and FileProvider Reality](macos-fileprovider-reality.md)
 - [iOS Surface Status](ios-surface-status.md)
-- [TCFS Workstream Reality Check - 2026-05-09](workstream-reality-check-2026-05-09.md)
+- [TCFS Workstream Reality Check - 2026-05-09](../archive/workstream-reality-check-2026-05-09.md)
 - [TCFS Fleet Parity Sprint Plan - 2026-05-09](fleet-parity-sprint-plan-2026-05-09.md)
 - [Feature Parity Gap Analysis](../../odrive-re/docs/feature-parity-gap-analysis.md)
