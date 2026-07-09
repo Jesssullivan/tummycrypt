@@ -1003,18 +1003,9 @@ async fn build_operator(config: &tcfs_core::config::TcfsConfig) -> Result<openda
     .context("building storage operator")
 }
 
-/// Expand `~` in path to the user's home directory
-fn expand_tilde(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/") {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_default();
-        PathBuf::from(format!("{}/{}", home, rest))
-    } else {
-        path.to_path_buf()
-    }
-}
+// `~`-expansion lives in tcfs-core so the CLI and daemon expand identically
+// (TIN-2657 adversarial gate, Fix B).
+use tcfs_core::config::expand_tilde;
 
 /// Resolve the state cache path: CLI flag > config > default user data dir
 fn resolve_state_path(

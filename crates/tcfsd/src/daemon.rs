@@ -2076,20 +2076,45 @@ fn ensure_dirs(config: &TcfsConfig) {
 /// Resolve the canonical `state.json` path from the configured `state_db` and,
 /// exactly once, absorb a legacy sibling `state.db` into it.
 ///
-/// The one-time absorb fires **only** when the canonical `.json` is absent and
-/// a *distinct* sibling `.db` exists — so an existing `.json` always wins
-/// untouched, with no size heuristic or merge (the live reality on hosts where
-/// both files exist). A copy failure is logged and the daemon continues, opening
-/// the still-absent `.json` fresh. Returns the `.json` path the caller opens.
+/// `state_db` is `~`-expanded first (config defaults carry a literal `~` and
+/// the loader does no normalization; without expansion the absorb would write
+/// a CWD-relative `./~/…`). The one-time absorb fires **only** when the
+/// canonical `.json` is absent and a *distinct* sibling `.db` exists — so an
+/// existing `.json` always wins untouched, with no size heuristic or merge
+/// (the live reality on hosts where both files exist).
+///
+/// The absorb is atomic and validated (mirrors the `StateCache::flush()`
+/// write-tmp-then-rename idiom): copy to `state.json.tmp`, parse-validate the
+/// temp through the real `StateCache` load path, then `rename` into place. A
+/// direct copy onto the canonical path could be truncated mid-copy (ENOSPC is
+/// documented fleet history), permanently satisfying the `!exists()` guard
+/// while failing every subsequent open. On ANY copy/parse/rename failure the
+/// temp is removed, the source `.db` is left untouched, and the daemon
+/// continues fresh with a `warn!`. Returns the `.json` path the caller opens.
 fn absorb_legacy_state_db(state_db: &std::path::Path) -> std::path::PathBuf {
+    let state_db = tcfs_core::config::expand_tilde(state_db);
     let state_json_path = state_db.with_extension("json");
-    if !state_json_path.exists() && state_db != state_json_path.as_path() && state_db.exists() {
-        match std::fs::copy(state_db, &state_json_path) {
-            Ok(_) => info!("migrated legacy state.db → state.json"),
+    if !state_json_path.exists() && state_db != state_json_path && state_db.exists() {
+        let tmp_path = {
+            let mut name = state_json_path.clone().into_os_string();
+            name.push(".tmp");
+            std::path::PathBuf::from(name)
+        };
+        let migrate = || -> Result<()> {
+            std::fs::copy(&state_db, &tmp_path)?;
+            // Parse-validate through the real load path so the temp is only
+            // installed if the daemon's own open() would accept it.
+            tcfs_sync::state::StateCache::open(&tmp_path)?;
+            std::fs::rename(&tmp_path, &state_json_path)?;
+            Ok(())
+        };
+        match migrate() {
+            Ok(()) => info!("migrated legacy state.db → state.json"),
             Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
                 warn!(
                     ?e,
-                    "state.db → state.json one-time migration failed; starting fresh"
+                    "state.db → state.json one-time migration failed; starting fresh (source .db left untouched)"
                 )
             }
         }
@@ -2435,5 +2460,96 @@ mod state_migration_tests {
         // Opening the still-absent `.json` starts fresh (empty cache, no crash).
         let cache = tcfs_sync::state::StateCache::open(&resolved).unwrap();
         assert!(cache.get(std::path::Path::new("/sync/nope.txt")).is_none());
+    }
+
+    #[test]
+    fn absorb_recovers_from_interrupted_prior_migration() {
+        // Adversarial gate Fix A: a stale corrupt/truncated `state.json.tmp`
+        // left by an interrupted prior migration must not poison the retry.
+        // The canonical `.json` may only appear when the freshly copied temp
+        // parse-validates, and the temp must be gone afterwards (renamed away).
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let json = dir.path().join("state.json");
+        let tmp = dir.path().join("state.json.tmp");
+        seed_state(&db, &[("/sync/a.txt", "data/index/a.txt")]);
+        std::fs::write(&tmp, b"{\"entries\": {\"trunc").unwrap(); // simulated ENOSPC remnant
+
+        let resolved = absorb_legacy_state_db(&db);
+
+        assert_eq!(resolved, json);
+        assert!(json.exists(), "retry over a stale temp must still migrate");
+        assert!(!tmp.exists(), "temp must be consumed by the rename");
+        let cache = tcfs_sync::state::StateCache::open(&resolved).unwrap();
+        assert!(
+            cache.get(std::path::Path::new("/sync/a.txt")).is_some(),
+            "canonical .json carries the validated .db content"
+        );
+    }
+
+    #[test]
+    fn absorb_declines_corrupt_db_source_and_cleans_temp() {
+        // Adversarial gate Fix A: a corrupt `.db` source must never be
+        // installed as the canonical `.json`. The temp is removed, the source
+        // `.db` is left byte-identical, and no canonical file appears — so the
+        // `!exists()` guard keeps retrying on later boots instead of being
+        // permanently defeated by a truncated canonical file.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let json = dir.path().join("state.json");
+        let tmp = dir.path().join("state.json.tmp");
+        let garbage: &[u8] = b"{\"last_nats_seq\": 7, \"entries\": {\"/sync/a.t"; // truncated JSON
+        std::fs::write(&db, garbage).unwrap();
+
+        let resolved = absorb_legacy_state_db(&db);
+
+        assert_eq!(resolved, json);
+        assert!(
+            !json.exists(),
+            "corrupt source must not produce a canonical .json"
+        );
+        assert!(!tmp.exists(), "failed migration must clean up its temp");
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            garbage,
+            "source .db must be left untouched for manual recovery"
+        );
+    }
+
+    #[test]
+    fn absorb_expands_tilde_in_configured_state_db() {
+        // Adversarial gate Fix B: SyncConfig::default() carries a literal
+        // `~/.local/share/tcfsd/state.db` and the config loader does zero
+        // normalization; absorb must target the $HOME-expanded path, never a
+        // CWD-relative `./~/…`. Guarded with a temp HOME (set + restored).
+        let home_dir = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home_dir.path());
+
+        let expanded_db = home_dir.path().join("tcfsd-tin2657/state.db");
+        std::fs::create_dir_all(expanded_db.parent().unwrap()).unwrap();
+        seed_state(&expanded_db, &[("/sync/a.txt", "data/index/a.txt")]);
+
+        let resolved = absorb_legacy_state_db(std::path::Path::new("~/tcfsd-tin2657/state.db"));
+
+        // Restore HOME before asserting so a panic can't leak the temp value.
+        match saved_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        let expected_json = home_dir.path().join("tcfsd-tin2657/state.json");
+        assert_eq!(
+            resolved, expected_json,
+            "absorb must resolve under $HOME, not CWD-relative ./~/…"
+        );
+        assert!(
+            expected_json.exists(),
+            "migration must land at the expanded path"
+        );
+        assert!(
+            !std::path::Path::new("~").exists(),
+            "no literal ./~ directory may be created"
+        );
     }
 }

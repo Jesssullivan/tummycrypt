@@ -579,6 +579,25 @@ impl Default for FuseConfig {
     }
 }
 
+/// Expand a leading `~/` in `path` to the user's home directory (`HOME`, then
+/// `USERPROFILE`). Any other path is returned unchanged.
+///
+/// Config defaults carry literal `~` paths (e.g. `sync.state_db`) and the
+/// config loader performs no normalization, so every consumer that touches the
+/// filesystem must expand first — otherwise a `~/…` value resolves to a
+/// CWD-relative `./~/…`. Shared here so the CLI and daemon expand identically.
+pub fn expand_tilde(path: &std::path::Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        PathBuf::from(format!("{}/{}", home, rest))
+    } else {
+        path.to_path_buf()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
