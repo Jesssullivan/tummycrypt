@@ -120,7 +120,9 @@ enum Commands {
         /// Remote prefix in the bucket (default: derived from local path name)
         #[arg(long, short = 'p')]
         prefix: Option<String>,
-        /// Path to the sync state cache JSON file (overrides config)
+        /// Path to the sync state cache JSON file (overrides config).
+        /// `.db` paths are normalized to their `.json` sibling — the file the
+        /// daemon owns — so the CLI and daemon always act on the same cache.
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -136,7 +138,9 @@ enum Commands {
         /// Remote prefix to look up chunks (default: derived from manifest path)
         #[arg(long, short = 'p')]
         prefix: Option<String>,
-        /// Path to the sync state cache JSON file (overrides config)
+        /// Path to the sync state cache JSON file (overrides config).
+        /// `.db` paths are normalized to their `.json` sibling — the file the
+        /// daemon owns — so the CLI and daemon always act on the same cache.
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -146,7 +150,9 @@ enum Commands {
     SyncStatus {
         /// Path to check (default: current directory)
         path: Option<PathBuf>,
-        /// Path to the sync state cache JSON file (overrides config)
+        /// Path to the sync state cache JSON file (overrides config).
+        /// `.db` paths are normalized to their `.json` sibling — the file the
+        /// daemon owns — so the CLI and daemon always act on the same cache.
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -295,7 +301,9 @@ enum Commands {
         /// Actually execute the plan (default: dry-run)
         #[arg(long)]
         execute: bool,
-        /// Path to the sync state cache JSON file (overrides config)
+        /// Path to the sync state cache JSON file (overrides config).
+        /// `.db` paths are normalized to their `.json` sibling — the file the
+        /// daemon owns — so the CLI and daemon always act on the same cache.
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -317,7 +325,9 @@ enum Commands {
         /// Remote prefix override
         #[arg(long, short = 'p')]
         prefix: Option<String>,
-        /// Path to the sync state cache JSON file (overrides config)
+        /// Path to the sync state cache JSON file (overrides config).
+        /// `.db` paths are normalized to their `.json` sibling — the file the
+        /// daemon owns — so the CLI and daemon always act on the same cache.
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -348,7 +358,9 @@ enum Commands {
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,
-        /// Path to the sync state cache JSON file (overrides config)
+        /// Path to the sync state cache JSON file (overrides config).
+        /// `.db` paths are normalized to their `.json` sibling — the file the
+        /// daemon owns — so the CLI and daemon always act on the same cache.
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -991,18 +1003,9 @@ async fn build_operator(config: &tcfs_core::config::TcfsConfig) -> Result<openda
     .context("building storage operator")
 }
 
-/// Expand `~` in path to the user's home directory
-fn expand_tilde(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/") {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_default();
-        PathBuf::from(format!("{}/{}", home, rest))
-    } else {
-        path.to_path_buf()
-    }
-}
+// `~`-expansion lives in tcfs-core so the CLI and daemon expand identically
+// (TIN-2657 adversarial gate, Fix B).
+use tcfs_core::config::expand_tilde;
 
 /// Resolve the state cache path: CLI flag > config > default user data dir
 fn resolve_state_path(
@@ -1010,7 +1013,11 @@ fn resolve_state_path(
     override_path: Option<&Path>,
 ) -> PathBuf {
     if let Some(p) = override_path {
-        return p.to_path_buf();
+        // Normalize the override to the canonical `.json` sibling so a
+        // `--state …/state.db` (or `TCFS_STATE_PATH`) input resolves to the
+        // exact file the daemon owns. `.with_extension("json")` is idempotent
+        // for `.json` inputs, so explicit `.json` overrides are unchanged.
+        return expand_tilde(p).with_extension("json");
     }
     // Config uses state_db (designed for RocksDB in Phase 4); for JSON Phase 2
     // we derive a sibling .json file
@@ -7255,6 +7262,108 @@ mod tests {
         config.sync.sync_root = Some(sync_root.to_path_buf());
         config.sync.state_db = sync_root.join("state.db");
         config
+    }
+
+    // ── TIN-2657: CLI/daemon state-path convergence ──────────────────────────
+
+    #[test]
+    fn resolve_state_path_override_db_equals_default() {
+        // THE TIN-2657 regression guard: a `--state …/state.db` override must
+        // resolve to the *same* file as the config default (the daemon-owned
+        // `state.json`). On the pre-fix `return p.to_path_buf()` this fails,
+        // because the override stayed `…/state.db` while the default derived
+        // `…/state.json` — the split that orphaned writes and hid conflicts.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        let config = test_config(&sync_root); // state_db = sync_root/state.db
+        let db_literal = config.sync.state_db.clone(); // …/state.db
+
+        let via_override = resolve_state_path(&config, Some(&db_literal));
+        let via_default = resolve_state_path(&config, None);
+
+        assert_eq!(
+            via_override, via_default,
+            "override `.db` must resolve to the same file as the default"
+        );
+        assert_eq!(
+            via_default.extension().and_then(|e| e.to_str()),
+            Some("json"),
+            "canonical state path is always `.json`"
+        );
+    }
+
+    #[test]
+    fn resolve_state_path_json_override_idempotent_and_tilde_expands() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(&dir.path().join("tree"));
+
+        // An explicit `.json` override is idempotent under normalization.
+        let json_override = dir.path().join("reconcile/root-a.json");
+        assert_eq!(
+            resolve_state_path(&config, Some(&json_override)),
+            json_override,
+            "`.json` override must pass through unchanged"
+        );
+
+        // A `~`-prefixed override is expanded, and `.db` still normalizes to
+        // `.json`. Read HOME rather than mutate it, so parallel tests can't race.
+        let home = std::env::var("HOME").expect("HOME set in test env");
+        let tilde = std::path::PathBuf::from("~/tcfs-tin2657/state.db");
+        assert_eq!(
+            resolve_state_path(&config, Some(&tilde)),
+            std::path::PathBuf::from(format!("{home}/tcfs-tin2657/state.json")),
+            "tilde expands and `.db` normalizes to `.json`"
+        );
+    }
+
+    #[test]
+    fn cli_write_via_db_override_visible_to_daemon_json_read() {
+        // CLI writes through a `--state …/state.db` override; the daemon reads
+        // at `config.sync.state_db.with_extension("json")`. Post-fix they are
+        // the same file, so the write is visible.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let file = sync_root.join("doc.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let config = test_config(&sync_root);
+
+        let cli_path = resolve_state_path(&config, Some(&config.sync.state_db));
+        let mut cli_state = tcfs_sync::state::StateCache::open(&cli_path).unwrap();
+        seed_tracked_file(&mut cli_state, &file, "data/index/doc.txt");
+        cli_state.flush().unwrap();
+
+        let daemon_path = config.sync.state_db.with_extension("json");
+        assert_eq!(cli_path, daemon_path, "CLI and daemon resolve one file");
+        let daemon_state = tcfs_sync::state::StateCache::open(&daemon_path).unwrap();
+        assert!(
+            daemon_state.get(&file).is_some(),
+            "CLI write must be visible to the daemon read"
+        );
+    }
+
+    #[test]
+    fn daemon_write_json_visible_to_cli_db_override_read() {
+        // The reverse: the daemon writes at the canonical `.json`; a CLI
+        // invocation using `--state …/state.db` must still see it.
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let file = sync_root.join("doc.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let config = test_config(&sync_root);
+
+        let daemon_path = config.sync.state_db.with_extension("json");
+        let mut daemon_state = tcfs_sync::state::StateCache::open(&daemon_path).unwrap();
+        seed_tracked_file(&mut daemon_state, &file, "data/index/doc.txt");
+        daemon_state.flush().unwrap();
+
+        let cli_path = resolve_state_path(&config, Some(&config.sync.state_db));
+        let cli_state = tcfs_sync::state::StateCache::open(&cli_path).unwrap();
+        assert!(
+            cli_state.get(&file).is_some(),
+            "daemon write must be visible to a `--state …/state.db` CLI read"
+        );
     }
 
     #[test]

@@ -238,7 +238,10 @@ pub struct SyncConfig {
     pub nats_token: Option<String>,
     /// Path to a custom CA certificate for NATS TLS verification
     pub nats_ca_cert: Option<PathBuf>,
-    /// RocksDB state cache path
+    /// State cache path. The key is named `state_db` for the (future) RocksDB
+    /// Phase 4 backend, but the live JSON cache is the `.json` sibling of this
+    /// path: both the daemon and the CLI derive `state_db.with_extension("json")`,
+    /// so a `…/state.db` value resolves to `…/state.json`.
     pub state_db: PathBuf,
     /// Worker thread count (0 = cpu_count)
     pub workers: usize,
@@ -573,6 +576,25 @@ impl Default for FuseConfig {
             cache_dir: PathBuf::from("~/.cache/tcfs"),
             cache_max_mb: 10240,
         }
+    }
+}
+
+/// Expand a leading `~/` in `path` to the user's home directory (`HOME`, then
+/// `USERPROFILE`). Any other path is returned unchanged.
+///
+/// Config defaults carry literal `~` paths (e.g. `sync.state_db`) and the
+/// config loader performs no normalization, so every consumer that touches the
+/// filesystem must expand first — otherwise a `~/…` value resolves to a
+/// CWD-relative `./~/…`. Shared here so the CLI and daemon expand identically.
+pub fn expand_tilde(path: &std::path::Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        PathBuf::from(format!("{}/{}", home, rest))
+    } else {
+        path.to_path_buf()
     }
 }
 
