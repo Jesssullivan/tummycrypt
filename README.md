@@ -2,10 +2,12 @@
 
 > Under active development. Not yet stable. Expect breaking changes.
 
-Current release: `v0.12.14` (tagged); workspace `main` is `0.12.16` and carries
-the merged `.git` fast-forward and divergent keep-both code paths, but the
-post-PR-4 divergent keep-both fleet deploy/canary is still pending. The Homebrew
-tap is stale at `0.12.12` and that formula skips symlinks.
+Current release: `v0.12.17` (signed tag + GitHub release, 2026-07-09 — first
+tagged release since `v0.12.14`; the `0.12.15`/`0.12.16` strings shipped to
+fleet hosts from untagged main builds and are folded in, see CHANGELOG). The
+`.git` fast-forward AND divergent keep-both conflict paths are merged and
+canary-proven (G5-git-5 closed); fleet deploy of v0.12.17 is the next step.
+The Homebrew tap is stale at `0.12.12` and that formula skips symlinks.
 
 Self-hosted encrypted file sync with on-demand hydration. The Linux FUSE mounted
 view is host-proven for clean-name traversal, hydrate-on-open, mounted
