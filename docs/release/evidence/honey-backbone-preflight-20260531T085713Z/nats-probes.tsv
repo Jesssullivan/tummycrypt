@@ -1,7 +1,0 @@
-side	host	healthz	tcp	nats_info
-local	nats-tcfs	{"status":"ok"}	ok	ok
-honey	nats-tcfs	curl: (28) Connection timed out after 3001 milliseconds	fail	TimeoutError:timed out
-local	10.245.131.232	curl: (28) Connection timed out after 3002 milliseconds	fail	TimeoutError:timed out
-honey	10.245.131.232	{"status":"ok"}	ok	ok
-local	100.71.19.127	curl: (28) Connection timed out after 3002 milliseconds	fail	TimeoutError:timed out
-honey	100.71.19.127	curl: (28) Connection timed out after 3002 milliseconds	fail	TimeoutError:timed out
