@@ -96,6 +96,10 @@ jobs:
   build-macos-aarch64:
     name: Build macOS aarch64
     runs-on: macos-14
+    # Hard stop well under the 6h hosted-runner ceiling: a wedged job must fail
+    # loud with hours to spare, not silently eat the whole window (both prior
+    # runs of this job died at exactly 6h00m inside "Set up FlakeHub Cache").
+    timeout-minutes: 300
     needs: flake-check
     # id-token: write is required for FlakeHub Cache OIDC push (below).
     permissions:
@@ -118,8 +122,13 @@ jobs:
       # is what lets neo `nix-switch` SUBSTITUTE the aarch64-darwin closure
       # (incl. tcfsd) instead of ever compiling locally. Requires this repo to be
       # enrolled in FlakeHub Cache; no-ops with a warning if not yet enrolled.
+      # continue-on-error alone is not enough: when un-enrolled this action can
+      # HANG rather than fail (observed twice: job cancelled at exactly the 6h
+      # ceiling with every build step still skipped) — timeout-minutes converts
+      # the hang into the warning this comment always assumed.
       - name: Set up FlakeHub Cache
         uses: DeterminateSystems/flakehub-cache-action@main
+        timeout-minutes: 10
         continue-on-error: true
 
       - name: Configure Attic
