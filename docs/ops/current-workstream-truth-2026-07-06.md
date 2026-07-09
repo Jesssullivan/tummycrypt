@@ -57,7 +57,7 @@ part of the truth:
   unusable over ssh). Resolve was exercised via the repo-precedent
   `require_session=false` bypass window, re-locked immediately after.
 - **TIN-2657 — OPEN:** the daemon remaps `sync.state_db` → `state.json`
-  (`crates/tcfs-daemon/src/daemon.rs:315`), so the CLI and daemon act on
+  (`crates/tcfsd/src/daemon.rs:315`), so the CLI and daemon act on
   different files — this is why the operator resolve VERB returned 0 refs even
   post-#541.
 

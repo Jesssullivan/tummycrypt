@@ -238,7 +238,10 @@ pub struct SyncConfig {
     pub nats_token: Option<String>,
     /// Path to a custom CA certificate for NATS TLS verification
     pub nats_ca_cert: Option<PathBuf>,
-    /// RocksDB state cache path
+    /// State cache path. The key is named `state_db` for the (future) RocksDB
+    /// Phase 4 backend, but the live JSON cache is the `.json` sibling of this
+    /// path: both the daemon and the CLI derive `state_db.with_extension("json")`,
+    /// so a `…/state.db` value resolves to `…/state.json`.
     pub state_db: PathBuf,
     /// Worker thread count (0 = cpu_count)
     pub workers: usize,

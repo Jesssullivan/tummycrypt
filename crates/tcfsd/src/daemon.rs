@@ -311,8 +311,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         false
     };
 
-    // Open state cache, purge stale entries, then wrap in Arc<Mutex>
-    let state_json_path = config.sync.state_db.with_extension("json");
+    // Open state cache, purge stale entries, then wrap in Arc<Mutex>. The
+    // canonical file is the `.json` sibling of the configured `state_db`; a
+    // legacy `state.db`-only host is absorbed into it exactly once.
+    let state_json_path = absorb_legacy_state_db(&config.sync.state_db);
     let mut state_cache_inner = tcfs_sync::state::StateCache::open(&state_json_path)
         .unwrap_or_else(|e| {
             warn!("state cache open failed: {e}  (starting fresh)");
@@ -2071,6 +2073,30 @@ fn ensure_dirs(config: &TcfsConfig) {
     }
 }
 
+/// Resolve the canonical `state.json` path from the configured `state_db` and,
+/// exactly once, absorb a legacy sibling `state.db` into it.
+///
+/// The one-time absorb fires **only** when the canonical `.json` is absent and
+/// a *distinct* sibling `.db` exists — so an existing `.json` always wins
+/// untouched, with no size heuristic or merge (the live reality on hosts where
+/// both files exist). A copy failure is logged and the daemon continues, opening
+/// the still-absent `.json` fresh. Returns the `.json` path the caller opens.
+fn absorb_legacy_state_db(state_db: &std::path::Path) -> std::path::PathBuf {
+    let state_json_path = state_db.with_extension("json");
+    if !state_json_path.exists() && state_db != state_json_path.as_path() && state_db.exists() {
+        match std::fs::copy(state_db, &state_json_path) {
+            Ok(_) => info!("migrated legacy state.db → state.json"),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "state.db → state.json one-time migration failed; starting fresh"
+                )
+            }
+        }
+    }
+    state_json_path
+}
+
 #[cfg(test)]
 mod keep_both_pr1_tests {
     use super::{auto_conflict_must_defer, handle_auto_pull};
@@ -2303,5 +2329,111 @@ mod keep_both_pr1_tests {
         .await;
 
         assert!(!should_ack, "manifest/event mismatch must withhold ack");
+    }
+}
+
+#[cfg(test)]
+mod state_migration_tests {
+    use super::absorb_legacy_state_db;
+
+    /// Seed `path` (opened as a JSON cache regardless of extension) with the
+    /// given `(cache-key, remote_path)` entries and flush.
+    fn seed_state(path: &std::path::Path, entries: &[(&str, &str)]) {
+        let mut cache = tcfs_sync::state::StateCache::open(path).unwrap();
+        for (key, remote_path) in entries {
+            cache.set(
+                std::path::Path::new(key),
+                tcfs_sync::state::SyncState {
+                    blake3: "hash".into(),
+                    size: 0,
+                    mtime: 0,
+                    chunk_count: 0,
+                    remote_path: (*remote_path).into(),
+                    last_synced: 0,
+                    vclock: tcfs_sync::conflict::VectorClock::new(),
+                    device_id: "neo".into(),
+                    conflict: None,
+                    status: tcfs_sync::state::FileSyncStatus::Synced,
+                },
+            );
+        }
+        cache.flush().unwrap();
+    }
+
+    #[test]
+    fn absorb_seeds_json_from_db_only_host() {
+        // `.db`-only, no `.json`: the one-time absorb seeds `state.json` from the
+        // legacy `.db` and the daemon serves the migrated entry.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let json = dir.path().join("state.json");
+        seed_state(&db, &[("/sync/a.txt", "data/index/a.txt")]);
+        assert!(!json.exists(), "precondition: no .json yet");
+
+        let resolved = absorb_legacy_state_db(&db);
+        assert_eq!(resolved, json, "resolves to the .json sibling");
+        assert!(json.exists(), ".json must be seeded from .db");
+
+        let cache = tcfs_sync::state::StateCache::open(&resolved).unwrap();
+        assert!(
+            cache.get(std::path::Path::new("/sync/a.txt")).is_some(),
+            "migrated entry must be visible after absorb"
+        );
+    }
+
+    #[test]
+    fn absorb_leaves_existing_json_untouched_when_both_exist() {
+        // Both exist: `.json` (2 entries) wins untouched; the *different* `.db`
+        // (1 entry) is never copied in — no size heuristic, no merge.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let json = dir.path().join("state.json");
+        seed_state(&db, &[("/sync/from-db.txt", "data/index/from-db.txt")]);
+        seed_state(
+            &json,
+            &[
+                ("/sync/keep-1.txt", "data/index/keep-1.txt"),
+                ("/sync/keep-2.txt", "data/index/keep-2.txt"),
+            ],
+        );
+
+        let resolved = absorb_legacy_state_db(&db);
+        assert_eq!(resolved, json);
+
+        let cache = tcfs_sync::state::StateCache::open(&resolved).unwrap();
+        assert!(
+            cache
+                .get(std::path::Path::new("/sync/keep-1.txt"))
+                .is_some(),
+            "existing .json entry 1 must survive"
+        );
+        assert!(
+            cache
+                .get(std::path::Path::new("/sync/keep-2.txt"))
+                .is_some(),
+            "existing .json entry 2 must survive"
+        );
+        assert!(
+            cache
+                .get(std::path::Path::new("/sync/from-db.txt"))
+                .is_none(),
+            ".json must win untouched; .db content must not leak in"
+        );
+    }
+
+    #[test]
+    fn absorb_neither_present_starts_fresh() {
+        // Neither file exists: no crash, returns the `.json` path, nothing seeded.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let json = dir.path().join("state.json");
+
+        let resolved = absorb_legacy_state_db(&db);
+        assert_eq!(resolved, json);
+        assert!(!json.exists(), "no source → nothing seeded");
+
+        // Opening the still-absent `.json` starts fresh (empty cache, no crash).
+        let cache = tcfs_sync::state::StateCache::open(&resolved).unwrap();
+        assert!(cache.get(std::path::Path::new("/sync/nope.txt")).is_none());
     }
 }

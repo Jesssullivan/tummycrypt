@@ -604,6 +604,13 @@ impl StateCache {
         let before = self.entries.len();
 
         self.entries.retain(|key, state| {
+            // Never drop an entry that carries an unresolved conflict, whatever
+            // its prefix. Cross-prefix roam (e.g. `git-roam/*`) records a
+            // conflict under a non-default prefix; purging it on boot would
+            // silently delete the record before the operator can resolve it.
+            if state.conflict.is_some() {
+                return true;
+            }
             // Keep entries whose remote_path starts with the expected prefix
             if !state.remote_path.starts_with(&prefix_slash) {
                 return false;
@@ -2048,5 +2055,95 @@ mod tests {
         cache.flush_if_stale(Duration::ZERO).unwrap();
         assert!(!cache.dirty);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn purge_stale_preserves_unresolved_conflicts_across_prefixes() {
+        // TIN-2657/TIN-2658: boot-time purge must never drop an entry that
+        // carries an unresolved conflict, even when its remote_path lives under
+        // a foreign prefix (e.g. the `git-roam/*` roam record). A plain foreign
+        // non-conflict entry is still dropped.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = StateCache::open(&dir.path().join("state.json")).unwrap();
+
+        // In-prefix ordinary entry — kept.
+        cache.set(
+            std::path::Path::new("/sync/keep.txt"),
+            SyncState {
+                blake3: "a".into(),
+                size: 1,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "data/index/keep.txt".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+        // Foreign-prefix entry carrying an unresolved conflict — must survive.
+        cache.set(
+            std::path::Path::new("/sync/repo/.git/HEAD"),
+            SyncState {
+                blake3: "b".into(),
+                size: 1,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "git-roam/repo/.git/HEAD".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: Some(crate::conflict::ConflictInfo {
+                    rel_path: "repo/.git/HEAD".into(),
+                    local_vclock: VectorClock::new(),
+                    remote_vclock: VectorClock::new(),
+                    local_blake3: "b".into(),
+                    remote_blake3: "c".into(),
+                    local_device: "neo".into(),
+                    remote_device: "honey".into(),
+                    detected_at: 0,
+                    times_recorded: 1,
+                    remote_manifest_key: None,
+                }),
+                status: FileSyncStatus::Conflict,
+            },
+        );
+        // Foreign-prefix ordinary entry with no conflict — must be dropped.
+        cache.set(
+            std::path::Path::new("/sync/foreign.txt"),
+            SyncState {
+                blake3: "d".into(),
+                size: 1,
+                mtime: 0,
+                chunk_count: 1,
+                remote_path: "git-roam/foreign.txt".into(),
+                last_synced: 0,
+                vclock: VectorClock::new(),
+                device_id: "neo".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+
+        let removed = cache.purge_stale("data/index");
+
+        assert_eq!(removed, 1, "only the foreign non-conflict entry is dropped");
+        assert!(
+            cache.get(std::path::Path::new("/sync/keep.txt")).is_some(),
+            "in-prefix entry retained"
+        );
+        assert!(
+            cache
+                .get(std::path::Path::new("/sync/repo/.git/HEAD"))
+                .is_some(),
+            "foreign-prefix UNRESOLVED CONFLICT must be preserved across boot"
+        );
+        assert!(
+            cache
+                .get(std::path::Path::new("/sync/foreign.txt"))
+                .is_none(),
+            "foreign-prefix non-conflict entry still purged"
+        );
     }
 }
