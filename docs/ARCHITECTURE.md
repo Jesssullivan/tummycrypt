@@ -15,7 +15,7 @@ task docs:pdf
 
 ## Overview
 
-tcfs is a Rust monorepo of 18 workspace crates organized around a daemon
+tcfs is a Rust monorepo of 19 workspace crates organized around a daemon
 (`tcfsd`) that exposes a gRPC service over a Unix domain socket. The daemon
 manages Linux FUSE mounts, coordinates with SeaweedFS via OpenDAL, and
 synchronizes state across a device fleet using NATS JetStream with vector
@@ -28,7 +28,7 @@ zstd, and encrypted with XChaCha20-Poly1305 before upload.
 See the [Architecture PDF](https://github.com/Jesssullivan/tummycrypt/actions/workflows/docs.yml) for full details including:
 
 - System architecture (client + server components)
-- Crate map (18 workspace crates)
+- Crate map (19 workspace crates)
 - Stub file format specification
 - Hydration sequence
 - Credential chain
