@@ -14,6 +14,9 @@ use secrecy::SecretString;
 /// Configuration for the TCFS provider.
 ///
 /// On iOS, these values come from the Keychain via the Swift layer.
+/// `s3_endpoint` must use HTTPS. This record intentionally exposes no
+/// plaintext opt-in; lower-level development tests can use the process-only
+/// `TCFS_STORAGE_ALLOW_INSECURE_HTTP` escape hatch.
 #[derive(uniffi::Record)]
 pub struct ProviderConfig {
     pub s3_endpoint: String,
@@ -1082,7 +1085,7 @@ mod tests {
 
     fn test_provider() -> Arc<TcfsProviderHandle> {
         TcfsProviderHandle::new(ProviderConfig {
-            s3_endpoint: "http://127.0.0.1:8333".into(),
+            s3_endpoint: "https://127.0.0.1:8333".into(),
             s3_bucket: "tcfs-test".into(),
             access_key: "test-access".into(),
             s3_secret: "test-secret".into(),

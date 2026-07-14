@@ -138,6 +138,7 @@ tasks:
       - task: lazy:test-macos-fileprovider-lab-gatekeeper-override
       - task: lazy:test-asc-fileprovider-lab-provision
       - task: lazy:test-fileprovider-provision
+      - task: lazy:test-ios-bootstrap-qr
       - task: lazy:test-fileprovider-surface-contract
       - task: lazy:test-release-workflow-fileprovider
       - task: lazy:test-release-workflow-container
@@ -1239,6 +1240,13 @@ tasks:
     desc: Regression-test FileProvider config provisioning metadata
     cmds:
       - bash scripts/test-fileprovider-provision-config.sh
+
+  lazy:test-ios-bootstrap-qr:
+    desc: Regression-test iOS bootstrap QR storage transport validation
+    cmds:
+      - bash -n swift/ios/Scripts/gen-bootstrap-qr.sh scripts/test-ios-bootstrap-qr.sh
+      - shellcheck scripts/test-ios-bootstrap-qr.sh
+      - bash scripts/test-ios-bootstrap-qr.sh
 
   lazy:test-fileprovider-surface-contract:
     desc: Regression-test FileProvider decorations, progress, and custom action contract

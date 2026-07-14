@@ -219,7 +219,7 @@ struct QRScannerView: View {
         isProcessing = true
 
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        scannerLogger.info("QR scanned: \(trimmed.prefix(30))...")
+        scannerLogger.info("QR scanned (payload bytes=\(trimmed.utf8.count))")
 
         // Route based on payload type to avoid sending raw JSON to base64 decoder.
         // Bootstrap configs (raw JSON or tcfs://bootstrap deep links) must be parsed
@@ -238,7 +238,7 @@ struct QRScannerView: View {
             } else {
                 DispatchQueue.main.async {
                     self.isProcessing = false
-                    self.errorMessage = "QR contains JSON but is not a valid TCFS bootstrap config or enrollment invite.\n\nExpected fields: s3_endpoint, s3_bucket, access_key, s3_secret."
+                    self.errorMessage = "QR contains JSON but is not a valid TCFS bootstrap config or enrollment invite.\n\nBootstrap storage endpoints must use https://."
                 }
             }
             return
@@ -268,7 +268,7 @@ struct QRScannerView: View {
         } else {
             DispatchQueue.main.async {
                 self.isProcessing = false
-                self.errorMessage = "Invalid bootstrap QR code. Could not decode configuration data."
+                self.errorMessage = "Invalid bootstrap QR code. The payload must decode successfully and its storage endpoint must use https://."
             }
         }
     }
@@ -296,7 +296,7 @@ struct QRScannerView: View {
             salt: config.encryption_salt ?? ""
         )
 
-        scannerLogger.info("Bootstrap config saved via scanner (endpoint=\(config.s3_endpoint))")
+        scannerLogger.info("Bootstrap config saved via scanner")
 
         DispatchQueue.main.async {
             self.isProcessing = false

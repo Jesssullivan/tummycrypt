@@ -14,7 +14,8 @@ pub use operator::{build_operator, StorageConfig};
 /// Parse a remote spec like `seaweedfs://host:port/bucket[/prefix]`.
 ///
 /// `seaweedfs://` is retained as the historical HTTP form for local/dev
-/// endpoints. Use `seaweedfs+https://` for production-like TLS endpoints.
+/// endpoints and still requires the caller's explicit insecure-HTTP opt-in.
+/// Use `seaweedfs+https://` for production TLS endpoints.
 ///
 /// Returns `(endpoint, bucket, prefix)` where:
 /// - endpoint: `http://host:port` or `https://host:port`

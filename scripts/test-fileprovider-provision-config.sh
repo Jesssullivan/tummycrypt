@@ -24,6 +24,7 @@ fileprovider_endpoint = "http://127.0.0.1:19101"
 
 [storage]
 endpoint = "http://example.invalid:8333"
+enforce_tls = false
 bucket = "tcfs"
 remote_prefix = "data"
 
@@ -46,6 +47,7 @@ jq -e \
   --arg master_key_file "$MASTER_KEY_FILE" \
   '
     .s3_endpoint == $endpoint and
+    .allow_insecure_http == true and
     .s3_bucket == $bucket and
     .s3_access == $access and
     .s3_secret == $secret and
@@ -57,6 +59,7 @@ jq -e \
   ' "$OUTPUT_JSON" >/dev/null
 
 grep -Fq "Master key file: present" "${TMPDIR}/provision.out"
+grep -Fq "Insecure HTTP allowed: true" "${TMPDIR}/provision.out"
 grep -Fq "Endpoint: http://127.0.0.1:19101" "${TMPDIR}/provision.out"
 grep -Fq "Also written to $APP_GROUP_JSON" "${TMPDIR}/provision.out"
 grep -Fq "TCFS_FILEPROVIDER_APP_GROUP_COPY_TIMEOUT" "$SCRIPT"
@@ -81,5 +84,21 @@ if [[ -e "$APP_GROUP_JSON" ]]; then
   printf 'expected skip mode not to write %s\n' "$APP_GROUP_JSON" >&2
   exit 1
 fi
+
+STRICT_CONFIG_TOML="${TMPDIR}/tcfs-strict.toml"
+cat >"$STRICT_CONFIG_TOML" <<EOF
+[storage]
+endpoint = "http://example.invalid:8333"
+bucket = "tcfs"
+EOF
+
+if HOME="$HOME_DIR" \
+    AWS_ACCESS_KEY_ID="test-access" \
+    AWS_SECRET_ACCESS_KEY="test-secret" \
+    bash "$SCRIPT" "$STRICT_CONFIG_TOML" >"${TMPDIR}/strict.out" 2>"${TMPDIR}/strict.err"; then
+  printf 'expected plaintext config without explicit opt-in to fail\n' >&2
+  exit 1
+fi
+grep -Fq "requires explicit 'enforce_tls = false'" "${TMPDIR}/strict.err"
 
 printf 'FileProvider provision config tests passed\n'

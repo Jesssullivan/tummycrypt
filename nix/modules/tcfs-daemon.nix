@@ -8,7 +8,7 @@
 #     configFile = "/etc/tcfs/config.toml";
 #     credentialsFile = "/etc/tcfs/age-identity.txt";
 #     mounts = [
-#       { remote = "seaweedfs://dees-appu-bearts:8333/bucket"; local = "/mnt/tcfs"; }
+#       { remote = "seaweedfs+https://seaweedfs.example.com/bucket"; local = "/mnt/tcfs"; }
 #     ];
 #   };
 #

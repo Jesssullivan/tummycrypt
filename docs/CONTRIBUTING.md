@@ -124,14 +124,26 @@ cargo clippy --workspace --all-targets --fix  # Auto-fix lints
 # This runs docker-compose with the local dev infrastructure
 task dev
 
-# In another terminal, run the daemon
-cargo run -p tcfsd
+# In another terminal, copy the annotated development config. It explicitly
+# opts the isolated local SeaweedFS endpoint into plaintext HTTP.
+DEV_CONFIG="${TMPDIR:-/tmp}/tcfs-dev.toml"
+cp config/tcfs.example.toml "$DEV_CONFIG"
+# Edit the copied file to use writable socket/state/cache paths and either
+# remove credentials_file or point it at your development credentials.
+${EDITOR:-vi} "$DEV_CONFIG"
+
+# Run the daemon and every CLI command against that same config.
+cargo run -p tcfsd -- --config "$DEV_CONFIG"
 
 # Use the CLI
-cargo run -p tcfs-cli -- status
-cargo run -p tcfs-cli -- push /path/to/files
-cargo run -p tcfs-cli -- mount seaweedfs://localhost:8333/tcfs /tmp/tcfs-mount
+cargo run -p tcfs-cli -- --config "$DEV_CONFIG" status
+cargo run -p tcfs-cli -- --config "$DEV_CONFIG" push /path/to/files
+cargo run -p tcfs-cli -- --config "$DEV_CONFIG" mount seaweedfs://localhost:8333/tcfs /tmp/tcfs-mount
 ```
+
+The example's `storage.enforce_tls = false` is only for the job-local
+development stack. Use an HTTPS endpoint and retain the secure default for any
+shared, remote, or fleet environment.
 
 ## Pull Request Guidelines
 

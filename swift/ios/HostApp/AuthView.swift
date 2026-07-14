@@ -157,9 +157,12 @@ class AuthViewModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
-            // Decode invite directly — no provider needed (credentials come FROM the invite)
+            // The current UniFFI API exposes invite parsing on a provider
+            // handle. Construction does not contact storage, so use a reserved
+            // HTTPS placeholder until credentials come FROM the invite.
             let config = ProviderConfig(
-                s3Endpoint: "", s3Bucket: "", accessKey: "", s3Secret: "",
+                s3Endpoint: "https://invite-parser.invalid", s3Bucket: "invite-parser",
+                accessKey: "unused", s3Secret: "unused",
                 remotePrefix: "default", deviceId: "pending",
                 encryptionPassphrase: "", encryptionSalt: ""
             )
@@ -171,6 +174,12 @@ class AuthViewModel: ObservableObject {
                 DispatchQueue.main.async {
                     self.isLoading = false
                     if result.success {
+                        if !result.storageEndpoint.isEmpty,
+                           !BootstrapConfig.isSecureStorageEndpoint(result.storageEndpoint) {
+                            self.errorMessage = "Enrollment invite returned an unsupported storage endpoint. TCFS on iOS requires HTTPS."
+                            authLogger.error("Rejected invite credentials with non-HTTPS storage endpoint")
+                            return
+                        }
                         // Auto-configure: save brokered credentials to keychain
                         if !result.storageEndpoint.isEmpty, let vm = tcfsViewModel {
                             vm.saveConfig(

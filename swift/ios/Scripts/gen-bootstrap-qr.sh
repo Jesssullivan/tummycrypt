@@ -2,11 +2,13 @@
 # Generate a TCFS bootstrap QR code for iOS device enrollment.
 #
 # Usage:
-#   ./gen-bootstrap-qr.sh                    # uses sops-nix secrets from current host
+#   TCFS_S3_ENDPOINT=https://storage.example.com ./gen-bootstrap-qr.sh
+#                                             # uses sops-nix secrets from current host
 #   ./gen-bootstrap-qr.sh --device-id myphone
 #
 # Requires: qrencode (brew install qrencode)
 set -euo pipefail
+umask 077
 
 DEVICE_ID="${1:-ios-$(hostname -s | tr '[:upper:]' '[:lower:]')}"
 
@@ -34,12 +36,32 @@ fi
 
 # Read endpoint + bucket from tcfs config
 CONFIG="${HOME}/.config/tcfs/config.toml"
+CONFIG_ENDPOINT=""
+CONFIG_BUCKET=""
 if [ -f "$CONFIG" ]; then
-    ENDPOINT=$(grep '^endpoint' "$CONFIG" | head -1 | sed 's/.*= *"//;s/".*//')
-    BUCKET=$(grep '^bucket' "$CONFIG" | head -1 | sed 's/.*= *"//;s/".*//')
-else
-    ENDPOINT="${TCFS_S3_ENDPOINT:-http://212.2.245.145:8333}"
-    BUCKET="tcfs"
+    CONFIG_ENDPOINT=$(grep '^endpoint' "$CONFIG" | head -1 | sed 's/.*= *"//;s/".*//' || true)
+    CONFIG_BUCKET=$(grep '^bucket' "$CONFIG" | head -1 | sed 's/.*= *"//;s/".*//' || true)
+fi
+ENDPOINT="${TCFS_S3_ENDPOINT:-$CONFIG_ENDPOINT}"
+BUCKET="${TCFS_S3_BUCKET:-${CONFIG_BUCKET:-tcfs}}"
+
+if [ -z "$ENDPOINT" ]; then
+    echo "ERROR: an HTTPS storage endpoint is required; set TCFS_S3_ENDPOINT or configure storage.endpoint" >&2
+    exit 1
+fi
+case "$ENDPOINT" in
+    https://*) ;;
+    *)
+        echo "ERROR: iOS bootstrap storage endpoint must use https://" >&2
+        exit 1
+        ;;
+esac
+ENDPOINT_AUTHORITY="${ENDPOINT#https://}"
+ENDPOINT_AUTHORITY="${ENDPOINT_AUTHORITY%%/*}"
+if [ -z "$ENDPOINT_AUTHORITY" ] || [[ "$ENDPOINT_AUTHORITY" == *"@"* ]] || \
+   [[ "$ENDPOINT" == *"?"* ]] || [[ "$ENDPOINT" == *"#"* ]]; then
+    echo "ERROR: iOS bootstrap storage endpoint must be an HTTPS URL without userinfo, query, or fragment" >&2
+    exit 1
 fi
 
 # Read encryption passphrase from sops-nix secret file (optional — plaintext mode if absent)
@@ -51,7 +73,7 @@ fi
 # Read encryption salt: env var > config.toml [crypto] section > empty (plaintext mode)
 ENCRYPTION_SALT="${TCFS_ENCRYPTION_SALT:-}"
 if [ -z "$ENCRYPTION_SALT" ] && [ -f "$CONFIG" ]; then
-    ENCRYPTION_SALT=$(grep '^salt' "$CONFIG" | head -1 | sed 's/.*= *"//;s/".*//')
+    ENCRYPTION_SALT=$(grep '^salt' "$CONFIG" | head -1 | sed 's/.*= *"//;s/".*//' || true)
 fi
 
 # Build encryption JSON fields (omitted entirely if passphrase is empty)
@@ -115,21 +137,22 @@ else
 fi
 echo ""
 
-if command -v qrencode &>/dev/null; then
-    OUT="/tmp/tcfs-bootstrap-qr.png"
-    echo "$JSON" | qrencode -o "$OUT" -s 8 -l H
-    echo "==> QR code saved to: $OUT"
+if ! command -v qrencode &>/dev/null; then
+    echo "ERROR: qrencode is required; refusing to print credential-bearing bootstrap JSON" >&2
+    echo "Install it with 'brew install qrencode' (macOS) or your system package manager." >&2
+    exit 1
+fi
 
-    # Try to open it
-    if command -v open &>/dev/null; then
-        open "$OUT"
-    elif command -v xdg-open &>/dev/null; then
-        xdg-open "$OUT"
-    fi
-else
-    echo "==> Install qrencode to generate QR image:"
-    echo "    brew install qrencode"
-    echo ""
-    echo "==> Raw JSON (paste into any QR generator):"
-    echo "$JSON"
+OUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tcfs-bootstrap-qr.XXXXXX")
+chmod 700 "$OUT_DIR"
+OUT="$OUT_DIR/bootstrap.png"
+printf '%s\n' "$JSON" | qrencode -o "$OUT" -s 8 -l H
+chmod 600 "$OUT"
+echo "==> QR code saved to: $OUT"
+
+# Try to open it
+if command -v open &>/dev/null; then
+    open "$OUT"
+elif command -v xdg-open &>/dev/null; then
+    xdg-open "$OUT"
 fi

@@ -11,7 +11,7 @@ private let enrollLogger = Logger(subsystem: "io.tinyland.tcfs.ios", category: "
 /// ```json
 /// {
 ///   "type": "tcfs-bootstrap",
-///   "s3_endpoint": "http://212.2.245.145:8333",
+///   "s3_endpoint": "https://storage.example.com",
 ///   "s3_bucket": "tcfs",
 ///   "access_key": "...",
 ///   "s3_secret": "...",
@@ -66,6 +66,8 @@ struct BootstrapConfig: Codable {
 
     /// Try to parse from a scanned QR string.
     /// Supports: raw JSON, base64-encoded JSON, or `tcfs://bootstrap?data=<base64>` deep link.
+    /// All accepted payloads require an HTTPS storage endpoint so no caller can
+    /// save credentials that the iOS FileProvider will later reject.
     static func parse(_ raw: String) -> BootstrapConfig? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -97,7 +99,11 @@ struct BootstrapConfig: Codable {
 
     private static func decodeJSON(_ json: String) -> BootstrapConfig? {
         guard let data = json.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(BootstrapConfig.self, from: data)
+        guard let config = try? JSONDecoder().decode(BootstrapConfig.self, from: data),
+              isSecureStorageEndpoint(config.s3_endpoint) else {
+            return nil
+        }
+        return config
     }
 
     private static func decodeBase64(_ encoded: String) -> BootstrapConfig? {
@@ -107,11 +113,26 @@ struct BootstrapConfig: Codable {
             // Pad if needed
             let padded = candidate.padding(toLength: ((candidate.count + 3) / 4) * 4, withPad: "=", startingAt: 0)
             if let data = Data(base64Encoded: padded),
-               let config = try? JSONDecoder().decode(BootstrapConfig.self, from: data) {
+               let config = try? JSONDecoder().decode(BootstrapConfig.self, from: data),
+               isSecureStorageEndpoint(config.s3_endpoint) {
                 return config
             }
         }
         return nil
+    }
+
+    static func isSecureStorageEndpoint(_ endpoint: String) -> Bool {
+        guard let components = URLComponents(string: endpoint),
+              components.scheme?.lowercased() == "https",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return false
+        }
+        return true
     }
 }
 
@@ -323,12 +344,12 @@ struct QREnrollmentView: View {
         scannedData = value
         isProcessing = true
 
-        enrollLogger.info("QR scanned: \(value.prefix(50))...")
+        enrollLogger.info("Enrollment QR scanned (payload bytes=\(value.utf8.count))")
 
         guard let config = BootstrapConfig.parse(value) else {
             DispatchQueue.main.async {
                 isProcessing = false
-                errorMessage = "QR code is not a valid TCFS bootstrap config.\n\nExpected JSON with s3_endpoint, s3_bucket, access_key, s3_secret."
+                errorMessage = "QR code is not a valid TCFS bootstrap config.\n\nExpected JSON with an https:// s3_endpoint, s3_bucket, access_key, and s3_secret."
             }
             return
         }
@@ -379,7 +400,7 @@ struct QREnrollmentView: View {
             salt: config.encryption_salt ?? ""
         )
 
-        enrollLogger.info("Bootstrap config saved to keychain (endpoint=\(config.s3_endpoint), bucket=\(config.s3_bucket))")
+        enrollLogger.info("Bootstrap config saved to keychain")
 
         DispatchQueue.main.async {
             isProcessing = false
