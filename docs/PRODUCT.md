@@ -88,21 +88,29 @@ ordinary file conflicts remain.
 
 ### Minimal A surface
 
-```bash
-tcfs reconcile --root git-roam-tool-daemon --execute
+Status on 2026-07-14: PR #551 implements named conflict inspection and the
+bounded Git keep-both resolve path. It does **not** implement
+`reconcile --root`, named-root ordinary-file resolution, or Lab
+enrollment/rendering. Those lifecycle surfaces remain staged under TIN-2859
+and its B0a/B0b/B0c children.
 
+```bash
+# Source-proven by PR #551
 tcfs conflicts --root git-roam-tool-daemon
 tcfs resolve --root git-roam-tool-daemon \
   . --strategy keep-both
 tcfs resolve --root git-roam-tool-daemon \
   . --strategy keep-both --execute
+
+# Staged B0b surface; not implemented yet
+tcfs reconcile --root git-roam-tool-daemon --execute
 ```
 
-Lab renders the existing `extraReconcileRoots` tuple into daemon config.
-`reconcile --root` and `resolve --root` select that trusted tuple;
-`conflicts` is read-only. A future privileged root-add/update surface belongs
-to B. Explicit state-file inspection may remain a diagnostic command, but it
-is not a mutation route.
+Lab must eventually render the existing `extraReconcileRoots` tuple into
+daemon config. Today `resolve --root` selects the daemon-trusted tuple and
+`conflicts --root` is read-only; `reconcile --root` remains staged. A future
+privileged root-add/update surface belongs to B. Explicit state-file inspection
+may remain a diagnostic command, but it is not a mutation route.
 
 ## TIN-2658 closure ceremony
 
