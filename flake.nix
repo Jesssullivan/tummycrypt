@@ -93,6 +93,9 @@
           inherit cargoArtifacts;
           pname = "tcfs-cli";
           cargoExtraArgs = "-p tcfs-cli";
+          # keep-both CLI tests (TIN-2658) run real `git` repos in checkPhase;
+          # the build sandbox has no ambient git.
+          nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.gitMinimal ];
           meta.mainProgram = "tcfs";
         });
 
