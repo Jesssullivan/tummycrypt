@@ -345,6 +345,27 @@ enum Commands {
         /// Execute repo-group git keep-both. Without this flag, repo mode is a dry-run.
         #[arg(long)]
         execute: bool,
+        /// Root identity to resolve against (TIN-2658 primary UX). A root is a
+        /// named per-root reconcile state cache, addressed by the scheduled
+        /// `tcfsd-reconcile-<name>` unit's isolated file at
+        /// `<tcfsd state dir>/reconcile/<name>.json`. With `--strategy keep-both`
+        /// on a git repo root, the repo-group conflict is resolved in-process
+        /// against that file (the daemon never sees it). An unknown name lists the
+        /// available roots. Mutually exclusive with `--state`.
+        #[arg(long, conflicts_with = "state")]
+        root: Option<String>,
+        /// Low-level escape hatch: explicit path to the sync state cache JSON file
+        /// (overrides config). `.db` paths are normalized to their `.json` sibling.
+        /// Prefer `--root <name>`; this is for ad-hoc/non-registered caches.
+        /// Mutually exclusive with `--root`.
+        #[arg(long, env = "TCFS_STATE_PATH")]
+        state: Option<PathBuf>,
+        /// Remote (S3) prefix override for reading peer ref blobs during a
+        /// repo-group keep-both. Defaults to the config's resolved prefix
+        /// (matching the daemon); only needed when the per-unit config is not on
+        /// `TCFS_CONFIG`.
+        #[arg(long)]
+        prefix: Option<String>,
     },
 
     /// List recorded sync conflicts (read-only)
@@ -358,9 +379,15 @@ enum Commands {
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,
-        /// Path to the sync state cache JSON file (overrides config).
-        /// `.db` paths are normalized to their `.json` sibling — the file the
-        /// daemon owns — so the CLI and daemon always act on the same cache.
+        /// Root identity to inspect (shares the `tcfs resolve --root` UX). A root
+        /// is a named per-root reconcile state cache at
+        /// `<tcfsd state dir>/reconcile/<name>.json`. An unknown name lists the
+        /// available roots. Mutually exclusive with `--state`.
+        #[arg(long, conflicts_with = "state")]
+        root: Option<String>,
+        /// Low-level escape hatch: explicit path to the sync state cache JSON file
+        /// (overrides config). `.db` paths are normalized to their `.json`
+        /// sibling. Prefer `--root <name>`. Mutually exclusive with `--root`.
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -925,20 +952,35 @@ async fn main() -> Result<()> {
             path,
             strategy,
             execute,
+            root,
+            state,
+            prefix,
         } => {
             #[cfg(unix)]
             {
-                cmd_resolve(&config, &path, strategy.as_deref(), execute).await
+                let state_path = resolve_root_or_state(&config, root.as_deref(), state.as_deref())?;
+                cmd_resolve(
+                    &config,
+                    &path,
+                    strategy.as_deref(),
+                    execute,
+                    state_path.as_deref(),
+                    prefix.as_deref(),
+                )
+                .await
             }
             #[cfg(not(unix))]
             {
-                let _ = (path, strategy, execute);
+                let _ = (path, strategy, execute, root, state, prefix);
                 anyhow::bail!(
                     "resolve command requires the daemon (not available on this platform)"
                 )
             }
         }
-        Commands::Conflicts { json, state } => cmd_conflicts(&config, json, state.as_deref()).await,
+        Commands::Conflicts { json, state, root } => {
+            let state_path = resolve_root_or_state(&config, root.as_deref(), state.as_deref())?;
+            cmd_conflicts(&config, json, state_path.as_deref()).await
+        }
     }
 }
 
@@ -1023,6 +1065,120 @@ fn resolve_state_path(
     // we derive a sibling .json file
     let db = expand_tilde(&config.sync.state_db);
     db.with_extension("json")
+}
+
+/// The tcfsd state directory (`~/.local/state/tcfsd` by default), reconstructed
+/// from the same `XDG_STATE_HOME` anchor `config.rs` uses for the daemon socket.
+/// Fallback for when the configured socket has no usable parent.
+fn xdg_state_tcfsd_dir() -> PathBuf {
+    std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home).join(".local/state")
+        })
+        .join("tcfsd")
+}
+
+/// Directory holding the scheduled reconcile units' isolated per-root state
+/// caches: `<tcfsd state dir>/reconcile/`.
+///
+/// Root-identity (2026-07-14 ADR): the tcfsd state dir is the daemon socket's
+/// directory (`~/.local/state/tcfsd/` by default — the socket lives beside the
+/// `reconcile/` subdir), so deriving from `config.daemon.socket` keeps the CLI
+/// and the `tcfsd-reconcile-<name>` units in agreement under socket overrides.
+/// Falls back to the direct XDG_STATE_HOME anchor if the socket has no parent.
+fn reconcile_root_dir(config: &tcfs_core::config::TcfsConfig) -> PathBuf {
+    expand_tilde(&config.daemon.socket)
+        .parent()
+        .map(Path::to_path_buf)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(xdg_state_tcfsd_dir)
+        .join("reconcile")
+}
+
+/// Available root names: the `*.json` stems under the reconcile dir, sorted. The
+/// reconcile directory IS the interim root registry (root-identity ADR).
+fn list_reconcile_roots(dir: &Path) -> Vec<String> {
+    let mut roots: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .collect();
+    roots.sort();
+    roots
+}
+
+/// Resolve a `--root <name>` to its per-root reconcile state file, or fail with
+/// the list of available roots (the reconcile dir doubles as the registry).
+fn resolve_root_state_path(
+    config: &tcfs_core::config::TcfsConfig,
+    root_name: &str,
+) -> Result<PathBuf> {
+    let dir = reconcile_root_dir(config);
+    let candidate = dir.join(format!("{root_name}.json"));
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    let available = list_reconcile_roots(&dir);
+    if available.is_empty() {
+        anyhow::bail!(
+            "unknown root '{root_name}': no reconcile roots found under {}. \
+             Roots are created by the scheduled tcfsd-reconcile-<name> units.",
+            dir.display()
+        );
+    }
+    anyhow::bail!(
+        "unknown root '{root_name}'. Available roots under {}: {}",
+        dir.display(),
+        available.join(", ")
+    );
+}
+
+/// Resolve the effective state-cache override from the mutually-exclusive
+/// `--root`/`--state` inputs. `--root <name>` resolves through the reconcile
+/// registry; `--state <path>` is the low-level escape hatch. clap already
+/// enforces the exclusion; this guards defensively and centralizes the mapping
+/// so `resolve` and `conflicts` share one root-identity resolution path.
+fn resolve_root_or_state(
+    config: &tcfs_core::config::TcfsConfig,
+    root: Option<&str>,
+    state: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    match (root, state) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--root and --state are mutually exclusive; pass only one")
+        }
+        (Some(name), None) => resolve_root_state_path(config, name).map(Some),
+        (None, state) => Ok(state.map(Path::to_path_buf)),
+    }
+}
+
+/// Machine-local directory for the repo keep-both undo bundle.
+///
+/// TIN-2658: byte-for-byte identical to the daemon's `undo_bundle_state_dir`
+/// (`crates/tcfsd/src/grpc.rs`), so a CLI-local repo keep-both writes its undo
+/// bundle to the same place the daemon's `resolve_git_keep_both_repo` would.
+/// Anchored to the state DB's parent (a machine-local location outside any sync
+/// root); expands a leading `~/` and falls back to the platform data dir.
+fn undo_bundle_state_dir(config: &tcfs_core::config::TcfsConfig) -> PathBuf {
+    config
+        .sync
+        .state_db
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(expand_tilde)
+        .unwrap_or_else(|| dirs::data_dir().unwrap_or_default().join("tcfsd"))
 }
 
 /// Resolve the daemon-owned per-folder policy store.
@@ -6701,9 +6857,32 @@ async fn cmd_resolve(
     path: &Path,
     strategy: Option<&str>,
     execute: bool,
+    state_override: Option<&Path>,
+    prefix_override: Option<&str>,
 ) -> Result<()> {
     let is_git_repo = path.join(".git").is_dir();
     let requested = strategy.map(|s| s.replace('-', "_"));
+
+    // TIN-2658: CLI-local repo-group keep-both against an operator-supplied
+    // per-root reconcile state cache. The scheduled `tcfsd-reconcile-*` units
+    // record `.git`-group conflicts into their OWN per-unit state file
+    // (`~/.local/state/tcfsd/reconcile/<unit>.json`), which the primary daemon
+    // never sees — so the daemon `resolve_conflict` RPC (below) cannot clear
+    // them. When `--root <name>` (or the low-level `--state`) selects that file
+    // for a git repo root with an explicit `--strategy keep-both` — already
+    // resolved to `state_override` at dispatch — resolve it in-process exactly
+    // the way the daemon's `resolve_git_keep_both_repo` does, writing the cleared
+    // conflicts back to the SAME file. Every other resolve path uses the daemon.
+    if resolve_uses_cli_local_repo_branch(is_git_repo, requested.as_deref(), state_override) {
+        return cmd_resolve_repo_keep_both_local(
+            config,
+            path,
+            execute,
+            state_override,
+            prefix_override,
+        )
+        .await;
+    }
 
     let resolution = match (is_git_repo, requested.as_deref()) {
         (true, None) | (true, Some("keep_both")) => {
@@ -6799,6 +6978,159 @@ async fn cmd_resolve(
         }
     } else {
         anyhow::bail!("resolution failed: {}", resp.error);
+    }
+
+    Ok(())
+}
+
+/// TIN-2658 routing predicate: true iff `tcfs resolve` should resolve a
+/// repo-group `.git` keep-both conflict CLI-locally against an operator-supplied
+/// `--state` cache (bypassing the daemon `resolve_conflict` RPC). All three
+/// conditions are required: an explicit `keep-both` strategy, a `--state`
+/// override, and a git repo root. Any other combination — per-file strategies,
+/// no `--state`, or a non-repo path — falls through to the daemon RPC. Pure, so
+/// the routing decision is unit-testable without a daemon.
+fn resolve_uses_cli_local_repo_branch(
+    is_git_repo: bool,
+    requested_strategy: Option<&str>,
+    state_override: Option<&Path>,
+) -> bool {
+    is_git_repo && requested_strategy == Some("keep_both") && state_override.is_some()
+}
+
+/// TIN-2658: resolve a repo-group `.git` keep-both conflict entirely in the CLI
+/// process against an operator-supplied `--state` cache. Thin wrapper that builds
+/// the storage operator from config, then delegates to the operator-injected core
+/// so tests can drive it with an in-memory operator (no S3 credentials).
+#[cfg(unix)]
+async fn cmd_resolve_repo_keep_both_local(
+    config: &tcfs_core::config::TcfsConfig,
+    path: &Path,
+    execute: bool,
+    state_override: Option<&Path>,
+    prefix_override: Option<&str>,
+) -> Result<()> {
+    let op = build_operator(config).await?;
+    resolve_repo_keep_both_with_operator(
+        &op,
+        config,
+        path,
+        execute,
+        state_override,
+        prefix_override,
+    )
+    .await
+}
+
+/// Operator-injected core of the TIN-2658 CLI-local repo keep-both. Mirrors the
+/// daemon's `resolve_git_keep_both_repo` (`crates/tcfsd/src/grpc.rs`)
+/// byte-for-byte in the parts that matter: same `StateCache::open(--state)`, same
+/// `remote_prefix` = config resolved prefix, same `undo_state_dir`, and the same
+/// on-disk master-key → `EncryptionContext` construction `cmd_reconcile` uses.
+/// The cleared conflicts are flushed back to the SAME per-unit file, so the next
+/// scheduled reconcile cycle sees zero conflicts. No daemon RPC.
+#[cfg(unix)]
+async fn resolve_repo_keep_both_with_operator(
+    op: &opendal::Operator,
+    config: &tcfs_core::config::TcfsConfig,
+    path: &Path,
+    execute: bool,
+    state_override: Option<&Path>,
+    prefix_override: Option<&str>,
+) -> Result<()> {
+    use tcfs_sync::conflict_git::{resolve_repo_keep_both, GitKeepBothMode};
+
+    let device_id = load_device_id(config);
+    let state_path = resolve_state_path(config, state_override);
+
+    // Storage prefix for reading peer ref blobs. NOT recoverable from the state
+    // cache — entries carry a `remote_manifest_key` (the object key) but not the
+    // S3 prefix, so it comes from config's resolved prefix (identical to the
+    // daemon) with an optional `--prefix` override for a non-default unit.
+    let remote_prefix = prefix_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| config.storage.resolved_prefix().to_string());
+
+    // Undo-bundle dir: byte-for-byte the daemon's `undo_bundle_state_dir`.
+    let undo_state_dir = undo_bundle_state_dir(config);
+
+    // Master key → encryption context, exactly as `cmd_reconcile` builds it (the
+    // `.git` ref blobs are encrypted when a master key is configured).
+    let master_key = config
+        .crypto
+        .master_key_file
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .filter(|k| k.len() == 32)
+        .map(|bytes| {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            tcfs_crypto::MasterKey::from_bytes(key)
+        });
+    let enc_ctx = master_key
+        .as_ref()
+        .map(|mk| build_encryption_context(config, &device_id, mk));
+
+    let mode = if execute {
+        GitKeepBothMode::Execute
+    } else {
+        GitKeepBothMode::DryRun
+    };
+
+    let mut state = tcfs_sync::state::StateCache::open(&state_path)
+        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+
+    println!(
+        "Repo-group keep-both ({}) for {}",
+        if execute { "execute" } else { "dry-run" },
+        path.display()
+    );
+    println!("  state:  {}", state_path.display());
+    println!("  prefix: {remote_prefix}");
+
+    let result = resolve_repo_keep_both(
+        op,
+        &mut state,
+        path,
+        &remote_prefix,
+        &device_id,
+        &undo_state_dir,
+        mode,
+        enc_ctx.as_ref(),
+    )
+    .await
+    .context("resolving repo-group keep-both conflict")?;
+
+    println!("{}", result.summary());
+    for parked in &result.parked_refs {
+        println!(
+            "  park {} → {}  (local {}, remote {})",
+            parked.head_ref,
+            parked.park_ref,
+            &parked.local_sha[..parked.local_sha.len().min(12)],
+            &parked.remote_sha[..parked.remote_sha.len().min(12)]
+        );
+    }
+    if let Some(bundle) = &result.undo_bundle {
+        println!("  undo bundle: {}", bundle.display());
+    }
+
+    if execute {
+        // `resolve_repo_keep_both` flushes internally on the write path; flush
+        // again so the CLI's own contract is explicit and the cleared map is
+        // guaranteed on disk in the per-unit file (covers the pure keep-local
+        // group, where nothing was parked).
+        state
+            .flush()
+            .context("flushing resolved conflict state to the per-unit cache")?;
+        println!(
+            "Resolved and flushed to {}. The next reconcile cycle will see zero conflicts.",
+            state_path.display()
+        );
+    } else {
+        println!(
+            "Dry-run only — no refs parked, no state written. Re-run with --execute to apply."
+        );
     }
 
     Ok(())
@@ -9617,5 +9949,392 @@ enabled = false
             summary.contains("WARNING: NO per-device forward secrecy"),
             "empty-recipient PerDevice must warn rather than reassure: {summary}"
         );
+    }
+
+    // ── TIN-2658: CLI-local repo keep-both against a per-root reconcile state ──
+
+    /// Run a git subcommand in `root`, asserting success (test fixtures only).
+    fn git_cmd(root: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .expect("git available on PATH");
+        assert!(
+            status.success(),
+            "git {args:?} failed in {}",
+            root.display()
+        );
+    }
+
+    /// Create a clean temp git repo with one commit at `root`.
+    fn init_temp_git_repo(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        git_cmd(root, &["init", "--quiet", "--initial-branch=main"]);
+        git_cmd(root, &["config", "user.email", "tcfs@example.invalid"]);
+        git_cmd(root, &["config", "user.name", "TCFS Test"]);
+        std::fs::write(root.join("file.txt"), b"base").unwrap();
+        git_cmd(root, &["add", "file.txt"]);
+        git_cmd(root, &["commit", "-m", "base", "--quiet"]);
+    }
+
+    /// Record a `keep-local`-class conflict (`.git/index`-style: no branch head,
+    /// no remote manifest key needed) at `abs_path` with `rel_path`, mirroring
+    /// how the reconcile unit records honey's stuck `.git`-group. Reused for the
+    /// non-`.git` sentinel too (rel_path without a `.git` component).
+    fn set_conflict(state: &mut tcfs_sync::state::StateCache, abs_path: &Path, rel_path: &str) {
+        let mut local = tcfs_sync::conflict::VectorClock::new();
+        local.tick("neo");
+        let mut remote = tcfs_sync::conflict::VectorClock::new();
+        remote.tick("honey");
+        state.set(
+            abs_path,
+            tcfs_sync::state::SyncState {
+                blake3: "local".into(),
+                size: 0,
+                mtime: 0,
+                chunk_count: 0,
+                remote_path: format!("data/manifests/{rel_path}"),
+                last_synced: 0,
+                vclock: local.clone(),
+                device_id: "neo".into(),
+                conflict: Some(tcfs_sync::conflict::ConflictInfo {
+                    rel_path: rel_path.to_string(),
+                    local_vclock: local,
+                    remote_vclock: remote,
+                    local_blake3: "local".into(),
+                    remote_blake3: "remote".into(),
+                    local_device: "neo".into(),
+                    remote_device: "honey".into(),
+                    detected_at: 1,
+                    // Mirror honey's runaway counter; irrelevant once cleared.
+                    times_recorded: 2292,
+                    remote_manifest_key: None,
+                }),
+                status: tcfs_sync::state::FileSyncStatus::Conflict,
+            },
+        );
+    }
+
+    /// THE seam regression (design §4.1): a `.git`-group conflict recorded in a
+    /// per-root reconcile state file is resolved by the CLI-local `--state`
+    /// branch, the daemon's primary cache is never touched, and the per-unit file
+    /// re-opens clean with `Synced` status — so the next reconcile cycle sees
+    /// zero conflicts (the 909-cycle loop stops).
+    ///
+    /// RED on origin/main: there, `Commands::Resolve` has no `--state`, so this
+    /// code path (`resolve_repo_keep_both_with_operator`) does not exist and the
+    /// only resolve route is the daemon RPC, which never sees the per-unit file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_local_keep_both_resolves_per_root_state_and_leaves_primary_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let repo = base.join("repo");
+        init_temp_git_repo(&repo);
+
+        // Primary (daemon-owned) cache: an UNRELATED conflict that must survive
+        // untouched — the CLI-local branch must neither open nor write it.
+        let primary_dir = base.join("primary");
+        std::fs::create_dir_all(&primary_dir).unwrap();
+        let primary_json = primary_dir.join("state.json");
+        {
+            let mut primary = tcfs_sync::state::StateCache::open(&primary_json).unwrap();
+            set_conflict(&mut primary, &base.join("sentinel.txt"), "sentinel.txt");
+            primary.flush().unwrap();
+        }
+        let primary_before = std::fs::read(&primary_json).unwrap();
+
+        // Per-unit reconcile cache (the `--state` target): the repo's stuck
+        // `.git`-group conflicts the daemon never sees.
+        let unit_dir = base.join("reconcile");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let unit_json = unit_dir.join("git-roam-tool-daemon.json");
+        {
+            let mut unit = tcfs_sync::state::StateCache::open(&unit_json).unwrap();
+            set_conflict(&mut unit, &repo.join(".git/index"), "repo/.git/index");
+            set_conflict(
+                &mut unit,
+                &repo.join(".git/COMMIT_EDITMSG"),
+                "repo/.git/COMMIT_EDITMSG",
+            );
+            unit.flush().unwrap();
+            assert_eq!(
+                unit.conflicts().len(),
+                2,
+                "two git-group conflicts recorded"
+            );
+        }
+
+        // Config anchors state_db at the PRIMARY; `--state` overrides to the unit.
+        let mut config = test_config(base);
+        config.sync.state_db = primary_dir.join("state.db");
+
+        resolve_repo_keep_both_with_operator(
+            &memory_op(),
+            &config,
+            &repo,
+            true, // execute
+            Some(&unit_json),
+            None,
+        )
+        .await
+        .expect("CLI-local repo keep-both resolves the per-unit conflicts");
+
+        // (a)+(c) per-unit conflicts cleared, and stay cleared on reopen; the
+        // entries flip to Synced — exactly what the next reconcile cycle reads.
+        let unit_after = tcfs_sync::state::StateCache::open(&unit_json).unwrap();
+        assert_eq!(
+            unit_after.conflicts().len(),
+            0,
+            "per-unit conflicts cleared and flushed to the same file"
+        );
+        let index_entry = unit_after
+            .get(&repo.join(".git/index"))
+            .expect("entry survives resolution");
+        assert!(index_entry.conflict.is_none(), "conflict cleared");
+        assert_eq!(
+            index_entry.status,
+            tcfs_sync::state::FileSyncStatus::Synced,
+            "status flips to Synced so reconcile re-records nothing"
+        );
+
+        // (b) the daemon's primary cache is byte-for-byte untouched.
+        let primary_after = std::fs::read(&primary_json).unwrap();
+        assert_eq!(
+            primary_before, primary_after,
+            "primary state cache must not be opened or written by the --state branch"
+        );
+    }
+
+    /// Design §4.5: dry-run (no `--execute`) with `--state` + keep-both prints
+    /// the plan but writes nothing — no flush, no ref parking, conflicts intact.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_local_keep_both_dry_run_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let repo = base.join("repo");
+        init_temp_git_repo(&repo);
+
+        let unit_json = base.join("unit.json");
+        {
+            let mut unit = tcfs_sync::state::StateCache::open(&unit_json).unwrap();
+            set_conflict(&mut unit, &repo.join(".git/index"), "repo/.git/index");
+            unit.flush().unwrap();
+        }
+        let unit_before = std::fs::read(&unit_json).unwrap();
+
+        let mut config = test_config(base);
+        config.sync.state_db = base.join("primary/state.db");
+
+        resolve_repo_keep_both_with_operator(
+            &memory_op(),
+            &config,
+            &repo,
+            false, // dry-run
+            Some(&unit_json),
+            None,
+        )
+        .await
+        .expect("dry-run succeeds");
+
+        assert_eq!(
+            unit_before,
+            std::fs::read(&unit_json).unwrap(),
+            "dry-run must not write the per-unit state file"
+        );
+        let unit_after = tcfs_sync::state::StateCache::open(&unit_json).unwrap();
+        assert_eq!(
+            unit_after.conflicts().len(),
+            1,
+            "dry-run leaves the conflict recorded"
+        );
+    }
+
+    /// Design §4.4 (git-fence at the CLI seam): a non-`.git` per-file conflict
+    /// inside the repo is NOT repo-group-resolved — only `.git`-internal paths are
+    /// collected. Proves keep-both against a repo root cannot silently clear
+    /// arbitrary per-file conflicts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_local_keep_both_ignores_non_git_per_file_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let repo = base.join("repo");
+        init_temp_git_repo(&repo);
+
+        let unit_json = base.join("unit.json");
+        {
+            let mut unit = tcfs_sync::state::StateCache::open(&unit_json).unwrap();
+            set_conflict(&mut unit, &repo.join(".git/index"), "repo/.git/index");
+            set_conflict(&mut unit, &repo.join("README.md"), "repo/README.md");
+            unit.flush().unwrap();
+        }
+
+        let mut config = test_config(base);
+        config.sync.state_db = base.join("primary/state.db");
+
+        resolve_repo_keep_both_with_operator(
+            &memory_op(),
+            &config,
+            &repo,
+            true, // execute
+            Some(&unit_json),
+            None,
+        )
+        .await
+        .expect("resolve clears only the .git-group, leaving per-file conflicts");
+
+        let unit_after = tcfs_sync::state::StateCache::open(&unit_json).unwrap();
+        assert!(
+            unit_after
+                .get(&repo.join(".git/index"))
+                .unwrap()
+                .conflict
+                .is_none(),
+            ".git-internal conflict is resolved"
+        );
+        let readme = unit_after
+            .get(&repo.join("README.md"))
+            .expect("non-git entry preserved");
+        assert!(
+            readme.conflict.is_some(),
+            "non-.git per-file conflict must NOT be repo-group-resolved (git-fence)"
+        );
+    }
+
+    /// Design §4.2 (daemon-untouched invariant) + §4.4 routing: the pure routing
+    /// predicate selects the CLI-local branch ONLY for keep-both + `--state` +
+    /// repo root; every other combination falls through to the daemon RPC.
+    #[test]
+    fn resolve_routing_predicate_selects_cli_local_only_for_keep_both_state_repo() {
+        let state = PathBuf::from("/x/unit.json");
+        // Taken: all three conditions hold.
+        assert!(resolve_uses_cli_local_repo_branch(
+            true,
+            Some("keep_both"),
+            Some(state.as_path())
+        ));
+        // Missing --state → daemon RPC (guards against accidental double-dispatch).
+        assert!(!resolve_uses_cli_local_repo_branch(
+            true,
+            Some("keep_both"),
+            None
+        ));
+        // Non-repo path → daemon RPC / per-file.
+        assert!(!resolve_uses_cli_local_repo_branch(
+            false,
+            Some("keep_both"),
+            Some(state.as_path())
+        ));
+        // Per-file strategies stay on the daemon even with --state.
+        for s in ["keep_local", "keep_remote", "defer"] {
+            assert!(
+                !resolve_uses_cli_local_repo_branch(true, Some(s), Some(state.as_path())),
+                "{s} must route to the daemon"
+            );
+        }
+        // No explicit strategy (git default) is out of scope: daemon RPC.
+        assert!(!resolve_uses_cli_local_repo_branch(
+            true,
+            None,
+            Some(state.as_path())
+        ));
+    }
+
+    /// The CLI-local undo bundle lands where the daemon's would: byte-for-byte
+    /// `undo_bundle_state_dir` = the state DB's parent directory.
+    #[test]
+    fn undo_bundle_state_dir_anchors_to_state_db_parent() {
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        config.sync.state_db = PathBuf::from("/var/lib/tcfsd/reconcile/unit.db");
+        assert_eq!(
+            undo_bundle_state_dir(&config),
+            PathBuf::from("/var/lib/tcfsd/reconcile")
+        );
+    }
+
+    // ── Root-identity UX (2026-07-14 ADR): --root <name> resolution ───────────
+
+    /// The reconcile dir is the daemon socket's directory + `reconcile/`, so a
+    /// root name maps to `<tcfsd state dir>/reconcile/<name>.json` and follows a
+    /// socket override.
+    #[test]
+    fn reconcile_root_dir_derives_from_daemon_socket_parent() {
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        config.daemon.socket = PathBuf::from("/home/jess/.local/state/tcfsd/tcfsd.sock");
+        assert_eq!(
+            reconcile_root_dir(&config),
+            PathBuf::from("/home/jess/.local/state/tcfsd/reconcile")
+        );
+    }
+
+    /// Happy path: `--root <name>` maps to `reconcile/<name>.json`. Unknown name:
+    /// error lists the available roots (the reconcile dir IS the registry), and
+    /// only `*.json` stems count as roots.
+    #[test]
+    fn root_resolution_happy_path_and_unknown_lists_available() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let recon = base.join("tcfsd/reconcile");
+        std::fs::create_dir_all(&recon).unwrap();
+        std::fs::write(recon.join("git-roam-tool-daemon.json"), b"{}").unwrap();
+        std::fs::write(recon.join("alpha.json"), b"{}").unwrap();
+        // A non-json file must NOT be listed as a root.
+        std::fs::write(recon.join("notes.txt"), b"x").unwrap();
+
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        config.daemon.socket = base.join("tcfsd/tcfsd.sock");
+
+        assert_eq!(
+            resolve_root_state_path(&config, "git-roam-tool-daemon").unwrap(),
+            recon.join("git-roam-tool-daemon.json")
+        );
+
+        let err = resolve_root_state_path(&config, "ghost")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown root 'ghost'"), "{err}");
+        assert!(err.contains("alpha"), "lists alpha: {err}");
+        assert!(
+            err.contains("git-roam-tool-daemon"),
+            "lists the daemon root: {err}"
+        );
+        assert!(
+            !err.contains("notes"),
+            "non-json files are not roots: {err}"
+        );
+    }
+
+    /// An empty registry yields an actionable error naming the reconcile dir.
+    #[test]
+    fn root_resolution_empty_registry_error_is_actionable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        config.daemon.socket = tmp.path().join("tcfsd/tcfsd.sock");
+        let err = resolve_root_state_path(&config, "anything")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no reconcile roots found"), "{err}");
+    }
+
+    /// `--root` and `--state` are mutually exclusive; each alone maps cleanly.
+    #[test]
+    fn root_and_state_are_mutually_exclusive() {
+        let config = tcfs_core::config::TcfsConfig::default();
+        let p = PathBuf::from("/x/unit.json");
+        let err = resolve_root_or_state(&config, Some("alpha"), Some(p.as_path()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mutually exclusive"), "{err}");
+        // `--state` alone passes straight through.
+        assert_eq!(
+            resolve_root_or_state(&config, None, Some(p.as_path())).unwrap(),
+            Some(p.clone())
+        );
+        // Neither flag → None (downstream falls back to the config default).
+        assert_eq!(resolve_root_or_state(&config, None, None).unwrap(), None);
     }
 }
