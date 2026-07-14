@@ -5,6 +5,63 @@
 
 use std::path::Path;
 
+const GIT_ROUTING_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CONFIG",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_GRAFT_FILE",
+];
+
+/// Build a Git command that cannot inherit repository-routing overrides from
+/// the daemon/service environment. Local repository configuration still loads;
+/// callers must validate its reported topology before mutation.
+pub(crate) fn sanitized_git_command() -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    for variable in GIT_ROUTING_ENV {
+        command.env_remove(variable);
+    }
+    // `git -c` values can also be injected through a numbered environment
+    // protocol. Remove every inherited member, not just COUNT.
+    for (key, _) in std::env::vars_os() {
+        let key_text = key.to_string_lossy();
+        if key_text.starts_with("GIT_CONFIG_KEY_") || key_text.starts_with("GIT_CONFIG_VALUE_") {
+            command.env_remove(key);
+        }
+    }
+    // `update-ref` can invoke reference-transaction hooks, and `status` can
+    // invoke a configured fsmonitor hook. The resolver must never execute code
+    // carried inside the roamed repository while handling a conflict.
+    #[cfg(windows)]
+    let null_device = "NUL";
+    #[cfg(not(windows))]
+    let null_device = "/dev/null";
+    command
+        .arg("-c")
+        .arg(format!("core.hooksPath={null_device}"))
+        .arg("-c")
+        .arg("core.fsmonitor=false")
+        .arg("-c")
+        .arg("core.logAllRefUpdates=false");
+    command
+}
+
 /// Relative path (under the repo working root) where the TCFS git bundle is
 /// written and synced as a normal object. Keeping it inside the working tree
 /// (not under `.git/`) means it flows through the regular file collector and
@@ -103,7 +160,7 @@ fn collect_ref_head_locks(dir: &Path, rel: &str, check: &mut GitSafetyCheck) {
 pub fn snapshot_git_for_sync(repo_root: &Path) -> anyhow::Result<std::path::PathBuf> {
     let bundle_path = repo_root.join(GIT_BUNDLE_REL_PATH);
 
-    let output = std::process::Command::new("git")
+    let output = sanitized_git_command()
         .args(["bundle", "create", &bundle_path.to_string_lossy(), "--all"])
         .current_dir(repo_root)
         .output()
@@ -178,7 +235,7 @@ pub fn restore_git_bundle_into(bundle: &Path, repo_root: &Path) -> anyhow::Resul
 /// Run a git command in `cwd`, returning an error with captured stderr on
 /// non-zero exit.
 pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
-    let output = std::process::Command::new("git")
+    let output = sanitized_git_command()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -243,7 +300,7 @@ pub fn classify_fast_forward(repo_root: &Path, local_sha: &str, remote_sha: &str
 /// (with an error) when an object is missing. Any non-zero/non-1 outcome is
 /// treated as "not an ancestor" so a missing object fails closed.
 fn is_ancestor(repo_root: &Path, ancestor: &str, descendant: &str) -> bool {
-    let output = std::process::Command::new("git")
+    let output = sanitized_git_command()
         .args([
             "-C",
             &repo_root.to_string_lossy(),
@@ -336,7 +393,7 @@ pub fn head_ref_for_git_path(rel_path: &str) -> Option<String> {
 /// `repo_root`, consulting loose refs and packed-refs via `git rev-parse`.
 /// Returns `None` if the ref cannot be resolved.
 pub fn local_ref_sha(repo_root: &Path, ref_name: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = sanitized_git_command()
         .args([
             "-C",
             &repo_root.to_string_lossy(),
@@ -361,7 +418,7 @@ pub fn local_ref_sha(repo_root: &Path, ref_name: &str) -> Option<String> {
 /// Resolve the bundle's default HEAD branch ref (e.g. `refs/heads/main`) by
 /// listing its refs. Returns `None` if HEAD cannot be determined.
 fn bundle_head_branch(bundle: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = sanitized_git_command()
         .args(["bundle", "list-heads", &bundle.to_string_lossy()])
         .output()
         .ok()?;
@@ -537,6 +594,38 @@ fn pid_alive(_pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitized_git_command_removes_repository_routing_environment() {
+        let command = sanitized_git_command();
+        let removed = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for variable in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_IMPLICIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_QUARANTINE_PATH",
+            "GIT_NO_REPLACE_OBJECTS",
+            "GIT_CONFIG_COUNT",
+        ] {
+            assert!(removed.contains(variable), "{variable} was not removed");
+        }
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg.starts_with("core.hooksPath=")));
+        assert!(args.iter().any(|arg| arg == "core.fsmonitor=false"));
+        assert!(args.iter().any(|arg| arg == "core.logAllRefUpdates=false"));
+    }
 
     #[test]
     fn test_safe_empty_git() {

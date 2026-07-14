@@ -243,15 +243,16 @@ impl TcfsMcp {
     ) -> String {
         // Repo-group git keep-both (`git_keep_both_dry_run` /
         // `git_keep_both_execute`) is a live `.git` WRITE path that parks peer
-        // branch heads and ticks the local clock to dominate the fleet. It MUST
-        // be operator-deliberate and reachable ONLY from the `tcfs resolve`
-        // CLI — never an MCP agent. Refuse it here (layer 1); the daemon also
-        // refuses it without operator-CLI provenance (layer 2), and this tool's
-        // input intentionally cannot set that provenance flag.
+        // branch heads and ticks the local clock to dominate the fleet. It must
+        // be operator-deliberate and is not exposed through MCP; the shipped
+        // deliberate surface is `tcfs resolve`. Refuse it here (layer 1); tcfsd
+        // requires an explicit operator-intent bit (layer 2), and this tool's
+        // input intentionally does not expose that bit. The bit is not an
+        // authorization boundary; daemon session permissions are.
         if input.resolution.trim_start().starts_with("git_keep_both") {
             return serde_json::json!({
-                "error": "repo-group git keep-both is operator-only and cannot be run through \
-                          MCP: it is a live .git write path that parks peer branch heads. Run it \
+                "error": "repo-group git keep-both is not exposed through MCP: it is a live \
+                          .git write path that parks peer branch heads. Run it \
                           deliberately from the CLI: `tcfs resolve <repo> --strategy keep-both \
                           [--execute]`.",
             })
@@ -263,8 +264,8 @@ impl TcfsMcp {
                     .resolve_conflict(ResolveConflictRequest {
                         path: input.rel_path.clone(),
                         resolution: input.resolution.clone(),
-                        // MCP is never operator-CLI provenance. The daemon
-                        // refuses git_keep_both_* without this being true.
+                        // MCP does not expose explicit operator intent. The
+                        // daemon refuses git_keep_both_* when this is false.
                         operator_cli: false,
                     })
                     .await
@@ -599,6 +600,20 @@ mod tests {
             }))
         }
 
+        async fn list_conflicts(
+            &self,
+            _request: Request<ListConflictsRequest>,
+        ) -> Result<Response<ListConflictsResponse>, Status> {
+            Err(Status::unimplemented("list_conflicts"))
+        }
+
+        async fn resolve_registered_root(
+            &self,
+            _request: Request<ResolveRegisteredRootRequest>,
+        ) -> Result<Response<ResolveRegisteredRootResponse>, Status> {
+            Err(Status::unimplemented("resolve_registered_root"))
+        }
+
         async fn mount(
             &self,
             _request: Request<MountRequest>,
@@ -867,7 +882,7 @@ mod tests {
         // unreachable from MCP. Both dry-run and execute must be refused BEFORE
         // any RPC / connection is attempted. Point the client at a bogus socket
         // that no daemon serves: if the guard short-circuited correctly we get
-        // the operator-only refusal; a "failed to connect" error would instead
+        // the MCP-surface refusal; a "failed to connect" error would instead
         // prove the request leaked toward the daemon.
         let bogus = std::path::PathBuf::from("/nonexistent/tcfs-keep-both-guard.sock");
         let mcp = TcfsMcp::new(bogus, None);
@@ -881,8 +896,8 @@ mod tests {
             );
             let err = value["error"].as_str().unwrap_or_default();
             assert!(
-                err.contains("operator-only"),
-                "{resolution} must be refused with operator-only guidance, got: {value}"
+                err.contains("not exposed through MCP"),
+                "{resolution} must be refused with MCP guidance, got: {value}"
             );
             assert!(
                 !err.contains("connect"),

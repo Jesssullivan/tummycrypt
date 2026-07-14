@@ -339,6 +339,10 @@ enum Commands {
     Resolve {
         /// Path to the conflicted file, or a git repo root for repo-group keep-both
         path: PathBuf,
+        /// Stable daemon-enrolled root identity. The daemon selects and fences
+        /// this root's local path, remote prefix, state cache, and policy.
+        #[arg(long)]
+        root: Option<String>,
         /// Resolution strategy: keep-local, keep-remote, keep-both, or defer
         #[arg(long, short = 's', value_parser = ["keep-local", "keep-remote", "keep-both", "defer"])]
         strategy: Option<String>,
@@ -349,18 +353,23 @@ enum Commands {
 
     /// List recorded sync conflicts (read-only)
     ///
-    /// Reads conflicts straight from the sync state cache — no daemon RPC, no
-    /// writes, no resolution. `.git`-internal conflicts are grouped by their
-    /// enclosing repository so a diverged repo shows as one entry with both
-    /// sides' HEADs (honest "objects not local yet" degradation when the remote
-    /// object has not roamed in); non-`.git` conflicts are listed flat.
+    /// Primary/legacy inspection reads the local cache directly. `--root`
+    /// asks the daemon to select the enrolled root's isolated cache. Neither
+    /// mode mutates conflict state. `.git`-internal conflicts are grouped by
+    /// their enclosing repository; non-`.git` conflicts are listed flat.
     Conflicts {
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,
+        /// Stable daemon-enrolled root identity. Named-root inspection uses the
+        /// daemon RPC so it reads the same isolated cache as `tcfs resolve`.
+        #[arg(long, conflicts_with = "state")]
+        root: Option<String>,
         /// Path to the sync state cache JSON file (overrides config).
         /// `.db` paths are normalized to their `.json` sibling — the file the
         /// daemon owns — so the CLI and daemon always act on the same cache.
+        /// This legacy option is read-only; named roots never accept a client
+        /// state path.
         #[arg(long, env = "TCFS_STATE_PATH")]
         state: Option<PathBuf>,
     },
@@ -923,22 +932,32 @@ async fn main() -> Result<()> {
         Commands::MigratePrefix { dry_run } => cmd_migrate_prefix(&config, dry_run).await,
         Commands::Resolve {
             path,
+            root,
             strategy,
             execute,
         } => {
             #[cfg(unix)]
             {
-                cmd_resolve(&config, &path, strategy.as_deref(), execute).await
+                cmd_resolve(
+                    &config,
+                    &path,
+                    root.as_deref(),
+                    strategy.as_deref(),
+                    execute,
+                )
+                .await
             }
             #[cfg(not(unix))]
             {
-                let _ = (path, strategy, execute);
+                let _ = (path, root, strategy, execute);
                 anyhow::bail!(
                     "resolve command requires the daemon (not available on this platform)"
                 )
             }
         }
-        Commands::Conflicts { json, state } => cmd_conflicts(&config, json, state.as_deref()).await,
+        Commands::Conflicts { json, root, state } => {
+            cmd_conflicts(&config, json, root.as_deref(), state.as_deref()).await
+        }
     }
 }
 
@@ -6481,6 +6500,14 @@ async fn cmd_reconcile(
     });
 
     let state_path = resolve_state_path(config, state_override);
+    // Serialize an executing, explicitly selected per-root state transaction
+    // with daemon-side registered-root inspection and resolution. Primary
+    // daemon scheduling keeps its existing in-process mutex path. StateCache
+    // flushes by replacing the JSON inode, so the shared lock is a sibling.
+    let _state_lock = (execute && state_override.is_some())
+        .then(|| tcfs_sync::state::StateFileLock::acquire(&state_path))
+        .transpose()
+        .with_context(|| format!("locking state cache: {}", state_path.display()))?;
     let state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
@@ -6703,10 +6730,17 @@ fn plan_may_orphan_remote_chunks(plan: &tcfs_sync::reconcile::ReconcilePlan) -> 
 async fn cmd_resolve(
     config: &tcfs_core::config::TcfsConfig,
     path: &Path,
+    root_id: Option<&str>,
     strategy: Option<&str>,
     execute: bool,
 ) -> Result<()> {
     let is_git_repo = path.join(".git").is_dir();
+    if root_id.is_some() && !is_git_repo {
+        anyhow::bail!(
+            "--root currently supports a registered git repository root only: {}",
+            path.display()
+        );
+    }
     let requested = strategy.map(|s| s.replace('-', "_"));
 
     let resolution = match (is_git_repo, requested.as_deref()) {
@@ -6766,16 +6800,83 @@ async fn cmd_resolve(
         }
     };
 
-    // Call daemon's ResolveConflict gRPC
+    // Named roots use a dedicated RPC. An older daemon returns Unimplemented;
+    // it cannot ignore a new request field and accidentally run the recognized
+    // git resolution against its primary cache.
     let mut client = connect_daemon(&config.daemon.socket).await?;
+    if let Some(root_id) = root_id {
+        let requested = std::fs::canonicalize(path)
+            .with_context(|| format!("canonicalizing repo root: {}", path.display()))?;
+        let mode = if execute {
+            tcfs_core::proto::RegisteredRootResolveMode::GitKeepBothExecute
+        } else {
+            tcfs_core::proto::RegisteredRootResolveMode::GitKeepBothDryRun
+        };
+        let response = client
+            .resolve_registered_root(tonic::Request::new(
+                tcfs_core::proto::ResolveRegisteredRootRequest {
+                    root_id: root_id.to_string(),
+                    path: requested.display().to_string(),
+                    mode: mode.into(),
+                    operator_cli: true,
+                },
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "resolving registered root '{root_id}' (daemon must support the dedicated stable-root RPC)"
+                )
+            })?
+            .into_inner();
+        anyhow::ensure!(
+            response.root_id == root_id,
+            "daemon selected root '{}' while '{}' was requested; refusing resolution evidence",
+            response.root_id,
+            root_id
+        );
+        let routed = std::fs::canonicalize(&response.local_root).with_context(|| {
+            format!(
+                "canonicalizing daemon-selected local_root for '{root_id}': {}",
+                response.local_root
+            )
+        })?;
+        anyhow::ensure!(
+            requested == routed,
+            "requested repo {} does not match daemon-selected root '{}' local_root {}",
+            requested.display(),
+            root_id,
+            routed.display()
+        );
+        anyhow::ensure!(
+            !response.remote_prefix.is_empty() && !response.state_path.is_empty(),
+            "daemon omitted atomic route evidence for registered root '{root_id}'"
+        );
+        if !response.success {
+            anyhow::bail!("resolution failed: {}", response.error);
+        }
+
+        println!("Root: {}", response.root_id);
+        println!("Local root: {}", response.local_root);
+        println!("Remote prefix: {}", response.remote_prefix);
+        println!("State cache: {}", response.state_path);
+        if !response.error.is_empty() {
+            println!("{}", response.error);
+        }
+        if !execute {
+            println!("Dry-run only. Re-run with --execute to mutate refs and clear conflicts.");
+        }
+        return Ok(());
+    }
+
+    // Primary/legacy conflict resolution remains on the original RPC.
     let resp = client
         .resolve_conflict(tonic::Request::new(
             tcfs_core::proto::ResolveConflictRequest {
                 path: path.to_string_lossy().to_string(),
                 resolution: resolution.clone(),
-                // Operator provenance: this is the human-driven `tcfs resolve`
-                // CLI. It is the ONLY caller allowed to reach the repo-group
-                // git keep-both write path (grpc gates git_keep_both_* on this).
+                // Explicit operator intent from the human-driven CLI. This is a
+                // client-supplied defense-in-depth hint, not attestation; tcfsd
+                // separately requires an authenticated push session.
                 operator_cli: true,
             },
         ))
@@ -6967,22 +7068,76 @@ fn conflict_age(detected_at: u64) -> String {
     }
 }
 
-/// `tcfs conflicts` — list recorded conflicts from the state cache, grouped by
-/// repo for `.git`-internal paths. Read-only: no daemon RPC, no writes.
+/// `tcfs conflicts` — list recorded conflicts, grouped by repo for
+/// `.git`-internal paths. Named roots use the daemon-selected cache; the
+/// primary/legacy path stays an offline read.
 async fn cmd_conflicts(
     config: &tcfs_core::config::TcfsConfig,
     json: bool,
+    root_id: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let state_path = resolve_state_path(config, state_override);
-    let state = tcfs_sync::state::StateCache::open(&state_path)
-        .with_context(|| format!("opening state cache: {}", state_path.display()))?;
-
-    let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = state
-        .conflicts()
-        .into_iter()
-        .filter_map(|(k, s)| s.conflict.as_ref().map(|c| (k.to_string(), c.clone())))
-        .collect();
+    let (state_path, routed_local_root, routed_remote_prefix, items) =
+        if let Some(root_id) = root_id {
+            let mut client = connect_daemon(&config.daemon.socket).await?;
+            let response = client
+                .list_conflicts(tonic::Request::new(
+                    tcfs_core::proto::ListConflictsRequest {
+                        root_id: root_id.to_string(),
+                    },
+                ))
+                .await
+                .with_context(|| format!("listing conflicts for registered root '{root_id}'"))?
+                .into_inner();
+            anyhow::ensure!(
+                response.root_id == root_id,
+                "daemon returned root '{}' while '{}' was requested; refusing inspection",
+                response.root_id,
+                root_id
+            );
+            let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = response
+                .conflicts
+                .into_iter()
+                .map(|record| {
+                    (
+                        record.cache_key,
+                        tcfs_sync::conflict::ConflictInfo {
+                            rel_path: record.rel_path,
+                            local_blake3: String::new(),
+                            remote_blake3: String::new(),
+                            local_device: record.local_device,
+                            remote_device: record.remote_device,
+                            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+                            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+                            detected_at: record.detected_at,
+                            times_recorded: record.times_recorded,
+                            remote_manifest_key: None,
+                        },
+                    )
+                })
+                .collect();
+            (
+                PathBuf::from(response.state_path),
+                Some(response.local_root),
+                Some(response.remote_prefix),
+                items,
+            )
+        } else {
+            let state_path = resolve_state_path(config, state_override);
+            let state = tcfs_sync::state::StateCache::open(&state_path)
+                .with_context(|| format!("opening state cache: {}", state_path.display()))?;
+            let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = state
+                .conflicts()
+                .into_iter()
+                .filter_map(|(key, state)| {
+                    state
+                        .conflict
+                        .as_ref()
+                        .map(|conflict| (key.to_string(), conflict.clone()))
+                })
+                .collect();
+            (state_path, None, None, items)
+        };
 
     let groups = group_conflicts(&items);
 
@@ -7016,6 +7171,9 @@ async fn cmd_conflicts(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "root_id": root_id,
+                "local_root": routed_local_root.as_deref(),
+                "remote_prefix": routed_remote_prefix.as_deref(),
                 "state_path": state_path.to_string_lossy(),
                 "conflict_count": items.len(),
                 "groups": rendered,
@@ -7025,8 +7183,21 @@ async fn cmd_conflicts(
     }
 
     if items.is_empty() {
+        if let Some(root_id) = root_id {
+            println!("Root: {root_id}");
+        }
         println!("No recorded conflicts.");
         return Ok(());
+    }
+
+    if let Some(root_id) = root_id {
+        println!("Root: {root_id}");
+        println!(
+            "Route: {} ↔ {}/ (state: {})",
+            routed_local_root.as_deref().unwrap_or("?"),
+            routed_remote_prefix.as_deref().unwrap_or("?"),
+            state_path.display()
+        );
     }
 
     println!(
@@ -7068,8 +7239,11 @@ async fn cmd_conflicts(
                     );
                 }
                 println!(
-                    "  resolve: tcfs resolve {} --strategy keep-both --execute   (repo-group)",
-                    root
+                    "  resolve: tcfs resolve {} --strategy keep-both --execute{}   (repo-group)",
+                    root,
+                    root_id
+                        .map(|root_id| format!(" --root {root_id}"))
+                        .unwrap_or_default()
                 );
             }
             None => {
@@ -7083,7 +7257,13 @@ async fn cmd_conflicts(
                         p.local_device,
                         p.remote_device
                     );
-                    println!("    resolve: tcfs resolve {}", p.rel_path);
+                    if root_id.is_some() {
+                        println!(
+                            "    resolve: named-root per-file resolution is outside the Strategy-A seam"
+                        );
+                    } else {
+                        println!("    resolve: tcfs resolve {}", p.rel_path);
+                    }
                 }
             }
         }
@@ -7172,6 +7352,46 @@ mod tests {
             times_recorded: 3,
             remote_manifest_key: None,
         }
+    }
+
+    #[test]
+    fn stable_root_flags_parse_and_conflicts_reject_state_mix() {
+        let cli = Cli::try_parse_from([
+            "tcfs",
+            "resolve",
+            "/repo",
+            "--root",
+            "git-roam-tool-daemon",
+            "--strategy",
+            "keep-both",
+            "--execute",
+        ])
+        .expect("parse registered-root resolve");
+        let Commands::Resolve {
+            root,
+            strategy,
+            execute,
+            ..
+        } = cli.command
+        else {
+            panic!("expected resolve command");
+        };
+        assert_eq!(root.as_deref(), Some("git-roam-tool-daemon"));
+        assert_eq!(strategy.as_deref(), Some("keep-both"));
+        assert!(execute);
+
+        assert!(
+            Cli::try_parse_from([
+                "tcfs",
+                "conflicts",
+                "--root",
+                "git-roam-tool-daemon",
+                "--state",
+                "/tmp/root.json",
+            ])
+            .is_err(),
+            "a named root must never be combined with a client state path"
+        );
     }
 
     #[test]

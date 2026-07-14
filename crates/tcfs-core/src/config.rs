@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Top-level daemon configuration (loaded from tcfs.toml)
@@ -299,6 +300,65 @@ pub struct SyncConfig {
     /// Grace period before orphaned remote chunk objects are eligible for cleanup.
     /// 0 = disabled. Default: 86400 (24 hours).
     pub orphan_chunk_cleanup_grace_secs: u64,
+    /// Daemon-trusted registry of non-primary sync roots.
+    ///
+    /// Clients address these entries by stable ID. They never supply a local
+    /// state path or remote prefix over RPC; tcfsd resolves both from this
+    /// configuration and applies the root policy before opening the cache.
+    /// Named paths and prefixes must be component-disjoint from the primary
+    /// route and from every registered peer.
+    #[serde(default)]
+    pub roots: BTreeMap<String, RegisteredRootConfig>,
+    /// Trusted parent directory for registered-root state caches.
+    ///
+    /// When unset, tcfsd uses `<daemon socket parent>/reconcile`, matching the
+    /// default per-user socket layout. Deployments that move the socket into a
+    /// runtime directory (for example systemd `%t` or `/run`) must set a
+    /// persistent directory explicitly.
+    #[serde(default)]
+    pub root_state_dir: Option<PathBuf>,
+}
+
+/// A daemon-enrolled non-primary root.
+///
+/// This is intentionally a narrow routing record, not the broad root lifecycle
+/// model tracked by TIN-1556. TIN-2853 uses it only to make an already scheduled,
+/// isolated reconcile cache inspectable and resolvable by stable ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegisteredRootConfig {
+    /// Local filesystem root owned by this identity.
+    pub local_root: PathBuf,
+    /// Exact object-store prefix used by this root's reconcile cycle.
+    pub remote_prefix: String,
+    /// Isolated JSON state cache. tcfsd additionally fences this under its
+    /// machine-local `reconcile/` state directory.
+    pub state_path: PathBuf,
+    /// Whether this root is inspection-only or may be explicitly resolved.
+    pub policy: RegisteredRootPolicy,
+}
+
+impl Default for RegisteredRootConfig {
+    fn default() -> Self {
+        Self {
+            local_root: PathBuf::new(),
+            remote_prefix: String::new(),
+            state_path: PathBuf::new(),
+            policy: RegisteredRootPolicy::InspectOnly,
+        }
+    }
+}
+
+/// Mutation policy for a daemon-enrolled root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RegisteredRootPolicy {
+    /// Conflict records may be listed and git keep-both may be dry-run, but
+    /// execute is rejected server-side.
+    #[default]
+    InspectOnly,
+    /// An authenticated operator may explicitly execute repo-group keep-both.
+    Resolve,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,6 +627,8 @@ impl Default for SyncConfig {
             trash_retention_secs: 30 * 24 * 3600, // 30 days
             reconcile_interval_secs: 300,         // 5 minutes
             orphan_chunk_cleanup_grace_secs: 24 * 3600,
+            roots: BTreeMap::new(),
+            root_state_dir: None,
         }
     }
 }
@@ -720,6 +782,57 @@ endpoint = "http://192.168.1.100:8333"
         assert_eq!(config.storage.region, "us-east-1");
         assert_eq!(config.storage.bucket, "tcfs");
         assert_eq!(config.daemon.log_level, "info");
+    }
+
+    #[test]
+    fn registered_root_config_parses_by_stable_id() {
+        let toml_str = r#"
+[sync.roots.git-roam-tool-daemon]
+local_root = "/home/jess/git/tinyland-tool-daemon"
+remote_prefix = "git-roam/tool-daemon"
+state_path = "/home/jess/.local/state/tcfsd/reconcile/git-roam-tool-daemon.json"
+policy = "resolve"
+"#;
+        let config: TcfsConfig = toml::from_str(toml_str).unwrap();
+        let root = config
+            .sync
+            .roots
+            .get("git-roam-tool-daemon")
+            .expect("registered root");
+
+        assert_eq!(
+            root.local_root,
+            PathBuf::from("/home/jess/git/tinyland-tool-daemon")
+        );
+        assert_eq!(root.remote_prefix, "git-roam/tool-daemon");
+        assert_eq!(
+            root.state_path,
+            PathBuf::from("/home/jess/.local/state/tcfsd/reconcile/git-roam-tool-daemon.json")
+        );
+        assert_eq!(root.policy, RegisteredRootPolicy::Resolve);
+        assert_eq!(
+            config.storage.enforce_tls,
+            TcfsConfig::default().storage.enforce_tls,
+            "registered roots inherit the global storage TLS posture; enrollment must not change its default"
+        );
+    }
+
+    #[test]
+    fn registered_root_policy_defaults_to_inspect_only() {
+        let config: TcfsConfig = toml::from_str(
+            r#"
+[sync.roots.docs]
+local_root = "/srv/docs"
+remote_prefix = "docs"
+state_path = "/run/tcfsd/reconcile/docs.json"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.sync.roots["docs"].policy,
+            RegisteredRootPolicy::InspectOnly
+        );
     }
 
     #[test]

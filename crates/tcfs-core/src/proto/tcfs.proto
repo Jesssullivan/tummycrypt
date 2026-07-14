@@ -15,6 +15,12 @@ service TcfsDaemon {
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
   rpc Watch(WatchRequest) returns (stream WatchEvent);
   rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
+  // Read conflicts from the daemon-selected cache for a stable root identity.
+  rpc ListConflicts(ListConflictsRequest) returns (ListConflictsResponse);
+  // Resolve the narrow registered-root repo-group seam. This is a distinct RPC
+  // so daemon downgrade cannot turn a named-root request into legacy primary
+  // ResolveConflict behavior by ignoring an unknown request field.
+  rpc ResolveRegisteredRoot(ResolveRegisteredRootRequest) returns (ResolveRegisteredRootResponse);
   rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
   rpc AuthUnlock(AuthUnlockRequest) returns (AuthUnlockResponse);
   rpc AuthLock(Empty) returns (AuthLockResponse);
@@ -167,20 +173,76 @@ message CredentialStatusResponse {
   bool needs_reload = 4;
 }
 
+message ListConflictsRequest {
+  // Empty selects the primary daemon cache. Non-empty IDs are resolved only
+  // through the daemon's trusted [sync.roots.<id>] registry.
+  string root_id = 1;
+}
+
+message ConflictRecord {
+  string cache_key = 1;
+  string rel_path = 2;
+  string local_device = 3;
+  string remote_device = 4;
+  uint64 detected_at = 5;
+  uint64 times_recorded = 6;
+}
+
+message ListConflictsResponse {
+  string root_id = 1;
+  string local_root = 2;
+  string remote_prefix = 3;
+  string state_path = 4;
+  repeated ConflictRecord conflicts = 5;
+}
+
 message ResolveConflictRequest {
   string path = 1;
   string resolution = 2;
-  // Operator provenance marker. Set ONLY by the `tcfs resolve` CLI. It gates
-  // the live `.git` WRITE path (repo-group git keep-both): the daemon refuses
-  // `git_keep_both_dry_run` / `git_keep_both_execute` unless this is true. The
-  // MCP `resolve_conflict` tool's input does NOT expose this field, so an MCP /
-  // automated / NATS client can never forge operator deliberation.
+  // Explicit operator-intent hint (the legacy field name is retained for wire
+  // compatibility). The shipped `tcfs resolve` CLI sets it; MCP does not expose
+  // it. This client-supplied bit is defense in depth, not attestation or an
+  // authorization boundary: the daemon also requires an authenticated session
+  // with push permission.
   bool operator_cli = 3;
+  // Field 4 was briefly used by an unshipped stable-root prototype. Never put
+  // routing identity on this legacy RPC: an old daemon would ignore it and
+  // execute a recognized resolution against its primary cache.
+  reserved 4;
+  reserved "root_id";
 }
 message ResolveConflictResponse {
   bool success = 1;
   string resolved_path = 2;
   string error = 3;
+}
+
+enum RegisteredRootResolveMode {
+  REGISTERED_ROOT_RESOLVE_MODE_UNSPECIFIED = 0;
+  REGISTERED_ROOT_RESOLVE_MODE_GIT_KEEP_BOTH_DRY_RUN = 1;
+  REGISTERED_ROOT_RESOLVE_MODE_GIT_KEEP_BOTH_EXECUTE = 2;
+}
+
+message ResolveRegisteredRootRequest {
+  string root_id = 1;
+  string path = 2;
+  RegisteredRootResolveMode mode = 3;
+  // Client-supplied operator-intent hint. Authentication, push permission,
+  // allowed-prefix grants, and the daemon-selected root policy remain the
+  // authorization boundary.
+  bool operator_cli = 4;
+}
+
+message ResolveRegisteredRootResponse {
+  bool success = 1;
+  string resolved_path = 2;
+  string error = 3;
+  // All route evidence below is populated from the daemon-selected registry
+  // record in the same RPC invocation that performs the operation.
+  string root_id = 4;
+  string local_root = 5;
+  string remote_prefix = 6;
+  string state_path = 7;
 }
 
 message AuthUnlockRequest {

@@ -13,11 +13,215 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::conflict::VectorClock;
+
+fn secure_read_file(path: &Path) -> Result<String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting private state file: {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("refusing to read state-cache symlink: {}", path.display());
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening private state file for read: {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading private state file metadata: {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "private state path is not a regular file: {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            anyhow::bail!(
+                "refusing to read hardlinked state file {} (link count {})",
+                path.display(),
+                metadata.nlink()
+            );
+        }
+    }
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .with_context(|| format!("reading private state file: {}", path.display()))?;
+    Ok(contents)
+}
+
+fn secure_write_file(path: &Path, contents: &[u8], create_new: bool) -> Result<()> {
+    if !create_new {
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("refusing to write state-cache symlink: {}", path.display());
+            }
+        }
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if create_new {
+        options.create_new(true);
+    } else {
+        // Do not truncate during open: inspect and secure the opened inode
+        // before any existing content can be damaged.
+        options.create(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening private state file: {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading private state file metadata: {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "private state path is not a regular file: {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.nlink() != 1 {
+            anyhow::bail!(
+                "refusing to write hardlinked state file {} (link count {})",
+                path.display(),
+                metadata.nlink()
+            );
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("securing private state file: {}", path.display()))?;
+    }
+    file.set_len(0)
+        .with_context(|| format!("truncating private state file: {}", path.display()))?;
+    file.write_all(contents)
+        .with_context(|| format!("writing private state file: {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing private state file: {}", path.display()))?;
+    Ok(())
+}
+
+fn secure_atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    let tmp_path = PathBuf::from(tmp_name);
+    if let Err(error) = secure_write_file(&tmp_path, contents, true) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error).with_context(|| format!("renaming state cache: {}", path.display()));
+    }
+    Ok(())
+}
+
+// ── StateFileLock ─────────────────────────────────────────────────────────
+
+/// Cross-process advisory lock for one JSON state cache.
+///
+/// [`StateCache::flush`] replaces the JSON inode with an atomic rename, so the
+/// lock lives in a stable sibling (`<state>.lock`) and is held across the full
+/// open/read/mutate/flush transaction. This coordinates scheduled CLI
+/// reconciliation with daemon-side operations on registered roots.
+#[derive(Debug)]
+pub struct StateFileLock {
+    _file: std::fs::File,
+}
+
+impl Drop for StateFileLock {
+    fn drop(&mut self) {
+        // Be explicit instead of relying only on descriptor close semantics;
+        // this also avoids platform-specific ambiguity after another process
+        // (or test thread) has attempted the same advisory lock.
+        let _ = self._file.unlock();
+    }
+}
+
+impl StateFileLock {
+    /// Stable sibling path used by every state-cache writer.
+    pub fn lock_path(state_path: &Path) -> PathBuf {
+        let mut path = state_path.as_os_str().to_os_string();
+        path.push(".lock");
+        PathBuf::from(path)
+    }
+
+    /// Acquire an exclusive lock without waiting.
+    ///
+    /// Contention normally means a scheduled reconcile is mid-cycle. Failing
+    /// fast keeps an attended conflict ceremony from queuing behind an
+    /// unbounded storage operation; the operator can retry after that cycle.
+    pub fn acquire(state_path: &Path) -> Result<Self> {
+        let lock_path = Self::lock_path(state_path);
+        if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating state lock dir: {}", parent.display()))?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options
+            .open(&lock_path)
+            .with_context(|| format!("opening state lock: {}", lock_path.display()))?;
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("reading state lock metadata: {}", lock_path.display()))?;
+        if !metadata.is_file() {
+            anyhow::bail!("state lock is not a regular file: {}", lock_path.display());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if metadata.nlink() != 1 {
+                anyhow::bail!(
+                    "state lock must have exactly one hard link, got {}: {}",
+                    metadata.nlink(),
+                    lock_path.display()
+                );
+            }
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("securing state lock: {}", lock_path.display()))?;
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+                "state cache {} is locked by another process; retry after the current reconcile cycle (lock: {})",
+                state_path.display(),
+                lock_path.display()
+            ),
+            Err(std::fs::TryLockError::Error(error)) => Err(error)
+                .with_context(|| format!("locking state cache via {}", lock_path.display())),
+        }
+    }
+}
 
 // ── FileSyncStatus ──────────────────────────────────────────────────────────
 
@@ -263,7 +467,7 @@ impl StateCache {
                             error = %primary_err,
                             "state cache corrupt, recovering from backup"
                         );
-                        Self::load_from_file(&bak_path).with_context(|| {
+                        Self::load_from_backup_file(&bak_path).with_context(|| {
                             format!(
                                 "both state cache and backup failed to load: {}",
                                 db_path.display()
@@ -305,12 +509,23 @@ impl StateCache {
     fn load_from_file(path: &Path) -> Result<(HashMap<String, SyncState>, u64, String)> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("reading: {}", path.display()))?;
+        Self::parse_file_content(path, &content)
+    }
 
-        if let Ok(data) = serde_json::from_str::<StateCacheOnDisk>(&content) {
+    fn load_from_backup_file(path: &Path) -> Result<(HashMap<String, SyncState>, u64, String)> {
+        let content = secure_read_file(path)?;
+        Self::parse_file_content(path, &content)
+    }
+
+    fn parse_file_content(
+        path: &Path,
+        content: &str,
+    ) -> Result<(HashMap<String, SyncState>, u64, String)> {
+        if let Ok(data) = serde_json::from_str::<StateCacheOnDisk>(content) {
             return Ok((data.entries, data.last_nats_seq, data.device_id));
         }
 
-        let entries: HashMap<String, SyncState> = serde_json::from_str(&content)
+        let entries: HashMap<String, SyncState> = serde_json::from_str(content)
             .with_context(|| format!("parsing state cache: {}", path.display()))?;
         Ok((entries, 0, String::new()))
     }
@@ -478,7 +693,11 @@ impl StateCache {
 
         if self.db_path.exists() {
             let bak_path = self.db_path.with_extension("json.bak");
-            let _ = std::fs::copy(&self.db_path, &bak_path);
+            let previous = std::fs::read(&self.db_path).with_context(|| {
+                format!("reading state cache for backup: {}", self.db_path.display())
+            })?;
+            secure_write_file(&bak_path, &previous, false)
+                .with_context(|| format!("writing state cache backup: {}", bak_path.display()))?;
         }
 
         let on_disk = StateCacheOnDisk {
@@ -488,17 +707,11 @@ impl StateCache {
         };
         let json = serde_json::to_string_pretty(&on_disk).context("serializing state cache")?;
 
-        // Atomic write: write to temp file, then rename
-        let tmp_path = self.db_path.with_extension("tmp");
-        std::fs::write(&tmp_path, &json)
-            .with_context(|| format!("writing state cache temp: {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &self.db_path)
-            .with_context(|| format!("renaming state cache: {}", self.db_path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.db_path, std::fs::Permissions::from_mode(0o600));
-        }
+        // Create a unique 0600 temp inode before writing any JSON, then rename
+        // it over the cache. Predictable umask-created `.tmp` crash artifacts
+        // and symlink-following backup writes are not acceptable for named
+        // conflict state.
+        secure_atomic_write(&self.db_path, json.as_bytes())?;
 
         self.dirty = false;
         self.last_flush = Instant::now();
@@ -1121,6 +1334,16 @@ pub fn make_sync_state_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn create_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed for {}", path.display());
+    }
+
     #[test]
     fn open_nonexistent_is_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -1385,6 +1608,52 @@ mod tests {
         let children_root = cache.children_with_prefix(dir.path());
         // All 3 files are children of dir (sub/a.txt, sub/b.txt, root.txt)
         assert_eq!(children_root.len(), 3);
+    }
+
+    #[test]
+    fn state_file_lock_serializes_process_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("root.json");
+        std::fs::write(&state_path, b"{}").unwrap();
+
+        let first = StateFileLock::acquire(&state_path).expect("first state lock");
+        let error = StateFileLock::acquire(&state_path)
+            .expect_err("second state lock must fail fast")
+            .to_string();
+        assert!(error.contains("locked by another process"), "{error}");
+        assert_eq!(
+            StateFileLock::lock_path(&state_path),
+            dir.path().join("root.json.lock")
+        );
+
+        drop(first);
+        StateFileLock::acquire(&state_path).expect("lock releases on drop");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_file_lock_rejects_fifo_without_blocking_and_hardlink_alias() {
+        let fifo_dir = tempfile::tempdir().unwrap();
+        let fifo_state = fifo_dir.path().join("fifo.json");
+        let fifo_lock = StateFileLock::lock_path(&fifo_state);
+        create_fifo(&fifo_lock);
+        let error = StateFileLock::acquire(&fifo_state)
+            .expect_err("FIFO lock path must fail instead of blocking")
+            .to_string();
+        assert!(
+            error.contains("opening state lock") || error.contains("not a regular file"),
+            "{error}"
+        );
+
+        let hardlink_dir = tempfile::tempdir().unwrap();
+        let hardlink_state = hardlink_dir.path().join("hardlink.json");
+        let outside = hardlink_dir.path().join("outside.lock");
+        std::fs::write(&outside, b"").unwrap();
+        std::fs::hard_link(&outside, StateFileLock::lock_path(&hardlink_state)).unwrap();
+        let error = StateFileLock::acquire(&hardlink_state)
+            .expect_err("hardlinked lock path must fail closed")
+            .to_string();
+        assert!(error.contains("exactly one hard link"), "{error}");
     }
 
     #[tokio::test]
@@ -2003,6 +2272,92 @@ mod tests {
         cache.flush().unwrap();
 
         assert!(dir.path().join("state.json.bak").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(dir.path().join("state.json.bak"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flush_rejects_preplaced_backup_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let tracked = dir.path().join("tracked.txt");
+        std::fs::write(&tracked, b"tracked").unwrap();
+        let mut cache = StateCache::open(&path).unwrap();
+        cache.set(
+            &tracked,
+            SyncState {
+                blake3: "one".into(),
+                size: 1,
+                mtime: 1,
+                chunk_count: 1,
+                remote_path: "idx/tracked.txt".into(),
+                last_synced: 1,
+                vclock: VectorClock::new(),
+                device_id: "device".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+        cache.flush().unwrap();
+
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"do not overwrite").unwrap();
+        symlink(&victim, dir.path().join("state.json.bak")).unwrap();
+        cache.set_status(&tracked, FileSyncStatus::Active);
+        let error = cache.flush().expect_err("backup symlink must fail closed");
+
+        assert!(error.to_string().contains("backup"), "{error:#}");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not overwrite");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flush_rejects_preplaced_backup_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let tracked = dir.path().join("tracked.txt");
+        std::fs::write(&tracked, b"tracked").unwrap();
+        let mut cache = StateCache::open(&path).unwrap();
+        cache.set(
+            &tracked,
+            SyncState {
+                blake3: "one".into(),
+                size: 1,
+                mtime: 1,
+                chunk_count: 1,
+                remote_path: "idx/tracked.txt".into(),
+                last_synced: 1,
+                vclock: VectorClock::new(),
+                device_id: "device".into(),
+                conflict: None,
+                status: FileSyncStatus::Synced,
+            },
+        );
+        cache.flush().unwrap();
+
+        create_fifo(&dir.path().join("state.json.bak"));
+        cache.set_status(&tracked, FileSyncStatus::Active);
+        let error = cache
+            .flush()
+            .expect_err("backup FIFO must fail instead of blocking");
+        assert!(error.to_string().contains("backup"), "{error:#}");
     }
 
     #[test]
@@ -2022,6 +2377,41 @@ mod tests {
         let cache = StateCache::open(&path).unwrap();
         assert_eq!(cache.last_nats_seq(), 99);
         assert_eq!(cache.device_id(), "recovered");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_symlinked_and_hardlinked_backup() {
+        use std::os::unix::fs::symlink;
+
+        let valid = serde_json::to_string(&StateCacheOnDisk {
+            last_nats_seq: 99,
+            device_id: "recovered".into(),
+            entries: HashMap::new(),
+        })
+        .unwrap();
+
+        let symlink_dir = tempfile::tempdir().unwrap();
+        let symlink_main = symlink_dir.path().join("state.json");
+        std::fs::write(&symlink_main, "corrupt").unwrap();
+        let symlink_target = symlink_dir.path().join("target.json");
+        std::fs::write(&symlink_target, &valid).unwrap();
+        symlink(&symlink_target, symlink_dir.path().join("state.json.bak")).unwrap();
+        let error = StateCache::open(&symlink_main)
+            .err()
+            .expect("symlinked recovery backup must fail closed");
+        assert!(error.to_string().contains("backup"), "{error:#}");
+
+        let hardlink_dir = tempfile::tempdir().unwrap();
+        let hardlink_main = hardlink_dir.path().join("state.json");
+        std::fs::write(&hardlink_main, "corrupt").unwrap();
+        let hardlink_target = hardlink_dir.path().join("target.json");
+        std::fs::write(&hardlink_target, &valid).unwrap();
+        std::fs::hard_link(&hardlink_target, hardlink_dir.path().join("state.json.bak")).unwrap();
+        let error = StateCache::open(&hardlink_main)
+            .err()
+            .expect("hardlinked recovery backup must fail closed");
+        assert!(error.to_string().contains("backup"), "{error:#}");
     }
 
     #[test]

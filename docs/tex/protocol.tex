@@ -163,12 +163,25 @@ service TcfsDaemon {
   rpc SyncStatus(SyncStatusRequest) returns (SyncStatusResponse);
   rpc Watch(WatchRequest) returns (stream WatchEvent);
   rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
+  rpc ListConflicts(ListConflictsRequest)
+      returns (ListConflictsResponse);
+  rpc ResolveRegisteredRoot(ResolveRegisteredRootRequest)
+      returns (ResolveRegisteredRootResponse);
   rpc ResolveConflict(ResolveConflictRequest)
       returns (ResolveConflictResponse);
 }
 \end{lstlisting}
 
-See \filepath{crates/tcfs-core/proto/tcfs.proto} for the full service definition
-including all message types.
+For a non-primary root, \code{ListConflicts} carries a stable \code{root\_id}.
+The separate \code{ResolveRegisteredRoot} method carries that ID, a checked
+repository path, and one of the two repo-group Git keep-both modes (dry-run or
+execute). The daemon resolves object prefix, state cache, and mutation policy
+from trusted configuration and returns the selected route identity in the same
+response. This scope does not provide named ordinary-file resolution or
+\code{reconcile --root}. Legacy \code{ResolveConflict} has no root selector;
+when named roots are enrolled, tcfsd fences rootless paths that enter them.
+
+See \filepath{crates/tcfs-core/src/proto/tcfs.proto} for the full service
+definition including all message types.
 
 \end{document}

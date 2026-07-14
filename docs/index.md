@@ -41,6 +41,9 @@ development instruction source.
 
 ## Daily-driver and roam operations
 
+- [Stable root routing ADR](design/stable-root-routing-2026-07-14.md) — narrow
+  daemon-trusted conflict routing seam; not broad root adoption.
+- [Divergent Git keep-both design](design/git-divergent-keep-both-2026-07-02.md)
 - [Git repository dogfood canary](ops/git-repo-canary-dogfood.md)
 - [Repo-roam acceptance](ops/git-roam-daily-driver-acceptance-2026-06-08.md)
 - [Repo-roam test plan](ops/repo-roam-test-plan-2026-06-08.md)

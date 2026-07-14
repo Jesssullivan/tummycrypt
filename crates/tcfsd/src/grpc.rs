@@ -17,7 +17,7 @@ use crate::cred_store::SharedCredStore;
 
 use base64::Engine;
 use secrecy::ExposeSecret;
-use tcfs_core::config::TcfsConfig;
+use tcfs_core::config::{RegisteredRootConfig, RegisteredRootPolicy, TcfsConfig};
 use tcfs_core::proto::{
     tcfs_daemon_server::{TcfsDaemon, TcfsDaemonServer},
     *,
@@ -86,6 +86,730 @@ fn repo_keep_both_mode(resolution: &str) -> Option<tcfs_sync::conflict_git::GitK
         "git_keep_both_execute" => Some(tcfs_sync::conflict_git::GitKeepBothMode::Execute),
         _ => None,
     }
+}
+
+/// Canonical, daemon-selected routing record for one non-primary root.
+#[derive(Debug, Clone)]
+struct RegisteredRootRoute {
+    root_id: String,
+    local_root: PathBuf,
+    remote_prefix: String,
+    state_path: PathBuf,
+    policy: RegisteredRootPolicy,
+}
+
+fn validate_root_id(root_id: &str) -> std::result::Result<(), String> {
+    let valid = !root_id.is_empty()
+        && root_id.len() <= 64
+        && !root_id.eq_ignore_ascii_case("primary")
+        && root_id
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && root_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid registered root id '{root_id}': use 1-64 lowercase ASCII letters, digits, '.', '_' or '-' (reserved: primary)"
+        ))
+    }
+}
+
+fn validate_remote_prefix(prefix: &str) -> std::result::Result<(), String> {
+    let valid = !prefix.is_empty()
+        && !prefix.starts_with('/')
+        && !prefix.ends_with('/')
+        && !prefix.contains('\\')
+        && prefix
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid registered root remote_prefix '{prefix}': expected a non-empty relative object-key prefix without '.', '..', empty, or backslash segments"
+        ))
+    }
+}
+
+fn has_parent_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+fn local_roots_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn canonicalize_if_present(
+    path: &Path,
+    description: &str,
+) -> std::result::Result<Option<PathBuf>, String> {
+    match std::fs::canonicalize(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "canonicalizing {description} {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn lexically_normalize_absolute(path: &Path) -> std::result::Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("expected an absolute path, got {}", path.display()));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!(
+                        "path escapes its filesystem root during lexical normalization: {}",
+                        path.display()
+                    ));
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if !normalized.is_absolute() {
+        return Err(format!(
+            "path lost its absolute root during normalization: {}",
+            path.display()
+        ));
+    }
+    Ok(normalized)
+}
+
+/// Resolve symlinks in the longest existing prefix, then append and normalize
+/// any missing tail. Conflict resolution must also fence deleted files and
+/// not-yet-created paths; `canonicalize(path)` alone would let those bypass a
+/// registered-root boundary.
+fn canonicalize_with_missing_tail(path: &Path) -> std::result::Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("expected an absolute path, got {}", path.display()));
+    }
+
+    let components = path.components().collect::<Vec<_>>();
+    for split in (1..=components.len()).rev() {
+        let mut prefix = PathBuf::new();
+        for component in &components[..split] {
+            prefix.push(component.as_os_str());
+        }
+        match std::fs::canonicalize(&prefix) {
+            Ok(mut resolved) => {
+                for component in &components[split..] {
+                    resolved.push(component.as_os_str());
+                }
+                return lexically_normalize_absolute(&resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "resolving path prefix {} for {}: {error}",
+                    prefix.display(),
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "no existing ancestor could be resolved for {}",
+        path.display()
+    ))
+}
+
+fn registered_root_containing_rootless_path(
+    config: &TcfsConfig,
+    path: &Path,
+) -> std::result::Result<Option<String>, String> {
+    if config.sync.roots.is_empty() {
+        return Ok(None);
+    }
+    if !path.is_absolute() {
+        return Err(format!(
+            "rootless conflict resolution uses an ambiguous relative path while registered roots are enrolled: {}; use an absolute primary-root path or `tcfs resolve <repo> --root <id>`",
+            path.display()
+        ));
+    }
+
+    let request_lexical = lexically_normalize_absolute(path)?;
+    let request_resolved = canonicalize_with_missing_tail(path)?;
+    for (root_id, root) in &config.sync.roots {
+        let root_path = tcfs_core::config::expand_tilde(&root.local_root);
+        let root_lexical = lexically_normalize_absolute(&root_path)
+            .map_err(|error| format!("invalid registered root '{root_id}' local_root: {error}"))?;
+        if request_lexical == root_lexical || request_lexical.starts_with(&root_lexical) {
+            return Ok(Some(root_id.clone()));
+        }
+
+        let root_resolved = canonicalize_with_missing_tail(&root_path).map_err(|error| {
+            format!("resolving registered root '{root_id}' local_root: {error}")
+        })?;
+        if request_resolved == root_resolved || request_resolved.starts_with(&root_resolved) {
+            return Ok(Some(root_id.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn remote_prefixes_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn registered_root_state_dir(config: &TcfsConfig) -> std::result::Result<PathBuf, String> {
+    if let Some(root_state_dir) = config.sync.root_state_dir.as_deref() {
+        let root_state_dir = tcfs_core::config::expand_tilde(root_state_dir);
+        if !root_state_dir.is_absolute() || has_parent_component(&root_state_dir) {
+            return Err(format!(
+                "sync.root_state_dir must be an absolute path without '..': {}",
+                root_state_dir.display()
+            ));
+        }
+        return Ok(root_state_dir);
+    }
+
+    let socket = tcfs_core::config::expand_tilde(&config.daemon.socket);
+    let parent = socket
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "daemon socket {} has no parent for registered-root state fencing",
+                socket.display()
+            )
+        })?;
+    let state_dir = parent.join("reconcile");
+    if !state_dir.is_absolute() || has_parent_component(&state_dir) {
+        return Err(format!(
+            "daemon-derived registered-root state directory must be absolute without '..': {}",
+            state_dir.display()
+        ));
+    }
+    Ok(state_dir)
+}
+
+fn normalized_registered_state_path(path: &Path) -> PathBuf {
+    let path = tcfs_core::config::expand_tilde(path);
+    if path.extension().is_some_and(|extension| extension == "db") {
+        path.with_extension("json")
+    } else {
+        path
+    }
+}
+
+/// Validate the trusted mapping without touching the filesystem.
+fn validate_registered_root_definition(
+    config: &TcfsConfig,
+    root_id: &str,
+    root: &RegisteredRootConfig,
+) -> std::result::Result<(PathBuf, PathBuf), String> {
+    validate_root_id(root_id)?;
+    validate_remote_prefix(&root.remote_prefix)?;
+
+    let local_root = tcfs_core::config::expand_tilde(&root.local_root);
+    if !local_root.is_absolute() || has_parent_component(&local_root) {
+        return Err(format!(
+            "registered root '{root_id}' local_root must be an absolute path without '..': {}",
+            local_root.display()
+        ));
+    }
+
+    let state_path = normalized_registered_state_path(&root.state_path);
+    if !state_path.is_absolute() || has_parent_component(&state_path) {
+        return Err(format!(
+            "registered root '{root_id}' state_path must be an absolute path without '..': {}",
+            state_path.display()
+        ));
+    }
+    if state_path
+        .extension()
+        .is_none_or(|extension| extension != "json")
+    {
+        return Err(format!(
+            "registered root '{root_id}' state_path must resolve to a .json cache: {}",
+            state_path.display()
+        ));
+    }
+
+    let expected_dir = registered_root_state_dir(config)?;
+    let expected_name = format!("{root_id}.json");
+    if state_path.parent() != Some(expected_dir.as_path())
+        || state_path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str())
+    {
+        return Err(format!(
+            "registered root '{root_id}' state_path must be {} (daemon-owned root-state fence), got {}",
+            expected_dir.join(expected_name).display(),
+            state_path.display()
+        ));
+    }
+
+    Ok((local_root, state_path))
+}
+
+/// Startup-time validation for every configured mapping. Runtime selection
+/// repeats this and adds symlink-aware canonicalization/existence checks.
+pub(crate) fn validate_registered_roots_config(config: &TcfsConfig) -> anyhow::Result<()> {
+    if config.sync.roots.is_empty() {
+        return Ok(());
+    }
+
+    let primary_local_root = if let Some(path) = config.sync.sync_root.as_deref() {
+        let path = tcfs_core::config::expand_tilde(path);
+        if !path.is_absolute() || has_parent_component(&path) {
+            anyhow::bail!(
+                "primary sync.sync_root must be an absolute path without '..' when registered roots are configured: {}",
+                path.display()
+            );
+        }
+        Some(path)
+    } else {
+        None
+    };
+    let primary_prefix = config.storage.resolved_prefix();
+    validate_remote_prefix(primary_prefix).map_err(|error| {
+        anyhow::anyhow!(
+            "primary storage prefix is invalid while registered roots are configured: {error}"
+        )
+    })?;
+    let root_state_dir = registered_root_state_dir(config).map_err(anyhow::Error::msg)?;
+    if let Some(primary) = primary_local_root.as_deref() {
+        if local_roots_overlap(&root_state_dir, primary) {
+            anyhow::bail!(
+                "registered-root state directory {} overlaps primary sync_root {}",
+                root_state_dir.display(),
+                primary.display()
+            );
+        }
+    }
+
+    let mut prefixes: Vec<(&str, &str)> = Vec::new();
+    let mut local_roots: Vec<(&str, PathBuf)> = Vec::new();
+    for (root_id, root) in &config.sync.roots {
+        let (local_root, _) = validate_registered_root_definition(config, root_id, root)
+            .map_err(anyhow::Error::msg)?;
+        if local_roots_overlap(&root_state_dir, &local_root) {
+            anyhow::bail!(
+                "registered-root state directory {} overlaps registered root '{root_id}' local_root {}",
+                root_state_dir.display(),
+                local_root.display()
+            );
+        }
+        if let Some(primary) = primary_local_root.as_deref() {
+            if local_roots_overlap(&local_root, primary) {
+                anyhow::bail!(
+                    "registered root '{root_id}' local_root {} overlaps primary sync_root {}",
+                    local_root.display(),
+                    primary.display()
+                );
+            }
+        }
+        if remote_prefixes_overlap(&root.remote_prefix, primary_prefix) {
+            anyhow::bail!(
+                "registered root '{root_id}' remote_prefix '{}' overlaps primary storage prefix '{}'",
+                root.remote_prefix,
+                primary_prefix
+            );
+        }
+        for (other_id, other_root) in &local_roots {
+            if local_roots_overlap(&local_root, other_root) {
+                anyhow::bail!(
+                    "registered roots '{root_id}' and '{other_id}' have overlapping local roots ({} and {})",
+                    local_root.display(),
+                    other_root.display()
+                );
+            }
+        }
+        for (other_id, other_prefix) in &prefixes {
+            if remote_prefixes_overlap(&root.remote_prefix, other_prefix) {
+                anyhow::bail!(
+                    "registered roots '{root_id}' and '{other_id}' have overlapping remote prefixes ('{}' and '{}')",
+                    root.remote_prefix,
+                    other_prefix
+                );
+            }
+        }
+        local_roots.push((root_id, local_root));
+        prefixes.push((root_id, &root.remote_prefix));
+    }
+    Ok(())
+}
+
+fn validate_canonical_local_root_isolation(
+    config: &TcfsConfig,
+    root_id: &str,
+    local_root: &Path,
+) -> std::result::Result<(), String> {
+    if let Some(primary) = config.sync.sync_root.as_deref() {
+        // The primary root may be configured before it is hydrated on this
+        // host. As with named peers, re-evaluate it on every selection so a
+        // symlink alias is fenced as soon as the path appears.
+        let primary_path = tcfs_core::config::expand_tilde(primary);
+        if let Some(primary) = canonicalize_if_present(&primary_path, "primary sync_root")? {
+            if local_roots_overlap(local_root, &primary) {
+                return Err(format!(
+                    "registered root '{root_id}' overlaps primary sync_root after canonicalization ({} and {})",
+                    local_root.display(),
+                    primary.display()
+                ));
+            }
+        }
+    }
+
+    for (other_id, other) in &config.sync.roots {
+        if other_id == root_id {
+            continue;
+        }
+        // A peer may be enrolled before it is hydrated on this host. Ignore it
+        // while unavailable, but re-evaluate it on every selected-root request
+        // so an alias becomes fenced as soon as the peer path appears.
+        let other_path = tcfs_core::config::expand_tilde(&other.local_root);
+        let Some(other_root) = canonicalize_if_present(
+            &other_path,
+            &format!("registered root '{other_id}' local_root"),
+        )?
+        else {
+            continue;
+        };
+        if local_roots_overlap(local_root, &other_root) {
+            return Err(format!(
+                "registered roots '{root_id}' and '{other_id}' overlap after canonicalization ({} and {})",
+                local_root.display(),
+                other_root.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_canonical_state_dir_isolation(
+    config: &TcfsConfig,
+    state_dir: &Path,
+) -> std::result::Result<(), String> {
+    if let Some(primary) = config.sync.sync_root.as_deref() {
+        let primary_path = tcfs_core::config::expand_tilde(primary);
+        if let Some(primary) = canonicalize_if_present(&primary_path, "primary sync_root")? {
+            if local_roots_overlap(state_dir, &primary) {
+                return Err(format!(
+                    "registered-root state directory {} overlaps primary sync_root after canonicalization ({})",
+                    state_dir.display(),
+                    primary.display()
+                ));
+            }
+        }
+    }
+
+    for (other_id, other) in &config.sync.roots {
+        let other_path = tcfs_core::config::expand_tilde(&other.local_root);
+        let Some(other_root) = canonicalize_if_present(
+            &other_path,
+            &format!("registered root '{other_id}' local_root"),
+        )?
+        else {
+            continue;
+        };
+        if local_roots_overlap(state_dir, &other_root) {
+            return Err(format!(
+                "registered-root state directory {} overlaps registered root '{other_id}' local_root after canonicalization ({})",
+                state_dir.display(),
+                other_root.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_registered_state_inode_isolation(
+    config: &TcfsConfig,
+    root_id: &str,
+    state_path: &Path,
+    metadata: &std::fs::Metadata,
+) -> std::result::Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    if metadata.nlink() != 1 {
+        return Err(format!(
+            "registered root '{root_id}' state cache must have exactly one hard link, got {}: {}",
+            metadata.nlink(),
+            state_path.display()
+        ));
+    }
+
+    let primary_state =
+        tcfs_core::config::expand_tilde(&config.sync.state_db).with_extension("json");
+    let mut candidates = vec![("primary state cache".to_string(), primary_state)];
+    candidates.extend(
+        config
+            .sync
+            .roots
+            .iter()
+            .filter(|(other_id, _)| other_id.as_str() != root_id)
+            .map(|(other_id, other)| {
+                (
+                    format!("registered root '{other_id}' state cache"),
+                    normalized_registered_state_path(&other.state_path),
+                )
+            }),
+    );
+
+    for (description, candidate) in candidates {
+        let candidate_metadata = match std::fs::metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "reading {description} inode metadata {} while selecting registered root '{root_id}': {error}",
+                    candidate.display()
+                ));
+            }
+        };
+        if candidate_metadata.dev() == metadata.dev() && candidate_metadata.ino() == metadata.ino()
+        {
+            return Err(format!(
+                "registered root '{root_id}' state cache aliases {description} by inode ({} and {})",
+                state_path.display(),
+                candidate.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_registered_root(
+    config: &TcfsConfig,
+    root_id: &str,
+    root: &RegisteredRootConfig,
+) -> std::result::Result<RegisteredRootRoute, String> {
+    let (local_root, state_path) = validate_registered_root_definition(config, root_id, root)?;
+    let local_root = std::fs::canonicalize(&local_root).map_err(|error| {
+        format!(
+            "registered root '{root_id}' local_root {} is unavailable: {error}",
+            local_root.display()
+        )
+    })?;
+    if !local_root.is_dir() {
+        return Err(format!(
+            "registered root '{root_id}' local_root is not a directory: {}",
+            local_root.display()
+        ));
+    }
+    validate_canonical_local_root_isolation(config, root_id, &local_root)?;
+
+    let metadata = std::fs::symlink_metadata(&state_path).map_err(|error| {
+        format!(
+            "registered root '{root_id}' state cache {} is unavailable: {error}",
+            state_path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "registered root '{root_id}' state cache must be a regular, non-symlink file: {}",
+            state_path.display()
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        validate_registered_state_inode_isolation(config, root_id, &state_path, &metadata)?;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "registered root '{root_id}' state cache must not be group/world accessible (mode 0600 or stricter): {}",
+                state_path.display()
+            ));
+        }
+    }
+
+    let state_dir = registered_root_state_dir(config)?;
+    let canonical_state_dir = std::fs::canonicalize(&state_dir).map_err(|error| {
+        format!(
+            "registered-root state directory {} is unavailable: {error}",
+            state_dir.display()
+        )
+    })?;
+    validate_canonical_state_dir_isolation(config, &canonical_state_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory_metadata = std::fs::metadata(&canonical_state_dir).map_err(|error| {
+            format!(
+                "reading registered-root state directory metadata {}: {error}",
+                canonical_state_dir.display()
+            )
+        })?;
+        if metadata.uid() != directory_metadata.uid() {
+            return Err(format!(
+                "registered root '{root_id}' state cache owner does not match its trusted directory owner: {}",
+                state_path.display()
+            ));
+        }
+        if directory_metadata.permissions().mode() & 0o022 != 0 {
+            return Err(format!(
+                "registered-root state directory must not be group/world writable: {}",
+                canonical_state_dir.display()
+            ));
+        }
+    }
+    let state_path = std::fs::canonicalize(&state_path).map_err(|error| {
+        format!("canonicalizing registered root '{root_id}' state cache: {error}")
+    })?;
+    if state_path.parent() != Some(canonical_state_dir.as_path()) {
+        return Err(format!(
+            "registered root '{root_id}' state cache escapes daemon-owned directory after canonicalization: {}",
+            state_path.display()
+        ));
+    }
+    if state_path.starts_with(&local_root) {
+        return Err(format!(
+            "registered root '{root_id}' state cache must remain outside local_root: {}",
+            state_path.display()
+        ));
+    }
+
+    Ok(RegisteredRootRoute {
+        root_id: root_id.to_string(),
+        local_root,
+        remote_prefix: root.remote_prefix.clone(),
+        state_path,
+        policy: root.policy,
+    })
+}
+
+fn object_key_is_within_prefix(key: &str, prefix: &str) -> bool {
+    let Some(suffix) = key
+        .strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+    else {
+        return false;
+    };
+    !suffix.is_empty()
+        && !suffix.contains('\\')
+        && suffix
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn check_registered_prefix_permission(
+    session: &tcfs_auth::Session,
+    prefix: &str,
+) -> std::result::Result<(), tonic::Status> {
+    let allowed = session.permissions.allowed_prefixes.is_empty()
+        || session.permissions.allowed_prefixes.iter().any(|allowed| {
+            let allowed = allowed.trim_matches('/');
+            !allowed.is_empty()
+                && (prefix == allowed
+                    || prefix
+                        .strip_prefix(allowed)
+                        .is_some_and(|suffix| suffix.starts_with('/')))
+        });
+    if allowed {
+        Ok(())
+    } else {
+        Err(tonic::Status::permission_denied(format!(
+            "device {} is not authorized for prefix '{prefix}'",
+            session.device_id
+        )))
+    }
+}
+
+fn validate_conflict_cache_route(
+    route: &RegisteredRootRoute,
+    state: &tcfs_sync::state::StateCache,
+) -> std::result::Result<(), String> {
+    for (cache_key, entry) in state.conflicts() {
+        let cache_path = Path::new(cache_key);
+        if cache_key.contains('\\')
+            || !cache_path.is_absolute()
+            || has_parent_component(cache_path)
+            || !cache_path.starts_with(&route.local_root)
+        {
+            return Err(format!(
+                "registered root '{}' cache contains conflict outside local_root: {}",
+                route.root_id, cache_key
+            ));
+        }
+        if let Some(conflict) = entry.conflict.as_ref() {
+            let rel_path = Path::new(&conflict.rel_path);
+            if conflict.rel_path.is_empty()
+                || conflict.rel_path.contains('\\')
+                || rel_path.is_absolute()
+                || has_parent_component(rel_path)
+            {
+                return Err(format!(
+                    "registered root '{}' cache contains an unsafe conflict rel_path: {}",
+                    route.root_id, conflict.rel_path
+                ));
+            }
+        }
+        if !object_key_is_within_prefix(&entry.remote_path, &route.remote_prefix) {
+            return Err(format!(
+                "registered root '{}' cache entry escapes remote_prefix '{}': {}",
+                route.root_id, route.remote_prefix, entry.remote_path
+            ));
+        }
+        if let Some(remote_manifest_key) = entry
+            .conflict
+            .as_ref()
+            .and_then(|conflict| conflict.remote_manifest_key.as_deref())
+        {
+            if !object_key_is_within_prefix(remote_manifest_key, &route.remote_prefix) {
+                return Err(format!(
+                    "registered root '{}' conflict manifest escapes remote_prefix '{}': {}",
+                    route.root_id, route.remote_prefix, remote_manifest_key
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_standalone_git_root(route: &RegisteredRootRoute) -> std::result::Result<(), String> {
+    tcfs_sync::conflict_git::validate_standalone_repo_topology(&route.local_root).map_err(|error| {
+        format!(
+            "registered root '{}' is not a standalone git repository: {error:#}",
+            route.root_id
+        )
+    })
+}
+
+fn conflict_records(state: &tcfs_sync::state::StateCache) -> Vec<ConflictRecord> {
+    let mut records = state
+        .conflicts()
+        .into_iter()
+        .filter_map(|(cache_key, entry)| {
+            let conflict = entry.conflict.as_ref()?;
+            Some(ConflictRecord {
+                cache_key: cache_key.to_string(),
+                rel_path: conflict.rel_path.clone(),
+                local_device: conflict.local_device.clone(),
+                remote_device: conflict.remote_device.clone(),
+                detected_at: conflict.detected_at,
+                times_recorded: conflict.times_recorded,
+            })
+        })
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        left.rel_path
+            .cmp(&right.rel_path)
+            .then_with(|| left.cache_key.cmp(&right.cache_key))
+    });
+    records
 }
 
 /// Machine-local directory for the keep-both undo bundle. It MUST be outside any
@@ -418,6 +1142,136 @@ impl TcfsDaemonImpl {
             totp_provider,
             webauthn_provider,
             rate_limiter,
+        }
+    }
+
+    fn registered_root(
+        &self,
+        root_id: &str,
+    ) -> std::result::Result<RegisteredRootRoute, tonic::Status> {
+        validate_root_id(root_id).map_err(tonic::Status::invalid_argument)?;
+        validate_registered_roots_config(&self.config)
+            .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
+        let Some(root) = self.config.sync.roots.get(root_id) else {
+            return Err(tonic::Status::not_found("registered root was not found"));
+        };
+        canonical_registered_root(&self.config, root_id, root)
+            .map_err(tonic::Status::failed_precondition)
+    }
+
+    async fn resolve_registered_git_keep_both_repo(
+        &self,
+        route: &RegisteredRootRoute,
+        path: &Path,
+        mode: tcfs_sync::conflict_git::GitKeepBothMode,
+    ) -> Result<tonic::Response<ResolveRegisteredRootResponse>, tonic::Status> {
+        if mode.is_execute() && route.policy != RegisteredRootPolicy::Resolve {
+            return Err(tonic::Status::permission_denied(format!(
+                "registered root '{}' policy is inspect-only; execute requires policy = \"resolve\"",
+                route.root_id
+            )));
+        }
+
+        let request_root = std::fs::canonicalize(path).map_err(|error| {
+            tonic::Status::failed_precondition(format!(
+                "canonicalizing requested repo root {}: {error}",
+                path.display()
+            ))
+        })?;
+        if request_root != route.local_root {
+            return Err(tonic::Status::permission_denied(format!(
+                "requested repo {} does not equal registered root '{}' local_root {}",
+                request_root.display(),
+                route.root_id,
+                route.local_root.display()
+            )));
+        }
+
+        // A direct gRPC client must not bypass the CLI's `.git` directory
+        // check and send the resolver into shared worktree metadata.
+        validate_standalone_git_root(route).map_err(tonic::Status::failed_precondition)?;
+
+        let op = {
+            let op_guard = self.operator.lock().await;
+            op_guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+        };
+        let enc_ctx = {
+            let mk_guard = self.master_key.lock().await;
+            mk_guard
+                .as_ref()
+                .map(|mk| build_encryption_context(&self.config, &self.device_id, mk))
+        };
+
+        // Coordinate with `tcfs reconcile --state <this cache>` for the full
+        // read/resolve/flush transaction. The lock is deliberately held across
+        // remote reads and git safety checks so no stale plan can overwrite the
+        // resolved snapshot.
+        let _state_lock = tcfs_sync::state::StateFileLock::acquire(&route.state_path)
+            .map_err(|error| tonic::Status::aborted(error.to_string()))?;
+        let mut state = tcfs_sync::state::StateCache::open(&route.state_path)
+            .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
+        validate_conflict_cache_route(route, &state).map_err(tonic::Status::failed_precondition)?;
+
+        let undo_state_dir = route
+            .state_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        let result = tcfs_sync::conflict_git::resolve_repo_keep_both(
+            &op,
+            &mut state,
+            &route.local_root,
+            &route.remote_prefix,
+            &self.device_id,
+            &undo_state_dir,
+            mode,
+            enc_ctx.as_ref(),
+        )
+        .await;
+
+        match result {
+            Ok(result) => {
+                if mode.is_execute() {
+                    // Existing NATS state events do not carry root identity.
+                    // Publishing this path would let primary-root consumers
+                    // apply it under the wrong local/prefix namespace.
+                    tracing::info!(
+                        root_id = %route.root_id,
+                        "registered-root conflict resolved; suppressing non-root-aware NATS event"
+                    );
+                }
+                let remaining_conflicts = state.conflicts().len();
+                let summary = if mode.is_execute() && remaining_conflicts > 0 {
+                    format!(
+                        "{}; WARNING: {remaining_conflicts} named-root conflict(s) remain; inspect `tcfs conflicts --root {}` before claiming convergence",
+                        result.summary(),
+                        route.root_id
+                    )
+                } else {
+                    result.summary()
+                };
+                Ok(tonic::Response::new(ResolveRegisteredRootResponse {
+                    success: true,
+                    resolved_path: result.repo_root.display().to_string(),
+                    error: summary,
+                    root_id: route.root_id.clone(),
+                    local_root: route.local_root.display().to_string(),
+                    remote_prefix: route.remote_prefix.clone(),
+                    state_path: route.state_path.display().to_string(),
+                }))
+            }
+            Err(error) => Ok(tonic::Response::new(ResolveRegisteredRootResponse {
+                success: false,
+                resolved_path: String::new(),
+                error: error.to_string(),
+                root_id: route.root_id.clone(),
+                local_root: route.local_root.display().to_string(),
+                remote_prefix: route.remote_prefix.clone(),
+                state_path: route.state_path.display().to_string(),
+            })),
         }
     }
 
@@ -1588,7 +2442,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 key,
                 state,
                 self.config.sync.sync_root.as_deref(),
-                &storage_prefix,
+                storage_prefix,
             ) else {
                 continue;
             };
@@ -1670,7 +2524,101 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Ok(tonic::Response::new(ListFilesResponse { files }))
     }
 
-    // ── Resolve Conflict ──────────────────────────────────────────────────
+    // ── Conflict inspection / resolution ─────────────────────────────────
+
+    async fn list_conflicts(
+        &self,
+        request: tonic::Request<ListConflictsRequest>,
+    ) -> Result<tonic::Response<ListConflictsResponse>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "pull")?;
+        let root_id = request.into_inner().root_id;
+
+        if root_id.is_empty() {
+            check_registered_prefix_permission(&session, self.config.storage.resolved_prefix())?;
+            let cache = self.state_cache.lock().await;
+            return Ok(tonic::Response::new(ListConflictsResponse {
+                root_id: "primary".to_string(),
+                local_root: self
+                    .config
+                    .sync
+                    .sync_root
+                    .as_deref()
+                    .map(tcfs_core::config::expand_tilde)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+                remote_prefix: self.config.storage.resolved_prefix().to_string(),
+                state_path: tcfs_core::config::expand_tilde(&self.config.sync.state_db)
+                    .with_extension("json")
+                    .display()
+                    .to_string(),
+                conflicts: conflict_records(&cache),
+            }));
+        }
+
+        let route = self.registered_root(&root_id)?;
+        check_registered_prefix_permission(&session, &route.remote_prefix)?;
+        let _state_lock = tcfs_sync::state::StateFileLock::acquire(&route.state_path)
+            .map_err(|error| tonic::Status::aborted(error.to_string()))?;
+        let state = tcfs_sync::state::StateCache::open(&route.state_path)
+            .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
+        validate_conflict_cache_route(&route, &state)
+            .map_err(tonic::Status::failed_precondition)?;
+
+        Ok(tonic::Response::new(ListConflictsResponse {
+            root_id: route.root_id,
+            local_root: route.local_root.display().to_string(),
+            remote_prefix: route.remote_prefix,
+            state_path: route.state_path.display().to_string(),
+            conflicts: conflict_records(&state),
+        }))
+    }
+
+    async fn resolve_registered_root(
+        &self,
+        request: tonic::Request<ResolveRegisteredRootRequest>,
+    ) -> Result<tonic::Response<ResolveRegisteredRootResponse>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "push")?;
+        let req = request.into_inner();
+        let route = self.registered_root(&req.root_id)?;
+        check_registered_prefix_permission(&session, &route.remote_prefix)?;
+
+        let mode = match RegisteredRootResolveMode::try_from(req.mode) {
+            Ok(RegisteredRootResolveMode::GitKeepBothDryRun) => {
+                tcfs_sync::conflict_git::GitKeepBothMode::DryRun
+            }
+            Ok(RegisteredRootResolveMode::GitKeepBothExecute) => {
+                tcfs_sync::conflict_git::GitKeepBothMode::Execute
+            }
+            Ok(RegisteredRootResolveMode::Unspecified) | Err(_) => {
+                return Err(tonic::Status::invalid_argument(
+                    "registered-root resolution mode must be git keep-both dry-run or execute",
+                ));
+            }
+        };
+
+        if !req.operator_cli {
+            tracing::warn!(
+                root_id = %route.root_id,
+                path = %req.path,
+                "refusing registered-root keep-both: missing explicit operator intent"
+            );
+            return Ok(tonic::Response::new(ResolveRegisteredRootResponse {
+                success: false,
+                resolved_path: String::new(),
+                error: "registered-root git keep-both requires explicit operator intent in addition to an authenticated push session; run it deliberately from `tcfs resolve --root <id> ...`"
+                    .to_string(),
+                root_id: route.root_id,
+                local_root: route.local_root.display().to_string(),
+                remote_prefix: route.remote_prefix,
+                state_path: route.state_path.display().to_string(),
+            }));
+        }
+
+        self.resolve_registered_git_keep_both_repo(&route, Path::new(&req.path), mode)
+            .await
+    }
 
     async fn resolve_conflict(
         &self,
@@ -1679,6 +2627,17 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let session = self.require_session(&request).await?;
         Self::check_permission(&session, "push")?;
         let req = request.into_inner();
+        let path = std::path::PathBuf::from(&req.path);
+
+        if let Some(root_id) = registered_root_containing_rootless_path(&self.config, &path)
+            .map_err(tonic::Status::failed_precondition)?
+        {
+            return Err(tonic::Status::failed_precondition(format!(
+                "rootless ResolveConflict path {} belongs to registered root '{root_id}'; the legacy primary-cache RPC is fenced here. Use `tcfs resolve {} --root {root_id}` so tcfsd selects the named cache and prefix atomically.",
+                path.display(),
+                path.display()
+            )));
+        }
 
         let resolution = match req.resolution.as_str() {
             "keep_local"
@@ -1699,8 +2658,6 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }
         };
 
-        let path = std::path::PathBuf::from(&req.path);
-
         // Reload state from disk in case the CLI wrote new entries. The git
         // fence below also consults the stored ConflictInfo rel_path, which is
         // the authoritative repo-relative path when the request arrived through
@@ -1716,12 +2673,12 @@ impl TcfsDaemon for TcfsDaemonImpl {
         if let Some(mode) = repo_keep_both_mode(&resolution) {
             // Operator-deliberate invariant: repo-group git keep-both is a live
             // `.git` WRITE path (parks peer branch heads, ticks the local clock
-            // to dominate the fleet). It is reachable ONLY through the human
-            // `tcfs resolve` CLI, which sets `operator_cli=true`. MCP's tool
-            // input cannot set that flag (and MCP also rejects git_keep_both_*
-            // before reaching this RPC), and no auto/NATS path sets it — so an
-            // agent / generic client can never trigger committed-work loss.
-            // Fail closed. This dispatch stays ahead of the per-file `.git`
+            // to dominate the fleet). The shipped CLI sets `operator_cli=true`;
+            // MCP does not expose it and also rejects git_keep_both_* before the
+            // RPC. The bit is client-supplied defense in depth, not attestation:
+            // session authentication and push permission remain the authorization
+            // boundary. Fail closed when the intent bit is absent. This dispatch
+            // stays ahead of the per-file `.git`
             // fence below because the repo-group path targets the repo ROOT
             // (not a `.git`-internal path); the fence is for per-file
             // keep_local/keep_remote/keep_both and does not apply here.
@@ -1729,15 +2686,16 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 tracing::warn!(
                     path = %req.path,
                     resolution = %resolution,
-                    "refusing repo-group git keep-both: missing operator CLI provenance"
+                    "refusing repo-group git keep-both: missing explicit operator intent"
                 );
                 return Ok(tonic::Response::new(ResolveConflictResponse {
                     success: false,
                     resolved_path: String::new(),
-                    error: "repo-group git keep-both is operator-only: run it deliberately from \
-                            the CLI (`tcfs resolve <repo> --strategy keep-both [--execute]`), not \
-                            through MCP or an automated client"
-                        .to_string(),
+                    error:
+                        "repo-group git keep-both requires explicit operator intent in addition \
+                            to an authenticated push session; run it deliberately from the CLI \
+                            (`tcfs resolve <repo> --strategy keep-both [--execute]`)"
+                            .to_string(),
                 }));
             }
             return self.resolve_git_keep_both_repo(&path, mode).await;
@@ -2086,7 +3044,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 let last = state.last_synced as i64;
                 if since == 0 || last > since {
                     let Some(rel_path) =
-                        logical_rel_path_from_state_key(key, state, sync_root, &storage_prefix)
+                        logical_rel_path_from_state_key(key, state, sync_root, storage_prefix)
                     else {
                         continue;
                     };
@@ -3170,8 +4128,75 @@ mod tests {
         test_daemon_with_operator(None)
     }
 
+    fn test_daemon_with_registered_root(
+        temp: &tempfile::TempDir,
+        root_id: &str,
+        local_root: &Path,
+    ) -> TcfsDaemonImpl {
+        let reconcile_dir = temp.path().join("reconcile");
+        std::fs::create_dir_all(&reconcile_dir).unwrap();
+        let state_path = reconcile_dir.join(format!("{root_id}.json"));
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        state.set_device_id("test-device".to_string());
+        state.flush().unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.auth.require_session = false;
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.storage.remote_prefix = Some("data".into());
+        config.sync.state_db = temp.path().join("primary.db");
+        config.sync.roots.insert(
+            root_id.into(),
+            RegisteredRootConfig {
+                local_root: local_root.to_path_buf(),
+                remote_prefix: format!("roots/{root_id}"),
+                state_path,
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+
+        TcfsDaemonImpl::new(
+            crate::cred_store::new_shared(),
+            Arc::new(config),
+            false,
+            "memory://".into(),
+            Arc::new(TokioMutex::new(
+                tcfs_sync::state::StateCache::open(&temp.path().join("primary.json")).unwrap(),
+            )),
+            Arc::new(TokioMutex::new(None)),
+            tcfs_sync::state::PathLocks::new(),
+            "test-device".into(),
+            "test-device".into(),
+            None,
+        )
+    }
+
     fn memory_operator() -> Operator {
         Operator::new(Memory::default()).unwrap().finish()
+    }
+
+    fn run_test_git(repo: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_clean_test_repo(repo: &Path) {
+        std::fs::create_dir_all(repo).unwrap();
+        run_test_git(repo, &["init", "-q"]);
+        run_test_git(repo, &["config", "user.name", "TCFS Test"]);
+        run_test_git(repo, &["config", "user.email", "tcfs@example.invalid"]);
+        std::fs::write(repo.join("README.md"), b"stable root\n").unwrap();
+        run_test_git(repo, &["add", "README.md"]);
+        run_test_git(repo, &["commit", "-q", "-m", "initial"]);
     }
 
     fn test_device_keypair() -> tcfs_secrets::device::LocalDeviceKey {
@@ -4060,6 +5085,724 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registered_root_inspect_and_execute_share_isolated_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+
+        let root_id = "git-roam-tool-daemon";
+        let reconcile_dir = temp.path().join("reconcile");
+        std::fs::create_dir_all(&reconcile_dir).unwrap();
+        let root_state_path = reconcile_dir.join(format!("{root_id}.json"));
+        let conflict_path = repo.join(".git/index");
+        {
+            let mut state =
+                tcfs_sync::state::StateCache::open(&root_state_path).expect("root state");
+            let mut entry = test_sync_state("git-roam/tool-daemon/index/.git/index", 42);
+            entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
+            entry.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+                rel_path: ".git/index".into(),
+                local_blake3: "local".into(),
+                remote_blake3: "remote".into(),
+                local_device: "neo".into(),
+                remote_device: "honey".into(),
+                local_vclock: tcfs_sync::conflict::VectorClock::new(),
+                remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+                detected_at: 42,
+                times_recorded: 6,
+                remote_manifest_key: None,
+            });
+            state.set(&conflict_path, entry);
+
+            let mut ordinary = test_sync_state("git-roam/tool-daemon/index/README.md", 43);
+            ordinary.status = tcfs_sync::state::FileSyncStatus::Conflict;
+            ordinary.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+                rel_path: "README.md".into(),
+                local_blake3: "same-bytes".into(),
+                remote_blake3: "same-bytes".into(),
+                local_device: "neo".into(),
+                remote_device: "honey".into(),
+                local_vclock: tcfs_sync::conflict::VectorClock::new(),
+                remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+                detected_at: 43,
+                times_recorded: 6,
+                remote_manifest_key: Some("git-roam/tool-daemon/manifests/readme".into()),
+            });
+            state.set(&repo.join("README.md"), ordinary);
+            state.flush().unwrap();
+        }
+
+        let primary_state_path = temp.path().join("primary.json");
+        let primary_cache = {
+            let mut state =
+                tcfs_sync::state::StateCache::open(&primary_state_path).expect("primary state");
+            state.set(
+                &temp.path().join("primary-sentinel"),
+                test_sync_state("data/index/primary-sentinel", 7),
+            );
+            state.flush().unwrap();
+            state
+        };
+        let primary_before = std::fs::read(&primary_state_path).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.auth.require_session = false;
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.storage.remote_prefix = Some("data".into());
+        config.sync.state_db = temp.path().join("primary.db");
+        config.sync.roots.insert(
+            root_id.into(),
+            RegisteredRootConfig {
+                local_root: repo.clone(),
+                remote_prefix: "git-roam/tool-daemon".into(),
+                state_path: root_state_path.clone(),
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+        validate_registered_roots_config(&config).unwrap();
+
+        let daemon = TcfsDaemonImpl::new(
+            crate::cred_store::new_shared(),
+            Arc::new(config),
+            true,
+            "memory://".into(),
+            Arc::new(TokioMutex::new(primary_cache)),
+            Arc::new(TokioMutex::new(Some(memory_operator()))),
+            tcfs_sync::state::PathLocks::new(),
+            "neo".into(),
+            "neo".into(),
+            None,
+        );
+
+        let inspected = daemon
+            .list_conflicts(tonic::Request::new(ListConflictsRequest {
+                root_id: root_id.into(),
+            }))
+            .await
+            .expect("inspect registered root")
+            .into_inner();
+        assert_eq!(inspected.root_id, root_id);
+        assert_eq!(
+            PathBuf::from(inspected.state_path),
+            std::fs::canonicalize(&root_state_path).unwrap()
+        );
+        assert_eq!(inspected.remote_prefix, "git-roam/tool-daemon");
+        assert_eq!(inspected.conflicts.len(), 2);
+        assert_eq!(inspected.conflicts[0].rel_path, ".git/index");
+        assert_eq!(inspected.conflicts[0].times_recorded, 6);
+
+        let resolved = daemon
+            .resolve_registered_root(tonic::Request::new(ResolveRegisteredRootRequest {
+                root_id: root_id.into(),
+                path: repo.display().to_string(),
+                mode: RegisteredRootResolveMode::GitKeepBothExecute.into(),
+                operator_cli: true,
+            }))
+            .await
+            .expect("resolve registered root")
+            .into_inner();
+        assert!(resolved.success, "{}", resolved.error);
+        assert_eq!(resolved.root_id, root_id);
+        assert_eq!(
+            PathBuf::from(&resolved.local_root),
+            std::fs::canonicalize(&repo).unwrap()
+        );
+        assert_eq!(resolved.remote_prefix, "git-roam/tool-daemon");
+        assert_eq!(
+            PathBuf::from(&resolved.state_path),
+            std::fs::canonicalize(&root_state_path).unwrap()
+        );
+        assert!(resolved.error.contains("WARNING: 1 named-root conflict"));
+
+        let root_after = tcfs_sync::state::StateCache::open(&root_state_path).unwrap();
+        let remaining = root_after.conflicts();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].1.conflict.as_ref().unwrap().rel_path,
+            "README.md",
+            "repo-group keep-both must not silently resolve ordinary files"
+        );
+        assert_eq!(
+            std::fs::read(&primary_state_path).unwrap(),
+            primary_before,
+            "registered-root execution must not touch the primary cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_root_rootless_resolve_rejects_repo_ordinary_missing_and_relative_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let daemon = test_daemon_with_registered_root(&temp, "named", &repo);
+
+        for (path, resolution, operator_cli) in [
+            (repo.clone(), "git_keep_both_dry_run", true),
+            (repo.join("README.md"), "keep_local", false),
+            (repo.join("deleted.txt"), "keep_remote", false),
+            (PathBuf::from("repo/README.md"), "keep_local", false),
+        ] {
+            let error = daemon
+                .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                    path: path.display().to_string(),
+                    resolution: resolution.into(),
+                    operator_cli,
+                }))
+                .await
+                .expect_err("legacy/rootless RPC must not enter a registered root");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                error.message().contains("--root")
+                    || error.message().contains("ambiguous relative path"),
+                "unexpected fence message for {}: {}",
+                path.display(),
+                error.message()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registered_root_rootless_resolve_rejects_symlink_alias_and_missing_child() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let alias = temp.path().join("repo-alias");
+        symlink(&repo, &alias).unwrap();
+        let daemon = test_daemon_with_registered_root(&temp, "named", &repo);
+
+        for (path, resolution, operator_cli) in [
+            (alias.clone(), "git_keep_both_dry_run", true),
+            (alias.join("deleted.txt"), "keep_remote", false),
+        ] {
+            let error = daemon
+                .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                    path: path.display().to_string(),
+                    resolution: resolution.into(),
+                    operator_cli,
+                }))
+                .await
+                .expect_err("symlink alias must not bypass registered-root routing");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(error.message().contains("registered root 'named'"));
+            assert!(error.message().contains("--root named"));
+        }
+    }
+
+    #[test]
+    fn registered_root_definition_rejects_state_escape_and_bad_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        let mut root = RegisteredRootConfig {
+            local_root: temp.path().join("repo"),
+            remote_prefix: "../other-root".into(),
+            state_path: temp.path().join("reconcile/root.json"),
+            policy: RegisteredRootPolicy::Resolve,
+        };
+
+        let error = validate_registered_root_definition(&config, "root", &root).unwrap_err();
+        assert!(error.contains("remote_prefix"), "{error}");
+
+        root.remote_prefix = "safe/root".into();
+        root.state_path = temp.path().join("outside/root.json");
+        let error = validate_registered_root_definition(&config, "root", &root).unwrap_err();
+        assert!(error.contains("daemon-owned root-state fence"), "{error}");
+
+        root.state_path = temp.path().join("reconcile/root.json");
+        config.sync.roots.insert("root".into(), root);
+        config.sync.roots.insert(
+            "nested".into(),
+            RegisteredRootConfig {
+                local_root: temp.path().join("nested"),
+                remote_prefix: "safe/root/nested".into(),
+                state_path: temp.path().join("reconcile/nested.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        let error = validate_registered_roots_config(&config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlapping remote prefixes"), "{error}");
+
+        let nested = config.sync.roots.get_mut("nested").unwrap();
+        nested.remote_prefix = "other/root".into();
+        nested.local_root = temp.path().join("repo/child");
+        let error = validate_registered_roots_config(&config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlapping local roots"), "{error}");
+    }
+
+    #[test]
+    fn registered_root_rejects_primary_lexical_overlap() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.sync_root = Some(primary.clone());
+        config.storage.remote_prefix = Some("roots/primary".into());
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: primary.join("nested"),
+                remote_prefix: "roots/named".into(),
+                state_path: temp.path().join("reconcile/named.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+
+        let error = validate_registered_roots_config(&config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlaps primary sync_root"), "{error}");
+
+        let named = config.sync.roots.get_mut("named").unwrap();
+        named.local_root = temp.path().join("primary-other");
+        named.remote_prefix = "roots/primary/nested".into();
+        let error = validate_registered_roots_config(&config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("overlaps primary storage prefix"), "{error}");
+
+        config.sync.roots.get_mut("named").unwrap().remote_prefix = "roots/primary-other".into();
+        validate_registered_roots_config(&config)
+            .expect("component-prefix and path string collisions are disjoint");
+        assert!(remote_prefixes_overlap(
+            "roots/primary/nested",
+            "roots/primary"
+        ));
+        assert!(remote_prefixes_overlap(
+            "roots/primary",
+            "roots/primary/nested"
+        ));
+        assert!(!remote_prefixes_overlap(
+            "roots/primary-other",
+            "roots/primary"
+        ));
+    }
+
+    #[test]
+    fn registered_root_state_directory_rejects_lexical_primary_and_named_overlap() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let named = temp.path().join("named");
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.sync_root = Some(primary.clone());
+        config.storage.remote_prefix = Some("roots/primary".into());
+        config.sync.root_state_dir = Some(primary.join("tcfs-state"));
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: named.clone(),
+                remote_prefix: "roots/named".into(),
+                state_path: primary.join("tcfs-state/named.json"),
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+
+        let error = validate_registered_roots_config(&config)
+            .expect_err("state directory inside primary root must be rejected")
+            .to_string();
+        assert!(error.contains("state directory"), "{error}");
+        assert!(error.contains("primary sync_root"), "{error}");
+
+        config.sync.root_state_dir = Some(named.join("tcfs-state"));
+        config.sync.roots.get_mut("named").unwrap().state_path =
+            named.join("tcfs-state/named.json");
+        let error = validate_registered_roots_config(&config)
+            .expect_err("state directory inside named root must be rejected")
+            .to_string();
+        assert!(error.contains("state directory"), "{error}");
+        assert!(error.contains("registered root 'named'"), "{error}");
+    }
+
+    #[test]
+    fn registered_root_object_key_fence_rejects_lexical_escapes() {
+        assert!(object_key_is_within_prefix(
+            "git-roam/repo/index/.git/index",
+            "git-roam/repo"
+        ));
+        for key in [
+            "git-roam/repo",
+            "git-roam/repo/",
+            "git-roam/repo/../other",
+            "git-roam/repo/./index",
+            "git-roam/repo//index",
+            "git-roam/repo/index\\escape",
+            "git-roam/repository/index",
+        ] {
+            assert!(
+                !object_key_is_within_prefix(key, "git-roam/repo"),
+                "unsafe object key passed prefix fence: {key}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_root_rejects_canonical_symlink_aliases_and_nesting() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let child = real.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&real, &alias).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.roots.insert(
+            "root-a".into(),
+            RegisteredRootConfig {
+                local_root: real.clone(),
+                remote_prefix: "roots/a".into(),
+                state_path: temp.path().join("reconcile/root-a.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        config.sync.roots.insert(
+            "root-b".into(),
+            RegisteredRootConfig {
+                local_root: alias,
+                remote_prefix: "roots/b".into(),
+                state_path: temp.path().join("reconcile/root-b.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        validate_registered_roots_config(&config)
+            .expect("distinct lexical paths and prefixes pass startup validation");
+
+        let canonical_real = std::fs::canonicalize(&real).unwrap();
+        let error = validate_canonical_local_root_isolation(&config, "root-a", &canonical_real)
+            .expect_err("symlink alias must be rejected at runtime");
+        assert!(error.contains("overlap after canonicalization"), "{error}");
+
+        config.sync.roots.remove("root-b");
+        let child_alias = temp.path().join("child-alias");
+        symlink(&child, &child_alias).unwrap();
+        config.sync.roots.insert(
+            "root-c".into(),
+            RegisteredRootConfig {
+                local_root: child_alias,
+                remote_prefix: "roots/c".into(),
+                state_path: temp.path().join("reconcile/root-c.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        let error = validate_canonical_local_root_isolation(&config, "root-a", &canonical_real)
+            .expect_err("canonical nested alias must be rejected at runtime");
+        assert!(error.contains("overlap after canonicalization"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_root_rejects_primary_canonical_aliases_and_nesting() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let child = primary.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let alias = temp.path().join("primary-alias");
+        symlink(&primary, &alias).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.sync_root = Some(primary.clone());
+        config.storage.remote_prefix = Some("roots/primary".into());
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: alias.clone(),
+                remote_prefix: "roots/named".into(),
+                state_path: temp.path().join("reconcile/named.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        validate_registered_roots_config(&config)
+            .expect("distinct lexical primary and named paths pass startup validation");
+
+        let canonical_alias = std::fs::canonicalize(&alias).unwrap();
+        let error = validate_canonical_local_root_isolation(&config, "named", &canonical_alias)
+            .expect_err("primary symlink alias must be rejected at runtime");
+        assert!(error.contains("primary sync_root"), "{error}");
+
+        let child_alias = temp.path().join("primary-child-alias");
+        symlink(&child, &child_alias).unwrap();
+        config.sync.roots.get_mut("named").unwrap().local_root = child_alias.clone();
+        validate_registered_roots_config(&config)
+            .expect("distinct lexical nested alias passes startup validation");
+        let canonical_child = std::fs::canonicalize(&child_alias).unwrap();
+        let error = validate_canonical_local_root_isolation(&config, "named", &canonical_child)
+            .expect_err("canonical primary nesting must be rejected at runtime");
+        assert!(error.contains("primary sync_root"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_root_state_directory_rejects_canonical_named_alias() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let named = temp.path().join("named");
+        let real_state_dir = named.join("machine-state");
+        std::fs::create_dir_all(&real_state_dir).unwrap();
+        let alias_state_dir = temp.path().join("state-alias");
+        symlink(&real_state_dir, &alias_state_dir).unwrap();
+        let state_path = alias_state_dir.join("named.json");
+        std::fs::write(&state_path, b"{}").unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.root_state_dir = Some(alias_state_dir.clone());
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: named,
+                remote_prefix: "roots/named".into(),
+                state_path,
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+        validate_registered_roots_config(&config)
+            .expect("lexically disjoint alias passes startup validation");
+
+        let error =
+            canonical_registered_root(&config, "named", config.sync.roots.get("named").unwrap())
+                .expect_err("canonical state directory inside named root must be rejected");
+        assert!(error.contains("state directory"), "{error}");
+        assert!(error.contains("after canonicalization"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_root_state_cache_rejects_hardlinks_and_primary_inode_alias() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let state_dir = temp.path().join("reconcile");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("named.json");
+        std::fs::write(&state_path, b"{}").unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: repo,
+                remote_prefix: "roots/named".into(),
+                state_path: state_path.clone(),
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+
+        let outside_alias = temp.path().join("outside-state-alias.json");
+        std::fs::hard_link(&state_path, &outside_alias).unwrap();
+        let error =
+            canonical_registered_root(&config, "named", config.sync.roots.get("named").unwrap())
+                .expect_err("hardlinked state must be rejected");
+        assert!(error.contains("exactly one hard link"), "{error}");
+
+        std::fs::remove_file(&outside_alias).unwrap();
+        config.sync.state_db = state_dir.join("named.db");
+        let error =
+            canonical_registered_root(&config, "named", config.sync.roots.get("named").unwrap())
+                .expect_err("primary and named cache must not share an inode");
+        assert!(error.contains("aliases primary state cache"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_root_peer_canonicalization_errors_fail_closed() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let loop_a = temp.path().join("loop-a");
+        let loop_b = temp.path().join("loop-b");
+        symlink(&loop_b, &loop_a).unwrap();
+        symlink(&loop_a, &loop_b).unwrap();
+        let state_dir = temp.path().join("reconcile");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let selected_state = state_dir.join("selected.json");
+        std::fs::write(&selected_state, b"{}").unwrap();
+        std::fs::set_permissions(&selected_state, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.roots.insert(
+            "selected".into(),
+            RegisteredRootConfig {
+                local_root: selected,
+                remote_prefix: "roots/selected".into(),
+                state_path: selected_state,
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+        config.sync.roots.insert(
+            "loop".into(),
+            RegisteredRootConfig {
+                local_root: loop_a,
+                remote_prefix: "roots/loop".into(),
+                state_path: state_dir.join("loop.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        validate_registered_roots_config(&config).unwrap();
+
+        let error = canonical_registered_root(
+            &config,
+            "selected",
+            config.sync.roots.get("selected").unwrap(),
+        )
+        .expect_err("peer symlink-loop errors must not be treated as unavailable");
+        assert!(
+            error.contains("canonicalizing registered root 'loop'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn registered_root_prefix_authorization_is_component_bounded() {
+        let mut session = tcfs_auth::Session::new("device-1", "neo", "test");
+        session.permissions.allowed_prefixes = vec!["git-roam/other".into()];
+        let error = check_registered_prefix_permission(&session, "git-roam/tool-daemon")
+            .expect_err("sibling prefix must be rejected");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        session.permissions.allowed_prefixes = vec!["git-roam/tool".into()];
+        assert!(check_registered_prefix_permission(&session, "git-roam/tool-daemon").is_err());
+
+        session.permissions.allowed_prefixes = vec!["git-roam".into()];
+        check_registered_prefix_permission(&session, "git-roam/tool-daemon")
+            .expect("ancestor prefix should authorize the registered root");
+
+        session.permissions.allowed_prefixes = vec!["git-roam/tool-daemon/".into()];
+        check_registered_prefix_permission(&session, "git-roam/tool-daemon")
+            .expect("trailing slash should normalize for an exact grant");
+    }
+
+    #[test]
+    fn registered_root_unknown_id_does_not_enumerate_enrollment() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let daemon = test_daemon_with_registered_root(&temp, "secret-root", &repo);
+
+        let error = daemon
+            .registered_root("missing")
+            .expect_err("unknown root must return not found");
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert!(!error.message().contains("secret-root"), "{error}");
+        assert!(!error.message().contains("missing"), "{error}");
+        assert!(!error.message().contains("available"), "{error}");
+    }
+
+    #[test]
+    fn registered_root_cache_and_git_metadata_fences_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: /tmp/shared-worktree").unwrap();
+        let route = RegisteredRootRoute {
+            root_id: "repo".into(),
+            local_root: repo.clone(),
+            remote_prefix: "git-roam/repo".into(),
+            state_path: temp.path().join("reconcile/repo.json"),
+            policy: RegisteredRootPolicy::Resolve,
+        };
+
+        let error = validate_standalone_git_root(&route).unwrap_err();
+        assert!(error.contains("linked or redirected"), "{error}");
+
+        let mut state = tcfs_sync::state::StateCache::open(&temp.path().join("unsafe.json"))
+            .expect("unsafe test state");
+        let mut entry = test_sync_state("git-roam/repo/index/.git/index", 42);
+        entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
+        entry.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+            rel_path: ".git/index".into(),
+            local_blake3: "local".into(),
+            remote_blake3: "remote".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            detected_at: 42,
+            times_recorded: 1,
+            remote_manifest_key: None,
+        });
+        state.set(&repo.join("../outside/.git/index"), entry);
+        let error = validate_conflict_cache_route(&route, &state).unwrap_err();
+        assert!(error.contains("outside local_root"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn registered_root_execute_obeys_inspect_only_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let reconcile_dir = temp.path().join("reconcile");
+        std::fs::create_dir_all(&reconcile_dir).unwrap();
+        let state_path = reconcile_dir.join("docs.json");
+        std::fs::write(&state_path, b"{}").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let mut config = TcfsConfig::default();
+        config.auth.require_session = false;
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.roots.insert(
+            "docs".into(),
+            RegisteredRootConfig {
+                local_root: repo.clone(),
+                remote_prefix: "docs".into(),
+                state_path,
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        let daemon = TcfsDaemonImpl::new(
+            crate::cred_store::new_shared(),
+            Arc::new(config),
+            true,
+            "memory://".into(),
+            Arc::new(TokioMutex::new(
+                tcfs_sync::state::StateCache::open(&temp.path().join("primary.json")).unwrap(),
+            )),
+            Arc::new(TokioMutex::new(Some(memory_operator()))),
+            tcfs_sync::state::PathLocks::new(),
+            "neo".into(),
+            "neo".into(),
+            None,
+        );
+
+        let error = daemon
+            .resolve_registered_root(tonic::Request::new(ResolveRegisteredRootRequest {
+                root_id: "docs".into(),
+                path: repo.display().to_string(),
+                mode: RegisteredRootResolveMode::GitKeepBothExecute.into(),
+                operator_cli: true,
+            }))
+            .await
+            .expect_err("inspect-only root must reject execute");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert!(error.message().contains("inspect-only"));
+    }
+
+    #[tokio::test]
     async fn resolve_conflict_invalid_resolution() {
         let daemon = test_daemon();
         let resp = daemon
@@ -4078,9 +5821,9 @@ mod tests {
     #[tokio::test]
     async fn resolve_conflict_repo_git_keep_both_requires_operator_cli() {
         // BLOCKING 1b: repo-group git keep-both must be refused (fail-closed)
-        // when operator-CLI provenance is absent — i.e. for MCP / automated /
-        // generic clients that cannot set `operator_cli`. Both dry-run and
-        // execute are gated BEFORE any storage/ref work happens.
+        // when the explicit operator-intent bit is absent. MCP cannot set the
+        // bit; a generic protobuf client can, so authenticated push permission
+        // remains the authorization boundary. Both modes are gated before work.
         let daemon = test_daemon();
         for resolution in ["git_keep_both_dry_run", "git_keep_both_execute"] {
             let resp = daemon
@@ -4094,10 +5837,10 @@ mod tests {
                 .into_inner();
             assert!(
                 !resp.success,
-                "{resolution} must be refused without operator provenance"
+                "{resolution} must be refused without explicit operator intent"
             );
             assert!(
-                resp.error.contains("operator-only"),
+                resp.error.contains("operator intent"),
                 "{resolution} error must direct to the CLI, got: {}",
                 resp.error
             );

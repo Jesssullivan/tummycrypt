@@ -6,7 +6,7 @@
 //! verify the repository before/after, then clear the group atomically.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Stdio;
 
 use anyhow::{anyhow, bail, Context, Result};
 use opendal::Operator;
@@ -30,6 +30,228 @@ impl GitKeepBothMode {
     pub fn is_execute(self) -> bool {
         self == Self::Execute
     }
+}
+
+fn git_output(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let output = git_safety::sanitized_git_command()
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("running sanitized git {args:?}"))?;
+    if !output.status.success() {
+        bail!(
+            "sanitized git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn require_real_git_directory(path: &Path, description: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting {description}: {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("{description} must be a real directory: {}", path.display());
+    }
+    Ok(())
+}
+
+fn validate_real_git_directory_if_present(path: &Path, description: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("{description} must be a real directory: {}", path.display());
+            }
+            reject_redirects_under_git_dir(path, description)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting {description}: {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn require_real_git_file_if_present(path: &Path, description: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("{description} must be a real file: {}", path.display());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting {description}: {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn reject_redirects_under_git_dir(path: &Path, description: &str) -> Result<()> {
+    for entry in std::fs::read_dir(path)
+        .with_context(|| format!("reading {description}: {}", path.display()))?
+    {
+        let entry = entry.with_context(|| format!("reading {description} entry"))?;
+        let entry_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&entry_path)
+            .with_context(|| format!("inspecting {description}: {}", entry_path.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "{description} contains a symlink redirect outside the standalone resolver seam: {}",
+                entry_path.display()
+            );
+        }
+        if metadata.is_dir() {
+            reject_redirects_under_git_dir(&entry_path, description)?;
+        } else if !metadata.is_file() {
+            bail!(
+                "{description} contains a non-regular entry: {}",
+                entry_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Prove that Git itself resolves this path as one ordinary standalone
+/// worktree with all routing anchored at `<root>/.git`.
+///
+/// Directory shape alone is insufficient: `commondir`, `core.worktree`,
+/// attached worktree administration, alternates, and inherited `GIT_*`
+/// variables can redirect otherwise normal-looking commands. Every probe and
+/// every resolver command uses the same sanitized command builder.
+pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
+    let repo_root = repo_root
+        .canonicalize()
+        .with_context(|| format!("canonicalizing git repo root: {}", repo_root.display()))?;
+    if !repo_root.is_dir() {
+        bail!("git repo root is not a directory: {}", repo_root.display());
+    }
+
+    let git_dir_path = repo_root.join(".git");
+    let metadata = std::fs::symlink_metadata(&git_dir_path)
+        .with_context(|| format!("inspecting git directory: {}", git_dir_path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "linked or redirected .git metadata is outside the standalone resolver seam: {}",
+            git_dir_path.display()
+        );
+    }
+    let git_dir = git_dir_path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing git directory: {}", git_dir_path.display()))?;
+
+    let refs_dir = git_dir.join("refs");
+    require_real_git_directory(&refs_dir, "Git refs directory")?;
+    reject_redirects_under_git_dir(&refs_dir, "Git refs directory")?;
+    let objects_dir = git_dir.join("objects");
+    require_real_git_directory(&objects_dir, "Git objects directory")?;
+    reject_redirects_under_git_dir(&objects_dir, "Git objects directory")?;
+    validate_real_git_directory_if_present(&git_dir.join("logs"), "Git logs directory")?;
+    for (relative, description) in [
+        ("HEAD", "Git HEAD"),
+        ("config", "Git config"),
+        ("config.worktree", "Git worktree config"),
+        ("index", "Git index"),
+        ("packed-refs", "Git packed refs"),
+    ] {
+        require_real_git_file_if_present(&git_dir.join(relative), description)?;
+    }
+
+    for (path, reason) in [
+        (
+            git_dir.join("commondir"),
+            "git commondir redirects metadata outside a standalone repository",
+        ),
+        (
+            git_dir.join("worktrees"),
+            "attached linked-worktree administration is outside this resolver seam",
+        ),
+    ] {
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => bail!("{reason}: {}", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspecting {}", path.display()));
+            }
+        }
+    }
+
+    let alternates = git_dir.join("objects/info/alternates");
+    match std::fs::symlink_metadata(&alternates) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!(
+                    "git alternates path is redirected or non-regular: {}",
+                    alternates.display()
+                );
+            }
+            let contents = std::fs::read_to_string(&alternates)
+                .with_context(|| format!("reading git alternates: {}", alternates.display()))?;
+            if contents.lines().any(|line| !line.trim().is_empty()) {
+                bail!(
+                    "external Git object alternates are outside the standalone resolver seam: {}",
+                    alternates.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting {}", alternates.display()));
+        }
+    }
+
+    let reported_top = git_output(&repo_root, &["rev-parse", "--show-toplevel"])?;
+    let reported_top = PathBuf::from(reported_top)
+        .canonicalize()
+        .context("canonicalizing Git-reported worktree root")?;
+    if reported_top != repo_root {
+        bail!(
+            "Git reports worktree root {} instead of enrolled root {} (external core.worktree or routing override)",
+            reported_top.display(),
+            repo_root.display()
+        );
+    }
+
+    let reported_git_dir = git_output(&repo_root, &["rev-parse", "--absolute-git-dir"])?;
+    let reported_git_dir = PathBuf::from(reported_git_dir)
+        .canonicalize()
+        .context("canonicalizing Git-reported git dir")?;
+    if reported_git_dir != git_dir {
+        bail!(
+            "Git reports git dir {} instead of {}",
+            reported_git_dir.display(),
+            git_dir.display()
+        );
+    }
+
+    let reported_common_dir = git_output(
+        &repo_root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let reported_common_dir = PathBuf::from(reported_common_dir)
+        .canonicalize()
+        .context("canonicalizing Git-reported common dir")?;
+    if reported_common_dir != git_dir {
+        bail!(
+            "Git reports common dir {} instead of {}",
+            reported_common_dir.display(),
+            git_dir.display()
+        );
+    }
+
+    let is_bare = git_output(&repo_root, &["rev-parse", "--is-bare-repository"])?;
+    if is_bare != "false" {
+        bail!("bare Git repositories are outside the standalone resolver seam");
+    }
+    let inside_worktree = git_output(&repo_root, &["rev-parse", "--is-inside-work-tree"])?;
+    if inside_worktree != "true" {
+        bail!("Git does not report the enrolled root as a working tree");
+    }
+    Ok(())
 }
 
 /// One branch head that would be, or was, parked under `refs/tcfs/theirs/**`.
@@ -119,9 +341,7 @@ pub async fn resolve_repo_keep_both(
         .canonicalize()
         .with_context(|| format!("canonicalizing repo root: {}", repo_root.display()))?;
     let git_dir = repo_root.join(".git");
-    if !git_dir.is_dir() {
-        bail!("{} is not a git repository root", repo_root.display());
-    }
+    validate_standalone_repo_topology(&repo_root)?;
 
     let candidates = collect_repo_conflicts(state, &repo_root)?;
     if candidates.is_empty() {
@@ -202,6 +422,8 @@ pub async fn resolve_repo_keep_both(
     // Re-check after acquiring the cooperative lock. The lock protects TCFS
     // peers; a local git command may still have started immediately before the
     // lock landed.
+    validate_standalone_repo_topology(&repo_root)
+        .context("git topology changed before locked execute")?;
     let safety = git_safety::git_is_safe(&git_dir);
     if !safety.blocking.is_empty() {
         bail!("git repository became busy: {}", safety.blocking.join("; "));
@@ -468,7 +690,7 @@ pub(crate) fn park_ref_create_only(repo_root: &Path, park_ref: &str, sha: &str) 
 }
 
 fn ensure_clean_worktree(repo_root: &Path) -> Result<()> {
-    let out = Command::new("git")
+    let out = git_safety::sanitized_git_command()
         .args(["status", "--porcelain=v1", "--untracked-files=normal"])
         .current_dir(repo_root)
         .output()
@@ -555,16 +777,93 @@ fn zero_oid_like(oid: &str) -> String {
 /// hash of the repo root, keeps it a genuine local-only rollback aid
 /// (BLOCKING 2 / design S6). `blacklist.rs` also fail-closed denies
 /// `.git/tcfs-undo/**` so any pre-existing in-tree bundle can never roam.
+fn ensure_private_undo_dir(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("undo path must be a real directory: {}", path.display());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder
+                .create(path)
+                .with_context(|| format!("creating undo dir {}", path.display()))?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting undo dir {}", path.display()));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("securing undo dir {}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn write_undo_bundle(repo_root: &Path, state_dir: &Path) -> Result<PathBuf> {
     let repo_hex = blake3::hash(repo_root.to_string_lossy().as_bytes()).to_hex();
-    let undo_dir = state_dir.join("keep-both-undo").join(&repo_hex[..16]);
-    std::fs::create_dir_all(&undo_dir)
-        .with_context(|| format!("creating undo dir {}", undo_dir.display()))?;
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating state dir {}", state_dir.display()))?;
+    let undo_base = state_dir.join("keep-both-undo");
+    ensure_private_undo_dir(&undo_base)?;
+    let undo_dir = undo_base.join(&repo_hex[..16]);
+    ensure_private_undo_dir(&undo_dir)?;
     let bundle = undo_dir.join(format!("keep-both-{}.bundle", Uuid::new_v4()));
     let bundle_str = bundle.to_string_lossy().to_string();
-    run_git(repo_root, &["bundle", "create", &bundle_str, "--all"])
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(&bundle)
+        .with_context(|| format!("creating private undo bundle {}", bundle.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("securing undo bundle {}", bundle.display()))?;
+    }
+
+    // Stream Git's bundle output into the already-private inode. Letting Git
+    // create the pathname would expose full repository history at the process
+    // umask until a later chmod.
+    let output = git_safety::sanitized_git_command()
+        .args(["bundle", "create", "-", "--all"])
+        .current_dir(repo_root)
+        .stdout(Stdio::from(file))
+        .output()
         .context("creating undo bundle")?;
-    run_git(repo_root, &["bundle", "verify", &bundle_str]).context("verifying undo bundle")?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&bundle);
+        bail!(
+            "git bundle create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let sync_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bundle)
+        .with_context(|| format!("reopening undo bundle {}", bundle.display()))?;
+    sync_file
+        .sync_all()
+        .with_context(|| format!("syncing undo bundle {}", bundle.display()))?;
+    if let Err(error) = run_git(repo_root, &["bundle", "verify", &bundle_str]) {
+        let _ = std::fs::remove_file(&bundle);
+        return Err(error).context("verifying undo bundle");
+    }
     Ok(bundle)
 }
 
@@ -582,7 +881,7 @@ fn rollback_refs(repo_root: &Path, refs: &[AppliedParkRef]) {
 }
 
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<()> {
-    let out = Command::new("git")
+    let out = git_safety::sanitized_git_command()
         .args(args)
         .current_dir(repo_root)
         .output()
@@ -619,6 +918,109 @@ mod tests {
             ),
             PathBuf::from("/tmp/root")
         );
+    }
+
+    #[test]
+    fn standalone_topology_accepts_ordinary_repo_and_rejects_redirect_files() {
+        let ordinary = tempfile::tempdir().unwrap();
+        let ordinary_repo = ordinary.path().join("repo");
+        init_repo(&ordinary_repo);
+        validate_standalone_repo_topology(&ordinary_repo).expect("ordinary repo topology");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let hooks = ordinary_repo.join(".git/hooks");
+            std::fs::remove_dir_all(&hooks).unwrap();
+            let external_hooks = ordinary.path().join("external-hooks");
+            std::fs::create_dir_all(&external_hooks).unwrap();
+            symlink(&external_hooks, &hooks).unwrap();
+        }
+        validate_standalone_repo_topology(&ordinary_repo)
+            .expect("hooks topology is irrelevant because hooks are disabled");
+
+        for (relative, expected) in [
+            ("commondir", "commondir"),
+            ("worktrees", "linked-worktree"),
+            ("objects/info/alternates", "alternates"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            init_repo(&repo);
+            let path = repo.join(".git").join(relative);
+            if relative == "worktrees" {
+                std::fs::create_dir_all(&path).unwrap();
+            } else {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"../external\n").unwrap();
+            }
+            let error = validate_standalone_repo_topology(&repo)
+                .expect_err("redirected/shared Git topology must fail closed");
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn standalone_topology_rejects_external_core_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let external = temp.path().join("external-worktree");
+        init_repo(&repo);
+        std::fs::create_dir_all(&external).unwrap();
+        let external_text = external.to_string_lossy().to_string();
+        git_safety::run_git(&repo, &["config", "core.worktree", external_text.as_str()]).unwrap();
+
+        let error = validate_standalone_repo_topology(&repo)
+            .expect_err("external core.worktree must fail closed");
+        assert!(
+            error.to_string().contains("worktree") || error.to_string().contains("show-toplevel"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_topology_rejects_critical_git_path_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        for relative in ["refs", "objects", "logs", "index", "config"] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            init_repo(&repo);
+            let path = repo.join(".git").join(relative);
+            let external = temp.path().join(format!("external-{relative}"));
+            if matches!(relative, "refs" | "objects" | "logs") {
+                if path.exists() {
+                    std::fs::remove_dir_all(&path).unwrap();
+                }
+                std::fs::create_dir_all(&external).unwrap();
+            } else {
+                if path.exists() {
+                    std::fs::remove_file(&path).unwrap();
+                }
+                std::fs::write(&external, b"external\n").unwrap();
+            }
+            symlink(&external, &path).unwrap();
+
+            let error = validate_standalone_repo_topology(&repo)
+                .expect_err("critical Git symlink must fail closed");
+            assert!(
+                error.to_string().contains("real")
+                    || error.to_string().contains("symlink redirect"),
+                "relative={relative}: {error:#}"
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        let nested = repo.join(".git/refs/tcfs");
+        let external = temp.path().join("external-refs");
+        std::fs::create_dir_all(&external).unwrap();
+        symlink(&external, &nested).unwrap();
+        let error = validate_standalone_repo_topology(&repo)
+            .expect_err("park-ref ancestry symlink must fail closed");
+        assert!(error.to_string().contains("symlink redirect"), "{error:#}");
     }
 
     #[tokio::test]
@@ -1020,7 +1422,7 @@ mod tests {
         // (iii) repository verifies clean.
         run_git(&winner, &["fsck", "--full"]).expect("fsck clean after execute");
         // (iv) BOTH heads reachable, no lost commits.
-        let rev_list = std::process::Command::new("git")
+        let rev_list = git_safety::sanitized_git_command()
             .args(["rev-list", "--all"])
             .current_dir(&winner)
             .output()
@@ -1043,6 +1445,33 @@ mod tests {
             !bundle.starts_with(winner.join(".git")),
             "undo bundle must NOT be under the repo .git"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&bundle).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "undo bundle must be private before it contains repository history"
+            );
+            assert_eq!(
+                std::fs::metadata(bundle.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "per-repo undo directory must be private"
+            );
+            assert_eq!(
+                std::fs::metadata(bundle.parent().unwrap().parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "undo root directory must be private"
+            );
+        }
 
         // (v) a second Execute is idempotent: re-inject the (re-detected)
         // conflict and re-run. No error, no double-park, refs unchanged.

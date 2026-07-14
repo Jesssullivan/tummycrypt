@@ -42,10 +42,25 @@ credentials_file = "/etc/tcfs/credentials.yaml"
 nats_url = "nats://localhost:4222"
 # RocksDB local state cache (tracks file hashes + sync state)
 state_db = "/var/lib/tcfsd/state.db"
+# Trusted parent for daemon-enrolled, isolated root caches. Set this for system
+# daemons because the socket parent (/run/tcfsd) is not persistent. The same
+# applies to systemd user sockets under %t.
+root_state_dir = "/var/lib/tcfsd/reconcile"
 # Sync worker threads (0 = auto-detect CPU count)
 workers = 0
 # Retry limit for failed tasks before moving to DLQ
 max_retries = 3
+
+# Strategy-A stable-root routing (optional). Clients send only the table ID;
+# tcfsd selects and fences every path/prefix below from this trusted config.
+# `inspect-only` permits conflict listing and keep-both dry-run. Change to
+# `resolve` only for a root approved for attended repo-group execution.
+#
+# [sync.roots.git-roam-tool-daemon]
+# local_root = "/home/user/git/tinyland-tool-daemon"
+# remote_prefix = "git-roam/tool-daemon"
+# state_path = "/var/lib/tcfsd/reconcile/git-roam-tool-daemon.json"
+# policy = "inspect-only"
 
 [fuse]
 # Negative dentry cache TTL in seconds (important for git performance)

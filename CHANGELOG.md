@@ -11,6 +11,14 @@ intent rather than the current supported/proven surface.
 
 ## [Unreleased]
 
+### Added
+
+- Daemon-trusted stable-root routing for isolated conflict caches: clients can
+  inspect a named root and run the bounded Git keep-both dry-run/execute flow
+  without supplying a state path or storage prefix. Registered roots inherit
+  the global storage transport and remain source-only until explicitly
+  enrolled and proven through the attended live convergence ceremony.
+
 ### Security
 
 - Credential-bearing S3/SeaweedFS clients now require HTTPS by default across

@@ -74,6 +74,11 @@ pub mod test_support {
 pub async fn run(config: TcfsConfig) -> Result<()> {
     info!("daemon starting");
 
+    // Root identities are a daemon trust boundary. Reject malformed mappings
+    // before opening storage, sockets, or caches; runtime selection adds
+    // symlink-aware existence and permission checks.
+    crate::grpc::validate_registered_roots_config(&config)?;
+
     // Ensure all required directories exist before anything else
     ensure_dirs(&config);
 

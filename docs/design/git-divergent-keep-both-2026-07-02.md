@@ -533,7 +533,7 @@ remaining work is fleet deploy plus the live divergent keep-both canary.
 | **PR-1** — fence per-file `.git` resolution (CLI+MCP) + `tcfs conflicts` read verb | #526 | `afd84b2` | ✅ merged |
 | (hardening) — fence paths + persistence | #527 | `449846e` | ✅ merged |
 | **PR-2** — executor hard-respects a foreign `.git/tcfs.lock`; `ConflictInfo.remote_manifest_key` | #528 | `1e41a23` | ✅ merged |
-| **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, **operator-CLI-only** (MCP/auto excluded via the `operator_cli` provenance gate) | #529 | `831d363b` | ✅ merged |
+| **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, authenticated push session plus an explicit operator-intent hint (MCP does not expose the hint) | #529 | `831d363b` | ✅ merged |
 | **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live after deploy/canary) | #534 | `4c61da4` | ✅ merged + LIVE-PROVEN 2026-07-08 |
 
 **PR-4 is merged AND live-proven.** The two-machine live-convergence proof
@@ -557,4 +557,4 @@ accepts on. The convergence is therefore proven via the guard; the operator VERB
 
 **Ratified operator §6 answers (2026-07-05):** parking namespace default = `refs/tcfs/theirs/**` (not real branches); bare `keep-local`/`keep-remote` = omitted (park-first only); dirty-tree = hard refuse; ticket routing = new ticket for the verb + TIN-1549 keeps the `tcfs conflicts`/banner UX surface. Bundle retention and escalation cadence remain open (non-blocking; PR-4-adjacent).
 
-**Security note (from the PR-3 adversarial review, #529):** the repo-group execute path is reachable **only** via the operator CLI (`operator_cli` proto flag); MCP rejects `git_keep_both*` before connect and the daemon refuses the dispatch without the flag — the agent/auto/NATS threat is closed. The undo bundle is written to the machine-local state dir (never in-tree), with `.git/tcfs-undo/**` fail-closed in the blacklist as belt-and-suspenders.
+**Security note (corrected 2026-07-14):** the repo-group execute path requires an authenticated push session and the client-supplied `operator_cli` intent hint. MCP rejects `git_keep_both*` before connect and does not expose the hint. The hint is defense in depth, not unforgeable provenance or an authorization boundary for generic protobuf clients. The undo bundle is written to the machine-local state dir (never in-tree), with `.git/tcfs-undo/**` fail-closed in the blacklist as belt-and-suspenders.
