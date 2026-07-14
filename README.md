@@ -1,328 +1,107 @@
-# tummycrypt / tcfs
+# tummycrypt / TCFS
 
-> Under active development. Not yet stable. Expect breaking changes.
+TCFS is the encrypted, remote-first userspace filesystem for the tinyland
+fleet. Its product goal is simple: enroll a working tree or selected directory
+once, then SSH to another enrolled machine and continue with the same bytes,
+including in-progress Git and agent state. Hydration and local unsync should be
+ordinary verbs, not a migration project.
 
-Current release: `v0.12.17` (signed tag + GitHub release, 2026-07-09 — first
-tagged release since `v0.12.14`; the `0.12.15`/`0.12.16` strings shipped to
-fleet hosts from untagged main builds and are folded in, see CHANGELOG). The
-`.git` fast-forward AND divergent keep-both conflict paths are merged and
-canary-proven (G5-git-5 closed); fleet deploy of v0.12.17 is the next step.
-The Homebrew tap is stale at `0.12.12` and that formula skips symlinks.
+> Active development. The current release is `v0.12.17`; do not treat TCFS as
+> a whole-home or linked-worktree solution yet.
 
-Self-hosted encrypted file sync with on-demand hydration. The Linux FUSE mounted
-view is host-proven for clean-name traversal, hydrate-on-open, mounted
-write/readback, cache clear/rehydrate, and recursive safe-unsync; offline or
-dehydrated sync-root copies can be represented by small `.tc`/`.tcf` stubs. FOSS
-odrive/Dropbox-style alternative under active development.
+## Start here
 
-## Canonical Home
+- [Vision](docs/VISION.md) — the north star and TCFS's place in Cordillera and
+  Rockies.
+- [Product sequence](docs/PRODUCT.md) — the approved A → B → C strategy and
+  proof ladder.
+- [Current truth](docs/ops/current.md) — live blockers, proof boundaries, and
+  the next operator ceremony.
+- [Documentation index](docs/index.md) — engineering, operations, evidence, and
+  client references.
 
-`Jesssullivan/tummycrypt` is the canonical source repository for tcfs.
-If `tinyland-inc/tummycrypt` exists, treat it as a fork or downstream
-distribution surface rather than the source of truth for planning, issues,
-releases, or contributor workflow.
+## What is proven
 
-Operational policy: [`docs/ops/remote-governance.md`](docs/ops/remote-governance.md).
+- Linux FUSE browse-before-download, hydration on open, write/readback,
+  rehydrate, and safe unsync.
+- One real Git repository roamed from `neo` to `honey` with branch, index,
+  dirty files, untracked files, stashes, and history intact.
+- Divergent raw-`.git` edits converged without committed-work loss through the
+  automatic keep-both guard. The separate operator resolver remains gated.
+- A bounded Claude project subtree roams between `neo` and `honey`.
+- A signed macOS FileProvider lifecycle has been proven in the PZM lab lane.
 
-## Reality And Wayfinding
+The proof packets are under [`docs/release/evidence/`](docs/release/evidence/).
+Claims without a packet or named live canary remain unproven.
 
-- Current proof posture: [docs/ops/product-reality-and-priority.md](docs/ops/product-reality-and-priority.md)
-- Current workstream truth:
-  [docs/ops/current-workstream-truth-2026-07-06.md](docs/ops/current-workstream-truth-2026-07-06.md)
-- Feature/objective matrix: [docs/ops/feature-objective-matrix-2026-05-09.md](docs/ops/feature-objective-matrix-2026-05-09.md)
-- Next fleet parity sprint: [docs/ops/fleet-parity-sprint-plan-2026-05-09.md](docs/ops/fleet-parity-sprint-plan-2026-05-09.md)
-- Lazy traversal QA matrix: [docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md](docs/ops/lazy-traversal-qa-permutation-matrix-2026-05-09.md)
-- Git repo dogfood canary: [docs/ops/git-repo-canary-dogfood.md](docs/ops/git-repo-canary-dogfood.md)
-- Real project-tree canary lane: `task lazy:home-canary-linux-xr-shadow`;
-  `home-canary-linux-xr-shadow-20260511T040325Z/` is scoped green for the
-  isolated `linux-xr` shadow. The storage-posture lane now has a release-binary
-  packet that completes the 7.7 GB shadow, proves honey mounted traversal and
-  all 85 symlink targets on the same prefix, and proves the raw Git `.pack` and
-  `.rev` object-count fixes. The mounted warning follow-up dropped S3
-  `NoSuchKey` rows from 274 to 0 by preserving real `.tc` filenames during VFS
-  lookup. A later lifecycle companion reused the same prefix and now reports
-  `scoped-project-tree-parity-evidence-complete`; production S3/Finder posture
-  remains separate because TLS endpoint posture, socket accounting,
-  generated-large-file policy, and production desktop UX are still open
-- Next dogfood lane: `task lazy:git-repo-canary` creates a shadow-first packet
-  for one clean git worktree, defaulting to `~/git/oauth-mux`. It is the safe
-  path toward repo mobility before any live repo, broad `~/git`, `~/Documents`,
-  dotfile, or home-directory takeover. The current green small-repo packets are
-  `docs/release/evidence/git-repo-canary-oauth-mux-sourcebin-fresh-20260515T014640Z/`
-  for source-built binaries and
-  `docs/release/evidence/git-repo-canary-oauth-mux-nixpkg-20260515T133843Z/`
-  for explicit current Nix flake package binaries on both `neo` and `honey`.
-  Both prove clean shadow push, 0 skipped symlinks, honey mounted
-  traversal/hydration, 9 mounted symlink target checks, and the Linux lifecycle
-  companion. Homebrew `0.12.12` remains stale and skips symlinks; live repo
-  moves still need large-repo fresh-tree restore and package-backed
-  restore/rollback proof.
-  `task lazy:git-repo-restore-proof` now records that restore gate; the first
-  Nix packet run timed out during `tcfs reconcile` remote-index dry-run and is
-  archived as a blocker under the Nix packet. Follow-up source-built proofs fix
-  the remote-index timeout and restore all 4,601 regular files plus 9 symlinks
-  exactly. The source-built packet,
-  `restore-proof-source-fix-empty-dirs-20260515T183805Z/`, also records
-  `state_entry_count=4610`, `restored_symlink_state_count=9`, and exact restore
-  of all 12 archived empty directories with `--require-empty-dirs`. The current
-  rebuilt Nix flake package binary now proves that same fresh-tree restore gate
-  in `restore-proof-nixpkg-current-empty-dirs-20260515T200359Z/`
-  (`tcfs_sha256=5ee0939f2d1f02cada1c46e429849613b5303fb930e0039a4622d5b712df95a8`).
-  Homebrew restore remains stale/unproven. The larger clean stress canary
-  against `~/git/linux-xr-fast` is now green for source-built shadow push,
-  honey mounted traversal/hydration, and the Linux lifecycle companion in
-  `git-repo-canary-linux-xr-fast-sourcefix-index-20260516T045054Z/`. The
-  source-built run proves the raw Git pack-index, temp-pack, and exact
-  `.git/index` chunk-profile fixes, but its fresh-tree restore attempt remains
-  a blocker: `restore-proof/` restored 2,036 of 2,038 regular files and all 6
-  empty directories, then missed two multi-GB `.git/objects/pack/*.pack` files
-  after transient chunk read failures. Commit `b1a6285` now streams restore
-  downloads to disk instead of buffering entire files and cleans failed temp
-  files, but a full large-restore rerun is still pending enough local restore
-  headroom. Live repo moves, Homebrew readiness, package-backed
-  restore/rollback, production Finder, broad `~/git`, and home-directory
-  takeover remain unclaimed.
-- Current production Finder truth: the May 18 PZM self-hosted Developer ID
-  lane closed the old read-timeout blocker. Run `26062554542` proved installed
-  strict preflight, storage `[ok]`, domain add, CloudStorage enumeration,
-  exact-content hydrate, evict/rehydrate, mutation upload/readback, and
-  conflict-status preservation through a notarized production `.pkg` without
-  `fileprovider_testing_mode=true`. The remaining macOS gaps are first-run
-  UX from installer to valid config/status, continuous per-tag release smoke,
-  and badge/progress/recovery assertions rather than basic FileProvider
-  hydration.
-- Release install proof: [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md)
-- Apple/Finder reality: [docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md) and [docs/ops/macos-fileprovider-reality.md](docs/ops/macos-fileprovider-reality.md)
-- Live backend acceptance: [docs/ops/neo-honey-acceptance.md](docs/ops/neo-honey-acceptance.md)
-- Repo roam (dev-env zero-diff): forward `neo -> honey` roam of a real repo's full
-  in-progress state is PROVEN (2026-06-09), evidence
-  `docs/release/evidence/repo-roam-canary-20260609/`. See
-  [Roam an in-progress repo across machines](#roam-an-in-progress-repo-across-machines).
-- Build substrate rule: do not use `neo` for heavy local builds. Use remote CI
-  or the fleet build substrate; PZM/Nix offload is tactical, while the durable
-  direction is the GloriousFlywheel/RBE/Darwin substrate lane.
+## What is not proven
 
-## Roam an in-progress repo across machines
+- Root-targeted production conflict resolution for scheduled roam roots.
+- Two repositories completing the full bidirectional roam, unsync, rehydrate,
+  divergence, restore, and second-cycle convergence loop.
+- Linked-worktree reconstruction, arbitrary agent sessions, or broad home and
+  dot-directory remotification.
+- Per-device-only crypto, headless SSH-first enrollment, or a TLS-protected
+  production S3 path.
+- Rocky 10 RPM/FUSE acceptance, Windows Explorer parity, iOS production use, or
+  NFS client parity.
 
-The "machine doesn't matter" goal: enroll a `~/git` repo once, and your in-progress
-work — current branch, staged and unstaged edits, untracked files, stashes, and full
-history — follows you to every machine, encrypted end to end. `ssh` into any enrolled
-host, `cd` into the repo, and pick up exactly where you left off.
-
-**Proven, live, forward direction (2026-06-09).** On the two-machine `neo`/`honey`
-fleet, a real repo's complete dev-env state roamed `neo -> honey` byte- and
-semantically identical — `dev-env-zero-diff=pass`, `git fsck` clean on both sides —
-covering a feature branch, a staged change, an unstaged change, an untracked file,
-and a stash. Evidence: `docs/release/evidence/repo-roam-canary-20260609/`.
-
-**How it works.** A scheduled `tcfs reconcile --path <repo> --prefix <prefix>
---execute` unit syncs the whole repo *including `.git`* as ordinary encrypted files
-(`[sync] sync_git_dirs = true`, `git_sync_mode = "raw"`) to object storage; the peer
-host pulls it on its own cycle or on demand. Only changed chunks move, and the
-fail-closed deny-set keeps secrets, `.env`, and live database/WAL files out. The repo
-files land directly in `~/git/<repo>` on each host — no mount required for the repo
-itself (distinct from the lazy on-open hydration of the `~/tcfs` view).
-
-**Prove it yourself (`neo -> honey`).** With a repo enrolled at `~/git/<repo>` (point
-the unit at any small, expendable repo):
+## Develop
 
 ```bash
-# 1) Source host: leave some in-progress work
-cd ~/git/<repo>
-git switch -c wip/roam-demo
-printf 'scratch\n' > NOTES.scratch          # untracked
-"$EDITOR" path/to/tracked-file              # unstaged edit
-git add path/to/other-file                  # staged edit
-git stash push -m demo -- path/to/third     # a stash
-
-# 2) Push now, or just wait for the ~5-minute scheduled cycle.
-#    macOS source host:
-launchctl kickstart -k "gui/$(id -u)/dev.tinyland.tcfsd-reconcile-<unit>"
-#    Linux source host:
-systemctl --user start tcfsd-reconcile-<unit>.service
-
-# 3) Other host: pick the work up over ssh and traverse into the repo
-ssh <other-host>
-cd ~/git/<repo>
-git update-index --refresh -q   # settle the stat cache after the pull
-git status                      # SAME branch + staged + unstaged + untracked
-git stash list                  # SAME stash
-git log --oneline -1            # SAME HEAD; full history present
-git fsck                        # clean
-```
-
-Turn the eyeball check into a hard pass/fail gate — capture a fingerprint on each
-host and compare; identical fingerprints mean a true zero-diff dev environment:
-
-```bash
-scripts/repo-roam-fingerprint.sh capture ~/git/<repo> /tmp/fp-source   # on source
-scripts/repo-roam-fingerprint.sh capture ~/git/<repo> /tmp/fp-peer     # on peer
-scripts/repo-roam-fingerprint.sh compare /tmp/fp-source /tmp/fp-peer    # exit 0 = zero-diff
-```
-
-Runbook: [docs/ops/repo-roam-test-plan-2026-06-08.md](docs/ops/repo-roam-test-plan-2026-06-08.md).
-
-**Boundary (not yet).** Two hosts editing the *same* repo concurrently do not
-auto-converge: divergent `.git` refs/index trip vector-clock conflict detection that
-is not yet `.git`-aware. Until that lands, use a one-writer-at-a-time handoff —
-quiesce one side before the other writes.
-
-## Features
-
-- **On-demand hydration**: Linux FUSE mounted files list as normal names and hydrate transparently on open
-- **E2E encryption core path**: XChaCha20-Poly1305 per-chunk, Argon2id KDF, BIP-39 recovery keys; per-surface proof varies
-- **Fleet sync**: Multi-machine sync via NATS JetStream with vector clock conflict detection
-- **Content-addressed storage**: FastCDC chunking, BLAKE3 hashing, zstd compression
-- **Git-safe**: Syncs `.git/` directories as atomic bundles with lock detection
-- **Cross-platform**: Linux is the best-supported runtime; macOS has packaged but still experimental desktop surfaces; Windows remains planned
-
-## Quick Start
-
-```bash
-# Nix devShell (recommended)
 nix develop
-# Or auto-load the committed devShell + env on cd
-direnv allow
-
-# Or manual: install the pinned Rust 1.93.0 toolchain, protobuf compiler, fuse3 (Linux)
-
-# Start local dev infrastructure (SeaweedFS + NATS + Prometheus + Grafana)
-task dev
-
-# Build + test
-task check
+~/.cargo/bin/cargo build --workspace
+~/.cargo/bin/cargo test --workspace
+~/.cargo/bin/cargo fmt --all -- --check
+~/.cargo/bin/cargo clippy --workspace --all-targets
 ```
 
-## Installation
+The repository contains 19 workspace crates. The protobuf source of truth is
+[`crates/tcfs-core/src/proto/tcfs.proto`](crates/tcfs-core/src/proto/tcfs.proto).
+See [`AGENTS.md`](AGENTS.md) before changing code or running fleet workflows.
+
+## Install
+
+### Canonical home
+
+The canonical source and release home is
+[`Jesssullivan/tummycrypt`](https://github.com/Jesssullivan/tummycrypt).
+The Nix release is the least ambiguous current installation surface:
 
 ```bash
-# macOS (Homebrew, current manual tap flow)
-# NOTE: the tap is stale at 0.12.12 and that formula skips symlinks;
-# prefer the Nix tagged install below for the current release.
-brew tap --custom-remote Jesssullivan/tummycrypt https://github.com/Jesssullivan/tummycrypt.git
-git -C "$(brew --repo Jesssullivan/tummycrypt)" fetch origin homebrew-tap
-git -C "$(brew --repo Jesssullivan/tummycrypt)" checkout homebrew-tap
-brew install Jesssullivan/tummycrypt/tcfs
-
-# Ubuntu 24.04+ / Debian 13+
-sudo dpkg -i tcfsd-*.deb tcfs-*.deb
-
-# RPM (Fedora 42 x86_64 proven; RHEL/Rocky pending, daemon-only today)
-sudo rpm -i tcfsd-*.rpm
-
-# Container (K8s worker mode; image build/signature published through
-# v0.12.14, runtime smoke pending)
-podman pull ghcr.io/jesssullivan/tcfsd:v0.12.14
-
-# Nix tagged profile install
-TAG=v0.12.14
+TAG=v0.12.17
 nix profile install \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfsd" \
   "github:Jesssullivan/tummycrypt?ref=${TAG}#tcfs-cli"
-
-# Linux/macOS tarball convenience installer
-# Fast CLI install, but not part of the canonical release-proof surface.
-curl -fsSL https://github.com/Jesssullivan/tummycrypt/releases/latest/download/install.sh | sh
 ```
 
-For the supported post-release proof contract across Homebrew, `.pkg`, `.deb`,
-`.rpm`, container, and Nix, see
-[docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md).
+Other artifacts exist, but their proof tiers differ:
 
-## CLI
+- Homebrew is stale at `0.12.12` and its formula skips symlinks.
+- Fedora 42 daemon-only RPM installation is proven; Rocky 10/FUSE is pending.
+- Debian/Ubuntu packages, tarballs, containers, and the macOS package have
+  lane-specific evidence and gaps.
 
-```bash
-tcfs status                    # Daemon status, device identity, NATS connection
-tcfs push <path>               # Upload with encryption + vector clock tick
-tcfs pull <manifest> <local>   # Download with conflict detection + decryption
-tcfs index inspect <path>      # Read-only remote index/manifest diagnostic
-tcfs mount <remote> <target>   # Linux FUSE mount with clean-name on-demand hydration
-tcfs unsync <path>             # Convert clean tracked files/directories back to .tc stubs
-tcfs device enroll             # Register device with age keypair
-tcfs device list               # Show enrolled fleet devices
+Use the [distribution smoke matrix](docs/ops/distribution-smoke-matrix.md)
+before promoting an artifact or platform claim.
+
+## Architecture in one minute
+
+```text
+CLI / TUI / MCP / native clients
+              │ gRPC
+              ▼
+            tcfsd
+      ┌───────┼────────┐
+      ▼       ▼        ▼
+  sync/VFS  crypto   auth/secrets
+      │
+      ├── encrypted CAS and manifests ──► S3 / SeaweedFS
+      └── state events ─────────────────► NATS JetStream
 ```
 
-## Binaries
+APFS, FUSE, FileProvider, NFS, and CFAPI are client or platform substrates.
+TCFS is the encrypted roaming and hydration layer above them. SSH transports
+the live terminal; TCFS transports persistent file state.
 
-| Binary | Purpose |
-|--------|---------|
-| `tcfs` | CLI: push, pull, mount, unsync, device management |
-| `tcfsd` | Daemon: gRPC, Linux FUSE mounts, NATS fleet sync, Prometheus metrics |
-| `tcfs-tui` | Terminal UI: dashboard with sync status, conflicts, mounts |
-| `tcfs-mcp` | MCP server: AI agent integration (8 tools, stdio transport) |
-
-macOS desktop naming: `TCFSProvider.app` is only the host app, and
-`TCFSFileProvider.appex` is the Finder/Files integration extension.
-
-## Architecture
-
-19 workspace crates organized in layers:
-
-```
-crates/
-├── tcfs-core/           # Shared types, config, protobuf (gRPC service)
-├── tcfs-crypto/         # XChaCha20-Poly1305, Argon2id, HKDF, BIP-39
-├── tcfs-secrets/        # SOPS/age decryption, KeePassXC, device identity
-├── tcfs-storage/        # OpenDAL S3/SeaweedFS operator + health checks
-├── tcfs-chunks/         # FastCDC chunking, BLAKE3 hashing, zstd compression
-├── tcfs-sync/           # Sync engine, vector clocks, NATS JetStream, reconciliation
-├── tcfs-auth/           # TOTP, WebAuthn/FIDO2, device enrollment
-├── tcfs-vfs/            # Virtual filesystem: hydration, disk cache, negative cache
-├── tcfs-fuse/           # Linux FUSE3 driver
-├── tcfs-nfs/            # NFS loopback mount (no kernel modules)
-├── tcfs-cloudfilter/    # Windows Cloud Files API (planned)
-├── tcfs-file-provider/  # macOS/iOS FileProvider FFI (cbindgen + UniFFI)
-├── tcfs-sops/           # SOPS+age fleet secret propagation
-├── tcfs-dbus/           # Linux D-Bus interface (stub default; gRPC backend feature-gated)
-├── tcfsd/               # Daemon binary (gRPC + metrics)
-├── tcfs-cli/            # CLI binary
-├── tcfs-tui/            # Terminal UI (ratatui)
-└── tcfs-mcp/            # MCP server (rmcp, stdio transport)
-```
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
-
-For packaged release proof across Homebrew, `.pkg`, `.deb`, `.rpm`, container,
-and Nix surfaces, see [docs/ops/distribution-smoke-matrix.md](docs/ops/distribution-smoke-matrix.md).
-For the bar after install succeeds, see
-[docs/ops/packaged-install-first-use.md](docs/ops/packaged-install-first-use.md).
-
-## Platform Support
-
-| Feature | Linux | macOS | Windows | iOS |
-|---------|-------|-------|---------|-----|
-| CLI (push/pull/reconcile) | Proven | Install-smoke proven; storage commands available but not continuous macOS acceptance | Planned | - |
-| Daemon (gRPC + metrics) | Proven | Available, lightly validated | Planned | - |
-| Filesystem mount | x86_64 FUSE lifecycle is host-proven; packaged mount/systemd first-use is still separate; NFS fallback evidence pending | Experimental | Cloud Files API skeleton | - |
-| FileProvider | - | Production Developer ID `.pkg` lifecycle proven on PZM for hydrate, evict/rehydrate, mutation, and conflict-status; first-run UX and continuous release proof still pending | - | Proof-of-concept; write hooks unproven |
-| Finder/Explorer badges | - | Experimental | - | - |
-| D-Bus integration | Interface exists; release UX not proven | - | - | - |
-| Fleet sync (NATS) | Proven core/live lanes | Core path available, not continuously acceptance-tested | Planned | - |
-| E2E encryption | Proven core path | Proven core path | Planned | Core crypto path available |
-
-See [docs/platform-support.md](docs/platform-support.md) for details.
-For the dated Apple posture, see
-[docs/ops/apple-surface-status.md](docs/ops/apple-surface-status.md).
-
-## Development
-
-```bash
-task build          # Build all crates
-task test           # Run workspace tests
-task lint           # Clippy + rustfmt
-task deny           # License + advisory check
-task check          # All of the above
-```
-
-See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for setup details and PR workflow.
-
-## Credential Setup
-
-```bash
-task sops:init       # Generate age key + configure .sops.yaml
-task sops:migrate    # Migrate credentials to SOPS-encrypted files
-```
-
-## License
-
-MIT OR Apache-2.0
+Dual licensed under MIT and Apache-2.0.

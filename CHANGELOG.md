@@ -6,8 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Current release-proof posture is tracked in `docs/release/evidence/` and
-`docs/ops/product-reality-and-priority.md`; older entries below may describe
-historical release intent rather than the current supported/proven surface.
+`docs/ops/current.md`; older entries below may describe historical release
+intent rather than the current supported/proven surface.
 
 ## [Unreleased]
 

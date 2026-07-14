@@ -1,3 +1,7 @@
 title: tcfs — TummyCrypt Filesystem
 description: FOSS self-hosted odrive-style encrypted sync target
 theme: jekyll-theme-cayman
+
+# Archive policy: publish docs/archive/README.md and the dated snapshots at
+# their stable paths. Current operator records still cite some snapshots;
+# .lychee.toml excludes only those frozen source documents from link crawling.

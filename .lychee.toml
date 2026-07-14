@@ -24,9 +24,17 @@ exclude = [
   "example.com",
   "^https://developer.apple.com/videos",
 ]
+# The archive index remains a checked, published navigation surface. These
+# dated snapshots are still published because current operator records cite
+# them, but their own historical relative links intentionally remain frozen.
 exclude_path = [
-  "docs/archive/",
+  "docs/archive/next-workstream-queue-2026-05-09.md",
+  "docs/archive/tinyland-branch-prune-proposal-2026-05-09.md",
+  "docs/archive/tinyland-upstream-disposition-2026-04-17.md",
+  "docs/archive/usage-reality-sprint-plan-2026-05-06.md",
+  "docs/archive/workstream-reality-check-2026-05-09.md",
 ]
-include_fragments = true
+# lychee 0.24+ replaced the boolean with an explicit fragment-check mode.
+include_fragments = "anchor-only"
 max_concurrency = 8
 timeout = 30

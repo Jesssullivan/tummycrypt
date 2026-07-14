@@ -3,7 +3,7 @@
 **Closes TIN-2347 (ledger item 9 execution): the three May FileProvider test-lane
 ghost identities are REVOKED fleet-wide.** This is the dated evidence packet
 required by TIN-2347's acceptance, executing the parked operator packet in
-[`docs/ops/ghost-device-revocation-safety-2026-07-02.md`](../../ops/ghost-device-revocation-safety-2026-07-02.md).
+[`docs/ops/ghost-device-revocation-safety-2026-07-02.md`](../../../ops/ghost-device-revocation-safety-2026-07-02.md).
 All commands were run inline by the orchestrator and operator-ratified.
 
 ## Scope
