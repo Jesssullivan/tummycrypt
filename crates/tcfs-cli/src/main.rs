@@ -348,10 +348,12 @@ enum Commands {
         /// Root identity to resolve against (TIN-2658 primary UX). A root is a
         /// named per-root reconcile state cache, addressed by the scheduled
         /// `tcfsd-reconcile-<name>` unit's isolated file at
-        /// `<tcfsd state dir>/reconcile/<name>.json`. With `--strategy keep-both`
-        /// on a git repo root, the repo-group conflict is resolved in-process
-        /// against that file (the daemon never sees it). An unknown name lists the
-        /// available roots. Mutually exclusive with `--state`.
+        /// `<tcfsd state dir>/reconcile/<name>.json`. On a git repo root with
+        /// keep-both (explicit `--strategy keep-both`, or omitted — the repo
+        /// default), the repo-group conflict is resolved in-process against that
+        /// file (the daemon never sees it); any strategy that cannot honor the
+        /// selected cache is an error, never a silent fallback. An unknown name
+        /// lists the available roots. Mutually exclusive with `--state`.
         #[arg(long, conflicts_with = "state")]
         root: Option<String>,
         /// Low-level escape hatch: explicit path to the sync state cache JSON file
@@ -979,7 +981,7 @@ async fn main() -> Result<()> {
         }
         Commands::Conflicts { json, state, root } => {
             let state_path = resolve_root_or_state(&config, root.as_deref(), state.as_deref())?;
-            cmd_conflicts(&config, json, state_path.as_deref()).await
+            cmd_conflicts(&config, json, state_path.as_deref(), root.as_deref()).await
         }
     }
 }
@@ -1125,6 +1127,19 @@ fn resolve_root_state_path(
     config: &tcfs_core::config::TcfsConfig,
     root_name: &str,
 ) -> Result<PathBuf> {
+    // Root names are bare identifiers into the reconcile registry — never
+    // path fragments. Reject anything that could escape the reconcile dir.
+    if root_name.is_empty()
+        || root_name.contains('/')
+        || root_name.contains('\\')
+        || root_name.contains("..")
+        || Path::new(root_name).is_absolute()
+    {
+        anyhow::bail!(
+            "invalid root name '{root_name}': root names are bare identifiers \
+             (no '/', '\\', '..', or absolute paths); use --state for explicit paths"
+        );
+    }
     let dir = reconcile_root_dir(config);
     let candidate = dir.join(format!("{root_name}.json"));
     if candidate.is_file() {
@@ -1161,6 +1176,70 @@ fn resolve_root_or_state(
         }
         (Some(name), None) => resolve_root_state_path(config, name).map(Some),
         (None, state) => Ok(state.map(Path::to_path_buf)),
+    }
+}
+
+/// Advisory exclusive lock on a state cache file (adversarial-gate FIX-2).
+///
+/// The scheduled `tcfsd-reconcile-<name>` timer and a CLI-local resolve race the
+/// same per-root JSON with zero coordination: `StateCache::flush()` is an
+/// unconditional full-snapshot rename, and record-only Conflict plans take no
+/// git lock — so an interleaved open→resolve→flush vs open→execute_plan→flush
+/// can silently clobber one side's writes. This lock serializes every CLI writer
+/// of an operator-selected state file: `flock(2)` semantics via
+/// `std::fs::File::try_lock` on a sibling `<state>.json.lock` file, held for the
+/// full open→mutate→flush span (released on drop, including on panic/exit).
+///
+/// Non-blocking by design: contention is expected to be a mid-cycle reconcile
+/// timer, and the right operator move is to retry after the cycle — not to queue
+/// blindly behind it.
+#[derive(Debug)]
+struct StateFileLock {
+    /// Held open for the lock's lifetime; the kernel releases the lock when the
+    /// descriptor closes (drop). The lock file itself is left in place — deleting
+    /// it would race a concurrent acquirer.
+    _file: std::fs::File,
+}
+
+impl StateFileLock {
+    /// Lock path convention: `<state-path>.lock` sibling (e.g.
+    /// `git-roam-tool-daemon.json.lock`). Locking a sibling rather than the state
+    /// file itself keeps the lock independent of `StateCache::flush()`'s
+    /// temp-write-then-rename (an flock on the state file would be lost when the
+    /// rename replaces the inode).
+    fn lock_path_for(state_path: &Path) -> PathBuf {
+        let mut os = state_path.as_os_str().to_os_string();
+        os.push(".lock");
+        PathBuf::from(os)
+    }
+
+    /// Acquire the lock, or fail fast with an operator-actionable error when
+    /// another process (typically the scheduled reconcile unit) holds it.
+    fn acquire(state_path: &Path) -> Result<Self> {
+        let lock_path = Self::lock_path_for(state_path);
+        if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating state dir {}", parent.display()))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening state lock {}", lock_path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+                "state file {} is locked by another process — is the scheduled \
+                 reconcile timer mid-cycle? Retry once the current cycle finishes \
+                 (lock: {}).",
+                state_path.display(),
+                lock_path.display()
+            ),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("locking state file via {}", lock_path.display()))
+            }
+        }
     }
 }
 
@@ -6633,6 +6712,17 @@ async fn cmd_reconcile(
     });
 
     let state_path = resolve_state_path(config, state_override);
+
+    // FIX-2: when reconciling against an operator-selected per-root state file
+    // (`--state`, or a scheduled `tcfsd-reconcile-<name>` unit), take the same
+    // advisory sibling lock the CLI-local resolve branch takes, for the whole
+    // open→execute_plan→flush span — otherwise a concurrent `tcfs resolve
+    // --root` and this reconcile could clobber each other's full-snapshot
+    // flushes. Selector-free runs on the primary cache keep today's behavior.
+    let _state_lock = state_override
+        .map(|_| StateFileLock::acquire(&state_path))
+        .transpose()?;
+
     let state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
@@ -6869,19 +6959,24 @@ async fn cmd_resolve(
     // (`~/.local/state/tcfsd/reconcile/<unit>.json`), which the primary daemon
     // never sees — so the daemon `resolve_conflict` RPC (below) cannot clear
     // them. When `--root <name>` (or the low-level `--state`) selects that file
-    // for a git repo root with an explicit `--strategy keep-both` — already
-    // resolved to `state_override` at dispatch — resolve it in-process exactly
-    // the way the daemon's `resolve_git_keep_both_repo` does, writing the cleared
-    // conflicts back to the SAME file. Every other resolve path uses the daemon.
-    if resolve_uses_cli_local_repo_branch(is_git_repo, requested.as_deref(), state_override) {
-        return cmd_resolve_repo_keep_both_local(
-            config,
-            path,
-            execute,
-            state_override,
-            prefix_override,
-        )
-        .await;
+    // for a git repo root with keep-both (explicit or the implicit git default)
+    // — already resolved to `state_override` at dispatch — resolve it in-process
+    // exactly the way the daemon's `resolve_git_keep_both_repo` does, writing the
+    // cleared conflicts back to the SAME file. A supplied selector that cannot be
+    // honored CLI-locally is a hard error (never a silent drop, FIX-1b); only
+    // selector-free invocations reach the daemon RPC below.
+    match route_resolve(is_git_repo, requested.as_deref(), state_override)? {
+        ResolveRoute::CliLocalRepoKeepBoth => {
+            return cmd_resolve_repo_keep_both_local(
+                config,
+                path,
+                execute,
+                state_override,
+                prefix_override,
+            )
+            .await;
+        }
+        ResolveRoute::Daemon => {}
     }
 
     let resolution = match (is_git_repo, requested.as_deref()) {
@@ -6983,19 +7078,62 @@ async fn cmd_resolve(
     Ok(())
 }
 
-/// TIN-2658 routing predicate: true iff `tcfs resolve` should resolve a
-/// repo-group `.git` keep-both conflict CLI-locally against an operator-supplied
-/// `--state` cache (bypassing the daemon `resolve_conflict` RPC). All three
-/// conditions are required: an explicit `keep-both` strategy, a `--state`
-/// override, and a git repo root. Any other combination — per-file strategies,
-/// no `--state`, or a non-repo path — falls through to the daemon RPC. Pure, so
-/// the routing decision is unit-testable without a daemon.
-fn resolve_uses_cli_local_repo_branch(
+/// Where `tcfs resolve` sends a request: the TIN-2658 CLI-local repo-group
+/// keep-both branch, or the daemon `resolve_conflict` RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolveRoute {
+    /// Resolve in-process against the operator-supplied `--root`/`--state` cache.
+    CliLocalRepoKeepBoth,
+    /// Route to the daemon RPC (primary cache).
+    Daemon,
+}
+
+/// TIN-2658 routing decision, pure and unit-testable without a daemon.
+///
+/// The CLI-local branch is selected when a `--root`/`--state` cache was supplied
+/// for a git repo root with the keep-both strategy — where "keep-both" matches
+/// the daemon arm's convention that a git repo with NO explicit `--strategy` is
+/// implicit keep-both (`(true, None)` below). Adversarial-gate FIX-1a: without
+/// the implicit-keep-both case, `tcfs resolve <repo> --root <name> --execute`
+/// silently dropped the root, routed to the daemon RPC (which has no state
+/// field), and printed "git keep-both executed: 0 ref(s)" against the WRONG
+/// cache — a deceptive no-op.
+///
+/// FIX-1b: a supplied root/state must NEVER silently drop. Any combination that
+/// cannot honor it CLI-locally (per-file strategies, defer, non-repo paths) is a
+/// hard error — the daemon RPC acts on the primary cache and would ignore the
+/// selector.
+fn route_resolve(
     is_git_repo: bool,
     requested_strategy: Option<&str>,
     state_override: Option<&Path>,
-) -> bool {
-    is_git_repo && requested_strategy == Some("keep_both") && state_override.is_some()
+) -> Result<ResolveRoute> {
+    let Some(state) = state_override else {
+        return Ok(ResolveRoute::Daemon);
+    };
+    // Implicit keep-both mirrors the daemon dispatch arm: `(true, None)` is
+    // repo-group keep-both there too.
+    let keep_both = matches!(requested_strategy, None | Some("keep_both"));
+    if is_git_repo && keep_both {
+        return Ok(ResolveRoute::CliLocalRepoKeepBoth);
+    }
+    if !is_git_repo {
+        anyhow::bail!(
+            "--root/--state selects the per-root reconcile cache {}, which only supports \
+             repo-group keep-both on a git repo root — the given path is not a git repo root. \
+             Per-file resolution acts on the daemon's primary cache: drop --root/--state, or \
+             point at the repo root with --strategy keep-both.",
+            state.display()
+        );
+    }
+    anyhow::bail!(
+        "--root/--state selects the per-root reconcile cache {}, which only supports \
+         --strategy keep-both (got --strategy {}). Per-file strategies act on the daemon's \
+         primary cache and would silently ignore the selected cache: drop --root/--state, \
+         or use --strategy keep-both.",
+        state.display(),
+        requested_strategy.unwrap_or("<none>").replace('_', "-")
+    )
 }
 
 /// TIN-2658: resolve a repo-group `.git` keep-both conflict entirely in the CLI
@@ -7076,6 +7214,13 @@ async fn resolve_repo_keep_both_with_operator(
     } else {
         GitKeepBothMode::DryRun
     };
+
+    // FIX-2: serialize against the scheduled reconcile unit for the whole
+    // open→resolve→flush span. Both writers of a per-root state file (this
+    // branch and `cmd_reconcile --state`) take the same sibling lock, so a
+    // mid-cycle timer cannot interleave a full-snapshot flush with ours.
+    // Held (via RAII) until this function returns.
+    let _state_lock = StateFileLock::acquire(&state_path)?;
 
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
@@ -7295,12 +7440,34 @@ fn conflict_age(detected_at: u64) -> String {
     }
 }
 
+/// The copy-pasteable repo-group resolve command suggested by `tcfs conflicts`.
+///
+/// FIX-1 follow-through: when conflicts were read via `--root <name>` (or the
+/// `--state <path>` escape hatch), the hint must carry the same selector — a
+/// hint without it would route the operator's next command at the daemon's
+/// primary cache, the exact deceptive no-op TIN-2658 fixes. `--strategy
+/// keep-both` stays explicit so the command reads unambiguously even though the
+/// repo default implies it.
+fn repo_resolve_hint(
+    repo_root: &str,
+    root_name: Option<&str>,
+    state_override: Option<&Path>,
+) -> String {
+    let selector = match (root_name, state_override) {
+        (Some(n), _) => format!(" --root {n}"),
+        (None, Some(p)) => format!(" --state {}", p.display()),
+        (None, None) => String::new(),
+    };
+    format!("tcfs resolve {repo_root} --strategy keep-both --execute{selector}   (repo-group)")
+}
+
 /// `tcfs conflicts` — list recorded conflicts from the state cache, grouped by
 /// repo for `.git`-internal paths. Read-only: no daemon RPC, no writes.
 async fn cmd_conflicts(
     config: &tcfs_core::config::TcfsConfig,
     json: bool,
     state_override: Option<&Path>,
+    root_name: Option<&str>,
 ) -> Result<()> {
     let state_path = resolve_state_path(config, state_override);
     let state = tcfs_sync::state::StateCache::open(&state_path)
@@ -7396,8 +7563,8 @@ async fn cmd_conflicts(
                     );
                 }
                 println!(
-                    "  resolve: tcfs resolve {} --strategy keep-both --execute   (repo-group)",
-                    root
+                    "  resolve: {}",
+                    repo_resolve_hint(root, root_name, state_override)
                 );
             }
             None => {
@@ -7412,6 +7579,13 @@ async fn cmd_conflicts(
                         p.remote_device
                     );
                     println!("    resolve: tcfs resolve {}", p.rel_path);
+                }
+                if root_name.is_some() || state_override.is_some() {
+                    println!(
+                        "    note: per-file conflicts cannot be resolved via --root/--state \
+                         (repo-group keep-both only); per-file resolve acts on the daemon's \
+                         primary cache"
+                    );
                 }
             }
         }
@@ -10211,37 +10385,274 @@ enabled = false
     #[test]
     fn resolve_routing_predicate_selects_cli_local_only_for_keep_both_state_repo() {
         let state = PathBuf::from("/x/unit.json");
-        // Taken: all three conditions hold.
-        assert!(resolve_uses_cli_local_repo_branch(
-            true,
-            Some("keep_both"),
-            Some(state.as_path())
-        ));
-        // Missing --state → daemon RPC (guards against accidental double-dispatch).
-        assert!(!resolve_uses_cli_local_repo_branch(
-            true,
-            Some("keep_both"),
-            None
-        ));
-        // Non-repo path → daemon RPC / per-file.
-        assert!(!resolve_uses_cli_local_repo_branch(
-            false,
-            Some("keep_both"),
-            Some(state.as_path())
-        ));
-        // Per-file strategies stay on the daemon even with --state.
-        for s in ["keep_local", "keep_remote", "defer"] {
-            assert!(
-                !resolve_uses_cli_local_repo_branch(true, Some(s), Some(state.as_path())),
-                "{s} must route to the daemon"
+        let st = Some(state.as_path());
+        // Taken: explicit keep-both + --root/--state + repo root.
+        assert_eq!(
+            route_resolve(true, Some("keep_both"), st).unwrap(),
+            ResolveRoute::CliLocalRepoKeepBoth
+        );
+        // FIX-1a: NO explicit strategy on a git repo is implicit keep-both (the
+        // daemon arm's own convention) — a supplied selector must still take
+        // the CLI-local branch, not silently drop to the daemon RPC.
+        assert_eq!(
+            route_resolve(true, None, st).unwrap(),
+            ResolveRoute::CliLocalRepoKeepBoth
+        );
+        // Missing selector → daemon RPC, for every strategy shape (guards
+        // against accidental double-dispatch).
+        for s in [None, Some("keep_both"), Some("keep_local"), Some("defer")] {
+            assert_eq!(
+                route_resolve(true, s, None).unwrap(),
+                ResolveRoute::Daemon,
+                "{s:?} without --root/--state must route to the daemon"
             );
         }
-        // No explicit strategy (git default) is out of scope: daemon RPC.
-        assert!(!resolve_uses_cli_local_repo_branch(
-            true,
+        assert_eq!(
+            route_resolve(false, None, None).unwrap(),
+            ResolveRoute::Daemon
+        );
+        // FIX-1b: a supplied selector that cannot be honored CLI-locally is a
+        // HARD ERROR — never a silent drop to the daemon.
+        for s in ["keep_local", "keep_remote", "defer"] {
+            let err = route_resolve(true, Some(s), st).unwrap_err().to_string();
+            assert!(
+                err.contains("keep-both") && err.contains("/x/unit.json"),
+                "{s} with a selector must hard-error naming the cache: {err}"
+            );
+        }
+        // Non-repo path with a selector: hard error too (per-file resolution
+        // cannot act on the per-root cache).
+        for s in [None, Some("keep_both"), Some("keep_local")] {
+            let err = route_resolve(false, s, st).unwrap_err().to_string();
+            assert!(
+                err.contains("not a git repo root"),
+                "non-repo path with selector must hard-error ({s:?}): {err}"
+            );
+        }
+    }
+
+    /// The dispatch-level FIX-1 regression the adversarial gate demanded:
+    /// `tcfs resolve <repo> --root <name> --execute` parses with strategy=None,
+    /// and that exact shape routes CLI-local — both with `--strategy keep-both`
+    /// and with the strategy omitted. On the pre-fix predicate the omitted form
+    /// returned Daemon, producing the deceptive "0 ref(s)" no-op.
+    #[test]
+    fn dispatch_root_selects_cli_local_with_and_without_strategy() {
+        // Strategy omitted (the live command shape from TIN-2658's runbook).
+        let cli = Cli::try_parse_from([
+            "tcfs",
+            "resolve",
+            "/repo",
+            "--root",
+            "git-roam-tool-daemon",
+            "--execute",
+        ])
+        .expect("parse resolve --root without --strategy");
+        let Commands::Resolve {
+            strategy,
+            root,
+            state,
+            execute,
+            ..
+        } = cli.command
+        else {
+            panic!("parsed a non-Resolve command");
+        };
+        assert_eq!(strategy, None);
+        assert_eq!(root.as_deref(), Some("git-roam-tool-daemon"));
+        assert_eq!(state, None);
+        assert!(execute);
+        let resolved = PathBuf::from("/x/reconcile/git-roam-tool-daemon.json");
+        let requested = strategy.as_deref().map(|s| s.replace('-', "_"));
+        assert_eq!(
+            route_resolve(true, requested.as_deref(), Some(resolved.as_path())).unwrap(),
+            ResolveRoute::CliLocalRepoKeepBoth,
+            "root without --strategy must route CLI-local"
+        );
+
+        // Explicit --strategy keep-both: same route.
+        let cli = Cli::try_parse_from([
+            "tcfs",
+            "resolve",
+            "/repo",
+            "--strategy",
+            "keep-both",
+            "--root",
+            "git-roam-tool-daemon",
+            "--execute",
+        ])
+        .expect("parse resolve --root with --strategy keep-both");
+        let Commands::Resolve { strategy, .. } = cli.command else {
+            panic!("parsed a non-Resolve command");
+        };
+        let requested = strategy.as_deref().map(|s| s.replace('-', "_"));
+        assert_eq!(
+            route_resolve(true, requested.as_deref(), Some(resolved.as_path())).unwrap(),
+            ResolveRoute::CliLocalRepoKeepBoth
+        );
+
+        // clap-level exclusion still enforced at parse time.
+        assert!(
+            Cli::try_parse_from(["tcfs", "resolve", "/repo", "--root", "a", "--state", "/x.json",])
+                .is_err(),
+            "--root and --state must conflict at parse time"
+        );
+    }
+
+    /// FIX-1b at the cmd_resolve seam: a supplied selector with a non-keep-both
+    /// strategy hard-errors BEFORE any daemon connect or storage build — the
+    /// error must name the cache, not silently resolve against the wrong one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cmd_resolve_hard_errors_on_selector_with_per_file_strategy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let repo = base.join("repo");
+        init_temp_git_repo(&repo);
+        let unit_json = base.join("unit.json");
+        std::fs::write(&unit_json, b"{}").unwrap();
+        let config = test_config(base);
+
+        // Per-file strategy + selector on a git repo root.
+        let err = cmd_resolve(
+            &config,
+            &repo,
+            Some("keep-local"),
+            false,
+            Some(unit_json.as_path()),
             None,
-            Some(state.as_path())
-        ));
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("keep-both"), "{err}");
+        assert!(err.contains("unit.json"), "must name the cache: {err}");
+
+        // Selector on a non-repo path: also a hard error, never a silent drop.
+        let not_repo = base.join("plain.txt");
+        std::fs::write(&not_repo, b"x").unwrap();
+        let err = cmd_resolve(
+            &config,
+            &not_repo,
+            Some("keep-both"),
+            false,
+            Some(unit_json.as_path()),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a git repo root"), "{err}");
+    }
+
+    // ── FIX-2: advisory state-file lock (flush clobber race) ──────────────────
+
+    /// Lock contention: while one handle holds the sibling lock, a second
+    /// acquisition fails fast with the operator-actionable message instead of
+    /// queueing or clobbering.
+    #[test]
+    fn state_file_lock_second_opener_errors_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("unit.json");
+        std::fs::write(&state, b"{}").unwrap();
+
+        let held = StateFileLock::acquire(&state).expect("first acquisition succeeds");
+        let err = StateFileLock::acquire(&state).unwrap_err().to_string();
+        assert!(
+            err.contains("locked by another process"),
+            "second opener must fail fast: {err}"
+        );
+        assert!(
+            err.contains("reconcile timer"),
+            "error must point at the likely holder: {err}"
+        );
+        drop(held);
+        // Released on drop: a fresh acquisition succeeds.
+        StateFileLock::acquire(&state).expect("lock released on drop");
+    }
+
+    /// The CLI-local resolve branch respects the lock end-to-end: with the
+    /// per-unit lock held (simulating a mid-cycle reconcile), the resolve errors
+    /// cleanly and mutates nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_local_keep_both_blocks_on_held_state_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let repo = base.join("repo");
+        init_temp_git_repo(&repo);
+        let unit_json = base.join("unit.json");
+        {
+            let mut unit = tcfs_sync::state::StateCache::open(&unit_json).unwrap();
+            set_conflict(&mut unit, &repo.join(".git/index"), "repo/.git/index");
+            unit.flush().unwrap();
+        }
+        let before = std::fs::read(&unit_json).unwrap();
+        let mut config = test_config(base);
+        config.sync.state_db = base.join("primary/state.db");
+
+        let _held = StateFileLock::acquire(&unit_json).unwrap();
+        let err = resolve_repo_keep_both_with_operator(
+            &memory_op(),
+            &config,
+            &repo,
+            true,
+            Some(&unit_json),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("locked by another process"), "{err}");
+        assert_eq!(
+            before,
+            std::fs::read(&unit_json).unwrap(),
+            "a lock-blocked resolve must not touch the state file"
+        );
+        let unit_after = tcfs_sync::state::StateCache::open(&unit_json).unwrap();
+        assert_eq!(unit_after.conflicts().len(), 1, "conflict still recorded");
+    }
+
+    /// Root names are identifiers, not path fragments: traversal shapes are
+    /// rejected before touching the filesystem.
+    #[test]
+    fn root_name_rejects_path_fragments() {
+        let config = tcfs_core::config::TcfsConfig::default();
+        for bad in ["a/b", "../etc", "..", "/abs/path", "a\\b", ""] {
+            let err = resolve_root_state_path(&config, bad)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("invalid root name"),
+                "'{bad}' must be rejected as a root name: {err}"
+            );
+        }
+    }
+
+    /// FIX-1 hint threading: the `tcfs conflicts` repo-group hint carries the
+    /// selector the conflicts were read with (and keeps --strategy explicit).
+    #[test]
+    fn conflicts_repo_hint_carries_selector() {
+        assert_eq!(
+            repo_resolve_hint("/g/repo", Some("git-roam-tool-daemon"), None),
+            "tcfs resolve /g/repo --strategy keep-both --execute --root git-roam-tool-daemon   (repo-group)"
+        );
+        // --root wins even though the resolved state path is also present.
+        let p = PathBuf::from("/s/unit.json");
+        assert_eq!(
+            repo_resolve_hint("/g/repo", Some("n"), Some(p.as_path())),
+            "tcfs resolve /g/repo --strategy keep-both --execute --root n   (repo-group)"
+        );
+        // Escape hatch: --state threads through too.
+        assert_eq!(
+            repo_resolve_hint("/g/repo", None, Some(p.as_path())),
+            "tcfs resolve /g/repo --strategy keep-both --execute --state /s/unit.json   (repo-group)"
+        );
+        // Selector-free: unchanged legacy hint.
+        assert_eq!(
+            repo_resolve_hint("/g/repo", None, None),
+            "tcfs resolve /g/repo --strategy keep-both --execute   (repo-group)"
+        );
     }
 
     /// The CLI-local undo bundle lands where the daemon's would: byte-for-byte
