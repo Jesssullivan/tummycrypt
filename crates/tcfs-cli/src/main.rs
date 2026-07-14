@@ -3102,6 +3102,7 @@ async fn cmd_mount(
         bucket: bucket.clone(),
         access_key_id: access_key,
         secret_access_key: secret_key,
+        allow_insecure_http: !config.storage.enforce_tls,
         s3_connect_timeout_secs: config.storage.s3_connect_timeout_secs,
         s3_pool_idle_timeout_secs: config.storage.s3_pool_idle_timeout_secs,
         s3_pool_max_idle_per_host: config.storage.s3_pool_max_idle_per_host,
@@ -4057,6 +4058,8 @@ fn write_init_config(
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct FileProviderInitConfig {
     s3_endpoint: String,
+    /// Explicit compatibility opt-in for isolated plaintext development S3.
+    allow_insecure_http: bool,
     s3_bucket: String,
     s3_access: String,
     s3_secret: String,
@@ -4113,6 +4116,7 @@ fn build_fileprovider_init_config(
     };
     FileProviderInitConfig {
         s3_endpoint: config.storage.endpoint.clone(),
+        allow_insecure_http: !config.storage.enforce_tls,
         s3_bucket: config.storage.bucket.clone(),
         s3_access: s3.access_key_id.clone(),
         s3_secret: s3.secret_access_key.expose_secret().to_string(),
@@ -7450,6 +7454,7 @@ mod tests {
         let rendered = build_fileprovider_init_config(&config, &s3, &master_key_path, "device-1");
 
         assert_eq!(rendered.s3_endpoint, "https://s3.example.test");
+        assert!(!rendered.allow_insecure_http);
         assert_eq!(rendered.s3_bucket, "tcfs-smoke");
         assert_eq!(rendered.s3_access, "access-key");
         assert_eq!(rendered.s3_secret, "secret-key");
@@ -7467,10 +7472,36 @@ mod tests {
 
         let json = serde_json::to_value(&rendered).unwrap();
         assert_eq!(json["s3_secret"], "secret-key");
+        assert_eq!(json["allow_insecure_http"], false);
         assert_eq!(
             json["master_key_file"].as_str(),
             Some(master_key_path.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn build_fileprovider_init_config_carries_explicit_http_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.storage.endpoint = "http://localhost:8333".into();
+        config.storage.enforce_tls = false;
+        let s3 = tcfs_secrets::S3Credentials {
+            access_key_id: "access-key".into(),
+            secret_access_key: secrecy::SecretString::from("secret-key".to_string()),
+            endpoint: config.storage.endpoint.clone(),
+            region: config.storage.region.clone(),
+        };
+
+        let rendered = build_fileprovider_init_config(
+            &config,
+            &s3,
+            &dir.path().join("master.key"),
+            "device-1",
+        );
+        let json = serde_json::to_value(&rendered).unwrap();
+
+        assert!(rendered.allow_insecure_http);
+        assert_eq!(json["allow_insecure_http"], true);
     }
 
     #[test]

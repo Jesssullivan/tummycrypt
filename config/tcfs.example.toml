@@ -14,8 +14,14 @@ log_level = "info"       # trace, debug, info, warn, error
 log_format = "json"      # json, text
 
 [storage]
-# SeaweedFS S3 gateway endpoint
-endpoint = "http://dees-appu-bearts:8333"
+# Local docker-compose SeaweedFS endpoint. Plaintext is accepted only because
+# this repository-managed development config opts in explicitly below.
+endpoint = "http://localhost:8333"
+enforce_tls = false
+# Production must use an authenticated HTTPS endpoint and enforce_tls = true.
+# endpoint = "https://seaweedfs.example.com:8333"
+# enforce_tls = true
+# ca_cert_path = "/etc/tcfs/certs/seaweedfs-ca.pem"
 region = "us-east-1"
 bucket = "tcfs"
 # Path to SOPS-encrypted credential file (loaded at startup)

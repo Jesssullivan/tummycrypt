@@ -9,7 +9,7 @@
 #     syncRoot = "~/tcfs";
 #     natsUrl = "nats://nats-tcfs:4222";
 #     mounts = [
-#       { remote = "seaweedfs://host/bucket"; local = "~/tcfs"; }
+#       { remote = "seaweedfs+https://seaweedfs.example.com/bucket"; local = "~/tcfs"; }
 #     ];
 #   };
 #

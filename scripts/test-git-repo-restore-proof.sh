@@ -65,6 +65,7 @@ EOF
 cat >"$CONFIG" <<'EOF'
 [storage]
 endpoint = "http://example.invalid"
+enforce_tls = false
 bucket = "tcfs"
 remote_prefix = "git-repo-canary-fixture"
 

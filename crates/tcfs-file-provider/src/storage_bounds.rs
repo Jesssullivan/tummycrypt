@@ -2,6 +2,7 @@ use tcfs_storage::operator::StorageConfig;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StorageTransportBounds {
+    pub allow_insecure_http: Option<bool>,
     pub max_concurrent_ops: Option<usize>,
     pub s3_connect_timeout_secs: Option<u64>,
     pub s3_pool_idle_timeout_secs: Option<u64>,
@@ -12,6 +13,7 @@ pub(crate) struct StorageTransportBounds {
 impl StorageTransportBounds {
     fn merge_missing(self, fallback: Self) -> Self {
         Self {
+            allow_insecure_http: self.allow_insecure_http.or(fallback.allow_insecure_http),
             max_concurrent_ops: self.max_concurrent_ops.or(fallback.max_concurrent_ops),
             s3_connect_timeout_secs: self
                 .s3_connect_timeout_secs
@@ -27,6 +29,9 @@ impl StorageTransportBounds {
     }
 
     fn apply_to_storage_config(self, config: &mut StorageConfig) {
+        if let Some(value) = self.allow_insecure_http {
+            config.allow_insecure_http = value;
+        }
         if let Some(value) = self.s3_connect_timeout_secs {
             config.s3_connect_timeout_secs = value;
         }
@@ -56,14 +61,19 @@ pub(crate) fn build_operator_from_json(config: &serde_json::Value) -> Option<ope
         return None;
     }
 
-    build_operator_from_parts(
+    match build_operator_from_parts(
         endpoint.to_string(),
         bucket.to_string(),
         access.to_string(),
         secret.to_string(),
         bounds_from_json_and_env(config),
-    )
-    .ok()
+    ) {
+        Ok(operator) => Some(operator),
+        Err(error) => {
+            tracing::error!(%error, "FileProvider storage operator rejected");
+            None
+        }
+    }
 }
 
 #[cfg_attr(not(feature = "uniffi"), allow(dead_code))]
@@ -108,6 +118,10 @@ fn bounds_from_json_and_env(config: &serde_json::Value) -> StorageTransportBound
 
 fn bounds_from_json(config: &serde_json::Value) -> StorageTransportBounds {
     StorageTransportBounds {
+        allow_insecure_http: json_bool(
+            config,
+            &["allow_insecure_http", "storage_allow_insecure_http"],
+        ),
         max_concurrent_ops: json_usize(
             config,
             &["max_concurrent_ops", "storage_max_concurrent_ops"],
@@ -136,6 +150,7 @@ fn bounds_from_json(config: &serde_json::Value) -> StorageTransportBounds {
 
 fn bounds_from_env() -> StorageTransportBounds {
     StorageTransportBounds {
+        allow_insecure_http: env_bool("TCFS_STORAGE_ALLOW_INSECURE_HTTP"),
         max_concurrent_ops: env_usize("TCFS_STORAGE_MAX_CONCURRENT_OPS"),
         s3_connect_timeout_secs: env_u64("TCFS_STORAGE_S3_CONNECT_TIMEOUT_SECS"),
         s3_pool_idle_timeout_secs: env_u64("TCFS_STORAGE_S3_POOL_IDLE_TIMEOUT_SECS"),
@@ -203,6 +218,7 @@ mod tests {
     #[test]
     fn parses_storage_bounds_from_json() {
         let config = serde_json::json!({
+            "allow_insecure_http": false,
             "max_concurrent_ops": "7",
             "s3_connect_timeout_secs": 5,
             "s3_pool_idle_timeout_secs": "13",
@@ -213,6 +229,7 @@ mod tests {
         assert_eq!(
             bounds_from_json(&config),
             StorageTransportBounds {
+                allow_insecure_http: Some(false),
                 max_concurrent_ops: Some(7),
                 s3_connect_timeout_secs: Some(5),
                 s3_pool_idle_timeout_secs: Some(13),
@@ -225,6 +242,7 @@ mod tests {
     #[test]
     fn json_bounds_accept_storage_prefixed_keys_and_explicit_false() {
         let config = serde_json::json!({
+            "storage_allow_insecure_http": true,
             "storage_max_concurrent_ops": 4,
             "storage_s3_connect_timeout_secs": "6",
             "storage_s3_pool_idle_timeout_secs": "0",
@@ -235,6 +253,7 @@ mod tests {
         assert_eq!(
             bounds_from_json(&config),
             StorageTransportBounds {
+                allow_insecure_http: Some(true),
                 max_concurrent_ops: Some(4),
                 s3_connect_timeout_secs: Some(6),
                 s3_pool_idle_timeout_secs: Some(0),
@@ -242,5 +261,30 @@ mod tests {
                 s3_http1_only: Some(false),
             }
         );
+    }
+
+    #[test]
+    fn direct_operator_rejects_plaintext_without_explicit_opt_in() {
+        let config = serde_json::json!({
+            "s3_endpoint": "http://localhost:8333",
+            "s3_bucket": "tcfs",
+            "s3_access": "test-access",
+            "s3_secret": "test-secret"
+        });
+
+        assert!(build_operator_from_json(&config).is_none());
+    }
+
+    #[test]
+    fn direct_operator_allows_explicit_plaintext_dev_opt_in() {
+        let config = serde_json::json!({
+            "s3_endpoint": "http://localhost:8333",
+            "s3_bucket": "tcfs",
+            "s3_access": "test-access",
+            "s3_secret": "test-secret",
+            "allow_insecure_http": true
+        });
+
+        assert!(build_operator_from_json(&config).is_some());
     }
 }

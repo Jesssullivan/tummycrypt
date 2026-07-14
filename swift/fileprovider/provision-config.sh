@@ -33,6 +33,12 @@ extract_toml() {
     grep -E "^[[:space:]]*$1[[:space:]]*=" "$CONFIG_TOML" 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*"([^"]*)".*/\1/' || true
 }
 
+extract_toml_bool() {
+    grep -E "^[[:space:]]*$1[[:space:]]*=" "$CONFIG_TOML" 2>/dev/null \
+        | head -1 \
+        | sed -E 's/.*=[[:space:]]*(true|false).*/\1/' || true
+}
+
 copy_app_group_config() {
     local src="$1"
     local dst="$2"
@@ -63,6 +69,7 @@ copy_app_group_config() {
 }
 
 S3_ENDPOINT="$(extract_toml endpoint)"
+STORAGE_ENFORCE_TLS="$(extract_toml_bool enforce_tls)"
 S3_BUCKET="$(extract_toml bucket)"
 REMOTE_PREFIX="$(extract_toml remote_prefix)"
 DEVICE_ID="$(extract_toml device_id)"
@@ -71,7 +78,27 @@ DAEMON_SOCKET="$(extract_toml fileprovider_socket)"
 DAEMON_ENDPOINT="$(extract_toml fileprovider_endpoint)"
 MASTER_KEY_FILE="$(extract_toml master_key_file)"
 
-S3_ENDPOINT="${S3_ENDPOINT:-http://212.2.245.145:8333}"
+if [ -z "$S3_ENDPOINT" ]; then
+    echo "ERROR: storage.endpoint is required for FileProvider provisioning" >&2
+    exit 1
+fi
+
+ALLOW_INSECURE_HTTP=false
+case "$S3_ENDPOINT" in
+    https://*) ;;
+    http://*)
+        if [ "$STORAGE_ENFORCE_TLS" != "false" ]; then
+            echo "ERROR: plaintext storage.endpoint requires explicit 'enforce_tls = false' for isolated development/testing" >&2
+            exit 1
+        fi
+        ALLOW_INSECURE_HTTP=true
+        ;;
+    *)
+        echo "ERROR: storage.endpoint must use https:// (or explicit development-only http://)" >&2
+        exit 1
+        ;;
+esac
+
 S3_BUCKET="${S3_BUCKET:-tcfs}"
 DEVICE_ID="${DEVICE_ID:-${DEVICE_NAME:-$(hostname -s)}}"
 REMOTE_PREFIX="${REMOTE_PREFIX:-devices/$DEVICE_ID}"
@@ -118,6 +145,7 @@ if [ -n "$DAEMON_ENDPOINT" ] && [ -n "$MASTER_KEY_FILE" ]; then
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
+  "allow_insecure_http": $ALLOW_INSECURE_HTTP,
   "s3_bucket": "$S3_BUCKET",
   "s3_access": "$S3_ACCESS",
   "s3_secret": "$S3_SECRET",
@@ -131,6 +159,7 @@ elif [ -n "$DAEMON_ENDPOINT" ]; then
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
+  "allow_insecure_http": $ALLOW_INSECURE_HTTP,
   "s3_bucket": "$S3_BUCKET",
   "s3_access": "$S3_ACCESS",
   "s3_secret": "$S3_SECRET",
@@ -143,6 +172,7 @@ elif [ -n "$DAEMON_SOCKET" ] && [ -n "$MASTER_KEY_FILE" ]; then
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
+  "allow_insecure_http": $ALLOW_INSECURE_HTTP,
   "s3_bucket": "$S3_BUCKET",
   "s3_access": "$S3_ACCESS",
   "s3_secret": "$S3_SECRET",
@@ -156,6 +186,7 @@ elif [ -n "$DAEMON_SOCKET" ]; then
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
+  "allow_insecure_http": $ALLOW_INSECURE_HTTP,
   "s3_bucket": "$S3_BUCKET",
   "s3_access": "$S3_ACCESS",
   "s3_secret": "$S3_SECRET",
@@ -168,6 +199,7 @@ elif [ -n "$MASTER_KEY_FILE" ]; then
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
+  "allow_insecure_http": $ALLOW_INSECURE_HTTP,
   "s3_bucket": "$S3_BUCKET",
   "s3_access": "$S3_ACCESS",
   "s3_secret": "$S3_SECRET",
@@ -180,6 +212,7 @@ else
 cat > "$CONFIG_JSON" <<CONFIGEOF
 {
   "s3_endpoint": "$S3_ENDPOINT",
+  "allow_insecure_http": $ALLOW_INSECURE_HTTP,
   "s3_bucket": "$S3_BUCKET",
   "s3_access": "$S3_ACCESS",
   "s3_secret": "$S3_SECRET",
@@ -193,6 +226,7 @@ chmod 600 "$CONFIG_JSON"
 
 echo "==> Config written to $CONFIG_JSON"
 echo "    Endpoint: $S3_ENDPOINT"
+echo "    Insecure HTTP allowed: $ALLOW_INSECURE_HTTP"
 echo "    Bucket:   $S3_BUCKET"
 echo "    Device:   $DEVICE_ID"
 echo "    Prefix:   $REMOTE_PREFIX"

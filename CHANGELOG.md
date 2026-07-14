@@ -11,6 +11,12 @@ intent rather than the current supported/proven surface.
 
 ## [Unreleased]
 
+### Security
+
+- Credential-bearing S3/SeaweedFS clients now require HTTPS by default across
+  daemon, CLI, direct mount, and FileProvider operator construction. Plaintext
+  compatibility requires an explicit development/test opt-in.
+
 ## [0.12.17] - 2026-07-09
 
 > **Version-truth note (TIN-2684):** the version strings `0.12.15` and

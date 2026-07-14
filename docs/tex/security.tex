@@ -170,8 +170,18 @@ enforce_tls = true
 ca_cert_path = "/etc/tcfs/certs/ca.pem"
 \end{lstlisting}
 
-When \code{enforce\_tls = true}, HTTP endpoints produce an error at startup.
-When \code{false} (default), HTTP endpoints produce a warning.
+HTTPS enforcement defaults to true. Credential-bearing HTTP endpoints fail
+closed across daemon, CLI, direct mount, and FileProvider operator
+construction. Setting \code{enforce\_tls = false} is an explicit compatibility
+opt-in for isolated development and tests; the lower-level direct-client
+equivalent for macOS JSON is \code{allow\_insecure\_http = true}. The iOS
+UniFFI \code{ProviderConfig} has no plaintext field; only the lower-level test
+process environment recognizes
+\code{TCFS\_STORAGE\_ALLOW\_INSECURE\_HTTP=true}. These modes produce a warning
+and must not be used for production or fleet reconciliation.
+\code{ca\_cert\_path} applies to daemon, CLI, and core operator paths. Direct
+FileProvider paths currently require a publicly WebPKI-trusted chain;
+sandbox-safe private-CA/PEM propagation remains open.
 
 \subsection{NATS}
 

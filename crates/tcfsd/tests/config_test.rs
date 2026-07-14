@@ -30,6 +30,7 @@ socket = "/tmp/test-tcfsd.sock"
 
 [storage]
 endpoint = "http://localhost:8333"
+enforce_tls = false
 bucket = "test-bucket"
 
 [sync]
@@ -53,6 +54,7 @@ enabled = false
         .await
         .expect("valid TOML should parse");
     assert_eq!(config.storage.bucket, "test-bucket");
+    assert!(!config.storage.enforce_tls);
     assert_eq!(
         config.daemon.socket,
         std::path::PathBuf::from("/tmp/test-tcfsd.sock")

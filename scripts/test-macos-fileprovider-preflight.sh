@@ -107,7 +107,7 @@ mkdir -p \
   "$(dirname "$CONFIG_PATH")" \
   "$(dirname "$FILEPROVIDER_CONFIG")"
 
-printf '[storage]\nendpoint = "http://example.invalid:8333"\nbucket = "tcfs"\n' >"$CONFIG_PATH"
+printf '[storage]\nendpoint = "http://example.invalid:8333"\nenforce_tls = false\nbucket = "tcfs"\n' >"$CONFIG_PATH"
 printf '{"socket_path":"/tmp/tcfs-fileprovider.sock"}\n' >"$FILEPROVIDER_CONFIG"
 write_info_plist "$APP_PATH/Contents/Info.plist" "io.tinyland.tcfs"
 write_info_plist "$APP_PATH/Contents/Extensions/TCFSFileProvider.appex/Contents/Info.plist" "io.tinyland.tcfs.fileprovider"

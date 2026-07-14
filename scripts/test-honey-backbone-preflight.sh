@@ -32,6 +32,7 @@ mkdir -p "$FAKE_BIN" "$FAKE_HOME/.config/tcfs"
 cat >"$FAKE_HOME/.config/tcfs/config.toml" <<'EOF'
 [storage]
 endpoint = "http://seaweedfs-tcfs:8333"
+enforce_tls = false
 secret = "do-not-leak"
 [sync]
 nats_url = "nats://nats-tcfs:4222"
@@ -127,6 +128,7 @@ OUT
     cat <<'OUT'
 [storage]
 endpoint = "http://10.245.93.143:8333"
+enforce_tls = false
 secret = "remote-secret"
 [sync]
 nats_url = "nats://10.245.131.232:4222"

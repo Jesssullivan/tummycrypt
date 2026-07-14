@@ -179,7 +179,9 @@ pub struct StorageConfig {
     pub remote_prefix: Option<String>,
     /// SOPS credential file path
     pub credentials_file: Option<PathBuf>,
-    /// Enforce HTTPS for S3 connections (warn/error on HTTP endpoints)
+    /// Enforce HTTPS for S3 connections (default: true).
+    /// Set false only for an explicitly isolated development/test endpoint.
+    #[serde(default = "default_true")]
     pub enforce_tls: bool,
     /// Path to a custom CA certificate for S3 TLS verification
     pub ca_cert_path: Option<PathBuf>,
@@ -522,7 +524,7 @@ impl Default for StorageConfig {
             bucket: "tcfs".into(),
             remote_prefix: None,
             credentials_file: None,
-            enforce_tls: false,
+            enforce_tls: true,
             ca_cert_path: None,
             max_concurrent_ops: 0,
             s3_connect_timeout_secs: 0,
@@ -685,7 +687,7 @@ argon2_parallelism = 8
         );
         assert_eq!(config.daemon.log_level, "info");
         assert_eq!(config.storage.endpoint, "http://localhost:8333");
-        assert!(!config.storage.enforce_tls);
+        assert!(config.storage.enforce_tls);
         assert_eq!(config.storage.bucket, "tcfs");
         assert_eq!(config.storage.max_concurrent_ops, 0);
         assert_eq!(config.storage.s3_connect_timeout_secs, 0);
@@ -710,6 +712,10 @@ endpoint = "http://192.168.1.100:8333"
 
         // Overridden
         assert_eq!(config.storage.endpoint, "http://192.168.1.100:8333");
+        assert!(
+            config.storage.enforce_tls,
+            "an HTTP endpoint must not silently disable the TLS default"
+        );
         // Defaults
         assert_eq!(config.storage.region, "us-east-1");
         assert_eq!(config.storage.bucket, "tcfs");
@@ -743,6 +749,17 @@ endpoint = "http://192.168.1.100:8333"
             config.nats_tls,
             "nats_tls must default to true for security"
         );
+    }
+
+    #[test]
+    fn storage_plaintext_http_requires_explicit_opt_in() {
+        let toml_str = r#"
+[storage]
+endpoint = "http://localhost:8333"
+enforce_tls = false
+"#;
+        let config: TcfsConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.storage.enforce_tls);
     }
 
     #[test]

@@ -21,7 +21,7 @@ struct TCFSApp: App {
 
     private func handleDeepLink(_ url: URL) {
         guard url.scheme == "tcfs" else {
-            hostLogger.warning("Ignoring URL with unknown scheme: \(url.absoluteString)")
+            hostLogger.warning("Ignoring URL with unknown scheme: \(url.scheme ?? "nil")")
             return
         }
 
@@ -33,14 +33,14 @@ struct TCFSApp: App {
         case "enroll":
             handleEnrollLink(url)
         default:
-            hostLogger.warning("Unrecognized deep link host: \(host ?? "nil") in \(url.absoluteString)")
+            hostLogger.warning("Unrecognized deep link host: \(host ?? "nil") (scheme=\(url.scheme ?? "nil"))")
         }
     }
 
     private func handleBootstrapLink(_ url: URL) {
         // BootstrapConfig.parse() already handles tcfs://bootstrap?data=<base64>
         guard let config = BootstrapConfig.parse(url.absoluteString) else {
-            hostLogger.error("Failed to parse bootstrap deep link: \(url.absoluteString)")
+            hostLogger.error("Rejected invalid bootstrap deep link; storage endpoint must use HTTPS")
             return
         }
 
@@ -58,14 +58,14 @@ struct TCFSApp: App {
             salt: config.encryption_salt ?? ""
         )
 
-        hostLogger.info("Bootstrap config saved via deep link (endpoint=\(config.s3_endpoint))")
+        hostLogger.info("Bootstrap config saved via deep link")
     }
 
     private func handleEnrollLink(_ url: URL) {
         // Extract the data query parameter, matching QRScannerView's parsing
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let dataParam = components.queryItems?.first(where: { $0.name == "data" })?.value else {
-            hostLogger.error("Enroll deep link missing 'data' parameter: \(url.absoluteString)")
+            hostLogger.error("Enroll deep link missing data parameter")
             return
         }
 

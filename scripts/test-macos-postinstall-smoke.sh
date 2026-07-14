@@ -88,6 +88,7 @@ mkdir -p \
 cat >"$CONFIG_PATH" <<EOF
 [storage]
 endpoint = "http://example.invalid:8333"
+enforce_tls = false
 bucket = "tcfs"
 
 [sync]

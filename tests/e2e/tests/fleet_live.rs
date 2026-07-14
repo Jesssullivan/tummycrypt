@@ -10,6 +10,7 @@
 //! Run:
 //!   TCFS_E2E_LIVE=1 \
 //!   TCFS_S3_ENDPOINT=http://seaweedfs-tcfs:8333 \
+//!   TCFS_STORAGE_ALLOW_INSECURE_HTTP=true \
 //!   TCFS_S3_BUCKET=tcfs \
 //!   AWS_ACCESS_KEY_ID=<from k8s secret seaweedfs-admin> \
 //!   AWS_SECRET_ACCESS_KEY=<from k8s secret seaweedfs-admin> \
@@ -45,7 +46,7 @@ fn s3_endpoint() -> String {
 }
 
 fn broken_s3_endpoint() -> String {
-    std::env::var("TCFS_S3_BROKEN_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:1".into())
+    std::env::var("TCFS_S3_BROKEN_ENDPOINT").unwrap_or_else(|_| "https://127.0.0.1:1".into())
 }
 
 fn s3_bucket() -> String {
@@ -54,6 +55,24 @@ fn s3_bucket() -> String {
 
 fn nats_url() -> String {
     std::env::var("TCFS_NATS_URL").unwrap_or_else(|_| "nats://nats-tcfs:4222".into())
+}
+
+fn parse_explicit_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn storage_allow_insecure_http() -> bool {
+    const NAME: &str = "TCFS_STORAGE_ALLOW_INSECURE_HTTP";
+    match std::env::var(NAME) {
+        Ok(value) => parse_explicit_bool(&value)
+            .unwrap_or_else(|| panic!("{NAME} must be one of true, false, 1, or 0; got {value:?}")),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => panic!("reading {NAME}: {error}"),
+    }
 }
 
 fn sample_state_event(
@@ -167,10 +186,28 @@ fn live_operator_for_endpoint(endpoint: &str) -> Option<opendal::Operator> {
         bucket,
         access_key_id: access,
         secret_access_key: secret,
+        allow_insecure_http: storage_allow_insecure_http(),
         ..Default::default()
     };
 
-    tcfs_storage::operator::build_operator(&config).ok()
+    Some(
+        tcfs_storage::operator::build_operator(&config).unwrap_or_else(|error| {
+            panic!(
+                "S3 operator rejected endpoint {endpoint}: {error:#}. Set \
+             TCFS_STORAGE_ALLOW_INSECURE_HTTP=true only for an isolated \
+             development/test HTTP endpoint."
+            )
+        }),
+    )
+}
+
+#[test]
+fn insecure_http_env_parser_is_explicit_and_false_by_default() {
+    assert_eq!(parse_explicit_bool("true"), Some(true));
+    assert_eq!(parse_explicit_bool("1"), Some(true));
+    assert_eq!(parse_explicit_bool(" false "), Some(false));
+    assert_eq!(parse_explicit_bool("0"), Some(false));
+    assert_eq!(parse_explicit_bool("yes"), None);
 }
 
 async fn cleanup_upload_objects(

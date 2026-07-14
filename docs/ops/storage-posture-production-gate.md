@@ -12,6 +12,19 @@ endpoint TLS posture, and the credential scope used for the run. It does not
 prove broad directory ownership, multitenancy, lost-device recovery, or long
 soak behavior.
 
+Source invariant: credential-bearing S3 operator construction requires HTTPS
+by default. Plaintext compatibility now requires the explicit
+development/test opt-in `storage.enforce_tls = false` (or
+`allow_insecure_http = true` in macOS direct-client JSON). The iOS UniFFI
+`ProviderConfig` remains HTTPS-only; only its lower-level process environment
+recognizes `TCFS_STORAGE_ALLOW_INSECURE_HTTP=true` for tests. This fail-closed
+source default does not itself provision a fleet TLS hostname, install its
+trust chain, or prove a live read/write path. `storage.ca_cert_path` reaches
+daemon/CLI/core operators; direct FileProvider paths currently require a
+publicly WebPKI-trusted chain, and sandbox-safe private-CA/PEM propagation
+remains open. The HTTPS canary evidence below remains valid and is distinct
+from the still-open neo/honey runtime migration.
+
 For the production posture packet, the canary should also include a negative
 scope probe by setting `scope_deny_prefix` to a prefix outside the credential
 policy. The workflow passes that to `tcfs storage canary

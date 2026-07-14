@@ -43,6 +43,8 @@ env:
   # Override defaults baked into fleet_live.rs (which point at tailnet MagicDNS)
   TCFS_E2E_LIVE: "1"
   TCFS_S3_ENDPOINT: "http://127.0.0.1:8333"
+  # Explicit test-only opt-in for the job-local compose endpoint.
+  TCFS_STORAGE_ALLOW_INSECURE_HTTP: "true"
   TCFS_S3_BUCKET: "tcfs"
   TCFS_NATS_URL: "nats://127.0.0.1:4222"
   # Keep infra failures cheap in CI; the production default is 300s.
