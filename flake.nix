@@ -81,6 +81,8 @@
         tcfsd = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tcfsd";
+          # Registered-root safety tests create real fixture repositories.
+          nativeCheckInputs = [ pkgs.git ];
           # Vendor OpenSSL on macOS to avoid dyld Team ID mismatch
           # when launchd loads the binary (Nix store openssl has different
           # code signature than the daemon binary).
