@@ -34,6 +34,7 @@ exclude_path = [
   "docs/archive/usage-reality-sprint-plan-2026-05-06.md",
   "docs/archive/workstream-reality-check-2026-05-09.md",
 ]
-include_fragments = true
+# lychee 0.24+ replaced the boolean with an explicit fragment-check mode.
+include_fragments = "anchor-only"
 max_concurrency = 8
 timeout = 30
