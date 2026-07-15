@@ -38,6 +38,8 @@ not need a manual copy step.
 One full repository has a proven `neo → honey` roam, and automatic divergent
 keep-both has a two-host live proof. Arbitrary repositories, sessions, and
 linked worktrees remain outside the claim.
+Live production status of the .git conflict gate: see
+[ops/current.md](ops/current.md) (TIN-2658).
 
 ### Hydrate and release space
 
@@ -66,13 +68,13 @@ TCFS is one range in a larger remote-first system:
 
 | Program or component | Responsibility |
 | --- | --- |
-| **Cordillera** | Remote-everything umbrella and cross-project product program |
-| **Rockies** | OS composition, host policy, enrollment, and fleet rollout |
+| **[Cordillera](https://linear.app/tinyland/initiative/cordillera-tinyland-remote-everything-program-15f56b187c19)** | Remote-everything umbrella and cross-project product program |
+| **[Rockies](https://github.com/tinyland-inc/rockies)** | OS composition, host policy, enrollment, and fleet rollout |
 | **TCFS** | Encrypted persistent state, roam, hydration, conflict safety, and local unsync |
 | **SSH / cmux** | Terminal and live-process transport |
 | **IDE routing** | Host-aware editor connection and cwd mapping |
-| **GloriousFlywheel** | Remote build and execution substrate |
-| **prompts-enqueue** | Prompt and context library; not the file transport or dispatcher |
+| **[GloriousFlywheel](https://github.com/tinyland-inc/GloriousFlywheel)** | Remote build and execution substrate |
+| **[prompts-enqueue](https://github.com/Jesssullivan/prompts-enqueue)** | Prompt and context library; not the file transport or dispatcher |
 | **APFS / FUSE / FileProvider / NFS / CFAPI** | Platform substrates and client surfaces |
 
 APFS is therefore neither a TCFS competitor nor proof of TCFS performance. It

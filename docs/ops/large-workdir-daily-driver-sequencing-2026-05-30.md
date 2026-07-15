@@ -1,3 +1,5 @@
+> Superseded for live status by [docs/ops/current.md](current.md) — retained as a dated record.
+
 # TCFS Large Workdir → Daily Driver Sequencing - 2026-05-30
 
 Status: operator-directed re-sequencing of the `TIN-1617` large-workdir
