@@ -328,21 +328,38 @@ fn collect_repo_conflicts(
             }
             // Not a branch head. Only GENUINELY UNPARKABLE ref-valued paths veto
             // the whole group: `packed-refs`, `refs/**` outside `refs/heads/`,
-            // detached/symbolic `HEAD`, and submodule refs — parking those
-            // safely is out of scope for PR-3 and dropping them would lose refs.
-            // Non-ref-class workdir/reflog state (`.git/index`, `.git/logs/**`,
-            // `.git/COMMIT_EDITMSG`) is design-intended kept-local (steps 7/9),
-            // which is what makes the verb usable on real divergent repos where
-            // those paths almost always differ.
+            // and submodule refs — parking those safely is out of scope for PR-3
+            // and dropping them would lose refs. Non-ref-class workdir/reflog
+            // state (`.git/index`, `.git/logs/**`, `.git/COMMIT_EDITMSG`) is
+            // design-intended kept-local (steps 7/9), which is what makes the
+            // verb usable on real divergent repos where those paths almost
+            // always differ.
+            //
+            // `.git/HEAD` is deliberately in the KEEP-LOCAL class, NOT ref-class
+            // (TIN-2658 live finding): HEAD is per-checkout WORKING STATE — on
+            // the resolving side it is (almost always) a symbolic ref like
+            // `ref: refs/heads/main`, not a publishable ref value. Keep-both
+            // semantics preserve the remote's line of work through the parked
+            // `refs/tcfs/theirs/<device>/heads/**` BRANCH refs; the loser's old
+            // head is a parked branch ref, never the HEAD file itself (matches
+            // the G5-git-13 criteria). Treating HEAD as ref-class made every
+            // real divergent repo unresolvable, because two checkouts' HEAD
+            // files conflict whenever the repo diverges at all. Submodule
+            // gitdir HEADs (`.git/modules/<name>/HEAD`) stay veto'd with the
+            // other submodule refs — parking inside submodule gitdirs is
+            // unhandled, and this fix must not silently widen parking.
             None => {
-                if crate::reconcile::is_git_ref_class_path(&rel_path) {
+                if is_checkout_head_path(&rel_path) {
+                    GitConflictKind::KeepLocal
+                } else if crate::reconcile::is_git_ref_class_path(&rel_path) {
                     bail!(
                         "unparkable ref-class .git conflict {}; only branch-head refs \
                          (.git/refs/heads/**) are parkable in PR-3",
                         rel_path
                     );
+                } else {
+                    GitConflictKind::KeepLocal
                 }
-                GitConflictKind::KeepLocal
             }
         };
 
@@ -355,6 +372,13 @@ fn collect_repo_conflicts(
     }
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(out)
+}
+
+/// True for the PRIMARY checkout's `.git/HEAD` file (already `/`-normalized
+/// rel path). Deliberately does NOT match a submodule gitdir's HEAD
+/// (`.git/modules/<name>/HEAD`) — those stay in the unparkable ref-class veto.
+fn is_checkout_head_path(rel_path: &str) -> bool {
+    rel_path == ".git/HEAD" || rel_path.ends_with("/.git/HEAD")
 }
 
 fn local_root_from_cache_key(cache_key: &str, rel_path: &str) -> PathBuf {
@@ -1071,6 +1095,229 @@ mod tests {
             "winner head still untouched on re-run"
         );
         run_git(&winner, &["fsck", "--full"]).expect("fsck clean after idempotent re-run");
+    }
+
+    /// TIN-2658 live-ceremony regression: a REAL divergent repo's conflict group
+    /// always carries a `.git/HEAD` conflict (two checkouts' HEAD files differ
+    /// whenever the repo diverges), and on the pre-fix classifier that single
+    /// path veto'd the whole group with "unparkable ref-class .git conflict
+    /// .git/HEAD" — making the resolve verb unusable exactly where it was
+    /// needed. The G5 fixture never hit this because its HEADs agreed.
+    ///
+    /// Group under test: conflicted `.git/HEAD` + parkable
+    /// `.git/refs/heads/main` + git-internals (`.git/index`,
+    /// `.git/logs/HEAD`). Asserts: resolution succeeds; HEAD resolves
+    /// keep-local (local symbolic-ref content byte-untouched); the branch ref
+    /// parks at the loser's SHA; the undo bundle is written; every conflict in
+    /// the group clears.
+    #[tokio::test]
+    async fn head_conflict_resolves_keep_local_alongside_parked_branch() {
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state-dir");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Shared base, two divergent clones (same shape as the execute test).
+        let base = dir.path().join("base");
+        init_repo(&base);
+        commit(&base, "file.txt", "base", "base");
+        let winner = dir.path().join("winner");
+        let loser = dir.path().join("loser");
+        git_safety::run_git(
+            dir.path(),
+            &[
+                "clone",
+                "--quiet",
+                &base.to_string_lossy(),
+                &winner.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        git_safety::run_git(
+            dir.path(),
+            &[
+                "clone",
+                "--quiet",
+                &base.to_string_lossy(),
+                &loser.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        init_repo(&winner);
+        init_repo(&loser);
+        let head_w = commit(&winner, "file.txt", "winner work", "winner");
+        let head_l = commit(&loser, "file.txt", "loser work", "loser");
+        assert_ne!(head_w, head_l);
+        git_safety::run_git(
+            &winner,
+            &[
+                "fetch",
+                "--quiet",
+                &loser.to_string_lossy(),
+                "refs/heads/main",
+            ],
+        )
+        .unwrap();
+        ensure_commit_present(&winner, &head_l).unwrap();
+
+        // Loser's branch-head ref content as a PR-2 remote manifest.
+        let ref_blob = dir.path().join("loser-ref-blob");
+        std::fs::write(&ref_blob, format!("{head_l}\n")).unwrap();
+        let mut up_state = StateCache::open(&dir.path().join("upload-state.json")).unwrap();
+        let up = engine::upload_file_with_device(
+            &op,
+            &ref_blob,
+            "data",
+            &mut up_state,
+            None,
+            "loser",
+            Some("loser/.git/refs/heads/main"),
+            None,
+        )
+        .await
+        .unwrap();
+        let manifest_key = up.remote_path.clone();
+
+        // The live group shape: HEAD + branch head + workdir/reflog internals.
+        let mut local = crate::conflict::VectorClock::new();
+        local.tick("winner");
+        let mut remote = crate::conflict::VectorClock::new();
+        remote.tick("loser");
+        let state_path = dir.path().join("state.json");
+        let mut state = StateCache::open(&state_path).unwrap();
+        state.set(
+            &winner.join(".git/refs/heads/main"),
+            conflict_state(
+                "winner/.git/refs/heads/main",
+                Some(manifest_key),
+                &local,
+                &remote,
+            ),
+        );
+        state.set(
+            &winner.join(".git/HEAD"),
+            conflict_state("winner/.git/HEAD", None, &local, &remote),
+        );
+        state.set(
+            &winner.join(".git/logs/HEAD"),
+            conflict_state("winner/.git/logs/HEAD", None, &local, &remote),
+        );
+        state.set(
+            &winner.join(".git/index"),
+            conflict_state("winner/.git/index", None, &local, &remote),
+        );
+
+        let head_file = winner.join(".git/HEAD");
+        let head_before = std::fs::read(&head_file).unwrap();
+        assert!(
+            String::from_utf8_lossy(&head_before).starts_with("ref:"),
+            "fixture sanity: local HEAD is a symbolic ref"
+        );
+        let logs_head_before = std::fs::read(winner.join(".git/logs/HEAD")).unwrap();
+
+        let result = resolve_repo_keep_both(
+            &op,
+            &mut state,
+            &winner,
+            "data",
+            "winner",
+            &state_dir,
+            GitKeepBothMode::Execute,
+            None,
+        )
+        .await
+        .expect(
+            "a group containing .git/HEAD must resolve (pre-fix: \
+             'unparkable ref-class .git conflict .git/HEAD')",
+        );
+
+        // Branch ref parked at the loser's SHA; winner's line untouched.
+        assert_eq!(result.parked_refs.len(), 1, "only the branch head parks");
+        assert_eq!(
+            git_safety::local_ref_sha(&winner, "refs/tcfs/theirs/loser/heads/main").as_deref(),
+            Some(head_l.as_str())
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&winner, "refs/heads/main").as_deref(),
+            Some(head_w.as_str())
+        );
+        // HEAD keep-local: the local symbolic-ref file is byte-untouched.
+        assert_eq!(
+            std::fs::read(&head_file).unwrap(),
+            head_before,
+            "keep-local HEAD must not be rewritten"
+        );
+        // .git/logs/HEAD keep-local too (was already non-ref-class; pin it).
+        assert_eq!(
+            std::fs::read(winner.join(".git/logs/HEAD")).unwrap(),
+            logs_head_before,
+            "keep-local logs/HEAD must not be rewritten"
+        );
+        // Undo bundle written (refs changed), under the state dir.
+        let bundle = result.undo_bundle.expect("undo bundle written");
+        assert!(bundle.starts_with(&state_dir));
+        assert!(bundle.is_file(), "undo bundle exists on disk");
+        // The whole group clears — HEAD included — so the reconcile loop stops.
+        assert!(
+            state.conflicts().is_empty(),
+            "HEAD + branch + internals all cleared"
+        );
+        run_git(&winner, &["fsck", "--full"]).expect("fsck clean after execute");
+    }
+
+    /// Guard against silently WIDENING parking (the other half of the live
+    /// fix): genuinely unhandled ref classes still veto. `.git/refs/tags/**`
+    /// keeps the "unparkable ref-class" error, and a submodule gitdir's HEAD
+    /// (`.git/modules/<name>/HEAD`) stays veto'd — only the primary checkout's
+    /// `.git/HEAD` moved to keep-local.
+    #[tokio::test]
+    async fn non_head_ref_classes_still_veto() {
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        commit(&repo, "file.txt", "base", "base");
+        let mut local = crate::conflict::VectorClock::new();
+        local.tick("winner");
+        let mut remote = crate::conflict::VectorClock::new();
+        remote.tick("loser");
+
+        for rel in ["repo/.git/refs/tags/v1", "repo/.git/modules/sub/HEAD"] {
+            let mut state =
+                StateCache::open(&dir.path().join(format!("state-{}.json", rel.len()))).unwrap();
+            let abs = dir.path().join(rel);
+            state.set(&abs, conflict_state(rel, None, &local, &remote));
+            let err = resolve_repo_keep_both(
+                &op,
+                &mut state,
+                &repo,
+                "data",
+                "winner",
+                dir.path(),
+                GitKeepBothMode::DryRun,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("unparkable ref-class"),
+                "{rel} must still veto: {err:#}"
+            );
+        }
+    }
+
+    /// The classification carve-out is exactly the primary checkout's HEAD.
+    #[test]
+    fn checkout_head_path_matches_primary_head_only() {
+        assert!(is_checkout_head_path(".git/HEAD"));
+        assert!(is_checkout_head_path("repo/.git/HEAD"));
+        assert!(is_checkout_head_path("nested/dir/repo/.git/HEAD"));
+        // Submodule gitdir HEAD: NOT the carve-out (stays ref-class veto).
+        assert!(!is_checkout_head_path("repo/.git/modules/sub/HEAD"));
+        // Reflog and branch-head paths are classified elsewhere.
+        assert!(!is_checkout_head_path("repo/.git/logs/HEAD"));
+        assert!(!is_checkout_head_path("repo/.git/refs/heads/HEAD"));
+        assert!(!is_checkout_head_path("repo/.git/HEADS"));
     }
 
     /// TIN-2652 seam regression: the test that was missing and would have caught
