@@ -119,14 +119,14 @@ host before rotating (Phase 0 inventory).
     (TIN-2306 stop-rule is next; see the TIN-2306 runbook and its `[CRED]` convention,
     docs/ops/tin2306-stop-rule-runbook-2026-07-14.md, PR #554).
 
-## Operator decisions (interviewed before the secret gates run)
+## Operator decisions — RATIFIED (2026-07-16 interview)
 
-| # | Decision | Options |
+| # | Decision | Ruling |
 |---|---|---|
-| D1 | Fleet GitHub credential shape | fine-grained PAT (fast) vs GitHub App (durable custody; TIN-2801 notes App custody owed for dispatch tokens) |
-| D2 | Forward-secrecy scope | none (accept old-content exposure to the leaked passphrase) / sensitive prefixes / all prefixes (cost from 0.5 dry-run) |
-| D3 | iOS re-issue timing | inside Phase 2 window vs deferred attended session (device offline risk) |
-| D4 | Ceremony window | single attended window for Phases 1+2 vs GitHub leg early + passphrase leg in its own window |
+| D1 | Fleet GitHub credential shape | **Fine-grained PAT**, scoped to org repos + read:packages + workflow as needed. GitHub-App custody for dispatch tokens stays a separate follow-up (TIN-2801). |
+| D2 | Forward-secrecy scope | **None — rewrap only.** Residual accepted: old content remains decryptable to the leaked passphrase only if pre-rotation manifests also leaked; exposure boundary was execution telemetry and no manifest leak is in evidence. Step 2.7 is skipped; step 0.5 sizing optional. |
+| D3 | iOS re-issue timing | Folded into D4's single window (attended). |
+| D4 | Ceremony window | **One combined attended window** for Phases 1+2, once #557 and the `--new-key-file` PR (#558) are green and reviewed. The same window also restores neo's YubiKey-dependent surfaces (GPG signing, SSH-to-GitHub), both broken since the 2026-07-15 crash. |
 
 ## Related runbooks (linked, not duplicated)
 
