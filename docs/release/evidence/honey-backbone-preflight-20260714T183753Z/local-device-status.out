@@ -1,0 +1,8 @@
+$ tcfs device status
+This device: neo.local
+  device_id:       03d8a0bd-36de-4df8-9b88-a923a9dd2c7a
+  public_key:      age156vuzu696tp0vm66q2h40zpg6atl3czrcvzepnyv4js84tv4450q6yf6hd
+  signing_key:     b0116055ea88c2f6
+  enrolled_at:     1773866714
+  revoked:         false
+  last_nats_seq:   0
