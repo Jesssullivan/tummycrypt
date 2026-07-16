@@ -61,10 +61,11 @@ host before rotating (Phase 0 inventory).
 ### Phase 0 — stage during freeze (all `[PREP-SAFE-NOW]`)
 
 0.1 Confirm freeze posture: `LAB_DEPLOY_FREEZE` set; lab#825 gate live.
-0.2 Land `tcfs rotate-key --new-key-file` (tummycrypt PR; merge ≠ deploy; **no tag or
+0.2 Land `tcfs rotate-key --new-key-file` — **PR #558** (merge ≠ deploy; **no tag or
     release under the freeze**). Fallback if not landed: pending-file pre-seed above.
-0.3 Fix lab `docs/operations/tcfs-fileprovider-deploy.md` — replace the "`cat` the key
-    file" instruction with metadata-only checks (lab PR).
+0.3 ~~Fix lab `docs/operations/tcfs-fileprovider-deploy.md` `cat` guidance~~ —
+    **already corrected on lab main** (verified 2026-07-16: the doc now forbids `cat`/
+    xtrace/pretty-printers on the key material; landed via lab#844's containment slice).
 0.4 Read-only inventory on each host (neo/honey/bumble): file modes and presence for
     every row above; `launchctl` posture for TIN-1954 (redacted output only); confirm
     no host is on the passphrase-Argon2id or FP-mnemonic derivation path.
