@@ -15,6 +15,7 @@
 //! against a memory operator, mirroring the patterns in
 //! `e2e_two_device_sync.rs` / `git_bundle_roundtrip.rs`.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -23,6 +24,8 @@ use tempfile::TempDir;
 
 use tcfs_sync::blacklist::Blacklist;
 use tcfs_sync::engine::{push_tree_with_device, upload_file_with_device, CollectConfig};
+use tcfs_sync::index_entry::RemoteEntryKind;
+use tcfs_sync::manifest::SyncManifest;
 use tcfs_sync::reconcile::{
     execute_plan, list_remote_index, reconcile, PullReason, PushReason, ReconcileAction,
     ReconcileConfig, ReconcilePlan, ReconcileSummary,
@@ -30,9 +33,11 @@ use tcfs_sync::reconcile::{
 use tcfs_sync::state::StateCache;
 
 fn memory_operator() -> Operator {
-    Operator::new(opendal::services::Memory::default())
+    let op = Operator::new(opendal::services::Memory::default())
         .expect("memory operator")
-        .finish()
+        .finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+    op
 }
 
 fn git(cwd: &Path, args: &[&str]) {
@@ -70,6 +75,40 @@ fn init_repo_c0(dir: &Path) {
     std::fs::write(dir.join("README.md"), b"c0\n").unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "--quiet", "-m", "C0"]);
+}
+
+/// Raw Git hydration is intentionally enrollment-only: the executor will not
+/// synthesize a missing or partial `.git`. Discover the repositories represented
+/// by the remote index and enroll each destination with a complete empty Git
+/// skeleton before planning the restore.
+async fn init_raw_git_destinations(op: &Operator, local_root: &Path, prefix: &str) {
+    let remote = list_remote_index(op, prefix)
+        .await
+        .expect("remote index for raw Git destination enrollment");
+    let mut repo_roots = BTreeSet::new();
+    for rel_path in remote.keys() {
+        if let Some((repo_rel, _)) = rel_path.split_once("/.git/") {
+            repo_roots.insert(repo_rel.to_string());
+        } else if rel_path.starts_with(".git/") {
+            repo_roots.insert(String::new());
+        }
+    }
+    assert!(
+        !repo_roots.is_empty(),
+        "raw Git fixture must contain at least one remote repository"
+    );
+
+    for repo_rel in repo_roots {
+        let repo_root = if repo_rel.is_empty() {
+            local_root.to_path_buf()
+        } else {
+            local_root.join(repo_rel)
+        };
+        std::fs::create_dir_all(&repo_root).unwrap();
+        if !repo_root.join(".git").exists() {
+            git(&repo_root, &["init", "--quiet", "-b", "main"]);
+        }
+    }
 }
 
 fn commit(dir: &Path, file: &str, content: &[u8], msg: &str) -> String {
@@ -220,13 +259,14 @@ async fn git_ff_converges_push_then_pull() {
     let mut b_state = StateCache::open(&b_tmp.path().join("b.db")).unwrap();
     let blacklist = raw_blacklist();
     let cfg = ff_config();
+    init_raw_git_destinations(&op, &b_repo, prefix).await;
 
     let b_pull_plan = reconcile(
         &op, &b_repo, prefix, &b_state, "device-b", &blacklist, &cfg, None,
     )
     .await
     .expect("device-b pull plan");
-    execute_plan(
+    let b_pull = execute_plan(
         &b_pull_plan,
         &op,
         &b_repo,
@@ -238,6 +278,16 @@ async fn git_ff_converges_push_then_pull() {
     )
     .await
     .expect("device-b pull execute");
+    assert!(
+        b_pull.errors.is_empty(),
+        "device-b pull errors: {:?}",
+        b_pull.errors
+    );
+    assert!(
+        b_pull.deferred_git_refs.is_empty(),
+        "device-b pull unexpectedly deferred Git paths: {:?}",
+        b_pull.deferred_git_refs
+    );
     b_state.flush().unwrap();
 
     // B now has the repo at C0; its .git is raw-restored. Objects + refs roamed,
@@ -340,13 +390,24 @@ async fn pull_into(
     blacklist: &Blacklist,
     cfg: &ReconcileConfig,
 ) -> StateCache {
+    init_raw_git_destinations(op, repo, prefix).await;
     let mut state = StateCache::open(db).unwrap();
     let plan = reconcile(op, repo, prefix, &state, device, blacklist, cfg, None)
         .await
         .expect("pull plan");
-    execute_plan(&plan, op, repo, prefix, &mut state, device, None, None)
+    let result = execute_plan(&plan, op, repo, prefix, &mut state, device, None, None)
         .await
         .expect("pull execute");
+    assert!(
+        result.errors.is_empty(),
+        "pull into {device} errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.deferred_git_refs.is_empty(),
+        "pull into {device} unexpectedly deferred Git paths: {:?}",
+        result.deferred_git_refs
+    );
     state.flush().unwrap();
     state
 }
@@ -574,6 +635,60 @@ fn plan_with(actions: Vec<ReconcileAction>) -> ReconcilePlan {
         device_id: "test-device".into(),
         generated_at: 0,
     }
+}
+
+/// Publish a fully bound manifest, then remove only its referenced chunks. The
+/// plan-wide manifest preflight must succeed, while hydration still fails during
+/// execution and exercises the objects-before-refs barrier.
+async fn seed_pull_with_missing_chunks(
+    op: &Operator,
+    prefix: &str,
+    source_root: &Path,
+    state: &mut StateCache,
+    rel_path: &str,
+) -> (String, u64) {
+    let source = source_root.join("broken-object-source");
+    let body = format!("chunk removed after manifest publication: {prefix}\n");
+    std::fs::write(&source, body.as_bytes()).unwrap();
+    upload_file_with_device(
+        op,
+        &source,
+        prefix,
+        state,
+        None,
+        "device-s",
+        Some(rel_path),
+        None,
+    )
+    .await
+    .expect("seed object upload");
+
+    let entry = list_remote_index(op, prefix)
+        .await
+        .expect("seeded object index")
+        .get(rel_path)
+        .expect("seeded object entry")
+        .clone();
+    let manifest_key = format!("{prefix}/manifests/{}", entry.manifest_hash);
+    let manifest_bytes = op
+        .read(&manifest_key)
+        .await
+        .expect("seeded object manifest")
+        .to_vec();
+    let manifest = SyncManifest::from_bytes(&manifest_bytes).expect("valid object manifest");
+    assert_eq!(manifest.rel_path.as_deref(), Some(rel_path));
+    assert!(
+        !manifest.chunk_hashes().is_empty(),
+        "broken object fixture must use at least one chunk"
+    );
+    for chunk_hash in manifest.chunk_hashes() {
+        let chunk_key = format!("{prefix}/chunks/{chunk_hash}");
+        op.delete(&chunk_key)
+            .await
+            .expect("remove object chunk after manifest publication");
+    }
+
+    (entry.manifest_hash, entry.size)
 }
 
 /// Recursively collect paths under `root` whose file name contains `needle`.
@@ -987,6 +1102,10 @@ async fn git_object_failure_bars_ref_actions_sequential() {
     )
     .await
     .expect("seed ref upload");
+    let object_rel = format!("r/.git/objects/ab/{}", "c".repeat(38));
+    let (object_manifest, object_size) =
+        seed_pull_with_missing_chunks(&op, prefix, seed_tmp.path(), &mut seed_state, &object_rel)
+            .await;
     let ref_manifest = list_remote_index(&op, prefix)
         .await
         .expect("seeded index")
@@ -996,21 +1115,27 @@ async fn git_object_failure_bars_ref_actions_sequential() {
         .clone();
 
     let root = TempDir::new().unwrap();
-    std::fs::create_dir_all(root.path().join("r/.git/objects")).unwrap();
+    init_raw_git_destinations(&op, root.path(), prefix).await;
     let plan = plan_with(vec![
-        // Object pull that FAILS (manifest does not exist on the remote).
+        // Manifest binding succeeds, but its chunk was removed after publication.
         ReconcileAction::Pull {
-            rel_path: "r/.git/objects/ab/feedface".into(),
-            manifest_hash: "0".repeat(64),
-            size: 1,
+            rel_path: object_rel.clone(),
+            manifest_hash: object_manifest,
+            size: object_size,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         },
         // Ref pull that WOULD succeed — the barrier must defer it.
         ReconcileAction::Pull {
             rel_path: "r/.git/refs/heads/main".into(),
             manifest_hash: ref_manifest,
             size: 41,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         },
     ]);
     let mut state = StateCache::open(&root.path().join("l.db")).unwrap();
@@ -1032,7 +1157,7 @@ async fn git_object_failure_bars_ref_actions_sequential() {
         "only the object pull may error: {:?}",
         res.errors
     );
-    assert!(res.errors[0].0.contains(".git/objects/"));
+    assert_eq!(res.errors[0].0, object_rel);
     assert_eq!(
         res.deferred_git_refs,
         vec!["r/.git/refs/heads/main".to_string()],
@@ -1046,18 +1171,40 @@ async fn git_object_failure_bars_ref_actions_sequential() {
     // ── Push direction ────────────────────────────────────────────────────
     let prefix2 = "test/git-barrier-seq-push";
     let root2 = TempDir::new().unwrap();
+    let repo2 = root2.path().join("r");
+    std::fs::create_dir_all(&repo2).unwrap();
+    git(&repo2, &["init", "--quiet", "-b", "main"]);
+    let object_rel2 = format!("r/.git/objects/de/{}", "a".repeat(38));
+    let object_path2 = root2.path().join(&object_rel2);
+    std::fs::create_dir_all(object_path2.parent().unwrap()).unwrap();
+    std::fs::write(&object_path2, b"removed before planned object push").unwrap();
     std::fs::create_dir_all(root2.path().join("r/.git/refs/heads")).unwrap();
-    std::fs::create_dir_all(root2.path().join("r/.git/objects/ab")).unwrap();
     std::fs::write(
         root2.path().join("r/.git/refs/heads/main"),
         format!("{}\n", "b".repeat(40)),
     )
     .unwrap();
+    // Local deletion now requires durable remote deletion authority. Seed the
+    // tombstone so the first action still creates the intended post-preflight
+    // object-push failure instead of being rejected by the stronger delete
+    // guard before it can exercise the objects-before-refs barrier.
+    op.write(
+        &format!("{prefix2}/index/{object_rel2}"),
+        tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+            .to_json_bytes()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let plan2 = plan_with(vec![
-        // Object push that FAILS (local file does not exist).
+        // Validation sees the object, then the earlier delete makes its push fail.
+        ReconcileAction::DeleteLocal {
+            local_path: object_path2.clone(),
+            rel_path: object_rel2.clone(),
+        },
         ReconcileAction::Push {
-            local_path: root2.path().join("r/.git/objects/ab/missing"),
-            rel_path: "r/.git/objects/ab/missing".into(),
+            local_path: object_path2,
+            rel_path: object_rel2.clone(),
             reason: PushReason::NewLocal,
         },
         // Ref push that WOULD succeed — the barrier must defer it.
@@ -1086,6 +1233,7 @@ async fn git_object_failure_bars_ref_actions_sequential() {
         "only the object push may error: {:?}",
         res2.errors
     );
+    assert_eq!(res2.errors[0].0, object_rel2);
     assert_eq!(
         res2.deferred_git_refs,
         vec!["r/.git/refs/heads/main".to_string()],
@@ -1098,10 +1246,10 @@ async fn git_object_failure_bars_ref_actions_sequential() {
     );
 }
 
-/// MEDIUM-1 (PR #513), concurrent fast path: a wave-0 `.git` pull failure must
-/// skip that repo's wave-1 ref-class pulls (deferred, not errored).
+/// MEDIUM-1 (PR #513): NewRemote raw-Git pulls use the locked executor. An
+/// object hydration failure must still bar the repo's later ref-class pull.
 #[tokio::test]
-async fn git_object_failure_bars_ref_pull_concurrent() {
+async fn git_object_failure_bars_new_remote_ref_pull_locked() {
     let op = memory_operator();
     let prefix = "test/git-barrier-concurrent";
 
@@ -1121,6 +1269,10 @@ async fn git_object_failure_bars_ref_pull_concurrent() {
     )
     .await
     .expect("seed ref upload");
+    let object_rel = format!("r/.git/objects/cd/{}", "e".repeat(38));
+    let (object_manifest, object_size) =
+        seed_pull_with_missing_chunks(&op, prefix, seed_tmp.path(), &mut seed_state, &object_rel)
+            .await;
     let ref_manifest = list_remote_index(&op, prefix)
         .await
         .expect("seeded index")
@@ -1130,20 +1282,26 @@ async fn git_object_failure_bars_ref_pull_concurrent() {
         .clone();
 
     let root = TempDir::new().unwrap();
-    // All-NewRemote pull plan with no encryption/progress → the concurrent
-    // fast path executes it (wave 0 = objects, wave 1 = refs).
+    init_raw_git_destinations(&op, root.path(), prefix).await;
+    // All-NewRemote raw-Git pulls still take the topology-checked locked path.
     let plan = plan_with(vec![
         ReconcileAction::Pull {
-            rel_path: "r/.git/objects/ab/feedface".into(),
-            manifest_hash: "0".repeat(64),
-            size: 1,
+            rel_path: object_rel.clone(),
+            manifest_hash: object_manifest,
+            size: object_size,
+            chunks: 1,
             reason: PullReason::NewRemote,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         },
         ReconcileAction::Pull {
             rel_path: "r/.git/refs/heads/main".into(),
             manifest_hash: ref_manifest,
             size: 41,
+            chunks: 1,
             reason: PullReason::NewRemote,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         },
     ]);
     let mut state = StateCache::open(&root.path().join("l.db")).unwrap();
@@ -1158,22 +1316,22 @@ async fn git_object_failure_bars_ref_pull_concurrent() {
         None,
     )
     .await
-    .expect("concurrent barrier execute");
+    .expect("NewRemote locked barrier execute");
     assert_eq!(
         res.errors.len(),
         1,
-        "only the wave-0 object pull may error: {:?}",
+        "only the object pull may error: {:?}",
         res.errors
     );
-    assert!(res.errors[0].0.contains(".git/objects/"));
+    assert_eq!(res.errors[0].0, object_rel);
     assert_eq!(
         res.deferred_git_refs,
         vec!["r/.git/refs/heads/main".to_string()],
-        "the wave-1 ref pull must be recorded as deferred, not errored"
+        "the ref pull must be recorded as deferred, not errored"
     );
     assert!(
         !root.path().join("r/.git/refs/heads/main").exists(),
-        "BARRIER: wave-1 ref must NOT be applied after a wave-0 object failure"
+        "BARRIER: ref must NOT be applied after an object failure"
     );
 }
 
@@ -1979,6 +2137,18 @@ async fn git_ff_divergent_detached_head_vetoes_whole_group() {
         &cfg,
     )
     .await;
+
+    // The enrolled empty repository already had the same symbolic HEAD, so its
+    // initial action is UpToDate rather than Pull. Preserve the seed publisher's
+    // last-synced baseline explicitly; this test's premise is an out-of-band
+    // rewrite of a tracked HEAD, not a never-tracked local file.
+    let detached_head_baseline = s_state
+        .get_by_rel_path(".git/HEAD")
+        .expect("seed state must track .git/HEAD")
+        .1
+        .clone();
+    b_state.set(&b_repo.join(".git/HEAD"), detached_head_baseline);
+    b_state.flush().unwrap();
 
     // A commits C1 and pushes → remote head advances to C1.
     commit_and_sync(

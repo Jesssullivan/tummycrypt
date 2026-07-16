@@ -119,16 +119,41 @@ impl SymlinkManifest {
         if manifest.kind != RemoteEntryKind::Symlink {
             anyhow::bail!("manifest is not a symlink");
         }
+        manifest.validate_metadata()?;
         Ok(manifest)
     }
 
     pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        self.validate_metadata()?;
         serde_json::to_vec_pretty(self)
             .map_err(|e| anyhow::anyhow!("serializing symlink manifest: {e}"))
+    }
+
+    fn validate_metadata(&self) -> anyhow::Result<()> {
+        if self.symlink_target.is_empty() || self.symlink_target.chars().any(char::is_control) {
+            anyhow::bail!("symlink manifest target is empty or contains a control character");
+        }
+        if let Some(rel_path) = self.rel_path.as_deref() {
+            crate::index_entry::validate_canonical_rel_path(rel_path)?;
+        }
+        Ok(())
     }
 }
 
 impl SyncManifest {
+    fn validate_storage_components(&self) -> anyhow::Result<()> {
+        for (index, hash) in self.chunks.iter().enumerate() {
+            crate::index_entry::validate_storage_key_component(
+                hash,
+                &format!("manifest chunk hash at index {index}"),
+            )?;
+        }
+        if let Some(rel_path) = self.rel_path.as_deref() {
+            crate::index_entry::validate_canonical_rel_path(rel_path)?;
+        }
+        Ok(())
+    }
+
     /// Parse manifest bytes, auto-detecting v1 (text) vs v2 (JSON).
     ///
     /// v1 format: newline-separated chunk hashes (no JSON)
@@ -141,8 +166,10 @@ impl SyncManifest {
         // regular-file schema must fail closed instead of being treated as v1
         // newline manifests.
         if text.trim_start().starts_with('{') {
-            return serde_json::from_str::<SyncManifest>(&text)
-                .map_err(|e| anyhow::anyhow!("parsing regular-file manifest JSON: {e}"));
+            let manifest = serde_json::from_str::<SyncManifest>(&text)
+                .map_err(|e| anyhow::anyhow!("parsing regular-file manifest JSON: {e}"))?;
+            manifest.validate_storage_components()?;
+            return Ok(manifest);
         }
 
         // Fall back to v1 text format: newline-separated chunk hashes
@@ -156,7 +183,7 @@ impl SyncManifest {
             anyhow::bail!("manifest is empty");
         }
 
-        Ok(SyncManifest {
+        let manifest = SyncManifest {
             version: 1,
             file_hash: String::new(),
             file_size: 0,
@@ -169,11 +196,14 @@ impl SyncManifest {
             mtime: None,
             encrypted_file_key: None,
             wrapped_file_keys: Vec::new(),
-        })
+        };
+        manifest.validate_storage_components()?;
+        Ok(manifest)
     }
 
     /// Serialize manifest to v2 JSON bytes.
     pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        self.validate_storage_components()?;
         serde_json::to_vec_pretty(self).map_err(|e| anyhow::anyhow!("serializing manifest: {e}"))
     }
 
@@ -246,6 +276,46 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn regular_manifest_rejects_unsafe_chunk_storage_components() {
+        for chunk in ["", ".", "..", "../other", "nested/hash", "nested\\hash"] {
+            let json = format!(
+                r#"{{"version":2,"file_hash":"file","file_size":1,"chunks":["{chunk}"],"vclock":{{"clocks":{{}}}},"written_by":"peer","written_at":0}}"#
+            );
+            assert!(
+                SyncManifest::from_bytes(json.as_bytes()).is_err(),
+                "unsafe JSON chunk hash must fail: {chunk:?}"
+            );
+
+            if !chunk.is_empty() {
+                assert!(
+                    SyncManifest::from_bytes(format!("{chunk}\n").as_bytes()).is_err(),
+                    "unsafe v1 chunk hash must fail: {chunk:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn regular_manifest_refuses_to_serialize_unsafe_chunk_storage_component() {
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "file".into(),
+            file_size: 1,
+            chunks: vec!["../other-root/chunk".into()],
+            vclock: VectorClock::new(),
+            written_by: "peer".into(),
+            written_at: 0,
+            rel_path: None,
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+
+        assert!(manifest.to_bytes().is_err());
+    }
+
     /// (b) Back-compat: an `mtime: None` manifest must serialize byte-identically
     /// to one written before the field existed (the key is omitted), so adding
     /// the field never perturbs manifest identity/addressing for the existing
@@ -296,6 +366,27 @@ mod tests {
         assert_eq!(parsed.kind, crate::index_entry::RemoteEntryKind::Symlink);
         assert_eq!(parsed.symlink_target, "../target.txt");
         assert!(SyncManifest::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn symlink_manifest_rejects_control_target_and_unsafe_rel_path() {
+        let control_target = SymlinkManifest::new(
+            "safe\nforged-log",
+            VectorClock::new(),
+            "peer".into(),
+            0,
+            Some("link".into()),
+        );
+        assert!(control_target.to_bytes().is_err());
+
+        let unsafe_rel = SymlinkManifest::new(
+            "sibling.txt",
+            VectorClock::new(),
+            "peer".into(),
+            0,
+            Some("../outside/link".into()),
+        );
+        assert!(unsafe_rel.to_bytes().is_err());
     }
 
     #[test]

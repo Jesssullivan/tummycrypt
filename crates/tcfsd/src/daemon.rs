@@ -1,7 +1,8 @@
 //! Daemon lifecycle: startup, health checks, systemd notify, gRPC server
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tcfs_core::config::TcfsConfig;
@@ -71,15 +72,289 @@ pub mod test_support {
     pub use super::watcher_record_conflict;
 }
 
+async fn load_invite_redemptions_for_startup(
+    daemon: &TcfsDaemonImpl,
+    path: &std::path::Path,
+) -> Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting invite redemption store: {}", path.display()))
+        }
+    }
+
+    daemon
+        .load_invite_redemptions(path)
+        .await
+        .with_context(|| format!("loading invite redemption store: {}", path.display()))
+}
+
+fn open_automatic_policy_store(
+    path: &std::path::Path,
+    surface: &str,
+) -> Result<tcfs_sync::policy::PolicyStore> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "folder policy for {surface} must be a regular, non-symlink file: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspecting folder policy for {surface}: {}", path.display())
+            })
+        }
+    }
+    tcfs_sync::policy::PolicyStore::open(path).with_context(|| {
+        format!(
+            "loading folder policy for {surface} automatic mutation: {}",
+            path.display()
+        )
+    })
+}
+
+fn reconcile_action_rel_path(action: &tcfs_sync::reconcile::ReconcileAction) -> &str {
+    match action {
+        tcfs_sync::reconcile::ReconcileAction::Push { rel_path, .. }
+        | tcfs_sync::reconcile::ReconcileAction::Pull { rel_path, .. }
+        | tcfs_sync::reconcile::ReconcileAction::DeleteLocal { rel_path, .. }
+        | tcfs_sync::reconcile::ReconcileAction::DeleteRemote { rel_path }
+        | tcfs_sync::reconcile::ReconcileAction::Conflict { rel_path, .. }
+        | tcfs_sync::reconcile::ReconcileAction::CreateDirectory { rel_path }
+        | tcfs_sync::reconcile::ReconcileAction::UpToDate { rel_path } => rel_path,
+    }
+}
+
+fn reconcile_action_mutates(action: &tcfs_sync::reconcile::ReconcileAction) -> bool {
+    !matches!(
+        action,
+        tcfs_sync::reconcile::ReconcileAction::UpToDate { .. }
+    )
+}
+
+fn reconcile_plan_has_mutations(plan: &tcfs_sync::reconcile::ReconcilePlan) -> bool {
+    plan.actions.iter().any(reconcile_action_mutates)
+}
+
+/// Mirror `tcfs_sync::state::PathLocks` identity normalization so one
+/// reconcile batch cannot deadlock by acquiring two lexical aliases for the
+/// same lock key. The lock manager canonicalizes the parent while preserving
+/// the final component; sorting and deduplicating must use that same spelling.
+fn reconcile_path_lock_identity(path: &std::path::Path) -> std::path::PathBuf {
+    path.parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        .or_else(|| std::fs::canonicalize(path).ok())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+fn reconcile_lock_paths(
+    plan: &tcfs_sync::reconcile::ReconcilePlan,
+    local_root: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>> {
+    let mut paths = Vec::new();
+    for action in plan
+        .actions
+        .iter()
+        .filter(|action| reconcile_action_mutates(action))
+    {
+        let rel_path = reconcile_action_rel_path(action);
+        tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+            .with_context(|| format!("invalid periodic reconcile path: {rel_path:?}"))?;
+        paths.push(reconcile_path_lock_identity(&local_root.join(rel_path)));
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn first_never_reconcile_path(
+    plan: &tcfs_sync::reconcile::ReconcilePlan,
+    local_root: &std::path::Path,
+    policy_store: &tcfs_sync::policy::PolicyStore,
+) -> Result<Option<String>> {
+    for action in plan
+        .actions
+        .iter()
+        .filter(|action| reconcile_action_mutates(action))
+    {
+        let rel_path = reconcile_action_rel_path(action);
+        tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+            .with_context(|| format!("invalid periodic reconcile policy path: {rel_path:?}"))?;
+        if policy_store.effective_mode(&local_root.join(rel_path))
+            == tcfs_sync::policy::SyncMode::Never
+        {
+            return Ok(Some(rel_path.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_daemon_data_dir_creation_parent(path: &std::path::Path) -> Result<()> {
+    let mut ancestor = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("tcfsd data directory has no parent")?;
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().with_context(|| {
+                    format!(
+                        "tcfsd data directory has no existing trusted ancestor: {}",
+                        path.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspecting tcfsd data-directory ancestor: {}",
+                        ancestor.display()
+                    )
+                })
+            }
+        }
+    }
+    tcfs_sync::conflict_git::validate_trusted_configured_path(ancestor).with_context(|| {
+        format!(
+            "validating tcfsd data-directory creation ancestor: {}",
+            ancestor.display()
+        )
+    })
+}
+
+fn prepare_private_daemon_data_dir(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "tcfsd data path must be a real directory: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            validate_daemon_data_dir_creation_parent(path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+                let mut builder = std::fs::DirBuilder::new();
+                builder.recursive(true).mode(0o700);
+                builder.create(path).with_context(|| {
+                    format!("creating private tcfsd data directory: {}", path.display())
+                })?;
+                // `DirBuilderExt::mode` is filtered through the process umask.
+                // Set the final directory explicitly so the daemon trust root
+                // is always usable and exactly owner-only.
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| {
+                        format!("securing private tcfsd data directory: {}", path.display())
+                    })?;
+            }
+            #[cfg(not(unix))]
+            anyhow::bail!(
+                "private tcfsd data-directory creation is unsupported on this platform: {}",
+                path.display()
+            );
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting tcfsd data directory: {}", path.display()))
+        }
+    }
+
+    let metadata = std::fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "inspecting private tcfsd data directory: {}",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "tcfsd data path must be a real directory: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        // SAFETY: `geteuid` has no preconditions and only reads process identity.
+        let effective_uid = unsafe { libc::geteuid() };
+        anyhow::ensure!(
+            metadata.uid() == effective_uid,
+            "tcfsd data directory must be owned by effective uid {effective_uid}, got uid {}: {}",
+            metadata.uid(),
+            path.display()
+        );
+        anyhow::ensure!(
+            metadata.mode() & 0o7777 == 0o700,
+            "tcfsd data directory must be mode 0700: {}",
+            path.display()
+        );
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!(
+        "private tcfsd data-directory validation is unsupported on this platform: {}",
+        path.display()
+    );
+
+    tcfs_sync::conflict_git::validate_trusted_configured_path(path)
+        .with_context(|| format!("validating tcfsd data-directory trust: {}", path.display()))?;
+    Ok(path.to_path_buf())
+}
+
+fn resolve_private_daemon_data_dir() -> Result<std::path::PathBuf> {
+    let base = dirs::data_dir().context(
+        "resolving persistent per-user data directory; refusing insecure /tmp tcfsd state",
+    )?;
+    prepare_private_daemon_data_dir(&base.join("tcfsd"))
+}
+
+fn acquire_daemon_instance_lock(
+    data_dir: &std::path::Path,
+) -> Result<tcfs_sync::state::StateFileLock> {
+    tcfs_sync::state::StateFileLock::acquire(&data_dir.join("daemon-instance")).with_context(|| {
+        format!(
+            "acquiring exclusive tcfsd lifetime lock in {}",
+            data_dir.display()
+        )
+    })
+}
+
+fn open_daemon_state_cache(path: &std::path::Path) -> Result<tcfs_sync::state::StateCache> {
+    tcfs_sync::state::StateCache::open(path).with_context(|| {
+        format!(
+            "opening authoritative daemon state cache: {}",
+            path.display()
+        )
+    })
+}
+
 pub async fn run(config: TcfsConfig) -> Result<()> {
     info!("daemon starting");
 
-    // Root identities are a daemon trust boundary. Reject malformed mappings
-    // before opening storage, sockets, or caches; runtime selection adds
-    // symlink-aware existence and permission checks.
+    // Root identities and sensitive-key isolation are daemon trust boundaries.
+    // Reject malformed mappings or master-key overlap before opening storage,
+    // sockets, or caches; runtime selection adds symlink-aware existence and
+    // permission checks.
     crate::grpc::validate_registered_roots_config(&config)?;
 
-    // Ensure all required directories exist before anything else
+    // Persistent daemon authority must never fall back to a shared temporary
+    // directory. Establish and lock its private trust root before device/state,
+    // storage, watcher, NATS, or socket side effects can begin.
+    let data_dir = resolve_private_daemon_data_dir()?;
+    let _daemon_instance_lock = acquire_daemon_instance_lock(&data_dir)?;
+    let policy_store_path = data_dir.join("folder-policies.json");
+    let pending_delete_ledger_path = data_dir.join("pending-remote-deletes.json");
+    replay_pending_remote_deletes(
+        &pending_delete_ledger_path,
+        config.sync.sync_root.as_deref(),
+    )
+    .context("replaying pending remote-delete staging before daemon side effects")?;
+
+    // Prepare the remaining runtime directories only after durable recovery.
     ensure_dirs(&config);
 
     // ── Device identity ──────────────────────────────────────────────────
@@ -319,15 +594,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
     // Open state cache, purge stale entries, then wrap in Arc<Mutex>. The
     // canonical file is the `.json` sibling of the configured `state_db`; a
     // legacy `state.db`-only host is absorbed into it exactly once.
-    let state_json_path = absorb_legacy_state_db(&config.sync.state_db);
-    let mut state_cache_inner = tcfs_sync::state::StateCache::open(&state_json_path)
-        .unwrap_or_else(|e| {
-            warn!("state cache open failed: {e}  (starting fresh)");
-            tcfs_sync::state::StateCache::open(&std::path::PathBuf::from(
-                "/tmp/tcfsd-state.db.json",
-            ))
-            .expect("fallback state cache")
-        });
+    let state_json_path = absorb_legacy_state_db(&config.sync.state_db)?;
+    let mut state_cache_inner = open_daemon_state_cache(&state_json_path)?;
 
     // Purge entries with wrong remote prefix or stale tmp paths
     let resolved_prefix = config.storage.resolved_prefix();
@@ -338,7 +606,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             prefix = resolved_prefix,
             "purged stale state cache entries"
         );
-        let _ = state_cache_inner.flush();
+        state_cache_inner
+            .flush()
+            .context("persisting startup state-cache purge before automatic sync")?;
     }
 
     let state_cache = Arc::new(tokio::sync::Mutex::new(state_cache_inner));
@@ -432,14 +702,13 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         "blacklist configured"
     );
 
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("tcfsd");
-    let policy_store_path = data_dir.join("folder-policies.json");
-
     // Per-path locks: prevent concurrent operations on the same file.
     // Shared across the watcher/scheduler and the state sync loop.
     let path_locks = tcfs_sync::state::PathLocks::new();
+    // The durable remote-delete journal has one slot. Serialize every handler
+    // across path locks so concurrent deletes cannot replace each other's
+    // recovery intent.
+    let pending_delete_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     // ── File Watcher + Scheduler ─────────────────────────────────────
     // If sync_root is configured, start watching for local file changes
@@ -475,9 +744,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     // Watcher → Scheduler bridge: convert watch events to sync tasks.
                     // Consults the blacklist to filter excluded paths before scheduling.
                     let bridge_blacklist = blacklist.clone();
-                    let bridge_policy_store = {
-                        tcfs_sync::policy::PolicyStore::open(&policy_store_path).unwrap_or_default()
-                    };
+                    let bridge_policy_path = policy_store_path.clone();
                     tokio::spawn(async move {
                         while let Some(event) = watch_rx.recv().await {
                             // Check blacklist before scheduling. Full component
@@ -494,6 +761,21 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                 );
                                 continue;
                             }
+
+                            let bridge_policy_store = match open_automatic_policy_store(
+                                &bridge_policy_path,
+                                "watcher",
+                            ) {
+                                Ok(store) => store,
+                                Err(error) => {
+                                    warn!(
+                                        path = %event.path.display(),
+                                        error = %error,
+                                        "watcher: policy unavailable; skipping event fail-closed"
+                                    );
+                                    continue;
+                                }
+                            };
 
                             // Check per-folder policy (Never = skip)
                             if let Some(policy) = bridge_policy_store.get(&event.path) {
@@ -538,6 +820,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     let sched_master_key = master_key.clone();
                     let sched_path_locks = path_locks.clone();
                     let sched_config = config.clone();
+                    let sched_policy_path = policy_store_path.clone();
 
                     tokio::spawn({
                         let scheduler = scheduler.clone();
@@ -555,10 +838,35 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                     let mk = sched_master_key.clone();
                                     let locks = sched_path_locks.clone();
                                     let cfg = sched_config.clone();
+                                    let policy_path = sched_policy_path.clone();
 
                                     Box::pin(async move {
                                         // Acquire per-path lock to prevent concurrent operations
                                         let _lock_guard = locks.lock(&task.path).await;
+
+                                        let policy_store = match open_automatic_policy_store(
+                                            &policy_path,
+                                            "watcher scheduler",
+                                        ) {
+                                            Ok(store) => store,
+                                            Err(error) => {
+                                                warn!(
+                                                    path = %task.path.display(),
+                                                    error = %error,
+                                                    "watcher scheduler: policy unavailable; refusing mutation"
+                                                );
+                                                return Ok(());
+                                            }
+                                        };
+                                        if policy_store.effective_mode(&task.path)
+                                            == tcfs_sync::policy::SyncMode::Never
+                                        {
+                                            debug!(
+                                                path = %task.path.display(),
+                                                "watcher scheduler: skipped (Never policy)"
+                                            );
+                                            return Ok(());
+                                        }
 
                                         match task.op {
                                             tcfs_sync::scheduler::SyncOp::Push => {
@@ -881,7 +1189,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         master_key,
     );
 
-    // Load persisted auth credentials (best-effort)
+    // Load persisted auth credentials. Sessions and MFA state remain
+    // best-effort, but an existing single-use invite ledger is replay authority
+    // and must load successfully before the daemon accepts enrollment traffic.
     let totp_cred_path = data_dir.join("totp-credentials.json");
     if totp_cred_path.exists() {
         if let Err(e) = impl_.load_totp_credentials(&totp_cred_path).await {
@@ -895,11 +1205,20 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         }
     }
     let invite_redemption_path = data_dir.join("invite-redemptions.json");
-    if invite_redemption_path.exists() {
-        if let Err(e) = impl_.load_invite_redemptions(&invite_redemption_path).await {
-            warn!("failed to load invite redemptions: {e}");
+    load_invite_redemptions_for_startup(&impl_, &invite_redemption_path).await?;
+    let device_authorization_path = data_dir.join("device-authorizations.json");
+    if device_authorization_path.exists() {
+        if let Err(e) = impl_
+            .load_device_authorizations(&device_authorization_path)
+            .await
+        {
+            warn!("failed to load device authorizations: {e}");
         }
     }
+    impl_
+        .ensure_local_device_authorization()
+        .await
+        .context("persisting local device authorization")?;
 
     // Connect to NATS for fleet state sync (non-blocking, best-effort)
     let nats_url = &config.sync.nats_url;
@@ -959,9 +1278,13 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         impl_.state_cache_handle(),
                         sync_root,
                         storage_prefix,
+                        config.clone(),
+                        impl_.master_key_handle(),
                         impl_.vfs_handle.clone(),
                         path_locks.clone(),
                         policy_path.clone(),
+                        pending_delete_ledger_path.clone(),
+                        pending_delete_lock.clone(),
                         download_threshold,
                     )
                     .await;
@@ -1071,6 +1394,10 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 0
             };
             let recon_blacklist = blacklist.clone();
+            let recon_policy_path = policy_store_path.clone();
+            let recon_path_locks = path_locks.clone();
+            let recon_pending_delete_lock = pending_delete_lock.clone();
+            let recon_pending_delete_ledger_path = pending_delete_ledger_path.clone();
 
             info!(
                 interval_secs = recon_interval,
@@ -1108,6 +1435,19 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                         }
                     };
                     drop(op_guard);
+
+                    // A missing policy file is the legitimate empty first-run
+                    // store. Any existing unreadable/corrupt store is authority
+                    // failure, so do no planning that could later be executed.
+                    if let Err(error) =
+                        open_automatic_policy_store(&recon_policy_path, "periodic reconcile")
+                    {
+                        warn!(
+                            error = %error,
+                            "periodic reconcile policy unavailable; skipping cycle fail-closed"
+                        );
+                        continue;
+                    }
 
                     // Enable `.git`-aware fast-forward conflict resolution when
                     // syncing raw `.git` dirs. Other knobs keep their defaults.
@@ -1154,20 +1494,81 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                     drop(cache);
 
                     let s = &plan.summary;
-                    if s.pushes == 0 && s.pulls == 0 && s.conflicts == 0 {
+                    if !reconcile_plan_has_mutations(&plan) {
                         debug!(up_to_date = s.up_to_date, "reconcile: nothing to do");
                     } else {
                         info!(
                             pushes = s.pushes,
                             pulls = s.pulls,
+                            local_deletes = s.local_deletes,
+                            remote_deletes = s.remote_deletes,
+                            directories = s.directories,
                             conflicts = s.conflicts,
                             up_to_date = s.up_to_date,
                             "reconcile: executing plan"
                         );
 
-                        // Reuse the encryption context built before the plan
-                        // (same master key, same device/config).
-                        let enc_ctx = &recon_enc;
+                        let lock_paths = match reconcile_lock_paths(&plan, &recon_root) {
+                            Ok(paths) => paths,
+                            Err(error) => {
+                                warn!(
+                                    error = %error,
+                                    "periodic reconcile plan contains an unsafe lock path; skipping cycle"
+                                );
+                                continue;
+                            }
+                        };
+
+                        // Match NATS remote-delete ordering exactly: the single
+                        // durable ledger first, then canonical sorted path locks,
+                        // then policy/state. This preserves raw-Git plan groups
+                        // while preventing a batch executor from crossing a
+                        // staged local delete.
+                        let _pending_delete_guard = recon_pending_delete_lock.lock().await;
+                        if let Err(error) =
+                            ensure_pending_delete_ledger_clear(&recon_pending_delete_ledger_path)
+                        {
+                            warn!(
+                                error = %error,
+                                "periodic reconcile withheld while remote-delete recovery remains unresolved"
+                            );
+                            continue;
+                        }
+                        let mut _path_guards = Vec::with_capacity(lock_paths.len());
+                        for path in &lock_paths {
+                            _path_guards.push(recon_path_locks.lock(path).await);
+                        }
+
+                        let policy_store = match open_automatic_policy_store(
+                            &recon_policy_path,
+                            "periodic reconcile execution",
+                        ) {
+                            Ok(store) => store,
+                            Err(error) => {
+                                warn!(
+                                    error = %error,
+                                    "periodic reconcile policy changed or became unavailable; skipping execution"
+                                );
+                                continue;
+                            }
+                        };
+                        match first_never_reconcile_path(&plan, &recon_root, &policy_store) {
+                            Ok(Some(path)) => {
+                                warn!(
+                                    path = %path,
+                                    "periodic reconcile plan intersects Never policy; skipping whole cycle to preserve grouped actions"
+                                );
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                warn!(
+                                    error = %error,
+                                    "periodic reconcile policy validation failed; skipping execution"
+                                );
+                                continue;
+                            }
+                        }
 
                         let mut cache = recon_state.lock().await;
                         match tcfs_sync::reconcile::execute_plan(
@@ -1177,7 +1578,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                             &recon_prefix,
                             &mut cache,
                             &recon_device,
-                            enc_ctx.as_ref(),
+                            recon_enc.as_ref(),
                             None,
                         )
                         .await
@@ -1234,6 +1635,8 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                                         within_grace = report.skipped_within_grace.len(),
                                         missing_last_modified =
                                             report.skipped_missing_last_modified.len(),
+                                        without_atomic_delete =
+                                            report.skipped_without_atomic_delete.len(),
                                         delete_errors = report.delete_errors.len(),
                                         scanned = report.scanned_chunks,
                                         referenced = report.referenced_chunks,
@@ -1284,7 +1687,16 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
                 });
 
                 let policy_store =
-                    tcfs_sync::policy::PolicyStore::open(&unsync_policy_path).unwrap_or_default();
+                    match open_automatic_policy_store(&unsync_policy_path, "auto-unsync") {
+                        Ok(store) => store,
+                        Err(error) => {
+                            warn!(
+                                error = %error,
+                                "auto-unsync policy unavailable; skipping sweep fail-closed"
+                            );
+                            continue;
+                        }
+                    };
                 let mut cache = unsync_state.lock().await;
 
                 if unsync_dry_run {
@@ -1357,7 +1769,9 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         info!(socket = %fp.display(), "gRPC: FileProvider socket");
     }
     if let Some(ref addr) = listen_addr {
-        info!(addr = %addr, "gRPC: TCP listening");
+        anyhow::bail!(
+            "refusing plaintext gRPC TCP listener at {addr}; use the owner-only Unix socket through SSH forwarding until TLS/mTLS transport is configured"
+        );
     }
 
     crate::grpc::serve(
@@ -1394,7 +1808,12 @@ fn spawn_remote_index_discovery(
             return;
         };
 
-        let sync_root = sync_root.unwrap_or_else(|| std::path::PathBuf::from("/tmp/tcfs"));
+        let Some(sync_root) = sync_root else {
+            debug!(
+                "remote index discovery skipped: no configured sync root for authoritative local keys"
+            );
+            return;
+        };
         let discovery = tokio::time::timeout(
             REMOTE_INDEX_DISCOVERY_TIMEOUT,
             tcfs_sync::reconcile::list_remote_index(&operator, &storage_prefix),
@@ -1460,6 +1879,142 @@ fn spawn_remote_index_discovery(
 }
 
 /// Spawn a background task that consumes state events from NATS.
+///
+/// NATS paths are notifications from another machine, not local filesystem
+/// authority. Validate them before they participate in policy, state-cache,
+/// lock, or filesystem lookups, and keep every configured-root target beneath
+/// the canonical sync root (including through existing parent symlinks).
+fn nats_automatic_mutation_rel_path(event: &tcfs_sync::StateEvent) -> Option<&str> {
+    match event {
+        tcfs_sync::StateEvent::FileSynced { rel_path, .. }
+        | tcfs_sync::StateEvent::FileDeleted { rel_path, .. }
+        | tcfs_sync::StateEvent::ConflictResolved { rel_path, .. } => Some(rel_path),
+        _ => None,
+    }
+}
+
+fn nats_fixed_ingress_deny<'a>(
+    blacklist: &tcfs_sync::blacklist::Blacklist,
+    event: &'a tcfs_sync::StateEvent,
+) -> Option<(&'a str, tcfs_sync::blacklist::BlacklistReason)> {
+    let rel_path = nats_automatic_mutation_rel_path(event)?;
+    blacklist
+        .check_fixed_ingress_path_components(std::path::Path::new(rel_path))
+        .map(|reason| (rel_path, reason))
+}
+
+fn contained_nats_target(
+    sync_root: &std::path::Path,
+    rel_path: &str,
+) -> Result<std::path::PathBuf> {
+    tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+        .context("invalid NATS event relative path")?;
+
+    let canonical_root = std::fs::canonicalize(sync_root)
+        .with_context(|| format!("canonicalizing sync root: {}", sync_root.display()))?;
+    let target = canonical_root.join(rel_path);
+    anyhow::ensure!(
+        target.starts_with(&canonical_root),
+        "NATS event target escaped sync root: {}",
+        target.display()
+    );
+
+    // Do not follow the final component: replacing or unlinking a symlink at
+    // the target itself is contained. Existing parent components, however,
+    // must resolve beneath the root or a write/remove could escape through a
+    // directory symlink. For not-yet-created parents, inspect the nearest
+    // existing ancestor.
+    let mut ancestor = target
+        .parent()
+        .context("NATS event target has no parent beneath sync root")?;
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                let resolved = std::fs::canonicalize(ancestor).with_context(|| {
+                    format!(
+                        "canonicalizing existing NATS target ancestor: {}",
+                        ancestor.display()
+                    )
+                })?;
+                anyhow::ensure!(
+                    resolved == canonical_root || resolved.starts_with(&canonical_root),
+                    "NATS event target ancestor escaped sync root: {} -> {}",
+                    ancestor.display(),
+                    resolved.display()
+                );
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor
+                    .parent()
+                    .context("NATS event target has no existing ancestor beneath sync root")?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspecting NATS target ancestor: {}", ancestor.display())
+                });
+            }
+        }
+    }
+
+    Ok(target)
+}
+
+fn validate_nats_resolved_mutation_target(
+    config: &TcfsConfig,
+    fixed_ingress_blacklist: &tcfs_sync::blacklist::Blacklist,
+    rel_path: &str,
+    local_path: &std::path::Path,
+) -> Result<()> {
+    if let Some(reason) = fixed_ingress_blacklist.check_fixed_ingress_path_components(local_path) {
+        anyhow::bail!(
+            "resolved NATS target for {rel_path:?} crosses a fixed security fence ({reason}): {}",
+            local_path.display()
+        );
+    }
+    tcfs_core::config::validate_sync_selection_excludes_master_key(config, local_path)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| {
+            format!(
+                "resolved NATS target for {rel_path:?} selects configured master-key material: {}",
+                local_path.display()
+            )
+        })
+}
+
+/// Resolve a validated remote relative path to the daemon's local key. A
+/// configured sync root is the preferred authority. Legacy rootless operation
+/// may select only an already-enrolled state entry, and validation still occurs
+/// before opening that state cache.
+async fn nats_local_path(
+    sync_root: Option<&std::path::Path>,
+    rel_path: &str,
+    state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+    config: &TcfsConfig,
+    fixed_ingress_blacklist: &tcfs_sync::blacklist::Blacklist,
+) -> Result<Option<std::path::PathBuf>> {
+    tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+        .context("invalid NATS event relative path")?;
+
+    let local_path = if let Some(root) = sync_root {
+        Some(contained_nats_target(root, rel_path)?)
+    } else {
+        let cache = state_cache.lock().await;
+        cache
+            .get_by_rel_path(rel_path)
+            .map(|(key, _)| std::path::PathBuf::from(key))
+    };
+    if let Some(local_path) = local_path.as_deref() {
+        validate_nats_resolved_mutation_target(
+            config,
+            fixed_ingress_blacklist,
+            rel_path,
+            local_path,
+        )?;
+    }
+    Ok(local_path)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_state_sync_loop(
     nats: &tcfs_sync::NatsClient,
@@ -1469,9 +2024,13 @@ async fn spawn_state_sync_loop(
     state_cache: Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
     sync_root: Option<std::path::PathBuf>,
     storage_prefix: String,
+    tcfs_config: Arc<TcfsConfig>,
+    master_key: Arc<tokio::sync::Mutex<Option<MasterKey>>>,
     vfs_handle: tokio::sync::watch::Receiver<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
     path_locks: tcfs_sync::state::PathLocks,
     policy_path: std::path::PathBuf,
+    pending_delete_ledger_path: std::path::PathBuf,
+    pending_delete_lock: Arc<tokio::sync::Mutex<()>>,
     auto_download_threshold: u64,
 ) {
     use futures::StreamExt;
@@ -1480,6 +2039,8 @@ async fn spawn_state_sync_loop(
         Ok(stream) => {
             let device_id = device_id.to_string();
             let conflict_mode = conflict_mode.to_string();
+            let fixed_ingress_blacklist =
+                tcfs_sync::blacklist::Blacklist::from_sync_config(&tcfs_config.sync);
             tokio::spawn(async move {
                 let mut stream = std::pin::pin!(stream);
                 info!(device = %device_id, "state sync loop started");
@@ -1497,15 +2058,67 @@ async fn spawn_state_sync_loop(
                                 continue;
                             }
 
+                            if let Some((rel_path, reason)) =
+                                nats_fixed_ingress_deny(&fixed_ingress_blacklist, &msg.event)
+                            {
+                                let rel_path = rel_path.to_owned();
+                                warn!(
+                                    path = %rel_path,
+                                    reason = %reason,
+                                    event = %event_type,
+                                    "ACK-dropping fixed-deny NATS mutation event"
+                                );
+                                if let Err(error) = msg.ack().await {
+                                    warn!(
+                                        path = %rel_path,
+                                        error = %error,
+                                        "ack fixed-deny NATS event failed"
+                                    );
+                                }
+                                continue;
+                            }
+
                             match &msg.event {
                                 tcfs_sync::StateEvent::FileSynced {
                                     rel_path,
                                     blake3,
                                     size,
                                     vclock: remote_vclock,
-                                    manifest_path,
                                     ..
                                 } => {
+                                    let file_path = match nats_local_path(
+                                        sync_root.as_deref(),
+                                        rel_path,
+                                        &state_cache,
+                                        &tcfs_config,
+                                        &fixed_ingress_blacklist,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(path)) => path,
+                                        Ok(None) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                "dropping NATS file event: no configured sync root or enrolled state entry"
+                                            );
+                                            if let Err(e) = msg.ack().await {
+                                                warn!("ack invalid state event failed: {e}");
+                                            }
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                error = %error,
+                                                "dropping invalid or uncontained NATS file event"
+                                            );
+                                            if let Err(e) = msg.ack().await {
+                                                warn!("ack invalid state event failed: {e}");
+                                            }
+                                            continue;
+                                        }
+                                    };
+
                                     info!(
                                         from_device = %event_device,
                                         path = %rel_path,
@@ -1516,13 +2129,20 @@ async fn spawn_state_sync_loop(
                                     );
 
                                     // Check folder policy before auto-pulling
-                                    let policy_store =
-                                        tcfs_sync::policy::PolicyStore::open(&policy_path)
-                                            .unwrap_or_default();
-                                    let file_path = sync_root
-                                        .as_ref()
-                                        .map(|r| r.join(rel_path))
-                                        .unwrap_or_else(|| std::path::PathBuf::from(rel_path));
+                                    let policy_store = match open_automatic_policy_store(
+                                        &policy_path,
+                                        "NATS FileSynced",
+                                    ) {
+                                        Ok(store) => store,
+                                        Err(error) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                error = %error,
+                                                "withholding NATS FileSynced ack: policy unavailable"
+                                            );
+                                            continue;
+                                        }
+                                    };
                                     let effective_mode = policy_store.effective_mode(&file_path);
 
                                     // Never-mode paths are completely ignored
@@ -1537,25 +2157,16 @@ async fn spawn_state_sync_loop(
                                         continue;
                                     }
 
-                                    // OnDemand mode: only auto-pull if size ≤ threshold
-                                    if effective_mode == tcfs_sync::policy::SyncMode::OnDemand
-                                        && !policy_store.should_auto_download(
-                                            &file_path,
-                                            *size,
-                                            auto_download_threshold,
-                                        )
-                                    {
-                                        debug!(
-                                            path = %rel_path,
-                                            size,
-                                            threshold = auto_download_threshold,
-                                            "skipping auto-pull: OnDemand file exceeds download threshold"
-                                        );
-                                        if let Err(e) = msg.ack().await {
-                                            warn!("ack failed: {e}");
-                                        }
-                                        continue;
-                                    }
+                                    // The NATS size is only diagnostic: a delayed or forged
+                                    // event must not decide OnDemand policy for whichever
+                                    // object the exact current path index now selects.
+                                    let auto_download_limit = (effective_mode
+                                        == tcfs_sync::policy::SyncMode::OnDemand)
+                                        .then(|| {
+                                            policy_store
+                                                .effective_download_threshold(&file_path)
+                                                .unwrap_or(auto_download_threshold)
+                                        });
 
                                     // Always mode: unconditional auto-pull
                                     // OnDemand mode (under threshold): conditional auto-pull
@@ -1568,12 +2179,14 @@ async fn spawn_state_sync_loop(
                                                 blake3,
                                                 *size,
                                                 remote_vclock,
-                                                manifest_path,
+                                                &file_path,
                                                 &operator,
                                                 &state_cache,
                                                 &path_locks,
-                                                sync_root.as_deref(),
                                                 &storage_prefix,
+                                                auto_download_limit,
+                                                &tcfs_config,
+                                                &master_key,
                                             )
                                             .await;
                                             if !should_ack {
@@ -1600,91 +2213,176 @@ async fn spawn_state_sync_loop(
                                         }
                                     }
                                 }
-                                tcfs_sync::StateEvent::ConflictResolved {
-                                    rel_path,
-                                    merged_vclock,
-                                    ..
-                                } => {
+                                tcfs_sync::StateEvent::ConflictResolved { rel_path, .. } => {
+                                    let local_path = match nats_local_path(
+                                        sync_root.as_deref(),
+                                        rel_path,
+                                        &state_cache,
+                                        &tcfs_config,
+                                        &fixed_ingress_blacklist,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(path)) => path,
+                                        Ok(None) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                "dropping NATS conflict event: no configured sync root or enrolled state entry"
+                                            );
+                                            if let Err(e) = msg.ack().await {
+                                                warn!("ack invalid state event failed: {e}");
+                                            }
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                error = %error,
+                                                "dropping invalid or uncontained NATS conflict event"
+                                            );
+                                            if let Err(e) = msg.ack().await {
+                                                warn!("ack invalid state event failed: {e}");
+                                            }
+                                            continue;
+                                        }
+                                    };
+
                                     info!(
                                         from_device = %event_device,
                                         path = %rel_path,
-                                        "remote conflict resolved, merging vclock"
+                                        "remote conflict resolved; reconciling exact current index"
                                     );
-                                    // Merge the resolved vclock into our local state
-                                    let mut cache = state_cache.lock().await;
-                                    let local_path = sync_root
-                                        .as_ref()
-                                        .map(|r| r.join(rel_path))
-                                        .unwrap_or_else(|| std::path::PathBuf::from(rel_path));
-                                    if let Some(entry) = cache.get(&local_path).cloned() {
-                                        let mut updated_vclock = entry.vclock.clone();
-                                        updated_vclock.merge(merged_vclock);
-                                        let updated = tcfs_sync::state::SyncState {
-                                            vclock: updated_vclock,
-                                            ..entry
-                                        };
-                                        cache.set(&local_path, updated);
-                                        if let Err(e) = cache.flush() {
-                                            warn!(error = %e, "state cache flush failed");
+
+                                    let policy_store = match open_automatic_policy_store(
+                                        &policy_path,
+                                        "NATS ConflictResolved",
+                                    ) {
+                                        Ok(store) => store,
+                                        Err(error) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                error = %error,
+                                                "withholding NATS ConflictResolved ack: policy unavailable"
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    let effective_mode = policy_store.effective_mode(&local_path);
+
+                                    // ConflictResolved payload clocks are notifications, not
+                                    // storage authority. In auto mode, route the wake-up through
+                                    // the same exact-index reconciliation as FileSynced. A failed
+                                    // durable state update must withhold the JetStream ack.
+                                    if conflict_mode == "auto"
+                                        && effective_mode != tcfs_sync::policy::SyncMode::Never
+                                    {
+                                        let auto_download_limit = (effective_mode
+                                            == tcfs_sync::policy::SyncMode::OnDemand)
+                                            .then(|| {
+                                                policy_store
+                                                    .effective_download_threshold(&local_path)
+                                                    .unwrap_or(auto_download_threshold)
+                                            });
+                                        let should_ack = handle_conflict_resolved(
+                                            &device_id,
+                                            &event_device,
+                                            rel_path,
+                                            &local_path,
+                                            &operator,
+                                            &state_cache,
+                                            &path_locks,
+                                            &storage_prefix,
+                                            auto_download_limit,
+                                            &tcfs_config,
+                                            &master_key,
+                                        )
+                                        .await;
+                                        if !should_ack {
+                                            continue;
                                         }
                                     }
                                 }
-                                tcfs_sync::StateEvent::FileDeleted {
-                                    rel_path,
-                                    vclock: _remote_vclock,
-                                    ..
-                                } => {
+                                tcfs_sync::StateEvent::FileDeleted { rel_path, .. } => {
+                                    let local_path = match nats_local_path(
+                                        sync_root.as_deref(),
+                                        rel_path,
+                                        &state_cache,
+                                        &tcfs_config,
+                                        &fixed_ingress_blacklist,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(path)) => path,
+                                        Ok(None) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                "dropping NATS delete event: no configured sync root or enrolled state entry"
+                                            );
+                                            if let Err(e) = msg.ack().await {
+                                                warn!("ack invalid state event failed: {e}");
+                                            }
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                error = %error,
+                                                "dropping invalid or uncontained NATS delete event"
+                                            );
+                                            if let Err(e) = msg.ack().await {
+                                                warn!("ack invalid state event failed: {e}");
+                                            }
+                                            continue;
+                                        }
+                                    };
+
                                     info!(
                                         from_device = %event_device,
                                         path = %rel_path,
                                         "remote file deleted"
                                     );
 
-                                    // Determine local path
-                                    let local_path = sync_root
-                                        .as_ref()
-                                        .map(|r| r.join(rel_path))
-                                        .unwrap_or_else(|| std::path::PathBuf::from(rel_path));
-
-                                    // Guard: defer delete if the file is locked by an active operation
-                                    if path_locks.is_locked(&local_path).await {
-                                        warn!(path = %local_path.display(), "deferring remote delete: file is locked by active operation");
+                                    let policy_store = match open_automatic_policy_store(
+                                        &policy_path,
+                                        "NATS FileDeleted",
+                                    ) {
+                                        Ok(store) => store,
+                                        Err(error) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                error = %error,
+                                                "withholding NATS FileDeleted ack: policy unavailable"
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    let effective_mode = policy_store.effective_mode(&local_path);
+                                    let outcome = handle_remote_delete(
+                                        &device_id,
+                                        &event_device,
+                                        rel_path,
+                                        &local_path,
+                                        &operator,
+                                        &state_cache,
+                                        &path_locks,
+                                        &storage_prefix,
+                                        effective_mode,
+                                        &pending_delete_ledger_path,
+                                        &pending_delete_lock,
+                                    )
+                                    .await;
+                                    if outcome == RemoteDeleteOutcome::Withhold {
                                         continue;
                                     }
 
-                                    // Remove local file if it exists
-                                    if local_path.exists() {
-                                        if let Err(e) = tokio::fs::remove_file(&local_path).await {
-                                            warn!(
-                                                path = %local_path.display(),
-                                                "failed to remove local file for remote delete: {e}"
-                                            );
-                                        } else {
-                                            info!(
-                                                path = %local_path.display(),
-                                                from_device = %event_device,
-                                                "removed local file (remote delete)"
-                                            );
+                                    if outcome == RemoteDeleteOutcome::AckDeleted {
+                                        // Invalidate FUSE cache only after both the guarded
+                                        // local delete and state-cache flush have committed.
+                                        if let Some(ref vfs) = *vfs_handle.borrow() {
+                                            let vpath = format!("/{}", rel_path);
+                                            vfs.invalidate_path(&vpath);
+                                            debug!(path = %vpath, "FUSE cache invalidated for deleted file");
                                         }
-                                    }
-
-                                    // Remove from state cache and merge vclock
-                                    let mut cache = state_cache.lock().await;
-                                    cache.remove(&local_path);
-                                    // Also try by rel_path (handles path normalization)
-                                    if let Some((key, _)) = cache.get_by_rel_path(rel_path) {
-                                        let key_owned = key.to_string();
-                                        cache.remove(std::path::Path::new(&key_owned));
-                                    }
-                                    if let Err(e) = cache.flush() {
-                                        warn!(error = %e, "state cache flush failed");
-                                    }
-
-                                    // Invalidate FUSE cache so the file disappears
-                                    if let Some(ref vfs) = *vfs_handle.borrow() {
-                                        let vpath = format!("/{}", rel_path);
-                                        vfs.invalidate_path(&vpath);
-                                        debug!(path = %vpath, "FUSE cache invalidated for deleted file");
                                     }
                                 }
                                 tcfs_sync::StateEvent::DeviceOnline { device_id: did, .. } => {
@@ -1730,6 +2428,1381 @@ fn auto_conflict_must_defer(rel_path: &str) -> bool {
     tcfs_sync::git_safety::repo_root_for_git_path(std::path::Path::new(""), rel_path).is_some()
 }
 
+async fn nats_snapshot_still_current(
+    op: &opendal::Operator,
+    snapshot: &tcfs_sync::engine::IndexedManifestSnapshot,
+) -> bool {
+    match tcfs_sync::engine::indexed_manifest_snapshot_is_current(op, snapshot).await {
+        Ok(true) => true,
+        Ok(false) => {
+            warn!(
+                path = %snapshot.rel_path(),
+                manifest = %snapshot.manifest_path(),
+                "NATS indexed snapshot changed before acknowledgement; withholding ack"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(
+                path = %snapshot.rel_path(),
+                manifest = %snapshot.manifest_path(),
+                error = %error,
+                "failed to recheck NATS indexed snapshot; withholding ack"
+            );
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteDeleteOutcome {
+    /// The event is safe to acknowledge, but no local state was mutated.
+    AckIgnored,
+    /// The authoritative remote absence was committed locally and is safe to acknowledge.
+    AckDeleted,
+    /// A retry or repo-group reconcile is required; the caller must not acknowledge.
+    Withhold,
+}
+
+enum CurrentRemoteDeleteState {
+    Missing,
+    Deleted,
+    Live(Box<tcfs_sync::engine::IndexedManifestSnapshot>),
+}
+
+/// Resolve the exact path without collapsing a durable v4 tombstone into a
+/// missing object. Only `Deleted` may authorize local removal.
+async fn current_remote_delete_state(
+    op: &opendal::Operator,
+    rel_path: &str,
+    storage_prefix: &str,
+) -> Result<CurrentRemoteDeleteState> {
+    match tcfs_sync::index_entry::read_exact_index_path_state(op, storage_prefix, rel_path).await? {
+        tcfs_sync::index_entry::ExactIndexPathState::Missing => {
+            Ok(CurrentRemoteDeleteState::Missing)
+        }
+        tcfs_sync::index_entry::ExactIndexPathState::Deleted => {
+            Ok(CurrentRemoteDeleteState::Deleted)
+        }
+        tcfs_sync::index_entry::ExactIndexPathState::Live => {
+            let snapshot = tcfs_sync::engine::resolve_exact_indexed_manifest_snapshot(
+                op,
+                rel_path,
+                storage_prefix,
+            )
+            .await?
+            .context("exact index changed or is preparing while binding remote-delete authority")?;
+            Ok(CurrentRemoteDeleteState::Live(Box::new(snapshot)))
+        }
+    }
+}
+
+const PENDING_REMOTE_DELETE_LEDGER_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingRemoteDelete {
+    rel_path: String,
+    staged_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingRemoteDeleteLedger {
+    version: u32,
+    pending: Option<PendingRemoteDelete>,
+}
+
+impl Default for PendingRemoteDeleteLedger {
+    fn default() -> Self {
+        Self {
+            version: PENDING_REMOTE_DELETE_LEDGER_VERSION,
+            pending: None,
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+unsafe extern "C" {
+    #[link_name = "renamex_np"]
+    fn tcfs_renamex_np(
+        from: *const libc::c_char,
+        to: *const libc::c_char,
+        flags: libc::c_uint,
+    ) -> libc::c_int;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+fn path_to_c_string(path: &std::path::Path) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path contains a NUL byte: {}", path.display()),
+        )
+    })
+}
+
+/// Atomically rename `source` to `destination` only while the destination is
+/// absent. An ordinary POSIX rename silently overwrites a path recreated after
+/// our last check, which is never safe for delete staging or rollback.
+#[cfg(target_os = "linux")]
+fn rename_noreplace(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    let source = path_to_c_string(source)?;
+    let destination = path_to_c_string(destination)?;
+    // SAFETY: both C strings are live for the call, use valid AT_FDCWD
+    // descriptors, and `renameat2` does not retain their pointers.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn rename_noreplace(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    // Darwin's public RENAME_EXCL flag for renamex_np(2).
+    const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+
+    let source = path_to_c_string(source)?;
+    let destination = path_to_c_string(destination)?;
+    // SAFETY: both C strings are live for the call and renamex_np does not
+    // retain their pointers.
+    let result = unsafe { tcfs_renamex_np(source.as_ptr(), destination.as_ptr(), RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+fn rename_noreplace(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "atomic rename-without-replacement is unsupported: {} -> {}",
+            source.display(),
+            destination.display()
+        ),
+    ))
+}
+
+fn sync_remote_delete_directory(path: &std::path::Path) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::File::open(parent)
+            .with_context(|| format!("opening remote-delete directory: {}", parent.display()))?
+            .sync_all()
+            .with_context(|| format!("syncing remote-delete directory: {}", parent.display()))?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = path;
+    Ok(())
+}
+
+fn validate_pending_delete_ledger_file(file: &std::fs::File, path: &std::path::Path) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspecting pending-delete ledger: {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "pending-delete ledger must be a regular file: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        // SAFETY: `geteuid` has no preconditions and only reads identity.
+        let effective_uid = unsafe { libc::geteuid() };
+        anyhow::ensure!(
+            metadata.uid() == effective_uid,
+            "pending-delete ledger must be owned by effective uid {effective_uid}: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            metadata.nlink() == 1,
+            "pending-delete ledger must have exactly one hard link: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            metadata.mode() & 0o077 == 0,
+            "pending-delete ledger must be mode 0600 or stricter: {}",
+            path.display()
+        );
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    tcfs_sync::path_acl::reject_write_grant_acl_fd(file, path).with_context(|| {
+        format!(
+            "validating pending-delete ledger descriptor ACL: {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn read_pending_delete_ledger(path: &std::path::Path) -> Result<PendingRemoteDeleteLedger> {
+    use std::io::Read;
+
+    let link_metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PendingRemoteDeleteLedger::default())
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspecting pending-delete ledger path: {}", path.display())
+            })
+        }
+    };
+    anyhow::ensure!(
+        !link_metadata.file_type().is_symlink(),
+        "pending-delete ledger must not be a symlink: {}",
+        path.display()
+    );
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening pending-delete ledger: {}", path.display()))?;
+    validate_pending_delete_ledger_file(&file, path)?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("reading pending-delete ledger: {}", path.display()))?;
+    validate_pending_delete_ledger_file(&file, path)?;
+    let ledger: PendingRemoteDeleteLedger = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing pending-delete ledger: {}", path.display()))?;
+    anyhow::ensure!(
+        ledger.version == PENDING_REMOTE_DELETE_LEDGER_VERSION,
+        "unsupported pending-delete ledger version {}: {}",
+        ledger.version,
+        path.display()
+    );
+    Ok(ledger)
+}
+
+fn write_pending_delete_ledger(
+    path: &std::path::Path,
+    ledger: &PendingRemoteDeleteLedger,
+) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "creating pending-delete ledger directory: {}",
+            parent.display()
+        )
+    })?;
+    let bytes = serde_json::to_vec_pretty(ledger).context("serializing pending-delete ledger")?;
+    let tmp_path = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("pending-remote-deletes"),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&tmp_path).with_context(|| {
+            format!(
+                "creating pending-delete ledger temp: {}",
+                tmp_path.display()
+            )
+        })?;
+        file.write_all(&bytes).with_context(|| {
+            format!("writing pending-delete ledger temp: {}", tmp_path.display())
+        })?;
+        file.sync_all().with_context(|| {
+            format!("syncing pending-delete ledger temp: {}", tmp_path.display())
+        })?;
+        drop(file);
+        rename_noreplace(&tmp_path, path)
+            .with_context(|| format!("installing pending-delete ledger: {}", path.display()))?;
+        sync_remote_delete_directory(path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+fn clear_pending_remote_delete(
+    ledger_path: &std::path::Path,
+    expected: &PendingRemoteDelete,
+) -> Result<()> {
+    let ledger = read_pending_delete_ledger(ledger_path)?;
+    anyhow::ensure!(
+        ledger.pending.as_ref() == Some(expected),
+        "pending-delete ledger changed before clear: {}",
+        ledger_path.display()
+    );
+    std::fs::remove_file(ledger_path).with_context(|| {
+        format!(
+            "removing committed pending-delete ledger: {}",
+            ledger_path.display()
+        )
+    })?;
+    sync_remote_delete_directory(ledger_path)
+}
+
+fn validate_remote_delete_staging_name(
+    local_path: &std::path::Path,
+    staged_name: &str,
+) -> Result<()> {
+    let local_name = local_path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .context("remote-delete local filename is not valid UTF-8")?;
+    let prefix = format!(".{local_name}.tcfs-delete-");
+    let nonce = staged_name
+        .strip_prefix(&prefix)
+        .and_then(|rest| rest.strip_suffix(".tc"))
+        .context("pending remote-delete staging name has an invalid shape")?;
+    let parsed = uuid::Uuid::parse_str(nonce).context("invalid remote-delete staging UUID")?;
+    anyhow::ensure!(
+        parsed.hyphenated().to_string() == nonce,
+        "pending remote-delete staging UUID is not canonical"
+    );
+    anyhow::ensure!(
+        std::path::Path::new(staged_name).components().count() == 1,
+        "pending remote-delete staging name must be one path component"
+    );
+    Ok(())
+}
+
+fn pending_remote_delete_entry(
+    rel_path: &str,
+    local_path: &std::path::Path,
+    staged_path: &std::path::Path,
+) -> Result<PendingRemoteDelete> {
+    tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+        .context("invalid pending remote-delete relative path")?;
+    anyhow::ensure!(
+        local_path.parent() == staged_path.parent(),
+        "pending remote-delete stage must be a same-directory sibling"
+    );
+    let staged_name = staged_path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .context("pending remote-delete staging filename is not valid UTF-8")?;
+    validate_remote_delete_staging_name(local_path, staged_name)?;
+    Ok(PendingRemoteDelete {
+        rel_path: rel_path.to_string(),
+        staged_name: staged_name.to_string(),
+    })
+}
+
+fn pending_remote_delete_paths(
+    sync_root: &std::path::Path,
+    pending: &PendingRemoteDelete,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let local_path = contained_nats_target(sync_root, &pending.rel_path)
+        .context("resolving pending remote-delete local path")?;
+    validate_remote_delete_staging_name(&local_path, &pending.staged_name)?;
+    let staged_path = local_path.with_file_name(&pending.staged_name);
+    anyhow::ensure!(
+        staged_path.parent() == local_path.parent(),
+        "pending remote-delete stage escaped its local parent"
+    );
+    Ok((local_path, staged_path))
+}
+
+fn ensure_pending_delete_ledger_clear(ledger_path: &std::path::Path) -> Result<()> {
+    let ledger = read_pending_delete_ledger(ledger_path)?;
+    anyhow::ensure!(
+        ledger.pending.is_none(),
+        "another remote delete remains pending: {}",
+        ledger_path.display()
+    );
+    Ok(())
+}
+
+fn stage_remote_delete_with_hook(
+    ledger_path: &std::path::Path,
+    rel_path: &str,
+    local_path: &std::path::Path,
+    staged_path: &std::path::Path,
+    after_rename: impl FnOnce() -> Result<()>,
+) -> Result<PendingRemoteDelete> {
+    let pending = pending_remote_delete_entry(rel_path, local_path, staged_path)?;
+    ensure_pending_delete_ledger_clear(ledger_path)?;
+    write_pending_delete_ledger(
+        ledger_path,
+        &PendingRemoteDeleteLedger {
+            version: PENDING_REMOTE_DELETE_LEDGER_VERSION,
+            pending: Some(pending.clone()),
+        },
+    )?;
+
+    if let Err(rename_error) = rename_noreplace(local_path, staged_path) {
+        if let Err(clear_error) = clear_pending_remote_delete(ledger_path, &pending) {
+            anyhow::bail!(
+                "staging remote delete failed: {rename_error}; clearing its durable intent also failed: {clear_error:#}"
+            );
+        }
+        return Err(rename_error).with_context(|| {
+            format!(
+                "renaming remote-delete target into staging: {} -> {}",
+                local_path.display(),
+                staged_path.display()
+            )
+        });
+    }
+    sync_remote_delete_directory(local_path)?;
+    after_rename()?;
+    Ok(pending)
+}
+
+fn stage_remote_delete(
+    ledger_path: &std::path::Path,
+    rel_path: &str,
+    local_path: &std::path::Path,
+    staged_path: &std::path::Path,
+) -> Result<PendingRemoteDelete> {
+    stage_remote_delete_with_hook(ledger_path, rel_path, local_path, staged_path, || Ok(()))
+}
+
+fn replay_pending_remote_deletes(
+    ledger_path: &std::path::Path,
+    sync_root: Option<&std::path::Path>,
+) -> Result<()> {
+    let ledger = read_pending_delete_ledger(ledger_path)?;
+    let Some(pending) = ledger.pending else {
+        return Ok(());
+    };
+    let sync_root = sync_root.context(
+        "pending remote-delete recovery requires the configured sync root that owns its bytes",
+    )?;
+    let (local_path, staged_path) = pending_remote_delete_paths(sync_root, &pending)?;
+
+    let staged_metadata = match std::fs::symlink_metadata(&staged_path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspecting pending remote-delete stage: {}",
+                    staged_path.display()
+                )
+            })
+        }
+    };
+    if let Some(metadata) = staged_metadata.as_ref() {
+        anyhow::ensure!(
+            metadata.is_file() || metadata.file_type().is_symlink(),
+            "pending remote-delete stage is neither a file nor symlink: {}",
+            staged_path.display()
+        );
+    }
+
+    match (
+        staged_metadata.is_some(),
+        std::fs::symlink_metadata(&local_path),
+    ) {
+        (true, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            match rename_noreplace(&staged_path, &local_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    warn!(
+                        path = %pending.rel_path,
+                        staged = %staged_path.display(),
+                        "pending remote-delete replay preserved staged bytes because the original path was recreated during recovery"
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "restoring pending remote-delete bytes: {} -> {}",
+                            staged_path.display(),
+                            local_path.display()
+                        )
+                    })
+                }
+            }
+            sync_remote_delete_directory(&local_path)?;
+            clear_pending_remote_delete(ledger_path, &pending)?;
+            info!(
+                path = %pending.rel_path,
+                "restored pending remote-delete bytes during startup replay"
+            );
+        }
+        (true, Ok(_)) => {
+            warn!(
+                path = %pending.rel_path,
+                staged = %staged_path.display(),
+                "pending remote-delete replay preserved staged bytes because the original path was recreated"
+            );
+        }
+        (false, Ok(_)) => {
+            clear_pending_remote_delete(ledger_path, &pending)?;
+            info!(
+                path = %pending.rel_path,
+                "cleared completed or rolled-back pending remote-delete intent"
+            );
+        }
+        (false, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            clear_pending_remote_delete(ledger_path, &pending)?;
+            info!(
+                path = %pending.rel_path,
+                "cleared completed pending remote-delete intent"
+            );
+        }
+        (false, Err(error)) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspecting pending remote-delete original: {}",
+                    local_path.display()
+                )
+            })
+        }
+        (true, Err(error)) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspecting pending remote-delete original: {}",
+                    local_path.display()
+                )
+            })
+        }
+    }
+    Ok(())
+}
+
+fn remote_delete_staging_path(local_path: &std::path::Path) -> std::path::PathBuf {
+    let mut staged_name = std::ffi::OsString::from(".");
+    staged_name.push(
+        local_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("tcfs-entry")),
+    );
+    staged_name.push(format!(
+        ".tcfs-delete-{}.tc",
+        uuid::Uuid::new_v4().hyphenated()
+    ));
+    local_path.with_file_name(staged_name)
+}
+
+/// Restore a same-directory delete staging rename without overwriting a path
+/// that reappeared independently. A failed restore leaves the uniquely named
+/// staging file in place so the original bytes are never discarded.
+async fn restore_staged_remote_delete(
+    rel_path: &str,
+    staged_path: &std::path::Path,
+    local_path: &std::path::Path,
+    ledger_path: &std::path::Path,
+    pending: &PendingRemoteDelete,
+) -> bool {
+    match rename_noreplace(staged_path, local_path) {
+        Ok(()) => {
+            if let Err(error) = sync_remote_delete_directory(local_path) {
+                warn!(
+                    path = %rel_path,
+                    error = %error,
+                    "restored staged remote delete but failed its directory fsync; durable intent retained"
+                );
+                return false;
+            }
+            if let Err(error) = clear_pending_remote_delete(ledger_path, pending) {
+                warn!(
+                    path = %rel_path,
+                    error = %error,
+                    "restored staged remote delete but failed to clear durable intent"
+                );
+                return false;
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            warn!(
+                path = %rel_path,
+                staged = %staged_path.display(),
+                "cannot restore staged remote delete without overwriting a newly created local path"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(
+                path = %rel_path,
+                staged = %staged_path.display(),
+                error = %error,
+                "failed to restore staged remote delete; original bytes remain staged"
+            );
+            false
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_remote_delete_conflict(
+    device_id: &str,
+    remote_device: &str,
+    rel_path: &str,
+    local_path: &std::path::Path,
+    actual_local_hash: Option<&str>,
+    cached: Option<&tcfs_sync::state::SyncState>,
+    state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+) -> bool {
+    let mut local_vclock = cached.map(|entry| entry.vclock.clone()).unwrap_or_default();
+    local_vclock.tick(device_id);
+    let conflict = tcfs_sync::conflict::ConflictInfo {
+        rel_path: rel_path.to_string(),
+        local_vclock,
+        // Remote index absence proves deletion, but it carries no
+        // authoritative clock. The NATS payload is only a wake-up signal and
+        // must not inject an unbound clock into durable conflict state.
+        remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+        local_blake3: actual_local_hash.unwrap_or("<absent>").to_string(),
+        remote_blake3: "<deleted>".to_string(),
+        local_device: device_id.to_string(),
+        remote_device: remote_device.to_string(),
+        detected_at: tcfs_sync::StateEvent::now(),
+        times_recorded: 0,
+        remote_manifest_key: None,
+    };
+
+    let mut cache = state_cache.lock().await;
+    let previous = cache.get(local_path).cloned();
+    watcher_record_conflict(&mut cache, local_path, conflict);
+    if let Err(error) = cache.flush() {
+        match previous {
+            Some(previous) => cache.set(local_path, previous),
+            None => cache.remove(local_path),
+        }
+        warn!(
+            path = %rel_path,
+            error = %error,
+            "failed to persist remote-delete conflict; withholding ack"
+        );
+        return false;
+    }
+    true
+}
+
+/// Treat a NATS FileDeleted event as a wake-up signal and apply it only while
+/// the exact current path index contains a durable v4 deletion tombstone and
+/// the local object still matches its cached identity. Physical absence is not
+/// deletion authority. The file is first parked by a same-directory rename so
+/// a state-cache flush failure can restore both halves of the local state.
+#[allow(clippy::too_many_arguments)]
+async fn handle_remote_delete(
+    device_id: &str,
+    remote_device: &str,
+    rel_path: &str,
+    local_path: &std::path::Path,
+    operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+    state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+    path_locks: &tcfs_sync::state::PathLocks,
+    storage_prefix: &str,
+    effective_mode: tcfs_sync::policy::SyncMode,
+    pending_delete_ledger_path: &std::path::Path,
+    pending_delete_lock: &Arc<tokio::sync::Mutex<()>>,
+) -> RemoteDeleteOutcome {
+    if let Err(error) = tcfs_sync::index_entry::validate_canonical_rel_path(rel_path) {
+        warn!(
+            path = %rel_path,
+            error = %error,
+            "dropping invalid NATS remote-delete path"
+        );
+        return RemoteDeleteOutcome::AckIgnored;
+    }
+
+    // Never-mode is an explicit local policy decision. It is safe to consume
+    // the notification without consulting or mutating storage/state.
+    if effective_mode == tcfs_sync::policy::SyncMode::Never {
+        debug!(
+            path = %rel_path,
+            "ignoring remote delete: folder policy is Never"
+        );
+        return RemoteDeleteOutcome::AckIgnored;
+    }
+
+    let _pending_delete_guard = pending_delete_lock.lock().await;
+    if let Err(error) = ensure_pending_delete_ledger_clear(pending_delete_ledger_path) {
+        warn!(
+            path = %rel_path,
+            error = %error,
+            "withholding remote delete while durable recovery intent remains unresolved"
+        );
+        return RemoteDeleteOutcome::Withhold;
+    }
+
+    let git_internal = auto_conflict_must_defer(rel_path);
+
+    let _lock_guard = path_locks.lock(local_path).await;
+    let op = {
+        let guard = operator.lock().await;
+        match guard.as_ref() {
+            Some(op) => op.clone(),
+            None => {
+                warn!(path = %rel_path, "no storage operator for NATS remote delete");
+                return RemoteDeleteOutcome::Withhold;
+            }
+        }
+    };
+
+    // A live exact snapshot makes this an obsolete delete notification. A
+    // physically missing index is not deletion authority: only a durable v4
+    // tombstone permits the local-delete state machine to continue.
+    match current_remote_delete_state(&op, rel_path, storage_prefix).await {
+        Ok(CurrentRemoteDeleteState::Live(snapshot)) => {
+            info!(
+                path = %rel_path,
+                current_hash = %snapshot.content_hash(),
+                "remote delete event is obsolete; exact path index is populated"
+            );
+            return if nats_snapshot_still_current(&op, &snapshot).await {
+                RemoteDeleteOutcome::AckIgnored
+            } else {
+                RemoteDeleteOutcome::Withhold
+            };
+        }
+        Ok(CurrentRemoteDeleteState::Deleted) => {}
+        Ok(CurrentRemoteDeleteState::Missing) => {
+            warn!(
+                path = %rel_path,
+                "remote delete notification has no durable v4 tombstone; withholding ack"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+        Err(error) => {
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to resolve exact delete authority for NATS remote delete; withholding ack"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+    }
+
+    let cached = {
+        let cache = state_cache.lock().await;
+        cache.get(local_path).cloned()
+    };
+    if cached.as_ref().is_some_and(|entry| {
+        matches!(
+            entry.status,
+            tcfs_sync::state::FileSyncStatus::Active | tcfs_sync::state::FileSyncStatus::Locked
+        )
+    }) {
+        info!(
+            path = %rel_path,
+            "deferring remote delete: local state is active or locked"
+        );
+        return RemoteDeleteOutcome::Withhold;
+    }
+
+    let expected_local = match tcfs_sync::engine::capture_local_fingerprint(local_path) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to capture local identity before NATS remote delete; withholding ack"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+    };
+    let actual_local_hash = match &expected_local {
+        tcfs_sync::engine::ExpectedLocalFingerprint::Absent => None,
+        tcfs_sync::engine::ExpectedLocalFingerprint::Tracked { blake3, .. } => {
+            Some(blake3.as_str())
+        }
+    };
+
+    // `.git` internals may only be changed by repo-group reconciliation, which
+    // owns Git locking, ref CAS, and loser parking. Still consume a no-op event
+    // after that reconcile has removed both local and cached state; otherwise a
+    // successfully completed grouped delete would redeliver forever.
+    if git_internal {
+        if cached.is_some() || actual_local_hash.is_some() {
+            warn!(
+                path = %rel_path,
+                "deferring .git-internal remote delete to repo-group reconciliation"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+        match current_remote_delete_state(&op, rel_path, storage_prefix).await {
+            Ok(CurrentRemoteDeleteState::Live(snapshot)) => {
+                return if nats_snapshot_still_current(&op, &snapshot).await {
+                    RemoteDeleteOutcome::AckIgnored
+                } else {
+                    RemoteDeleteOutcome::Withhold
+                };
+            }
+            Ok(CurrentRemoteDeleteState::Deleted) => {}
+            Ok(CurrentRemoteDeleteState::Missing) => {
+                warn!(
+                    path = %rel_path,
+                    "grouped Git delete convergence has no durable remote tombstone"
+                );
+                return RemoteDeleteOutcome::Withhold;
+            }
+            Err(error) => {
+                warn!(
+                    path = %rel_path,
+                    error = %error,
+                    "failed to recheck converged .git-internal remote delete"
+                );
+                return RemoteDeleteOutcome::Withhold;
+            }
+        }
+        let mut cache = state_cache.lock().await;
+        if let Err(error) = cache.flush() {
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to flush converged .git-internal delete state"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+        return RemoteDeleteOutcome::AckIgnored;
+    }
+
+    let local_diverged = match (&cached, actual_local_hash) {
+        (None, None) => false,
+        (Some(entry), Some(actual)) => entry.blake3 != actual,
+        // Untracked bytes and a missing tracked object are both local changes.
+        _ => true,
+    };
+
+    if local_diverged {
+        // Hashing may take time. Do not record a delete conflict if the exact
+        // path was republished while its local identity was being captured.
+        match current_remote_delete_state(&op, rel_path, storage_prefix).await {
+            Ok(CurrentRemoteDeleteState::Live(snapshot)) => {
+                return if nats_snapshot_still_current(&op, &snapshot).await {
+                    RemoteDeleteOutcome::AckIgnored
+                } else {
+                    RemoteDeleteOutcome::Withhold
+                };
+            }
+            Ok(CurrentRemoteDeleteState::Deleted) => {}
+            Ok(CurrentRemoteDeleteState::Missing) => {
+                warn!(
+                    path = %rel_path,
+                    "remote tombstone disappeared before delete-conflict persistence"
+                );
+                return RemoteDeleteOutcome::Withhold;
+            }
+            Err(error) => {
+                warn!(
+                    path = %rel_path,
+                    error = %error,
+                    "failed to recheck remote absence before recording delete conflict"
+                );
+                return RemoteDeleteOutcome::Withhold;
+            }
+        }
+
+        let persisted = persist_remote_delete_conflict(
+            device_id,
+            remote_device,
+            rel_path,
+            local_path,
+            actual_local_hash,
+            cached.as_ref(),
+            state_cache,
+        )
+        .await;
+        if persisted {
+            warn!(
+                path = %rel_path,
+                "local identity diverged from cached state; preserving it and withholding delete ack"
+            );
+        }
+        return RemoteDeleteOutcome::Withhold;
+    }
+
+    if cached
+        .as_ref()
+        .is_some_and(|entry| entry.status != tcfs_sync::state::FileSyncStatus::Synced)
+    {
+        info!(
+            path = %rel_path,
+            "deferring remote delete: tracked local state is not safely synchronized"
+        );
+        return RemoteDeleteOutcome::Withhold;
+    }
+
+    let tcfs_sync::engine::ExpectedLocalFingerprint::Tracked { .. } = &expected_local else {
+        // Both the local path and its cache entry are absent. Recheck remote
+        // authority, then require any pending state-cache changes to flush
+        // before acknowledging the completed deletion.
+        match current_remote_delete_state(&op, rel_path, storage_prefix).await {
+            Ok(CurrentRemoteDeleteState::Live(snapshot)) => {
+                return if nats_snapshot_still_current(&op, &snapshot).await {
+                    RemoteDeleteOutcome::AckIgnored
+                } else {
+                    RemoteDeleteOutcome::Withhold
+                };
+            }
+            Ok(CurrentRemoteDeleteState::Deleted) => {}
+            Ok(CurrentRemoteDeleteState::Missing) => {
+                warn!(
+                    path = %rel_path,
+                    "already-missing local path has no durable remote tombstone"
+                );
+                return RemoteDeleteOutcome::Withhold;
+            }
+            Err(error) => {
+                warn!(
+                    path = %rel_path,
+                    error = %error,
+                    "failed to recheck remote absence for already-missing local path"
+                );
+                return RemoteDeleteOutcome::Withhold;
+            }
+        }
+        let mut cache = state_cache.lock().await;
+        if let Err(error) = cache.flush() {
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "state cache flush failed for already-completed remote delete"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+        return RemoteDeleteOutcome::AckDeleted;
+    };
+
+    let cached = cached.expect("matching tracked local identity requires cached state");
+    let staged_path = remote_delete_staging_path(local_path);
+    let expected_pending = match pending_remote_delete_entry(rel_path, local_path, &staged_path) {
+        Ok(pending) => pending,
+        Err(error) => {
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to validate guarded remote-delete staging path"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+    };
+    let pending = match stage_remote_delete(
+        pending_delete_ledger_path,
+        rel_path,
+        local_path,
+        &staged_path,
+    ) {
+        Ok(pending) => pending,
+        Err(error) => {
+            if std::fs::symlink_metadata(&staged_path).is_ok() {
+                let _ = restore_staged_remote_delete(
+                    rel_path,
+                    &staged_path,
+                    local_path,
+                    pending_delete_ledger_path,
+                    &expected_pending,
+                )
+                .await;
+            }
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to durably stage local file for guarded remote delete"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+    };
+
+    let staged_fingerprint = match tcfs_sync::engine::capture_local_fingerprint(&staged_path) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            let _ = restore_staged_remote_delete(
+                rel_path,
+                &staged_path,
+                local_path,
+                pending_delete_ledger_path,
+                &pending,
+            )
+            .await;
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to verify staged local identity; withholding remote delete"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+    };
+    if staged_fingerprint != expected_local {
+        let _ = restore_staged_remote_delete(
+            rel_path,
+            &staged_path,
+            local_path,
+            pending_delete_ledger_path,
+            &pending,
+        )
+        .await;
+        warn!(
+            path = %rel_path,
+            "local identity changed while staging remote delete; withholding ack"
+        );
+        return RemoteDeleteOutcome::Withhold;
+    }
+
+    // The remote path may have been republished after the first absence read.
+    // Restore the local file before acknowledging such an obsolete event.
+    match current_remote_delete_state(&op, rel_path, storage_prefix).await {
+        Ok(CurrentRemoteDeleteState::Live(snapshot)) => {
+            if !restore_staged_remote_delete(
+                rel_path,
+                &staged_path,
+                local_path,
+                pending_delete_ledger_path,
+                &pending,
+            )
+            .await
+            {
+                return RemoteDeleteOutcome::Withhold;
+            }
+            return if nats_snapshot_still_current(&op, &snapshot).await {
+                RemoteDeleteOutcome::AckIgnored
+            } else {
+                RemoteDeleteOutcome::Withhold
+            };
+        }
+        Ok(CurrentRemoteDeleteState::Deleted) => {}
+        Ok(CurrentRemoteDeleteState::Missing) => {
+            let _ = restore_staged_remote_delete(
+                rel_path,
+                &staged_path,
+                local_path,
+                pending_delete_ledger_path,
+                &pending,
+            )
+            .await;
+            warn!(
+                path = %rel_path,
+                "remote tombstone disappeared after staging local delete"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+        Err(error) => {
+            let _ = restore_staged_remote_delete(
+                rel_path,
+                &staged_path,
+                local_path,
+                pending_delete_ledger_path,
+                &pending,
+            )
+            .await;
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to recheck remote absence after staging local delete"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+    }
+
+    {
+        let mut cache = state_cache.lock().await;
+        cache.remove(local_path);
+        if let Err(error) = cache.flush() {
+            cache.set(local_path, cached.clone());
+            let _ = restore_staged_remote_delete(
+                rel_path,
+                &staged_path,
+                local_path,
+                pending_delete_ledger_path,
+                &pending,
+            )
+            .await;
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "state cache flush failed; rolled back staged remote delete"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+    }
+
+    // Close the remote publication window that included the state-cache
+    // commit. If the path was republished, roll the cache and local file back
+    // before consuming the obsolete delete notification.
+    match current_remote_delete_state(&op, rel_path, storage_prefix).await {
+        Ok(CurrentRemoteDeleteState::Live(snapshot)) => {
+            let restored = restore_staged_remote_delete(
+                rel_path,
+                &staged_path,
+                local_path,
+                pending_delete_ledger_path,
+                &pending,
+            )
+            .await;
+            let cache_restored = {
+                let mut cache = state_cache.lock().await;
+                cache.set(local_path, cached.clone());
+                match cache.flush() {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(
+                            path = %rel_path,
+                            error = %error,
+                            "failed to persist state rollback after remote republish"
+                        );
+                        false
+                    }
+                }
+            };
+            return if restored
+                && cache_restored
+                && nats_snapshot_still_current(&op, &snapshot).await
+            {
+                RemoteDeleteOutcome::AckIgnored
+            } else {
+                RemoteDeleteOutcome::Withhold
+            };
+        }
+        Ok(CurrentRemoteDeleteState::Deleted) => {}
+        Ok(CurrentRemoteDeleteState::Missing) => {
+            let restored = restore_staged_remote_delete(
+                rel_path,
+                &staged_path,
+                local_path,
+                pending_delete_ledger_path,
+                &pending,
+            )
+            .await;
+            let mut cache = state_cache.lock().await;
+            cache.set(local_path, cached.clone());
+            let cache_restored = cache.flush().is_ok();
+            warn!(
+                path = %rel_path,
+                restored,
+                cache_restored,
+                "remote tombstone disappeared before local delete commit; rolled back"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+        Err(error) => {
+            let restored = restore_staged_remote_delete(
+                rel_path,
+                &staged_path,
+                local_path,
+                pending_delete_ledger_path,
+                &pending,
+            )
+            .await;
+            let mut cache = state_cache.lock().await;
+            cache.set(local_path, cached.clone());
+            let cache_restored = cache.flush().is_ok();
+            warn!(
+                path = %rel_path,
+                error = %error,
+                restored,
+                cache_restored,
+                "failed final remote-absence check; rolled back guarded delete"
+            );
+            return RemoteDeleteOutcome::Withhold;
+        }
+    }
+
+    if let Err(error) = tokio::fs::remove_file(&staged_path).await {
+        let restored = restore_staged_remote_delete(
+            rel_path,
+            &staged_path,
+            local_path,
+            pending_delete_ledger_path,
+            &pending,
+        )
+        .await;
+        let mut cache = state_cache.lock().await;
+        cache.set(local_path, cached);
+        let cache_restored = cache.flush().is_ok();
+        warn!(
+            path = %rel_path,
+            error = %error,
+            restored,
+            cache_restored,
+            "failed to commit staged remote delete; rolled back and withheld ack"
+        );
+        return RemoteDeleteOutcome::Withhold;
+    }
+    if let Err(error) = sync_remote_delete_directory(local_path) {
+        warn!(
+            path = %rel_path,
+            error = %error,
+            "remote delete removed staged bytes but directory fsync failed; retaining durable intent"
+        );
+        return RemoteDeleteOutcome::Withhold;
+    }
+    if let Err(error) = clear_pending_remote_delete(pending_delete_ledger_path, &pending) {
+        warn!(
+            path = %rel_path,
+            error = %error,
+            "remote delete committed but durable intent clear failed; withholding ack"
+        );
+        return RemoteDeleteOutcome::Withhold;
+    }
+
+    info!(
+        path = %rel_path,
+        from_device = %remote_device,
+        "committed guarded local file removal for authoritative remote delete"
+    );
+    RemoteDeleteOutcome::AckDeleted
+}
+
+/// Reconcile a ConflictResolved notification against the exact current path
+/// index. The event-supplied merged clock is deliberately absent from this
+/// interface: only the indexed manifest may advance local state.
+#[allow(clippy::too_many_arguments)]
+async fn handle_conflict_resolved(
+    device_id: &str,
+    event_device: &str,
+    rel_path: &str,
+    local_path: &std::path::Path,
+    operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+    state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+    path_locks: &tcfs_sync::state::PathLocks,
+    storage_prefix: &str,
+    auto_download_limit: Option<u64>,
+    tcfs_config: &TcfsConfig,
+    master_key: &Arc<tokio::sync::Mutex<Option<MasterKey>>>,
+) -> bool {
+    // These placeholder values are diagnostics only. `handle_auto_pull`
+    // resolves and retains a typed snapshot from the live exact index before
+    // it classifies or mutates anything.
+    let notification_clock = tcfs_sync::conflict::VectorClock::new();
+    handle_auto_pull(
+        device_id,
+        event_device,
+        rel_path,
+        "<conflict-resolved-notification>",
+        0,
+        &notification_clock,
+        local_path,
+        operator,
+        state_cache,
+        path_locks,
+        storage_prefix,
+        auto_download_limit,
+        tcfs_config,
+        master_key,
+    )
+    .await
+}
+
+/// Persist knowledge from an exact indexed snapshot when local and remote
+/// content are already identical. A changed snapshot or any flush failure
+/// rolls the in-memory update back and withholds acknowledgement.
+async fn persist_current_snapshot_vclock(
+    rel_path: &str,
+    local_path: &std::path::Path,
+    op: &opendal::Operator,
+    snapshot: &tcfs_sync::engine::IndexedManifestSnapshot,
+    state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+) -> bool {
+    if !nats_snapshot_still_current(op, snapshot).await {
+        return false;
+    }
+
+    let previous = {
+        let cache = state_cache.lock().await;
+        match cache.get(local_path).cloned() {
+            Some(entry) if entry.blake3 == snapshot.content_hash() => entry,
+            Some(_) => {
+                warn!(
+                    path = %rel_path,
+                    "local cache identity changed before authoritative vclock update"
+                );
+                return false;
+            }
+            None => {
+                warn!(
+                    path = %rel_path,
+                    "local cache entry vanished before authoritative vclock update"
+                );
+                return false;
+            }
+        }
+    };
+
+    let mut merged_vclock = previous.vclock.clone();
+    merged_vclock.merge(snapshot.vclock());
+    if merged_vclock == previous.vclock {
+        return nats_snapshot_still_current(op, snapshot).await;
+    }
+
+    {
+        let mut cache = state_cache.lock().await;
+        cache.set(
+            local_path,
+            tcfs_sync::state::SyncState {
+                vclock: merged_vclock,
+                ..previous.clone()
+            },
+        );
+        if let Err(error) = cache.flush() {
+            cache.set(local_path, previous.clone());
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to persist authoritative conflict-resolution vclock; withholding ack"
+            );
+            return false;
+        }
+    }
+
+    if nats_snapshot_still_current(op, snapshot).await {
+        return true;
+    }
+
+    let mut cache = state_cache.lock().await;
+    cache.set(local_path, previous);
+    if let Err(error) = cache.flush() {
+        warn!(
+            path = %rel_path,
+            error = %error,
+            "failed to persist vclock rollback after indexed snapshot changed"
+        );
+    }
+    false
+}
+
 /// Handle auto-pull logic for a remote FileSynced event.
 #[allow(clippy::too_many_arguments)]
 async fn handle_auto_pull(
@@ -1739,105 +3812,250 @@ async fn handle_auto_pull(
     remote_blake3: &str,
     remote_size: u64,
     remote_vclock: &tcfs_sync::conflict::VectorClock,
-    manifest_path: &str,
+    local_path: &std::path::Path,
     operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
     state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
     path_locks: &tcfs_sync::state::PathLocks,
-    sync_root: Option<&std::path::Path>,
     storage_prefix: &str,
+    auto_download_limit: Option<u64>,
+    tcfs_config: &TcfsConfig,
+    master_key: &Arc<tokio::sync::Mutex<Option<MasterKey>>>,
 ) -> bool {
-    // Determine local path for this rel_path
-    let local_path = match sync_root {
-        Some(root) => root.join(rel_path),
-        None => {
-            // Try to find in state cache by rel_path
-            let cache = state_cache.lock().await;
-            match cache.get_by_rel_path(rel_path) {
-                Some((key, _)) => std::path::PathBuf::from(key),
-                None => {
-                    info!(
-                        path = %rel_path,
-                        "no sync_root configured and file not in state cache, skipping auto-pull"
-                    );
-                    return true;
-                }
-            }
-        }
-    };
-    let _lock_guard = path_locks.lock(&local_path).await;
+    // Keep this private helper fail-closed even if a future caller bypasses
+    // spawn_state_sync_loop's containment resolver. Invalid poison events are
+    // safe to acknowledge because no retry can make their path valid.
+    if let Err(error) = tcfs_sync::index_entry::validate_canonical_rel_path(rel_path) {
+        warn!(
+            path = %rel_path,
+            error = %error,
+            "dropping invalid NATS auto-pull path"
+        );
+        return true;
+    }
+    let git_internal = auto_conflict_must_defer(rel_path);
 
-    // Compare vector clocks
-    let (local_blake3, local_vclock) = {
-        let cache = state_cache.lock().await;
-        match cache.get(&local_path) {
-            Some(entry) => (entry.blake3.clone(), entry.vclock.clone()),
+    let _lock_guard = path_locks.lock(local_path).await;
+
+    // The NATS manifest_path is deliberately ignored. It is only a historical
+    // notification field and can lag or be forged. Resolve the exact current
+    // path index and retain that typed authority through the checked download.
+    let op = {
+        let guard = operator.lock().await;
+        match guard.as_ref() {
+            Some(op) => op.clone(),
             None => {
-                // New file from remote — download it
-                info!(path = %rel_path, from = %remote_device, "new file from remote, pulling");
-                drop(cache);
-                return do_auto_download(
-                    device_id,
-                    remote_blake3,
-                    remote_size,
-                    remote_vclock,
-                    manifest_path,
-                    &local_path,
-                    operator,
-                    state_cache,
-                    storage_prefix,
-                )
-                .await;
+                warn!(path = %rel_path, "no storage operator for NATS auto-pull");
+                return false;
             }
         }
     };
+    let snapshot = match tcfs_sync::engine::resolve_exact_indexed_manifest_snapshot(
+        &op,
+        rel_path,
+        storage_prefix,
+    )
+    .await
+    {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            warn!(
+                path = %rel_path,
+                "NATS auto-pull has no exact current index entry; withholding ack"
+            );
+            return false;
+        }
+        Err(error) => {
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to snapshot current NATS index entry; withholding ack"
+            );
+            return false;
+        }
+    };
+
+    if remote_blake3 != snapshot.content_hash()
+        || remote_size != snapshot.size()
+        || remote_vclock != snapshot.vclock()
+        || remote_device != snapshot.written_by()
+    {
+        info!(
+            path = %rel_path,
+            event_hash = %remote_blake3,
+            current_hash = %snapshot.content_hash(),
+            event_size = remote_size,
+            current_size = snapshot.size(),
+            event_device = %remote_device,
+            current_device = %snapshot.written_by(),
+            "NATS event metadata lags the exact current indexed snapshot"
+        );
+    }
+
+    if !git_internal && auto_download_limit.is_some_and(|limit| snapshot.size() > limit) {
+        debug!(
+            path = %rel_path,
+            event_size = remote_size,
+            current_size = snapshot.size(),
+            threshold = auto_download_limit.unwrap_or_default(),
+            "skipping auto-pull: authoritative OnDemand object exceeds download threshold"
+        );
+        return nats_snapshot_still_current(&op, &snapshot).await;
+    }
+
+    let cached = {
+        let cache = state_cache.lock().await;
+        cache.get(local_path).cloned()
+    };
+    if cached
+        .as_ref()
+        .is_some_and(|entry| entry.status == tcfs_sync::state::FileSyncStatus::Active)
+    {
+        info!(path = %rel_path, "deferring auto-pull: file is actively being modified");
+        return false;
+    }
+
+    let expected_local = match tcfs_sync::engine::capture_local_fingerprint(local_path) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to capture local identity before NATS auto-pull; withholding ack"
+            );
+            return false;
+        }
+    };
+
+    let actual_local_hash = match &expected_local {
+        tcfs_sync::engine::ExpectedLocalFingerprint::Absent => None,
+        tcfs_sync::engine::ExpectedLocalFingerprint::Tracked { blake3, .. } => {
+            Some(blake3.as_str())
+        }
+    };
+    let local_diverged = match (&cached, actual_local_hash) {
+        (None, None) => false,
+        (Some(entry), Some(actual)) => entry.blake3 != actual,
+        // An existing untracked entry and a missing tracked entry are both
+        // local changes. Neither may be silently replaced by a remote wake-up.
+        _ => true,
+    };
+
+    if local_diverged {
+        let mut local_vclock = cached
+            .as_ref()
+            .map(|entry| entry.vclock.clone())
+            .unwrap_or_default();
+        local_vclock.tick(device_id);
+        let local_blake3 = actual_local_hash.unwrap_or("<absent>").to_string();
+        let detected_at = tcfs_sync::StateEvent::now();
+        let conflict = tcfs_sync::conflict::ConflictInfo {
+            rel_path: rel_path.to_string(),
+            local_vclock,
+            remote_vclock: snapshot.vclock().clone(),
+            local_blake3,
+            remote_blake3: snapshot.content_hash().to_string(),
+            local_device: device_id.to_string(),
+            remote_device: snapshot.written_by().to_string(),
+            detected_at,
+            times_recorded: 0,
+            remote_manifest_key: Some(snapshot.manifest_path().to_string()),
+        };
+        let mut cache = state_cache.lock().await;
+        let previous = cache.get(local_path).cloned();
+        watcher_record_conflict(&mut cache, local_path, conflict);
+        if let Err(error) = cache.flush() {
+            match previous {
+                Some(previous) => cache.set(local_path, previous),
+                None => cache.remove(local_path),
+            }
+            warn!(
+                path = %rel_path,
+                error = %error,
+                "failed to persist NATS local-divergence conflict; withholding ack"
+            );
+            return false;
+        }
+        warn!(
+            path = %rel_path,
+            "local bytes differ from cached identity; preserving them and withholding NATS ack"
+        );
+        return false;
+    }
+
+    let Some(cached) = cached else {
+        if git_internal {
+            info!(
+                path = %rel_path,
+                "deferring new .git-internal remote path to repo-group reconciliation"
+            );
+            return false;
+        }
+        info!(path = %rel_path, from = %snapshot.written_by(), "new file from current remote snapshot, pulling");
+        return do_auto_download(
+            device_id,
+            remote_blake3,
+            remote_size,
+            rel_path,
+            local_path,
+            &op,
+            &snapshot,
+            &expected_local,
+            state_cache,
+            tcfs_config,
+            master_key,
+        )
+        .await;
+    };
+
+    let local_blake3 = cached.blake3;
+    let local_vclock = cached.vclock;
 
     let outcome = tcfs_sync::conflict::compare_clocks(
         &local_vclock,
-        remote_vclock,
+        snapshot.vclock(),
         &local_blake3,
-        remote_blake3,
+        snapshot.content_hash(),
         rel_path,
         device_id,
-        remote_device,
+        snapshot.written_by(),
     );
 
     match outcome {
         tcfs_sync::conflict::SyncOutcome::UpToDate => {
             info!(path = %rel_path, "already up to date");
-            true
+            persist_current_snapshot_vclock(rel_path, local_path, &op, &snapshot, state_cache).await
         }
         tcfs_sync::conflict::SyncOutcome::LocalNewer => {
             info!(path = %rel_path, "local is newer, skipping pull");
-            true
+            nats_snapshot_still_current(&op, &snapshot).await
         }
         tcfs_sync::conflict::SyncOutcome::RemoteNewer => {
-            // Guard: defer auto-pull if file is actively being modified
-            {
-                let cache = state_cache.lock().await;
-                if let Some(entry) = cache.get(&local_path) {
-                    if entry.status == tcfs_sync::state::FileSyncStatus::Active {
-                        info!(path = %rel_path, "deferring auto-pull: file is actively being modified");
-                        return true;
-                    }
-                }
+            if git_internal {
+                info!(
+                    path = %rel_path,
+                    "deferring newer .git-internal remote path to repo-group reconciliation"
+                );
+                return false;
             }
-            info!(path = %rel_path, from = %remote_device, "remote is newer, auto-pulling");
+            info!(path = %rel_path, from = %snapshot.written_by(), "current remote snapshot is newer, auto-pulling");
             do_auto_download(
                 device_id,
                 remote_blake3,
                 remote_size,
-                remote_vclock,
-                manifest_path,
-                &local_path,
-                operator,
+                rel_path,
+                local_path,
+                &op,
+                &snapshot,
+                &expected_local,
                 state_cache,
-                storage_prefix,
+                tcfs_config,
+                master_key,
             )
             .await
         }
         tcfs_sync::conflict::SyncOutcome::Conflict(conflict_info) => {
             let mut conflict_info = conflict_info;
-            conflict_info.remote_manifest_key = Some(manifest_path.to_string());
+            conflict_info.remote_manifest_key = Some(snapshot.manifest_path().to_string());
             // keep-both PR-1 (safety invariant S2): automatic per-file
             // resolution must NEVER touch `.git` internals. AutoResolver's
             // lexicographic KeepRemote would auto-download the remote ref/index
@@ -1848,11 +4066,16 @@ async fn handle_auto_pull(
             // with `tcfs conflicts`). The conflict stays recorded by the
             // reconcile engine's Conflict arm, so it remains visible and
             // re-tried.
-            if auto_conflict_must_defer(rel_path) {
+            if git_internal {
                 {
                     let mut cache = state_cache.lock().await;
-                    watcher_record_conflict(&mut cache, &local_path, conflict_info.clone());
+                    let previous = cache.get(local_path).cloned();
+                    watcher_record_conflict(&mut cache, local_path, conflict_info.clone());
                     if let Err(e) = cache.flush() {
+                        match previous {
+                            Some(previous) => cache.set(local_path, previous),
+                            None => cache.remove(local_path),
+                        }
                         warn!(path = %rel_path, "failed to persist deferred git conflict: {e}");
                         return false;
                     }
@@ -1861,7 +4084,7 @@ async fn handle_auto_pull(
                     path = %rel_path,
                     "AutoResolver: deferring .git-internal conflict (repo-group resolution required)"
                 );
-                return true;
+                return false;
             }
             info!(
                 path = %rel_path,
@@ -1880,12 +4103,14 @@ async fn handle_auto_pull(
                         device_id,
                         remote_blake3,
                         remote_size,
-                        remote_vclock,
-                        manifest_path,
-                        &local_path,
-                        operator,
+                        rel_path,
+                        local_path,
+                        &op,
+                        &snapshot,
+                        &expected_local,
                         state_cache,
-                        storage_prefix,
+                        tcfs_config,
+                        master_key,
                     )
                     .await;
                 }
@@ -1893,125 +4118,101 @@ async fn handle_auto_pull(
                     info!(path = %rel_path, "AutoResolver: deferred");
                 }
             }
-            true
+            nats_snapshot_still_current(&op, &snapshot).await
         }
     }
 }
 
-/// Handle auto-pull for a remote file sync event.
+/// Hydrate the exact object selected by the current path index.
 ///
-/// Index-first strategy: does NOT download files to local disk. The push
-/// from the remote host already wrote index + manifest + chunks to S3.
-/// The FUSE mount discovers new files via readdir (S3 index listing) and
-/// hydrates on demand when the user opens them. This avoids writing to
-/// the FUSE mount (which may be read-only from the daemon's perspective)
-/// and eliminates the EROFS errors that occurred when sync_root was the
-/// FUSE mountpoint.
-///
-/// We only update the state cache so vector clocks stay in sync.
+/// A NATS event is a wake-up signal, not manifest authority. The caller has
+/// already captured and validated the live index plus manifest bytes. This
+/// function preserves that single snapshot through a guarded commit: the exact
+/// index authority and local bytes must both still match immediately before the
+/// atomic replacement.
+#[allow(clippy::too_many_arguments)]
 async fn do_auto_download(
-    _device_id: &str,
-    expected_blake3: &str,
-    expected_size: u64,
-    expected_vclock: &tcfs_sync::conflict::VectorClock,
-    manifest_path: &str,
+    device_id: &str,
+    event_blake3: &str,
+    event_size: u64,
+    rel_path: &str,
     local_path: &std::path::Path,
-    operator: &Arc<tokio::sync::Mutex<Option<opendal::Operator>>>,
+    op: &opendal::Operator,
+    snapshot: &tcfs_sync::engine::IndexedManifestSnapshot,
+    expected_local: &tcfs_sync::engine::ExpectedLocalFingerprint,
     state_cache: &Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
-    _storage_prefix: &str,
+    tcfs_config: &TcfsConfig,
+    master_key: &Arc<tokio::sync::Mutex<Option<MasterKey>>>,
 ) -> bool {
-    // Verify the manifest exists in S3 (confirms push completed)
-    let op = {
-        let guard = operator.lock().await;
-        match guard.as_ref() {
-            Some(op) => op.clone(),
-            None => {
-                warn!("no storage operator for auto-pull verification");
-                return false;
-            }
-        }
+    let encryption = {
+        let guard = master_key.lock().await;
+        guard
+            .as_ref()
+            .map(|key| crate::grpc::build_encryption_context(tcfs_config, device_id, key))
     };
 
-    match op.read(manifest_path).await {
-        Ok(manifest_data) => {
-            // Parse manifest to extract file hash and vclock for state cache
-            let manifest_bytes = manifest_data.to_bytes();
-            match tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes) {
-                Ok(manifest) => {
-                    if manifest.file_hash != expected_blake3
-                        || manifest.file_size != expected_size
-                        || manifest.vclock != *expected_vclock
-                    {
-                        warn!(
-                            path = %local_path.display(),
-                            manifest = %manifest_path,
-                            event_hash = %expected_blake3,
-                            manifest_hash = %manifest.file_hash,
-                            event_size = expected_size,
-                            manifest_size = manifest.file_size,
-                            "auto-pull: manifest does not match state event; withholding ack"
-                        );
-                        return false;
-                    }
+    let mut cache = state_cache.lock().await;
+    let previous = cache.get(local_path).cloned();
+    let result = tcfs_sync::engine::hydrate_indexed_snapshot_with_device(
+        op,
+        snapshot,
+        local_path,
+        None,
+        device_id,
+        Some(&mut cache),
+        encryption.as_ref(),
+        expected_local,
+    )
+    .await;
+
+    match result {
+        Ok(download) => {
+            if let Some(current) = download.sync_state.as_ref() {
+                if current.blake3 != event_blake3 || current.size != event_size {
                     info!(
-                        path = %local_path.display(),
-                        manifest = %manifest_path,
-                        hash = %manifest.file_hash,
-                        written_by = %manifest.written_by,
-                        "auto-pull: S3 data verified, updating state cache"
+                        path = %rel_path,
+                        event_hash = %event_blake3,
+                        current_hash = %current.blake3,
+                        event_size,
+                        current_size = current.size,
+                        manifest = %snapshot.manifest_path(),
+                        "NATS event lagged current path index; hydrated current indexed object"
                     );
-                    // Update state cache with the remote's metadata so
-                    // vector clocks stay in sync for future conflict detection.
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let mut cache = state_cache.lock().await;
-                    let previous = cache.get(local_path).cloned();
-                    cache.set(
-                        local_path,
-                        tcfs_sync::state::SyncState {
-                            blake3: manifest.file_hash.clone(),
-                            size: manifest.file_size,
-                            mtime: manifest.written_at,
-                            chunk_count: manifest.chunks.len(),
-                            remote_path: manifest_path.to_string(),
-                            last_synced: now,
-                            vclock: manifest.vclock.clone(),
-                            device_id: manifest.written_by.clone(),
-                            conflict: None,
-                            status: tcfs_sync::state::FileSyncStatus::Synced,
-                        },
-                    );
-                    if let Err(e) = cache.flush() {
-                        warn!(error = %e, "state cache flush failed");
-                        match previous {
-                            Some(previous) => cache.set(local_path, previous),
-                            None => cache.remove(local_path),
-                        }
-                        return false;
-                    }
-                    debug!(
-                        key = %local_path.display(),
-                        hash = %manifest.file_hash,
-                        "auto-pull: state cache updated with remote metadata"
-                    );
-                    true
-                }
-                Err(e) => {
-                    warn!(
-                        manifest = %manifest_path,
-                        "auto-pull: failed to parse manifest: {e}"
-                    );
-                    false
                 }
             }
+
+            if let Err(error) = cache.flush() {
+                warn!(
+                    path = %local_path.display(),
+                    error = %error,
+                    "auto-pull state cache flush failed; withholding ack"
+                );
+                match previous {
+                    Some(previous) => cache.set(local_path, previous),
+                    None => cache.remove(local_path),
+                }
+                return false;
+            }
+
+            info!(
+                path = %local_path.display(),
+                manifest = %snapshot.manifest_path(),
+                bytes = download.bytes,
+                "auto-pull hydrated current indexed object"
+            );
+            drop(cache);
+            nats_snapshot_still_current(op, snapshot).await
         }
-        Err(e) => {
+        Err(error) => {
+            match previous {
+                Some(previous) => cache.set(local_path, previous),
+                None => cache.remove(local_path),
+            }
             warn!(
                 path = %local_path.display(),
-                manifest = %manifest_path,
-                "auto-pull: manifest not found in S3: {e}"
+                manifest = %snapshot.manifest_path(),
+                error = %error,
+                "auto-pull failed to hydrate current indexed object; withholding ack"
             );
             false
         }
@@ -2088,50 +4289,331 @@ fn ensure_dirs(config: &TcfsConfig) {
 /// existing `.json` always wins untouched, with no size heuristic or merge
 /// (the live reality on hosts where both files exist).
 ///
-/// The absorb is atomic and validated (mirrors the `StateCache::flush()`
-/// write-tmp-then-rename idiom): copy to `state.json.tmp`, parse-validate the
-/// temp through the real `StateCache` load path, then `rename` into place. A
-/// direct copy onto the canonical path could be truncated mid-copy (ENOSPC is
-/// documented fleet history), permanently satisfying the `!exists()` guard
-/// while failing every subsequent open. On ANY copy/parse/rename failure the
-/// temp is removed, the source `.db` is left untouched, and the daemon
-/// continues fresh with a `warn!`. Returns the `.json` path the caller opens.
-fn absorb_legacy_state_db(state_db: &std::path::Path) -> std::path::PathBuf {
+/// The legacy file is first validated through the real secure `StateCache`
+/// reader, then atomically renamed without replacement and its parent is
+/// fsynced. Any validation/rename/fsync failure aborts daemon startup; an
+/// existing legacy authority must never silently degrade into fresh state.
+fn absorb_legacy_state_db(state_db: &std::path::Path) -> Result<std::path::PathBuf> {
     let state_db = tcfs_core::config::expand_tilde(state_db);
     let state_json_path = state_db.with_extension("json");
-    if !state_json_path.exists() && state_db != state_json_path && state_db.exists() {
-        let tmp_path = {
-            let mut name = state_json_path.clone().into_os_string();
-            name.push(".tmp");
-            std::path::PathBuf::from(name)
-        };
-        let migrate = || -> Result<()> {
-            std::fs::copy(&state_db, &tmp_path)?;
-            // Parse-validate through the real load path so the temp is only
-            // installed if the daemon's own open() would accept it.
-            tcfs_sync::state::StateCache::open(&tmp_path)?;
-            std::fs::rename(&tmp_path, &state_json_path)?;
-            Ok(())
-        };
-        match migrate() {
-            Ok(()) => info!("migrated legacy state.db → state.json"),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp_path);
-                warn!(
-                    ?e,
-                    "state.db → state.json one-time migration failed; starting fresh (source .db left untouched)"
-                )
+    let entry_exists = |path: &std::path::Path| -> Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error)
+                .with_context(|| format!("inspecting daemon state path: {}", path.display())),
+        }
+    };
+
+    // A dangling symlink or non-regular canonical entry counts as present and
+    // is rejected by the subsequent secure open instead of being overwritten.
+    if !entry_exists(&state_json_path)? && state_db != state_json_path && entry_exists(&state_db)? {
+        let mut legacy_state = open_daemon_state_cache(&state_db)
+            .context("validating legacy daemon state before absorb")?;
+        // `StateCache::open` can recover content corruption from the secure
+        // `.json.bak` generation. Make that repair explicit and fallible here;
+        // relying on Drop would only warn on a failed flush and could rename a
+        // still-corrupt primary into canonical authority.
+        legacy_state
+            .flush()
+            .context("durably repairing recovered legacy daemon state before absorb")?;
+        drop(legacy_state);
+        rename_noreplace(&state_db, &state_json_path).with_context(|| {
+            format!(
+                "atomically absorbing legacy daemon state without replacement: {} -> {}",
+                state_db.display(),
+                state_json_path.display()
+            )
+        })?;
+        if let Err(sync_error) = sync_remote_delete_directory(&state_json_path) {
+            let rollback = rename_noreplace(&state_json_path, &state_db)
+                .context("rolling back legacy daemon state absorb after directory sync failure")
+                .and_then(|()| {
+                    sync_remote_delete_directory(&state_db)
+                        .context("syncing rolled-back legacy daemon state authority")
+                });
+            match rollback {
+                Ok(()) => anyhow::bail!(
+                    "syncing legacy daemon state absorb failed and was rolled back: {sync_error:#}"
+                ),
+                Err(rollback_error) => anyhow::bail!(
+                    "syncing legacy daemon state absorb failed: {sync_error:#}; rollback also failed: {rollback_error:#}"
+                ),
             }
         }
+        info!("migrated legacy state.db → state.json");
     }
-    state_json_path
+    Ok(state_json_path)
+}
+
+#[cfg(test)]
+mod invite_redemption_startup_tests {
+    use super::{load_invite_redemptions_for_startup, TcfsDaemonImpl};
+    use std::sync::Arc;
+
+    fn test_daemon(temp: &tempfile::TempDir) -> TcfsDaemonImpl {
+        TcfsDaemonImpl::new(
+            crate::cred_store::new_shared(),
+            Arc::new(tcfs_core::config::TcfsConfig::default()),
+            false,
+            "memory://".into(),
+            Arc::new(tokio::sync::Mutex::new(
+                tcfs_sync::state::StateCache::open(&temp.path().join("state.json")).unwrap(),
+            )),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            tcfs_sync::state::PathLocks::new(),
+            "startup-test-device".into(),
+            "startup-test-device".into(),
+            None,
+        )
+    }
+
+    async fn seed_redeemed_invite(path: &std::path::Path) {
+        let store = tcfs_auth::InviteRedemptionStore::new();
+        store
+            .claim("invite-a", "nonce-a", "laptop", "age1test", "linux-x86_64")
+            .await
+            .unwrap();
+        store.save_to_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_start_allows_missing_invite_redemption_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = test_daemon(&temp);
+        let path = temp.path().join("invite-redemptions.json");
+
+        load_invite_redemptions_for_startup(&daemon, &path)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_fails_closed_on_corrupt_invite_redemption_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = test_daemon(&temp);
+        let path = temp.path().join("invite-redemptions.json");
+        seed_redeemed_invite(&path).await;
+
+        std::fs::write(&path, b"{\"invite-a:nonce-a\":").unwrap();
+
+        let error = load_invite_redemptions_for_startup(&daemon, &path)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("loading invite redemption store"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_fails_closed_on_unsafe_invite_redemption_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = test_daemon(&temp);
+        let path = temp.path().join("invite-redemptions.json");
+        seed_redeemed_invite(&path).await;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = load_invite_redemptions_for_startup(&daemon, &path)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("loading invite redemption store"));
+    }
 }
 
 #[cfg(test)]
 mod keep_both_pr1_tests {
-    use super::{auto_conflict_must_defer, handle_auto_pull};
+    use super::{
+        acquire_daemon_instance_lock, auto_conflict_must_defer, contained_nats_target,
+        first_never_reconcile_path, handle_auto_pull, handle_conflict_resolved,
+        handle_remote_delete, nats_fixed_ingress_deny, open_automatic_policy_store,
+        open_daemon_state_cache, pending_remote_delete_paths, prepare_private_daemon_data_dir,
+        reconcile_lock_paths, reconcile_plan_has_mutations, remote_delete_staging_path,
+        rename_noreplace, replay_pending_remote_deletes, stage_remote_delete_with_hook,
+        validate_nats_resolved_mutation_target, write_pending_delete_ledger, PendingRemoteDelete,
+        PendingRemoteDeleteLedger, RemoteDeleteOutcome, PENDING_REMOTE_DELETE_LEDGER_VERSION,
+    };
     use opendal::services::Memory;
     use opendal::Operator;
+
+    fn test_config() -> tcfs_core::config::TcfsConfig {
+        tcfs_core::config::TcfsConfig::default()
+    }
+
+    fn no_master_key() -> std::sync::Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>> {
+        std::sync::Arc::new(tokio::sync::Mutex::new(None))
+    }
+
+    fn memory_operator() -> Operator {
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+        op
+    }
+
+    async fn memory_operator_with_tombstone(rel_path: &str) -> Operator {
+        let op = memory_operator();
+        op.write(
+            &format!("data/index/{rel_path}"),
+            tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+                .to_json_bytes()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        op
+    }
+
+    fn test_manifest(
+        rel_path: &str,
+        file_hash: &str,
+        file_size: u64,
+        vclock: tcfs_sync::conflict::VectorClock,
+    ) -> tcfs_sync::manifest::SyncManifest {
+        tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: file_hash.into(),
+            file_size,
+            chunks: Vec::new(),
+            vclock,
+            written_by: "honey".into(),
+            written_at: 1_700_000_000,
+            rel_path: Some(rel_path.into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        }
+    }
+
+    async fn seed_current_manifest(
+        op: &Operator,
+        rel_path: &str,
+        object_id: &str,
+        manifest: &tcfs_sync::manifest::SyncManifest,
+    ) {
+        op.write(
+            &format!("data/manifests/{object_id}"),
+            manifest.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            op,
+            "data",
+            &format!("data/index/{rel_path}"),
+            &tcfs_sync::index_entry::RemoteIndexEntry::new(
+                object_id,
+                manifest.file_size,
+                manifest.chunks.len(),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn bytes_hash(bytes: &[u8]) -> String {
+        blake3::hash(bytes).to_hex().to_string()
+    }
+
+    async fn seed_current_bytes(
+        op: &Operator,
+        rel_path: &str,
+        bytes: &[u8],
+        vclock: tcfs_sync::conflict::VectorClock,
+        written_by: &str,
+    ) -> String {
+        let file_hash = bytes_hash(bytes);
+        let chunks = if bytes.is_empty() {
+            Vec::new()
+        } else {
+            op.write(&format!("data/chunks/{file_hash}"), bytes.to_vec())
+                .await
+                .unwrap();
+            vec![file_hash.clone()]
+        };
+        let manifest = tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: file_hash.clone(),
+            file_size: bytes.len() as u64,
+            chunks,
+            vclock,
+            written_by: written_by.into(),
+            written_at: 1_700_000_000,
+            rel_path: Some(rel_path.into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        seed_current_manifest(op, rel_path, &file_hash, &manifest).await;
+        file_hash
+    }
+
+    fn synced_state(
+        rel_path: &str,
+        blake3: String,
+        size: u64,
+        vclock: tcfs_sync::conflict::VectorClock,
+        device_id: &str,
+    ) -> tcfs_sync::state::SyncState {
+        tcfs_sync::state::SyncState {
+            blake3,
+            size,
+            mtime: 0,
+            chunk_count: usize::from(size > 0),
+            remote_path: rel_path.into(),
+            last_synced: 0,
+            vclock,
+            device_id: device_id.into(),
+            conflict: None,
+            status: tcfs_sync::state::FileSyncStatus::Synced,
+        }
+    }
+
+    fn state_cache_with_blocked_flush(dir: &std::path::Path) -> tcfs_sync::state::StateCache {
+        // StateCache::open now rejects an already-invalid parent topology.
+        // Open against a valid directory, then replace that directory with a
+        // file so the operation under test encounters the intended flush
+        // failure rather than bypassing startup validation.
+        let blocked_parent = dir.join("state-parent-is-file");
+        std::fs::create_dir(&blocked_parent).unwrap();
+        let cache = tcfs_sync::state::StateCache::open(&blocked_parent.join("state.json")).unwrap();
+        std::fs::remove_dir(&blocked_parent).unwrap();
+        std::fs::write(&blocked_parent, b"not a directory").unwrap();
+        cache
+    }
+
+    async fn remote_delete_outcome(
+        rel_path: &str,
+        local_path: &std::path::Path,
+        operator: Option<Operator>,
+        state_cache: &std::sync::Arc<tokio::sync::Mutex<tcfs_sync::state::StateCache>>,
+        effective_mode: tcfs_sync::policy::SyncMode,
+    ) -> RemoteDeleteOutcome {
+        let ledger_path = local_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("pending-remote-deletes.json");
+        let pending_delete_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        handle_remote_delete(
+            "neo",
+            "honey",
+            rel_path,
+            local_path,
+            &std::sync::Arc::new(tokio::sync::Mutex::new(operator)),
+            state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            effective_mode,
+            &ledger_path,
+            &pending_delete_lock,
+        )
+        .await
+    }
 
     #[test]
     fn auto_defers_git_internal_conflicts() {
@@ -2151,6 +4633,431 @@ mod keep_both_pr1_tests {
         assert!(!auto_conflict_must_defer("docs/gitignore-notes.md"));
     }
 
+    #[test]
+    fn remote_delete_staging_is_watcher_fenced() {
+        let staged = remote_delete_staging_path(std::path::Path::new("sync/notes/todo.txt"));
+        assert_eq!(
+            staged.extension().and_then(std::ffi::OsStr::to_str),
+            Some("tc")
+        );
+        assert!(
+            staged
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".tcfs-delete-"),
+            "staging path remains recognizable for recovery diagnostics"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn private_daemon_data_dir_is_owner_only_and_rejects_unsafe_existing_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private/tcfsd");
+        prepare_private_daemon_data_dir(&private).unwrap();
+        let metadata = std::fs::symlink_metadata(&private).unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+
+        let unsafe_dir = dir.path().join("unsafe-tcfsd");
+        std::fs::create_dir(&unsafe_dir).unwrap();
+        std::fs::set_permissions(&unsafe_dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let error = prepare_private_daemon_data_dir(&unsafe_dir).unwrap_err();
+        assert!(error.to_string().contains("mode 0700"), "{error:#}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn private_daemon_data_dir_validates_existing_ancestor_before_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let unsafe_parent = dir.path().join("unsafe-parent");
+        std::fs::create_dir(&unsafe_parent).unwrap();
+        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let candidate = unsafe_parent.join("missing/tcfsd");
+
+        let error = prepare_private_daemon_data_dir(&candidate).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("creation ancestor"),
+            "{error:#}"
+        );
+        assert!(
+            !unsafe_parent.join("missing").exists(),
+            "untrusted ancestors must be rejected before directory creation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_daemon_data_dir_rejects_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let alias = dir.path().join("tcfsd");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        let error = prepare_private_daemon_data_dir(&alias).unwrap_err();
+        assert!(error.to_string().contains("real directory"), "{error:#}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn daemon_lifetime_lock_rejects_second_instance_and_releases_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = prepare_private_daemon_data_dir(&dir.path().join("tcfsd")).unwrap();
+        let first = acquire_daemon_instance_lock(&data_dir).unwrap();
+        let error = acquire_daemon_instance_lock(&data_dir).unwrap_err();
+        assert!(format!("{error:#}").contains("locked by another process"));
+        drop(first);
+        acquire_daemon_instance_lock(&data_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_state_cache_corruption_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        std::fs::write(&state_path, b"{corrupt daemon state").unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = open_daemon_state_cache(&state_path)
+            .err()
+            .expect("corrupt daemon state must fail closed");
+        assert!(
+            format!("{error:#}").contains("opening authoritative daemon state cache"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn atomic_no_replace_preserves_both_source_and_recreated_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("staged.tc");
+        let destination = dir.path().join("original.txt");
+        std::fs::write(&source, b"parked bytes").unwrap();
+        std::fs::write(&destination, b"recreated bytes").unwrap();
+
+        let error = rename_noreplace(&source, &destination).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&source).unwrap(), b"parked bytes");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"recreated bytes");
+    }
+
+    #[test]
+    fn fixed_ingress_ack_drops_every_automatic_nats_mutation_variant() {
+        let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&test_config().sync);
+        let events = [
+            tcfs_sync::StateEvent::FileSynced {
+                device_id: "honey".into(),
+                rel_path: ".ssh/id_ed25519".into(),
+                blake3: "forged".into(),
+                size: 1,
+                vclock: Default::default(),
+                manifest_path: "data/manifests/forged".into(),
+                timestamp: 1,
+            },
+            tcfs_sync::StateEvent::FileDeleted {
+                device_id: "honey".into(),
+                rel_path: "secrets/AUTH.JSON".into(),
+                vclock: Default::default(),
+                timestamp: 1,
+            },
+            tcfs_sync::StateEvent::ConflictResolved {
+                device_id: "honey".into(),
+                rel_path: "repo/.git/index.lock".into(),
+                resolution: "remote".into(),
+                merged_vclock: Default::default(),
+                timestamp: 1,
+            },
+        ];
+
+        for event in &events {
+            assert!(
+                nats_fixed_ingress_deny(&blacklist, event).is_some(),
+                "fixed ingress must ACK-drop {event:?}"
+            );
+        }
+        let ordinary = tcfs_sync::StateEvent::FileDeleted {
+            device_id: "honey".into(),
+            rel_path: "notes/todo.txt".into(),
+            vclock: Default::default(),
+            timestamp: 1,
+        };
+        assert!(nats_fixed_ingress_deny(&blacklist, &ordinary).is_none());
+    }
+
+    #[test]
+    fn rootless_nats_target_cannot_alias_configured_master_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("custom-sensitive-material.bin");
+        std::fs::write(&key_path, [7_u8; tcfs_crypto::KEY_SIZE]).unwrap();
+        let mut config = test_config();
+        config.crypto.master_key_file = Some(key_path.clone());
+        let blacklist = tcfs_sync::blacklist::Blacklist::from_sync_config(&config.sync);
+
+        let error = validate_nats_resolved_mutation_target(
+            &config,
+            &blacklist,
+            "ordinary-looking-name.bin",
+            &key_path,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("master-key material"));
+    }
+
+    #[test]
+    fn corrupt_policy_is_unavailable_to_automatic_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("folder-policies.json");
+        std::fs::write(&policy_path, b"{not valid policy JSON").unwrap();
+
+        for surface in [
+            "watcher",
+            "watcher scheduler",
+            "NATS FileSynced",
+            "NATS FileDeleted",
+            "NATS ConflictResolved",
+            "auto-unsync",
+            "periodic reconcile",
+            "periodic reconcile execution",
+        ] {
+            let error = open_automatic_policy_store(&policy_path, surface)
+                .err()
+                .expect("corrupt policy must fail closed");
+            assert!(
+                format!("{error:#}").contains("parsing policy store"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn periodic_reconcile_never_policy_suppresses_whole_group_and_locks_deterministically() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sync");
+        let never = root.join("private");
+        std::fs::create_dir_all(&never).unwrap();
+        let policy_path = dir.path().join("folder-policies.json");
+        let mut policy = tcfs_sync::policy::PolicyStore::open(&policy_path).unwrap();
+        policy.set(
+            &never,
+            tcfs_sync::policy::FolderPolicy {
+                sync_mode: tcfs_sync::policy::SyncMode::Never,
+                ..Default::default()
+            },
+        );
+        let plan = tcfs_sync::reconcile::ReconcilePlan {
+            actions: vec![
+                tcfs_sync::reconcile::ReconcileAction::DeleteRemote {
+                    rel_path: "z-last.txt".into(),
+                },
+                tcfs_sync::reconcile::ReconcileAction::DeleteRemote {
+                    rel_path: "private/secret.txt".into(),
+                },
+                tcfs_sync::reconcile::ReconcileAction::DeleteRemote {
+                    rel_path: "a-first.txt".into(),
+                },
+                tcfs_sync::reconcile::ReconcileAction::DeleteRemote {
+                    rel_path: "z-last.txt".into(),
+                },
+            ],
+            summary: Default::default(),
+            device_id: "neo".into(),
+            generated_at: 1,
+        };
+
+        assert!(reconcile_plan_has_mutations(&plan));
+        assert_eq!(
+            first_never_reconcile_path(&plan, &root, &policy).unwrap(),
+            Some("private/secret.txt".into())
+        );
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            reconcile_lock_paths(&plan, &root).unwrap(),
+            vec![
+                canonical_root.join("a-first.txt"),
+                canonical_root.join("private/secret.txt"),
+                canonical_root.join("z-last.txt")
+            ]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn periodic_reconcile_lock_paths_deduplicate_symlinked_parent_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sync");
+        let real_parent = root.join("real");
+        let alias_parent = root.join("alias");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        std::os::unix::fs::symlink(&real_parent, &alias_parent).unwrap();
+        let plan = tcfs_sync::reconcile::ReconcilePlan {
+            actions: vec![
+                tcfs_sync::reconcile::ReconcileAction::DeleteRemote {
+                    rel_path: "real/file.txt".into(),
+                },
+                tcfs_sync::reconcile::ReconcileAction::DeleteRemote {
+                    rel_path: "alias/file.txt".into(),
+                },
+            ],
+            summary: Default::default(),
+            device_id: "neo".into(),
+            generated_at: 1,
+        };
+
+        assert_eq!(
+            reconcile_lock_paths(&plan, &root).unwrap(),
+            vec![std::fs::canonicalize(real_parent).unwrap().join("file.txt")]
+        );
+    }
+
+    #[test]
+    fn crash_after_staging_rename_replays_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sync");
+        let local_path = root.join("notes/todo.txt");
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, b"original bytes").unwrap();
+        let staged_path = remote_delete_staging_path(&local_path);
+        let ledger_path = dir.path().join("state/pending-remote-deletes.json");
+
+        let error = stage_remote_delete_with_hook(
+            &ledger_path,
+            "notes/todo.txt",
+            &local_path,
+            &staged_path,
+            || anyhow::bail!("injected crash after staging rename"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected crash"), "{error:#}");
+        assert!(!local_path.exists());
+        assert_eq!(std::fs::read(&staged_path).unwrap(), b"original bytes");
+        assert!(ledger_path.exists());
+
+        replay_pending_remote_deletes(&ledger_path, Some(&root)).unwrap();
+
+        assert_eq!(std::fs::read(&local_path).unwrap(), b"original bytes");
+        assert!(!staged_path.exists());
+        assert!(!ledger_path.exists());
+    }
+
+    #[test]
+    fn pending_delete_replay_never_overwrites_recreated_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sync");
+        let local_path = root.join("notes/todo.txt");
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, b"park me").unwrap();
+        let staged_path = remote_delete_staging_path(&local_path);
+        let ledger_path = dir.path().join("state/pending-remote-deletes.json");
+        stage_remote_delete_with_hook(
+            &ledger_path,
+            "notes/todo.txt",
+            &local_path,
+            &staged_path,
+            || anyhow::bail!("injected crash"),
+        )
+        .unwrap_err();
+        std::fs::write(&local_path, b"recreated bytes").unwrap();
+
+        replay_pending_remote_deletes(&ledger_path, Some(&root)).unwrap();
+
+        assert_eq!(std::fs::read(&local_path).unwrap(), b"recreated bytes");
+        assert_eq!(std::fs::read(&staged_path).unwrap(), b"park me");
+        assert!(
+            ledger_path.exists(),
+            "unresolved recovery intent is retained"
+        );
+    }
+
+    #[test]
+    fn pending_delete_ledger_validates_containment_and_stage_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sync");
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+
+        let traversal = PendingRemoteDelete {
+            rel_path: "../outside.txt".into(),
+            staged_name: ".outside.txt.tcfs-delete-00000000-0000-0000-0000-000000000000.tc".into(),
+        };
+        assert!(pending_remote_delete_paths(&root, &traversal).is_err());
+
+        let malformed_stage = PendingRemoteDelete {
+            rel_path: "notes/todo.txt".into(),
+            staged_name: "../../outside.tc".into(),
+        };
+        assert!(pending_remote_delete_paths(&root, &malformed_stage).is_err());
+
+        let ledger_path = dir.path().join("pending.json");
+        write_pending_delete_ledger(
+            &ledger_path,
+            &PendingRemoteDeleteLedger {
+                version: PENDING_REMOTE_DELETE_LEDGER_VERSION,
+                pending: Some(traversal),
+            },
+        )
+        .unwrap();
+        assert!(
+            replay_pending_remote_deletes(&ledger_path, Some(&root)).is_err(),
+            "startup replay must fail closed on an escaping ledger entry"
+        );
+    }
+
+    #[test]
+    fn nats_targets_require_canonical_contained_relative_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sync");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let safe = contained_nats_target(&root, "notes/todo.txt").unwrap();
+        assert_eq!(
+            safe,
+            std::fs::canonicalize(&root).unwrap().join("notes/todo.txt")
+        );
+
+        for invalid in [
+            "",
+            "/absolute",
+            "../outside",
+            "notes/../outside",
+            "notes/./todo.txt",
+            "notes//todo.txt",
+            "notes\\todo.txt",
+            "notes/line\nfeed",
+            "C:/windows/path",
+        ] {
+            assert!(
+                contained_nats_target(&root, invalid).is_err(),
+                "NATS path must be rejected: {invalid:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nats_target_rejects_parent_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("sync");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let error = contained_nats_target(&root, "escape/victim.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("escaped sync root"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn git_conflict_flush_failure_withholds_ack_signal() {
         // If a deferred `.git` conflict cannot be persisted, the auto-pull
@@ -2160,16 +5067,17 @@ mod keep_both_pr1_tests {
         let sync_root = dir.path().join("sync");
         let rel_path = "repo/.git/refs/heads/main";
         let local_path = sync_root.join(rel_path);
+        let local_bytes = b"local-ref";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+        let local_hash = bytes_hash(local_bytes);
 
-        let blocked_parent = dir.path().join("state-parent-is-file");
-        std::fs::write(&blocked_parent, b"not a directory").unwrap();
-        let mut state_cache =
-            tcfs_sync::state::StateCache::open(&blocked_parent.join("state.json")).unwrap();
+        let mut state_cache = state_cache_with_blocked_flush(dir.path());
         state_cache.set(
             &local_path,
             tcfs_sync::state::SyncState {
-                blake3: "local".into(),
-                size: 0,
+                blake3: local_hash,
+                size: local_bytes.len() as u64,
                 mtime: 0,
                 chunk_count: 0,
                 remote_path: rel_path.into(),
@@ -2182,22 +5090,30 @@ mod keep_both_pr1_tests {
         );
 
         let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(state_cache));
-        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let remote_vclock = tcfs_sync::conflict::VectorClock::new();
+        let op = memory_operator();
+        let remote_bytes = b"remote-ref";
+        let remote_hash =
+            seed_current_bytes(&op, rel_path, remote_bytes, remote_vclock.clone(), "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+        let config = test_config();
+        let master_key = no_master_key();
 
         let should_ack = handle_auto_pull(
             "neo",
             "honey",
             rel_path,
-            "remote",
-            0,
+            &remote_hash,
+            remote_bytes.len() as u64,
             &remote_vclock,
-            "data/manifests/git",
+            &local_path,
             &operator,
             &state_cache,
             &tcfs_sync::state::PathLocks::new(),
-            Some(&sync_root),
             "data",
+            None,
+            &config,
+            &master_key,
         )
         .await;
 
@@ -2205,6 +5121,342 @@ mod keep_both_pr1_tests {
             !should_ack,
             "failed deferred-conflict persistence must withhold ack"
         );
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("original in-memory state");
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Synced);
+        assert!(
+            state.conflict.is_none(),
+            "failed flush must roll back memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_pull_defers_new_git_internal_path_without_hydration_or_cache_advance() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let local_path = dir.path().join("sync").join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap(),
+        ));
+        let mut remote_vclock = tcfs_sync::conflict::VectorClock::new();
+        remote_vclock.tick("honey");
+        let remote_bytes = b"0123456789abcdef\n";
+        let op = memory_operator();
+        let remote_hash =
+            seed_current_bytes(&op, rel_path, remote_bytes, remote_vclock.clone(), "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            rel_path,
+            &remote_hash,
+            remote_bytes.len() as u64,
+            &remote_vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            // A policy threshold must not turn repo-group deferral into ack.
+            Some(0),
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(!should_ack, "repo-group reconcile must consume the event");
+        assert!(!local_path.exists(), "NATS must not hydrate a Git ref");
+        assert!(
+            state_cache.lock().await.get(&local_path).is_none(),
+            "NATS must not advance cache state for a new Git ref"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_pull_defers_remote_newer_git_internal_path_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let local_bytes = b"aaaaaaaaaaaaaaaa\n";
+        let remote_bytes = b"bbbbbbbbbbbbbbbb\n";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+
+        let mut local_vclock = tcfs_sync::conflict::VectorClock::new();
+        local_vclock.tick("neo");
+        let mut remote_vclock = local_vclock.clone();
+        remote_vclock.tick("honey");
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                local_vclock.clone(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+        let op = memory_operator();
+        let remote_hash =
+            seed_current_bytes(&op, rel_path, remote_bytes, remote_vclock.clone(), "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            rel_path,
+            &remote_hash,
+            remote_bytes.len() as u64,
+            &remote_vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(!should_ack, "newer Git state remains repo-group work");
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("original Git cache state");
+        assert_eq!(state.blake3, bytes_hash(local_bytes));
+        assert_eq!(state.vclock, local_vclock);
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Synced);
+        assert!(state.conflict.is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_pull_acknowledges_read_only_up_to_date_git_internal_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let bytes = b"aaaaaaaaaaaaaaaa\n";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, bytes).unwrap();
+
+        let mut vclock = tcfs_sync::conflict::VectorClock::new();
+        vclock.tick("honey");
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(bytes),
+                bytes.len() as u64,
+                vclock.clone(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+        let op = memory_operator();
+        let remote_hash = seed_current_bytes(&op, rel_path, bytes, vclock.clone(), "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            rel_path,
+            &remote_hash,
+            bytes.len() as u64,
+            &vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(should_ack, "UpToDate is safe read-only acknowledgement");
+        assert_eq!(std::fs::read(&local_path).unwrap(), bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("unchanged Git cache state");
+        assert_eq!(state.blake3, bytes_hash(bytes));
+        assert_eq!(state.vclock, vclock);
+    }
+
+    #[tokio::test]
+    async fn conflict_resolved_uses_indexed_clock_not_notification_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/resolved.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let state_path = dir.path().join("state.json");
+        let bytes = b"same resolved content";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, bytes).unwrap();
+
+        let mut local_vclock = tcfs_sync::conflict::VectorClock::new();
+        local_vclock.tick("neo");
+        let mut cache = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(bytes),
+                bytes.len() as u64,
+                local_vclock,
+                "neo",
+            ),
+        );
+        cache.flush().unwrap();
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let mut indexed_vclock = tcfs_sync::conflict::VectorClock::new();
+        indexed_vclock.tick("honey");
+        indexed_vclock.tick("honey");
+        let op = memory_operator();
+        seed_current_bytes(&op, rel_path, bytes, indexed_vclock, "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        // The event sender can disagree with the indexed manifest writer, and
+        // ConflictResolved's payload clock is not accepted by this interface.
+        let should_ack = handle_conflict_resolved(
+            "neo",
+            "mallory",
+            rel_path,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(should_ack, "durable authoritative merge is ack-safe");
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("resolved cache state");
+        assert_eq!(state.vclock.get("neo"), 1);
+        assert_eq!(state.vclock.get("honey"), 2);
+        assert_eq!(state.vclock.get("mallory"), 0);
+        drop(cache);
+        let persisted = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        assert_eq!(persisted.get(&local_path).unwrap().vclock.get("honey"), 2);
+    }
+
+    #[tokio::test]
+    async fn conflict_resolved_flush_failure_rolls_back_and_withholds_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/resolved.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let bytes = b"same resolved content";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, bytes).unwrap();
+
+        let mut cache = state_cache_with_blocked_flush(dir.path());
+        let mut local_vclock = tcfs_sync::conflict::VectorClock::new();
+        local_vclock.tick("neo");
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(bytes),
+                bytes.len() as u64,
+                local_vclock.clone(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let mut indexed_vclock = local_vclock.clone();
+        indexed_vclock.tick("honey");
+        let op = memory_operator();
+        seed_current_bytes(&op, rel_path, bytes, indexed_vclock, "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_conflict_resolved(
+            "neo",
+            "honey",
+            rel_path,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(!should_ack, "failed durable merge must be redelivered");
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("rolled-back cache state");
+        assert_eq!(state.vclock, local_vclock);
+        assert_eq!(state.vclock.get("honey"), 0);
+    }
+
+    #[tokio::test]
+    async fn auto_pull_persists_git_conflict_and_withholds_ack_for_grouped_reconcile() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let local_bytes = b"aaaaaaaaaaaaaaaa\n";
+        let remote_bytes = b"bbbbbbbbbbbbbbbb\n";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+
+        let mut local_vclock = tcfs_sync::conflict::VectorClock::new();
+        local_vclock.tick("neo");
+        let mut remote_vclock = tcfs_sync::conflict::VectorClock::new();
+        remote_vclock.tick("honey");
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                local_vclock,
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+        let op = memory_operator();
+        let remote_hash =
+            seed_current_bytes(&op, rel_path, remote_bytes, remote_vclock.clone(), "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            rel_path,
+            &remote_hash,
+            remote_bytes.len() as u64,
+            &remote_vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(!should_ack, "grouped reconcile must consume the conflict");
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("persisted Git conflict");
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Conflict);
+        let conflict = state.conflict.as_ref().expect("Git conflict payload");
+        assert_eq!(conflict.local_blake3, bytes_hash(local_bytes));
+        assert_eq!(conflict.remote_blake3, remote_hash);
+        assert!(conflict.remote_manifest_key.is_some());
     }
 
     #[tokio::test]
@@ -2221,6 +5473,9 @@ mod keep_both_pr1_tests {
         ));
         let operator = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let remote_vclock = tcfs_sync::conflict::VectorClock::new();
+        let local_path = sync_root.join("notes/todo.txt");
+        let config = test_config();
+        let master_key = no_master_key();
 
         let should_ack = handle_auto_pull(
             "neo",
@@ -2229,12 +5484,14 @@ mod keep_both_pr1_tests {
             "remote",
             0,
             &remote_vclock,
-            "data/manifests/notes/todo.txt",
+            &local_path,
             &operator,
             &state_cache,
             &tcfs_sync::state::PathLocks::new(),
-            Some(&sync_root),
             "data",
+            None,
+            &config,
+            &master_key,
         )
         .await;
 
@@ -2244,69 +5501,42 @@ mod keep_both_pr1_tests {
         );
     }
 
-    fn memory_operator() -> Operator {
-        Operator::new(Memory::default()).unwrap().finish()
-    }
-
-    fn test_manifest(
-        file_hash: &str,
-        file_size: u64,
-        vclock: tcfs_sync::conflict::VectorClock,
-    ) -> tcfs_sync::manifest::SyncManifest {
-        tcfs_sync::manifest::SyncManifest {
-            version: 2,
-            file_hash: file_hash.into(),
-            file_size,
-            chunks: Vec::new(),
-            vclock,
-            written_by: "honey".into(),
-            written_at: 1_700_000_000,
-            rel_path: Some("notes/todo.txt".into()),
-            mode: None,
-            mtime: None,
-            encrypted_file_key: None,
-            wrapped_file_keys: Vec::new(),
-        }
-    }
-
     #[tokio::test]
     async fn auto_download_flush_failure_rolls_back_in_memory_state() {
         let dir = tempfile::tempdir().unwrap();
         let sync_root = dir.path().join("sync");
         let rel_path = "notes/todo.txt";
         let local_path = sync_root.join(rel_path);
-        let blocked_parent = dir.path().join("state-parent-is-file");
-        std::fs::write(&blocked_parent, b"not a directory").unwrap();
         let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-            tcfs_sync::state::StateCache::open(&blocked_parent.join("state.json")).unwrap(),
+            state_cache_with_blocked_flush(dir.path()),
         ));
 
         let mut remote_vclock = tcfs_sync::conflict::VectorClock::new();
         remote_vclock.tick("honey");
-        let manifest = test_manifest("remote", 5, remote_vclock.clone());
+        let remote_hash = bytes_hash(b"");
+        let manifest = test_manifest(rel_path, &remote_hash, 0, remote_vclock.clone());
         let op = memory_operator();
-        op.write(
-            "data/manifests/notes/todo.txt",
-            manifest.to_bytes().unwrap(),
-        )
-        .await
-        .unwrap();
+        seed_current_manifest(&op, rel_path, &remote_hash, &manifest).await;
         let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+        let config = test_config();
+        let master_key = no_master_key();
 
         for attempt in 0..2 {
             let should_ack = handle_auto_pull(
                 "neo",
                 "honey",
                 rel_path,
-                "remote",
-                5,
+                &remote_hash,
+                0,
                 &remote_vclock,
-                "data/manifests/notes/todo.txt",
+                &local_path,
                 &operator,
                 &state_cache,
                 &tcfs_sync::state::PathLocks::new(),
-                Some(&sync_root),
                 "data",
+                None,
+                &config,
+                &master_key,
             )
             .await;
             assert!(
@@ -2322,9 +5552,741 @@ mod keep_both_pr1_tests {
     }
 
     #[tokio::test]
-    async fn auto_download_manifest_mismatch_withholds_ack_signal() {
+    async fn auto_pull_classifies_the_current_snapshot_not_a_delayed_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        let local_bytes = b"version-a";
+        let current_bytes = b"version-b";
+        std::fs::write(&local_path, local_bytes).unwrap();
+
+        let mut local_vclock = tcfs_sync::conflict::VectorClock::new();
+        local_vclock.tick("neo");
+        let local_hash = bytes_hash(local_bytes);
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                local_hash.clone(),
+                local_bytes.len() as u64,
+                local_vclock.clone(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let mut current_vclock = local_vclock.clone();
+        current_vclock.tick("honey");
+        let op = memory_operator();
+        let current_hash =
+            seed_current_bytes(&op, rel_path, current_bytes, current_vclock, "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "old-publisher",
+            rel_path,
+            &local_hash,
+            local_bytes.len() as u64,
+            &local_vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(
+            should_ack,
+            "the authoritative newer snapshot should hydrate"
+        );
+        assert_eq!(std::fs::read(&local_path).unwrap(), current_bytes);
+        let cache = state_cache.lock().await;
+        assert_eq!(cache.get(&local_path).unwrap().blake3, current_hash);
+    }
+
+    #[tokio::test]
+    async fn auto_pull_tie_break_uses_the_current_manifest_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        let local_bytes = b"local-wins";
+        let remote_bytes = b"remote-loses";
+        std::fs::write(&local_path, local_bytes).unwrap();
+
+        let mut local_vclock = tcfs_sync::conflict::VectorClock::new();
+        local_vclock.tick("neo");
+        let mut remote_vclock = tcfs_sync::conflict::VectorClock::new();
+        remote_vclock.tick("zulu");
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                local_vclock,
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+        let op = memory_operator();
+        let remote_hash =
+            seed_current_bytes(&op, rel_path, remote_bytes, remote_vclock.clone(), "zulu").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            // If this event publisher incorrectly controlled the tie-break,
+            // `neo > aardvark` would choose KeepRemote and destroy local bytes.
+            "aardvark",
+            rel_path,
+            &remote_hash,
+            remote_bytes.len() as u64,
+            &remote_vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(should_ack);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+    }
+
+    #[tokio::test]
+    async fn auto_pull_preserves_unsynced_local_bytes_and_records_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        let cached_bytes = b"last-synced";
+        let edited_bytes = b"unsynced-local-edit";
+        let remote_bytes = b"remote-newer";
+        std::fs::write(&local_path, edited_bytes).unwrap();
+
+        let mut cached_vclock = tcfs_sync::conflict::VectorClock::new();
+        cached_vclock.tick("neo");
+        let mut remote_vclock = cached_vclock.clone();
+        remote_vclock.tick("honey");
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(cached_bytes),
+                cached_bytes.len() as u64,
+                cached_vclock,
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+        let op = memory_operator();
+        let remote_hash =
+            seed_current_bytes(&op, rel_path, remote_bytes, remote_vclock.clone(), "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            rel_path,
+            &remote_hash,
+            remote_bytes.len() as u64,
+            &remote_vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(!should_ack, "local divergence must remain retryable");
+        assert_eq!(std::fs::read(&local_path).unwrap(), edited_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).unwrap();
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Conflict);
+        let conflict = state.conflict.as_ref().unwrap();
+        assert_eq!(conflict.local_blake3, bytes_hash(edited_bytes));
+        assert_eq!(conflict.remote_blake3, remote_hash);
+    }
+
+    #[tokio::test]
+    async fn auto_pull_preserves_an_existing_untracked_local_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        let local_bytes = b"untracked-local";
+        let remote_bytes = b"new-remote";
+        std::fs::write(&local_path, local_bytes).unwrap();
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap(),
+        ));
+        let mut remote_vclock = tcfs_sync::conflict::VectorClock::new();
+        remote_vclock.tick("honey");
+        let op = memory_operator();
+        let remote_hash =
+            seed_current_bytes(&op, rel_path, remote_bytes, remote_vclock.clone(), "honey").await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            rel_path,
+            &remote_hash,
+            remote_bytes.len() as u64,
+            &remote_vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            None,
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(!should_ack);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        assert_eq!(
+            state_cache.lock().await.get(&local_path).unwrap().status,
+            tcfs_sync::state::FileSyncStatus::Conflict
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_only_file_deleted_cannot_erase_live_remote_index_or_local_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let local_bytes = b"last-synced-local";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+
+        let local_vclock = tcfs_sync::conflict::VectorClock::new();
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                local_vclock,
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let mut current_vclock = tcfs_sync::conflict::VectorClock::new();
+        current_vclock.tick("honey");
+        let op = memory_operator();
+        seed_current_bytes(
+            &op,
+            rel_path,
+            b"republished-current",
+            current_vclock,
+            "honey",
+        )
+        .await;
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(op.clone()),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::AckIgnored);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        let current =
+            tcfs_sync::engine::resolve_exact_indexed_manifest_snapshot(&op, rel_path, "data")
+                .await
+                .unwrap()
+                .expect("live remote index remains authoritative");
+        assert_eq!(current.content_hash(), bytes_hash(b"republished-current"));
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("cached state is preserved");
+        assert_eq!(state.blake3, bytes_hash(local_bytes));
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Synced);
+        assert!(state.conflict.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_delete_without_tombstone_never_removes_matching_tracked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/list-lag.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let state_path = dir.path().join("state.json");
+        let local_bytes = b"last-synced";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+
+        let mut cache = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                tcfs_sync::conflict::VectorClock::new(),
+                "neo",
+            ),
+        );
+        cache.flush().unwrap();
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(memory_operator()),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::Withhold);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("cached state is preserved");
+        assert_eq!(state.blake3, bytes_hash(local_bytes));
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Synced);
+        assert!(state.conflict.is_none());
+        drop(cache);
+
+        let persisted = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        assert_eq!(
+            persisted.get(&local_path).unwrap().blake3,
+            bytes_hash(local_bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_delete_preserves_edit_without_persisting_forged_event_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let state_path = dir.path().join("state.json");
+        let cached_bytes = b"last-synced";
+        let edited_bytes = b"unsynced-local-edit";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, edited_bytes).unwrap();
+
+        let mut cache = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(cached_bytes),
+                cached_bytes.len() as u64,
+                tcfs_sync::conflict::VectorClock::new(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let mut forged_clock = tcfs_sync::conflict::VectorClock::new();
+        for _ in 0..100 {
+            forged_clock.tick("mallory");
+        }
+        let notification = tcfs_sync::StateEvent::FileDeleted {
+            device_id: "mallory".into(),
+            rel_path: rel_path.into(),
+            vclock: forged_clock,
+            timestamp: tcfs_sync::StateEvent::now(),
+        };
+        let notification_path = match &notification {
+            tcfs_sync::StateEvent::FileDeleted { rel_path, .. } => rel_path.as_str(),
+            _ => unreachable!(),
+        };
+
+        let outcome = remote_delete_outcome(
+            notification_path,
+            &local_path,
+            Some(memory_operator_with_tombstone(rel_path).await),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::Withhold);
+        assert_eq!(std::fs::read(&local_path).unwrap(), edited_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("conflict state");
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Conflict);
+        let conflict = state.conflict.as_ref().expect("delete conflict payload");
+        assert_eq!(conflict.local_blake3, bytes_hash(edited_bytes));
+        assert_eq!(conflict.remote_blake3, "<deleted>");
+        assert!(
+            conflict.remote_vclock.clocks.is_empty(),
+            "an unbound FileDeleted payload clock must never become durable authority"
+        );
+        drop(cache);
+
+        let persisted = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        assert_eq!(
+            persisted.get(&local_path).unwrap().status,
+            tcfs_sync::state::FileSyncStatus::Conflict
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_delete_preserves_untracked_local_file_as_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/untracked.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let local_bytes = b"local-only";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap(),
+        ));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(memory_operator_with_tombstone(rel_path).await),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::Withhold);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("synthetic conflict state");
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Conflict);
+        assert_eq!(
+            state.conflict.as_ref().unwrap().local_blake3,
+            bytes_hash(local_bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_delete_treats_missing_tracked_file_as_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/missing.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(b"last-synced"),
+                b"last-synced".len() as u64,
+                tcfs_sync::conflict::VectorClock::new(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(memory_operator_with_tombstone(rel_path).await),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::Withhold);
+        assert!(!local_path.exists());
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("missing-file conflict state");
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Conflict);
+        assert_eq!(state.conflict.as_ref().unwrap().local_blake3, "<absent>");
+    }
+
+    #[tokio::test]
+    async fn remote_delete_commits_matching_tracked_file_and_cache_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let state_path = dir.path().join("state.json");
+        let local_bytes = b"last-synced";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+        let mut cache = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                tcfs_sync::conflict::VectorClock::new(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(memory_operator_with_tombstone(rel_path).await),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::AckDeleted);
+        assert!(!local_path.exists());
+        assert!(state_cache.lock().await.get(&local_path).is_none());
+        let persisted = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        assert!(persisted.get(&local_path).is_none());
+        assert!(
+            std::fs::read_dir(local_path.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tcfs-delete-")),
+            "successful delete must not leak a staging file"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_delete_acks_when_local_and_cache_are_already_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/already-gone.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap(),
+        ));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(memory_operator_with_tombstone(rel_path).await),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::AckDeleted);
+        assert!(!local_path.exists());
+        assert!(state_cache.lock().await.get(&local_path).is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_delete_flush_failure_restores_file_and_in_memory_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let local_bytes = b"last-synced";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+
+        let mut cache = state_cache_with_blocked_flush(dir.path());
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                tcfs_sync::conflict::VectorClock::new(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(memory_operator_with_tombstone(rel_path).await),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::Withhold);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("rolled-back cache state");
+        assert_eq!(state.blake3, bytes_hash(local_bytes));
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Synced);
+        assert!(state.conflict.is_none());
+        assert!(
+            std::fs::read_dir(local_path.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tcfs-delete-")),
+            "rollback must restore rather than leak the staging file"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_delete_never_policy_acknowledges_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "private/todo.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let local_bytes = b"policy-protected";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                tcfs_sync::conflict::VectorClock::new(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            None,
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Never,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::AckIgnored);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("policy-protected cache");
+        assert_eq!(state.blake3, bytes_hash(local_bytes));
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Synced);
+        assert!(state.conflict.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_delete_defers_git_internal_path_without_per_file_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let local_bytes = b"0123456789abcdef\n";
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, local_bytes).unwrap();
+        let mut cache = tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap();
+        cache.set(
+            &local_path,
+            synced_state(
+                rel_path,
+                bytes_hash(local_bytes),
+                local_bytes.len() as u64,
+                tcfs_sync::conflict::VectorClock::new(),
+                "neo",
+            ),
+        );
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(cache));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(memory_operator_with_tombstone(rel_path).await),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::Withhold);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_bytes);
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("git cache is preserved");
+        assert_eq!(state.blake3, bytes_hash(local_bytes));
+        assert_eq!(state.status, tcfs_sync::state::FileSyncStatus::Synced);
+        assert!(state.conflict.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_delete_acks_git_internal_path_after_grouped_reconcile_converges() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let local_path = dir.path().join("sync").join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap(),
+        ));
+
+        let outcome = remote_delete_outcome(
+            rel_path,
+            &local_path,
+            Some(memory_operator_with_tombstone(rel_path).await),
+            &state_cache,
+            tcfs_sync::policy::SyncMode::Always,
+        )
+        .await;
+
+        assert_eq!(outcome, RemoteDeleteOutcome::AckIgnored);
+        assert!(!local_path.exists());
+        assert!(state_cache.lock().await.get(&local_path).is_none());
+    }
+
+    #[tokio::test]
+    async fn on_demand_threshold_uses_the_current_manifest_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "notes/large.txt";
+        let local_path = dir.path().join("sync").join(rel_path);
+        let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tcfs_sync::state::StateCache::open(&dir.path().join("state.json")).unwrap(),
+        ));
+        let mut current_vclock = tcfs_sync::conflict::VectorClock::new();
+        current_vclock.tick("honey");
+        let op = memory_operator();
+        let manifest = test_manifest(rel_path, "large-current", 64, current_vclock.clone());
+        seed_current_manifest(&op, rel_path, "large-current", &manifest).await;
+        let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+
+        let should_ack = handle_auto_pull(
+            "neo",
+            "honey",
+            rel_path,
+            "forged-small-event",
+            0,
+            &current_vclock,
+            &local_path,
+            &operator,
+            &state_cache,
+            &tcfs_sync::state::PathLocks::new(),
+            "data",
+            Some(1),
+            &test_config(),
+            &no_master_key(),
+        )
+        .await;
+
+        assert!(should_ack, "policy skips are safe to acknowledge");
+        assert!(
+            !local_path.exists(),
+            "the authoritative large object must not hydrate"
+        );
+        assert!(state_cache.lock().await.get(&local_path).is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_download_uses_current_index_when_event_metadata_is_stale() {
         let dir = tempfile::tempdir().unwrap();
         let sync_root = dir.path().join("sync");
+        let rel_path = "notes/todo.txt";
+        let local_path = sync_root.join(rel_path);
         let state_path = dir.path().join("state.json");
         let state_cache = std::sync::Arc::new(tokio::sync::Mutex::new(
             tcfs_sync::state::StateCache::open(&state_path).unwrap(),
@@ -2332,39 +6294,54 @@ mod keep_both_pr1_tests {
 
         let mut remote_vclock = tcfs_sync::conflict::VectorClock::new();
         remote_vclock.tick("honey");
-        let manifest = test_manifest("stale", 5, remote_vclock.clone());
+        let current_hash = bytes_hash(b"");
+        let manifest = test_manifest(rel_path, &current_hash, 0, remote_vclock.clone());
         let op = memory_operator();
+        seed_current_manifest(&op, rel_path, &current_hash, &manifest).await;
+        let stale_manifest = test_manifest(rel_path, "stale-event", 0, remote_vclock.clone());
         op.write(
-            "data/manifests/notes/todo.txt",
-            manifest.to_bytes().unwrap(),
+            "data/manifests/stale-event",
+            stale_manifest.to_bytes().unwrap(),
         )
         .await
         .unwrap();
         let operator = std::sync::Arc::new(tokio::sync::Mutex::new(Some(op)));
+        let config = test_config();
+        let master_key = no_master_key();
 
         let should_ack = handle_auto_pull(
             "neo",
             "honey",
-            "notes/todo.txt",
-            "remote",
-            5,
+            rel_path,
+            "stale-event",
+            999,
             &remote_vclock,
-            "data/manifests/notes/todo.txt",
+            &local_path,
             &operator,
             &state_cache,
             &tcfs_sync::state::PathLocks::new(),
-            Some(&sync_root),
             "data",
+            Some(0),
+            &config,
+            &master_key,
         )
         .await;
 
-        assert!(!should_ack, "manifest/event mismatch must withhold ack");
+        assert!(
+            should_ack,
+            "current indexed object should hydrate successfully"
+        );
+        assert_eq!(std::fs::read(&local_path).unwrap(), b"");
+        let cache = state_cache.lock().await;
+        let state = cache.get(&local_path).expect("hydrated state");
+        assert_eq!(state.blake3, current_hash);
+        assert_eq!(state.remote_path, format!("data/manifests/{current_hash}"));
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", target_os = "ios")))]
 mod state_migration_tests {
-    use super::absorb_legacy_state_db;
+    use super::{absorb_legacy_state_db, open_daemon_state_cache};
 
     /// Seed `path` (opened as a JSON cache regardless of extension) with the
     /// given `(cache-key, remote_path)` entries and flush.
@@ -2400,9 +6377,10 @@ mod state_migration_tests {
         seed_state(&db, &[("/sync/a.txt", "data/index/a.txt")]);
         assert!(!json.exists(), "precondition: no .json yet");
 
-        let resolved = absorb_legacy_state_db(&db);
+        let resolved = absorb_legacy_state_db(&db).unwrap();
         assert_eq!(resolved, json, "resolves to the .json sibling");
         assert!(json.exists(), ".json must be seeded from .db");
+        assert!(!db.exists(), "validated legacy authority is renamed once");
 
         let cache = tcfs_sync::state::StateCache::open(&resolved).unwrap();
         assert!(
@@ -2427,7 +6405,7 @@ mod state_migration_tests {
             ],
         );
 
-        let resolved = absorb_legacy_state_db(&db);
+        let resolved = absorb_legacy_state_db(&db).unwrap();
         assert_eq!(resolved, json);
 
         let cache = tcfs_sync::state::StateCache::open(&resolved).unwrap();
@@ -2458,7 +6436,7 @@ mod state_migration_tests {
         let db = dir.path().join("state.db");
         let json = dir.path().join("state.json");
 
-        let resolved = absorb_legacy_state_db(&db);
+        let resolved = absorb_legacy_state_db(&db).unwrap();
         assert_eq!(resolved, json);
         assert!(!json.exists(), "no source → nothing seeded");
 
@@ -2468,11 +6446,10 @@ mod state_migration_tests {
     }
 
     #[test]
-    fn absorb_recovers_from_interrupted_prior_migration() {
-        // Adversarial gate Fix A: a stale corrupt/truncated `state.json.tmp`
-        // left by an interrupted prior migration must not poison the retry.
-        // The canonical `.json` may only appear when the freshly copied temp
-        // parse-validates, and the temp must be gone afterwards (renamed away).
+    fn absorb_ignores_unrelated_stale_legacy_temp() {
+        // The migration no longer uses a predictable copy temp. A stale file
+        // from an older daemon cannot poison or become authority for the direct,
+        // validated no-replace rename.
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("state.db");
         let json = dir.path().join("state.json");
@@ -2480,11 +6457,14 @@ mod state_migration_tests {
         seed_state(&db, &[("/sync/a.txt", "data/index/a.txt")]);
         std::fs::write(&tmp, b"{\"entries\": {\"trunc").unwrap(); // simulated ENOSPC remnant
 
-        let resolved = absorb_legacy_state_db(&db);
+        let resolved = absorb_legacy_state_db(&db).unwrap();
 
         assert_eq!(resolved, json);
-        assert!(json.exists(), "retry over a stale temp must still migrate");
-        assert!(!tmp.exists(), "temp must be consumed by the rename");
+        assert!(json.exists(), "stale legacy temp must not block migration");
+        assert!(
+            tmp.exists(),
+            "unrelated stale temp is never opened or trusted"
+        );
         let cache = tcfs_sync::state::StateCache::open(&resolved).unwrap();
         assert!(
             cache.get(std::path::Path::new("/sync/a.txt")).is_some(),
@@ -2492,32 +6472,79 @@ mod state_migration_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn absorb_declines_corrupt_db_source_and_cleans_temp() {
-        // Adversarial gate Fix A: a corrupt `.db` source must never be
-        // installed as the canonical `.json`. The temp is removed, the source
-        // `.db` is left byte-identical, and no canonical file appears — so the
-        // `!exists()` guard keeps retrying on later boots instead of being
-        // permanently defeated by a truncated canonical file.
+    fn absorb_corrupt_db_source_fails_startup_and_preserves_authority() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A corrupt existing legacy authority aborts startup. It is not copied,
+        // renamed, deleted, or silently replaced with an empty canonical cache.
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("state.db");
         let json = dir.path().join("state.json");
-        let tmp = dir.path().join("state.json.tmp");
         let garbage: &[u8] = b"{\"last_nats_seq\": 7, \"entries\": {\"/sync/a.t"; // truncated JSON
         std::fs::write(&db, garbage).unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        let resolved = absorb_legacy_state_db(&db);
+        let error = absorb_legacy_state_db(&db).unwrap_err();
 
-        assert_eq!(resolved, json);
+        assert!(
+            format!("{error:#}").contains("validating legacy daemon state"),
+            "{error:#}"
+        );
         assert!(
             !json.exists(),
             "corrupt source must not produce a canonical .json"
         );
-        assert!(!tmp.exists(), "failed migration must clean up its temp");
         assert_eq!(
             std::fs::read(&db).unwrap(),
             garbage,
             "source .db must be left untouched for manual recovery"
+        );
+    }
+
+    #[test]
+    fn absorb_repairs_valid_backup_before_promoting_legacy_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let json = dir.path().join("state.json");
+        seed_state(&db, &[("/sync/recovered.txt", "data/index/recovered.txt")]);
+
+        // A second durable generation creates the secure `.json.bak` recovery
+        // copy used by StateCache even while the legacy primary is named `.db`.
+        let mut cache = tcfs_sync::state::StateCache::open(&db).unwrap();
+        cache.set_last_nats_seq(9);
+        cache.flush().unwrap();
+        drop(cache);
+        std::fs::write(&db, b"{corrupt legacy primary").unwrap();
+
+        let resolved = absorb_legacy_state_db(&db).unwrap();
+        assert_eq!(resolved, json);
+        assert!(!db.exists());
+        let repaired = open_daemon_state_cache(&json).unwrap();
+        assert!(
+            repaired
+                .get(std::path::Path::new("/sync/recovered.txt"))
+                .is_some(),
+            "validated backup content must be repaired before canonical promotion"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absorb_treats_dangling_canonical_symlink_as_present_and_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let json = dir.path().join("state.json");
+        seed_state(&db, &[("/sync/a.txt", "data/index/a.txt")]);
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &json).unwrap();
+
+        let resolved = absorb_legacy_state_db(&db).unwrap();
+        assert_eq!(resolved, json);
+        assert!(db.exists(), "legacy authority must not be consumed");
+        assert!(
+            open_daemon_state_cache(&resolved).is_err(),
+            "dangling canonical entry must reach the secure open and fail"
         );
     }
 
@@ -2542,6 +6569,7 @@ mod state_migration_tests {
             Some(h) => std::env::set_var("HOME", h),
             None => std::env::remove_var("HOME"),
         }
+        let resolved = resolved.unwrap();
 
         let expected_json = home_dir.path().join("tcfsd-tin2657/state.json");
         assert_eq!(
@@ -2553,8 +6581,8 @@ mod state_migration_tests {
             "migration must land at the expanded path"
         );
         assert!(
-            !std::path::Path::new("~").exists(),
-            "no literal ./~ directory may be created"
+            !std::path::Path::new("~/tcfsd-tin2657").exists(),
+            "no literal ./~/tcfsd-tin2657 path may be created"
         );
     }
 }

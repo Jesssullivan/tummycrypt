@@ -9,7 +9,9 @@ use tcfs_fuse::{mount, MountConfig};
 use tempfile::TempDir;
 
 fn memory_operator() -> Operator {
-    Operator::new(Memory::default()).unwrap().finish()
+    let op = Operator::new(Memory::default()).unwrap().finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+    op
 }
 
 fn skip_reason() -> Option<&'static str> {
@@ -117,6 +119,7 @@ async fn spawn_mount(
                 on_flush: None,
                 device_id: "test-device".into(),
                 master_key: None,
+                encryption_required: false,
             },
             None,
         )

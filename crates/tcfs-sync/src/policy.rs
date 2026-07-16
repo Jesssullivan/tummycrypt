@@ -11,6 +11,31 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Canonicalize a policy path as far as the filesystem currently allows.
+///
+/// `std::fs::canonicalize` requires the entire path to exist. Policy lookups,
+/// however, commonly target files that have not been created yet. Canonicalize
+/// the deepest existing ancestor and append the missing suffix so aliases in
+/// that ancestor (for example macOS `/var` -> `/private/var`) are still
+/// normalized consistently.
+fn normalize_policy_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+
+    for ancestor in path.ancestors().skip(1) {
+        let Ok(canonical_ancestor) = std::fs::canonicalize(ancestor) else {
+            continue;
+        };
+        let Ok(missing_suffix) = path.strip_prefix(ancestor) else {
+            continue;
+        };
+        return canonical_ancestor.join(missing_suffix);
+    }
+
+    path.to_path_buf()
+}
+
 /// Sync mode for a folder.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,7 +112,7 @@ impl PolicyStore {
     /// Returns the first matching policy found at or above the given path.
     /// Returns None if no policy covers this path.
     pub fn get(&self, path: &Path) -> Option<&FolderPolicy> {
-        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical = normalize_policy_path(path);
 
         let mut current = Some(canonical.as_path());
         while let Some(dir) = current {
@@ -102,19 +127,13 @@ impl PolicyStore {
 
     /// Set a policy for a folder path.
     pub fn set(&mut self, path: &Path, policy: FolderPolicy) {
-        let key = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| path.to_path_buf())
-            .to_string_lossy()
-            .into_owned();
+        let key = normalize_policy_path(path).to_string_lossy().into_owned();
         self.policies.insert(key, policy);
     }
 
     /// Remove a policy for a folder path.
     pub fn remove(&mut self, path: &Path) -> bool {
-        let key = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| path.to_path_buf())
-            .to_string_lossy()
-            .into_owned();
+        let key = normalize_policy_path(path).to_string_lossy().into_owned();
         self.policies.remove(&key).is_some()
     }
 
@@ -269,6 +288,33 @@ mod tests {
         let policy = store.get(&file).unwrap();
         assert_eq!(policy.sync_mode, SyncMode::Never);
         assert!(policy.auto_unsync_exempt);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_policy_parent_walk_normalizes_existing_alias_for_missing_descendants() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policies.json");
+        let mut store = PolicyStore::open(&path).unwrap();
+
+        let canonical_parent = dir.path().join("canonical");
+        let aliased_parent = dir.path().join("alias");
+        std::fs::create_dir_all(&canonical_parent).unwrap();
+        symlink(&canonical_parent, &aliased_parent).unwrap();
+
+        store.set(
+            &aliased_parent,
+            FolderPolicy {
+                sync_mode: SyncMode::Never,
+                ..Default::default()
+            },
+        );
+
+        let missing_descendant = aliased_parent.join("missing/at/several/levels/file.txt");
+        assert!(!missing_descendant.exists());
+        assert_eq!(store.effective_mode(&missing_descendant), SyncMode::Never);
     }
 
     #[test]

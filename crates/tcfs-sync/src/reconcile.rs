@@ -24,7 +24,9 @@ use crate::conflict_git;
 use crate::engine::{self, OptionalEncryption, ProgressFn};
 use crate::git_safety;
 use crate::index_entry::{
-    manifest_key, parse_index_entry_record, resolve_visible_index_entry, RemoteIndexEntry,
+    manifest_key, parse_index_entry_record, portable_casefold_path, read_exact_index_path_state,
+    resolve_visible_index_entry, validate_canonical_rel_path, validate_staged_manifest_key,
+    ExactIndexPathState, PendingIndexEntry, RemoteEntryKind, RemoteIndexEntry,
 };
 use crate::manifest::{SymlinkManifest, SyncManifest};
 use crate::state::{FileSyncStatus, StateCache, StateCacheBackend, SyncState};
@@ -33,6 +35,312 @@ const REMOTE_INDEX_READ_CONCURRENCY: usize = 32;
 const REMOTE_PULL_CONCURRENCY: usize = 16;
 const DIR_MARKER: &str = ".tcfs_dir";
 const DIR_MARKER_SUFFIX: &str = "/.tcfs_dir";
+/// A publisher uploads chunks before it can make its staged manifest visible.
+/// Keep a full-day quarantine so a concurrent sweep cannot turn that bounded
+/// publication window into immediate data loss, even when callers request a
+/// zero grace period.
+const MIN_INDEXED_ORPHAN_CHUNK_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Keep reconcile callers on the shared portable path-ingress contract.
+fn validate_safe_relative_path(rel_path: &str) -> Result<()> {
+    validate_canonical_rel_path(rel_path)
+}
+
+fn is_gitfile_pointer_path(rel_path: &str) -> bool {
+    Path::new(rel_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+}
+
+#[derive(Clone, Copy)]
+enum LocalTargetKind {
+    /// Read or unlink the final entry itself. A final symlink is data, but no
+    /// symlink is allowed in its ancestor chain.
+    Entry,
+    /// Replace/create a regular file. A pre-existing final symlink must not be
+    /// followed by the downloader.
+    FileWrite,
+    /// Create or reuse a directory. The final entry, when present, must be a
+    /// real trusted directory.
+    Directory,
+}
+
+/// Validate every existing descendant between the trusted named root and a
+/// local action target. Group/world-writable or foreign-owned ancestors allow
+/// cross-principal replacement after the check; symlink ancestors can route a
+/// syntactically safe relative path outside the root outright.
+fn validate_local_target(
+    local_root: &Path,
+    rel_path: &str,
+    target_kind: LocalTargetKind,
+) -> Result<()> {
+    validate_safe_relative_path(rel_path)?;
+    let components = rel_path.split('/').collect::<Vec<_>>();
+    let mut cursor = local_root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        cursor.push(component);
+        let is_final = index + 1 == components.len();
+        let metadata = match std::fs::symlink_metadata(&cursor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspecting local sync target component: {}",
+                        cursor.display()
+                    )
+                });
+            }
+        };
+
+        if metadata.file_type().is_symlink() {
+            if is_final && matches!(target_kind, LocalTargetKind::Entry) {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "local sync target contains a symlink routing component: {}",
+                cursor.display()
+            );
+        }
+
+        if !is_final || matches!(target_kind, LocalTargetKind::Directory) {
+            if !metadata.is_dir() {
+                anyhow::bail!(
+                    "local sync target ancestor must be a directory: {}",
+                    cursor.display()
+                );
+            }
+            require_trusted_local_directory(&cursor, &metadata)?;
+        } else if matches!(target_kind, LocalTargetKind::FileWrite) && metadata.is_dir() {
+            anyhow::bail!(
+                "local file pull target is an existing directory: {}",
+                cursor.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_trusted_local_directory(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: geteuid has no preconditions and only reads process identity.
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        anyhow::bail!(
+            "local sync target directory must be owned by effective uid {effective_uid}: {}",
+            path.display()
+        );
+    }
+    if metadata.mode() & 0o022 != 0 {
+        anyhow::bail!(
+            "local sync target directory must not be group/world-writable: {}",
+            path.display()
+        );
+    }
+    crate::path_acl::reject_write_grant_acl(path)
+        .with_context(|| format!("validating local directory ACL: {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn require_trusted_local_directory(_path: &Path, _metadata: &std::fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+fn create_private_directory_tree(path: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .with_context(|| format!("creating private local directory tree: {}", path.display()))
+}
+
+fn supplied_local_path_matches(local_root: &Path, rel_path: &str, supplied: &Path) -> Result<bool> {
+    let absolute_root = std::path::absolute(local_root)?;
+    let absolute_supplied = std::path::absolute(supplied)?;
+    let Ok(supplied_relative) = absolute_supplied.strip_prefix(&absolute_root) else {
+        return Ok(false);
+    };
+    let Some(supplied_text) = supplied_relative.to_str() else {
+        return Ok(false);
+    };
+    Ok(crate::engine::normalize_rel_path_text(supplied_text) == rel_path)
+}
+
+/// Defense-in-depth for serialized or manually constructed plans. Validation
+/// runs before the concurrent fast path and before any action mutates local or
+/// remote state, so one crafted path fails the entire plan atomically.
+fn validate_plan_for_execution(plan: &ReconcilePlan, local_root: &Path) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    conflict_git::validate_trusted_configured_path(local_root)
+        .context("validating configured local reconciliation root")?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let metadata = std::fs::symlink_metadata(local_root)
+            .context("inspecting configured local reconciliation root")?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("configured local reconciliation root must be a real directory");
+        }
+    }
+
+    let fixed_ingress_guard = Blacklist::default();
+    for action in &plan.actions {
+        let rel_path = match action {
+            ReconcileAction::Push {
+                local_path,
+                rel_path,
+                ..
+            } => {
+                if is_gitfile_pointer_path(rel_path) {
+                    anyhow::bail!("a non-directory .git entry must never roam: {rel_path}");
+                }
+                if is_git_object_routing_path(rel_path) {
+                    anyhow::bail!(
+                        "raw Git object routing metadata is outside the reconciliation seam: {rel_path}"
+                    );
+                }
+                if !supplied_local_path_matches(local_root, rel_path, local_path)? {
+                    anyhow::bail!(
+                        "push action local path does not match its in-root relative path: {}",
+                        local_path.display()
+                    );
+                }
+                validate_local_target(local_root, rel_path, LocalTargetKind::Entry)?;
+                if is_git_internal_path(rel_path) {
+                    let metadata = std::fs::symlink_metadata(local_path).with_context(|| {
+                        format!("inspecting raw Git push source: {}", local_path.display())
+                    })?;
+                    if metadata.file_type().is_symlink() {
+                        anyhow::bail!(
+                            "symbolic links inside raw Git metadata must never publish: {rel_path}"
+                        );
+                    }
+                }
+                rel_path
+            }
+            ReconcileAction::Pull {
+                rel_path,
+                manifest_hash,
+                expected_kind,
+                expected_symlink_target,
+                ..
+            } => {
+                if is_gitfile_pointer_path(rel_path) {
+                    anyhow::bail!(
+                        "a remote non-directory .git entry must never hydrate: {rel_path}"
+                    );
+                }
+                crate::index_entry::validate_storage_key_component(
+                    manifest_hash,
+                    "pull action manifest_hash",
+                )?;
+                match (expected_kind, expected_symlink_target) {
+                    (RemoteEntryKind::RegularFile, None) => {}
+                    (RemoteEntryKind::Symlink, Some(_)) => {}
+                    _ => anyhow::bail!(
+                        "pull action kind and symlink target are inconsistent: {rel_path}"
+                    ),
+                }
+                if is_git_internal_path(rel_path) && *expected_kind == RemoteEntryKind::Symlink {
+                    anyhow::bail!(
+                        "symbolic links inside raw Git metadata must never hydrate: {rel_path}"
+                    );
+                }
+                if is_git_object_routing_path(rel_path) {
+                    anyhow::bail!(
+                        "remote Git object routing metadata is outside the reconciliation seam: {rel_path}"
+                    );
+                }
+                validate_local_target(local_root, rel_path, LocalTargetKind::FileWrite)?;
+                rel_path
+            }
+            ReconcileAction::DeleteLocal {
+                local_path,
+                rel_path,
+            } => {
+                if !supplied_local_path_matches(local_root, rel_path, local_path)? {
+                    anyhow::bail!(
+                        "delete-local action path does not match its in-root relative path: {}",
+                        local_path.display()
+                    );
+                }
+                validate_local_target(local_root, rel_path, LocalTargetKind::Entry)?;
+                rel_path
+            }
+            ReconcileAction::CreateDirectory { rel_path } => {
+                validate_local_target(local_root, rel_path, LocalTargetKind::Directory)?;
+                rel_path
+            }
+            ReconcileAction::DeleteRemote { rel_path }
+            | ReconcileAction::Conflict { rel_path, .. }
+            | ReconcileAction::UpToDate { rel_path } => rel_path,
+        };
+        validate_safe_relative_path(rel_path)
+            .with_context(|| format!("unsafe reconciliation plan path: {rel_path:?}"))?;
+        if let Some(reason) =
+            fixed_ingress_guard.check_fixed_ingress_path_components(Path::new(rel_path))
+        {
+            anyhow::bail!(
+                "reconciliation plan contains config-independent denied path ({reason}): {rel_path}"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn validate_pull_manifests_for_execution(
+    plan: &ReconcilePlan,
+    op: &Operator,
+    local_root: &Path,
+    remote_prefix: &str,
+) -> Result<()> {
+    for action in &plan.actions {
+        let ReconcileAction::Pull {
+            rel_path,
+            manifest_hash,
+            size,
+            chunks,
+            expected_kind,
+            expected_symlink_target,
+            ..
+        } = action
+        else {
+            continue;
+        };
+        let manifest_path = format!(
+            "{}/manifests/{}",
+            remote_prefix.trim_end_matches('/'),
+            manifest_hash
+        );
+        let bytes = op
+            .read(&manifest_path)
+            .await
+            .with_context(|| format!("preflighting pull manifest: {manifest_path}"))?
+            .to_vec();
+        let entry = RemoteIndexEntry {
+            manifest_hash: manifest_hash.clone(),
+            size: *size,
+            chunks: *chunks,
+            kind: *expected_kind,
+            symlink_target: expected_symlink_target.clone(),
+        };
+        engine::validate_indexed_manifest_entry_binding(&bytes, manifest_hash, &entry, rel_path)
+            .with_context(|| format!("binding pull manifest before mutation: {manifest_path}"))?;
+        if let Some(target) = expected_symlink_target.as_deref() {
+            engine::validate_indexed_symlink_target(&local_root.join(rel_path), target)
+                .with_context(|| format!("validating pull symlink target: {rel_path}"))?;
+        }
+    }
+    Ok(())
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -105,7 +413,14 @@ pub enum ReconcileAction {
         rel_path: String,
         manifest_hash: String,
         size: u64,
+        chunks: usize,
         reason: PullReason,
+        /// Index-declared object kind bound to the downloaded manifest before
+        /// any local mutation.
+        expected_kind: RemoteEntryKind,
+        /// Exact index-declared symlink target, when `expected_kind` is a
+        /// symlink. Prevents a manifest substitution from changing the target.
+        expected_symlink_target: Option<String>,
     },
     DeleteLocal {
         local_path: PathBuf,
@@ -179,14 +494,12 @@ pub struct ExecutionResult {
     pub errors: Vec<(String, String)>,
     pub bytes_uploaded: u64,
     pub bytes_downloaded: u64,
-    /// Ref-class `.git` actions (`refs/**`, `packed-refs`, `HEAD`) that were
-    /// deferred this run rather than applied. Two causes, both fail-closed and
-    /// non-error: an object action for the same repo failed
-    /// (objects-before-refs barrier), or the repo's `.git/tcfs.lock` is held by
-    /// a live foreign holder (keep-both PR-2, S3), or the PR-4 loser-side
-    /// no-loss guard could not park a locally divergent head before overwrite.
-    /// The next reconcile cycle re-plans them once the objects land / the holder
-    /// releases / parking succeeds.
+    /// Raw `.git` actions deferred this run rather than applied. The legacy
+    /// field name includes object/directory actions too: an invalid/incomplete
+    /// topology, native Git activity, or a foreign `.git/tcfs.lock` defers the
+    /// whole repository; object failure and loser-guard failures additionally
+    /// defer dependent ref actions. A later cycle re-plans after the gate
+    /// clears.
     pub deferred_git_refs: Vec<String>,
 }
 
@@ -206,6 +519,10 @@ pub struct OrphanedChunkCleanupReport {
     pub deleted_chunks: Vec<String>,
     pub skipped_within_grace: Vec<String>,
     pub skipped_missing_last_modified: Vec<String>,
+    /// Old orphan candidates retained because the backend did not expose a
+    /// usable object version and exact-version deletion capability. An
+    /// unconditional delete would race a publisher refreshing the same CAS key.
+    pub skipped_without_atomic_delete: Vec<String>,
     pub delete_errors: Vec<(String, String)>,
     pub referenced_chunks: usize,
     pub scanned_chunks: usize,
@@ -224,6 +541,22 @@ struct PlannedOrphanCleanup {
     deletable: Vec<RemoteChunkObject>,
     skipped_within_grace: Vec<String>,
     skipped_missing_last_modified: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AtomicOrphanDeleteReadiness {
+    DeleteVersion(String),
+    WithinGrace,
+    MissingLastModified,
+    WithoutAtomicDelete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomicOrphanDeleteOutcome {
+    Deleted,
+    WithinGrace,
+    MissingLastModified,
+    WithoutAtomicDelete,
 }
 
 // ── Remote Index ─────────────────────────────────────────────────────────────
@@ -246,20 +579,43 @@ pub async fn list_remote_index(
     let manifest_keys = Arc::new(list_remote_manifest_keys(op, &manifest_prefix).await?);
     let read_permits = Arc::new(Semaphore::new(REMOTE_INDEX_READ_CONCURRENCY));
     let mut tasks = JoinSet::new();
+    let mut normalized_sources: HashMap<String, String> = HashMap::new();
 
     for entry in entries {
         let full_key = entry.path().to_string();
-        let rel_path = crate::engine::normalize_rel_path_text(
-            full_key.strip_prefix(&index_prefix).unwrap_or(&full_key),
-        );
+        let raw_rel_path = full_key.strip_prefix(&index_prefix).ok_or_else(|| {
+            anyhow::anyhow!(
+                "remote index listing returned key outside requested prefix {index_prefix:?}: {full_key:?}"
+            )
+        })?;
+        if raw_rel_path.is_empty() || raw_rel_path.ends_with('/') {
+            continue;
+        }
+        // Validate the serialized spelling before normalizing it. Otherwise a
+        // remote backslash or decomposed-Unicode key can silently acquire a
+        // different pathname meaning on another client.
+        validate_safe_relative_path(raw_rel_path)
+            .with_context(|| format!("invalid raw remote index path from key: {full_key:?}"))?;
+        let rel_path = crate::engine::normalize_rel_path_text(raw_rel_path);
 
         // Skip directory markers and empty paths.
-        if rel_path.is_empty()
-            || rel_path.ends_with('/')
-            || rel_path == DIR_MARKER
-            || rel_path.ends_with(DIR_MARKER_SUFFIX)
-        {
+        if rel_path.is_empty() || rel_path.ends_with('/') {
             continue;
+        }
+        if rel_path == DIR_MARKER {
+            continue;
+        }
+        if let Some(marker_dir) = rel_path.strip_suffix(DIR_MARKER_SUFFIX) {
+            validate_safe_relative_path(marker_dir)
+                .with_context(|| format!("invalid remote directory marker key: {full_key:?}"))?;
+            continue;
+        }
+        validate_safe_relative_path(&rel_path)
+            .with_context(|| format!("invalid remote index path from key: {full_key:?}"))?;
+        if let Some(previous_key) = normalized_sources.insert(rel_path.clone(), full_key.clone()) {
+            anyhow::bail!(
+                "remote index keys collide after path normalization for {rel_path:?}: {previous_key:?} and {full_key:?}"
+            );
         }
 
         let op = op.clone();
@@ -280,6 +636,7 @@ pub async fn list_remote_index(
     }
 
     let mut result = HashMap::new();
+    let mut first_error: Option<anyhow::Error> = None;
     while let Some(joined) = tasks.join_next().await {
         match joined {
             Ok(Ok((rel_path, _full_key, Some(visible)))) => {
@@ -289,12 +646,22 @@ pub async fn list_remote_index(
                 debug!(key = full_key, "skipping non-visible index entry");
             }
             Ok(Err(e)) => {
-                warn!(error = %e, "skipping unreadable index entry");
+                warn!(error = %e, "remote index entry is unreadable; reconciliation will fail closed");
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
             }
             Err(e) => {
-                warn!(error = %e, "remote index entry task failed");
+                warn!(error = %e, "remote index entry task failed; reconciliation will fail closed");
+                if first_error.is_none() {
+                    first_error = Some(anyhow::Error::new(e));
+                }
             }
         }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error).context("remote index is not fully readable");
     }
 
     debug!(count = result.len(), "fetched remote index");
@@ -310,17 +677,41 @@ async fn list_remote_empty_dirs(op: &Operator, remote_prefix: &str) -> Result<Ha
         .context("listing remote directory markers")?;
 
     let mut result = HashSet::new();
+    let mut normalized_sources: HashMap<String, String> = HashMap::new();
     for entry in entries {
         let full_key = entry.path();
-        let rel_path = crate::engine::normalize_rel_path_text(
-            full_key.strip_prefix(&index_prefix).unwrap_or(full_key),
-        );
+        let raw_rel_path = full_key.strip_prefix(&index_prefix).ok_or_else(|| {
+            anyhow::anyhow!(
+                "remote marker listing returned key outside requested prefix {index_prefix:?}: {full_key:?}"
+            )
+        })?;
+        if raw_rel_path.is_empty() || raw_rel_path.ends_with('/') {
+            continue;
+        }
+        validate_safe_relative_path(raw_rel_path)
+            .with_context(|| format!("invalid raw remote marker path from key: {full_key:?}"))?;
+        let rel_path = crate::engine::normalize_rel_path_text(raw_rel_path);
 
         let Some(dir_path) = rel_path.strip_suffix(DIR_MARKER_SUFFIX) else {
             continue;
         };
         if dir_path.is_empty() {
             continue;
+        }
+        validate_safe_relative_path(dir_path)
+            .with_context(|| format!("invalid remote directory marker key: {full_key:?}"))?;
+        if !crate::index_entry::directory_marker_is_visible(op, full_key)
+            .await
+            .with_context(|| format!("reading remote directory marker: {full_key:?}"))?
+        {
+            continue;
+        }
+        if let Some(previous_key) =
+            normalized_sources.insert(dir_path.to_string(), full_key.to_string())
+        {
+            anyhow::bail!(
+                "remote directory marker keys collide after path normalization for {dir_path:?}: {previous_key:?} and {full_key:?}"
+            );
         }
         result.insert(dir_path.to_string());
     }
@@ -330,6 +721,145 @@ async fn list_remote_empty_dirs(op: &Operator, remote_prefix: &str) -> Result<Ha
         "fetched remote empty directory markers"
     );
     Ok(result)
+}
+
+fn validate_casefold_prefix_aliases<'a>(
+    paths: impl Iterator<Item = &'a str>,
+    namespace: &str,
+) -> Result<()> {
+    let mut prefixes: HashMap<String, String> = HashMap::new();
+    for path in paths {
+        let mut prefix = String::new();
+        for component in path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            let folded = portable_casefold_path(&prefix)?;
+            if let Some(previous) = prefixes.get(&folded) {
+                if previous != &prefix {
+                    anyhow::bail!(
+                        "{namespace} contains case-insensitive component aliases: {previous:?} and {prefix:?}"
+                    );
+                }
+            } else {
+                prefixes.insert(folded, prefix.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A remote namespace must be representable by one ordinary filesystem tree.
+/// A file cannot also be a directory marker or be an ancestor of another file
+/// or marker (`foo` together with `foo/bar`). Marker ancestors are fine.
+fn validate_remote_namespace(
+    remote_index: &HashMap<String, RemoteIndexEntry>,
+    remote_empty_dirs: &HashSet<String>,
+) -> Result<()> {
+    validate_casefold_prefix_aliases(
+        remote_index
+            .keys()
+            .map(String::as_str)
+            .chain(remote_empty_dirs.iter().map(String::as_str)),
+        "remote namespace",
+    )?;
+    let mut folded_files: HashMap<String, &str> = HashMap::new();
+    for file in remote_index.keys() {
+        let folded = portable_casefold_path(file)?;
+        if let Some(previous) = folded_files.insert(folded, file) {
+            anyhow::bail!(
+                "remote file paths collide under case-insensitive clients: {previous:?} and {file:?}"
+            );
+        }
+    }
+    let mut folded_directories: HashMap<String, &str> = HashMap::new();
+    for directory in remote_empty_dirs {
+        let folded = portable_casefold_path(directory)?;
+        if let Some(previous) = folded_directories.insert(folded, directory) {
+            anyhow::bail!(
+                "remote directory markers collide under case-insensitive clients: {previous:?} and {directory:?}"
+            );
+        }
+    }
+
+    for (folded_file, file) in &folded_files {
+        if let Some(directory) = folded_directories.get(folded_file) {
+            anyhow::bail!(
+                "remote namespace collision: file {file:?} aliases directory marker {directory:?}"
+            );
+        }
+        for (separator, _) in folded_file.match_indices('/') {
+            let folded_ancestor = &folded_file[..separator];
+            if let Some(ancestor) = folded_files.get(folded_ancestor) {
+                anyhow::bail!(
+                    "remote namespace collision: file {ancestor:?} is an ancestor of file {file:?}"
+                );
+            }
+        }
+    }
+
+    for (folded_directory, directory) in &folded_directories {
+        for (separator, _) in folded_directory.match_indices('/') {
+            let folded_ancestor = &folded_directory[..separator];
+            if let Some(ancestor) = folded_files.get(folded_ancestor) {
+                anyhow::bail!(
+                    "remote namespace collision: file {ancestor:?} is an ancestor of directory marker {directory:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One validated logical view of the remote path index.
+///
+/// Physical v4 tombstones are excluded from both collections. Callers should
+/// use this snapshot, rather than a local state cache, as listing authority.
+#[derive(Debug)]
+pub struct RemoteNamespaceSnapshot {
+    pub files: HashMap<String, RemoteIndexEntry>,
+    pub directories: HashSet<String>,
+}
+
+pub async fn list_remote_namespace(
+    op: &Operator,
+    remote_prefix: &str,
+) -> Result<RemoteNamespaceSnapshot> {
+    let files = list_remote_index(op, remote_prefix).await?;
+    let directories = list_remote_empty_dirs(op, remote_prefix).await?;
+    validate_remote_namespace(&files, &directories)?;
+    Ok(RemoteNamespaceSnapshot { files, directories })
+}
+
+fn validate_remote_ingress_blacklist(
+    remote_index: &HashMap<String, RemoteIndexEntry>,
+    remote_empty_dirs: &HashSet<String>,
+    blacklist: &Blacklist,
+) -> Result<()> {
+    for rel_path in remote_index.keys() {
+        let path = Path::new(rel_path);
+        if let Some(reason) = blacklist
+            .check_path_components(path)
+            .or_else(|| blacklist.check(path, false))
+        {
+            anyhow::bail!(
+                "remote path is excluded from hydration by the configured blacklist ({reason}): {rel_path}"
+            );
+        }
+    }
+    for rel_path in remote_empty_dirs {
+        let path = Path::new(rel_path);
+        if let Some(reason) = blacklist
+            .check_path_components(path)
+            .or_else(|| blacklist.check(path, true))
+        {
+            anyhow::bail!(
+                "remote directory marker is excluded from hydration by the configured blacklist ({reason}): {rel_path}"
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn list_remote_manifest_keys(
@@ -348,6 +878,12 @@ async fn list_remote_manifest_keys(
         if key.is_empty() || key.ends_with('/') {
             continue;
         }
+        let manifest_name = key.strip_prefix(manifest_prefix).ok_or_else(|| {
+            anyhow::anyhow!(
+                "manifest listing returned key outside requested prefix {manifest_prefix:?}: {key:?}"
+            )
+        })?;
+        crate::index_entry::validate_storage_key_component(manifest_name, "listed manifest key")?;
         result.insert(key.to_string());
     }
 
@@ -409,8 +945,45 @@ pub async fn find_orphaned_chunks(
 /// Delete orphaned chunks only after they have aged past a grace period.
 ///
 /// Chunks without usable last-modified metadata are left in place so cleanup
-/// stays conservative on backends that do not expose object timestamps.
+/// stays conservative on backends that do not expose object timestamps. Every
+/// candidate is re-statted immediately before deletion, and deletion requires
+/// a usable object version plus exact-version delete support. This prevents an
+/// old scan result from deleting a CAS object that a concurrent publisher
+/// refreshed before making its manifest visible. A shared/indexed root always
+/// enforces [`MIN_INDEXED_ORPHAN_CHUNK_GRACE`], even when a legacy caller
+/// requests zero, because chunk upload necessarily precedes publication of the
+/// staged manifest that makes it reachable.
 pub async fn cleanup_orphaned_chunks(
+    op: &Operator,
+    remote_prefix: &str,
+    grace_period: Duration,
+    now: SystemTime,
+) -> Result<OrphanedChunkCleanupReport> {
+    cleanup_orphaned_chunks_with_effective_grace(
+        op,
+        remote_prefix,
+        indexed_orphan_chunk_grace(grace_period),
+        now,
+    )
+    .await
+}
+
+/// Clean a proven single-writer legacy manifest-only root without imposing the
+/// indexed-root grace floor. A zero requested grace is honored, but deletion
+/// still requires a fresh timestamp and exact object version: legacy mode does
+/// not weaken the generation-pinned delete invariant.
+///
+/// Callers must reject indexed roots before invoking this entry point.
+pub async fn cleanup_legacy_orphaned_chunks(
+    op: &Operator,
+    remote_prefix: &str,
+    grace_period: Duration,
+    now: SystemTime,
+) -> Result<OrphanedChunkCleanupReport> {
+    cleanup_orphaned_chunks_with_effective_grace(op, remote_prefix, grace_period, now).await
+}
+
+async fn cleanup_orphaned_chunks_with_effective_grace(
     op: &Operator,
     remote_prefix: &str,
     grace_period: Duration,
@@ -425,23 +998,39 @@ pub async fn cleanup_orphaned_chunks(
     );
 
     let mut deleted_chunks = Vec::new();
+    let mut skipped_within_grace = plan.skipped_within_grace;
+    let mut skipped_missing_last_modified = plan.skipped_missing_last_modified;
+    let mut skipped_without_atomic_delete = Vec::new();
     let mut delete_errors = Vec::new();
 
     for entry in plan.deletable {
-        match op.delete(&entry.object_key).await {
-            Ok(()) => deleted_chunks.push(entry.chunk_hash),
+        match delete_orphaned_chunk_atomically(op, &entry, grace_period, now).await {
+            Ok(AtomicOrphanDeleteOutcome::Deleted) => deleted_chunks.push(entry.chunk_hash),
+            Ok(AtomicOrphanDeleteOutcome::WithinGrace) => {
+                skipped_within_grace.push(entry.chunk_hash)
+            }
+            Ok(AtomicOrphanDeleteOutcome::MissingLastModified) => {
+                skipped_missing_last_modified.push(entry.chunk_hash)
+            }
+            Ok(AtomicOrphanDeleteOutcome::WithoutAtomicDelete) => {
+                skipped_without_atomic_delete.push(entry.chunk_hash)
+            }
             Err(e) => delete_errors.push((entry.chunk_hash, e.to_string())),
         }
     }
 
     deleted_chunks.sort();
+    skipped_within_grace.sort();
+    skipped_missing_last_modified.sort();
+    skipped_without_atomic_delete.sort();
     delete_errors.sort_by(|a, b| a.0.cmp(&b.0));
 
     Ok(OrphanedChunkCleanupReport {
         orphaned_chunks_found: plan.orphaned_chunks_found,
         deleted_chunks,
-        skipped_within_grace: plan.skipped_within_grace,
-        skipped_missing_last_modified: plan.skipped_missing_last_modified,
+        skipped_within_grace,
+        skipped_missing_last_modified,
+        skipped_without_atomic_delete,
         delete_errors,
         referenced_chunks: scan.referenced_chunks.len(),
         scanned_chunks: scan.chunk_objects.len(),
@@ -451,6 +1040,8 @@ pub async fn cleanup_orphaned_chunks(
 async fn scan_remote_chunks(op: &Operator, remote_prefix: &str) -> Result<RemoteChunkScan> {
     let prefix = remote_prefix.trim_end_matches('/');
     let manifest_prefix = format!("{prefix}/manifests/");
+    let staging_manifest_prefix = format!("{prefix}/staging/manifests/");
+    let index_prefix = format!("{prefix}/index/");
     let chunk_prefix = format!("{prefix}/chunks/");
 
     let manifest_entries = op
@@ -465,20 +1056,126 @@ async fn scan_remote_chunks(op: &Operator, remote_prefix: &str) -> Result<Remote
         if key.ends_with('/') {
             continue;
         }
-
-        match op.read(key).await {
-            Ok(data) => match SyncManifest::from_bytes(&data.to_vec()) {
-                Ok(manifest) => {
-                    referenced_chunks.extend(manifest.chunks);
-                }
-                Err(e) => {
-                    warn!(manifest = key, error = %e, "skipping unparseable manifest during orphan scan")
-                }
-            },
-            Err(e) => {
-                warn!(manifest = key, error = %e, "skipping unreadable manifest during orphan scan")
-            }
+        let manifest_name = key.strip_prefix(&manifest_prefix).ok_or_else(|| {
+            anyhow::anyhow!(
+                "manifest listing returned key outside requested prefix {manifest_prefix:?}: {key:?}"
+            )
+        })?;
+        if manifest_name.contains('/') {
+            validate_safe_relative_path(manifest_name)
+                .with_context(|| format!("validating legacy path-addressed manifest key: {key}"))?;
+            let data = op
+                .read(key)
+                .await
+                .with_context(|| format!("reading legacy manifest during orphan scan: {key}"))?;
+            mark_legacy_path_manifest_references(
+                &data.to_vec(),
+                manifest_name,
+                &mut referenced_chunks,
+            )
+            .with_context(|| format!("parsing legacy manifest during orphan scan: {key}"))?;
+            continue;
         }
+        crate::index_entry::validate_storage_key_component(
+            manifest_name,
+            "orphan-scan manifest key",
+        )?;
+        let data = op
+            .read(key)
+            .await
+            .with_context(|| format!("reading manifest during orphan scan: {key}"))?;
+        infer_and_mark_manifest_references(
+            &data.to_vec(),
+            manifest_name,
+            false,
+            &mut referenced_chunks,
+        )
+        .with_context(|| format!("parsing manifest during orphan scan: {key}"))?;
+    }
+
+    // Staging is itself a reachability surface. A process can stop after the
+    // staged object is durable but before its preparing index record is
+    // visible, so retaining only index-addressable staged manifests loses
+    // data. Unknown or malformed staged metadata aborts the sweep: leaking
+    // storage is preferable to guessing that its chunks are dead.
+    let staged_entries = op
+        .list_with(&staging_manifest_prefix)
+        .recursive(true)
+        .await
+        .context("listing staged manifests during orphan scan")?;
+    for entry in staged_entries {
+        let key = entry.path();
+        if key.ends_with('/') {
+            continue;
+        }
+        let object_id = staged_manifest_object_id(&staging_manifest_prefix, key)?;
+        let data = op
+            .read(key)
+            .await
+            .with_context(|| format!("reading staged manifest during orphan scan: {key}"))?;
+        let (remote_entry, _) = infer_and_mark_manifest_references(
+            &data.to_vec(),
+            &object_id,
+            true,
+            &mut referenced_chunks,
+        )
+        .with_context(|| format!("validating staged manifest during orphan scan: {key}"))?;
+        let pending = PendingIndexEntry::from_remote_entry(&remote_entry, key);
+        validate_staged_manifest_key(&manifest_prefix, &pending)
+            .with_context(|| format!("validating staged manifest key during orphan scan: {key}"))?;
+    }
+
+    // A preparing index entry is another durable reachability root. Re-read
+    // its exact staged object even though the staging namespace was scanned
+    // above. This makes a missing/misbound pending object fail closed instead
+    // of allowing its not-yet-committed chunks to be collected.
+    let index_entries = op
+        .list_with(&index_prefix)
+        .recursive(true)
+        .await
+        .context("listing remote index during orphan scan")?;
+    for entry in index_entries {
+        let key = entry.path();
+        if key.ends_with('/') {
+            continue;
+        }
+        let rel_path = key.strip_prefix(&index_prefix).ok_or_else(|| {
+            anyhow::anyhow!(
+                "index listing returned key outside requested prefix {index_prefix:?}: {key:?}"
+            )
+        })?;
+        if rel_path == DIR_MARKER || rel_path.ends_with(DIR_MARKER_SUFFIX) {
+            continue;
+        }
+        validate_safe_relative_path(rel_path)
+            .with_context(|| format!("validating index path during orphan scan: {key}"))?;
+        let index_data = op
+            .read(key)
+            .await
+            .with_context(|| format!("reading index entry during orphan scan: {key}"))?;
+        let parsed = parse_index_entry_record(&index_data.to_vec())
+            .with_context(|| format!("parsing index entry during orphan scan: {key}"))?;
+        let Some(pending) = parsed.pending_entry() else {
+            continue;
+        };
+        validate_staged_manifest_key(&manifest_prefix, pending)
+            .with_context(|| format!("validating pending manifest during orphan scan: {key}"))?;
+        let staged_data = op
+            .read(&pending.staged_manifest_key)
+            .await
+            .with_context(|| {
+                format!(
+                    "reading pending staged manifest during orphan scan: {}",
+                    pending.staged_manifest_key
+                )
+            })?;
+        mark_expected_manifest_references(
+            &staged_data.to_vec(),
+            &pending.as_remote_entry(),
+            rel_path,
+            &mut referenced_chunks,
+        )
+        .with_context(|| format!("validating pending manifest during orphan scan: {key}"))?;
     }
 
     let chunk_entries = op
@@ -490,10 +1187,15 @@ async fn scan_remote_chunks(op: &Operator, remote_prefix: &str) -> Result<Remote
     let mut chunk_objects = Vec::new();
     for entry in chunk_entries {
         let key = entry.path();
-        let chunk_hash = key.strip_prefix(&chunk_prefix).unwrap_or(key);
-        if chunk_hash.is_empty() || chunk_hash.ends_with('/') {
+        if key.ends_with('/') {
             continue;
         }
+        let chunk_hash = key.strip_prefix(&chunk_prefix).ok_or_else(|| {
+            anyhow::anyhow!(
+                "chunk listing returned key outside requested prefix {chunk_prefix:?}: {key:?}"
+            )
+        })?;
+        crate::index_entry::validate_storage_key_component(chunk_hash, "orphan-scan chunk key")?;
 
         let last_modified = if referenced_chunks.contains(chunk_hash) {
             entry.metadata().last_modified().map(SystemTime::from)
@@ -517,6 +1219,175 @@ async fn scan_remote_chunks(op: &Operator, remote_prefix: &str) -> Result<Remote
     })
 }
 
+/// Mark chunks reachable from the historical `manifests/<relative-path>`
+/// layout. Nested keys are unambiguously legacy because modern manifest
+/// objects are flat and byte-addressed. The path remains authoritative: when
+/// an older manifest carries `rel_path`, it must match the storage key exactly.
+fn mark_legacy_path_manifest_references(
+    bytes: &[u8],
+    rel_path: &str,
+    referenced_chunks: &mut HashSet<String>,
+) -> Result<()> {
+    match SyncManifest::from_bytes(bytes) {
+        Ok(manifest) => {
+            anyhow::ensure!(
+                matches!(manifest.version, 1..=3),
+                "unsupported legacy regular-file manifest version: {}",
+                manifest.version
+            );
+            if manifest.version >= 2 {
+                crate::index_entry::validate_storage_key_component(
+                    &manifest.file_hash,
+                    "legacy regular manifest file_hash",
+                )?;
+            }
+            if manifest.version == 3 {
+                anyhow::ensure!(
+                    !manifest.wrapped_file_keys.is_empty(),
+                    "legacy regular manifest v3 is missing per-device wrapped keys"
+                );
+            }
+            if let Some(actual) = manifest.rel_path.as_deref() {
+                anyhow::ensure!(
+                    actual == rel_path,
+                    "legacy manifest rel_path mismatch: expected {rel_path:?}, got {actual:?}"
+                );
+            }
+            for chunk in &manifest.chunks {
+                crate::index_entry::validate_storage_key_component(
+                    chunk,
+                    "legacy regular manifest chunk",
+                )?;
+            }
+            referenced_chunks.extend(manifest.chunks);
+            Ok(())
+        }
+        Err(sync_error) => {
+            let manifest = SymlinkManifest::from_bytes(bytes).with_context(|| {
+                format!(
+                    "parsing legacy manifest as regular ({sync_error}) or symlink during orphan scan"
+                )
+            })?;
+            if let Some(actual) = manifest.rel_path.as_deref() {
+                anyhow::ensure!(
+                    actual == rel_path,
+                    "legacy symlink manifest rel_path mismatch: expected {rel_path:?}, got {actual:?}"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Parse a final or standalone staged manifest, validate its object binding,
+/// and retain every chunk it names. The returned entry can be used to validate
+/// the staged filename against the same immutable object identity.
+fn infer_and_mark_manifest_references(
+    bytes: &[u8],
+    object_id: &str,
+    require_embedded_rel_path: bool,
+    referenced_chunks: &mut HashSet<String>,
+) -> Result<(RemoteIndexEntry, String)> {
+    match SyncManifest::from_bytes(bytes) {
+        Ok(manifest) => {
+            let rel_path = match manifest.rel_path.as_deref() {
+                Some(rel_path) => rel_path.to_string(),
+                None if !require_embedded_rel_path => "gc-manifest".to_string(),
+                None => anyhow::bail!("staged regular-file manifest is missing rel_path"),
+            };
+            let remote_entry =
+                RemoteIndexEntry::new(object_id, manifest.file_size, manifest.chunks.len());
+            mark_expected_manifest_references(bytes, &remote_entry, &rel_path, referenced_chunks)?;
+            Ok((remote_entry, rel_path))
+        }
+        Err(sync_error) => {
+            let symlink = SymlinkManifest::from_bytes(bytes).with_context(|| {
+                format!("parsing manifest as regular ({sync_error}) or symlink during orphan scan")
+            })?;
+            let rel_path = match symlink.rel_path.as_deref() {
+                Some(rel_path) => rel_path.to_string(),
+                None if !require_embedded_rel_path => "gc-symlink".to_string(),
+                None => anyhow::bail!("staged symlink manifest is missing rel_path"),
+            };
+            let remote_entry =
+                RemoteIndexEntry::new_symlink(object_id, symlink.symlink_target.clone());
+            mark_expected_manifest_references(bytes, &remote_entry, &rel_path, referenced_chunks)?;
+            Ok((remote_entry, rel_path))
+        }
+    }
+}
+
+fn mark_expected_manifest_references(
+    bytes: &[u8],
+    entry: &RemoteIndexEntry,
+    rel_path: &str,
+    referenced_chunks: &mut HashSet<String>,
+) -> Result<()> {
+    engine::validate_indexed_manifest_binding(
+        bytes,
+        &entry.manifest_hash,
+        entry.kind,
+        entry.symlink_target.as_deref(),
+        rel_path,
+    )?;
+
+    match entry.kind {
+        RemoteEntryKind::RegularFile => {
+            let manifest = SyncManifest::from_bytes(bytes)
+                .context("parsing expected regular-file manifest during orphan scan")?;
+            anyhow::ensure!(
+                manifest.file_size == entry.size && manifest.chunks.len() == entry.chunks,
+                "regular-file manifest metadata disagrees with its index entry"
+            );
+            referenced_chunks.extend(manifest.chunks);
+        }
+        RemoteEntryKind::Symlink => {
+            let manifest = SymlinkManifest::from_bytes(bytes)
+                .context("parsing expected symlink manifest during orphan scan")?;
+            anyhow::ensure!(
+                entry.chunks == 0 && entry.size == manifest.symlink_target.len() as u64,
+                "symlink manifest metadata disagrees with its index entry"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn staged_manifest_object_id(staging_prefix: &str, key: &str) -> Result<String> {
+    let staged_name = key.strip_prefix(staging_prefix).ok_or_else(|| {
+        anyhow::anyhow!(
+            "staged manifest listing returned key outside requested prefix {staging_prefix:?}: {key:?}"
+        )
+    })?;
+    crate::index_entry::validate_storage_key_component(
+        staged_name,
+        "orphan-scan staged manifest key",
+    )?;
+    let stem = staged_name
+        .strip_suffix(".json")
+        .context("staged manifest key must end in .json")?;
+    let stem_bytes = stem.as_bytes();
+    anyhow::ensure!(
+        stem_bytes.len() > 37
+            && stem_bytes[..36].iter().all(|byte| byte.is_ascii())
+            && stem_bytes[36] == b'-',
+        "staged manifest key must contain a canonical UUID and object id: {key:?}"
+    );
+    let transaction = &stem[..36];
+    let transaction_id = uuid::Uuid::parse_str(transaction)
+        .context("staged manifest transaction id must be a UUID")?;
+    anyhow::ensure!(
+        transaction_id.hyphenated().to_string() == transaction,
+        "staged manifest transaction id must use canonical hyphenated UUID spelling: {transaction:?}"
+    );
+    let object_id = &stem[37..];
+    crate::index_entry::validate_storage_key_component(
+        object_id,
+        "orphan-scan staged manifest object id",
+    )?;
+    Ok(object_id.to_string())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RemoteChunkScan {
     referenced_chunks: HashSet<String>,
@@ -529,6 +1400,98 @@ async fn chunk_last_modified(op: &Operator, key: &str) -> Option<SystemTime> {
         .ok()
         .and_then(|meta| meta.last_modified())
         .map(SystemTime::from)
+}
+
+fn indexed_orphan_chunk_grace(requested: Duration) -> Duration {
+    requested.max(MIN_INDEXED_ORPHAN_CHUNK_GRACE)
+}
+
+fn atomic_orphan_delete_readiness(
+    scanned_last_modified: Option<SystemTime>,
+    fresh_last_modified: Option<SystemTime>,
+    fresh_version: Option<&str>,
+    delete_with_version: bool,
+    grace_period: Duration,
+    now: SystemTime,
+) -> AtomicOrphanDeleteReadiness {
+    let Some(fresh_last_modified) = fresh_last_modified else {
+        return AtomicOrphanDeleteReadiness::MissingLastModified;
+    };
+
+    // A changed timestamp means this object was refreshed after the scan. It
+    // receives a new full grace window even when the caller's `now` is skewed.
+    if scanned_last_modified != Some(fresh_last_modified) {
+        return AtomicOrphanDeleteReadiness::WithinGrace;
+    }
+    match now.duration_since(fresh_last_modified) {
+        Ok(age) if age >= grace_period => {}
+        Ok(_) | Err(_) => return AtomicOrphanDeleteReadiness::WithinGrace,
+    }
+
+    if !delete_with_version {
+        return AtomicOrphanDeleteReadiness::WithoutAtomicDelete;
+    }
+    let Some(version) = fresh_version
+        .filter(|version| !version.is_empty() && !version.eq_ignore_ascii_case("null"))
+    else {
+        // S3's literal `null` version is shared by unversioned/suspended writes
+        // and therefore is not a generation token.
+        return AtomicOrphanDeleteReadiness::WithoutAtomicDelete;
+    };
+    AtomicOrphanDeleteReadiness::DeleteVersion(version.to_string())
+}
+
+async fn delete_orphaned_chunk_atomically(
+    op: &Operator,
+    entry: &RemoteChunkObject,
+    grace_period: Duration,
+    now: SystemTime,
+) -> Result<AtomicOrphanDeleteOutcome> {
+    let metadata = match op.stat(&entry.object_key).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
+            // Another collector already achieved the desired postcondition.
+            return Ok(AtomicOrphanDeleteOutcome::Deleted);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("re-statting orphan chunk: {}", entry.object_key));
+        }
+    };
+    let readiness = atomic_orphan_delete_readiness(
+        entry.last_modified,
+        metadata.last_modified().map(SystemTime::from),
+        metadata.version(),
+        op.info().full_capability().delete_with_version,
+        grace_period,
+        now,
+    );
+
+    let version = match readiness {
+        AtomicOrphanDeleteReadiness::DeleteVersion(version) => version,
+        AtomicOrphanDeleteReadiness::WithinGrace => {
+            return Ok(AtomicOrphanDeleteOutcome::WithinGrace)
+        }
+        AtomicOrphanDeleteReadiness::MissingLastModified => {
+            return Ok(AtomicOrphanDeleteOutcome::MissingLastModified)
+        }
+        AtomicOrphanDeleteReadiness::WithoutAtomicDelete => {
+            return Ok(AtomicOrphanDeleteOutcome::WithoutAtomicDelete)
+        }
+    };
+
+    match op.delete_with(&entry.object_key).version(&version).await {
+        Ok(()) => Ok(AtomicOrphanDeleteOutcome::Deleted),
+        Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
+            Ok(AtomicOrphanDeleteOutcome::Deleted)
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "deleting orphan chunk version {version:?}: {}",
+                entry.object_key
+            )
+        }),
+    }
 }
 
 fn plan_orphaned_chunk_cleanup(
@@ -592,16 +1555,42 @@ pub async fn reconcile(
 
     // 1. Collect local files
     let local_files = collect_local_set(local_root, blacklist)?;
+    for (rel_path, local_path) in &local_files {
+        if is_git_internal_path(rel_path) {
+            let metadata = std::fs::symlink_metadata(local_path).with_context(|| {
+                format!(
+                    "inspecting collected raw Git path: {}",
+                    local_path.display()
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!(
+                    "local symbolic link inside raw Git metadata is outside the reconciliation seam: {rel_path}"
+                );
+            }
+        }
+    }
     debug!(count = local_files.len(), "collected local files");
 
     // 2. Fetch remote index
-    let remote_index = list_remote_index(op, remote_prefix).await?;
+    let RemoteNamespaceSnapshot {
+        files: remote_index,
+        directories: remote_empty_dirs,
+    } = list_remote_namespace(op, remote_prefix).await?;
     debug!(count = remote_index.len(), "fetched remote index");
-    let remote_empty_dirs = list_remote_empty_dirs(op, remote_prefix).await?;
     debug!(
         count = remote_empty_dirs.len(),
         "fetched remote empty directory markers"
     );
+    validate_remote_ingress_blacklist(&remote_index, &remote_empty_dirs, blacklist)?;
+    validate_casefold_prefix_aliases(
+        local_files
+            .keys()
+            .map(String::as_str)
+            .chain(remote_index.keys().map(String::as_str))
+            .chain(remote_empty_dirs.iter().map(String::as_str)),
+        "combined local/remote reconciliation namespace",
+    )?;
 
     // 3. Build alignment — union of all known paths
     let mut all_paths: HashSet<String> = HashSet::new();
@@ -633,7 +1622,8 @@ pub async fn reconcile(
             device_id,
             config,
         )
-        .await;
+        .await
+        .with_context(|| format!("classifying reconciliation path {rel_path:?}"))?;
 
         match &action {
             ReconcileAction::Push { .. } => summary.pushes += 1,
@@ -748,41 +1738,71 @@ pub(crate) fn is_git_ref_class_path(rel: &str) -> bool {
     if !is_git_internal_path(rel) {
         return false;
     }
-    rel.contains(".git/refs/")
-        || rel.ends_with(".git/packed-refs")
-        || rel.ends_with(".git/HEAD")
-        || is_git_modules_ref_class(rel)
+    let folded = rel.to_ascii_lowercase();
+    folded.contains(".git/refs/")
+        || folded.ends_with(".git/packed-refs")
+        || folded.ends_with(".git/head")
+        || is_git_modules_ref_class(&folded)
 }
 
-/// True for `.git` paths that carry object data (`.git/objects/**`, loose or
-/// pack) — including a submodule's own object store at
-/// `.git/modules/<name>/objects/**` (M-4, PR #513). A failed object action for
-/// a repo bars that repo's ref-class actions for the rest of the run
-/// (objects-before-refs barrier): a ref must never be published or applied when
-/// the objects it needs may not have landed.
+/// True only for immutable Git object payloads whose names are content-derived:
+/// exact loose SHA-1/SHA-256 objects and `pack-<hash>.{pack,idx,rev}` payloads.
+/// Mutable or routing metadata under `objects/info`, commit-graph,
+/// multi-pack-index, `.keep`, and `.promisor` must never use the lock bypass.
 fn is_git_object_class_path(rel: &str) -> bool {
-    if !is_git_internal_path(rel) {
+    let rel = rel.replace('\\', "/").to_ascii_lowercase();
+    let Some((_, after_git)) = rel.split_once(".git/") else {
         return false;
+    };
+    let object_tail = if let Some(tail) = after_git.strip_prefix("objects/") {
+        tail
+    } else if let Some(module_tail) = after_git.strip_prefix("modules/") {
+        let Some(marker) = module_tail.rfind("/objects/") else {
+            return false;
+        };
+        if marker == 0 {
+            return false;
+        }
+        &module_tail[marker + "/objects/".len()..]
+    } else {
+        return false;
+    };
+
+    let is_hex = |value: &str| {
+        (value.len() == 40 || value.len() == 64)
+            && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    if let Some((fanout, remainder)) = object_tail.split_once('/') {
+        if !remainder.contains('/')
+            && fanout.len() == 2
+            && fanout.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            let full_hash = format!("{fanout}{remainder}");
+            return is_hex(&full_hash);
+        }
     }
-    rel.contains(".git/objects/") || is_git_modules_object_class(rel)
+    let Some(pack_name) = object_tail.strip_prefix("pack/pack-") else {
+        return false;
+    };
+    let Some((hash, extension)) = pack_name.rsplit_once('.') else {
+        return false;
+    };
+    is_hex(hash) && matches!(extension, "pack" | "idx" | "rev")
 }
 
-/// Submodule object-store paths: anything under a `.git/modules/<name>/objects/`
-/// tail (the `<name>` may itself contain slashes / nested `modules/`).
-fn is_git_modules_object_class(rel: &str) -> bool {
-    match rel.find(".git/modules/") {
-        Some(pos) => rel[pos..].contains("/objects/"),
-        None => false,
-    }
+fn is_git_object_routing_path(rel: &str) -> bool {
+    let rel = rel.replace('\\', "/").to_ascii_lowercase();
+    rel.ends_with("/objects/info/alternates") || rel.ends_with("/objects/info/http-alternates")
 }
 
 /// Submodule ref-class paths: `refs/**`, `packed-refs`, or `HEAD` inside a
 /// `.git/modules/<name>/` gitdir.
 fn is_git_modules_ref_class(rel: &str) -> bool {
-    match rel.find(".git/modules/") {
+    let folded = rel.to_ascii_lowercase();
+    match folded.find(".git/modules/") {
         Some(pos) => {
-            let tail = &rel[pos..];
-            tail.contains("/refs/") || tail.ends_with("/packed-refs") || tail.ends_with("/HEAD")
+            let tail = &folded[pos..];
+            tail.contains("/refs/") || tail.ends_with("/packed-refs") || tail.ends_with("/head")
         }
         None => false,
     }
@@ -810,22 +1830,34 @@ fn git_ref_barrier_hit(rel_path: &str, local_root: &Path, barred: &BTreeSet<Path
         .is_some_and(|root| barred.contains(&root))
 }
 
-/// True when `rel_path` is a ref-class `.git` path whose enclosing repo is held
-/// by a live FOREIGN `.git/tcfs.lock` holder this run — the action must be
-/// deferred (keep-both PR-2, S3). Only ref-class paths (`refs/**`,
-/// `packed-refs`, `HEAD`, submodule ref-class) gate on the lock; object-class
-/// (`.git/objects/**`) and normal-file writes are content-addressed / atomic
-/// and proceed as today.
-fn git_ref_foreign_lock_hit(
+/// True when `rel_path` is any `.git` path whose enclosing repo could not be
+/// locked this run. Object paths are not exempt: pathname shape alone does not
+/// prove content-address coherence, so every Git action defers while busy.
+fn git_mutation_lock_hit(
     rel_path: &str,
     local_root: &Path,
-    foreign_locked: &BTreeSet<PathBuf>,
+    blocked_repos: &BTreeSet<PathBuf>,
 ) -> bool {
-    if foreign_locked.is_empty() || !is_git_ref_class_path(rel_path) {
+    if blocked_repos.is_empty() || !is_git_internal_path(rel_path) {
         return false;
     }
     git_safety::repo_root_for_git_path(local_root, rel_path)
-        .is_some_and(|root| foreign_locked.contains(&root))
+        .is_some_and(|root| blocked_repos.contains(&root))
+}
+
+/// True when any `.git` path belongs to a repo whose configured spelling or
+/// metadata topology is invalid. Unlike a busy-but-valid repo, object-class
+/// actions must also defer: following an alias could mutate or export a victim.
+fn git_invalid_topology_hit(
+    rel_path: &str,
+    local_root: &Path,
+    invalid_repos: &BTreeSet<PathBuf>,
+) -> bool {
+    if invalid_repos.is_empty() || !is_git_internal_path(rel_path) {
+        return false;
+    }
+    git_safety::repo_root_for_git_path(local_root, rel_path)
+        .is_some_and(|root| invalid_repos.contains(&root))
 }
 
 /// Extract the plan-time head-ref pins carried by a `.git` fast-forward action
@@ -982,14 +2014,613 @@ fn module_tail_raw_head(module_tail: &str) -> Option<&str> {
         .filter(|module_subpath| !module_subpath.is_empty())
 }
 
-/// Read the SHA `ref_name` resolves to in an explicit git dir (`--git-dir`),
-/// consulting loose refs and packed-refs. `--git-dir` (not `-C`) so a
-/// submodule's bare-style module gitdir resolves correctly. `None` if the ref
-/// is absent or not a concrete SHA.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_files_ref_storage(mut command: std::process::Command) -> Result<()> {
+    let output = command
+        .args(["config", "--null", "--get-all", "extensions.refStorage"])
+        .output()
+        .context("inspecting explicit Git directory reference backend")?;
+    match output.status.code() {
+        Some(0) => {
+            let values = output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|value| !value.is_empty())
+                .map(|value| String::from_utf8_lossy(value).trim().to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            if values.is_empty() || values.iter().any(|value| value != "files") {
+                anyhow::bail!(
+                    "explicit Git directory uses unsupported reference backend: {}",
+                    values.join(", ")
+                );
+            }
+        }
+        Some(1) => {}
+        _ => anyhow::bail!(
+            "explicit Git directory reference-backend inspection failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reject_entry_at_git_dir(directory: &std::fs::File, name: &str) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+
+    let entry_name = name.to_string();
+    let name = CString::new(name).context("building Git metadata entry name")?;
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the directory descriptor is live, `name` is NUL-terminated, and
+    // `metadata` points to writable storage for one `stat` result.
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status == 0 {
+        anyhow::bail!("explicit Git directory contains unsupported {entry_name} metadata entry");
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(error).with_context(|| format!("inspecting explicit Git metadata entry {entry_name}"))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn descriptor_git_dir_command(directory: std::fs::File) -> std::process::Command {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let mut command = git_safety::sanitized_git_command();
+    command.env("GIT_DIR", ".").env("GIT_COMMON_DIR", ".");
+    // SAFETY: `fchdir(2)` is async-signal-safe. Moving `directory` into the
+    // callback also keeps the capability alive until the child has entered it.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(directory.as_raw_fd()) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    command
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn split_explicit_git_dir(git_dir: &Path) -> Result<(PathBuf, Vec<std::ffi::OsString>)> {
+    let mut cursor = git_dir;
+    let mut components = Vec::new();
+    loop {
+        let name = cursor.file_name().ok_or_else(|| {
+            anyhow::anyhow!(
+                "explicit Git directory is not contained by a repository .git directory: {}",
+                git_dir.display()
+            )
+        })?;
+        components.push(name.to_os_string());
+        if name == ".git" {
+            components.reverse();
+            let repo_root = cursor
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            return Ok((repo_root.to_path_buf(), components));
+        }
+        cursor = cursor.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "explicit Git directory is not contained by a repository .git directory: {}",
+                git_dir.display()
+            )
+        })?;
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_explicit_repo_root_spelling(repo_root: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    conflict_git::validate_trusted_configured_path(repo_root)?;
+    let absolute = std::path::absolute(repo_root).with_context(|| {
+        format!(
+            "making explicit Git repo root absolute without resolving aliases: {}",
+            repo_root.display()
+        )
+    })?;
+    let mut prefix = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::RootDir | Component::Normal(_) => prefix.push(component.as_os_str()),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::Prefix(_) => {
+                anyhow::bail!(
+                    "explicit Git repo root contains unsupported path traversal: {}",
+                    repo_root.display()
+                );
+            }
+        }
+        let metadata = std::fs::symlink_metadata(&prefix).with_context(|| {
+            format!(
+                "inspecting explicit Git repo root component: {}",
+                prefix.display()
+            )
+        })?;
+        if !metadata.file_type().is_symlink() {
+            if !metadata.is_dir() {
+                anyhow::bail!(
+                    "explicit Git repo root component must be a directory: {}",
+                    prefix.display()
+                );
+            }
+            continue;
+        }
+
+        let parent = prefix.parent().unwrap_or_else(|| Path::new("/"));
+        let parent_metadata = std::fs::symlink_metadata(parent).with_context(|| {
+            format!(
+                "inspecting parent of explicit Git repo root alias: {}",
+                parent.display()
+            )
+        })?;
+        let protected_root_alias = metadata.uid() == 0
+            && parent_metadata.uid() == 0
+            && (parent_metadata.mode() & 0o022 == 0 || parent_metadata.mode() & 0o1000 != 0);
+        if !protected_root_alias {
+            anyhow::bail!(
+                "explicit Git repo root contains a mutable symlink component: {}",
+                prefix.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_explicit_git_dir_capability(git_dir: &Path) -> Result<(std::fs::File, PathBuf)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let (repo_root, components) = split_explicit_git_dir(git_dir)?;
+    validate_explicit_repo_root_spelling(&repo_root)?;
+    let canonical_root = repo_root.canonicalize().with_context(|| {
+        format!(
+            "canonicalizing explicit Git repo root: {}",
+            repo_root.display()
+        )
+    })?;
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut directory = options.open(&canonical_root).with_context(|| {
+        format!(
+            "opening explicit Git repo root capability: {}",
+            canonical_root.display()
+        )
+    })?;
+    let mut canonical_git_dir = canonical_root;
+
+    for component in components {
+        let component_name = component.to_string_lossy().into_owned();
+        canonical_git_dir.push(&component);
+        let component = CString::new(component.as_bytes()).with_context(|| {
+            format!("invalid explicit Git directory component: {component_name}")
+        })?;
+        // SAFETY: `directory` owns a live directory descriptor, `component`
+        // is NUL-terminated, and the returned descriptor is transferred into
+        // exactly one `File`. O_NOFOLLOW rejects each symlinked component.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "opening real explicit Git directory component {component_name} under {}",
+                    git_dir.display()
+                )
+            });
+        }
+        // SAFETY: `openat` returned one new owned descriptor above.
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok((directory, canonical_git_dir))
+}
+
+/// Create/traverse a `.git` directory chain from an already-captured metadata
+/// descriptor. Every traversed directory is same-principal, non-writable by
+/// other principals, opened without following symlinks, and tightened to 0700
+/// before the path-based download engine can create a temporary file below it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ensure_private_git_directory_chain(
+    git_directory: &std::fs::File,
+    components: &[&str],
+) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut directory = git_directory
+        .try_clone()
+        .context("cloning captured Git directory capability")?;
+    let root_metadata = directory
+        .metadata()
+        .context("inspecting captured Git directory capability")?;
+    require_same_principal_git_metadata_fd(
+        &directory,
+        Path::new("<captured-.git>"),
+        &root_metadata,
+        "captured Git directory",
+    )?;
+    // SAFETY: directory is a live descriptor owned for this function.
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("tightening captured Git directory permissions")?;
+    }
+
+    let mut display_path = PathBuf::from("<captured-.git>");
+    for component in components {
+        if component.is_empty() || *component == "." || *component == ".." {
+            anyhow::bail!("unsafe Git directory component: {component:?}");
+        }
+        let component_name = CString::new(*component)
+            .with_context(|| format!("invalid Git directory component: {component:?}"))?;
+        display_path.push(component);
+
+        // SAFETY: directory is live and component_name is NUL-terminated.
+        let mut fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                component_name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0,
+            )
+        };
+        if fd < 0 {
+            let open_error = std::io::Error::last_os_error();
+            if open_error.kind() != std::io::ErrorKind::NotFound {
+                return Err(open_error).with_context(|| {
+                    format!("opening private Git directory: {}", display_path.display())
+                });
+            }
+            // SAFETY: directory is live, component_name is valid, and the
+            // explicit 0700 mode cannot be widened by any process umask.
+            let mkdir_status =
+                unsafe { libc::mkdirat(directory.as_raw_fd(), component_name.as_ptr(), 0o700) };
+            if mkdir_status != 0 {
+                let mkdir_error = std::io::Error::last_os_error();
+                if mkdir_error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(mkdir_error).with_context(|| {
+                        format!("creating private Git directory: {}", display_path.display())
+                    });
+                }
+            }
+            // SAFETY: same as the first openat; O_NOFOLLOW rejects a raced
+            // symlink or non-directory at the just-created name.
+            fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    component_name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    0,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!(
+                        "reopening private Git directory: {}",
+                        display_path.display()
+                    )
+                });
+            }
+        }
+
+        // SAFETY: openat returned one new descriptor now owned by this File.
+        let child = unsafe { std::fs::File::from_raw_fd(fd) };
+        let metadata = child.metadata().with_context(|| {
+            format!(
+                "inspecting private Git directory: {}",
+                display_path.display()
+            )
+        })?;
+        if !metadata.is_dir() {
+            anyhow::bail!(
+                "Git metadata component must be a directory: {}",
+                display_path.display()
+            );
+        }
+        require_same_principal_git_metadata_fd(
+            &child,
+            &display_path,
+            &metadata,
+            "Git metadata directory",
+        )?;
+        // SAFETY: child is a live descriptor owned for the rest of this loop.
+        if unsafe { libc::fchmod(child.as_raw_fd(), 0o700) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("tightening Git directory: {}", display_path.display()));
+        }
+        directory = child;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn ensure_private_git_directory_chain(
+    _git_directory: &std::fs::File,
+    _components: &[&str],
+) -> Result<()> {
+    anyhow::bail!("private Git directory creation requires Linux or macOS")
+}
+
+fn git_directory_components(rel_path: &str, include_target: bool) -> Result<Vec<&str>> {
+    validate_safe_relative_path(rel_path)?;
+    let components = rel_path.split('/').collect::<Vec<_>>();
+    let git_index = components
+        .iter()
+        .position(|component| *component == ".git")
+        .ok_or_else(|| anyhow::anyhow!("path is not inside a Git metadata directory"))?;
+    let mut descendants = components[git_index + 1..].to_vec();
+    if !include_target {
+        descendants.pop();
+    }
+    Ok(descendants)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn open_explicit_git_dir_capability(_git_dir: &Path) -> Result<(std::fs::File, PathBuf)> {
+    anyhow::bail!("safe explicit Git directory capabilities are supported only on Linux and macOS")
+}
+
+fn require_real_git_file_if_present(path: &Path, description: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                anyhow::bail!(
+                    "{description} must be a regular non-symlink file: {}",
+                    path.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting {description}: {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_same_principal_git_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    description: &str,
+) -> Result<()> {
+    require_same_principal_git_metadata_identity(path, metadata, description)?;
+    crate::path_acl::reject_write_grant_acl(path)
+        .with_context(|| format!("validating Git metadata ACL: {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_same_principal_git_metadata_fd(
+    file: &std::fs::File,
+    display_path: &Path,
+    metadata: &std::fs::Metadata,
+    description: &str,
+) -> Result<()> {
+    require_same_principal_git_metadata_identity(display_path, metadata, description)?;
+    crate::path_acl::reject_write_grant_acl_fd(file, display_path).with_context(|| {
+        format!(
+            "validating descriptor-anchored Git metadata ACL: {}",
+            display_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_same_principal_git_metadata_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    description: &str,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` has no preconditions and only reads process identity.
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        anyhow::bail!(
+            "{description} must be owned by effective uid {effective_uid}, got uid {}: {}",
+            metadata.uid(),
+            path.display()
+        );
+    }
+    if metadata.mode() & 0o022 != 0 {
+        anyhow::bail!(
+            "{description} must not be group/world-writable: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn require_same_principal_git_metadata(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+    _description: &str,
+) -> Result<()> {
+    anyhow::bail!("same-principal Git metadata validation requires Linux or macOS")
+}
+
+fn reject_redirects_under_explicit_git_dir(path: &Path, description: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!("{description} must be a real directory: {}", path.display());
+            }
+            require_same_principal_git_metadata(path, &metadata, description)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting {description}: {}", path.display()));
+        }
+    }
+
+    for entry in std::fs::read_dir(path)
+        .with_context(|| format!("reading {description}: {}", path.display()))?
+    {
+        let entry = entry.with_context(|| format!("reading {description} entry"))?;
+        let entry_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&entry_path)
+            .with_context(|| format!("inspecting {description} entry: {}", entry_path.display()))?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "{description} must not contain symlinks: {}",
+                entry_path.display()
+            );
+        }
+        require_same_principal_git_metadata(&entry_path, &metadata, description)?;
+        if metadata.is_dir() {
+            reject_redirects_under_explicit_git_dir(&entry_path, description)?;
+        } else if !metadata.is_file() {
+            anyhow::bail!(
+                "{description} contains unsupported metadata type: {}",
+                entry_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_explicit_git_dir_critical_topology(canonical_git_dir: &Path) -> Result<bool> {
+    reject_redirects_under_explicit_git_dir(
+        canonical_git_dir,
+        "explicit standalone Git metadata tree",
+    )?;
+    let head = canonical_git_dir.join("HEAD");
+    let head_present = match std::fs::symlink_metadata(&head) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                anyhow::bail!(
+                    "Git HEAD must be a regular non-symlink file: {}",
+                    head.display()
+                );
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("inspecting explicit Git HEAD"),
+    };
+
+    let objects = canonical_git_dir.join("objects");
+    let objects_present = match std::fs::symlink_metadata(&objects) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!(
+                    "Git objects must be a real directory: {}",
+                    objects.display()
+                );
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("inspecting explicit Git objects"),
+    };
+
+    for (relative, description) in [
+        ("packed-refs", "Git packed-refs"),
+        ("config", "Git config"),
+        ("shallow", "Git shallow boundary"),
+    ] {
+        require_real_git_file_if_present(&canonical_git_dir.join(relative), description)?;
+    }
+    if std::fs::symlink_metadata(canonical_git_dir.join("config.worktree")).is_ok() {
+        anyhow::bail!("Git worktree config is outside the standalone reconcile seam");
+    }
+    for alternate in ["objects/info/alternates", "objects/info/http-alternates"] {
+        match std::fs::symlink_metadata(canonical_git_dir.join(alternate)) {
+            Ok(_) => {
+                anyhow::bail!("Git object alternates are outside the standalone reconcile seam")
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspecting Git object alternates"),
+        }
+    }
+    Ok(head_present && objects_present)
+}
+
+fn capture_standalone_git_dir(git_dir: &Path) -> Result<(std::fs::File, PathBuf, bool)> {
+    let (directory, canonical_git_dir) = open_explicit_git_dir_capability(git_dir)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        reject_entry_at_git_dir(&directory, "commondir")?;
+        reject_entry_at_git_dir(&directory, "worktrees")?;
+    }
+    let ready = validate_explicit_git_dir_critical_topology(&canonical_git_dir)?;
+    Ok((directory, canonical_git_dir, ready))
+}
+
+/// Build a sanitized Git command pinned to one standalone, files-ref metadata
+/// directory. On Linux/macOS the child enters an already-open directory
+/// capability, so a pathname replacement cannot redirect the spawned Git
+/// process. `GIT_COMMON_DIR=.` makes a late `commondir` file inert; rejecting
+/// any enrolled `commondir`/`worktrees` entry keeps linked-worktree topology
+/// outside this raw reconcile seam.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sanitized_standalone_git_dir_command(git_dir: &Path) -> Result<std::process::Command> {
+    let (directory, _, ready) = capture_standalone_git_dir(git_dir)?;
+    if !ready {
+        anyhow::bail!(
+            "explicit Git directory is incomplete and cannot run guarded Git commands: {}",
+            git_dir.display()
+        );
+    }
+
+    let probe_directory = directory
+        .try_clone()
+        .context("cloning explicit Git directory capability")?;
+    validate_files_ref_storage(descriptor_git_dir_command(probe_directory))?;
+
+    let mut command = descriptor_git_dir_command(directory);
+    // Pin the backend after validation as a final defense against a late
+    // same-directory config rewrite between the probe and the Git operation.
+    command
+        .arg("-c")
+        .arg("extensions.refStorage=files")
+        .arg("-c")
+        .arg("core.fsync=reference");
+    Ok(command)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn sanitized_standalone_git_dir_command(git_dir: &Path) -> Result<std::process::Command> {
+    let _ = git_dir;
+    anyhow::bail!("safe explicit Git directory commands are supported only on Linux and macOS")
+}
+
+/// Read the SHA `ref_name` resolves to in an explicit metadata directory,
+/// consulting loose refs and packed-refs. A submodule's bare-style module
+/// gitdir remains supported; redirected/common metadata fails closed.
 fn git_dir_ref_sha(git_dir: &Path, ref_name: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(git_dir)
+    let output = sanitized_standalone_git_dir_command(git_dir)
+        .ok()?
         .args(["rev-parse", "--verify", "--quiet", ref_name])
         .output()
         .ok()?;
@@ -1004,37 +2635,59 @@ fn git_dir_ref_sha(git_dir: &Path, ref_name: &str) -> Option<String> {
 /// module-gitdirs work. A missing object (exit != 0/1) is treated as "not an
 /// ancestor" so the guard fails closed toward parking/deferring.
 fn git_dir_is_ancestor(git_dir: &Path, ancestor: &str, descendant: &str) -> bool {
-    std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(git_dir)
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .output()
-        .map(|out| out.status.code() == Some(0))
+    sanitized_standalone_git_dir_command(git_dir)
+        .ok()
+        .and_then(|mut command| {
+            command
+                .args(["merge-base", "--is-ancestor", ancestor, descendant])
+                .output()
+                .ok()
+        })
+        .map(|output| output.status.code() == Some(0))
         .unwrap_or(false)
 }
 
 fn git_dir_commit_present(git_dir: &Path, sha: &str) -> bool {
-    std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(git_dir)
-        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
-        .output()
-        .map(|out| out.status.success())
+    sanitized_standalone_git_dir_command(git_dir)
+        .ok()
+        .and_then(|mut command| {
+            command
+                .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+                .output()
+                .ok()
+        })
+        .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
 fn git_dir_object_present(git_dir: &Path, sha: &str) -> bool {
-    std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(git_dir)
-        .args(["cat-file", "-e", &format!("{sha}^{{object}}")])
-        .output()
-        .map(|out| out.status.success())
+    sanitized_standalone_git_dir_command(git_dir)
+        .ok()
+        .and_then(|mut command| {
+            command
+                .args(["cat-file", "-e", &format!("{sha}^{{object}}")])
+                .output()
+                .ok()
+        })
+        .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
-fn git_dir_ready_for_ref_guard(git_dir: &Path) -> bool {
-    git_dir.join("HEAD").exists() && git_dir.join("objects").is_dir()
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn git_dir_ready_for_ref_guard(git_dir: &Path) -> Result<bool> {
+    let (repo_root, _) = split_explicit_git_dir(git_dir)?;
+    validate_explicit_repo_root_spelling(&repo_root)?;
+    match std::fs::symlink_metadata(git_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting explicit Git directory: {}", git_dir.display())),
+        Ok(_) => capture_standalone_git_dir(git_dir).map(|(_, _, ready)| ready),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn git_dir_ready_for_ref_guard(_git_dir: &Path) -> Result<bool> {
+    anyhow::bail!("guarded raw Git restore is supported only on Linux and macOS")
 }
 
 fn git_dir_head_is_symbolic(git_dir: &Path) -> bool {
@@ -1047,7 +2700,7 @@ fn git_dir_head_is_symbolic(git_dir: &Path) -> bool {
 
 fn git_ref_name_valid(ref_name: &str) -> bool {
     ref_name.starts_with("refs/")
-        && std::process::Command::new("git")
+        && git_safety::sanitized_git_command()
             .args(["check-ref-format", ref_name])
             .output()
             .map(|out| out.status.success())
@@ -1105,6 +2758,51 @@ fn zero_oid_like(oid: &str) -> String {
     "0".repeat(oid.len())
 }
 
+fn sync_directory_chain(mut directory: &Path, stop_at: &Path) -> Result<()> {
+    loop {
+        std::fs::File::open(directory)
+            .with_context(|| {
+                format!(
+                    "opening directory for durability sync: {}",
+                    directory.display()
+                )
+            })?
+            .sync_all()
+            .with_context(|| {
+                format!("syncing directory for durability: {}", directory.display())
+            })?;
+        if directory == stop_at {
+            return Ok(());
+        }
+        directory = directory.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "durability directory chain escaped stop boundary: {}",
+                stop_at.display()
+            )
+        })?;
+    }
+}
+
+fn sync_created_git_ref(git_dir: &Path, ref_name: &str, expected_sha: &str) -> Result<()> {
+    if git_dir_ref_sha(git_dir, ref_name).as_deref() != Some(expected_sha) {
+        anyhow::bail!("Git ref readback mismatch after update-ref: {ref_name}");
+    }
+    let ref_path = git_dir.join(ref_name);
+    std::fs::File::open(&ref_path)
+        .with_context(|| {
+            format!(
+                "opening created Git ref for durability: {}",
+                ref_path.display()
+            )
+        })?
+        .sync_all()
+        .with_context(|| format!("syncing created Git ref: {}", ref_path.display()))?;
+    let parent = ref_path
+        .parent()
+        .context("created Git ref has no parent directory")?;
+    sync_directory_chain(parent, git_dir)
+}
+
 fn git_dir_update_ref_cas(
     git_dir: &Path,
     ref_name: &str,
@@ -1114,9 +2812,7 @@ fn git_dir_update_ref_cas(
     let expected = expected_old
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| zero_oid_like(new_sha));
-    let output = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(git_dir)
+    let output = sanitized_standalone_git_dir_command(git_dir)?
         .args(["update-ref", ref_name, new_sha, &expected])
         .output()
         .with_context(|| format!("running git update-ref for {ref_name}"))?;
@@ -1126,13 +2822,12 @@ fn git_dir_update_ref_cas(
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    sync_created_git_ref(git_dir, ref_name, new_sha)?;
     Ok(())
 }
 
 fn git_dir_delete_ref_cas(git_dir: &Path, ref_name: &str, expected_old: &str) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(git_dir)
+    let output = sanitized_standalone_git_dir_command(git_dir)?
         .args(["update-ref", "-d", ref_name, expected_old])
         .output()
         .with_context(|| format!("running git update-ref -d for {ref_name}"))?;
@@ -1142,7 +2837,164 @@ fn git_dir_delete_ref_cas(git_dir: &Path, ref_name: &str, expected_old: &str) ->
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    if git_dir_ref_sha(git_dir, ref_name).is_some() {
+        anyhow::bail!("Git ref still resolves after delete: {ref_name}");
+    }
+    let ref_parent = git_dir
+        .join(ref_name)
+        .parent()
+        .map(Path::to_path_buf)
+        .context("deleted Git ref has no parent directory")?;
+    sync_directory_chain(&ref_parent, git_dir)?;
     Ok(())
+}
+
+fn git_dir_available_park_ref(git_dir: &Path, park_ref: &str, sha: &str) -> Result<String> {
+    if let Some(existing) = git_dir_ref_sha(git_dir, park_ref) {
+        if existing == sha {
+            return Ok(park_ref.to_string());
+        }
+        let min_suffix_len = sha.len().min(12);
+        for suffix_len in min_suffix_len..=sha.len() {
+            let suffixed = format!("{park_ref}-{}", &sha[..suffix_len]);
+            match git_dir_ref_sha(git_dir, &suffixed) {
+                Some(existing) if existing == sha => return Ok(suffixed),
+                Some(_) => continue,
+                None => return Ok(suffixed),
+            }
+        }
+        anyhow::bail!(
+            "no available explicit-git-dir park ref for {sha}: base {park_ref} and every SHA-prefixed suffix are occupied"
+        );
+    }
+    Ok(park_ref.to_string())
+}
+
+fn git_dir_park_ref_create_only(git_dir: &Path, park_ref: &str, sha: &str) -> Result<String> {
+    let selected = git_dir_available_park_ref(git_dir, park_ref, sha)?;
+    if git_dir_ref_sha(git_dir, &selected).as_deref() == Some(sha) {
+        return Ok(selected);
+    }
+    git_dir_update_ref_cas(git_dir, &selected, sha, None)
+        .with_context(|| format!("parking {sha} at {selected} in explicit Git directory"))?;
+    Ok(selected)
+}
+
+fn ensure_private_loser_guard_dir(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!(
+                    "loser-guard undo path must be a real directory: {}",
+                    path.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(path).with_context(|| {
+                format!("creating loser-guard undo directory: {}", path.display())
+            })?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspecting loser-guard undo directory: {}", path.display())
+            });
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("securing loser-guard undo directory: {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn write_loser_guard_undo_bundle(
+    repo_root: &Path,
+    git_dir: &Path,
+    state_dir: &Path,
+) -> Result<PathBuf> {
+    // Capture and validate both commands before creating an artifact. A
+    // redirected/symlinked metadata path therefore fails without exporting
+    // any victim history into the state directory.
+    let mut create_command = sanitized_standalone_git_dir_command(git_dir)?;
+    let mut verify_command = sanitized_standalone_git_dir_command(git_dir)?;
+
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating state directory: {}", state_dir.display()))?;
+    crate::path_acl::reject_write_grant_acl(state_dir).with_context(|| {
+        format!(
+            "validating loser-guard state-dir ACL: {}",
+            state_dir.display()
+        )
+    })?;
+    let undo_base = state_dir.join("keep-both-undo");
+    ensure_private_loser_guard_dir(&undo_base)?;
+    let repo_hex = blake3::hash(repo_root.to_string_lossy().as_bytes()).to_hex();
+    let undo_dir = undo_base.join(&repo_hex[..16]);
+    ensure_private_loser_guard_dir(&undo_dir)?;
+    let bundle = undo_dir.join(format!("keep-both-{}.bundle", uuid::Uuid::new_v4()));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(&bundle)
+        .with_context(|| format!("creating private loser-guard bundle: {}", bundle.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("securing loser-guard bundle: {}", bundle.display()))?;
+    }
+
+    let output = create_command
+        .args(["bundle", "create", "-", "--all"])
+        .stdout(std::process::Stdio::from(file))
+        .output()
+        .context("creating descriptor-anchored loser-guard bundle")?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&bundle);
+        anyhow::bail!(
+            "descriptor-anchored loser-guard bundle create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let sync_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bundle)
+        .with_context(|| format!("reopening loser-guard bundle: {}", bundle.display()))?;
+    sync_file
+        .sync_all()
+        .with_context(|| format!("syncing loser-guard bundle: {}", bundle.display()))?;
+    sync_directory_chain(&undo_dir, state_dir)
+        .context("syncing loser-guard bundle directory chain")?;
+
+    let bundle_arg = bundle.to_string_lossy().to_string();
+    let verification = verify_command
+        .args(["bundle", "verify", &bundle_arg])
+        .output()
+        .context("verifying descriptor-anchored loser-guard bundle")?;
+    if !verification.status.success() {
+        let _ = std::fs::remove_file(&bundle);
+        anyhow::bail!(
+            "descriptor-anchored loser-guard bundle verify failed: {}",
+            String::from_utf8_lossy(&verification.stderr)
+        );
+    }
+    Ok(bundle)
 }
 
 /// Outcome of acquiring cooperative `.git/tcfs.lock` guards for a plan.
@@ -1151,26 +3003,29 @@ fn git_dir_delete_ref_cas(git_dir: &Path, ref_name: &str, expected_old: &str) ->
 /// repo's lock cannot be taken. A lock held by a FOREIGN live holder — another
 /// sync cycle or process, a PID `acquire_git_lock` could neither acquire nor
 /// steal as stale — means the cooperative lock fences nothing if we still write
-/// ref-class paths. Those repos are surfaced in `foreign_locked_repos` so the
-/// executor DEFERS their ref-class `.git` actions this run.
+/// Git mutation. Those repos are surfaced in `blocked_git_repos` so the
+/// executor defers every `.git` action this run.
 struct GitLockAcquisition {
     /// Held guards; dropping the vec (with the owning struct) releases all locks.
     guards: Vec<git_safety::GitLockGuard>,
-    /// Repo roots whose `.git/tcfs.lock` is held by a live foreign holder that
-    /// could not be acquired or stolen-as-stale this run. Ref-class writes for
-    /// these repos are deferred (recorded, not errored); the next cycle
-    /// re-plans them once the holder releases. A STALE (dead-owner, aged) lock
-    /// is stolen by `acquire_git_lock` and returns `Ok`, so a leaked lock never
-    /// lands a repo here — no deadlock on a leaked lock.
-    foreign_locked_repos: BTreeSet<PathBuf>,
+    /// Repo roots unavailable for cooperative mutation because native Git is
+    /// busy or another TCFS process holds the advisory lock. Every `.git`
+    /// action for these repos is deferred until a later reconcile.
+    blocked_git_repos: BTreeSet<PathBuf>,
+    /// Repo roots whose configured spelling or Git metadata topology is
+    /// untrusted. Every `.git` action, including object-class transfers, is
+    /// deferred so TCFS neither mutates nor exports an external target.
+    invalid_git_repos: BTreeSet<PathBuf>,
+    /// Captured standalone `.git` directories for descriptor-relative private
+    /// parent creation. Present for valid repos even when a native/foreign lock
+    /// blocks all Git transfers.
+    git_directories: HashMap<PathBuf, std::fs::File>,
 }
 
 /// Acquire cooperative `.git/tcfs.lock` guards for every repo that has a
 /// `.git/*` write action in `plan`. Returns the held guards plus the set of
-/// repos whose lock is held by a live foreign holder (ref-class writes there
-/// must defer, keep-both PR-2). Repos whose `.git` is mid-operation are skipped
-/// (logged) and keep today's behavior — a busy repo simply re-reconciles next
-/// cycle.
+/// repos unavailable because native Git is busy or a foreign holder owns the
+/// advisory lock. Every `.git` action for either case must defer.
 fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLockAcquisition {
     let mut repos: BTreeSet<PathBuf> = BTreeSet::new();
     for action in &plan.actions {
@@ -1178,7 +3033,8 @@ fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLoc
             ReconcileAction::Push { rel_path, .. }
             | ReconcileAction::Pull { rel_path, .. }
             | ReconcileAction::DeleteLocal { rel_path, .. }
-            | ReconcileAction::DeleteRemote { rel_path } => rel_path.as_str(),
+            | ReconcileAction::DeleteRemote { rel_path }
+            | ReconcileAction::CreateDirectory { rel_path } => rel_path.as_str(),
             _ => continue,
         };
         if !is_git_internal_path(rel) {
@@ -1190,42 +3046,104 @@ fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLoc
     }
 
     let mut guards = Vec::new();
-    let mut foreign_locked_repos: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut blocked_git_repos: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut invalid_git_repos: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut git_directories: HashMap<PathBuf, std::fs::File> = HashMap::new();
     for repo_root in repos {
         let git_dir = repo_root.join(".git");
-        if !git_dir.is_dir() {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let spelling = validate_explicit_repo_root_spelling(&repo_root);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let spelling: Result<()> = Err(anyhow::anyhow!(
+            "guarded raw Git reconciliation is supported only on Linux and macOS"
+        ));
+        if let Err(error) = spelling {
+            warn!(
+                repo = %repo_root.display(),
+                error = %format!("{error:#}"),
+                "git ff: invalid repo-root spelling; deferring every .git action"
+            );
+            invalid_git_repos.insert(repo_root);
             continue;
         }
-        let safety = git_safety::git_is_safe(&git_dir);
+        match std::fs::symlink_metadata(&git_dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                warn!(
+                    repo = %repo_root.display(),
+                    "git topology: raw metadata materialization requires an existing complete repository; deferring every .git action"
+                );
+                invalid_git_repos.insert(repo_root);
+                continue;
+            }
+            Err(error) => {
+                warn!(
+                    repo = %repo_root.display(),
+                    error = %error,
+                    "git ff: cannot inspect Git directory; deferring every .git action"
+                );
+                invalid_git_repos.insert(repo_root);
+                continue;
+            }
+            Ok(_) => {}
+        }
+        let (git_directory, canonical_git_dir, ready) = match capture_standalone_git_dir(&git_dir) {
+            Ok(captured) => captured,
+            Err(error) => {
+                warn!(
+                    repo = %repo_root.display(),
+                    error = %format!("{error:#}"),
+                    "git ff: invalid Git metadata topology; deferring every .git action"
+                );
+                invalid_git_repos.insert(repo_root);
+                continue;
+            }
+        };
+        if !ready {
+            warn!(
+                repo = %repo_root.display(),
+                "git topology: incomplete repository bootstrap is unsupported; deferring every .git action"
+            );
+            invalid_git_repos.insert(repo_root);
+            continue;
+        }
+        let safety = git_safety::git_is_safe(&canonical_git_dir);
         if !safety.blocking.is_empty() {
             warn!(
                 repo = %repo_root.display(),
                 blocking = ?safety.blocking,
-                "git ff: repo busy, skipping tcfs.lock acquire this cycle"
+                "git ff: repo busy; deferring every .git action this cycle"
             );
+            git_directories.insert(repo_root.clone(), git_directory);
+            blocked_git_repos.insert(repo_root);
             continue;
         }
-        match git_safety::acquire_git_lock(&git_dir) {
-            Ok(guard) => guards.push(guard),
+        match git_safety::acquire_git_lock_at(&git_directory) {
+            Ok(guard) => {
+                guards.push(guard);
+                git_directories.insert(repo_root, git_directory);
+            }
             Err(e) => {
                 // A live FOREIGN holder owns this repo's `.git/tcfs.lock`. A
                 // stale (dead-owner, aged) lock would have been stolen and
                 // returned Ok, so this Err means the lock is genuinely held —
-                // writing ref-class paths anyway would race the holder. Record
-                // the repo so the executor DEFERS its ref-class actions this
+                // writing any raw Git path anyway would race the holder. Record
+                // the repo so the executor DEFERS every `.git` action this
                 // run (keep-both PR-2, S3) instead of proceeding unlocked.
                 warn!(
                     repo = %repo_root.display(),
                     error = %format!("{e:#}"),
-                    "git ff: foreign holder owns tcfs.lock; deferring ref-class writes for this repo"
+                    "git ff: foreign holder owns tcfs.lock; deferring every .git action for this repo"
                 );
-                foreign_locked_repos.insert(repo_root);
+                blocked_git_repos.insert(repo_root.clone());
+                git_directories.insert(repo_root, git_directory);
             }
         }
     }
     GitLockAcquisition {
         guards,
-        foreign_locked_repos,
+        blocked_git_repos,
+        invalid_git_repos,
+        git_directories,
     }
 }
 
@@ -1240,8 +3158,8 @@ async fn classify_path(
     remote_prefix: &str,
     device_id: &str,
     config: &ReconcileConfig,
-) -> ReconcileAction {
-    match (local, remote, tracked) {
+) -> Result<ReconcileAction> {
+    let action = match (local, remote, tracked) {
         // New local file — not on remote, not previously synced
         (Some(local_path), None, None) => ReconcileAction::Push {
             local_path: local_path.clone(),
@@ -1267,7 +3185,10 @@ async fn classify_path(
             rel_path: rel_path.to_string(),
             manifest_hash: remote_entry.manifest_hash.clone(),
             size: remote_entry.size,
+            chunks: remote_entry.chunks,
             reason: PullReason::NewRemote,
+            expected_kind: remote_entry.kind,
+            expected_symlink_target: remote_entry.symlink_target.clone(),
         },
 
         // Was synced, now deleted from remote — delete locally if configured
@@ -1290,24 +3211,44 @@ async fn classify_path(
             if is_git_ref_class_path(rel_path) {
                 let diverged = tcfs_chunks::hash_file(local_path)
                     .map(|h| tcfs_chunks::hash_to_hex(&h) != tracked_state.blake3)
-                    .unwrap_or(false);
+                    .with_context(|| {
+                        format!("hashing tracked Git ref before orphan classification: {rel_path}")
+                    })?;
                 if diverged {
                     warn!(
                         path = %rel_path,
                         "TIN-2584: divergent git ref with remote index entry momentarily \
                          absent; routing to conflict-aware push instead of a silent no-op"
                     );
-                    return ReconcileAction::Push {
+                    return Ok(ReconcileAction::Push {
                         local_path: local_path.clone(),
                         rel_path: rel_path.to_string(),
                         reason: PushReason::LocalNewer,
-                    };
+                    });
                 }
             }
+
             if config.delete_local_orphans {
-                ReconcileAction::DeleteLocal {
-                    local_path: local_path.clone(),
-                    rel_path: rel_path.to_string(),
+                // A bulk LIST miss is not deletion authority. Only the durable
+                // v4 tombstone installed by the CAS delete path can authorize
+                // local removal; a missing object may be LIST lag or lost
+                // legacy state.
+                let exact_remote_state =
+                    read_exact_index_path_state(op, remote_prefix, rel_path).await?;
+                if exact_remote_state == ExactIndexPathState::Deleted {
+                    ReconcileAction::DeleteLocal {
+                        local_path: local_path.clone(),
+                        rel_path: rel_path.to_string(),
+                    }
+                } else {
+                    debug!(
+                        path = %rel_path,
+                        state = ?exact_remote_state,
+                        "withholding local delete without an exact v4 remote tombstone"
+                    );
+                    ReconcileAction::UpToDate {
+                        rel_path: rel_path.to_string(),
+                    }
                 }
             } else {
                 ReconcileAction::UpToDate {
@@ -1318,7 +3259,7 @@ async fn classify_path(
 
         // Both exist — compare via vector clocks
         (Some(local_path), Some(remote_entry), tracked_opt) => {
-            compare_both_exist(
+            return compare_both_exist(
                 rel_path,
                 local_path,
                 remote_entry,
@@ -1327,7 +3268,7 @@ async fn classify_path(
                 remote_prefix,
                 device_id,
             )
-            .await
+            .await;
         }
 
         // Ghost: tracked but gone from both sides
@@ -1339,7 +3280,8 @@ async fn classify_path(
         (None, None, None) => ReconcileAction::UpToDate {
             rel_path: rel_path.to_string(),
         },
-    }
+    };
+    Ok(action)
 }
 
 /// Compare when both local and remote exist — uses vector clocks.
@@ -1351,16 +3293,33 @@ async fn compare_both_exist(
     op: &Operator,
     remote_prefix: &str,
     device_id: &str,
-) -> ReconcileAction {
+) -> Result<ReconcileAction> {
     // Symlinks are first-class entries: they must NOT be dereferenced and hashed
     // like regular files (that would hash the *target's* content and then fail to
     // parse the stored SymlinkManifest as a SyncManifest, re-pushing every cycle).
     // Detect a local symlink with symlink_metadata (does not follow the link) and
     // compare on symlink identity instead. Mirrors the push path
     // (`upload_symlink_with_device`) and `collect_local_set` (preserve_symlinks).
-    let local_is_symlink = std::fs::symlink_metadata(local_path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
+    let local_metadata = std::fs::symlink_metadata(local_path).with_context(|| {
+        format!(
+            "inspecting local reconciliation entry: {}",
+            local_path.display()
+        )
+    })?;
+    let local_is_symlink = local_metadata.file_type().is_symlink();
+    if local_is_symlink != remote_entry.is_symlink() {
+        return compare_both_exist_cross_kind(
+            rel_path,
+            local_path,
+            local_is_symlink,
+            remote_entry,
+            tracked,
+            op,
+            remote_prefix,
+            device_id,
+        )
+        .await;
+    }
     if local_is_symlink {
         return compare_both_exist_symlink(
             rel_path,
@@ -1373,17 +3332,19 @@ async fn compare_both_exist(
         )
         .await;
     }
+    if remote_entry.symlink_target.is_some() {
+        anyhow::bail!("regular remote index entry carries a symlink target at {rel_path:?}");
+    }
 
     // Get local hash
-    let local_hash = match tcfs_chunks::hash_file(local_path) {
-        Ok(h) => tcfs_chunks::hash_to_hex(&h),
-        Err(e) => {
-            warn!(path = %local_path.display(), error = %e, "failed to hash local file");
-            return ReconcileAction::UpToDate {
-                rel_path: rel_path.to_string(),
-            };
-        }
-    };
+    let local_hash = tcfs_chunks::hash_file(local_path)
+        .map(|hash| tcfs_chunks::hash_to_hex(&hash))
+        .with_context(|| {
+            format!(
+                "hashing local reconciliation file: {}",
+                local_path.display()
+            )
+        })?;
 
     // Get local vector clock from tracked state
     let mut local_vclock = tracked.map(|s| s.vclock.clone()).unwrap_or_default();
@@ -1395,27 +3356,21 @@ async fn compare_both_exist(
         &remote_entry.manifest_hash
     );
 
-    let remote_manifest = match op.read(&manifest_path).await {
-        Ok(data) => match SyncManifest::from_bytes(&data.to_vec()) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(path = manifest_path, error = %e, "failed to parse remote manifest");
-                return ReconcileAction::Push {
-                    local_path: local_path.to_path_buf(),
-                    rel_path: rel_path.to_string(),
-                    reason: PushReason::NewLocal,
-                };
-            }
-        },
-        Err(e) => {
-            warn!(path = manifest_path, error = %e, "failed to read remote manifest");
-            return ReconcileAction::Push {
-                local_path: local_path.to_path_buf(),
-                rel_path: rel_path.to_string(),
-                reason: PushReason::NewLocal,
-            };
-        }
-    };
+    let remote_bytes = op
+        .read(&manifest_path)
+        .await
+        .with_context(|| format!("reading remote manifest: {manifest_path}"))?
+        .to_vec();
+    engine::validate_indexed_manifest_binding(
+        &remote_bytes,
+        &remote_entry.manifest_hash,
+        RemoteEntryKind::RegularFile,
+        None,
+        rel_path,
+    )
+    .with_context(|| format!("validating remote manifest/index binding: {manifest_path}"))?;
+    let remote_manifest = SyncManifest::from_bytes(&remote_bytes)
+        .with_context(|| format!("parsing remote regular-file manifest: {manifest_path}"))?;
 
     let remote_device = remote_manifest.written_by.as_str();
 
@@ -1462,7 +3417,216 @@ async fn compare_both_exist(
         remote_device,
     );
 
-    outcome_to_action(outcome, rel_path, local_path, remote_entry, &manifest_path)
+    Ok(outcome_to_action(
+        outcome,
+        rel_path,
+        local_path,
+        remote_entry,
+        &manifest_path,
+    ))
+}
+
+/// Causal metadata extracted from one fully bound remote manifest.
+///
+/// The logical identity includes the entry kind. The raw content identity is
+/// retained separately because conflict-state consumers use regular-file and
+/// symlink hashes to locate and describe the two concrete versions.
+struct ReconcileManifestCausality {
+    content_hash: String,
+    logical_identity: String,
+    vclock: VectorClock,
+    written_by: String,
+}
+
+/// Keep reconciliation's typed identity domain identical to the publisher's.
+///
+/// This is deliberately local to reconciliation: the publisher helper also
+/// carries publication-only metadata, while this path needs only the stable
+/// type tag and canonical raw content identity.
+fn reconcile_logical_content_identity(kind: RemoteEntryKind, content_hash: &str) -> String {
+    let kind = match kind {
+        RemoteEntryKind::RegularFile => "regular_file",
+        RemoteEntryKind::Symlink => "symlink",
+    };
+    format!("tcfs-logical-content-v1:{kind}:{content_hash}")
+}
+
+/// Compare typed identities while keeping canonical raw hashes in conflicts.
+#[allow(clippy::too_many_arguments)]
+fn compare_reconcile_typed_content_clocks(
+    local: &VectorClock,
+    remote: &VectorClock,
+    local_kind: RemoteEntryKind,
+    local_hash: &str,
+    remote_identity: &str,
+    remote_hash: &str,
+    rel_path: &str,
+    local_device: &str,
+    remote_device: &str,
+) -> crate::conflict::SyncOutcome {
+    let local_identity = reconcile_logical_content_identity(local_kind, local_hash);
+    let mut outcome = compare_clocks(
+        local,
+        remote,
+        &local_identity,
+        remote_identity,
+        rel_path,
+        local_device,
+        remote_device,
+    );
+    if let crate::conflict::SyncOutcome::Conflict(info) = &mut outcome {
+        info.local_blake3 = local_hash.to_string();
+        info.remote_blake3 = remote_hash.to_string();
+    }
+    outcome
+}
+
+/// Parse the exact index-selected remote manifest into type-aware causality.
+fn parse_reconcile_manifest_causality(
+    bytes: &[u8],
+    remote_entry: &RemoteIndexEntry,
+    rel_path: &str,
+    local_path: &Path,
+) -> Result<ReconcileManifestCausality> {
+    engine::validate_indexed_manifest_entry_binding(
+        bytes,
+        &remote_entry.manifest_hash,
+        remote_entry,
+        rel_path,
+    )
+    .context("validating cross-kind remote manifest/index binding")?;
+
+    match remote_entry.kind {
+        RemoteEntryKind::RegularFile => {
+            let manifest = SyncManifest::from_bytes(bytes)
+                .context("parsing cross-kind remote regular-file manifest")?;
+            let content_hash = manifest.file_hash;
+            Ok(ReconcileManifestCausality {
+                logical_identity: reconcile_logical_content_identity(
+                    RemoteEntryKind::RegularFile,
+                    &content_hash,
+                ),
+                content_hash,
+                vclock: manifest.vclock,
+                written_by: manifest.written_by,
+            })
+        }
+        RemoteEntryKind::Symlink => {
+            let expected_target = remote_entry
+                .symlink_target
+                .as_deref()
+                .context("cross-kind remote symlink index entry is missing its target")?;
+            engine::validate_indexed_symlink_target(local_path, expected_target)
+                .context("validating cross-kind indexed symlink target")?;
+            let manifest = SymlinkManifest::from_bytes(bytes)
+                .context("parsing cross-kind remote symlink manifest")?;
+            engine::validate_indexed_symlink_target(local_path, &manifest.symlink_target)
+                .context("validating cross-kind manifest symlink target")?;
+            anyhow::ensure!(
+                manifest.symlink_target == expected_target,
+                "cross-kind remote symlink manifest target does not match index at {rel_path:?}"
+            );
+            let content_hash = engine::symlink_manifest_hash(&manifest.symlink_target);
+            Ok(ReconcileManifestCausality {
+                logical_identity: reconcile_logical_content_identity(
+                    RemoteEntryKind::Symlink,
+                    &content_hash,
+                ),
+                content_hash,
+                vclock: manifest.vclock,
+                written_by: manifest.written_by,
+            })
+        }
+    }
+}
+
+/// Compare a regular-file/symlink type transition by causality, not by kind.
+///
+/// A local type replacement is an ordinary local edit: when its canonical raw
+/// identity differs from the tracked baseline, tick a comparison-only clone of
+/// the local clock just as the publisher does before it classifies the current
+/// remote entry. An unchanged local object keeps its tracked clock, allowing a
+/// causally newer remote type replacement to pull cleanly. Concurrent or
+/// equal-clock cross-kind versions remain a recorded conflict.
+#[allow(clippy::too_many_arguments)]
+async fn compare_both_exist_cross_kind(
+    rel_path: &str,
+    local_path: &Path,
+    local_is_symlink: bool,
+    remote_entry: &RemoteIndexEntry,
+    tracked: Option<&SyncState>,
+    op: &Operator,
+    remote_prefix: &str,
+    device_id: &str,
+) -> Result<ReconcileAction> {
+    let (local_kind, local_hash) = if local_is_symlink {
+        let target = engine::read_symlink_target_text(local_path).with_context(|| {
+            format!(
+                "reading local symlink target during type transition: {}",
+                local_path.display()
+            )
+        })?;
+        engine::validate_indexed_symlink_target(local_path, &target)
+            .context("validating local symlink target during type transition")?;
+        (
+            RemoteEntryKind::Symlink,
+            engine::symlink_manifest_hash(&target),
+        )
+    } else {
+        let hash = tcfs_chunks::hash_file(local_path)
+            .map(|hash| tcfs_chunks::hash_to_hex(&hash))
+            .with_context(|| {
+                format!(
+                    "hashing local regular file during type transition: {}",
+                    local_path.display()
+                )
+            })?;
+        (RemoteEntryKind::RegularFile, hash)
+    };
+    anyhow::ensure!(
+        local_kind != remote_entry.kind,
+        "cross-kind reconciliation requires different local and remote entry kinds"
+    );
+
+    let manifest_path = format!(
+        "{}/manifests/{}",
+        remote_prefix.trim_end_matches('/'),
+        &remote_entry.manifest_hash
+    );
+    let remote_bytes = op
+        .read(&manifest_path)
+        .await
+        .with_context(|| format!("reading cross-kind remote manifest: {manifest_path}"))?
+        .to_vec();
+    let remote =
+        parse_reconcile_manifest_causality(&remote_bytes, remote_entry, rel_path, local_path)?;
+
+    let mut local_vclock = tracked
+        .map(|state| state.vclock.clone())
+        .unwrap_or_default();
+    if !device_id.is_empty() && tracked.is_some_and(|state| state.blake3 != local_hash) {
+        local_vclock.tick(device_id);
+    }
+
+    let outcome = compare_reconcile_typed_content_clocks(
+        &local_vclock,
+        &remote.vclock,
+        local_kind,
+        &local_hash,
+        &remote.logical_identity,
+        &remote.content_hash,
+        rel_path,
+        device_id,
+        &remote.written_by,
+    );
+
+    Ok(outcome_to_action(
+        outcome,
+        rel_path,
+        local_path,
+        remote_entry,
+        &manifest_path,
+    ))
 }
 
 /// Map a `SyncOutcome` to the corresponding `ReconcileAction`.
@@ -1490,7 +3654,10 @@ fn outcome_to_action(
             rel_path: rel_path.to_string(),
             manifest_hash: remote_entry.manifest_hash.clone(),
             size: remote_entry.size,
+            chunks: remote_entry.chunks,
             reason: PullReason::RemoteNewer,
+            expected_kind: remote_entry.kind,
+            expected_symlink_target: remote_entry.symlink_target.clone(),
         },
         crate::conflict::SyncOutcome::Conflict(mut info) => {
             // keep-both PR-2 data-model graft: capture the remote side's
@@ -1626,9 +3793,12 @@ async fn reclassify_git_ff_conflicts(
                             rel_path: rel_path.clone(),
                             manifest_hash: entry.manifest_hash.clone(),
                             size: entry.size,
+                            chunks: entry.chunks,
                             reason: PullReason::GitFastForward {
                                 ref_pins: ref_pins.clone(),
                             },
+                            expected_kind: entry.kind,
+                            expected_symlink_target: entry.symlink_target.clone(),
                         },
                         // No remote entry: fail closed, keep the conflict.
                         None => continue,
@@ -1752,11 +3922,10 @@ async fn decide_repo_fast_forward(
 /// Read the remote commit SHA stored at a `.git/refs/heads/<branch>` path by
 /// downloading the (tiny) ref blob from the remote and parsing its content.
 ///
-/// The blob is downloaded into an ephemeral, per-call temp directory under
-/// [`std::env::temp_dir`] — never under the sync root (planning must not
+/// The checked blob is materialized only inside a securely randomized,
+/// per-call temporary directory — never under the sync root (planning must not
 /// fabricate files a raw-mode collector could then roam) and never inside the
-/// repo's live `.git`. The directory is removed again before returning,
-/// success or failure.
+/// repo's live `.git`. The directory guard removes it before returning.
 ///
 /// Returns `None` if the remote has no entry for this path, the download fails,
 /// or the content is not a concrete SHA (e.g. a symbolic ref).
@@ -1768,34 +3937,54 @@ async fn read_remote_ref_sha(
     encryption: OptionalEncryption<'_>,
 ) -> Option<String> {
     let entry = remote_index.get(rel_path)?;
-    download_ref_sha_from_manifest(op, remote_prefix, &entry.manifest_hash, encryption).await
+    download_ref_sha_from_manifest(
+        op,
+        remote_prefix,
+        &entry.manifest_hash,
+        entry.size,
+        entry.chunks,
+        rel_path,
+        encryption,
+    )
+    .await
 }
 
-/// Download the tiny ref blob addressed by `manifest_hash` into an ephemeral,
-/// per-call temp dir (never under a sync root, never inside a live `.git`) and
-/// parse it as a concrete SHA. Shared by `read_remote_ref_sha` (plan-time) and
-/// the execute-loop loser-side no-loss guard (PR-4), which needs the INCOMING
-/// ref SHA a pull is about to write before deciding whether the overwrite would
-/// orphan committed local work. Returns `None` on download failure or a
-/// non-concrete (symbolic) ref — callers MUST treat `None` as "cannot prove
-/// safe" and fail closed.
+/// Download the tiny ref blob selected by the path index and parse it as a
+/// concrete SHA. The manifest object id, regular-file kind, and relative path
+/// are bound before any bytes can influence a fast-forward decision.
 async fn download_ref_sha_from_manifest(
     op: &Operator,
     remote_prefix: &str,
     manifest_hash: &str,
+    expected_size: u64,
+    expected_chunks: usize,
+    rel_path: &str,
     encryption: OptionalEncryption<'_>,
 ) -> Option<String> {
-    download_bytes_from_manifest(op, remote_prefix, manifest_hash, encryption)
-        .await
-        .and_then(|bytes| git_safety::parse_ref_sha(&bytes))
+    download_bytes_from_manifest(
+        op,
+        remote_prefix,
+        manifest_hash,
+        expected_size,
+        expected_chunks,
+        rel_path,
+        encryption,
+    )
+    .await
+    .and_then(|bytes| git_safety::parse_ref_sha(&bytes))
 }
 
-/// Download a manifest-addressed blob into an ephemeral temp dir and return its
-/// bytes. Used by SHA-ref guards and opaque packed-refs guards.
+/// Download a path-indexed regular-file blob into a securely randomized,
+/// per-call directory and return its bytes. The checked engine validates the
+/// manifest object id, kind, and relative path in memory before materializing
+/// the payload; no predictable path is exposed beneath the system temp dir.
 async fn download_bytes_from_manifest(
     op: &Operator,
     remote_prefix: &str,
     manifest_hash: &str,
+    expected_size: u64,
+    expected_chunks: usize,
+    rel_path: &str,
     encryption: OptionalEncryption<'_>,
 ) -> Option<Vec<u8>> {
     let manifest_path = format!(
@@ -1803,16 +3992,9 @@ async fn download_bytes_from_manifest(
         remote_prefix.trim_end_matches('/'),
         manifest_hash
     );
-    // Unique per call (pid + process-wide sequence) so concurrent reconciles
-    // in one or many processes never collide on the same path.
-    static FF_REF_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = FF_REF_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp_dir = std::env::temp_dir().join(format!("tcfs-ff-{}-{seq}", std::process::id()));
-    if std::fs::create_dir_all(&tmp_dir).is_err() {
-        return None;
-    }
-    let tmp_path = tmp_dir.join("ref");
-    let download = engine::download_file_with_device(
+    let tmp_dir = tempfile::tempdir().ok()?;
+    let tmp_path = tmp_dir.path().join("payload");
+    let download = engine::download_file_with_device_checked(
         op,
         &manifest_path,
         &tmp_path,
@@ -1821,16 +4003,20 @@ async fn download_bytes_from_manifest(
         "",
         None,
         encryption,
+        rel_path,
+        RemoteEntryKind::RegularFile,
+        None,
+        expected_size,
+        expected_chunks,
     )
     .await;
     let bytes = match download {
         Ok(_) => std::fs::read(&tmp_path).ok(),
         Err(e) => {
-            warn!(manifest = manifest_hash, error = %format!("{e:#}"), "git ref guard: remote blob download failed");
+            warn!(manifest = manifest_hash, path = %rel_path, error = %format!("{e:#}"), "git ref guard: checked remote blob download failed");
             None
         }
     };
-    let _ = std::fs::remove_dir_all(&tmp_dir);
     bytes
 }
 
@@ -1838,36 +4024,56 @@ async fn read_sync_manifest_for_state(
     op: &Operator,
     remote_prefix: &str,
     manifest_hash: &str,
-) -> Option<(String, SyncManifest)> {
+    rel_path: &str,
+) -> Result<(String, SyncManifest)> {
     let manifest_path = format!(
         "{}/manifests/{}",
         remote_prefix.trim_end_matches('/'),
         manifest_hash
     );
-    let manifest_bytes = op.read(&manifest_path).await.ok()?;
-    SyncManifest::from_bytes(&manifest_bytes.to_vec())
-        .ok()
-        .map(|manifest| (manifest_path, manifest))
+    let manifest_bytes = op
+        .read(&manifest_path)
+        .await
+        .with_context(|| format!("reading pulled ref manifest: {manifest_path}"))?
+        .to_vec();
+    engine::validate_indexed_manifest_binding(
+        &manifest_bytes,
+        manifest_hash,
+        RemoteEntryKind::RegularFile,
+        None,
+        rel_path,
+    )
+    .with_context(|| format!("binding pulled ref manifest for state: {manifest_path}"))?;
+    let manifest = SyncManifest::from_bytes(&manifest_bytes)
+        .with_context(|| format!("parsing pulled ref manifest for state: {manifest_path}"))?;
+    Ok((manifest_path, manifest))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_guarded_ref_pull_state(
     op: &Operator,
     remote_prefix: &str,
     manifest_hash: &str,
+    rel_path: &str,
     local_path: &Path,
     incoming_bytes: &[u8],
     state: &mut StateCache,
     device_id: &str,
 ) -> Result<()> {
-    let (manifest_path, manifest) = read_sync_manifest_for_state(op, remote_prefix, manifest_hash)
-        .await
-        .context("reading pulled ref manifest for state")?;
+    let (manifest_path, manifest) =
+        read_sync_manifest_for_state(op, remote_prefix, manifest_hash, rel_path)
+            .await
+            .context("reading pulled ref manifest for state")?;
+    let hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(incoming_bytes));
+    anyhow::ensure!(
+        manifest.file_hash == hash,
+        "pulled ref bytes no longer match the bound manifest for {rel_path}"
+    );
     let mut local_vclock = state
         .get(local_path)
         .map(|s| s.vclock.clone())
-        .unwrap_or_else(VectorClock::new);
+        .unwrap_or_default();
     local_vclock.merge(&manifest.vclock);
-    let hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(incoming_bytes));
     let sync_state = crate::state::make_sync_state_full(
         local_path,
         hash,
@@ -1882,10 +4088,11 @@ async fn record_guarded_ref_pull_state(
 
 /// True if a repo-relative path lies inside a `.git` directory.
 fn is_git_internal_path(rel_path: &str) -> bool {
-    rel_path == ".git"
-        || rel_path.starts_with(".git/")
-        || rel_path.contains("/.git/")
-        || rel_path.ends_with("/.git")
+    let folded = rel_path.to_ascii_lowercase();
+    folded == ".git"
+        || folded.starts_with(".git/")
+        || folded.contains("/.git/")
+        || folded.ends_with("/.git")
 }
 
 /// Compare when both sides exist and the local entry is a symbolic link.
@@ -1906,51 +4113,54 @@ async fn compare_both_exist_symlink(
     op: &Operator,
     remote_prefix: &str,
     device_id: &str,
-) -> ReconcileAction {
+) -> Result<ReconcileAction> {
+    if remote_entry.kind != RemoteEntryKind::Symlink {
+        anyhow::bail!("remote index kind is not symlink at {rel_path:?}");
+    }
+    let expected_target = remote_entry
+        .symlink_target
+        .as_deref()
+        .context("remote symlink index entry is missing its target")?;
     // Read the local link target without following it.
-    let local_target = match crate::engine::read_symlink_target_text(local_path) {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(path = %local_path.display(), error = %e, "failed to read local symlink target");
-            return ReconcileAction::UpToDate {
-                rel_path: rel_path.to_string(),
-            };
-        }
-    };
+    let local_target = crate::engine::read_symlink_target_text(local_path)
+        .with_context(|| format!("reading local symlink target: {}", local_path.display()))?;
+    engine::validate_indexed_symlink_target(local_path, &local_target)
+        .context("validating local symlink target before reconciliation")?;
+    engine::validate_indexed_symlink_target(local_path, expected_target)
+        .context("validating indexed symlink target before reconciliation")?;
     let local_hash = crate::engine::symlink_manifest_hash(&local_target);
     let local_vclock = tracked.map(|s| s.vclock.clone()).unwrap_or_default();
 
     // Fetch and parse the remote manifest as a SymlinkManifest — the exact type
-    // the push path serialized. Failing closed: if the remote entry is not a
-    // symlink manifest (kind/version mismatch or unreadable), fall back to the
-    // conservative re-push so we never silently treat a mismatched remote as
-    // up-to-date.
+    // the push path serialized. Kind/version/identity/target mismatches abort
+    // classification before any action can mutate either side.
     let manifest_path = format!(
         "{}/manifests/{}",
         remote_prefix.trim_end_matches('/'),
         &remote_entry.manifest_hash
     );
-    let remote_manifest = match op.read(&manifest_path).await {
-        Ok(data) => match SymlinkManifest::from_bytes(&data.to_vec()) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(path = manifest_path, error = %e, "failed to parse remote symlink manifest");
-                return ReconcileAction::Push {
-                    local_path: local_path.to_path_buf(),
-                    rel_path: rel_path.to_string(),
-                    reason: PushReason::NewLocal,
-                };
-            }
-        },
-        Err(e) => {
-            warn!(path = manifest_path, error = %e, "failed to read remote symlink manifest");
-            return ReconcileAction::Push {
-                local_path: local_path.to_path_buf(),
-                rel_path: rel_path.to_string(),
-                reason: PushReason::NewLocal,
-            };
-        }
-    };
+    let remote_bytes = op
+        .read(&manifest_path)
+        .await
+        .with_context(|| format!("reading remote symlink manifest: {manifest_path}"))?
+        .to_vec();
+    engine::validate_indexed_manifest_binding(
+        &remote_bytes,
+        &remote_entry.manifest_hash,
+        RemoteEntryKind::Symlink,
+        Some(expected_target),
+        rel_path,
+    )
+    .with_context(|| {
+        format!("validating remote symlink manifest/index binding: {manifest_path}")
+    })?;
+    let remote_manifest = SymlinkManifest::from_bytes(&remote_bytes)
+        .with_context(|| format!("parsing remote symlink manifest: {manifest_path}"))?;
+    engine::validate_indexed_symlink_target(local_path, &remote_manifest.symlink_target)
+        .context("validating manifest symlink target before reconciliation")?;
+    if remote_manifest.symlink_target != expected_target {
+        anyhow::bail!("remote symlink manifest target does not match index at {rel_path:?}");
+    }
 
     let remote_hash = crate::engine::symlink_manifest_hash(&remote_manifest.symlink_target);
     let remote_device = remote_manifest.written_by.as_str();
@@ -1965,7 +4175,13 @@ async fn compare_both_exist_symlink(
         remote_device,
     );
 
-    outcome_to_action(outcome, rel_path, local_path, remote_entry, &manifest_path)
+    Ok(outcome_to_action(
+        outcome,
+        rel_path,
+        local_path,
+        remote_entry,
+        &manifest_path,
+    ))
 }
 
 // ── Execution ────────────────────────────────────────────────────────────────
@@ -1989,16 +4205,34 @@ fn new_remote_pull_fast_path_safe(plan: &ReconcilePlan) -> bool {
             }
         )
     }) && plan.actions.iter().all(|action| {
-        !matches!(
-            action,
-            ReconcileAction::Pull { rel_path, .. } if is_git_ref_class_path(rel_path)
-        )
+        let rel_path = match action {
+            ReconcileAction::Pull { rel_path, .. }
+            | ReconcileAction::CreateDirectory { rel_path } => rel_path,
+            _ => return true,
+        };
+        !is_git_internal_path(rel_path)
     })
 }
 
 /// Execute a reconciliation plan, performing all I/O operations.
 ///
 /// Errors on individual actions are collected — the plan continues past failures.
+async fn require_current_remote_delete_tombstone(
+    op: &Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+) -> Result<()> {
+    match read_exact_index_path_state(op, remote_prefix, rel_path).await? {
+        ExactIndexPathState::Deleted => Ok(()),
+        ExactIndexPathState::Missing => anyhow::bail!(
+            "remote index is missing, not durably tombstoned; refusing local delete: {rel_path}"
+        ),
+        ExactIndexPathState::Live => anyhow::bail!(
+            "remote index is live or preparing; refusing stale-plan local delete: {rel_path}"
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_plan(
     plan: &ReconcilePlan,
@@ -2010,6 +4244,12 @@ pub async fn execute_plan(
     encryption: OptionalEncryption<'_>,
     progress: Option<&ProgressFn>,
 ) -> Result<ExecutionResult> {
+    validate_plan_for_execution(plan, local_root)
+        .context("refusing unsafe reconciliation plan before execution")?;
+    validate_pull_manifests_for_execution(plan, op, local_root, remote_prefix)
+        .await
+        .context("refusing unbound pull manifests before execution")?;
+
     if encryption.is_none() && progress.is_none() && new_remote_pull_fast_path_safe(plan) {
         let result = execute_new_remote_pulls_concurrent(
             plan,
@@ -2020,9 +4260,9 @@ pub async fn execute_plan(
             device_id,
         )
         .await?;
-        if let Err(e) = state.flush() {
-            warn!(error = %e, "failed to flush state cache after concurrent pull execution");
-        }
+        state
+            .flush()
+            .context("persisting state cache after concurrent pull execution")?;
         info!(
             pulled = result.pulled,
             errors = result.errors.len(),
@@ -2038,14 +4278,15 @@ pub async fn execute_plan(
     // window. This stops a concurrent commit (which rewrites refs/index mid-run)
     // from tearing the push. keep-both PR-2 (S3): if a repo's lock is held by a
     // live FOREIGN holder, the cooperative lock fences nothing were we to write
-    // ref-class paths anyway — so those repos' ref-class actions DEFER this run
-    // (see `git_ref_foreign_lock_hit` below); object-class and normal-file
-    // writes still proceed. A STALE (dead-owner, aged) lock is stolen on
-    // acquire, so a leaked lock never deadlocks a repo. Repos mid-`.git`
-    // operation keep today's behavior (skipped, re-reconciled next cycle).
+    // any `.git` path anyway — so every Git action DEFERs this run (see
+    // `git_mutation_lock_hit` below). Normal-file writes still proceed. Native Git
+    // busy markers enter the same deferred set. A stale diagnostic file with
+    // no advisory owner is reusable and never deadlocks a repo.
     // Guards live for the duration of this function and drop (release) on return.
     let git_lock_acq = acquire_git_locks_for_plan(plan, local_root);
-    let foreign_locked_repos = &git_lock_acq.foreign_locked_repos;
+    let blocked_git_repos = &git_lock_acq.blocked_git_repos;
+    let invalid_git_repos = &git_lock_acq.invalid_git_repos;
+    let git_directories = &git_lock_acq.git_directories;
     let _git_locks = &git_lock_acq.guards;
 
     // Objects-before-refs BARRIER (per repo, both directions): the plan orders
@@ -2069,23 +4310,70 @@ pub async fn execute_plan(
             ReconcileAction::Push { rel_path, .. }
             | ReconcileAction::Pull { rel_path, .. }
             | ReconcileAction::DeleteLocal { rel_path, .. }
-            | ReconcileAction::DeleteRemote { rel_path } => Some(rel_path),
+            | ReconcileAction::DeleteRemote { rel_path }
+            | ReconcileAction::CreateDirectory { rel_path } => Some(rel_path),
             _ => None,
         };
         if let Some(rel_path) = git_write_rel_path {
-            // keep-both PR-2 (S3): a live FOREIGN holder owns this repo's
-            // `.git/tcfs.lock`. Writing ref-class paths while another sync holds
-            // the lock races it, so DEFER this repo's ref-class actions this run
-            // (recorded, not errored); the next cycle re-plans them once the
-            // holder releases. Object-class and normal-file writes are
-            // unaffected — only ref-class paths gate on the lock.
-            if git_ref_foreign_lock_hit(rel_path, local_root, foreign_locked_repos) {
-                info!(
+            if git_invalid_topology_hit(rel_path, local_root, invalid_git_repos) {
+                warn!(
                     path = %rel_path,
-                    "git lock: foreign holder owns .git/tcfs.lock; deferring ref action"
+                    "git topology: invalid repo alias/metadata; deferring all .git I/O"
                 );
                 result.deferred_git_refs.push(rel_path.clone());
                 continue;
+            }
+            // A live foreign holder or native Git busy marker means TCFS does
+            // not own this repo's mutation window. Defer every `.git` action;
+            // normal files remain independent.
+            if git_mutation_lock_hit(rel_path, local_root, blocked_git_repos) {
+                info!(
+                    path = %rel_path,
+                    "git lock: repo mutation window unavailable; deferring .git action"
+                );
+                result.deferred_git_refs.push(rel_path.clone());
+                continue;
+            }
+            if is_git_internal_path(rel_path)
+                && matches!(
+                    action,
+                    ReconcileAction::Pull { .. } | ReconcileAction::CreateDirectory { .. }
+                )
+            {
+                let Some(repo_root) = git_safety::repo_root_for_git_path(local_root, rel_path)
+                else {
+                    result.deferred_git_refs.push(rel_path.clone());
+                    continue;
+                };
+                let Some(git_directory) = git_directories.get(&repo_root) else {
+                    warn!(
+                        path = %rel_path,
+                        "git topology: no captured metadata capability; deferring action"
+                    );
+                    result.deferred_git_refs.push(rel_path.clone());
+                    continue;
+                };
+                let include_target = matches!(action, ReconcileAction::CreateDirectory { .. });
+                let private_components = match git_directory_components(rel_path, include_target) {
+                    Ok(components) => components,
+                    Err(error) => {
+                        warn!(path = %rel_path, error = %format!("{error:#}"), "git topology: invalid metadata path; deferring action");
+                        result.deferred_git_refs.push(rel_path.clone());
+                        continue;
+                    }
+                };
+                if let Err(error) =
+                    ensure_private_git_directory_chain(git_directory, &private_components)
+                {
+                    warn!(
+                        path = %rel_path,
+                        error = %format!("{error:#}"),
+                        "git topology: private metadata parent creation failed; deferring action"
+                    );
+                    mark_git_object_failure(rel_path, local_root, &mut git_object_failed_repos);
+                    result.deferred_git_refs.push(rel_path.clone());
+                    continue;
+                }
             }
             if git_ref_barrier_hit(rel_path, local_root, &git_object_failed_repos) {
                 info!(
@@ -2119,6 +4407,15 @@ pub async fn execute_plan(
                 rel_path,
                 reason,
             } => {
+                if let Err(error) =
+                    validate_local_target(local_root, rel_path, LocalTargetKind::Entry)
+                {
+                    result.errors.push((
+                        rel_path.clone(),
+                        format!("local push path became unsafe: {error:#}"),
+                    ));
+                    continue;
+                }
                 // Symlinks (TIN-1620 T13-Z) are published as first-class link
                 // manifests, not run through the chunked-file uploader, which
                 // would otherwise dereference or fail on them. `symlink_metadata`
@@ -2189,6 +4486,10 @@ pub async fn execute_plan(
             ReconcileAction::Pull {
                 rel_path,
                 manifest_hash,
+                size,
+                chunks,
+                expected_kind,
+                expected_symlink_target,
                 ..
             } => {
                 let manifest_path = format!(
@@ -2200,7 +4501,9 @@ pub async fn execute_plan(
 
                 // Ensure parent directory exists
                 if let Some(parent) = local_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
+                    if let Err(e) = create_private_directory_tree(parent).and_then(|()| {
+                        validate_local_target(local_root, rel_path, LocalTargetKind::FileWrite)
+                    }) {
                         mark_git_object_failure(rel_path, local_root, &mut git_object_failed_repos);
                         result
                             .errors
@@ -2230,6 +4533,9 @@ pub async fn execute_plan(
                                     op,
                                     remote_prefix,
                                     manifest_hash,
+                                    *size,
+                                    *chunks,
+                                    rel_path,
                                     encryption,
                                 )
                                 .await,
@@ -2243,7 +4549,19 @@ pub async fn execute_plan(
                                     continue;
                                 }
                                 (Err(e), Some(_)) if e.kind() == std::io::ErrorKind::NotFound => {
-                                    if !git_dir_ready_for_ref_guard(git_dir) {
+                                    let git_dir_ready = match git_dir_ready_for_ref_guard(git_dir) {
+                                        Ok(ready) => ready,
+                                        Err(error) => {
+                                            warn!(
+                                                path = %rel_path,
+                                                error = %format!("{error:#}"),
+                                                "loser-guard: invalid Git directory topology; deferring packed-refs bootstrap"
+                                            );
+                                            result.deferred_git_refs.push(rel_path.clone());
+                                            continue;
+                                        }
+                                    };
+                                    if !git_dir_ready {
                                         // Bootstrap raw restore of a not-yet
                                         // initialized gitdir. The wave-0 object
                                         // barrier still guards missing object
@@ -2253,6 +4571,9 @@ pub async fn execute_plan(
                                             op,
                                             remote_prefix,
                                             manifest_hash,
+                                            *size,
+                                            *chunks,
+                                            rel_path,
                                             encryption,
                                         )
                                         .await
@@ -2287,6 +4608,7 @@ pub async fn execute_plan(
                                             op,
                                             remote_prefix,
                                             manifest_hash,
+                                            rel_path,
                                             &local_path,
                                             &incoming,
                                             state,
@@ -2329,6 +4651,7 @@ pub async fn execute_plan(
                                         op,
                                         remote_prefix,
                                         manifest_hash,
+                                        rel_path,
                                         &local_path,
                                         &current,
                                         state,
@@ -2360,6 +4683,9 @@ pub async fn execute_plan(
                                 op,
                                 remote_prefix,
                                 manifest_hash,
+                                *size,
+                                *chunks,
+                                rel_path,
                                 encryption,
                             )
                             .await
@@ -2374,7 +4700,19 @@ pub async fn execute_plan(
                                     continue;
                                 }
                             };
-                            if !git_dir_ready_for_ref_guard(&git_dir) {
+                            let git_dir_ready = match git_dir_ready_for_ref_guard(&git_dir) {
+                                Ok(ready) => ready,
+                                Err(error) => {
+                                    warn!(
+                                        path = %rel_path,
+                                        error = %format!("{error:#}"),
+                                        "loser-guard: invalid Git directory topology; deferring ref bootstrap"
+                                    );
+                                    result.deferred_git_refs.push(rel_path.clone());
+                                    continue;
+                                }
+                            };
+                            if !git_dir_ready {
                                 // Bootstrap raw restore of a not-yet
                                 // initialized gitdir. Git commands cannot prove
                                 // refs until the repository skeleton exists; the
@@ -2390,6 +4728,7 @@ pub async fn execute_plan(
                                             op,
                                             remote_prefix,
                                             manifest_hash,
+                                            rel_path,
                                             &local_path,
                                             &incoming_bytes,
                                             state,
@@ -2470,8 +4809,9 @@ pub async fn execute_plan(
                                             result.deferred_git_refs.push(rel_path.clone());
                                             continue;
                                         };
-                                        let bundle = match conflict_git::write_undo_bundle(
+                                        let bundle = match write_loser_guard_undo_bundle(
                                             &repo_root,
+                                            &git_dir,
                                             &undo_state_dir,
                                         ) {
                                             Ok(bundle) => bundle,
@@ -2485,8 +4825,8 @@ pub async fn execute_plan(
                                                 continue;
                                             }
                                         };
-                                        let parked_ref = match conflict_git::park_ref_create_only(
-                                            &repo_root,
+                                        let parked_ref = match git_dir_park_ref_create_only(
+                                            &git_dir,
                                             &park_ref,
                                             current_sha,
                                         ) {
@@ -2525,6 +4865,7 @@ pub async fn execute_plan(
                                     op,
                                     remote_prefix,
                                     manifest_hash,
+                                    rel_path,
                                     &local_path,
                                     &incoming_bytes,
                                     state,
@@ -2556,7 +4897,7 @@ pub async fn execute_plan(
                     }
                 }
 
-                match engine::download_file_with_device(
+                match engine::download_file_with_device_checked(
                     op,
                     &manifest_path,
                     &local_path,
@@ -2565,6 +4906,11 @@ pub async fn execute_plan(
                     device_id,
                     Some(state),
                     encryption,
+                    rel_path,
+                    *expected_kind,
+                    expected_symlink_target.as_deref(),
+                    *size,
+                    *chunks,
                 )
                 .await
                 {
@@ -2585,6 +4931,29 @@ pub async fn execute_plan(
                 local_path,
                 rel_path,
             } => {
+                if let Err(error) =
+                    validate_local_target(local_root, rel_path, LocalTargetKind::Entry)
+                {
+                    result.errors.push((
+                        rel_path.clone(),
+                        format!("local delete path became unsafe: {error:#}"),
+                    ));
+                    continue;
+                }
+                if let Err(error) =
+                    require_current_remote_delete_tombstone(op, remote_prefix, rel_path).await
+                {
+                    warn!(
+                        path = %rel_path,
+                        error = %format!("{error:#}"),
+                        "remote deletion authority is absent or obsolete; preserving local entry"
+                    );
+                    result.errors.push((
+                        rel_path.clone(),
+                        format!("remote delete authority unavailable: {error:#}"),
+                    ));
+                    continue;
+                }
                 if is_git_ref_class_path(rel_path) {
                     match loser_guard_ref_target(local_root, rel_path) {
                         Some(LoserGuardTarget::PackedRefs { .. }) => {
@@ -2630,8 +4999,9 @@ pub async fn execute_plan(
                                 result.deferred_git_refs.push(rel_path.clone());
                                 continue;
                             };
-                            let bundle = match conflict_git::write_undo_bundle(
+                            let bundle = match write_loser_guard_undo_bundle(
                                 &repo_root,
+                                &git_dir,
                                 &undo_state_dir,
                             ) {
                                 Ok(bundle) => bundle,
@@ -2645,8 +5015,8 @@ pub async fn execute_plan(
                                     continue;
                                 }
                             };
-                            let parked_ref = match conflict_git::park_ref_create_only(
-                                &repo_root, &park_ref, &current,
+                            let parked_ref = match git_dir_park_ref_create_only(
+                                &git_dir, &park_ref, &current,
                             ) {
                                 Ok(parked_ref) => parked_ref,
                                 Err(e) => {
@@ -2667,6 +5037,19 @@ pub async fn execute_plan(
                                 bundle = %bundle.display(),
                                 "loser-guard: bundled pre-delete .git + parked local ref; applying CAS local delete"
                             );
+                            if let Err(e) =
+                                require_current_remote_delete_tombstone(op, remote_prefix, rel_path)
+                                    .await
+                            {
+                                warn!(
+                                    path = %rel_path,
+                                    r#ref = %ref_name,
+                                    error = %format!("{e:#}"),
+                                    "remote tombstone changed before ref delete; deferring local delete"
+                                );
+                                result.deferred_git_refs.push(rel_path.clone());
+                                continue;
+                            }
                             if let Err(e) = git_dir_delete_ref_cas(&git_dir, &ref_name, &current) {
                                 warn!(
                                     path = %rel_path,
@@ -2690,6 +5073,20 @@ pub async fn execute_plan(
                             continue;
                         }
                     }
+                }
+                if let Err(error) =
+                    require_current_remote_delete_tombstone(op, remote_prefix, rel_path).await
+                {
+                    warn!(
+                        path = %rel_path,
+                        error = %format!("{error:#}"),
+                        "remote tombstone changed immediately before local unlink"
+                    );
+                    result.errors.push((
+                        rel_path.clone(),
+                        format!("remote delete authority changed before unlink: {error:#}"),
+                    ));
+                    continue;
                 }
                 match tokio::fs::remove_file(local_path).await {
                     Ok(()) => {
@@ -2768,7 +5165,9 @@ pub async fn execute_plan(
 
             ReconcileAction::CreateDirectory { rel_path } => {
                 let local_path = local_root.join(rel_path);
-                match std::fs::create_dir_all(&local_path) {
+                match create_private_directory_tree(&local_path).and_then(|()| {
+                    validate_local_target(local_root, rel_path, LocalTargetKind::Directory)
+                }) {
                     Ok(()) => {
                         result.directories_created += 1;
                     }
@@ -2786,9 +5185,9 @@ pub async fn execute_plan(
         }
     }
 
-    if let Err(e) = state.flush() {
-        warn!(error = %e, "failed to flush state cache after plan execution");
-    }
+    state
+        .flush()
+        .context("persisting state cache after plan execution")?;
 
     info!(
         pushed = result.pushed,
@@ -2821,7 +5220,9 @@ async fn execute_new_remote_pulls_concurrent(
     for action in &plan.actions {
         if let ReconcileAction::CreateDirectory { rel_path } = action {
             let local_path = local_root.join(rel_path);
-            match std::fs::create_dir_all(&local_path) {
+            match create_private_directory_tree(&local_path).and_then(|()| {
+                validate_local_target(local_root, rel_path, LocalTargetKind::Directory)
+            }) {
                 Ok(()) => {
                     result.directories_created += 1;
                 }
@@ -2846,6 +5247,10 @@ async fn execute_new_remote_pulls_concurrent(
             let ReconcileAction::Pull {
                 rel_path,
                 manifest_hash,
+                size,
+                chunks,
+                expected_kind,
+                expected_symlink_target,
                 reason: PullReason::NewRemote,
                 ..
             } = action
@@ -2874,6 +5279,17 @@ async fn execute_new_remote_pulls_concurrent(
             let op = op.clone();
             let rel_path = rel_path.clone();
             let local_path = local_root.join(&rel_path);
+            if let Some(parent) = local_path.parent() {
+                if let Err(error) = create_private_directory_tree(parent).and_then(|()| {
+                    validate_local_target(local_root, &rel_path, LocalTargetKind::FileWrite)
+                }) {
+                    result.errors.push((
+                        rel_path,
+                        format!("creating trusted pull parent failed: {error:#}"),
+                    ));
+                    continue;
+                }
+            }
             let remote_prefix = remote_prefix.to_string();
             let manifest_path = format!(
                 "{}/manifests/{}",
@@ -2881,6 +5297,10 @@ async fn execute_new_remote_pulls_concurrent(
                 manifest_hash
             );
             let device_id = device_id.to_string();
+            let expected_kind = *expected_kind;
+            let expected_symlink_target = expected_symlink_target.clone();
+            let expected_size = *size;
+            let expected_chunks = *chunks;
             let read_permits = Arc::clone(&read_permits);
 
             tasks.spawn(async move {
@@ -2890,13 +5310,7 @@ async fn execute_new_remote_pulls_concurrent(
                         .await
                         .context("acquiring remote pull permit")?;
 
-                    if let Some(parent) = local_path.parent() {
-                        tokio::fs::create_dir_all(parent)
-                            .await
-                            .with_context(|| format!("creating dir: {}", parent.display()))?;
-                    }
-
-                    engine::download_file_with_device(
+                    engine::download_file_with_device_checked(
                         &op,
                         &manifest_path,
                         &local_path,
@@ -2905,6 +5319,11 @@ async fn execute_new_remote_pulls_concurrent(
                         &device_id,
                         None,
                         None,
+                        &rel_path,
+                        expected_kind,
+                        expected_symlink_target.as_deref(),
+                        expected_size,
+                        expected_chunks,
                     )
                     .await
                     .with_context(|| format!("pull failed: {rel_path}"))
@@ -2972,8 +5391,49 @@ fn collect_local_set(local_root: &Path, blacklist: &Blacklist) -> Result<HashMap
     let mut map = HashMap::new();
     for entry in result.files.into_iter().chain(result.symlinks) {
         if let Ok(rel) = entry.strip_prefix(local_root) {
-            let rel_str = crate::engine::normalize_rel_path_text(&rel.to_string_lossy());
-            map.insert(rel_str, entry);
+            let rel_text = rel.to_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "local path is not valid UTF-8 and cannot be represented remotely: {}",
+                    entry.display()
+                )
+            })?;
+            let rel_str = crate::engine::normalize_rel_path_text(rel_text);
+            validate_safe_relative_path(&rel_str).with_context(|| {
+                format!(
+                    "local path cannot be represented safely for sync: {}",
+                    entry.display()
+                )
+            })?;
+            if let Some(previous) = map.insert(rel_str.clone(), entry.clone()) {
+                anyhow::bail!(
+                    "local paths collide after cross-platform normalization for {rel_str:?}: {} and {}",
+                    previous.display(),
+                    entry.display()
+                );
+            }
+        }
+    }
+    validate_casefold_prefix_aliases(
+        map.keys().map(String::as_str),
+        "local reconciliation namespace",
+    )?;
+    let mut folded_paths: HashMap<String, &str> = HashMap::new();
+    for rel_path in map.keys() {
+        let folded = portable_casefold_path(rel_path)?;
+        if let Some(previous) = folded_paths.insert(folded, rel_path) {
+            anyhow::bail!(
+                "local paths collide under case-insensitive clients: {previous:?} and {rel_path:?}"
+            );
+        }
+    }
+    for (folded_path, rel_path) in &folded_paths {
+        for (separator, _) in folded_path.match_indices('/') {
+            let folded_ancestor = &folded_path[..separator];
+            if let Some(ancestor) = folded_paths.get(folded_ancestor) {
+                anyhow::bail!(
+                    "local namespace cannot roam to case-insensitive clients: file {ancestor:?} is an ancestor of {rel_path:?}"
+                );
+            }
         }
     }
     Ok(map)
@@ -3000,7 +5460,20 @@ mod tests {
     use opendal::services::Memory;
 
     fn memory_op() -> Operator {
-        Operator::new(Memory::default()).unwrap().finish()
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        crate::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+        op
+    }
+
+    async fn seed_delete_tombstone(op: &Operator, prefix: &str, rel_path: &str) {
+        op.write(
+            &format!("{prefix}/index/{rel_path}"),
+            crate::index_entry::VersionedIndexEntry::deleted()
+                .to_json_bytes()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     // ── list_remote_index ────────────────────────────────────────────────
@@ -3098,6 +5571,467 @@ mod tests {
         assert!(!dirs.contains("file.txt"));
     }
 
+    #[test]
+    fn relative_path_boundary_rejects_cross_platform_aliases() {
+        for path in [
+            "",
+            "/absolute",
+            "../escape",
+            "safe/../escape",
+            "safe//file",
+            "safe/./file",
+            "C:relative",
+            "C:/absolute",
+            "back\\slash",
+            "control\nname",
+            "e\u{301}.txt",
+            "repo/.GIT/config",
+            "repo/.git/REFS/heads/main",
+            "repo/.git/HEAD.LOCK",
+        ] {
+            assert!(
+                validate_safe_relative_path(path).is_err(),
+                "ambiguous path must fail closed: {path:?}"
+            );
+        }
+
+        for path in ["normal/file.txt", "é.txt", "repo/.git/refs/heads/main"] {
+            validate_safe_relative_path(path)
+                .unwrap_or_else(|error| panic!("canonical path rejected {path:?}: {error:#}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_index_rejects_backslash_spelling_before_normalization() {
+        let op = memory_op();
+        op.write(
+            "data/index/dir\\file.txt",
+            RemoteIndexEntry::new("file-hash", 0, 0).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/manifests/file-hash",
+            br#"{"version":2,"file_hash":"file-hash","file_size":0,"chunks":[],"vclock":{"clocks":{}},"written_by":"neo","written_at":0}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let error = list_remote_index(&op, "data")
+            .await
+            .expect_err("remote backslash spellings must not become path separators");
+        assert!(format!("{error:#}").contains("invalid raw remote index path"));
+    }
+
+    #[test]
+    fn remote_namespace_rejects_casefold_prefix_aliases_and_file_markers() {
+        let case_aliases = HashMap::from([
+            ("Foo/a".to_string(), RemoteIndexEntry::new("one", 0, 0)),
+            ("foo/b".to_string(), RemoteIndexEntry::new("two", 0, 0)),
+        ]);
+        assert!(validate_remote_namespace(&case_aliases, &HashSet::new()).is_err());
+
+        let unicode_case_aliases = HashMap::from([
+            ("Straße/a".to_string(), RemoteIndexEntry::new("one", 0, 0)),
+            ("STRASSE/b".to_string(), RemoteIndexEntry::new("two", 0, 0)),
+        ]);
+        assert!(
+            validate_remote_namespace(&unicode_case_aliases, &HashSet::new()).is_err(),
+            "Unicode casefold expansions must collide on portable clients"
+        );
+
+        let file_and_child = HashMap::from([
+            ("node".to_string(), RemoteIndexEntry::new("one", 0, 0)),
+            ("node/child".to_string(), RemoteIndexEntry::new("two", 0, 0)),
+        ]);
+        assert!(validate_remote_namespace(&file_and_child, &HashSet::new()).is_err());
+
+        let file = HashMap::from([("node".to_string(), RemoteIndexEntry::new("one", 0, 0))]);
+        let marker = HashSet::from(["NODE".to_string()]);
+        assert!(validate_remote_namespace(&file, &marker).is_err());
+    }
+
+    #[test]
+    fn normalized_local_plan_mapping_accepts_nfd_filesystem_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let supplied = dir.path().join("e\u{301}.txt");
+        assert!(
+            supplied_local_path_matches(dir.path(), "é.txt", &supplied).unwrap(),
+            "NFD filesystem spelling must map to the canonical NFC plan path"
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_aborts_without_mutation_on_corrupt_or_misbound_manifest() {
+        for (object_id, bytes) in [
+            ("corrupt", b"{not-json".to_vec()),
+            (
+                "wrong-object-id",
+                SyncManifest {
+                    version: 2,
+                    file_hash: "different-file-hash".into(),
+                    file_size: 5,
+                    chunks: Vec::new(),
+                    vclock: VectorClock::new(),
+                    written_by: "peer".into(),
+                    written_at: 0,
+                    rel_path: Some("doc.txt".into()),
+                    mode: None,
+                    mtime: None,
+                    encrypted_file_key: None,
+                    wrapped_file_keys: Vec::new(),
+                }
+                .to_bytes()
+                .unwrap(),
+            ),
+        ] {
+            let op = memory_op();
+            let dir = tempfile::tempdir().unwrap();
+            let local_path = dir.path().join("doc.txt");
+            std::fs::write(&local_path, b"local").unwrap();
+            let manifest_key = format!("data/manifests/{object_id}");
+            op.write(&manifest_key, bytes.clone()).await.unwrap();
+            let entry = RemoteIndexEntry::new(object_id, 5, 0);
+
+            let error =
+                compare_both_exist("doc.txt", &local_path, &entry, None, &op, "data", "neo")
+                    .await
+                    .expect_err("untrusted manifest metadata must abort classification");
+
+            assert!(!format!("{error:#}").is_empty());
+            assert_eq!(std::fs::read(&local_path).unwrap(), b"local");
+            assert_eq!(op.read(&manifest_key).await.unwrap().to_vec(), bytes);
+        }
+    }
+
+    fn causal_test_clock(entries: &[(&str, u64)]) -> VectorClock {
+        let mut clock = VectorClock::new();
+        for (device, value) in entries {
+            for _ in 0..*value {
+                clock.tick(device);
+            }
+        }
+        clock
+    }
+
+    fn causal_test_state(blake3: String, vclock: VectorClock) -> SyncState {
+        SyncState {
+            blake3,
+            size: 0,
+            mtime: 0,
+            chunk_count: 0,
+            remote_path: "data/manifests/baseline".into(),
+            last_synced: 0,
+            vclock,
+            device_id: "baseline".into(),
+            conflict: None,
+            status: FileSyncStatus::Synced,
+        }
+    }
+
+    fn causal_test_content_hash(bytes: &[u8]) -> String {
+        tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(bytes))
+    }
+
+    async fn write_causal_test_regular_manifest(
+        op: &Operator,
+        rel_path: &str,
+        content: &[u8],
+        vclock: VectorClock,
+    ) -> (RemoteIndexEntry, String) {
+        let content_hash = causal_test_content_hash(content);
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: content_hash.clone(),
+            file_size: content.len() as u64,
+            chunks: Vec::new(),
+            vclock,
+            written_by: "peer".into(),
+            written_at: 1,
+            rel_path: Some(rel_path.into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        let bytes = manifest.to_bytes().unwrap();
+        let object_id = crate::index_entry::manifest_object_id(&bytes);
+        op.write(&format!("data/manifests/{object_id}"), bytes)
+            .await
+            .unwrap();
+        (
+            RemoteIndexEntry::new(object_id, content.len() as u64, 0),
+            content_hash,
+        )
+    }
+
+    async fn write_causal_test_symlink_manifest(
+        op: &Operator,
+        rel_path: &str,
+        target: &str,
+        vclock: VectorClock,
+    ) -> (RemoteIndexEntry, String) {
+        let manifest =
+            SymlinkManifest::new(target, vclock, "peer".into(), 1, Some(rel_path.into()));
+        let bytes = manifest.to_bytes().unwrap();
+        let object_id = crate::index_entry::manifest_object_id(&bytes);
+        op.write(&format!("data/manifests/{object_id}"), bytes)
+            .await
+            .unwrap();
+        (
+            RemoteIndexEntry::new_symlink(object_id, target),
+            engine::symlink_manifest_hash(target),
+        )
+    }
+
+    #[tokio::test]
+    async fn local_regular_type_replacement_pushes_when_causally_newer() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("doc.txt");
+        std::fs::write(&local_path, b"replacement regular file").unwrap();
+        let baseline_clock = causal_test_clock(&[("peer", 1)]);
+        let (entry, remote_hash) = write_causal_test_symlink_manifest(
+            &op,
+            "doc.txt",
+            "old-target.txt",
+            baseline_clock.clone(),
+        )
+        .await;
+        let tracked = causal_test_state(remote_hash, baseline_clock);
+
+        let action = compare_both_exist(
+            "doc.txt",
+            &local_path,
+            &entry,
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+        )
+        .await
+        .expect("a local regular-file replacement should be classified causally");
+
+        assert!(matches!(
+            action,
+            ReconcileAction::Push {
+                reason: PushReason::LocalNewer,
+                ..
+            }
+        ));
+        assert_eq!(
+            std::fs::read(&local_path).unwrap(),
+            b"replacement regular file"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_symlink_type_replacement_pulls_when_causally_newer() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("doc.txt");
+        let local_content = b"unchanged regular file";
+        std::fs::write(&local_path, local_content).unwrap();
+        let local_hash = causal_test_content_hash(local_content);
+        let tracked = causal_test_state(local_hash, causal_test_clock(&[("peer", 1)]));
+        let (entry, _) = write_causal_test_symlink_manifest(
+            &op,
+            "doc.txt",
+            "new-target.txt",
+            causal_test_clock(&[("peer", 2)]),
+        )
+        .await;
+
+        let action = compare_both_exist(
+            "doc.txt",
+            &local_path,
+            &entry,
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+        )
+        .await
+        .expect("a causally newer remote symlink should replace a regular file");
+
+        assert!(matches!(
+            action,
+            ReconcileAction::Pull {
+                reason: PullReason::RemoteNewer,
+                expected_kind: RemoteEntryKind::Symlink,
+                expected_symlink_target: Some(ref target),
+                ..
+            } if target == "new-target.txt"
+        ));
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_content);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_symlink_type_replacement_pushes_when_causally_newer() {
+        use std::os::unix::fs::symlink;
+
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("doc.txt");
+        symlink("new-target.txt", &local_path).unwrap();
+        let baseline_clock = causal_test_clock(&[("peer", 1)]);
+        let (entry, remote_hash) = write_causal_test_regular_manifest(
+            &op,
+            "doc.txt",
+            b"old regular file",
+            baseline_clock.clone(),
+        )
+        .await;
+        let tracked = causal_test_state(remote_hash, baseline_clock);
+
+        let action = compare_both_exist(
+            "doc.txt",
+            &local_path,
+            &entry,
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+        )
+        .await
+        .expect("a local symlink replacement should be classified causally");
+
+        assert!(matches!(
+            action,
+            ReconcileAction::Push {
+                reason: PushReason::LocalNewer,
+                ..
+            }
+        ));
+        assert_eq!(
+            std::fs::read_link(&local_path).unwrap(),
+            Path::new("new-target.txt")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_regular_type_replacement_pulls_when_causally_newer() {
+        use std::os::unix::fs::symlink;
+
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("doc.txt");
+        let local_target = "old-target.txt";
+        symlink(local_target, &local_path).unwrap();
+        let tracked = causal_test_state(
+            engine::symlink_manifest_hash(local_target),
+            causal_test_clock(&[("peer", 1)]),
+        );
+        let (entry, _) = write_causal_test_regular_manifest(
+            &op,
+            "doc.txt",
+            b"new regular file",
+            causal_test_clock(&[("peer", 2)]),
+        )
+        .await;
+
+        let action = compare_both_exist(
+            "doc.txt",
+            &local_path,
+            &entry,
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+        )
+        .await
+        .expect("a causally newer remote regular file should replace a symlink");
+
+        assert!(matches!(
+            action,
+            ReconcileAction::Pull {
+                reason: PullReason::RemoteNewer,
+                expected_kind: RemoteEntryKind::RegularFile,
+                expected_symlink_target: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            std::fs::read_link(&local_path).unwrap(),
+            Path::new(local_target)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_cross_kind_replacement_records_raw_identity_conflict() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_path = dir.path().join("doc.txt");
+        let local_content = b"local concurrent regular edit";
+        std::fs::write(&local_path, local_content).unwrap();
+        let local_hash = causal_test_content_hash(local_content);
+        let tracked = causal_test_state(
+            causal_test_content_hash(b"common regular baseline"),
+            causal_test_clock(&[("base", 1)]),
+        );
+        let (entry, remote_hash) = write_causal_test_symlink_manifest(
+            &op,
+            "doc.txt",
+            "remote-target.txt",
+            causal_test_clock(&[("base", 1), ("peer", 1)]),
+        )
+        .await;
+
+        let action = compare_both_exist(
+            "doc.txt",
+            &local_path,
+            &entry,
+            Some(&tracked),
+            &op,
+            "data",
+            "neo",
+        )
+        .await
+        .expect("concurrent type replacements should classify as a conflict");
+
+        let ReconcileAction::Conflict { info, .. } = action else {
+            panic!("concurrent cross-kind edits must remain a conflict");
+        };
+        assert_eq!(info.local_blake3, local_hash);
+        assert_eq!(info.remote_blake3, remote_hash);
+        let expected_manifest_key = format!("data/manifests/{}", entry.manifest_hash);
+        assert_eq!(
+            info.remote_manifest_key.as_deref(),
+            Some(expected_manifest_key.as_str())
+        );
+        assert_eq!(info.local_vclock.get("neo"), 1);
+        assert_eq!(info.remote_vclock.get("peer"), 1);
+        assert_eq!(std::fs::read(&local_path).unwrap(), local_content);
+    }
+
+    #[test]
+    fn typed_cross_kind_identity_never_collapses_equal_raw_hashes() {
+        let clock = causal_test_clock(&[("base", 1)]);
+        let raw_hash = "same-canonical-raw-hash";
+        let remote_identity =
+            reconcile_logical_content_identity(RemoteEntryKind::Symlink, raw_hash);
+
+        let outcome = compare_reconcile_typed_content_clocks(
+            &clock,
+            &clock,
+            RemoteEntryKind::RegularFile,
+            raw_hash,
+            &remote_identity,
+            raw_hash,
+            "doc.txt",
+            "neo",
+            "peer",
+        );
+
+        let crate::conflict::SyncOutcome::Conflict(info) = outcome else {
+            panic!("type tags must prevent cross-kind content equality");
+        };
+        assert_eq!(info.local_blake3, raw_hash);
+        assert_eq!(info.remote_blake3, raw_hash);
+    }
+
     #[tokio::test]
     async fn find_orphaned_chunks_empty_when_every_chunk_is_referenced() {
         let op = memory_op();
@@ -3163,6 +6097,299 @@ mod tests {
         assert_eq!(report.orphaned_chunks, vec!["chunk-orphan".to_string()]);
     }
 
+    #[tokio::test]
+    async fn orphan_scan_treats_legacy_path_manifest_chunks_as_reachable() {
+        let op = memory_op();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "legacy-file-hash".into(),
+            file_size: 11,
+            chunks: vec!["chunk-legacy".into()],
+            vclock: VectorClock::new(),
+            written_by: "legacy-peer".into(),
+            written_at: 0,
+            rel_path: Some("nested/doc.txt".into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+
+        op.write(
+            "data/manifests/nested/doc.txt",
+            manifest.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        op.write("data/chunks/chunk-legacy", b"hello world".to_vec())
+            .await
+            .unwrap();
+
+        let report = find_orphaned_chunks(&op, "data").await.unwrap();
+
+        assert_eq!(report.referenced_chunks, 1);
+        assert_eq!(report.scanned_chunks, 1);
+        assert!(report.orphaned_chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_rejects_misbound_legacy_path_manifest() {
+        let op = memory_op();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "legacy-file-hash".into(),
+            file_size: 11,
+            chunks: vec!["chunk-legacy".into()],
+            vclock: VectorClock::new(),
+            written_by: "legacy-peer".into(),
+            written_at: 0,
+            rel_path: Some("other/doc.txt".into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+
+        op.write(
+            "data/manifests/nested/doc.txt",
+            manifest.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        op.write("data/chunks/chunk-legacy", b"hello world".to_vec())
+            .await
+            .unwrap();
+
+        let error = find_orphaned_chunks(&op, "data")
+            .await
+            .expect_err("legacy manifest path disagreement must abort GC classification");
+
+        assert!(
+            format!("{error:#}").contains("legacy manifest rel_path mismatch"),
+            "{error:#}"
+        );
+    }
+
+    async fn assert_unsafe_legacy_manifest_aborts_cleanup(
+        manifest_key: &str,
+        manifest_bytes: Vec<u8>,
+        unsafe_component: &str,
+    ) {
+        let op = memory_op();
+        let victim_key = "data/chunks/unrelated-old";
+        op.write(manifest_key, manifest_bytes).await.unwrap();
+        op.write(victim_key, b"must survive failed validation".to_vec())
+            .await
+            .unwrap();
+
+        let cleanup_now =
+            SystemTime::now() + MIN_INDEXED_ORPHAN_CHUNK_GRACE + Duration::from_secs(1);
+        let old_candidate = RemoteChunkObject {
+            object_key: victim_key.to_string(),
+            chunk_hash: "unrelated-old".to_string(),
+            last_modified: Some(
+                cleanup_now - MIN_INDEXED_ORPHAN_CHUNK_GRACE - Duration::from_secs(1),
+            ),
+        };
+        let control_plan = plan_orphaned_chunk_cleanup(
+            &[old_candidate],
+            &HashSet::new(),
+            indexed_orphan_chunk_grace(Duration::ZERO),
+            cleanup_now,
+        );
+        assert_eq!(
+            control_plan
+                .deletable
+                .iter()
+                .map(|entry| entry.chunk_hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["unrelated-old"]
+        );
+
+        let error = cleanup_orphaned_chunks(&op, "data", Duration::ZERO, cleanup_now)
+            .await
+            .expect_err("unsafe legacy chunk metadata must abort GC before deletion");
+
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("manifest chunk hash at index 0") && error.contains(unsafe_component),
+            "{error}"
+        );
+        assert!(
+            op.exists(victim_key).await.unwrap(),
+            "GC must not delete an unrelated old chunk after legacy validation fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup_rejects_unsafe_legacy_v1_chunk_before_delete() {
+        assert_unsafe_legacy_manifest_aborts_cleanup(
+            "data/manifests/nested/v1.txt",
+            b"../victim\n".to_vec(),
+            "../victim",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup_rejects_unsafe_legacy_v2_chunk_before_delete() {
+        assert_unsafe_legacy_manifest_aborts_cleanup(
+            "data/manifests/nested/v2.txt",
+            br#"{"version":2,"file_hash":"legacy-file-hash","file_size":1,"chunks":["chunk\\escape"],"vclock":{"clocks":{}},"written_by":"legacy-peer","written_at":0,"rel_path":"nested/v2.txt","encrypted_file_key":null,"wrapped_file_keys":[]}"#.to_vec(),
+            "chunk\\\\escape",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_treats_staged_publication_chunks_as_reachable() {
+        let op = memory_op();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "file-hash".into(),
+            file_size: 11,
+            chunks: vec!["chunk-staged".into()],
+            vclock: VectorClock::new(),
+            written_by: "neo".into(),
+            written_at: 0,
+            rel_path: Some("doc.txt".into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        let bytes = manifest.to_bytes().unwrap();
+        let object_id = crate::index_entry::manifest_object_id(&bytes);
+        let staged_key =
+            format!("data/staging/manifests/00000000-0000-0000-0000-000000000001-{object_id}.json");
+        op.write(&staged_key, bytes).await.unwrap();
+        op.write("data/chunks/chunk-staged", b"hello world".to_vec())
+            .await
+            .unwrap();
+
+        let report = find_orphaned_chunks(&op, "data").await.unwrap();
+
+        assert_eq!(report.referenced_chunks, 1);
+        assert_eq!(report.scanned_chunks, 1);
+        assert!(report.orphaned_chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_fails_closed_when_preparing_manifest_is_missing() {
+        let op = memory_op();
+        let entry = RemoteIndexEntry::new("pending-object", 11, 1);
+        let staged_key =
+            "data/staging/manifests/00000000-0000-0000-0000-000000000001-pending-object.json";
+        let pending = crate::index_entry::PendingIndexEntry::from_remote_entry(&entry, staged_key);
+        let preparing = crate::index_entry::VersionedIndexEntry::preparing(None, pending);
+        op.write("data/index/doc.txt", preparing.to_json_bytes().unwrap())
+            .await
+            .unwrap();
+        op.write("data/chunks/victim", b"must survive".to_vec())
+            .await
+            .unwrap();
+
+        let error = find_orphaned_chunks(&op, "data")
+            .await
+            .expect_err("a missing preparing manifest must abort GC classification");
+
+        assert!(
+            format!("{error:#}").contains("reading pending staged manifest"),
+            "{error:#}"
+        );
+        assert!(op.exists("data/chunks/victim").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup_aborts_before_delete_on_malformed_manifest() {
+        let op = memory_op();
+        op.write("data/manifests/malformed", b"{not-json".to_vec())
+            .await
+            .unwrap();
+        op.write("data/chunks/victim", b"must survive".to_vec())
+            .await
+            .unwrap();
+
+        let error = cleanup_orphaned_chunks(&op, "data", Duration::ZERO, SystemTime::now())
+            .await
+            .expect_err("malformed reachable metadata must abort GC");
+
+        assert!(
+            format!("{error:#}").contains("parsing manifest during orphan scan"),
+            "{error:#}"
+        );
+        assert!(
+            op.exists("data/chunks/victim").await.unwrap(),
+            "GC must not delete anything after a malformed manifest"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup_aborts_before_delete_on_wrong_manifest_identity() {
+        let op = memory_op();
+        let manifest = SyncManifest {
+            version: 2,
+            file_hash: "actual-file-hash".into(),
+            file_size: 0,
+            chunks: Vec::new(),
+            vclock: VectorClock::new(),
+            written_by: "neo".into(),
+            written_at: 0,
+            rel_path: Some("doc.txt".into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        op.write(
+            "data/manifests/wrong-object-id",
+            manifest.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+        op.write("data/chunks/victim", b"must survive".to_vec())
+            .await
+            .unwrap();
+
+        let error = cleanup_orphaned_chunks(&op, "data", Duration::ZERO, SystemTime::now())
+            .await
+            .expect_err("misbound reachable metadata must abort GC");
+
+        assert!(
+            format!("{error:#}").contains("manifest object identity mismatch"),
+            "{error:#}"
+        );
+        assert!(
+            op.exists("data/chunks/victim").await.unwrap(),
+            "GC must not delete anything after an identity mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_scan_accepts_bound_symlink_manifests_without_references() {
+        let op = memory_op();
+        let manifest = SymlinkManifest::new(
+            "target.txt",
+            VectorClock::new(),
+            "neo".into(),
+            0,
+            Some("link.txt".into()),
+        );
+        let bytes = manifest.to_bytes().unwrap();
+        let object_id = crate::index_entry::manifest_object_id(&bytes);
+        op.write(&format!("data/manifests/{object_id}"), bytes)
+            .await
+            .unwrap();
+        op.write("data/chunks/orphan", b"unreferenced".to_vec())
+            .await
+            .unwrap();
+
+        let report = find_orphaned_chunks(&op, "data").await.unwrap();
+        assert_eq!(report.referenced_chunks, 0);
+        assert_eq!(report.scanned_chunks, 1);
+        assert_eq!(report.orphaned_chunks, vec!["orphan".to_string()]);
+    }
+
     #[test]
     fn plan_orphaned_chunk_cleanup_respects_grace_period() {
         let now = UNIX_EPOCH + Duration::from_secs(10_000);
@@ -3220,6 +6447,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn zero_grace_cannot_delete_chunk_in_publish_before_stage_window() {
+        let now = UNIX_EPOCH + Duration::from_secs(100_000);
+        let chunk_objects = vec![RemoteChunkObject {
+            object_key: "data/chunks/new-upload".into(),
+            chunk_hash: "new-upload".into(),
+            last_modified: Some(now - Duration::from_secs(1)),
+        }];
+
+        let plan = plan_orphaned_chunk_cleanup(
+            &chunk_objects,
+            &HashSet::new(),
+            indexed_orphan_chunk_grace(Duration::ZERO),
+            now,
+        );
+
+        assert_eq!(
+            indexed_orphan_chunk_grace(Duration::ZERO),
+            MIN_INDEXED_ORPHAN_CHUNK_GRACE
+        );
+        assert!(plan.deletable.is_empty());
+        assert_eq!(plan.skipped_within_grace, vec!["new-upload".to_string()]);
+    }
+
+    #[test]
+    fn legacy_zero_grace_is_honored_without_bypassing_atomic_delete() {
+        let now = UNIX_EPOCH + Duration::from_secs(100_000);
+        let candidate = RemoteChunkObject {
+            object_key: "data/chunks/legacy-orphan".into(),
+            chunk_hash: "legacy-orphan".into(),
+            last_modified: Some(now),
+        };
+
+        let indexed_plan = plan_orphaned_chunk_cleanup(
+            std::slice::from_ref(&candidate),
+            &HashSet::new(),
+            indexed_orphan_chunk_grace(Duration::ZERO),
+            now,
+        );
+        assert!(indexed_plan.deletable.is_empty());
+
+        let legacy_plan = plan_orphaned_chunk_cleanup(
+            std::slice::from_ref(&candidate),
+            &HashSet::new(),
+            Duration::ZERO,
+            now,
+        );
+        assert_eq!(legacy_plan.deletable, vec![candidate]);
+        assert_eq!(
+            atomic_orphan_delete_readiness(Some(now), Some(now), None, false, Duration::ZERO, now,),
+            AtomicOrphanDeleteReadiness::WithoutAtomicDelete,
+            "grace=0 must not authorize an unconditional legacy delete"
+        );
+    }
+
+    #[test]
+    fn refresh_after_scan_restarts_grace_before_atomic_delete() {
+        let now = UNIX_EPOCH + Duration::from_secs(200_000);
+        let scanned_last_modified = now - MIN_INDEXED_ORPHAN_CHUNK_GRACE - Duration::from_secs(1);
+        let candidate = RemoteChunkObject {
+            object_key: "data/chunks/reused".into(),
+            chunk_hash: "reused".into(),
+            last_modified: Some(scanned_last_modified),
+        };
+        let plan = plan_orphaned_chunk_cleanup(
+            std::slice::from_ref(&candidate),
+            &HashSet::new(),
+            MIN_INDEXED_ORPHAN_CHUNK_GRACE,
+            now,
+        );
+        assert_eq!(plan.deletable, vec![candidate]);
+
+        // Model the normal publisher interleaving deterministically: its CAS
+        // refresh lands after the orphan scan but before the destructive stat.
+        let readiness = atomic_orphan_delete_readiness(
+            Some(scanned_last_modified),
+            Some(now - Duration::from_secs(1)),
+            Some("publisher-version"),
+            true,
+            MIN_INDEXED_ORPHAN_CHUNK_GRACE,
+            now,
+        );
+        assert_eq!(readiness, AtomicOrphanDeleteReadiness::WithinGrace);
+    }
+
+    #[test]
+    fn atomic_delete_gate_requires_capability_and_usable_version() {
+        let now = UNIX_EPOCH + Duration::from_secs(200_000);
+        let old = now - MIN_INDEXED_ORPHAN_CHUNK_GRACE - Duration::from_secs(1);
+
+        for (version, capability) in [
+            (Some("version-1"), false),
+            (None, true),
+            (Some(""), true),
+            (Some("null"), true),
+        ] {
+            assert_eq!(
+                atomic_orphan_delete_readiness(
+                    Some(old),
+                    Some(old),
+                    version,
+                    capability,
+                    MIN_INDEXED_ORPHAN_CHUNK_GRACE,
+                    now,
+                ),
+                AtomicOrphanDeleteReadiness::WithoutAtomicDelete
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_delete_gate_pins_the_fresh_object_version() {
+        let now = UNIX_EPOCH + Duration::from_secs(200_000);
+        let old = now - MIN_INDEXED_ORPHAN_CHUNK_GRACE - Duration::from_secs(1);
+
+        assert_eq!(
+            atomic_orphan_delete_readiness(
+                Some(old),
+                Some(old),
+                Some("fresh-version-7"),
+                true,
+                MIN_INDEXED_ORPHAN_CHUNK_GRACE,
+                now,
+            ),
+            AtomicOrphanDeleteReadiness::DeleteVersion("fresh-version-7".into())
+        );
+    }
+
     #[tokio::test]
     async fn cleanup_orphaned_chunks_skips_missing_last_modified() {
         let op = memory_op();
@@ -3259,6 +6614,7 @@ mod tests {
             report.skipped_missing_last_modified,
             vec!["chunk-orphan".to_string()]
         );
+        assert!(report.skipped_without_atomic_delete.is_empty());
         assert!(report.delete_errors.is_empty());
         assert!(op.read("data/chunks/chunk-orphan").await.is_ok());
     }
@@ -3473,6 +6829,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_plan_reports_state_flush_failure_on_both_pull_paths() {
+        for (reason, expected_context) in [
+            (
+                PullReason::NewRemote,
+                "persisting state cache after concurrent pull execution",
+            ),
+            (
+                PullReason::RemoteNewer,
+                "persisting state cache after plan execution",
+            ),
+        ] {
+            let op = memory_op();
+            let dir = tempfile::tempdir().unwrap();
+            let restore_root = dir.path().join("restore");
+            std::fs::create_dir(&restore_root).unwrap();
+            let manifest_hash =
+                upload_blob(&op, dir.path(), "remote-source", b"remote bytes", "doc.txt").await;
+            let state_path = dir.path().join("blocked-state.json");
+            let mut state = StateCache::open(&state_path).unwrap();
+            // Opening a not-yet-created cache succeeds. Replacing its target
+            // with a directory gives both executor branches a deterministic
+            // flush failure after the local pull and in-memory state mutation.
+            std::fs::create_dir(&state_path).unwrap();
+            let plan = plan_of(vec![ReconcileAction::Pull {
+                rel_path: "doc.txt".into(),
+                manifest_hash,
+                size: 12,
+                chunks: 1,
+                reason,
+                expected_kind: RemoteEntryKind::RegularFile,
+                expected_symlink_target: None,
+            }]);
+
+            let error = execute_plan(
+                &plan,
+                &op,
+                &restore_root,
+                "data",
+                &mut state,
+                "honey",
+                None,
+                None,
+            )
+            .await
+            .expect_err("a state flush failure must prevent a converged result");
+
+            assert!(format!("{error:#}").contains(expected_context), "{error:#}");
+            assert_eq!(
+                std::fs::read(restore_root.join("doc.txt")).unwrap(),
+                b"remote bytes",
+                "the mutation happened, so returning success would falsely report durable convergence"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn execute_plan_restores_remote_empty_directories() {
         let op = memory_op();
         let dir = tempfile::tempdir().unwrap();
@@ -3525,6 +6937,127 @@ mod tests {
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert!(restore_root.join("empty").is_dir());
         assert!(restore_root.join("nested/also-empty").is_dir());
+    }
+
+    #[tokio::test]
+    async fn pull_manifest_preflight_aborts_before_earlier_plan_mutation() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path().join("root");
+        std::fs::create_dir(&local_root).unwrap();
+        let keep = local_root.join("keep.txt");
+        std::fs::write(&keep, b"preserve me").unwrap();
+        op.write("data/manifests/corrupt", b"{not-json".to_vec())
+            .await
+            .unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let plan = plan_of(vec![
+            ReconcileAction::DeleteLocal {
+                local_path: keep.clone(),
+                rel_path: "keep.txt".into(),
+            },
+            ReconcileAction::Pull {
+                rel_path: "incoming.txt".into(),
+                manifest_hash: "corrupt".into(),
+                size: 0,
+                chunks: 0,
+                reason: PullReason::NewRemote,
+                expected_kind: RemoteEntryKind::RegularFile,
+                expected_symlink_target: None,
+            },
+        ]);
+
+        execute_plan(
+            &plan,
+            &op,
+            &local_root,
+            "data",
+            &mut state,
+            "neo",
+            None,
+            None,
+        )
+        .await
+        .expect_err("all pull metadata must bind before any action executes");
+
+        assert_eq!(std::fs::read(&keep).unwrap(), b"preserve me");
+        assert!(!local_root.join("incoming.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execution_rejects_symlink_ancestor_without_touching_victim() {
+        use std::os::unix::fs::symlink;
+
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path().join("root");
+        let victim = dir.path().join("victim");
+        std::fs::create_dir(&local_root).unwrap();
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("secret.txt"), b"untouched").unwrap();
+        symlink(&victim, local_root.join("route")).unwrap();
+        let routed = local_root.join("route/secret.txt");
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let plan = plan_of(vec![ReconcileAction::DeleteLocal {
+            local_path: routed,
+            rel_path: "route/secret.txt".into(),
+        }]);
+
+        execute_plan(
+            &plan,
+            &op,
+            &local_root,
+            "data",
+            &mut state,
+            "neo",
+            None,
+            None,
+        )
+        .await
+        .expect_err("a symlink ancestor must fail before unlink");
+
+        assert_eq!(
+            std::fs::read(victim.join("secret.txt")).unwrap(),
+            b"untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fixed_ingress_guard_preserves_tcfs_lock_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path().join("root");
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let lock_path = repo.join(".git/tcfs.lock");
+        std::fs::write(&lock_path, b"foreign lock").unwrap();
+        let inode = std::fs::symlink_metadata(&lock_path).unwrap().ino();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let plan = plan_of(vec![ReconcileAction::DeleteLocal {
+            local_path: lock_path.clone(),
+            rel_path: "repo/.git/tcfs.lock".into(),
+        }]);
+
+        let error = execute_plan(
+            &plan,
+            &op,
+            &local_root,
+            "data",
+            &mut state,
+            "neo",
+            None,
+            None,
+        )
+        .await
+        .expect_err("cooperative lock paths are never serialized plan payloads");
+
+        assert!(format!("{error:#}").contains("config-independent denied path"));
+        assert_eq!(std::fs::symlink_metadata(&lock_path).unwrap().ino(), inode);
+        assert_eq!(std::fs::read(&lock_path).unwrap(), b"foreign lock");
     }
 
     #[cfg(unix)]
@@ -3748,7 +7281,8 @@ mod tests {
             "chunks": [],
             "vclock": {"clocks": {"neo": 1}},
             "written_by": "neo",
-            "written_at": 0
+            "written_at": 0,
+            "rel_path": "same.txt"
         });
         op.write(
             &format!("data/manifests/{hash}"),
@@ -4024,10 +7558,10 @@ mod tests {
         ));
 
         assert!(is_git_object_class_path(
-            "repo/.git/modules/dep/objects/ab/cdef0123456789"
+            "repo/.git/modules/dep/objects/ab/00000000000000000000000000000000000000"
         ));
         assert!(is_git_object_class_path(
-            "repo/.git/modules/dep/objects/pack/pack-abc.pack"
+            "repo/.git/modules/dep/objects/pack/pack-0000000000000000000000000000000000000000.pack"
         ));
 
         // A submodule ref is NOT object-class, and a submodule object is NOT
@@ -4041,7 +7575,9 @@ mod tests {
 
         // Top-level gitdir classification is unchanged.
         assert!(is_git_ref_class_path("repo/.git/refs/heads/main"));
-        assert!(is_git_object_class_path("repo/.git/objects/ab/cdef"));
+        assert!(is_git_object_class_path(
+            "repo/.git/objects/ab/00000000000000000000000000000000000000"
+        ));
         // A submodule working-tree source file is neither class.
         assert!(!is_git_ref_class_path("repo/dep/src/main.rs"));
         assert!(!is_git_object_class_path("repo/dep/src/main.rs"));
@@ -4115,13 +7651,13 @@ mod tests {
         git_safety::local_ref_sha(path, "HEAD").unwrap()
     }
 
-    async fn upload_ref_blob(op: &Operator, root: &Path, sha: &str) -> String {
+    async fn upload_ref_blob(op: &Operator, root: &Path, sha: &str, rel_path: &str) -> String {
         upload_blob(
             op,
             root,
             "remote-ref",
             format!("{sha}\n").as_bytes(),
-            "repo/.git/refs/heads/main",
+            rel_path,
         )
         .await
     }
@@ -4160,6 +7696,199 @@ mod tests {
             .expect("uploaded ref index entry")
             .manifest_hash
             .clone()
+    }
+
+    #[tokio::test]
+    async fn git_decision_reads_bind_manifest_identity_kind_and_path() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let ref_bytes = b"0123456789abcdef0123456789abcdef01234567\n";
+        let manifest_hash = upload_blob(&op, dir.path(), "checked-ref", ref_bytes, rel_path).await;
+
+        assert_eq!(
+            download_bytes_from_manifest(
+                &op,
+                "data",
+                &manifest_hash,
+                ref_bytes.len() as u64,
+                1,
+                rel_path,
+                None,
+            )
+            .await,
+            Some(ref_bytes.to_vec())
+        );
+        let (_, manifest) = read_sync_manifest_for_state(&op, "data", &manifest_hash, rel_path)
+            .await
+            .unwrap();
+        assert_eq!(manifest.rel_path.as_deref(), Some(rel_path));
+        let mut decision_state = StateCache::open(&dir.path().join("decision-state.json")).unwrap();
+        let local_path = dir.path().join(rel_path);
+        assert!(
+            record_guarded_ref_pull_state(
+                &op,
+                "data",
+                &manifest_hash,
+                rel_path,
+                &local_path,
+                b"different ref bytes\n",
+                &mut decision_state,
+                "local",
+            )
+            .await
+            .is_err(),
+            "state must not merge metadata from a manifest that differs from the applied ref bytes"
+        );
+        assert!(decision_state.get(&local_path).is_none());
+
+        let wrong_path = "repo/.git/refs/heads/other";
+        assert!(
+            download_bytes_from_manifest(
+                &op,
+                "data",
+                &manifest_hash,
+                ref_bytes.len() as u64,
+                1,
+                wrong_path,
+                None,
+            )
+            .await
+            .is_none(),
+            "a manifest for another ref path must not influence Git decisions"
+        );
+        assert!(
+            read_sync_manifest_for_state(&op, "data", &manifest_hash, wrong_path)
+                .await
+                .is_err()
+        );
+
+        let manifest_key = format!("data/manifests/{manifest_hash}");
+        let manifest_bytes = op.read(&manifest_key).await.unwrap().to_vec();
+        let forged_object_id = "forged-manifest-object";
+        op.write(
+            &format!("data/manifests/{forged_object_id}"),
+            manifest_bytes,
+        )
+        .await
+        .unwrap();
+        assert!(
+            download_bytes_from_manifest(
+                &op,
+                "data",
+                forged_object_id,
+                ref_bytes.len() as u64,
+                1,
+                rel_path,
+                None,
+            )
+            .await
+            .is_none(),
+            "manifest bytes stored under the wrong object id must fail closed"
+        );
+        assert!(
+            read_sync_manifest_for_state(&op, "data", forged_object_id, rel_path)
+                .await
+                .is_err()
+        );
+
+        let symlink = SymlinkManifest::new(
+            "target",
+            VectorClock::new(),
+            "remote".into(),
+            1,
+            Some(rel_path.into()),
+        );
+        let symlink_bytes = symlink.to_bytes().unwrap();
+        let symlink_object_id = crate::index_entry::manifest_object_id(&symlink_bytes);
+        op.write(
+            &format!("data/manifests/{symlink_object_id}"),
+            symlink_bytes,
+        )
+        .await
+        .unwrap();
+        assert!(
+            download_bytes_from_manifest(&op, "data", &symlink_object_id, 6, 0, rel_path, None,)
+                .await
+                .is_none(),
+            "a symlink manifest must not enter the regular Git ref read lane"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_git_hydration_never_bootstraps_missing_or_incomplete_metadata() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let missing_repo = local_root.join("missing-repo");
+        std::fs::create_dir(&missing_repo).unwrap();
+        let partial_repo = local_root.join("partial-repo");
+        std::fs::create_dir(&partial_repo).unwrap();
+        std::fs::create_dir(partial_repo.join(".git")).unwrap();
+        std::fs::write(partial_repo.join(".git/sentinel"), b"partial").unwrap();
+
+        let missing_rel = "missing-repo/.git/refs/heads/main";
+        let partial_rel = "partial-repo/.git/HEAD";
+        let missing_manifest = upload_blob(
+            &op,
+            local_root,
+            "missing-remote-ref",
+            b"0123456789abcdef0123456789abcdef01234567\n",
+            missing_rel,
+        )
+        .await;
+        let partial_manifest = upload_blob(
+            &op,
+            local_root,
+            "partial-remote-head",
+            b"ref: refs/heads/main\n",
+            partial_rel,
+        )
+        .await;
+        let mut state = StateCache::open(&local_root.join("state/state.json")).unwrap();
+        let plan = plan_of(vec![
+            ReconcileAction::Pull {
+                rel_path: missing_rel.into(),
+                manifest_hash: missing_manifest,
+                size: 41,
+                chunks: 1,
+                reason: PullReason::NewRemote,
+                expected_kind: RemoteEntryKind::RegularFile,
+                expected_symlink_target: None,
+            },
+            ReconcileAction::Pull {
+                rel_path: partial_rel.into(),
+                manifest_hash: partial_manifest,
+                size: 21,
+                chunks: 1,
+                reason: PullReason::NewRemote,
+                expected_kind: RemoteEntryKind::RegularFile,
+                expected_symlink_target: None,
+            },
+        ]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.deferred_git_refs,
+            vec![missing_rel.to_string(), partial_rel.to_string()]
+        );
+        assert!(
+            !missing_repo.join(".git").exists(),
+            "TCFS must not synthesize a repository control directory"
+        );
+        assert_eq!(
+            std::fs::read(partial_repo.join(".git/sentinel")).unwrap(),
+            b"partial"
+        );
+        assert!(
+            !partial_repo.join(".git/HEAD").exists(),
+            "incomplete repository metadata must remain untouched"
+        );
     }
 
     #[test]
@@ -4229,15 +7958,49 @@ mod tests {
         let local_head = commit_file(&repo, "file.txt", "local work", "local");
         assert_ne!(base, local_head);
 
-        let manifest_hash = upload_ref_blob(&op, local_root, &base).await;
+        let rel_path = "repo/.git/refs/heads/main";
+        let manifest_hash = upload_ref_blob(&op, local_root, &base, rel_path).await;
+        let incoming_bytes =
+            download_bytes_from_manifest(&op, "data", &manifest_hash, 41, 1, rel_path, None)
+                .await
+                .expect("bound remote ref fixture must be readable");
+        assert_eq!(
+            git_safety::parse_ref_sha(&incoming_bytes).as_deref(),
+            Some(base.as_str())
+        );
+        assert!(git_dir_ready_for_ref_guard(&repo.join(".git")).unwrap());
+        assert!(git_dir_commit_present(&repo.join(".git"), &base));
+        assert!(!git_dir_is_ancestor(&repo.join(".git"), &local_head, &base));
+        assert!(conflict_git::theirs_ref_name("neo", "refs/heads/main").is_some());
         let state_path = dir.path().join("state/state.json");
         let mut state = crate::state::StateCache::open(&state_path).unwrap();
         let plan = plan_of(vec![ReconcileAction::Pull {
-            rel_path: "repo/.git/refs/heads/main".to_string(),
+            rel_path: rel_path.to_string(),
             manifest_hash,
             size: 41,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
+
+        let acquisition = acquire_git_locks_for_plan(&plan, local_root);
+        assert!(
+            acquisition.invalid_git_repos.is_empty(),
+            "fixture repository must satisfy the guarded topology boundary"
+        );
+        assert!(
+            acquisition.blocked_git_repos.is_empty(),
+            "fixture repository must not carry native/foreign busy markers"
+        );
+        let git_directory = acquisition
+            .git_directories
+            .get(&repo)
+            .expect("fixture repository must have a captured metadata capability");
+        let private_components = git_directory_components(rel_path, false).unwrap();
+        ensure_private_git_directory_chain(git_directory, &private_components)
+            .expect("fixture ref parents must satisfy the private metadata boundary");
+        drop(acquisition);
 
         let result = execute_plan(
             &plan, &op, local_root, "data", &mut state, "neo", None, None,
@@ -4245,7 +8008,13 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.deferred_git_refs.is_empty(), "{result:?}");
+        assert!(
+            result.deferred_git_refs.is_empty(),
+            "{result:?}; main={:?}; parked={:?}; undo_exists={}",
+            git_safety::local_ref_sha(&repo, "refs/heads/main"),
+            git_safety::local_ref_sha(&repo, "refs/tcfs/theirs/neo/heads/main"),
+            state_path.parent().unwrap().join("keep-both-undo").exists()
+        );
         assert_eq!(result.pulled, 1);
         assert_eq!(
             git_safety::local_ref_sha(&repo, "refs/heads/main").as_deref(),
@@ -4285,15 +8054,18 @@ mod tests {
         )
         .unwrap();
 
-        let manifest_hash = upload_ref_blob(&op, local_root, &incoming).await;
+        let rel_path = "repo/.git/modules/dep/refs/heads/main";
+        let manifest_hash = upload_ref_blob(&op, local_root, &incoming, rel_path).await;
         let state_path = dir.path().join("state/state.json");
         let mut state = crate::state::StateCache::open(&state_path).unwrap();
-        let rel_path = "repo/.git/modules/dep/refs/heads/main";
         let plan = plan_of(vec![ReconcileAction::Pull {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: 41,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4322,20 +8094,23 @@ mod tests {
         init_git_repo(&repo);
         let base = commit_file(&repo, "file.txt", "base", "base");
         let current = commit_file(&repo, "file.txt", "tagged work", "tagged");
-        git_safety::run_git(&repo, &["tag", "v1", &current]).unwrap();
+        git_safety::run_git(&repo, &["tag", "--no-sign", "v1", &current]).unwrap();
         git_safety::run_git(&repo, &["checkout", "--quiet", "-b", "incoming", &base]).unwrap();
         let incoming = commit_file(&repo, "file.txt", "incoming work", "incoming");
         git_safety::run_git(&repo, &["checkout", "--quiet", "main"]).unwrap();
 
-        let manifest_hash = upload_ref_blob(&op, local_root, &incoming).await;
+        let rel_path = "repo/.git/refs/tags/v1";
+        let manifest_hash = upload_ref_blob(&op, local_root, &incoming, rel_path).await;
         let state_path = dir.path().join("state/state.json");
         let mut state = crate::state::StateCache::open(&state_path).unwrap();
-        let rel_path = "repo/.git/refs/tags/v1";
         let plan = plan_of(vec![ReconcileAction::Pull {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: 41,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4389,7 +8164,10 @@ mod tests {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: remote_bytes.len() as u64,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4439,7 +8217,10 @@ mod tests {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: remote_bytes.len() as u64,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4468,6 +8249,7 @@ mod tests {
 
         let rel_path = "repo/.git/refs/heads/side";
         let local_path = local_root.join(rel_path);
+        seed_delete_tombstone(&op, "data", rel_path).await;
         let state_path = dir.path().join("state/state.json");
         let mut state = crate::state::StateCache::open(&state_path).unwrap();
         let plan = plan_of(vec![ReconcileAction::DeleteLocal {
@@ -4504,10 +8286,11 @@ mod tests {
         let repo = local_root.join("repo");
         init_git_repo(&repo);
         let tagged = commit_file(&repo, "file.txt", "tagged work", "tagged");
-        git_safety::run_git(&repo, &["tag", "v1", &tagged]).unwrap();
+        git_safety::run_git(&repo, &["tag", "--no-sign", "v1", &tagged]).unwrap();
 
         let rel_path = "repo/.git/refs/tags/v1";
         let local_path = local_root.join(rel_path);
+        seed_delete_tombstone(&op, "data", rel_path).await;
         let state_path = dir.path().join("state/state.json");
         let mut state = crate::state::StateCache::open(&state_path).unwrap();
         let plan = plan_of(vec![ReconcileAction::DeleteLocal {
@@ -4539,6 +8322,7 @@ mod tests {
         let head = commit_file(&repo, "file.txt", "base", "base");
         let rel_path = "repo/.git/packed-refs";
         let local_path = local_root.join(rel_path);
+        seed_delete_tombstone(&op, "data", rel_path).await;
         let packed_bytes =
             format!("# pack-refs with: peeled fully-peeled sorted\n{head} refs/heads/main\n");
         std::fs::write(&local_path, packed_bytes.as_bytes()).unwrap();
@@ -4585,7 +8369,10 @@ mod tests {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: 41,
+            chunks: 1,
             reason: PullReason::NewRemote,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4628,7 +8415,10 @@ mod tests {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: 41,
+            chunks: 1,
             reason: PullReason::NewRemote,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4675,7 +8465,10 @@ mod tests {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: 41,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4720,7 +8513,10 @@ mod tests {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: 41,
+            chunks: 1,
             reason: PullReason::RemoteNewer,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4764,7 +8560,10 @@ mod tests {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: packed_bytes.len() as u64,
+            chunks: 1,
             reason: PullReason::NewRemote,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4805,7 +8604,10 @@ mod tests {
             rel_path: rel_path.to_string(),
             manifest_hash,
             size: packed_bytes.len() as u64,
+            chunks: 1,
             reason: PullReason::NewRemote,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         let result = execute_plan(
@@ -4864,6 +8666,451 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sanitized_git_dir_updates_do_not_run_repository_hooks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        git_safety::run_git(&repo, &["config", "commit.gpgSign", "false"]).unwrap();
+        let head = commit_file(&repo, "file.txt", "base", "base");
+
+        let hooks_dir = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook = hooks_dir.join("reference-transaction");
+        let sentinel = hooks_dir.join("reference-transaction.ran");
+        std::fs::write(&hook, b"#!/bin/sh\nprintf ran > \"${0}.ran\"\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        git_safety::run_git(
+            &repo,
+            &["config", "core.hooksPath", hooks_dir.to_str().unwrap()],
+        )
+        .unwrap();
+
+        // Prove the fixture is armed: an ordinary Git update must run the
+        // configured hook before the resolver-specific assertions below.
+        let control_ref = "refs/heads/hook-control";
+        let control = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["update-ref", control_ref, &head])
+            .output()
+            .unwrap();
+        assert!(
+            control.status.success(),
+            "ordinary git update-ref failed: {}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        assert!(sentinel.exists(), "the hook control did not run");
+        std::fs::remove_file(&sentinel).unwrap();
+
+        git_dir_delete_ref_cas(&repo.join(".git"), control_ref, &head).unwrap();
+        assert!(git_safety::local_ref_sha(&repo, control_ref).is_none());
+        assert!(
+            !sentinel.exists(),
+            "the reference-transaction hook must not run during update-ref -d"
+        );
+
+        let probe_ref = "refs/heads/sanitized-hook-probe";
+        git_dir_update_ref_cas(&repo.join(".git"), probe_ref, &head, None).unwrap();
+        assert_eq!(
+            git_safety::local_ref_sha(&repo, probe_ref).as_deref(),
+            Some(head.as_str())
+        );
+        assert!(
+            !sentinel.exists(),
+            "the reference-transaction hook must not run during update-ref"
+        );
+
+        git_dir_delete_ref_cas(&repo.join(".git"), probe_ref, &head).unwrap();
+        assert!(git_safety::local_ref_sha(&repo, probe_ref).is_none());
+        assert!(
+            !sentinel.exists(),
+            "the reference-transaction hook must not run during update-ref -d"
+        );
+    }
+
+    #[test]
+    fn sanitized_git_dir_helpers_ignore_ambient_routing() {
+        const CHILD_MARKER: &str = "TCFS_TEST_GIT_ROUTING_CHILD";
+        const EXPECTED_GIT_DIR: &str = "TCFS_TEST_EXPECTED_GIT_DIR";
+        const EXPECTED_HEAD: &str = "TCFS_TEST_EXPECTED_HEAD";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let git_dir = PathBuf::from(std::env::var_os(EXPECTED_GIT_DIR).unwrap());
+            let expected_head = std::env::var(EXPECTED_HEAD).unwrap();
+
+            assert_eq!(
+                git_dir_ref_sha(&git_dir, "HEAD").as_deref(),
+                Some(expected_head.as_str())
+            );
+            assert!(git_dir_commit_present(&git_dir, &expected_head));
+            assert!(git_dir_object_present(&git_dir, &expected_head));
+            git_dir_update_ref_cas(
+                &git_dir,
+                "refs/heads/sanitized-routing-probe",
+                &expected_head,
+                None,
+            )
+            .unwrap();
+            return;
+        }
+
+        // Run the actual assertions in a child test process. This lets the
+        // regression supply hostile GIT_* routing without mutating the parent
+        // test process's environment while other tests may be running.
+        let dir = tempfile::tempdir().unwrap();
+        let expected_repo = dir.path().join("expected");
+        init_git_repo(&expected_repo);
+        git_safety::run_git(&expected_repo, &["config", "commit.gpgSign", "false"]).unwrap();
+        let expected_head = commit_file(&expected_repo, "file.txt", "expected", "expected");
+
+        let redirect_repo = dir.path().join("redirect");
+        init_git_repo(&redirect_repo);
+        git_safety::run_git(&redirect_repo, &["config", "commit.gpgSign", "false"]).unwrap();
+        let redirect_head = commit_file(&redirect_repo, "file.txt", "redirect", "redirect");
+        assert_ne!(expected_head, redirect_head);
+
+        let expected_git_dir = std::fs::canonicalize(expected_repo.join(".git")).unwrap();
+        let redirect_git_dir = std::fs::canonicalize(redirect_repo.join(".git")).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "reconcile::tests::sanitized_git_dir_helpers_ignore_ambient_routing",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env(EXPECTED_GIT_DIR, &expected_git_dir)
+            .env(EXPECTED_HEAD, &expected_head)
+            .env("GIT_COMMON_DIR", &redirect_git_dir)
+            .env("GIT_OBJECT_DIRECTORY", redirect_git_dir.join("objects"))
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "routing-isolation child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&expected_repo, "refs/heads/sanitized-routing-probe")
+                .as_deref(),
+            Some(expected_head.as_str())
+        );
+        assert!(
+            git_safety::local_ref_sha(&redirect_repo, "refs/heads/sanitized-routing-probe")
+                .is_none(),
+            "ambient routing must not redirect update-ref into another repository"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn snapshot_regular_tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(
+            root: &Path,
+            directory: &Path,
+            snapshot: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            let mut entries = std::fs::read_dir(directory)
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let path = entry.path();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    visit(root, &path, snapshot);
+                } else if metadata.is_file() {
+                    snapshot.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read(path).unwrap(),
+                    );
+                } else if metadata.file_type().is_symlink() {
+                    snapshot.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read_link(path)
+                            .unwrap()
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    );
+                }
+            }
+        }
+
+        let mut snapshot = std::collections::BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sanitized_git_dir_helpers_reject_commondir_without_touching_victim() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        init_git_repo(&source);
+        let source_head = commit_file(&source, "file.txt", "source", "source");
+
+        let victim = dir.path().join("victim");
+        init_git_repo(&victim);
+        let victim_head = commit_file(&victim, "file.txt", "victim", "victim");
+        assert_ne!(source_head, victim_head);
+
+        let source_git = source.join(".git");
+        std::fs::write(
+            source_git.join("commondir"),
+            format!("{}\n", victim.join(".git").display()),
+        )
+        .unwrap();
+        let victim_before = snapshot_regular_tree(&victim.join(".git"));
+
+        assert!(
+            git_dir_ref_sha(&source_git, "HEAD").is_none(),
+            "redirected reads must fail closed"
+        );
+        assert!(
+            !git_dir_commit_present(&source_git, &victim_head),
+            "redirected object probes must fail closed"
+        );
+        let bundle_error = write_loser_guard_undo_bundle(
+            &source,
+            &source_git,
+            &dir.path().join("state-commondir"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{bundle_error:#}").contains("commondir"),
+            "{bundle_error:#}"
+        );
+        let park_error = git_dir_park_ref_create_only(
+            &source_git,
+            "refs/tcfs/theirs/source/heads/main",
+            &victim_head,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{park_error:#}").contains("commondir"),
+            "{park_error:#}"
+        );
+        let update_error = git_dir_update_ref_cas(
+            &source_git,
+            "refs/heads/commondir-probe",
+            &victim_head,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{update_error:#}").contains("commondir"),
+            "{update_error:#}"
+        );
+        let delete_error =
+            git_dir_delete_ref_cas(&source_git, "refs/heads/main", &victim_head).unwrap_err();
+        assert!(
+            format!("{delete_error:#}").contains("commondir"),
+            "{delete_error:#}"
+        );
+
+        assert_eq!(
+            snapshot_regular_tree(&victim.join(".git")),
+            victim_before,
+            "commondir target bytes must remain untouched"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&victim, "refs/heads/main").as_deref(),
+            Some(victim_head.as_str())
+        );
+        assert!(
+            git_safety::local_ref_sha(&victim, "refs/heads/commondir-probe").is_none(),
+            "commondir target refs must remain untouched"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sanitized_git_dir_helpers_reject_symlink_chain_without_touching_victim() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        init_git_repo(&victim);
+        let victim_head = commit_file(&victim, "file.txt", "victim", "victim");
+        let victim_before = snapshot_regular_tree(&victim.join(".git"));
+
+        let direct = dir.path().join("direct");
+        init_git_repo(&direct);
+        std::fs::rename(direct.join(".git"), direct.join(".git-authorized")).unwrap();
+        symlink(victim.join(".git"), direct.join(".git")).unwrap();
+        let direct_error = git_dir_park_ref_create_only(
+            &direct.join(".git"),
+            "refs/tcfs/theirs/direct/heads/main",
+            &victim_head,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{direct_error:#}").contains("real explicit Git directory component"),
+            "{direct_error:#}"
+        );
+
+        let modules = dir.path().join("modules");
+        init_git_repo(&modules);
+        symlink(victim.join(".git"), modules.join(".git/modules")).unwrap();
+        let module_error = git_dir_update_ref_cas(
+            &modules.join(".git/modules"),
+            "refs/heads/module-symlink-probe",
+            &victim_head,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{module_error:#}").contains("real explicit Git directory component"),
+            "{module_error:#}"
+        );
+
+        let alias_parent = dir.path().join("alias-parent");
+        std::fs::create_dir(&alias_parent).unwrap();
+        symlink(&victim, alias_parent.join("repo-alias")).unwrap();
+        let alias_git = alias_parent.join("repo-alias/.git");
+        let alias_bundle_error = write_loser_guard_undo_bundle(
+            &alias_parent.join("repo-alias"),
+            &alias_git,
+            &dir.path().join("state-alias"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{alias_bundle_error:#}").contains("mutable symlink component"),
+            "{alias_bundle_error:#}"
+        );
+        let alias_park_error = git_dir_park_ref_create_only(
+            &alias_git,
+            "refs/tcfs/theirs/alias/heads/main",
+            &victim_head,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{alias_park_error:#}").contains("mutable symlink component"),
+            "{alias_park_error:#}"
+        );
+
+        let partial_target = dir.path().join("partial-target");
+        std::fs::create_dir(&partial_target).unwrap();
+        let partial = dir.path().join("partial");
+        std::fs::create_dir(&partial).unwrap();
+        symlink(&partial_target, partial.join(".git")).unwrap();
+        assert!(
+            git_dir_ready_for_ref_guard(&partial.join(".git")).is_err(),
+            "an existing invalid gitdir must not be mistaken for missing bootstrap state"
+        );
+
+        let invalid_plan = plan_of(vec![
+            git_push("direct/.git/objects/aa/direct-object"),
+            git_push("modules/.git/modules/refs/heads/module-probe"),
+            git_push("alias-parent/repo-alias/.git/refs/heads/alias-probe"),
+            git_push("partial/.git/objects/aa/partial-object"),
+        ]);
+        let acquisition = acquire_git_locks_for_plan(&invalid_plan, dir.path());
+        for invalid_repo in [
+            &direct,
+            &modules,
+            &alias_parent.join("repo-alias"),
+            &partial,
+        ] {
+            assert!(
+                acquisition.invalid_git_repos.contains(invalid_repo),
+                "invalid repo must be topology-blocked: {}",
+                invalid_repo.display()
+            );
+        }
+        for rel_path in [
+            "direct/.git/objects/aa/direct-object",
+            "modules/.git/modules/refs/heads/module-probe",
+            "alias-parent/repo-alias/.git/refs/heads/alias-probe",
+            "partial/.git/objects/aa/partial-object",
+        ] {
+            assert!(
+                git_invalid_topology_hit(rel_path, dir.path(), &acquisition.invalid_git_repos),
+                "all invalid-topology Git I/O must defer: {rel_path}"
+            );
+        }
+        drop(acquisition);
+
+        assert_eq!(
+            snapshot_regular_tree(&victim.join(".git")),
+            victim_before,
+            "symlink target bytes must remain untouched"
+        );
+        for probe_ref in [
+            "refs/heads/module-symlink-probe",
+            "refs/tcfs/theirs/direct/heads/main",
+            "refs/tcfs/theirs/alias/heads/main",
+        ] {
+            assert!(
+                git_safety::local_ref_sha(&victim, probe_ref).is_none(),
+                "symlink target ref {probe_ref} must not be created"
+            );
+        }
+        assert_eq!(
+            snapshot_regular_tree(&partial_target),
+            std::collections::BTreeMap::new(),
+            "partial symlink target must not receive tcfs.lock or object bootstrap data"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sanitized_git_dir_helpers_reject_nested_refs_and_objects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        init_git_repo(&source);
+        let source_head = commit_file(&source, "file.txt", "source", "source");
+        let victim = dir.path().join("victim");
+        init_git_repo(&victim);
+        commit_file(&victim, "file.txt", "victim", "victim");
+        let victim_before = snapshot_regular_tree(&victim.join(".git"));
+
+        let source_git = source.join(".git");
+        symlink(victim.join(".git/refs"), source_git.join("refs/tcfs")).unwrap();
+        let refs_error = git_dir_park_ref_create_only(
+            &source_git,
+            "refs/tcfs/theirs/source/heads/main",
+            &source_head,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{refs_error:#}").contains("must not contain symlinks"),
+            "{refs_error:#}"
+        );
+        std::fs::remove_file(source_git.join("refs/tcfs")).unwrap();
+
+        std::fs::remove_dir(source_git.join("objects/pack")).unwrap();
+        symlink(victim.join(".git/objects"), source_git.join("objects/pack")).unwrap();
+        let objects_error = sanitized_standalone_git_dir_command(&source_git).unwrap_err();
+        assert!(
+            format!("{objects_error:#}").contains("must not contain symlinks"),
+            "{objects_error:#}"
+        );
+
+        let plan = plan_of(vec![git_push("source/.git/objects/pack/probe")]);
+        let acquisition = acquire_git_locks_for_plan(&plan, dir.path());
+        assert!(acquisition.invalid_git_repos.contains(&source));
+        assert!(git_invalid_topology_hit(
+            "source/.git/objects/pack/probe",
+            dir.path(),
+            &acquisition.invalid_git_repos
+        ));
+        drop(acquisition);
+        assert_eq!(
+            snapshot_regular_tree(&victim.join(".git")),
+            victim_before,
+            "nested Git metadata symlinks must not mutate or export the victim"
+        );
+    }
+
     #[tokio::test]
     async fn git_ref_class_remote_delete_defers() {
         let op = memory_op();
@@ -4904,7 +9151,10 @@ mod tests {
             rel_path: rel.to_string(),
             manifest_hash: "remote-manifest".to_string(),
             size: 41,
+            chunks: 1,
             reason: PullReason::NewRemote,
+            expected_kind: RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }
     }
 
@@ -4917,39 +9167,85 @@ mod tests {
         }
     }
 
-    /// Backdate a lock file's mtime past the staleness threshold, so the ONLY
-    /// variable between the live-owner and dead-owner tests is owner liveness.
-    fn age_lock(lock_path: &Path) {
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        let f = std::fs::File::options()
+    /// Hold the stable lock inode through an independent descriptor, modeling
+    /// another process without relying on diagnostic PID/mtime contents.
+    fn hold_foreign_git_lock(lock_path: &Path) -> std::fs::File {
+        let file = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
             .write(true)
             .open(lock_path)
             .unwrap();
-        f.set_times(std::fs::FileTimes::new().set_modified(old))
-            .unwrap();
+        file.try_lock().unwrap();
+        file
     }
 
-    /// (test a) A FOREIGN live holder of `.git/tcfs.lock` forces this repo's
-    /// ref-class `.git` writes to DEFER, while object-class and normal-file
-    /// writes are unaffected. Fail-before: without the foreign-lock plumbing the
-    /// executor took no note of the held lock and wrote refs anyway.
-    #[test]
-    fn foreign_live_lock_defers_ref_class_writes_only() {
+    #[tokio::test]
+    async fn foreign_and_native_locks_preserve_loose_objects_during_execution() {
+        let op = memory_op();
         let dir = tempfile::tempdir().unwrap();
         let local_root = dir.path();
-        let git_dir = local_root.join("repo/.git");
-        std::fs::create_dir_all(&git_dir).unwrap();
+        let foreign_repo = local_root.join("foreign");
+        let native_repo = local_root.join("native");
+        init_git_repo(&foreign_repo);
+        init_git_repo(&native_repo);
 
-        // Simulate a live FOREIGN holder: lock owned by PID 1 (init/launchd —
-        // always alive, genuinely not this process), backdated past staleness so
-        // youth is not what keeps it held. A live owner is never stolen.
+        let object_tail = "b".repeat(38);
+        let foreign_rel = format!("foreign/.git/objects/aa/{object_tail}");
+        let native_rel = format!("native/.git/objects/aa/{object_tail}");
+        let foreign_object = local_root.join(&foreign_rel);
+        let native_object = local_root.join(&native_rel);
+        std::fs::create_dir_all(foreign_object.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(native_object.parent().unwrap()).unwrap();
+        std::fs::write(&foreign_object, b"foreign object").unwrap();
+        std::fs::write(&native_object, b"native object").unwrap();
+
+        let _foreign_lock = hold_foreign_git_lock(&foreign_repo.join(".git/tcfs.lock"));
+        std::fs::write(native_repo.join(".git/index.lock"), b"native busy").unwrap();
+        let mut state = StateCache::open(&local_root.join("state/state.json")).unwrap();
+        let plan = plan_of(vec![
+            ReconcileAction::DeleteLocal {
+                local_path: foreign_object.clone(),
+                rel_path: foreign_rel.clone(),
+            },
+            ReconcileAction::DeleteLocal {
+                local_path: native_object.clone(),
+                rel_path: native_rel.clone(),
+            },
+        ]);
+
+        let result = execute_plan(
+            &plan, &op, local_root, "data", &mut state, "neo", None, None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deferred_git_refs, vec![foreign_rel, native_rel]);
+        assert_eq!(std::fs::read(foreign_object).unwrap(), b"foreign object");
+        assert_eq!(std::fs::read(native_object).unwrap(), b"native object");
+        assert_eq!(result.deleted_local, 0);
+    }
+
+    /// (test a) A FOREIGN live holder of `.git/tcfs.lock` forces every raw-Git
+    /// action for this repo to DEFER, while normal-file writes are unaffected.
+    /// Fail-before: without the foreign-lock plumbing the executor took no note
+    /// of the held lock and wrote refs anyway.
+    #[test]
+    fn foreign_live_lock_defers_all_git_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let git_dir = repo.join(".git");
+
         let lock_path = git_dir.join("tcfs.lock");
-        std::fs::write(&lock_path, "1 0\n").unwrap();
-        age_lock(&lock_path);
+        let _foreign_lock = hold_foreign_git_lock(&lock_path);
 
         let plan = plan_of(vec![
             git_push("repo/.git/refs/heads/main"), // ref-class → defers
-            git_push("repo/.git/objects/ab/cdef01234567"), // object-class → runs
+            git_push("repo/.git/index"),           // mutable metadata → defers
+            git_push("repo/.git/objects/ab/cdef01234567"), // unverified object → defers
             git_push("repo/notes.txt"),            // normal file → runs
         ]);
 
@@ -4957,7 +9253,7 @@ mod tests {
         let repo_root = local_root.join("repo");
 
         assert!(
-            acq.foreign_locked_repos.contains(&repo_root),
+            acq.blocked_git_repos.contains(&repo_root),
             "a live foreign tcfs.lock holder must mark the repo foreign-locked"
         );
         assert!(
@@ -4969,33 +9265,73 @@ mod tests {
             "the foreign holder's lock must be left in place"
         );
 
-        // Only ref-class paths in the foreign-locked repo defer.
+        // Every .git action in the blocked repo defers.
         assert!(
-            git_ref_foreign_lock_hit(
+            git_mutation_lock_hit(
                 "repo/.git/refs/heads/main",
                 local_root,
-                &acq.foreign_locked_repos
+                &acq.blocked_git_repos
             ),
             "ref-class write must defer under a foreign lock"
         );
         assert!(
-            !git_ref_foreign_lock_hit(
-                "repo/.git/objects/ab/cdef01234567",
-                local_root,
-                &acq.foreign_locked_repos
-            ),
-            "object-class write proceeds (content-addressed, never conflicts)"
+            git_mutation_lock_hit("repo/.git/index", local_root, &acq.blocked_git_repos),
+            "index write must defer under a foreign lock"
         );
         assert!(
-            !git_ref_foreign_lock_hit("repo/notes.txt", local_root, &acq.foreign_locked_repos),
+            git_mutation_lock_hit(
+                "repo/.git/objects/ab/cdef01234567",
+                local_root,
+                &acq.blocked_git_repos
+            ),
+            "unverified object payloads must also defer under a foreign lock"
+        );
+        assert!(
+            !git_mutation_lock_hit("repo/notes.txt", local_root, &acq.blocked_git_repos),
             "normal-file write proceeds"
         );
     }
 
+    #[test]
+    fn native_git_busy_marker_defers_all_git_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let git_dir = repo.join(".git");
+        std::fs::write(git_dir.join("index.lock"), b"busy").unwrap();
+
+        let plan = plan_of(vec![
+            git_push("repo/.git/refs/heads/main"),
+            git_push("repo/.git/index"),
+            git_push("repo/.git/objects/ab/cdef01234567"),
+        ]);
+        let acq = acquire_git_locks_for_plan(&plan, local_root);
+        let repo_root = local_root.join("repo");
+
+        assert!(acq.guards.is_empty());
+        assert!(acq.blocked_git_repos.contains(&repo_root));
+        assert!(git_mutation_lock_hit(
+            "repo/.git/refs/heads/main",
+            local_root,
+            &acq.blocked_git_repos
+        ));
+        assert!(git_mutation_lock_hit(
+            "repo/.git/index",
+            local_root,
+            &acq.blocked_git_repos
+        ));
+        assert!(git_mutation_lock_hit(
+            "repo/.git/objects/ab/cdef01234567",
+            local_root,
+            &acq.blocked_git_repos
+        ));
+    }
+
     /// (test c) The all-NewRemote concurrent pull fast path returns before
-    /// normal execute-plan lock acquisition. It must therefore refuse plans
-    /// containing ref-class `.git` pulls and let the main executor path apply
-    /// the foreign-lock gate.
+    /// normal execute-plan lock/topology acquisition. Every `.git` action,
+    /// including content-addressed objects, must take the main path so an
+    /// invalid repo alias cannot mutate or export an external target.
     #[test]
     fn new_remote_ref_class_pull_disables_pre_lock_fast_path() {
         let normal_plan = plan_of(vec![
@@ -5005,8 +9341,8 @@ mod tests {
             },
         ]);
         assert!(
-            new_remote_pull_fast_path_safe(&normal_plan),
-            "object-class new-remote pulls may still use the concurrent fast path"
+            !new_remote_pull_fast_path_safe(&normal_plan),
+            "object-class Git pulls must also pass topology validation"
         );
 
         let ref_plan = plan_of(vec![git_pull_new_remote("repo/.git/refs/heads/main")]);
@@ -5022,6 +9358,23 @@ mod tests {
             !new_remote_pull_fast_path_safe(&submodule_ref_plan),
             "submodule ref-class pulls must also go through the locked executor path"
         );
+
+        let index_plan = plan_of(vec![git_pull_new_remote("repo/.git/index")]);
+        assert!(
+            !new_remote_pull_fast_path_safe(&index_plan),
+            "mutable non-object Git metadata must go through the locked executor path"
+        );
+
+        let refs_dir_plan = plan_of(vec![
+            git_pull_new_remote("repo/.git/objects/ab/cdef01234567"),
+            ReconcileAction::CreateDirectory {
+                rel_path: "repo/.git/refs/tcfs".to_string(),
+            },
+        ]);
+        assert!(
+            !new_remote_pull_fast_path_safe(&refs_dir_plan),
+            "non-object Git directories must not bypass lock acquisition"
+        );
     }
 
     /// (test d) Ref-class deletes are writes too: a plan containing only a
@@ -5031,12 +9384,12 @@ mod tests {
     fn foreign_lock_acquisition_covers_ref_class_deletes() {
         let dir = tempfile::tempdir().unwrap();
         let local_root = dir.path();
-        let git_dir = local_root.join("repo/.git");
-        std::fs::create_dir_all(&git_dir).unwrap();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let git_dir = repo.join(".git");
 
         let lock_path = git_dir.join("tcfs.lock");
-        std::fs::write(&lock_path, "1 0\n").unwrap();
-        age_lock(&lock_path);
+        let _foreign_lock = hold_foreign_git_lock(&lock_path);
 
         let plan = plan_of(vec![
             ReconcileAction::DeleteLocal {
@@ -5051,61 +9404,54 @@ mod tests {
         let repo_root = local_root.join("repo");
 
         assert!(
-            acq.foreign_locked_repos.contains(&repo_root),
+            acq.blocked_git_repos.contains(&repo_root),
             "delete-only ref-class plans must still mark the repo foreign-locked"
         );
         assert!(
-            git_ref_foreign_lock_hit(
+            git_mutation_lock_hit(
                 "repo/.git/refs/heads/main",
                 local_root,
-                &acq.foreign_locked_repos
+                &acq.blocked_git_repos
             ),
             "local ref delete must defer under a foreign lock"
         );
         assert!(
-            git_ref_foreign_lock_hit(
-                "repo/.git/packed-refs",
-                local_root,
-                &acq.foreign_locked_repos
-            ),
+            git_mutation_lock_hit("repo/.git/packed-refs", local_root, &acq.blocked_git_repos),
             "remote packed-refs delete must defer under a foreign lock"
         );
     }
 
-    /// (test b) A STALE lock (dead owner, aged past the threshold) is stolen on
-    /// acquire and yields a held guard — a leaked lock must NEVER deadlock this
-    /// repo's ref-class writes. Same fixture as (a) but a dead PID.
+    /// (test b) Stale diagnostic contents without a live advisory owner do not
+    /// deadlock this repo's ref-class writes. The persistent inode is reused.
     #[test]
     fn stale_dead_lock_is_stealable_no_deadlock() {
         let dir = tempfile::tempdir().unwrap();
         let local_root = dir.path();
-        let git_dir = local_root.join("repo/.git");
-        std::fs::create_dir_all(&git_dir).unwrap();
+        let repo = local_root.join("repo");
+        init_git_repo(&repo);
+        let git_dir = repo.join(".git");
 
-        // Leaked lock: dead owner PID (far past any real pid space), aged past
-        // the staleness threshold. Must be stolen, not treated as foreign-held.
         let lock_path = git_dir.join("tcfs.lock");
         std::fs::write(&lock_path, "999999999 0\n").unwrap();
-        age_lock(&lock_path);
 
         let plan = plan_of(vec![git_push("repo/.git/refs/heads/main")]);
         let acq = acquire_git_locks_for_plan(&plan, local_root);
         let repo_root = local_root.join("repo");
 
         assert!(
-            !acq.foreign_locked_repos.contains(&repo_root),
-            "a stale dead-owner lock must be stolen, not deferred as foreign-held"
+            !acq.blocked_git_repos.contains(&repo_root),
+            "stale contents without an advisory owner must not be treated as locked"
         );
         assert_eq!(
             acq.guards.len(),
             1,
-            "stealing the stale lock yields exactly one held guard (no deadlock)"
+            "reusing the persistent inode yields exactly one held guard"
         );
         assert!(
-            !git_ref_foreign_lock_hit(
+            !git_mutation_lock_hit(
                 "repo/.git/refs/heads/main",
                 local_root,
-                &acq.foreign_locked_repos
+                &acq.blocked_git_repos
             ),
             "ref-class writes proceed once the stale lock is stolen"
         );
@@ -5115,21 +9461,25 @@ mod tests {
 
     /// Write a v2 manifest with an explicit vclock + file_hash so a classifier
     /// test can pin the remote side's clock exactly, with no push/pull round
-    /// trip. `hash` is the manifest storage key the `RemoteIndexEntry` points at.
+    /// trip. Return an index entry addressed by the serialized manifest's exact
+    /// object identity, including the path binding checked by reconciliation.
     async fn seed_manifest_vclock(
         op: &Operator,
         prefix: &str,
-        hash: &str,
+        rel_path: &str,
         file_hash: &str,
         vclock_json: &str,
         written_by: &str,
-    ) {
+    ) -> RemoteIndexEntry {
         let body = format!(
-            r#"{{"version":2,"file_hash":"{file_hash}","file_size":41,"chunks":[],"vclock":{vclock_json},"written_by":"{written_by}","written_at":0}}"#
+            r#"{{"version":2,"file_hash":"{file_hash}","file_size":41,"chunks":[],"vclock":{vclock_json},"written_by":"{written_by}","written_at":0,"rel_path":"{rel_path}"}}"#
         );
-        op.write(&format!("{prefix}/manifests/{hash}"), body.into_bytes())
+        let body = body.into_bytes();
+        let manifest_hash = crate::index_entry::manifest_object_id(&body);
+        op.write(&format!("{prefix}/manifests/{manifest_hash}"), body)
             .await
             .unwrap();
+        RemoteIndexEntry::new(manifest_hash, 41, 1)
     }
 
     fn tin2584_state(blake3: &str, vclock: VectorClock) -> SyncState {
@@ -5168,16 +9518,15 @@ mod tests {
         let rel = "repo/.git/refs/heads/main";
 
         // Remote head has advanced to {neo:2} with fresh content.
-        seed_manifest_vclock(
+        let remote_entry = seed_manifest_vclock(
             &op,
             prefix,
-            "remotehash",
+            rel,
             "remotecontenthash",
             r#"{"clocks":{"neo":2}}"#,
             "neo",
         )
         .await;
-        let remote_entry = RemoteIndexEntry::new("remotehash", 41, 1);
 
         // Local ref diverged out-of-band; tracked clock is the stale {neo:1}
         // (strictly dominated by {neo:2}) and its blake3 no longer matches.
@@ -5200,7 +9549,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(action, ReconcileAction::Conflict { .. }),
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
             "dominated out-of-band divergence must record a Conflict (not RemoteNewer), got {action:?}"
         );
     }
@@ -5214,16 +9563,15 @@ mod tests {
         let prefix = "data";
         let rel = "repo/.git/refs/tags/v1";
 
-        seed_manifest_vclock(
+        let remote_entry = seed_manifest_vclock(
             &op,
             prefix,
-            "rh",
+            rel,
             "remotecontenthash",
             r#"{"clocks":{"neo":1}}"#,
             "neo",
         )
         .await;
-        let remote_entry = RemoteIndexEntry::new("rh", 41, 1);
 
         let dir = tempfile::TempDir::new().unwrap();
         let local_path = dir.path().join("v1");
@@ -5244,7 +9592,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(action, ReconcileAction::Conflict { .. }),
+            matches!(action, Ok(ReconcileAction::Conflict { .. })),
             "equal-clock divergence must stay Conflict (never promoted to LocalNewer), got {action:?}"
         );
     }
@@ -5258,16 +9606,15 @@ mod tests {
         let prefix = "data";
         let rel = "repo/.git/refs/heads/main";
 
-        seed_manifest_vclock(
+        let remote_entry = seed_manifest_vclock(
             &op,
             prefix,
-            "rh",
+            rel,
             "remotecontenthash",
             r#"{"clocks":{"neo":1}}"#,
             "neo",
         )
         .await;
-        let remote_entry = RemoteIndexEntry::new("rh", 41, 1);
 
         let dir = tempfile::TempDir::new().unwrap();
         let local_path = dir.path().join("main");
@@ -5288,7 +9635,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(action, ReconcileAction::Push { .. }),
+            matches!(action, Ok(ReconcileAction::Push { .. })),
             "a ref whose tracked clock strictly dominates remote must Push, got {action:?}"
         );
     }
@@ -5322,7 +9669,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(action, ReconcileAction::Push { .. }),
+            matches!(action, Ok(ReconcileAction::Push { .. })),
             "a divergent ref with a momentarily-absent remote entry must not be a silent \
              UpToDate no-op, got {action:?}"
         );
@@ -5356,8 +9703,164 @@ mod tests {
         .await;
 
         assert!(
-            matches!(action, ReconcileAction::UpToDate { .. }),
+            matches!(action, Ok(ReconcileAction::UpToDate { .. })),
             "an unchanged ref with a momentarily-absent remote entry must stay UpToDate, got {action:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_exact_index_never_authorizes_local_orphan_delete() {
+        let op = memory_op();
+        let rel_path = "notes/list-lag.txt";
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, b"last-synced").unwrap();
+        let tracked = tin2584_state(
+            &tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap()),
+            tin2584_vclock(&[("neo", 1)]),
+        );
+        let config = ReconcileConfig {
+            delete_local_orphans: true,
+            ..Default::default()
+        };
+
+        let action = classify_path(
+            rel_path,
+            Some(&local_path),
+            None,
+            Some(&tracked),
+            &op,
+            "data",
+            "honey",
+            &config,
+        )
+        .await;
+
+        assert!(
+            matches!(action, Ok(ReconcileAction::UpToDate { .. })),
+            "a physical miss may be LIST lag or lost state, never delete authority: {action:?}"
+        );
+        assert_eq!(std::fs::read(&local_path).unwrap(), b"last-synced");
+    }
+
+    #[tokio::test]
+    async fn v4_tombstone_authorizes_classified_local_delete() {
+        let op = memory_op();
+        let rel_path = "notes/deleted.txt";
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, b"last-synced").unwrap();
+        let tracked = tin2584_state(
+            &tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap()),
+            tin2584_vclock(&[("neo", 1)]),
+        );
+        let config = ReconcileConfig {
+            delete_local_orphans: true,
+            ..Default::default()
+        };
+        seed_delete_tombstone(&op, "data", rel_path).await;
+
+        let action = classify_path(
+            rel_path,
+            Some(&local_path),
+            None,
+            Some(&tracked),
+            &op,
+            "data",
+            "honey",
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(action, ReconcileAction::DeleteLocal { .. }));
+
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        state.set(&local_path, tracked);
+        let result = execute_plan(
+            &plan_of(vec![action]),
+            &op,
+            dir.path(),
+            "data",
+            &mut state,
+            "honey",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deleted_local, 1);
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert!(!local_path.exists());
+        assert!(state.get(&local_path).is_none());
+    }
+
+    #[tokio::test]
+    async fn republished_exact_index_invalidates_stale_local_delete_plan() {
+        let op = memory_op();
+        let rel_path = "notes/republished.txt";
+        let dir = tempfile::TempDir::new().unwrap();
+        let local_path = dir.path().join(rel_path);
+        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        std::fs::write(&local_path, b"last-synced").unwrap();
+        let tracked = tin2584_state(
+            &tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_file(&local_path).unwrap()),
+            tin2584_vclock(&[("neo", 1)]),
+        );
+        let config = ReconcileConfig {
+            delete_local_orphans: true,
+            ..Default::default()
+        };
+        seed_delete_tombstone(&op, "data", rel_path).await;
+
+        let action = classify_path(
+            rel_path,
+            Some(&local_path),
+            None,
+            Some(&tracked),
+            &op,
+            "data",
+            "honey",
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(action, ReconcileAction::DeleteLocal { .. }));
+
+        op.write(
+            &format!("data/index/{rel_path}"),
+            RemoteIndexEntry::new("republished-manifest", 11, 1).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        state.set(&local_path, tracked.clone());
+
+        let result = execute_plan(
+            &plan_of(vec![action]),
+            &op,
+            dir.path(),
+            "data",
+            &mut state,
+            "honey",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deleted_local, 0);
+        assert_eq!(std::fs::read(&local_path).unwrap(), b"last-synced");
+        let preserved = state.get(&local_path).expect("tracked state is preserved");
+        assert_eq!(preserved.blake3, tracked.blake3);
+        assert_eq!(preserved.vclock, tracked.vclock);
+        assert!(
+            result.errors.iter().any(|(path, error)| {
+                path == rel_path && error.contains("remote delete authority unavailable")
+            }),
+            "stale-plan rejection must be observable: {result:?}"
         );
     }
 

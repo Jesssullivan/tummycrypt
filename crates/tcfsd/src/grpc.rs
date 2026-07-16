@@ -24,60 +24,104 @@ use tcfs_core::proto::{
 };
 use tcfs_sync::state::StateCacheBackend;
 
-fn path_resolves_to_git_internal(path: &Path) -> bool {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        if tcfs_sync::git_safety::repo_root_for_git_path(
-            Path::new(""),
-            &canonical.to_string_lossy(),
-        )
-        .is_some()
-        {
-            return true;
-        }
-    }
+const FILE_PROVIDER_VERSION_MISMATCH_PREFIX: &str = "file-provider version mismatch:";
+const EXACT_PULL_CHUNK_SIZE: usize = 1024 * 1024;
 
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    let Ok(parent) = std::fs::canonicalize(parent) else {
-        return false;
-    };
-    let resolved = match path.file_name() {
-        Some(name) => parent.join(name),
-        None => parent,
-    };
-    tcfs_sync::git_safety::repo_root_for_git_path(Path::new(""), &resolved.to_string_lossy())
-        .is_some()
+fn file_provider_version_mismatch_status(requested: &str, current: &str) -> tonic::Status {
+    tonic::Status::failed_precondition(format!(
+        "{FILE_PROVIDER_VERSION_MISMATCH_PREFIX} requested {requested}, current {current}"
+    ))
 }
 
-fn resolve_conflict_git_fence_error(
-    path: &Path,
-    resolution: &str,
-    state_entry: Option<&tcfs_sync::state::SyncState>,
-) -> Option<String> {
-    if resolution == "defer" {
-        return None;
+async fn authoritative_watch_event(
+    operator: &opendal::Operator,
+    storage_prefix: &str,
+    rel_path: &str,
+    requested_event_type: &str,
+    timestamp: i64,
+    device_id: String,
+) -> std::result::Result<WatchEvent, tonic::Status> {
+    use tcfs_sync::index_entry::ExactIndexPathState;
+
+    tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+        .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
+    let filename = Path::new(rel_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let state =
+        tcfs_sync::index_entry::read_exact_index_path_state(operator, storage_prefix, rel_path)
+            .await
+            .map_err(|error| {
+                tonic::Status::internal(format!(
+                    "read authoritative Watch index state for {rel_path}: {error:#}"
+                ))
+            })?;
+
+    match state {
+        ExactIndexPathState::Deleted => Ok(WatchEvent {
+            path: rel_path.to_string(),
+            event_type: "deleted".into(),
+            timestamp,
+            filename,
+            device_id,
+            ..Default::default()
+        }),
+        ExactIndexPathState::Missing => Err(tonic::Status::failed_precondition(format!(
+            "Watch authority is missing (not tombstoned) for {rel_path}; full refresh required"
+        ))),
+        ExactIndexPathState::Live => {
+            let snapshot = tcfs_sync::engine::resolve_exact_indexed_manifest_snapshot(
+                operator,
+                rel_path,
+                storage_prefix,
+            )
+            .await
+            .map_err(|error| {
+                tonic::Status::internal(format!(
+                    "resolve authoritative Watch manifest for {rel_path}: {error:#}"
+                ))
+            })?
+            .ok_or_else(|| {
+                tonic::Status::aborted(format!(
+                    "Watch authority changed while resolving live path {rel_path}; full refresh required"
+                ))
+            })?;
+            let event_type = match requested_event_type {
+                "created" => "created",
+                "renamed" => "renamed",
+                _ => "modified",
+            };
+            Ok(WatchEvent {
+                path: rel_path.to_string(),
+                event_type: event_type.into(),
+                timestamp,
+                filename,
+                size: snapshot.size(),
+                blake3: snapshot.content_hash().to_string(),
+                is_directory: false,
+                device_id,
+                version_token: snapshot.manifest_object_id().to_string(),
+            })
+        }
     }
+}
 
-    let raw_path = path.to_string_lossy();
-    let is_git_internal = tcfs_sync::git_safety::repo_root_for_git_path(Path::new(""), &raw_path)
-        .is_some()
-        || path_resolves_to_git_internal(path)
-        || state_entry
-            .and_then(|entry| entry.conflict.as_ref())
-            .is_some_and(|conflict| {
-                tcfs_sync::git_safety::repo_root_for_git_path(Path::new(""), &conflict.rel_path)
-                    .is_some()
-            });
-
-    is_git_internal.then(|| {
-        format!(
-            "'{}' is a git-internal path; per-file resolution ({resolution}) would corrupt the \
-             repository object store. Resolve the whole repo group instead \
-             (`tcfs resolve <repo> --strategy keep-both --execute`). Inspect with `tcfs conflicts`.",
-            path.display()
-        )
-    })
+fn legacy_push_rejection_reason(
+    skipped: bool,
+    outcome: Option<&tcfs_sync::conflict::SyncOutcome>,
+) -> Option<String> {
+    match outcome {
+        Some(tcfs_sync::conflict::SyncOutcome::RemoteNewer) => {
+            Some("push rejected: the remote version is newer".into())
+        }
+        Some(tcfs_sync::conflict::SyncOutcome::Conflict(info)) => Some(format!(
+            "push rejected: concurrent update conflict between {} and {}",
+            info.local_device, info.remote_device
+        )),
+        _ if skipped => Some("push rejected: sync engine skipped publication".into()),
+        _ => None,
+    }
 }
 
 fn repo_keep_both_mode(resolution: &str) -> Option<tcfs_sync::conflict_git::GitKeepBothMode> {
@@ -198,6 +242,34 @@ fn canonicalize_with_missing_tail(path: &Path) -> std::result::Result<PathBuf, S
         return Err(format!("expected an absolute path, got {}", path.display()));
     }
 
+    // `canonicalize()` reports a dangling symlink as NotFound. Do not then
+    // treat that symlink name as an ordinary missing tail: a later target could
+    // redirect the mutation outside the authorized root.
+    let mut probe = PathBuf::new();
+    for component in path.components() {
+        probe.push(component.as_os_str());
+        match std::fs::symlink_metadata(&probe) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::canonicalize(&probe).map_err(|error| {
+                    format!(
+                        "refusing unresolved symlink component {} in {}: {error}",
+                        probe.display(),
+                        path.display()
+                    )
+                })?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "inspecting path component {} for {}: {error}",
+                    probe.display(),
+                    path.display()
+                ));
+            }
+        }
+    }
+
     let components = path.components().collect::<Vec<_>>();
     for split in (1..=components.len()).rev() {
         let mut prefix = PathBuf::new();
@@ -228,38 +300,156 @@ fn canonicalize_with_missing_tail(path: &Path) -> std::result::Result<PathBuf, S
     ))
 }
 
-fn registered_root_containing_rootless_path(
-    config: &TcfsConfig,
-    path: &Path,
-) -> std::result::Result<Option<String>, String> {
+fn rootless_path_may_belong_to_registered_root(config: &TcfsConfig, path: &Path) -> bool {
     if config.sync.roots.is_empty() {
-        return Ok(None);
+        return false;
     }
     if !path.is_absolute() {
+        return true;
+    }
+
+    let Ok(request_lexical) = lexically_normalize_absolute(path) else {
+        return true;
+    };
+    let Ok(request_resolved) = canonicalize_with_missing_tail(path) else {
+        return true;
+    };
+    for root in config.sync.roots.values() {
+        let root_path = tcfs_core::config::expand_tilde(&root.local_root);
+        let Ok(root_lexical) = lexically_normalize_absolute(&root_path) else {
+            return true;
+        };
+        if request_lexical == root_lexical || request_lexical.starts_with(&root_lexical) {
+            return true;
+        }
+
+        let Ok(root_resolved) = canonicalize_with_missing_tail(&root_path) else {
+            return true;
+        };
+        if request_resolved == root_resolved || request_resolved.starts_with(&root_resolved) {
+            return true;
+        }
+    }
+    false
+}
+
+fn rootless_path_is_within_primary_sync_root(config: &TcfsConfig, path: &Path) -> bool {
+    let Some(root) = config.sync.sync_root.as_deref() else {
+        return false;
+    };
+    let root = tcfs_core::config::expand_tilde(root);
+    if !path.is_absolute() || !root.is_absolute() {
+        return false;
+    }
+    let (Ok(path_lexical), Ok(root_lexical)) = (
+        lexically_normalize_absolute(path),
+        lexically_normalize_absolute(&root),
+    ) else {
+        return false;
+    };
+    if path_lexical != root_lexical && !path_lexical.starts_with(&root_lexical) {
+        return false;
+    }
+    let (Ok(path_resolved), Ok(root_resolved)) = (
+        canonicalize_with_missing_tail(path),
+        canonicalize_with_missing_tail(&root),
+    ) else {
+        return false;
+    };
+    path_resolved == root_resolved || path_resolved.starts_with(root_resolved)
+}
+
+/// Bind a local mutation target to the daemon's configured primary root and
+/// return its canonical slash-separated remote-index path. This resolves every
+/// existing symlink component before deriving the relative path, so a stub
+/// cannot use a lexical in-root name to select or mutate an out-of-root file.
+fn primary_sync_root_target(
+    config: &TcfsConfig,
+    target: &Path,
+    operation: &str,
+) -> std::result::Result<(PathBuf, String), String> {
+    let configured_root = config
+        .sync
+        .sync_root
+        .as_deref()
+        .ok_or_else(|| format!("{operation} requires a configured sync.sync_root"))?;
+    let configured_root = tcfs_core::config::expand_tilde(configured_root);
+    if !configured_root.is_absolute() {
         return Err(format!(
-            "rootless conflict resolution uses an ambiguous relative path while registered roots are enrolled: {}; use an absolute primary-root path or `tcfs resolve <repo> --root <id>`",
-            path.display()
+            "configured sync.sync_root must be absolute: {}",
+            configured_root.display()
+        ));
+    }
+    if !target.is_absolute() {
+        return Err(format!(
+            "{operation} target must be absolute: {}",
+            target.display()
         ));
     }
 
-    let request_lexical = lexically_normalize_absolute(path)?;
-    let request_resolved = canonicalize_with_missing_tail(path)?;
-    for (root_id, root) in &config.sync.roots {
-        let root_path = tcfs_core::config::expand_tilde(&root.local_root);
-        let root_lexical = lexically_normalize_absolute(&root_path)
-            .map_err(|error| format!("invalid registered root '{root_id}' local_root: {error}"))?;
-        if request_lexical == root_lexical || request_lexical.starts_with(&root_lexical) {
-            return Ok(Some(root_id.clone()));
-        }
-
-        let root_resolved = canonicalize_with_missing_tail(&root_path).map_err(|error| {
-            format!("resolving registered root '{root_id}' local_root: {error}")
-        })?;
-        if request_resolved == root_resolved || request_resolved.starts_with(&root_resolved) {
-            return Ok(Some(root_id.clone()));
-        }
+    let canonical_root = std::fs::canonicalize(&configured_root).map_err(|error| {
+        format!(
+            "canonicalizing configured sync.sync_root {}: {error}",
+            configured_root.display()
+        )
+    })?;
+    if !canonical_root.is_dir() {
+        return Err(format!(
+            "configured sync.sync_root is not a directory: {}",
+            canonical_root.display()
+        ));
     }
-    Ok(None)
+    let canonical_target = canonicalize_with_missing_tail(target)?;
+    if canonical_target == canonical_root || !canonical_target.starts_with(&canonical_root) {
+        return Err(format!(
+            "{operation} target is outside configured sync.sync_root: {}",
+            target.display()
+        ));
+    }
+
+    let relative = canonical_target
+        .strip_prefix(&canonical_root)
+        .map_err(|_| format!("{operation} target lost configured root prefix"))?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(format!(
+                "{operation} target has a non-canonical relative component: {}",
+                target.display()
+            ));
+        };
+        components.push(
+            component
+                .to_str()
+                .ok_or_else(|| format!("{operation} target is not valid UTF-8"))?,
+        );
+    }
+    let rel_path = components.join("/");
+    tcfs_sync::index_entry::validate_canonical_rel_path(&rel_path)
+        .map_err(|error| format!("invalid {operation} relative path: {error}"))?;
+
+    Ok((canonical_target, rel_path))
+}
+
+fn validate_fixed_ingress_path(path: &Path, description: &str) -> std::result::Result<(), String> {
+    let fixed = tcfs_sync::blacklist::Blacklist::default();
+    if let Some(reason) = fixed.check_fixed_ingress_path_components(path) {
+        return Err(format!(
+            "{description} {} is blocked by the fixed security deny-set: {reason}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pull_destination(
+    config: &TcfsConfig,
+    destination: &Path,
+    logical_path: &str,
+) -> std::result::Result<(), String> {
+    validate_fixed_ingress_path(Path::new(logical_path), "pull logical path")?;
+    validate_fixed_ingress_path(destination, "pull destination")?;
+    tcfs_core::config::validate_sync_selection_excludes_master_key(config, destination)
 }
 
 fn remote_prefixes_overlap(left: &str, right: &str) -> bool {
@@ -362,9 +552,15 @@ fn validate_registered_root_definition(
     Ok((local_root, state_path))
 }
 
-/// Startup-time validation for every configured mapping. Runtime selection
-/// repeats this and adds symlink-aware canonicalization/existence checks.
+/// Startup-time validation for every configured mapping and the master-key
+/// isolation boundary. Runtime root selection repeats the mapping checks and
+/// adds stricter ownership/existence validation.
 pub(crate) fn validate_registered_roots_config(config: &TcfsConfig) -> anyhow::Result<()> {
+    if let Some(master_key_path) = config.crypto.master_key_file.as_deref() {
+        tcfs_core::config::validate_master_key_outside_sync_roots(config, master_key_path)
+            .map_err(anyhow::Error::msg)?;
+    }
+
     if config.sync.roots.is_empty() {
         return Ok(());
     }
@@ -597,6 +793,11 @@ fn canonical_registered_root(
     root: &RegisteredRootConfig,
 ) -> std::result::Result<RegisteredRootRoute, String> {
     let (local_root, state_path) = validate_registered_root_definition(config, root_id, root)?;
+    tcfs_sync::conflict_git::validate_trusted_configured_path(&local_root).map_err(|error| {
+        format!(
+            "registered root '{root_id}' configured local_root has an untrusted original path chain: {error:#}"
+        )
+    })?;
     let local_root = std::fs::canonicalize(&local_root).map_err(|error| {
         format!(
             "registered root '{root_id}' local_root {} is unavailable: {error}",
@@ -609,6 +810,37 @@ fn canonical_registered_root(
             local_root.display()
         ));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let local_metadata = std::fs::symlink_metadata(&local_root).map_err(|error| {
+            format!(
+                "reading registered root '{root_id}' local_root metadata {}: {error}",
+                local_root.display()
+            )
+        })?;
+        // SAFETY: `geteuid` has no preconditions and only reads process identity.
+        let effective_uid = unsafe { libc::geteuid() };
+        if local_metadata.uid() != effective_uid {
+            return Err(format!(
+                "registered root '{root_id}' local_root must be owned by tcfsd effective uid {effective_uid}, got uid {}: {}",
+                local_metadata.uid(),
+                local_root.display(),
+            ));
+        }
+        if local_metadata.mode() & 0o022 != 0 {
+            return Err(format!(
+                "registered root '{root_id}' local_root must not be group/world writable: {}",
+                local_root.display()
+            ));
+        }
+    }
+    tcfs_sync::path_acl::reject_write_grant_acl(&local_root).map_err(|error| {
+        format!("registered root '{root_id}' local_root has an untrusted extended ACL: {error:#}")
+    })?;
+    tcfs_sync::conflict_git::validate_trusted_ancestor_chain(&local_root).map_err(|error| {
+        format!("registered root '{root_id}' local_root has an untrusted ancestor chain: {error:#}")
+    })?;
     validate_canonical_local_root_isolation(config, root_id, &local_root)?;
 
     let metadata = std::fs::symlink_metadata(&state_path).map_err(|error| {
@@ -623,6 +855,9 @@ fn canonical_registered_root(
             state_path.display()
         ));
     }
+    tcfs_sync::path_acl::reject_write_grant_acl(&state_path).map_err(|error| {
+        format!("registered root '{root_id}' state cache has an untrusted extended ACL: {error:#}")
+    })?;
 
     #[cfg(unix)]
     {
@@ -637,12 +872,24 @@ fn canonical_registered_root(
     }
 
     let state_dir = registered_root_state_dir(config)?;
+    tcfs_sync::conflict_git::validate_trusted_configured_path(&state_dir).map_err(|error| {
+        format!(
+            "registered root '{root_id}' configured state directory has an untrusted original path chain: {error:#}"
+        )
+    })?;
     let canonical_state_dir = std::fs::canonicalize(&state_dir).map_err(|error| {
         format!(
             "registered-root state directory {} is unavailable: {error}",
             state_dir.display()
         )
     })?;
+    tcfs_sync::conflict_git::validate_trusted_ancestor_chain(&canonical_state_dir).map_err(
+        |error| {
+            format!(
+                "registered root '{root_id}' state directory has an untrusted ancestor chain: {error:#}"
+            )
+        },
+    )?;
     validate_canonical_state_dir_isolation(config, &canonical_state_dir)?;
     #[cfg(unix)]
     {
@@ -653,10 +900,14 @@ fn canonical_registered_root(
                 canonical_state_dir.display()
             )
         })?;
-        if metadata.uid() != directory_metadata.uid() {
+        // SAFETY: `geteuid` has no preconditions and only reads process identity.
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid || directory_metadata.uid() != effective_uid {
             return Err(format!(
-                "registered root '{root_id}' state cache owner does not match its trusted directory owner: {}",
-                state_path.display()
+                "registered root '{root_id}' state directory and cache must be owned by tcfsd effective uid {effective_uid} (directory uid {}, cache uid {}): {}",
+                directory_metadata.uid(),
+                metadata.uid(),
+                state_path.display(),
             ));
         }
         if directory_metadata.permissions().mode() & 0o022 != 0 {
@@ -666,6 +917,11 @@ fn canonical_registered_root(
             ));
         }
     }
+    tcfs_sync::path_acl::reject_write_grant_acl(&canonical_state_dir).map_err(|error| {
+        format!(
+            "registered root '{root_id}' state directory has an untrusted extended ACL: {error:#}"
+        )
+    })?;
     let state_path = std::fs::canonicalize(&state_path).map_err(|error| {
         format!("canonicalizing registered root '{root_id}' state cache: {error}")
     })?;
@@ -705,11 +961,48 @@ fn object_key_is_within_prefix(key: &str, prefix: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
+fn primary_conflict_entry_matches_prefix(
+    entry: &tcfs_sync::state::SyncState,
+    prefix: &str,
+) -> bool {
+    if entry.status != tcfs_sync::state::FileSyncStatus::Conflict
+        || !object_key_is_within_prefix(&entry.remote_path, prefix)
+    {
+        return false;
+    }
+    let Some(conflict) = entry.conflict.as_ref() else {
+        return false;
+    };
+    let rel_path = Path::new(&conflict.rel_path);
+    if conflict.rel_path.is_empty()
+        || conflict.rel_path.contains('\\')
+        || rel_path.is_absolute()
+        || has_parent_component(rel_path)
+    {
+        return false;
+    }
+    conflict
+        .remote_manifest_key
+        .as_deref()
+        .is_none_or(|key| object_key_is_within_prefix(key, prefix))
+}
+
 fn check_registered_prefix_permission(
     session: &tcfs_auth::Session,
     prefix: &str,
 ) -> std::result::Result<(), tonic::Status> {
-    let allowed = session.permissions.allowed_prefixes.is_empty()
+    if registered_prefix_allowed(session, prefix) {
+        Ok(())
+    } else {
+        Err(tonic::Status::permission_denied(format!(
+            "device {} is not authorized for the requested storage scope",
+            session.device_id
+        )))
+    }
+}
+
+fn registered_prefix_allowed(session: &tcfs_auth::Session, prefix: &str) -> bool {
+    session.permissions.allowed_prefixes.is_empty()
         || session.permissions.allowed_prefixes.iter().any(|allowed| {
             let allowed = allowed.trim_matches('/');
             !allowed.is_empty()
@@ -717,15 +1010,7 @@ fn check_registered_prefix_permission(
                     || prefix
                         .strip_prefix(allowed)
                         .is_some_and(|suffix| suffix.starts_with('/')))
-        });
-    if allowed {
-        Ok(())
-    } else {
-        Err(tonic::Status::permission_denied(format!(
-            "device {} is not authorized for prefix '{prefix}'",
-            session.device_id
-        )))
-    }
+        })
 }
 
 fn validate_conflict_cache_route(
@@ -984,6 +1269,7 @@ pub struct TcfsDaemonImpl {
     vfs_tx: tokio::sync::watch::Sender<Option<std::sync::Arc<tcfs_vfs::TcfsVfs>>>,
     // Auth infrastructure
     session_store: tcfs_auth::SessionStore,
+    device_authorizations: tcfs_auth::DeviceAuthorizationStore,
     invite_redemptions: tcfs_auth::InviteRedemptionStore,
     totp_provider: Arc<tcfs_auth::totp::TotpProvider>,
     webauthn_provider: Arc<tcfs_auth::webauthn::WebAuthnProvider>,
@@ -1015,6 +1301,22 @@ fn sanitize_rel_path(path: &str) -> std::result::Result<String, String> {
     Ok(path.to_string())
 }
 
+fn normalize_existing_path_ancestor(path: &Path) -> std::path::PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    for ancestor in path.ancestors().skip(1) {
+        let Ok(canonical_ancestor) = std::fs::canonicalize(ancestor) else {
+            continue;
+        };
+        let Ok(missing_suffix) = path.strip_prefix(ancestor) else {
+            continue;
+        };
+        return canonical_ancestor.join(missing_suffix);
+    }
+    path.to_path_buf()
+}
+
 fn logical_rel_path_from_state_key(
     key: &str,
     state: &tcfs_sync::state::SyncState,
@@ -1022,15 +1324,17 @@ fn logical_rel_path_from_state_key(
     storage_prefix: &str,
 ) -> Option<String> {
     if let Some(root) = sync_root {
-        let root = root.to_string_lossy();
-        let root = root.trim_end_matches('/');
-        if !root.is_empty() {
-            let root_prefix = format!("{root}/");
-            if let Some(rel) = key.strip_prefix(&root_prefix) {
-                let rel = rel.trim_start_matches('/');
-                if !rel.is_empty() {
-                    return Some(rel.to_string());
-                }
+        // StateCache keys canonicalize the parent while preserving the final
+        // component. Apply the same identity rule to the configured root so
+        // macOS aliases such as /var and /private/var cannot orphan otherwise
+        // exact manifest-bound metadata.
+        let normalized_root = normalize_existing_path_ancestor(root);
+        let normalized_key = normalize_existing_path_ancestor(Path::new(key));
+        if let Ok(rel) = normalized_key.strip_prefix(&normalized_root) {
+            let rel = rel.to_string_lossy();
+            let rel = rel.trim_start_matches('/');
+            if !rel.is_empty() {
+                return Some(rel.to_string());
             }
         }
     }
@@ -1042,6 +1346,38 @@ fn logical_rel_path_from_state_key(
         .map(|rel| rel.trim_start_matches('/'))
         .filter(|rel| !rel.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn list_files_remainder<'a>(rel_path: &'a str, requested_prefix: &str) -> Option<&'a str> {
+    if requested_prefix.is_empty() {
+        return Some(rel_path);
+    }
+    rel_path
+        .strip_prefix(requested_prefix)
+        .and_then(|remainder| remainder.strip_prefix('/'))
+        .filter(|remainder| !remainder.is_empty())
+}
+
+fn hydration_state_name(status: tcfs_sync::state::FileSyncStatus) -> &'static str {
+    match status {
+        tcfs_sync::state::FileSyncStatus::NotSynced => "not_synced",
+        tcfs_sync::state::FileSyncStatus::Synced => "synced",
+        tcfs_sync::state::FileSyncStatus::Active => "active",
+        tcfs_sync::state::FileSyncStatus::Locked => "locked",
+        tcfs_sync::state::FileSyncStatus::Conflict => "conflict",
+    }
+}
+
+fn cached_state_matches_remote_manifest(
+    state: &tcfs_sync::state::SyncState,
+    manifest_key: &str,
+) -> bool {
+    state.remote_path == manifest_key
+        || state
+            .conflict
+            .as_ref()
+            .and_then(|conflict| conflict.remote_manifest_key.as_deref())
+            == Some(manifest_key)
 }
 
 fn logical_rel_path_from_fs_path(path: &Path, sync_root: Option<&Path>) -> String {
@@ -1138,6 +1474,7 @@ impl TcfsDaemonImpl {
             vfs_handle: vfs_rx,
             vfs_tx,
             session_store: tcfs_auth::SessionStore::new(),
+            device_authorizations: tcfs_auth::DeviceAuthorizationStore::new(),
             invite_redemptions: tcfs_auth::InviteRedemptionStore::new(),
             totp_provider,
             webauthn_provider,
@@ -1157,6 +1494,37 @@ impl TcfsDaemonImpl {
         };
         canonical_registered_root(&self.config, root_id, root)
             .map_err(tonic::Status::failed_precondition)
+    }
+
+    /// Registered roots are an authority boundary and must never inherit the
+    /// daemon's development-only synthetic admin session.
+    fn require_registered_root_auth_posture(&self) -> Result<(), tonic::Status> {
+        if self.config.auth.require_session {
+            Ok(())
+        } else {
+            Err(tonic::Status::failed_precondition(
+                "registered-root operations require auth.require_session = true",
+            ))
+        }
+    }
+
+    /// Resolve a registered root only after its configured prefix is known to
+    /// be in the caller's scope. Unknown and unauthorized IDs deliberately
+    /// share one response so the registry cannot be enumerated.
+    fn authorized_registered_root(
+        &self,
+        session: &tcfs_auth::Session,
+        root_id: &str,
+    ) -> std::result::Result<RegisteredRootRoute, tonic::Status> {
+        validate_root_id(root_id).map_err(tonic::Status::invalid_argument)?;
+        let not_found = || tonic::Status::not_found("registered root was not found");
+        let Some(root) = self.config.sync.roots.get(root_id) else {
+            return Err(not_found());
+        };
+        if !registered_prefix_allowed(session, &root.remote_prefix) {
+            return Err(not_found());
+        }
+        self.registered_root(root_id)
     }
 
     async fn resolve_registered_git_keep_both_repo(
@@ -1186,6 +1554,9 @@ impl TcfsDaemonImpl {
                 route.local_root.display()
             )));
         }
+
+        let repo_anchor = tcfs_sync::conflict_git::GitRepoAnchor::capture(&route.local_root)
+            .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
 
         // A direct gRPC client must not bypass the CLI's `.git` directory
         // check and send the resolver into shared worktree metadata.
@@ -1224,6 +1595,7 @@ impl TcfsDaemonImpl {
             &op,
             &mut state,
             &route.local_root,
+            Some(&repo_anchor),
             &route.remote_prefix,
             &self.device_id,
             &undo_state_dir,
@@ -1280,6 +1652,11 @@ impl TcfsDaemonImpl {
         path: &Path,
         mode: tcfs_sync::conflict_git::GitKeepBothMode,
     ) -> Result<tonic::Response<ResolveConflictResponse>, tonic::Status> {
+        // The compatibility RPC remains available for proven primary-cache
+        // conflicts, but it must bind the authorized path before any await.
+        // Registered roots are fenced out by the caller and use their own RPC.
+        let repo_anchor = tcfs_sync::conflict_git::GitRepoAnchor::capture(path)
+            .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
         let op = {
             let op_guard = self.operator.lock().await;
             op_guard
@@ -1305,6 +1682,7 @@ impl TcfsDaemonImpl {
                 &op,
                 &mut cache,
                 path,
+                Some(&repo_anchor),
                 &prefix,
                 &self.device_id,
                 &undo_state_dir,
@@ -1337,6 +1715,7 @@ impl TcfsDaemonImpl {
     async fn enrollment_bootstrap_for_invite(
         &self,
         invite: &tcfs_auth::EnrollmentInvite,
+        bootstrap_session: &tcfs_auth::Session,
     ) -> Result<tcfs_auth::EnrollmentBootstrap, tonic::Status> {
         let (storage_access_key, storage_secret_key) =
             self.enrollment_storage_credentials(invite).await;
@@ -1378,6 +1757,10 @@ impl TcfsDaemonImpl {
                 .encryption_salt
                 .clone()
                 .or_else(|| self.config.crypto.kdf_salt.clone()),
+            session_token: Some(bootstrap_session.token.clone()),
+            session_expires_at: bootstrap_session
+                .expires_at
+                .map(|expires_at| expires_at.timestamp()),
         })
     }
 
@@ -1432,6 +1815,11 @@ impl TcfsDaemonImpl {
         self.invite_redemptions.load_from_file(path).await
     }
 
+    /// Load enrollment-derived device authorizations from disk.
+    pub async fn load_device_authorizations(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.device_authorizations.load_from_file(path).await
+    }
+
     /// Save sessions to disk (called after session changes).
     async fn persist_sessions(&self) {
         let path = self.data_dir.join("sessions.json");
@@ -1444,6 +1832,32 @@ impl TcfsDaemonImpl {
     async fn persist_invite_redemptions(&self) -> anyhow::Result<()> {
         let path = self.data_dir.join("invite-redemptions.json");
         self.invite_redemptions.save_to_file(&path).await
+    }
+
+    async fn persist_device_authorizations(&self) -> anyhow::Result<()> {
+        let path = self.data_dir.join("device-authorizations.json");
+        self.device_authorizations.save_to_file(&path).await
+    }
+
+    /// The daemon's own enrolled identity is the only safe bootstrap admin.
+    /// Every other device must arrive through a signed invite.
+    pub async fn ensure_local_device_authorization(&self) -> anyhow::Result<()> {
+        if self
+            .device_authorizations
+            .get(&self.device_id)
+            .await
+            .is_none()
+        {
+            self.device_authorizations
+                .authorize(
+                    self.device_id.clone(),
+                    self.device_name.clone(),
+                    tcfs_auth::DevicePermissions::admin(),
+                )
+                .await;
+            self.persist_device_authorizations().await?;
+        }
+        Ok(())
     }
 
     /// Validate a session token from gRPC request metadata.
@@ -1476,7 +1890,20 @@ impl TcfsDaemonImpl {
 
         match token {
             Some(t) => match self.session_store.validate(&t).await {
-                Some(session) => Ok(session),
+                Some(mut session) => {
+                    let authorization = self
+                        .device_authorizations
+                        .get(&session.device_id)
+                        .await
+                        .ok_or_else(|| {
+                            tonic::Status::unauthenticated("session device is no longer enrolled")
+                        })?;
+                    // Enrollment authority is live truth. Persisted sessions
+                    // cannot retain grants after a device is scoped or revoked.
+                    session.device_name = authorization.device_name;
+                    session.permissions = authorization.permissions;
+                    Ok(session)
+                }
                 None => Err(tonic::Status::unauthenticated(
                     "invalid or expired session token",
                 )),
@@ -1747,20 +2174,29 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let mount_device_id = self.device_id.clone();
             let flush_prefix = prefix.clone();
             let mount_master_key = self.master_key.clone();
+            let encryption_required = self.config.crypto.enabled;
             let on_flush: Option<tcfs_vfs::OnFlushCallback> = Some(std::sync::Arc::new(
                 move |vpath: &str,
-                      hash: &str,
+                      file_hash: &str,
+                      manifest_object_id: &str,
                       size: u64,
                       _chunks: usize,
                       vclock: &tcfs_sync::conflict::VectorClock| {
+                    let path = match tcfs_vfs::virtual_path_to_canonical_rel_path(vpath) {
+                        Ok(path) => path.to_string(),
+                        Err(error) => {
+                            tracing::warn!(
+                                path = %vpath,
+                                %error,
+                                "refusing to publish invalid VFS flush path"
+                            );
+                            return;
+                        }
+                    };
                     let nats = nats_handle.clone();
                     let device = flush_device_id.clone();
-                    // Strip leading '/' from FUSE virtual path to produce a
-                    // relative path matching the S3 index key format. Without
-                    // this, receiving hosts get `/file.txt` instead of `file.txt`
-                    // and sync_root.join() produces malformed local paths.
-                    let path = vpath.trim_start_matches('/').to_string();
-                    let hash = hash.to_string();
+                    let file_hash = file_hash.to_string();
+                    let manifest_object_id = manifest_object_id.to_string();
                     let vclock = vclock.clone();
                     let pfx = flush_prefix.clone();
                     tokio::spawn(async move {
@@ -1768,10 +2204,10 @@ impl TcfsDaemon for TcfsDaemonImpl {
                             let event = tcfs_sync::StateEvent::FileSynced {
                                 device_id: device,
                                 rel_path: path.clone(),
-                                blake3: hash.clone(),
+                                blake3: file_hash,
                                 size,
                                 vclock,
-                                manifest_path: format!("{}/manifests/{}", pfx, hash),
+                                manifest_path: format!("{}/manifests/{}", pfx, manifest_object_id),
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -1803,6 +2239,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         on_flush,
                         device_id: mount_device_id,
                         master_key: Some(mount_master_key),
+                        encryption_required,
                     },
                     Some(&vfs_sender),
                 )
@@ -1924,36 +2361,76 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Self::check_permission(&session, "push")?;
         use tokio_stream::StreamExt;
 
-        let op = self.operator.lock().await;
-        let op = op
-            .as_ref()
-            .ok_or_else(|| tonic::Status::unavailable("no storage operator — check credentials"))?;
-        let op = op.clone();
-
         let state_cache = self.state_cache.clone();
         let prefix = self.config.storage.resolved_prefix().to_string();
 
         let mut stream = request.into_inner();
 
         // Collect the streamed chunks into a file buffer
-        let mut path = String::new();
+        let mut path: Option<String> = None;
         let mut data = Vec::new();
+        let mut saw_last = false;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
-            if path.is_empty() {
-                path = chunk.path.clone();
+            if saw_last {
+                return Err(tonic::Status::invalid_argument(
+                    "push stream included data after its terminal chunk",
+                ));
+            }
+            match path.as_deref() {
+                None => {
+                    if chunk.path.is_empty() {
+                        return Err(tonic::Status::invalid_argument(
+                            "first push chunk must include a non-empty path",
+                        ));
+                    }
+                    path = Some(chunk.path.clone());
+                }
+                Some(expected_path) if expected_path != chunk.path => {
+                    return Err(tonic::Status::invalid_argument(
+                        "push stream changed paths between chunks",
+                    ));
+                }
+                Some(_) => {}
+            }
+            if chunk.offset != data.len() as u64 {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "push chunk offset {} does not match assembled length {}",
+                    chunk.offset,
+                    data.len()
+                )));
             }
             data.extend_from_slice(&chunk.data);
+            saw_last = chunk.last;
         }
 
-        if path.is_empty() {
+        let path =
+            path.ok_or_else(|| tonic::Status::invalid_argument("no path provided in push stream"))?;
+        if !saw_last {
             return Err(tonic::Status::invalid_argument(
-                "no path provided in push stream",
+                "push stream ended before its terminal chunk",
             ));
         }
 
         let path = sanitize_rel_path(&path).map_err(tonic::Status::invalid_argument)?;
+        validate_fixed_ingress_path(Path::new(&path), "push logical path")
+            .map_err(tonic::Status::invalid_argument)?;
+        if let Some(sync_root) = self.config.sync.sync_root.as_deref() {
+            let logical_target = tcfs_core::config::expand_tilde(sync_root).join(&path);
+            tcfs_core::config::validate_sync_selection_excludes_master_key(
+                &self.config,
+                &logical_target,
+            )
+            .map_err(tonic::Status::invalid_argument)?;
+        }
+
+        let op = self.operator.lock().await;
+        let op = op
+            .as_ref()
+            .ok_or_else(|| tonic::Status::unavailable("no storage operator — check credentials"))?;
+        let op = op.clone();
+
         let lock_path = self.lock_path_for_request(Path::new(&path));
         let _lock_guard = self.path_locks.lock(&lock_path).await;
 
@@ -2009,6 +2486,21 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     if cache.mark_conflict(&local_path, info.clone()) {
                         let _ = cache.flush();
                     }
+                }
+
+                if let Some(error) =
+                    legacy_push_rejection_reason(upload.skipped, upload.outcome.as_ref())
+                {
+                    let progress = PushProgress {
+                        bytes_sent: 0,
+                        total_bytes,
+                        chunk_hash: String::new(),
+                        done: true,
+                        error,
+                    };
+                    return Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
+                        progress,
+                    )))));
                 }
 
                 // Rel-path publication is owned by upload_file_with_device so
@@ -2082,6 +2574,257 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Box<dyn tokio_stream::Stream<Item = Result<PullProgress, tonic::Status>> + Send>,
     >;
 
+    type PullExactStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<PullProgress, tonic::Status>> + Send>,
+    >;
+
+    async fn pull_exact(
+        &self,
+        request: tonic::Request<PullExactRequest>,
+    ) -> Result<tonic::Response<Self::PullExactStream>, tonic::Status> {
+        let session = self.require_session(&request).await?;
+        Self::check_permission(&session, "pull")?;
+        let req = request.into_inner();
+
+        validate_fixed_ingress_path(Path::new(&req.remote_path), "PullExact logical path")
+            .map_err(tonic::Status::invalid_argument)?;
+        if req.expected_version.is_empty() {
+            return Err(tonic::Status::invalid_argument(
+                "PullExact expected_version must be non-empty",
+            ));
+        }
+
+        let op = {
+            let operator = self.operator.lock().await;
+            operator
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+        };
+        let prefix = self.config.storage.resolved_prefix().to_string();
+        let selected =
+            tcfs_sync::engine::read_exact_visible_index_selection(&op, &req.remote_path, &prefix)
+                .await
+                .map_err(|error| {
+                    tonic::Status::internal(format!(
+                        "read exact FileProvider index version: {error:#}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    tonic::Status::not_found(format!(
+                        "no exact index entry for FileProvider item: {}",
+                        req.remote_path
+                    ))
+                })?;
+        if req.expected_version != selected.manifest_hash {
+            return Err(file_provider_version_mismatch_status(
+                &req.expected_version,
+                &selected.manifest_hash,
+            ));
+        }
+        let snapshot = tcfs_sync::engine::resolve_exact_indexed_manifest_snapshot(
+            &op,
+            &req.remote_path,
+            &prefix,
+        )
+        .await
+        .map_err(|error| {
+            tonic::Status::internal(format!("resolve exact FileProvider manifest: {error:#}"))
+        })?
+        .ok_or_else(|| {
+            tonic::Status::not_found(format!(
+                "no exact index entry for FileProvider item: {}",
+                req.remote_path
+            ))
+        })?;
+
+        if snapshot.kind() != tcfs_sync::index_entry::RemoteEntryKind::RegularFile {
+            return Err(tonic::Status::failed_precondition(
+                "PullExact currently supports regular files only",
+            ));
+        }
+
+        let selected_version = snapshot.manifest_object_id().to_string();
+        if req.expected_version != selected_version {
+            return Err(file_provider_version_mismatch_status(
+                &req.expected_version,
+                &selected_version,
+            ));
+        }
+
+        // Hydrate only into a daemon-owned temporary path. PullExact never
+        // receives or writes a client destination, and does not mutate the
+        // daemon state cache. The snapshot boundary rechecks both the exact
+        // index selection and this absent local target immediately before its
+        // final rename.
+        let temp_dir = tempfile::tempdir()
+            .map_err(|error| tonic::Status::internal(format!("PullExact tempdir: {error}")))?;
+        let content_path = temp_dir.path().join("exact-content");
+        let expected_local =
+            tcfs_sync::engine::capture_local_fingerprint(&content_path).map_err(|error| {
+                tonic::Status::internal(format!("fingerprint PullExact staging path: {error}"))
+            })?;
+        let hydrate_result = {
+            let mk_guard = self.master_key.lock().await;
+            let enc_ctx = mk_guard
+                .as_ref()
+                .map(|mk| build_encryption_context(&self.config, &self.device_id, mk));
+            tcfs_sync::engine::hydrate_indexed_snapshot_with_device(
+                &op,
+                &snapshot,
+                &content_path,
+                None,
+                &self.device_id,
+                None,
+                enc_ctx.as_ref(),
+                &expected_local,
+            )
+            .await
+        };
+
+        let download = match hydrate_result {
+            Ok(download) => download,
+            Err(error) => {
+                // A concurrent index advance is a version mismatch, not a
+                // generic storage failure. Re-resolve once to distinguish it
+                // without classifying corruption or transport errors as absent.
+                match tcfs_sync::engine::resolve_exact_indexed_manifest_snapshot(
+                    &op,
+                    &req.remote_path,
+                    &prefix,
+                )
+                .await
+                {
+                    Ok(Some(current)) if current.manifest_object_id() != selected_version => {
+                        return Err(file_provider_version_mismatch_status(
+                            &req.expected_version,
+                            current.manifest_object_id(),
+                        ));
+                    }
+                    Ok(None) => {
+                        return Err(file_provider_version_mismatch_status(
+                            &req.expected_version,
+                            "<deleted>",
+                        ));
+                    }
+                    Err(recheck_error) => {
+                        return Err(tonic::Status::internal(format!(
+                            "PullExact hydration failed ({error:#}); authority recheck failed: {recheck_error:#}"
+                        )));
+                    }
+                    Ok(Some(_)) => {
+                        return Err(tonic::Status::data_loss(format!(
+                            "hydrate exact FileProvider content: {error:#}"
+                        )));
+                    }
+                }
+            }
+        };
+
+        if download.bytes != snapshot.size() {
+            return Err(tonic::Status::data_loss(format!(
+                "PullExact byte count mismatch: manifest {}, hydrated {}",
+                snapshot.size(),
+                download.bytes
+            )));
+        }
+
+        let total_bytes = snapshot.size();
+        let (stream_tx, stream_rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+
+            // Keep the temporary directory alive until streaming completes or
+            // the receiver disconnects.
+            let _temp_dir = temp_dir;
+            let mut file = match tokio::fs::File::open(&content_path).await {
+                Ok(file) => file,
+                Err(error) => {
+                    let _ = stream_tx
+                        .send(Err(tonic::Status::internal(format!(
+                            "open PullExact staged content: {error}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+            let mut buffer = vec![0u8; EXACT_PULL_CHUNK_SIZE];
+            let mut bytes_received = 0u64;
+
+            loop {
+                let read = match file.read(&mut buffer).await {
+                    Ok(read) => read,
+                    Err(error) => {
+                        let _ = stream_tx
+                            .send(Err(tonic::Status::internal(format!(
+                                "read PullExact staged content: {error}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                };
+                if read == 0 {
+                    break;
+                }
+                bytes_received = match bytes_received.checked_add(read as u64) {
+                    Some(total) => total,
+                    None => {
+                        let _ = stream_tx
+                            .send(Err(tonic::Status::data_loss(
+                                "PullExact byte counter overflow",
+                            )))
+                            .await;
+                        return;
+                    }
+                };
+                if bytes_received > total_bytes {
+                    let _ = stream_tx
+                        .send(Err(tonic::Status::data_loss(
+                            "PullExact streamed more bytes than the selected manifest",
+                        )))
+                        .await;
+                    return;
+                }
+                let progress = PullProgress {
+                    bytes_received,
+                    total_bytes,
+                    done: false,
+                    error: String::new(),
+                    data: buffer[..read].to_vec(),
+                    exact_content: false,
+                    version_token: String::new(),
+                };
+                if stream_tx.send(Ok(progress)).await.is_err() {
+                    return;
+                }
+            }
+
+            if bytes_received != total_bytes {
+                let _ = stream_tx
+                    .send(Err(tonic::Status::data_loss(format!(
+                        "PullExact staged length mismatch: expected {total_bytes}, streamed {bytes_received}"
+                    ))))
+                    .await;
+                return;
+            }
+
+            let terminal = PullProgress {
+                bytes_received,
+                total_bytes,
+                done: true,
+                error: String::new(),
+                data: Vec::new(),
+                exact_content: true,
+                version_token: selected_version,
+            };
+            let _ = stream_tx.send(Ok(terminal)).await;
+        });
+
+        Ok(tonic::Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(stream_rx),
+        )))
+    }
+
     async fn pull(
         &self,
         request: tonic::Request<PullRequest>,
@@ -2096,6 +2839,22 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Self::check_permission(&session, "pull")?;
         let req = request.into_inner();
 
+        validate_fixed_ingress_path(Path::new(&req.remote_path), "pull logical path")
+            .map_err(tonic::Status::invalid_argument)?;
+        let requested_local_path = std::path::PathBuf::from(&req.local_path);
+        validate_fixed_ingress_path(&requested_local_path, "pull destination")
+            .map_err(tonic::Status::invalid_argument)?;
+        tcfs_core::config::validate_sync_selection_excludes_master_key(
+            &self.config,
+            &requested_local_path,
+        )
+        .map_err(tonic::Status::invalid_argument)?;
+        let (local_path, local_rel_path) =
+            primary_sync_root_target(&self.config, &requested_local_path, "pull")
+                .map_err(tonic::Status::invalid_argument)?;
+        validate_pull_destination(&self.config, &local_path, &local_rel_path)
+            .map_err(tonic::Status::invalid_argument)?;
+
         let op = self.operator.lock().await;
         let op = op
             .as_ref()
@@ -2103,16 +2862,29 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let op = op.clone();
 
         let prefix = self.config.storage.resolved_prefix().to_string();
-        let local_path = std::path::PathBuf::from(&req.local_path);
         let state_cache = self.state_cache.clone();
 
         let sync_root = self.config.sync.sync_root.as_deref();
         let _lock_guard = self.path_locks.lock(&local_path).await;
 
-        let resolved_manifest =
-            tcfs_sync::engine::resolve_manifest_path(&op, &req.remote_path, &prefix, sync_root)
-                .await
-                .map_err(|e| tonic::Status::not_found(format!("resolve manifest: {e}")))?;
+        let resolved_manifest = tcfs_sync::engine::resolve_manifest_reference(
+            &op,
+            &req.remote_path,
+            &prefix,
+            sync_root,
+        )
+        .await
+        .map_err(|e| tonic::Status::not_found(format!("resolve manifest: {e}")))?;
+
+        if let Some(resolved_rel_path) = resolved_manifest.rel_path() {
+            validate_fixed_ingress_path(Path::new(resolved_rel_path), "resolved pull logical path")
+                .map_err(tonic::Status::invalid_argument)?;
+        }
+
+        // Explicit `.../manifests/<id>` compatibility reads have no index rel to
+        // preflight here. The shared download boundary validates their parsed
+        // manifest-bound rel_path before any local or cache mutation; it still
+        // cannot redirect the canonical, in-root destination selected above.
 
         let result = {
             let mut cache = state_cache.lock().await;
@@ -2120,7 +2892,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let enc_ctx = mk_guard
                 .as_ref()
                 .map(|mk| build_encryption_context(&self.config, &self.device_id, mk));
-            tcfs_sync::engine::download_file_with_device(
+            tcfs_sync::engine::download_resolved_file_with_device(
                 &op,
                 &resolved_manifest,
                 &local_path,
@@ -2140,6 +2912,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     total_bytes: dl.bytes,
                     done: true,
                     error: String::new(),
+                    ..Default::default()
                 };
                 Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
                     progress,
@@ -2152,6 +2925,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     total_bytes: 0,
                     done: true,
                     error: format!("{e}"),
+                    ..Default::default()
                 };
                 Ok(tonic::Response::new(Box::pin(tokio_stream::once(Ok(
                     progress,
@@ -2173,9 +2947,51 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let session = self.require_session(&request).await?;
         Self::check_permission(&session, "pull")?;
         let req = request.into_inner();
-        let stub_path = std::path::PathBuf::from(&req.stub_path);
+        let requested_stub_path = std::path::PathBuf::from(&req.stub_path);
 
         info!(stub = %req.stub_path, "hydrate requested");
+
+        // Hydration mutates local state. Bind the requested stub and its real
+        // target to the configured primary root before reading either path.
+        let (stub_path, _) =
+            primary_sync_root_target(&self.config, &requested_stub_path, "hydrate").map_err(
+                |error| tonic::Status::invalid_argument(format!("invalid stub path: {error}")),
+            )?;
+        let stub_metadata = std::fs::symlink_metadata(&requested_stub_path)
+            .map_err(|error| tonic::Status::not_found(format!("read stub metadata: {error}")))?;
+        if stub_metadata.file_type().is_symlink() || !stub_metadata.is_file() {
+            return Err(tonic::Status::invalid_argument(
+                "hydrate stub must be a regular, non-symlink file",
+            ));
+        }
+
+        let requested_real_path = tcfs_vfs::stub_to_real_name(requested_stub_path.as_os_str())
+            .ok_or_else(|| {
+                tonic::Status::invalid_argument(format!(
+                    "cannot derive real name from stub: {}",
+                    req.stub_path
+                ))
+            })?;
+        validate_fixed_ingress_path(&requested_real_path, "hydrate logical path")
+            .map_err(tonic::Status::invalid_argument)?;
+        tcfs_core::config::validate_sync_selection_excludes_master_key(
+            &self.config,
+            &requested_real_path,
+        )
+        .map_err(tonic::Status::invalid_argument)?;
+        let (real_path, local_rel_path) =
+            primary_sync_root_target(&self.config, &requested_real_path, "hydrate").map_err(
+                |error| tonic::Status::invalid_argument(format!("invalid hydrate target: {error}")),
+            )?;
+        if tcfs_vfs::real_to_stub_name(real_path.as_os_str()) != stub_path {
+            return Err(tonic::Status::invalid_argument(
+                "stub and hydrated target do not resolve to the same root path",
+            ));
+        }
+        validate_fixed_ingress_path(Path::new(&local_rel_path), "hydrate logical path")
+            .map_err(tonic::Status::invalid_argument)?;
+        tcfs_core::config::validate_sync_selection_excludes_master_key(&self.config, &real_path)
+            .map_err(tonic::Status::invalid_argument)?;
 
         // Read and parse stub file
         let stub_content = std::fs::read_to_string(&stub_path)
@@ -2183,30 +2999,50 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let meta = tcfs_vfs::StubMeta::parse(&stub_content)
             .map_err(|e| tonic::Status::invalid_argument(format!("parse stub: {e}")))?;
 
-        // Derive real file path from stub path
-        let real_path = tcfs_vfs::stub_to_real_name(stub_path.as_os_str()).ok_or_else(|| {
-            tonic::Status::invalid_argument(format!(
-                "cannot derive real name from stub: {}",
-                req.stub_path
-            ))
-        })?;
-
-        // Extract manifest hash from oid
-        let blake3_hex = meta
-            .blake3_hex()
-            .ok_or_else(|| tonic::Status::invalid_argument("stub oid missing blake3: prefix"))?;
+        // The stub oid and size are historical hints, not immutable authority.
+        // Bind origin exactly to the local target, then resolve today's typed
+        // path index so an old placeholder follows copy-on-write updates.
         let prefix = self.config.storage.resolved_prefix().to_string();
-        let manifest_path = format!("{prefix}/manifests/{blake3_hex}");
+        let origin_prefix = format!("seaweedfs://{prefix}/");
+        let rel_path = meta.origin.strip_prefix(&origin_prefix).ok_or_else(|| {
+            tonic::Status::invalid_argument(
+                "stub origin is outside the daemon's configured storage prefix",
+            )
+        })?;
+        tcfs_sync::index_entry::validate_canonical_rel_path(rel_path).map_err(|error| {
+            tonic::Status::invalid_argument(format!("invalid stub origin path: {error}"))
+        })?;
+        if rel_path != local_rel_path {
+            return Err(tonic::Status::invalid_argument(format!(
+                "stub origin path '{rel_path}' does not match local hydrate target '{local_rel_path}'"
+            )));
+        }
 
-        let op = self.operator.lock().await;
-        let op = op
-            .as_ref()
-            .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
-        let op = op.clone();
-        drop(self.operator.lock().await);
+        let op = {
+            let operator = self.operator.lock().await;
+            operator
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+        };
 
         let total_bytes = meta.size;
         let _lock_guard = self.path_locks.lock(&real_path).await;
+        let expected_local =
+            tcfs_sync::engine::capture_local_fingerprint(&real_path).map_err(|error| {
+                tonic::Status::failed_precondition(format!("fingerprint hydrate target: {error}"))
+            })?;
+        let snapshot =
+            tcfs_sync::engine::resolve_exact_indexed_manifest_snapshot(&op, rel_path, &prefix)
+                .await
+                .map_err(|error| {
+                    tonic::Status::not_found(format!("resolve exact stub origin: {error}"))
+                })?
+                .ok_or_else(|| {
+                    tonic::Status::not_found(format!(
+                        "no current index entry for stub origin: {rel_path}"
+                    ))
+                })?;
 
         let result = {
             let mut cache = self.state_cache.lock().await;
@@ -2214,15 +3050,15 @@ impl TcfsDaemon for TcfsDaemonImpl {
             let enc_ctx = mk_guard
                 .as_ref()
                 .map(|mk| build_encryption_context(&self.config, &self.device_id, mk));
-            tcfs_sync::engine::download_file_with_device(
+            tcfs_sync::engine::hydrate_indexed_snapshot_with_device(
                 &op,
-                &manifest_path,
+                &snapshot,
                 &real_path,
-                &prefix,
                 None,
                 &self.device_id,
                 Some(&mut cache),
                 enc_ctx.as_ref(),
+                &expected_local,
             )
             .await
         };
@@ -2240,7 +3076,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
                 let progress = HydrateProgress {
                     bytes_received: dl.bytes,
-                    total_bytes,
+                    total_bytes: dl.bytes,
                     local_path: real_path.to_string_lossy().to_string(),
                     done: true,
                     error: String::new(),
@@ -2427,99 +3263,116 @@ impl TcfsDaemon for TcfsDaemonImpl {
         request: tonic::Request<ListFilesRequest>,
     ) -> Result<tonic::Response<ListFilesResponse>, tonic::Status> {
         let req = request.into_inner();
-        let prefix = req.prefix; // logical directory prefix (e.g., "dotfiles/" or "")
-
-        let cache = self.state_cache.lock().await;
-        let all = cache.all_entries();
-
-        let mut dirs_seen = std::collections::HashSet::new();
-        let mut files: Vec<FileEntry> = Vec::new();
-
-        let storage_prefix = self.config.storage.resolved_prefix();
-
-        for (key, state) in &all {
-            let Some(rel_path) = logical_rel_path_from_state_key(
-                key,
-                state,
-                self.config.sync.sync_root.as_deref(),
-                storage_prefix,
-            ) else {
-                continue;
-            };
-
-            if rel_path.is_empty() {
-                continue;
-            }
-
-            // Filter by prefix: only entries under the requested directory
-            let normalized_prefix = if prefix.is_empty() {
-                ""
-            } else if prefix.ends_with('/') {
-                prefix.as_str()
-            } else {
-                // Caller omitted trailing slash — we'll match with it
-                &prefix
-            };
-
-            let remainder = if normalized_prefix.is_empty() {
-                rel_path.clone()
-            } else {
-                // Must start with prefix (exact prefix match, not substring)
-                let pfx = if normalized_prefix.ends_with('/') {
-                    normalized_prefix.to_string()
-                } else {
-                    format!("{}/", normalized_prefix)
-                };
-                match rel_path.strip_prefix(&pfx) {
-                    Some(r) => r.to_string(),
-                    None => continue,
-                }
-            };
-
-            if remainder.is_empty() {
-                continue;
-            }
-
-            if remainder.contains('/') {
-                // File in a subdirectory — synthesize a directory entry
-                let dir_name = remainder.split('/').next().unwrap_or(&remainder);
-                if dirs_seen.insert(dir_name.to_string()) {
-                    let dir_path = if normalized_prefix.is_empty() {
-                        format!("{}/", dir_name)
-                    } else {
-                        let pfx = normalized_prefix.trim_end_matches('/');
-                        format!("{}/{}/", pfx, dir_name)
-                    };
-                    files.push(FileEntry {
-                        path: dir_path,
-                        filename: dir_name.to_string(),
-                        size: 0,
-                        last_synced: 0,
-                        is_directory: true,
-                        blake3: String::new(),
-                        hydration_state: String::new(),
-                    });
-                }
-            } else {
-                // Immediate child file
-                let hydration = match state.status {
-                    tcfs_sync::state::FileSyncStatus::NotSynced => "not_synced",
-                    tcfs_sync::state::FileSyncStatus::Synced => "synced",
-                    tcfs_sync::state::FileSyncStatus::Active => "active",
-                    tcfs_sync::state::FileSyncStatus::Locked => "locked",
-                    tcfs_sync::state::FileSyncStatus::Conflict => "conflict",
-                };
-                files.push(FileEntry {
-                    path: rel_path,
-                    filename: remainder.clone(),
-                    size: state.size,
-                    last_synced: state.last_synced as i64,
-                    is_directory: false,
-                    blake3: state.blake3.clone(),
-                    hydration_state: hydration.to_string(),
-                });
-            }
+        let requested_prefix = req.prefix.strip_suffix('/').unwrap_or(&req.prefix);
+        if !requested_prefix.is_empty() {
+            tcfs_sync::index_entry::validate_canonical_rel_path(requested_prefix)
+                .map_err(|error| tonic::Status::invalid_argument(error.to_string()))?;
         }
+
+        let op = {
+            let operator = self.operator.lock().await;
+            operator
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+        };
+        let storage_prefix = self.config.storage.resolved_prefix();
+        let namespace = tcfs_sync::reconcile::list_remote_namespace(&op, storage_prefix)
+            .await
+            .map_err(|error| {
+                tonic::Status::failed_precondition(format!(
+                    "remote namespace is unavailable or invalid: {error:#}"
+                ))
+            })?;
+
+        // The remote index is listing authority. Cache entries only enrich a
+        // remote file when they are bound to that exact current manifest.
+        let cached_by_rel = {
+            let cache = self.state_cache.lock().await;
+            let mut by_rel = std::collections::HashMap::new();
+            for (key, state) in cache.all_entries() {
+                if let Some(rel_path) = logical_rel_path_from_state_key(
+                    &key,
+                    state,
+                    self.config.sync.sync_root.as_deref(),
+                    storage_prefix,
+                ) {
+                    by_rel.entry(rel_path).or_insert_with(|| state.clone());
+                }
+            }
+            by_rel
+        };
+
+        let mut directory_paths = std::collections::BTreeSet::new();
+        let mut files = Vec::new();
+        for (rel_path, remote_entry) in &namespace.files {
+            let Some(remainder) = list_files_remainder(rel_path, requested_prefix) else {
+                continue;
+            };
+            if let Some((directory, _)) = remainder.split_once('/') {
+                let directory_path = if requested_prefix.is_empty() {
+                    format!("{directory}/")
+                } else {
+                    format!("{requested_prefix}/{directory}/")
+                };
+                directory_paths.insert(directory_path);
+                continue;
+            }
+
+            let manifest_key = format!(
+                "{}/manifests/{}",
+                storage_prefix.trim_end_matches('/'),
+                remote_entry.manifest_hash
+            );
+            let cached = cached_by_rel
+                .get(rel_path)
+                .filter(|state| cached_state_matches_remote_manifest(state, &manifest_key));
+            files.push(FileEntry {
+                path: rel_path.clone(),
+                filename: remainder.to_string(),
+                size: remote_entry.size,
+                last_synced: cached.map_or(0, |state| state.last_synced as i64),
+                is_directory: false,
+                blake3: cached.map_or_else(String::new, |state| state.blake3.clone()),
+                hydration_state: cached
+                    .map_or("not_synced", |state| hydration_state_name(state.status))
+                    .to_string(),
+                version_token: remote_entry.manifest_hash.clone(),
+            });
+        }
+
+        for rel_path in &namespace.directories {
+            let Some(remainder) = list_files_remainder(rel_path, requested_prefix) else {
+                continue;
+            };
+            let directory = remainder.split('/').next().unwrap_or(remainder);
+            let directory_path = if requested_prefix.is_empty() {
+                format!("{directory}/")
+            } else {
+                format!("{requested_prefix}/{directory}/")
+            };
+            directory_paths.insert(directory_path);
+        }
+
+        files.extend(directory_paths.into_iter().map(|path| {
+            let filename = path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            FileEntry {
+                path,
+                filename,
+                size: 0,
+                last_synced: 0,
+                is_directory: true,
+                blake3: String::new(),
+                hydration_state: String::new(),
+                version_token: String::new(),
+            }
+        }));
+        files.sort_by(|left, right| left.path.cmp(&right.path));
 
         Ok(tonic::Response::new(ListFilesResponse { files }))
     }
@@ -2530,6 +3383,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<ListConflictsRequest>,
     ) -> Result<tonic::Response<ListConflictsResponse>, tonic::Status> {
+        if !request.get_ref().root_id.is_empty() {
+            self.require_registered_root_auth_posture()?;
+        }
         let session = self.require_session(&request).await?;
         Self::check_permission(&session, "pull")?;
         let root_id = request.into_inner().root_id;
@@ -2556,8 +3412,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }));
         }
 
-        let route = self.registered_root(&root_id)?;
-        check_registered_prefix_permission(&session, &route.remote_prefix)?;
+        let route = self.authorized_registered_root(&session, &root_id)?;
         let _state_lock = tcfs_sync::state::StateFileLock::acquire(&route.state_path)
             .map_err(|error| tonic::Status::aborted(error.to_string()))?;
         let state = tcfs_sync::state::StateCache::open(&route.state_path)
@@ -2578,11 +3433,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
         &self,
         request: tonic::Request<ResolveRegisteredRootRequest>,
     ) -> Result<tonic::Response<ResolveRegisteredRootResponse>, tonic::Status> {
+        self.require_registered_root_auth_posture()?;
         let session = self.require_session(&request).await?;
-        Self::check_permission(&session, "push")?;
         let req = request.into_inner();
-        let route = self.registered_root(&req.root_id)?;
-        check_registered_prefix_permission(&session, &route.remote_prefix)?;
 
         let mode = match RegisteredRootResolveMode::try_from(req.mode) {
             Ok(RegisteredRootResolveMode::GitKeepBothDryRun) => {
@@ -2598,6 +3451,17 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }
         };
 
+        // Permission checks stay ahead of route lookup so a session cannot use
+        // known-vs-unknown behavior to enumerate the registry. Dry-run is an
+        // inspection operation and reads remote ref content, so it requires
+        // pull. Execute performs the same reads and then mutates refs/state, so
+        // it additionally requires push.
+        Self::check_permission(&session, "pull")?;
+        if mode.is_execute() {
+            Self::check_permission(&session, "push")?;
+        }
+        let route = self.authorized_registered_root(&session, &req.root_id)?;
+
         if !req.operator_cli {
             tracing::warn!(
                 root_id = %route.root_id,
@@ -2607,7 +3471,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             return Ok(tonic::Response::new(ResolveRegisteredRootResponse {
                 success: false,
                 resolved_path: String::new(),
-                error: "registered-root git keep-both requires explicit operator intent in addition to an authenticated push session; run it deliberately from `tcfs resolve --root <id> ...`"
+                error: "registered-root git keep-both requires explicit operator intent in addition to an appropriately permissioned authenticated session; run it deliberately from `tcfs resolve --root <id> ...`"
                     .to_string(),
                 root_id: route.root_id,
                 local_root: route.local_root.display().to_string(),
@@ -2625,19 +3489,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         request: tonic::Request<ResolveConflictRequest>,
     ) -> Result<tonic::Response<ResolveConflictResponse>, tonic::Status> {
         let session = self.require_session(&request).await?;
-        Self::check_permission(&session, "push")?;
         let req = request.into_inner();
-        let path = std::path::PathBuf::from(&req.path);
-
-        if let Some(root_id) = registered_root_containing_rootless_path(&self.config, &path)
-            .map_err(tonic::Status::failed_precondition)?
-        {
-            return Err(tonic::Status::failed_precondition(format!(
-                "rootless ResolveConflict path {} belongs to registered root '{root_id}'; the legacy primary-cache RPC is fenced here. Use `tcfs resolve {} --root {root_id}` so tcfsd selects the named cache and prefix atomically.",
-                path.display(),
-                path.display()
-            )));
-        }
 
         let resolution = match req.resolution.as_str() {
             "keep_local"
@@ -2651,357 +3503,141 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     success: false,
                     resolved_path: String::new(),
                     error: format!(
-                        "invalid resolution '{}': use keep_local, keep_remote, keep_both, or defer",
+                        "invalid resolution '{}': use defer, or repository keep-both through the shipped CLI",
                         other
                     ),
                 }));
             }
         };
 
-        // Reload state from disk in case the CLI wrote new entries. The git
-        // fence below also consults the stored ConflictInfo rel_path, which is
-        // the authoritative repo-relative path when the request arrived through
-        // a symlink alias or another local spelling.
-        let state_entry = {
-            let mut cache = self.state_cache.lock().await;
-            if let Err(e) = cache.reload_from_disk() {
-                tracing::warn!("failed to reload state cache: {e}");
+        // Capability checks must precede prefix routing and state lookup: a
+        // push-only session must not use a failing remote-read strategy to
+        // probe primary-cache enrollment or remote content. Retired per-file
+        // strategies retain their historical capability checks before one
+        // uniform refusal. `defer` remains behind the historical push authority
+        // even though it is a no-op. Git dry-run requires pull; execute requires
+        // both pull and push.
+        match resolution.as_str() {
+            "keep_remote" | "git_keep_both_dry_run" => {
+                Self::check_permission(&session, "pull")?;
             }
-            cache.get(&path).cloned()
-        };
-
-        if let Some(mode) = repo_keep_both_mode(&resolution) {
-            // Operator-deliberate invariant: repo-group git keep-both is a live
-            // `.git` WRITE path (parks peer branch heads, ticks the local clock
-            // to dominate the fleet). The shipped CLI sets `operator_cli=true`;
-            // MCP does not expose it and also rejects git_keep_both_* before the
-            // RPC. The bit is client-supplied defense in depth, not attestation:
-            // session authentication and push permission remain the authorization
-            // boundary. Fail closed when the intent bit is absent. This dispatch
-            // stays ahead of the per-file `.git`
-            // fence below because the repo-group path targets the repo ROOT
-            // (not a `.git`-internal path); the fence is for per-file
-            // keep_local/keep_remote/keep_both and does not apply here.
-            if !req.operator_cli {
-                tracing::warn!(
-                    path = %req.path,
-                    resolution = %resolution,
-                    "refusing repo-group git keep-both: missing explicit operator intent"
-                );
-                return Ok(tonic::Response::new(ResolveConflictResponse {
-                    success: false,
-                    resolved_path: String::new(),
-                    error:
-                        "repo-group git keep-both requires explicit operator intent in addition \
-                            to an authenticated push session; run it deliberately from the CLI \
-                            (`tcfs resolve <repo> --strategy keep-both [--execute]`)"
-                            .to_string(),
-                }));
+            "keep_both" | "git_keep_both_execute" => {
+                Self::check_permission(&session, "pull")?;
+                Self::check_permission(&session, "push")?;
             }
-            return self.resolve_git_keep_both_repo(&path, mode).await;
+            "keep_local" | "defer" => {
+                Self::check_permission(&session, "push")?;
+            }
+            _ => unreachable!("resolution was validated above"),
         }
 
-        // keep-both PR-1 (safety invariant S1): per-file conflict resolution
-        // must NEVER touch `.git` internals. keep_local rewrites the manifest,
-        // keep_remote splices the remote device's ref/index over this device's
-        // object store, and keep_both renames a loose ref into the branch
-        // namespace — each is the G5-git-5 `.git` corruption vector (no lock,
-        // no fsck, no objects-before-refs ordering). Refuse them for any
-        // `.git`-internal path and point the operator at repo-group resolution.
-        // `defer` is a no-op (records intent only) and stays allowed. This
-        // guard also covers the MCP `resolve_conflict` tool, which is a thin
-        // passthrough to this same RPC.
-        if let Some(error) =
-            resolve_conflict_git_fence_error(&path, &resolution, state_entry.as_ref())
-        {
+        check_registered_prefix_permission(&session, self.config.storage.resolved_prefix())?;
+        if matches!(
+            resolution.as_str(),
+            "keep_local" | "keep_remote" | "keep_both"
+        ) {
             tracing::warn!(
-                path = %req.path,
                 resolution = %resolution,
-                "refusing per-file resolution of a .git-internal conflict"
+                "refusing retired legacy per-file mutation before path or state lookup"
             );
             return Ok(tonic::Response::new(ResolveConflictResponse {
                 success: false,
                 resolved_path: String::new(),
-                error,
+                error: concat!(
+                    "legacy per-file mutation is disabled because it cannot bind the ",
+                    "requested path to an authenticated root and indexed manifest; use ",
+                    "defer, or use the root-scoped repository resolver for Git conflicts"
+                )
+                .to_string(),
             }));
         }
 
-        info!(
-            path = %req.path,
-            resolution = %resolution,
-            device = %self.device_id,
-            "conflict resolution requested"
-        );
+        if resolution == "defer" {
+            info!("conflict deferred without path or state lookup");
+            return Ok(tonic::Response::new(ResolveConflictResponse {
+                success: true,
+                resolved_path: req.path,
+                error: String::new(),
+            }));
+        }
 
-        match resolution.as_str() {
-            "defer" => {
-                info!(path = %req.path, "conflict deferred");
-                Ok(tonic::Response::new(ResolveConflictResponse {
-                    success: true,
-                    resolved_path: req.path,
-                    error: String::new(),
-                }))
+        let mode = repo_keep_both_mode(&resolution)
+            .expect("validated non-file, non-defer resolution is repository keep-both");
+
+        // The repository mutation is operator-deliberate. MCP exposes no
+        // conflict-resolution tool. This client-supplied bit is defense in
+        // depth, not attestation; authenticated mode-specific permissions are
+        // the authorization boundary. Refuse before path or state lookup.
+        if !req.operator_cli {
+            tracing::warn!(
+                resolution = %resolution,
+                "refusing repo-group git keep-both: missing explicit operator intent"
+            );
+            return Ok(tonic::Response::new(ResolveConflictResponse {
+                success: false,
+                resolved_path: String::new(),
+                error:
+                    "repo-group git keep-both requires explicit operator intent in addition \
+                        to an appropriately permissioned authenticated session; run it deliberately from the CLI \
+                        (`tcfs resolve <repo> --strategy keep-both [--execute]`)"
+                        .to_string(),
+            }));
+        }
+
+        let path = std::path::PathBuf::from(&req.path);
+        let primary_prefix = self.config.storage.resolved_prefix().to_string();
+        let canonical_requested_path = canonicalize_with_missing_tail(&path).ok();
+
+        // Reload state from disk in case the CLI wrote new entries. Repository
+        // routing is permitted only when this exact primary cache contains a
+        // current Git conflict under the selected storage prefix.
+        let primary_repo_conflict = {
+            let mut cache = self.state_cache.lock().await;
+            if let Err(e) = cache.reload_from_disk() {
+                tracing::warn!("failed to reload state cache: {e}");
             }
-            "keep_local" => {
-                // Read local state, tick vclock, build new manifest, upload
-                let local_state = {
-                    let cache = self.state_cache.lock().await;
-                    cache.get(&path).cloned()
-                };
+            let git_dir = canonical_requested_path
+                .as_deref()
+                .unwrap_or(&path)
+                .join(".git");
+            cache.conflicts().iter().any(|(cache_key, entry)| {
+                Path::new(cache_key).starts_with(&git_dir)
+                    && primary_conflict_entry_matches_prefix(entry, &primary_prefix)
+            })
+        };
 
-                let local_state = match local_state {
-                    Some(s) => s,
-                    None => {
-                        return Ok(tonic::Response::new(ResolveConflictResponse {
-                            success: false,
-                            resolved_path: String::new(),
-                            error: format!("no local state for path: {}", req.path),
-                        }));
-                    }
-                };
-
-                // Tick our vclock and build updated manifest
-                let mut vclock = local_state.vclock.clone();
-                vclock.tick(&self.device_id);
-
-                let manifest = tcfs_sync::manifest::SyncManifest {
-                    version: 2,
-                    file_hash: local_state.blake3.clone(),
-                    file_size: local_state.size,
-                    chunks: vec![],
-                    vclock: vclock.clone(),
-                    written_by: self.device_id.clone(),
-                    written_at: tcfs_sync::StateEvent::now(),
-                    rel_path: Some(req.path.clone()),
-                    mode: None,
-                    mtime: None,
-                    encrypted_file_key: None,
-                    wrapped_file_keys: Vec::new(),
-                };
-
-                // Upload updated manifest
-                let op = self.operator.lock().await;
-                if let Some(op) = op.as_ref() {
-                    let manifest_key = local_state.remote_path.clone();
-                    let manifest_bytes = manifest
-                        .to_bytes()
-                        .map_err(|e| tonic::Status::internal(format!("manifest serialize: {e}")))?;
-                    op.write(&manifest_key, manifest_bytes)
-                        .await
-                        .map_err(|e| tonic::Status::internal(format!("manifest upload: {e}")))?;
-                }
-                drop(op);
-
-                // Update state cache (clear conflict + status)
-                {
-                    let mut cache = self.state_cache.lock().await;
-                    if let Some(entry) = cache.get(&path).cloned() {
-                        let updated = tcfs_sync::state::SyncState {
-                            vclock,
-                            last_synced: tcfs_sync::StateEvent::now(),
-                            conflict: None,
-                            status: tcfs_sync::state::FileSyncStatus::Synced,
-                            ..entry
-                        };
-                        cache.set(&path, updated);
-                        let _ = cache.flush();
-                    }
-                }
-
-                // Publish ConflictResolved via NATS
-                self.publish_conflict_resolved(&req.path, "keep_local")
-                    .await;
-
-                Ok(tonic::Response::new(ResolveConflictResponse {
-                    success: true,
-                    resolved_path: req.path,
-                    error: String::new(),
-                }))
-            }
-            "keep_remote" => {
-                // Download remote version to local path
-                let (remote_path, prefix) = {
-                    let cache = self.state_cache.lock().await;
-                    let entry = cache.get(&path);
-                    let remote = entry.map(|e| e.remote_path.clone()).unwrap_or_default();
-                    let prefix = self.config.storage.resolved_prefix().to_string();
-                    (remote, prefix)
-                };
-
-                if remote_path.is_empty() {
-                    return Ok(tonic::Response::new(ResolveConflictResponse {
-                        success: false,
-                        resolved_path: String::new(),
-                        error: format!("no remote path for: {}", req.path),
-                    }));
-                }
-
-                let op = self.operator.lock().await;
-                let op = op
-                    .as_ref()
-                    .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
-                let op = op.clone();
-                drop(self.operator.lock().await);
-
-                let result = {
-                    let mut cache = self.state_cache.lock().await;
-                    tcfs_sync::engine::download_file_with_device(
-                        &op,
-                        &remote_path,
-                        &path,
-                        &prefix,
-                        None,
-                        &self.device_id,
-                        Some(&mut cache),
-                        None,
-                    )
-                    .await
-                };
-
-                match result {
-                    Ok(_dl) => {
-                        // Ensure conflict is fully cleared (download_file_with_device
-                        // creates fresh state, but belt-and-suspenders)
-                        {
-                            let mut cache = self.state_cache.lock().await;
-                            cache.resolve_conflict(&path);
-                            let _ = cache.flush();
-                        }
-                        self.publish_conflict_resolved(&req.path, "keep_remote")
-                            .await;
-                        Ok(tonic::Response::new(ResolveConflictResponse {
-                            success: true,
-                            resolved_path: req.path,
-                            error: String::new(),
-                        }))
-                    }
-                    Err(e) => Ok(tonic::Response::new(ResolveConflictResponse {
-                        success: false,
-                        resolved_path: String::new(),
-                        error: format!("download failed: {e}"),
-                    })),
-                }
-            }
-            "keep_both" => {
-                // Rename local file to {stem}.conflict-{device_id}{ext}, then download remote
-                let (remote_path, prefix) = {
-                    let cache = self.state_cache.lock().await;
-                    let entry = cache.get(&path);
-                    let remote = entry.map(|e| e.remote_path.clone()).unwrap_or_default();
-                    let prefix = self.config.storage.resolved_prefix().to_string();
-                    (remote, prefix)
-                };
-
-                if remote_path.is_empty() {
-                    return Ok(tonic::Response::new(ResolveConflictResponse {
-                        success: false,
-                        resolved_path: String::new(),
-                        error: format!("no remote path for: {}", req.path),
-                    }));
-                }
-
-                // Rename local file
-                let conflict_path = {
-                    let p = std::path::Path::new(&req.path);
-                    let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-                    let ext = p
-                        .extension()
-                        .map(|e| format!(".{}", e.to_string_lossy()))
-                        .unwrap_or_default();
-                    let parent = p.parent().unwrap_or(std::path::Path::new(""));
-                    parent
-                        .join(format!("{}.conflict-{}{}", stem, self.device_id, ext))
-                        .to_string_lossy()
-                        .to_string()
-                };
-
-                if path.exists() {
-                    if let Err(e) = std::fs::rename(&path, &conflict_path) {
-                        return Ok(tonic::Response::new(ResolveConflictResponse {
-                            success: false,
-                            resolved_path: String::new(),
-                            error: format!("rename failed: {e}"),
-                        }));
-                    }
-                }
-
-                // Download remote to original path
-                let op = self.operator.lock().await;
-                let op = op
-                    .as_ref()
-                    .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
-                let op = op.clone();
-                drop(self.operator.lock().await);
-
-                let result = {
-                    let mut cache = self.state_cache.lock().await;
-                    tcfs_sync::engine::download_file_with_device(
-                        &op,
-                        &remote_path,
-                        &path,
-                        &prefix,
-                        None,
-                        &self.device_id,
-                        Some(&mut cache),
-                        None,
-                    )
-                    .await
-                };
-
-                match result {
-                    Ok(_dl) => {
-                        // Push the conflict copy to S3 index so FileProvider
-                        // enumerates both the original and the conflict version
-                        let conflict_file = std::path::Path::new(&conflict_path);
-                        if conflict_file.exists() {
-                            let mut cache = self.state_cache.lock().await;
-                            if let Err(e) = tcfs_sync::engine::upload_file(
-                                &op,
-                                conflict_file,
-                                &prefix,
-                                &mut cache,
-                                None,
-                            )
-                            .await
-                            {
-                                warn!(
-                                    path = %conflict_path,
-                                    "failed to push conflict copy to S3: {e}"
-                                );
-                            }
-                        }
-
-                        // Ensure conflict is fully cleared on the original path
-                        {
-                            let mut cache = self.state_cache.lock().await;
-                            cache.resolve_conflict(&path);
-                            let _ = cache.flush();
-                        }
-
-                        self.publish_conflict_resolved(&req.path, "keep_both").await;
-                        Ok(tonic::Response::new(ResolveConflictResponse {
-                            success: true,
-                            resolved_path: conflict_path,
-                            error: String::new(),
-                        }))
-                    }
-                    Err(e) => {
-                        // Try to rename back on failure
-                        let _ = std::fs::rename(&conflict_path, &path);
-                        Ok(tonic::Response::new(ResolveConflictResponse {
-                            success: false,
-                            resolved_path: String::new(),
-                            error: format!("download after rename failed: {e}"),
-                        }))
-                    }
-                }
-            }
-            _ => {
-                return Err(tonic::Status::invalid_argument(
-                    "unsupported resolution strategy",
-                ))
+        if !self.config.sync.roots.is_empty() {
+            let primary_route_proven = if self.config.sync.sync_root.is_some() {
+                rootless_path_is_within_primary_sync_root(&self.config, &path)
+            } else {
+                primary_repo_conflict
+            };
+            if rootless_path_may_belong_to_registered_root(&self.config, &path)
+                || !primary_route_proven
+            {
+                return Err(tonic::Status::failed_precondition(
+                    "legacy primary-cache conflict route is unavailable for this path; use an authorized absolute primary path or `tcfs resolve <repo> --root <id>`",
+                ));
             }
         }
+
+        let primary_path_allowed = self.config.sync.sync_root.is_none()
+            || rootless_path_is_within_primary_sync_root(&self.config, &path);
+        if !primary_path_allowed
+            || rootless_path_may_belong_to_registered_root(&self.config, &path)
+            || !primary_repo_conflict
+            || canonical_requested_path.as_deref() != Some(path.as_path())
+        {
+            return Err(tonic::Status::failed_precondition(
+                "legacy primary-cache conflict route is unavailable for this path; use an authorized absolute primary path or `tcfs resolve <repo> --root <id>`",
+            ));
+        }
+        let repo_path = canonical_requested_path.as_deref().ok_or_else(|| {
+            tonic::Status::failed_precondition(
+                "legacy primary-cache conflict route is unavailable for this path; use an authorized absolute primary path or `tcfs resolve <repo> --root <id>`",
+            )
+        })?;
+        self.resolve_git_keep_both_repo(repo_path, mode).await
     }
 
     // ── Watch ─────────────────────────────────────────────────────────────
@@ -3026,62 +3662,33 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         let since = req.since_timestamp;
         info!(paths = ?req.paths, since, "watch requested");
+        if since > 0 {
+            return Err(tonic::Status::failed_precondition(
+                "authoritative incremental Watch journal is unavailable; preserve the prior anchor and perform a full ListFiles refresh",
+            ));
+        }
         let watch_roots: Vec<String> = req
             .paths
             .iter()
             .map(|path| normalize_watch_root(path))
             .collect();
+        let watch_operator = {
+            let operator = self.operator.lock().await;
+            operator
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+        };
+        let watch_storage_prefix = self.config.storage.resolved_prefix().to_string();
 
         let (async_tx, async_rx) = tokio::sync::mpsc::channel(256);
 
-        // ── Emit initial deltas from state cache (catch-up since anchor) ────
-        if since >= 0 {
-            let cache = self.state_cache.lock().await;
-            let all = cache.all_entries();
-            let storage_prefix = self.config.storage.resolved_prefix();
-            let sync_root = self.config.sync.sync_root.as_deref();
-            for (key, state) in &all {
-                let last = state.last_synced as i64;
-                if since == 0 || last > since {
-                    let Some(rel_path) =
-                        logical_rel_path_from_state_key(key, state, sync_root, storage_prefix)
-                    else {
-                        continue;
-                    };
-                    if rel_path.is_empty() || !rel_path_matches_watch_roots(&rel_path, &watch_roots)
-                    {
-                        continue;
-                    }
-                    let filename = std::path::Path::new(rel_path.as_str())
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let is_directory = sync_root
-                        .map(|root| root.join(&rel_path).is_dir())
-                        .unwrap_or_else(|| std::path::Path::new(key.as_str()).is_dir());
-                    let event = WatchEvent {
-                        path: rel_path,
-                        event_type: "modified".into(),
-                        timestamp: last,
-                        filename,
-                        size: state.size,
-                        blake3: state.blake3.clone(),
-                        is_directory,
-                        device_id: state.device_id.clone(),
-                    };
-                    if async_tx.send(Ok(event)).await.is_err() {
-                        // Client already disconnected
-                        let stream = tokio_stream::wrappers::ReceiverStream::new(async_rx);
-                        return Ok(tonic::Response::new(Box::pin(stream)));
-                    }
-                }
-            }
-        }
-
         // ── Live local filesystem events via notify ─────────────────────────
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
-        let state_cache_for_notify = self.state_cache.clone();
         let sync_root = self.config.sync.sync_root.clone();
+        let operator_for_notify = watch_operator.clone();
+        let storage_prefix_for_notify = watch_storage_prefix.clone();
+        let runtime_for_notify = tokio::runtime::Handle::current();
         let mut watch_targets = Vec::new();
 
         for root in &watch_roots {
@@ -3155,45 +3762,25 @@ impl TcfsDaemon for TcfsDaemonImpl {
                             let path = event.paths.first().cloned().unwrap_or_default();
                             let logical_path =
                                 logical_rel_path_from_fs_path(&path, sync_root.as_deref());
-                            let filename = path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default();
                             let timestamp = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs() as i64;
-
-                            // Enrich with state cache metadata (best-effort)
-                            let (size, blake3) = {
-                                let cache = state_cache_for_notify.blocking_lock();
-                                cache
-                                    .get(&path)
-                                    .map(|s| (s.size, s.blake3.clone()))
-                                    .unwrap_or((0, String::new()))
-                            };
-
-                            let is_dir = path.is_dir();
-
-                            WatchEvent {
-                                path: logical_path,
-                                event_type: event_type.to_string(),
+                            runtime_for_notify.block_on(authoritative_watch_event(
+                                &operator_for_notify,
+                                &storage_prefix_for_notify,
+                                &logical_path,
+                                event_type,
                                 timestamp,
-                                filename,
-                                size,
-                                blake3,
-                                is_directory: is_dir,
-                                device_id: String::new(), // local event
-                            }
+                                String::new(),
+                            ))
                         }
-                        Err(e) => WatchEvent {
-                            path: String::new(),
-                            event_type: format!("error: {e}"),
-                            timestamp: 0,
-                            ..Default::default()
-                        },
+                        Err(error) => Err(tonic::Status::internal(format!(
+                            "local Watch notification failed: {error}"
+                        ))),
                     };
-                    if notify_tx.blocking_send(Ok(event)).is_err() {
+                    let authority_failed = event.is_err();
+                    if notify_tx.blocking_send(event).is_err() || authority_failed {
                         break; // Client disconnected
                     }
                 }
@@ -3207,7 +3794,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
         // the daemon's durable state_sync_loop consumer for messages.
         let nats_tx = async_tx;
         let nats_client = self.nats.clone();
-        let _device_id = self.device_id.clone();
+        let operator_for_nats = watch_operator;
+        let storage_prefix_for_nats = watch_storage_prefix;
+        let watch_roots_for_nats = watch_roots.clone();
         tokio::spawn(async move {
             let client = nats_client.lock().await;
             let Some(nats) = client.as_ref() else {
@@ -3228,25 +3817,24 @@ impl TcfsDaemon for TcfsDaemonImpl {
                                     tcfs_sync::StateEvent::FileSynced {
                                         device_id: dev,
                                         rel_path,
-                                        blake3,
-                                        size,
                                         timestamp,
                                         ..
                                     } => {
-                                        let filename = std::path::Path::new(&rel_path)
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        WatchEvent {
-                                            path: rel_path,
-                                            event_type: "modified".into(),
-                                            timestamp: timestamp as i64,
-                                            filename,
-                                            size,
-                                            blake3,
-                                            is_directory: false,
-                                            device_id: dev,
+                                        if !rel_path_matches_watch_roots(
+                                            &rel_path,
+                                            &watch_roots_for_nats,
+                                        ) {
+                                            continue;
                                         }
+                                        authoritative_watch_event(
+                                            &operator_for_nats,
+                                            &storage_prefix_for_nats,
+                                            &rel_path,
+                                            "modified",
+                                            timestamp as i64,
+                                            dev,
+                                        )
+                                        .await
                                     }
                                     tcfs_sync::StateEvent::FileDeleted {
                                         device_id: dev,
@@ -3254,18 +3842,21 @@ impl TcfsDaemon for TcfsDaemonImpl {
                                         timestamp,
                                         ..
                                     } => {
-                                        let filename = std::path::Path::new(&rel_path)
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        WatchEvent {
-                                            path: rel_path,
-                                            event_type: "deleted".into(),
-                                            timestamp: timestamp as i64,
-                                            filename,
-                                            device_id: dev,
-                                            ..Default::default()
+                                        if !rel_path_matches_watch_roots(
+                                            &rel_path,
+                                            &watch_roots_for_nats,
+                                        ) {
+                                            continue;
                                         }
+                                        authoritative_watch_event(
+                                            &operator_for_nats,
+                                            &storage_prefix_for_nats,
+                                            &rel_path,
+                                            "deleted",
+                                            timestamp as i64,
+                                            dev,
+                                        )
+                                        .await
                                     }
                                     tcfs_sync::StateEvent::FileRenamed {
                                         device_id: dev,
@@ -3273,33 +3864,48 @@ impl TcfsDaemon for TcfsDaemonImpl {
                                         timestamp,
                                         ..
                                     } => {
-                                        let filename = std::path::Path::new(&new_path)
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        WatchEvent {
-                                            path: new_path,
-                                            event_type: "renamed".into(),
-                                            timestamp: timestamp as i64,
-                                            filename,
-                                            device_id: dev,
-                                            ..Default::default()
+                                        if !rel_path_matches_watch_roots(
+                                            &new_path,
+                                            &watch_roots_for_nats,
+                                        ) {
+                                            continue;
                                         }
+                                        authoritative_watch_event(
+                                            &operator_for_nats,
+                                            &storage_prefix_for_nats,
+                                            &new_path,
+                                            "renamed",
+                                            timestamp as i64,
+                                            dev,
+                                        )
+                                        .await
                                     }
                                     _ => continue, // Skip DeviceOnline/Offline etc
                                 };
-                                if nats_tx.send(Ok(watch_event)).await.is_err() {
-                                    break; // Client disconnected
+                                let authority_failed = watch_event.is_err();
+                                if nats_tx.send(watch_event).await.is_err() || authority_failed {
+                                    break;
                                 }
                             }
                             Err(e) => {
                                 warn!("watch: NATS state consumer error: {e}");
+                                let _ = nats_tx
+                                    .send(Err(tonic::Status::unavailable(format!(
+                                        "Watch NATS consumer failed: {e}"
+                                    ))))
+                                    .await;
+                                break;
                             }
                         }
                     }
                 }
                 Err(e) => {
                     warn!("watch: failed to create NATS state consumer: {e}");
+                    let _ = nats_tx
+                        .send(Err(tonic::Status::unavailable(format!(
+                            "create Watch NATS consumer: {e}"
+                        ))))
+                        .await;
                 }
             }
         });
@@ -3403,8 +4009,13 @@ impl TcfsDaemon for TcfsDaemonImpl {
         use tcfs_auth::AuthProvider;
 
         let session = self.require_session(&request).await?;
-        Self::check_permission(&session, "admin")?;
         let req = request.into_inner();
+        // A signed invite supplies a short-lived session scoped to the joining
+        // device. It may enroll that device's own MFA credential, but managing
+        // any other identity remains an administrator operation.
+        if req.device_id != session.device_id {
+            Self::check_permission(&session, "admin")?;
+        }
         info!(device_id = %req.device_id, method = %req.method, "auth enroll requested");
 
         match req.method.as_str() {
@@ -3470,8 +4081,10 @@ impl TcfsDaemon for TcfsDaemonImpl {
         request: tonic::Request<AuthCompleteEnrollRequest>,
     ) -> Result<tonic::Response<AuthCompleteEnrollResponse>, tonic::Status> {
         let session = self.require_session(&request).await?;
-        Self::check_permission(&session, "admin")?;
         let req = request.into_inner();
+        if req.device_id != session.device_id {
+            Self::check_permission(&session, "admin")?;
+        }
         info!(device_id = %req.device_id, method = %req.method, "auth complete enroll requested");
 
         match req.method.as_str() {
@@ -3572,9 +4185,9 @@ impl TcfsDaemon for TcfsDaemonImpl {
         };
 
         // Try TOTP first, then WebAuthn (method is implicit in the response data)
-        let verify_result = match self.totp_provider.verify(&response).await {
-            Ok(r @ tcfs_auth::VerifyResult::Success { .. }) => Ok(r),
-            _ => self.webauthn_provider.verify(&response).await,
+        let (auth_method, verify_result) = match self.totp_provider.verify(&response).await {
+            Ok(r @ tcfs_auth::VerifyResult::Success { .. }) => ("totp", Ok(r)),
+            _ => ("webauthn", self.webauthn_provider.verify(&response).await),
         };
 
         match verify_result {
@@ -3582,23 +4195,27 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 session_token: _,
                 device_id,
             }) => {
-                // Create and store session
-                let auth_method = if self
-                    .totp_provider
-                    .verify(&tcfs_auth::AuthResponse {
-                        challenge_id: String::new(),
-                        data: response.data.clone(),
-                        device_id: device_id.clone(),
-                    })
-                    .await
-                    .is_ok_and(|r| matches!(r, tcfs_auth::VerifyResult::Success { .. }))
-                {
-                    "totp"
-                } else {
-                    "webauthn"
+                if device_id != req.device_id {
+                    self.rate_limiter.record_failure(&req.device_id).await;
+                    return Ok(tonic::Response::new(AuthVerifyResponse {
+                        success: false,
+                        session_token: String::new(),
+                        error: "verified identity does not match requested device".into(),
+                    }));
+                }
+                let Some(authorization) = self.device_authorizations.get(&device_id).await else {
+                    self.rate_limiter.record_failure(&device_id).await;
+                    tracing::warn!(%device_id, "authenticated device has no enrollment authorization");
+                    return Ok(tonic::Response::new(AuthVerifyResponse {
+                        success: false,
+                        session_token: String::new(),
+                        error: "device is not enrolled or has been revoked".into(),
+                    }));
                 };
-                let session = tcfs_auth::Session::new(&device_id, &device_id, auth_method)
-                    .with_expiry(self.config.auth.session_expiry_hours);
+                let session =
+                    tcfs_auth::Session::new(&device_id, &authorization.device_name, auth_method)
+                        .with_permissions(authorization.permissions)
+                        .with_expiry(self.config.auth.session_expiry_hours);
                 let token = session.token.clone();
                 self.session_store.insert(session).await;
                 self.persist_sessions().await;
@@ -3719,7 +4336,14 @@ impl TcfsDaemon for TcfsDaemonImpl {
             ));
         }
 
-        let bootstrap = self.enrollment_bootstrap_for_invite(&invite).await?;
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let bootstrap_session =
+            tcfs_auth::Session::new(&device_id, &req.device_name, "enrollment_invite")
+                .with_permissions(invite.permissions.clone())
+                .with_expiry(1);
+        let bootstrap = self
+            .enrollment_bootstrap_for_invite(&invite, &bootstrap_session)
+            .await?;
         let bootstrap_json = serde_json::to_vec(&bootstrap).map_err(|e| {
             tonic::Status::internal(format!("serializing enrollment bootstrap: {e}"))
         })?;
@@ -3757,7 +4381,25 @@ impl TcfsDaemon for TcfsDaemonImpl {
         }
 
         // Enroll device in the local registry
-        let device_id = uuid::Uuid::new_v4().to_string();
+        self.device_authorizations
+            .authorize(
+                device_id.clone(),
+                req.device_name.clone(),
+                invite.permissions.clone(),
+            )
+            .await;
+        if let Err(error) = self.persist_device_authorizations().await {
+            tracing::error!(
+                %error,
+                %device_id,
+                "failed to persist enrolled device authorization"
+            );
+            return Err(tonic::Status::internal(
+                "failed to persist enrolled device authorization",
+            ));
+        }
+        self.session_store.insert(bootstrap_session).await;
+        self.persist_sessions().await;
         info!(
             device_id = %device_id,
             device_name = %req.device_name,
@@ -4073,8 +4715,41 @@ mod tests {
     use opendal::Operator;
     use secrecy::{ExposeSecret, SecretString};
     use tcfs_core::proto::tcfs_daemon_client::TcfsDaemonClient;
+    use tokio_stream::StreamExt;
     use tonic::transport::{Channel, Endpoint, Uri};
     use tower::service_fn;
+
+    #[test]
+    fn legacy_push_rejects_non_publication_outcomes() {
+        let remote_newer = tcfs_sync::conflict::SyncOutcome::RemoteNewer;
+        assert!(legacy_push_rejection_reason(false, Some(&remote_newer))
+            .unwrap()
+            .contains("remote version is newer"));
+
+        let conflict =
+            tcfs_sync::conflict::SyncOutcome::Conflict(tcfs_sync::conflict::ConflictInfo {
+                rel_path: "conflict.txt".into(),
+                local_vclock: tcfs_sync::conflict::VectorClock::new(),
+                remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+                local_blake3: "local".into(),
+                remote_blake3: "remote".into(),
+                local_device: "local-device".into(),
+                remote_device: "remote-device".into(),
+                detected_at: 1,
+                times_recorded: 1,
+                remote_manifest_key: None,
+            });
+        let error = legacy_push_rejection_reason(false, Some(&conflict)).unwrap();
+        assert!(error.contains("conflict"));
+        assert!(error.contains("local-device"));
+        assert!(error.contains("remote-device"));
+
+        let up_to_date = tcfs_sync::conflict::SyncOutcome::UpToDate;
+        assert!(legacy_push_rejection_reason(true, Some(&up_to_date))
+            .unwrap()
+            .contains("skipped publication"));
+        assert!(legacy_push_rejection_reason(false, Some(&up_to_date)).is_none());
+    }
 
     /// Build a TcfsDaemonImpl with in-memory components for testing.
     fn test_daemon_with_operator_master_and_session_requirement(
@@ -4128,10 +4803,11 @@ mod tests {
         test_daemon_with_operator(None)
     }
 
-    fn test_daemon_with_registered_root(
+    fn test_daemon_with_registered_root_session_requirement(
         temp: &tempfile::TempDir,
         root_id: &str,
         local_root: &Path,
+        require_session: bool,
     ) -> TcfsDaemonImpl {
         let reconcile_dir = temp.path().join("reconcile");
         std::fs::create_dir_all(&reconcile_dir).unwrap();
@@ -4141,7 +4817,7 @@ mod tests {
         state.flush().unwrap();
 
         let mut config = TcfsConfig::default();
-        config.auth.require_session = false;
+        config.auth.require_session = require_session;
         config.daemon.socket = temp.path().join("tcfsd.sock");
         config.storage.remote_prefix = Some("data".into());
         config.sync.state_db = temp.path().join("primary.db");
@@ -4171,8 +4847,49 @@ mod tests {
         )
     }
 
+    fn test_daemon_with_registered_root(
+        temp: &tempfile::TempDir,
+        root_id: &str,
+        local_root: &Path,
+    ) -> TcfsDaemonImpl {
+        test_daemon_with_registered_root_session_requirement(temp, root_id, local_root, false)
+    }
+
     fn memory_operator() -> Operator {
-        Operator::new(Memory::default()).unwrap().finish()
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+        op
+    }
+
+    async fn seed_remote_file(op: &Operator, rel_path: &str) -> String {
+        let manifest = tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: blake3::hash(b"").to_hex().to_string(),
+            file_size: 0,
+            chunks: Vec::new(),
+            vclock: tcfs_sync::conflict::VectorClock::new(),
+            written_by: "remote-test-device".into(),
+            written_at: 1_700_000_000,
+            rel_path: Some(rel_path.into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        let manifest_bytes = manifest.to_bytes().unwrap();
+        let manifest_id = tcfs_sync::index_entry::manifest_object_id(&manifest_bytes);
+        op.write(&format!("data/manifests/{manifest_id}"), manifest_bytes)
+            .await
+            .unwrap();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            op,
+            "data",
+            &format!("data/index/{rel_path}"),
+            &tcfs_sync::index_entry::RemoteIndexEntry::new(&manifest_id, 0, 0),
+        )
+        .await
+        .unwrap();
+        manifest_id
     }
 
     fn run_test_git(repo: &Path, args: &[&str]) {
@@ -4236,11 +4953,760 @@ mod tests {
         device_id: &str,
         permissions: tcfs_auth::DevicePermissions,
     ) -> String {
+        daemon
+            .device_authorizations
+            .authorize(device_id, device_id, permissions.clone())
+            .await;
         let session =
             tcfs_auth::Session::new(device_id, device_id, "test").with_permissions(permissions);
         let token = session.token.clone();
         daemon.session_store.insert(session).await;
         token
+    }
+
+    fn primary_io_test_daemon(
+        temp: &tempfile::TempDir,
+        sync_root: &Path,
+        operator_value: Option<Operator>,
+        master_key_file: Option<PathBuf>,
+        require_session: bool,
+    ) -> TcfsDaemonImpl {
+        let mut config = TcfsConfig::default();
+        config.auth.require_session = require_session;
+        config.sync.sync_root = Some(sync_root.to_path_buf());
+        config.sync.state_db = temp.path().join("hydrate-state.db");
+        config.storage.bucket = "data".into();
+        config.storage.remote_prefix = Some("data".into());
+        config.crypto.master_key_file = master_key_file;
+
+        TcfsDaemonImpl::new(
+            crate::cred_store::new_shared(),
+            Arc::new(config),
+            operator_value.is_some(),
+            "memory://".into(),
+            Arc::new(TokioMutex::new(
+                tcfs_sync::state::StateCache::open(&temp.path().join("hydrate-state.json"))
+                    .unwrap(),
+            )),
+            Arc::new(TokioMutex::new(operator_value)),
+            tcfs_sync::state::PathLocks::new(),
+            "hydrate-test-device".into(),
+            "hydrate-test-device".into(),
+            None,
+        )
+    }
+
+    fn hydrate_test_daemon(
+        temp: &tempfile::TempDir,
+        sync_root: &Path,
+        operator_value: Option<Operator>,
+    ) -> TcfsDaemonImpl {
+        primary_io_test_daemon(temp, sync_root, operator_value, None, false)
+    }
+
+    async fn expect_pull_error(
+        daemon: &TcfsDaemonImpl,
+        token: &str,
+        remote_path: &str,
+        local_path: &Path,
+    ) -> tonic::Status {
+        match daemon
+            .pull(request_with_bearer(
+                PullRequest {
+                    remote_path: remote_path.into(),
+                    local_path: local_path.display().to_string(),
+                },
+                token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("pull should have been rejected before storage access"),
+            Err(error) => error,
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_rejects_fixed_logical_paths_before_storage_or_cache_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let destination = sync_root.join("unchanged.txt");
+        std::fs::write(&destination, b"keep-local-bytes").unwrap();
+        let daemon = primary_io_test_daemon(&temp, &sync_root, None, None, true);
+        let token = insert_test_session(
+            &daemon,
+            "pull-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+
+        for remote_path in ["master.key", ".rotate-pending", ".env"] {
+            let error = expect_pull_error(&daemon, &token, remote_path, &destination).await;
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(
+                error.message().contains("fixed security deny-set"),
+                "{remote_path}: {error}"
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), b"keep-local-bytes");
+            assert!(daemon.state_cache.lock().await.get(&destination).is_none());
+        }
+
+        for name in ["master.key", ".rotate-pending", ".env"] {
+            let blocked_destination = sync_root.join(name);
+            std::fs::write(&blocked_destination, b"keep-sensitive-name-bytes").unwrap();
+            let error =
+                expect_pull_error(&daemon, &token, "notes/safe.txt", &blocked_destination).await;
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(
+                error.message().contains("fixed security deny-set"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(&blocked_destination).unwrap(),
+                b"keep-sensitive-name-bytes"
+            );
+            assert!(daemon
+                .state_cache
+                .lock()
+                .await
+                .get(&blocked_destination)
+                .is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pull_rejects_fixed_rel_discovered_during_resolution_before_cache_or_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let destination = sync_root.join("unchanged.txt");
+        std::fs::write(&destination, b"keep-local-bytes").unwrap();
+
+        let hidden_rel = ".env";
+        let hidden_source = sync_root.join(hidden_rel);
+        let logical_alias = sync_root.join("innocent.txt");
+        std::fs::write(&hidden_source, b"keep-sensitive-source-bytes").unwrap();
+        std::os::unix::fs::symlink(&hidden_source, &logical_alias).unwrap();
+        let manifest = tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: blake3::hash(b"").to_hex().to_string(),
+            file_size: 0,
+            chunks: Vec::new(),
+            vclock: tcfs_sync::conflict::VectorClock::new(),
+            written_by: "hostile-peer".into(),
+            written_at: 1_700_000_000,
+            rel_path: Some(hidden_rel.into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        let manifest_bytes = manifest.to_bytes().unwrap();
+        let object_id = tcfs_sync::index_entry::manifest_object_id(&manifest_bytes);
+        let op = memory_operator();
+        op.write(&format!("data/manifests/{object_id}"), manifest_bytes)
+            .await
+            .unwrap();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            &op,
+            "data",
+            &format!("data/index/{hidden_rel}"),
+            &tcfs_sync::index_entry::RemoteIndexEntry::new(&object_id, 0, 0),
+        )
+        .await
+        .unwrap();
+
+        let daemon = primary_io_test_daemon(&temp, &sync_root, Some(op), None, true);
+        let token = insert_test_session(
+            &daemon,
+            "fallback-pull-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+        let error = expect_pull_error(
+            &daemon,
+            &token,
+            &logical_alias.display().to_string(),
+            &destination,
+        )
+        .await;
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error.message().contains("fixed security deny-set"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"keep-local-bytes");
+        assert_eq!(
+            std::fs::read(&hidden_source).unwrap(),
+            b"keep-sensitive-source-bytes"
+        );
+        assert!(daemon.state_cache.lock().await.get(&destination).is_none());
+    }
+
+    #[tokio::test]
+    async fn file_provider_pull_exact_miss_never_uses_same_filename_elsewhere() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let destination = sync_root.join("destination.txt");
+        std::fs::write(&destination, b"keep-local-bytes").unwrap();
+
+        let op = memory_operator();
+        op.write(
+            "data/index/other/doc.txt",
+            tcfs_sync::index_entry::RemoteIndexEntry::new("other-object", 0, 0).to_legacy_bytes(),
+        )
+        .await
+        .unwrap();
+        let daemon = primary_io_test_daemon(&temp, &sync_root, Some(op), None, true);
+        let token = insert_test_session(
+            &daemon,
+            "file-provider-exact-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+
+        let error = match daemon
+            .pull_exact(request_with_bearer(
+                PullExactRequest {
+                    remote_path: "missing/doc.txt".into(),
+                    expected_version: "missing-version".into(),
+                },
+                &token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("an exact FileProvider miss must not use basename fallback"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert!(
+            error
+                .message()
+                .contains("no exact index entry for FileProvider item"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"keep-local-bytes");
+        assert!(daemon.state_cache.lock().await.get(&destination).is_none());
+    }
+
+    #[tokio::test]
+    async fn file_provider_pull_exact_requires_version_and_marks_empty_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let op = memory_operator();
+        let version = seed_remote_file(&op, "empty.txt").await;
+        let daemon = primary_io_test_daemon(&temp, &sync_root, Some(op), None, true);
+        let token = insert_test_session(
+            &daemon,
+            "file-provider-version-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+
+        let stale = match daemon
+            .pull_exact(request_with_bearer(
+                PullExactRequest {
+                    remote_path: "empty.txt".into(),
+                    expected_version: "stale-version".into(),
+                },
+                &token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("stale exact version must fail before content streaming"),
+            Err(error) => error,
+        };
+        assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            stale
+                .message()
+                .starts_with(FILE_PROVIDER_VERSION_MISMATCH_PREFIX),
+            "{stale}"
+        );
+
+        let mut stream = daemon
+            .pull_exact(request_with_bearer(
+                PullExactRequest {
+                    remote_path: "empty.txt".into(),
+                    expected_version: version.clone(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        let terminal = tokio_stream::StreamExt::next(&mut stream)
+            .await
+            .expect("empty PullExact must emit a terminal marker")
+            .unwrap();
+        assert!(terminal.done);
+        assert!(terminal.exact_content);
+        assert_eq!(terminal.version_token, version);
+        assert_eq!(terminal.bytes_received, 0);
+        assert_eq!(terminal.total_bytes, 0);
+        assert!(terminal.data.is_empty());
+        assert!(tokio_stream::StreamExt::next(&mut stream).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn file_provider_pull_exact_rejects_stale_before_manifest_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let op = memory_operator();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            &op,
+            "data",
+            "data/index/corrupt.txt",
+            &tcfs_sync::index_entry::RemoteIndexEntry::new("missing-manifest", 0, 0),
+        )
+        .await
+        .unwrap();
+        let daemon = primary_io_test_daemon(&temp, &sync_root, Some(op.clone()), None, true);
+        let token = insert_test_session(
+            &daemon,
+            "file-provider-corrupt-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+
+        let stale = match daemon
+            .pull_exact(request_with_bearer(
+                PullExactRequest {
+                    remote_path: "corrupt.txt".into(),
+                    expected_version: "stale-manifest".into(),
+                },
+                &token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("stale exact version must win over unrelated manifest corruption"),
+            Err(error) => error,
+        };
+        assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            stale
+                .message()
+                .starts_with(FILE_PROVIDER_VERSION_MISMATCH_PREFIX),
+            "{stale}"
+        );
+
+        let error = match daemon
+            .pull_exact(request_with_bearer(
+                PullExactRequest {
+                    remote_path: "corrupt.txt".into(),
+                    expected_version: "missing-manifest".into(),
+                },
+                &token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("missing selected manifest is corruption, not logical absence"),
+            Err(error) => error,
+        };
+        assert_ne!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.code(), tonic::Code::Internal);
+
+        let preparing = tcfs_sync::index_entry::VersionedIndexEntry::preparing(
+            None,
+            tcfs_sync::index_entry::PendingIndexEntry::new(
+                "pending-manifest",
+                0,
+                0,
+                "data/staging/manifests/00000000-0000-4000-8000-000000000000-pending-manifest.json",
+            ),
+        )
+        .to_json_bytes()
+        .unwrap();
+        op.write("data/index/pending.txt", preparing.clone())
+            .await
+            .unwrap();
+        op.write(
+            "data/manifests/pending-manifest",
+            b"must not be parsed by a bound pending-only pull".to_vec(),
+        )
+        .await
+        .unwrap();
+        let pending = match daemon
+            .pull_exact(request_with_bearer(
+                PullExactRequest {
+                    remote_path: "pending.txt".into(),
+                    expected_version: "pending-manifest".into(),
+                },
+                &token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("bound PullExact must not recover a never-visible pending version"),
+            Err(error) => error,
+        };
+        assert_eq!(pending.code(), tonic::Code::NotFound);
+        assert_eq!(
+            op.read("data/index/pending.txt").await.unwrap().to_vec(),
+            preparing
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_rejects_outside_root_and_custom_master_key_alias_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let key_path = sync_root.join("custom-key-material.bin");
+        std::fs::write(&key_path, b"keep-key-bytes").unwrap();
+        #[cfg(unix)]
+        let key_alias = {
+            let alias = sync_root.join("key-alias.bin");
+            std::os::unix::fs::symlink(&key_path, &alias).unwrap();
+            alias
+        };
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&outside, b"keep-outside-bytes").unwrap();
+
+        let daemon = primary_io_test_daemon(&temp, &sync_root, None, Some(key_path.clone()), true);
+        let token = insert_test_session(
+            &daemon,
+            "scoped-pull-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+
+        let outside_error = expect_pull_error(&daemon, &token, "notes/safe.txt", &outside).await;
+        assert_eq!(outside_error.code(), tonic::Code::InvalidArgument);
+        assert!(outside_error
+            .message()
+            .contains("outside configured sync.sync_root"));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep-outside-bytes");
+
+        let error = expect_pull_error(&daemon, &token, "notes/safe.txt", &key_path).await;
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error.message().contains("crypto.master_key_file"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&key_path).unwrap(), b"keep-key-bytes");
+        assert!(daemon.state_cache.lock().await.get(&key_path).is_none());
+        #[cfg(unix)]
+        {
+            let error = expect_pull_error(&daemon, &token, "notes/safe.txt", &key_alias).await;
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(
+                error.message().contains("crypto.master_key_file"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&key_path).unwrap(), b"keep-key-bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn hydrate_rejects_fixed_targets_before_storage_or_cache_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let daemon = primary_io_test_daemon(&temp, &sync_root, None, None, true);
+        let token = insert_test_session(
+            &daemon,
+            "hydrate-fixed-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+
+        for name in ["master.key", ".rotate-pending", ".env"] {
+            let real_path = sync_root.join(name);
+            let stub_path = sync_root.join(tcfs_vfs::real_to_stub_name(std::ffi::OsStr::new(name)));
+            std::fs::write(&real_path, b"keep-real-bytes").unwrap();
+            let stub = tcfs_vfs::StubMeta::for_upload(
+                blake3::hash(b"old").to_hex().as_ref(),
+                3,
+                1,
+                "data",
+                name,
+            );
+            let stub_bytes = stub.to_bytes();
+            std::fs::write(&stub_path, &stub_bytes).unwrap();
+
+            let error = match daemon
+                .hydrate(request_with_bearer(
+                    HydrateRequest {
+                        stub_path: stub_path.display().to_string(),
+                        partial_ok: false,
+                    },
+                    &token,
+                ))
+                .await
+            {
+                Ok(_) => panic!("fixed-deny hydrate should fail before storage access"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(
+                error.message().contains("fixed security deny-set"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&real_path).unwrap(), b"keep-real-bytes");
+            assert_eq!(std::fs::read(&stub_path).unwrap(), stub_bytes);
+            assert!(daemon.state_cache.lock().await.get(&real_path).is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hydrate_rejects_custom_master_key_through_symlinked_directory_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        let real_dir = sync_root.join("real");
+        let alias_dir = sync_root.join("alias");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &alias_dir).unwrap();
+        let key_path = real_dir.join("custom-key-material.bin");
+        let canonical_stub = real_dir.join("custom-key-material.bin.tc");
+        let aliased_stub = alias_dir.join("custom-key-material.bin.tc");
+        std::fs::write(&key_path, b"keep-key-bytes").unwrap();
+        let stub = tcfs_vfs::StubMeta::for_upload(
+            blake3::hash(b"old").to_hex().as_ref(),
+            3,
+            1,
+            "data",
+            "real/custom-key-material.bin",
+        );
+        let stub_bytes = stub.to_bytes();
+        std::fs::write(&canonical_stub, &stub_bytes).unwrap();
+
+        let daemon = primary_io_test_daemon(&temp, &sync_root, None, Some(key_path.clone()), true);
+        let token = insert_test_session(
+            &daemon,
+            "hydrate-key-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+        let error = match daemon
+            .hydrate(request_with_bearer(
+                HydrateRequest {
+                    stub_path: aliased_stub.display().to_string(),
+                    partial_ok: false,
+                },
+                &token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("master-key hydrate alias should fail before storage access"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error.message().contains("crypto.master_key_file"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&key_path).unwrap(), b"keep-key-bytes");
+        assert_eq!(std::fs::read(&canonical_stub).unwrap(), stub_bytes);
+        assert!(daemon.state_cache.lock().await.get(&key_path).is_none());
+    }
+
+    #[tokio::test]
+    async fn hydrate_stale_stub_uses_current_exact_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        let rel_path = "notes/todo.txt";
+        std::fs::create_dir_all(sync_root.join("notes")).unwrap();
+
+        let current_hash = blake3::hash(b"").to_hex().to_string();
+        let stale_hash = blake3::hash(b"old content").to_hex().to_string();
+        let manifest = tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: current_hash.clone(),
+            file_size: 0,
+            chunks: Vec::new(),
+            vclock: tcfs_sync::conflict::VectorClock::new(),
+            written_by: "honey".into(),
+            written_at: 1_700_000_000,
+            rel_path: Some(rel_path.into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        let manifest_bytes = manifest.to_bytes().unwrap();
+        let manifest_id = tcfs_sync::index_entry::manifest_object_id(&manifest_bytes);
+        let op = memory_operator();
+        op.write(&format!("data/manifests/{manifest_id}"), manifest_bytes)
+            .await
+            .unwrap();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            &op,
+            "data",
+            &format!("data/index/{rel_path}"),
+            &tcfs_sync::index_entry::RemoteIndexEntry::new(&manifest_id, 0, 0),
+        )
+        .await
+        .unwrap();
+
+        let stub_path = sync_root.join("notes/todo.txt.tc");
+        let stub = tcfs_vfs::StubMeta::for_upload(&stale_hash, 11, 1, "data", rel_path);
+        std::fs::write(&stub_path, stub.to_bytes()).unwrap();
+
+        let daemon = hydrate_test_daemon(&temp, &sync_root, Some(op));
+        let token = insert_test_session(
+            &daemon,
+            "hydrate-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+        let response = daemon
+            .hydrate(request_with_bearer(
+                HydrateRequest {
+                    stub_path: stub_path.display().to_string(),
+                    partial_ok: false,
+                },
+                &token,
+            ))
+            .await
+            .unwrap();
+        let progress = response
+            .into_inner()
+            .next()
+            .await
+            .expect("hydrate progress")
+            .unwrap();
+
+        assert!(progress.done);
+        assert!(
+            progress.error.is_empty(),
+            "hydrate error: {}",
+            progress.error
+        );
+        assert_eq!(progress.bytes_received, 0);
+        assert_eq!(progress.total_bytes, 0);
+        assert_eq!(std::fs::read(sync_root.join(rel_path)).unwrap(), b"");
+        assert!(!stub_path.exists());
+    }
+
+    #[tokio::test]
+    async fn hydrate_exact_index_miss_never_uses_same_filename_elsewhere() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        let requested_rel = "notes/todo.txt";
+        let other_rel = "other/todo.txt";
+        std::fs::create_dir_all(sync_root.join("notes")).unwrap();
+
+        let empty_hash = blake3::hash(b"").to_hex().to_string();
+        let other_manifest = tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: empty_hash,
+            file_size: 0,
+            chunks: Vec::new(),
+            vclock: tcfs_sync::conflict::VectorClock::new(),
+            written_by: "remote-peer".into(),
+            written_at: 1_700_000_000,
+            rel_path: Some(other_rel.into()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        let other_bytes = other_manifest.to_bytes().unwrap();
+        let other_id = tcfs_sync::index_entry::manifest_object_id(&other_bytes);
+        let op = memory_operator();
+        op.write(&format!("data/manifests/{other_id}"), other_bytes)
+            .await
+            .unwrap();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            &op,
+            "data",
+            &format!("data/index/{other_rel}"),
+            &tcfs_sync::index_entry::RemoteIndexEntry::new(&other_id, 0, 0),
+        )
+        .await
+        .unwrap();
+
+        let stub_path = sync_root.join("notes/todo.txt.tc");
+        let stub = tcfs_vfs::StubMeta::for_upload(
+            blake3::hash(b"stale").to_hex().as_ref(),
+            5,
+            1,
+            "data",
+            requested_rel,
+        );
+        let stub_bytes = stub.to_bytes();
+        std::fs::write(&stub_path, &stub_bytes).unwrap();
+
+        let daemon = hydrate_test_daemon(&temp, &sync_root, Some(op));
+        let token = insert_test_session(
+            &daemon,
+            "hydrate-exact-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+        let error = match daemon
+            .hydrate(request_with_bearer(
+                HydrateRequest {
+                    stub_path: stub_path.display().to_string(),
+                    partial_ok: false,
+                },
+                &token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("exact hydrate miss must not use filename fallback"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert!(error.message().contains("no current index entry"));
+        assert_eq!(std::fs::read(&stub_path).unwrap(), stub_bytes);
+        let real_path = sync_root.join(requested_rel);
+        assert!(std::fs::symlink_metadata(&real_path).is_err());
+        assert!(daemon.state_cache.lock().await.get(&real_path).is_none());
+    }
+
+    #[tokio::test]
+    async fn hydrate_rejects_stub_origin_for_a_different_local_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(sync_root.join("notes")).unwrap();
+        let stub_path = sync_root.join("notes/todo.txt.tc");
+        let stub = tcfs_vfs::StubMeta::for_upload(
+            blake3::hash(b"old").to_hex().as_ref(),
+            3,
+            1,
+            "data",
+            "other/path.txt",
+        );
+        std::fs::write(&stub_path, stub.to_bytes()).unwrap();
+        let daemon = hydrate_test_daemon(&temp, &sync_root, None);
+        let token = insert_test_session(
+            &daemon,
+            "hydrate-reader",
+            tcfs_auth::DevicePermissions::read_only(),
+        )
+        .await;
+
+        let error = match daemon
+            .hydrate(request_with_bearer(
+                HydrateRequest {
+                    stub_path: stub_path.display().to_string(),
+                    partial_ok: false,
+                },
+                &token,
+            ))
+            .await
+        {
+            Ok(_) => panic!("mismatched stub origin must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error
+                .message()
+                .contains("does not match local hydrate target"),
+            "unexpected error: {error}"
+        );
     }
 
     fn test_sync_state(remote_path: &str, last_synced: u64) -> tcfs_sync::state::SyncState {
@@ -4569,7 +6035,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_enroll_requires_admin_session() {
+    async fn auth_enroll_allows_self_or_admin_session() {
         let daemon = test_daemon_with_required_sessions();
         let request = AuthEnrollRequest {
             device_id: "new-device".into(),
@@ -4594,6 +6060,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(non_admin.code(), tonic::Code::PermissionDenied);
 
+        let self_request = AuthEnrollRequest {
+            device_id: "regular-device".into(),
+            method: "unsupported".into(),
+        };
+        let self_allowed = daemon
+            .auth_enroll(request_with_bearer(self_request, &user_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!self_allowed.success);
+        assert!(self_allowed.error.contains("unsupported auth method"));
+
         let admin_token = insert_test_session(
             &daemon,
             "admin-device",
@@ -4612,7 +6090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_complete_enroll_requires_admin_session() {
+    async fn auth_complete_enroll_allows_self_or_admin_session() {
         let daemon = test_daemon_with_required_sessions();
         let request = AuthCompleteEnrollRequest {
             device_id: "new-device".into(),
@@ -4637,6 +6115,22 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(non_admin.code(), tonic::Code::PermissionDenied);
+
+        let self_request = AuthCompleteEnrollRequest {
+            device_id: "regular-device".into(),
+            method: "totp".into(),
+            attestation_data: Vec::new(),
+        };
+        let self_allowed = daemon
+            .auth_complete_enroll(request_with_bearer(self_request, &user_token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            self_allowed.success,
+            "self completion failed: {}",
+            self_allowed.error
+        );
 
         let admin_token = insert_test_session(
             &daemon,
@@ -4875,6 +6369,19 @@ mod tests {
             bootstrap.master_key_base64.as_deref(),
             Some(expected_master_key.as_str())
         );
+        let bootstrap_token = bootstrap
+            .session_token
+            .as_deref()
+            .expect("encrypted bootstrap must carry a joining-device session");
+        assert!(bootstrap.session_expires_at.is_some());
+        let session = daemon
+            .session_store
+            .validate(bootstrap_token)
+            .await
+            .expect("bootstrap session must be live");
+        assert_eq!(session.device_id, resp.device_id);
+        assert_eq!(session.device_name, "new-laptop");
+        assert!(!session.permissions.can_admin);
     }
 
     #[tokio::test]
@@ -5019,6 +6526,86 @@ mod tests {
         assert_eq!(resp.state, "unknown");
     }
 
+    #[tokio::test]
+    async fn list_files_uses_live_remote_namespace_and_cache_only_for_bound_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let op = memory_operator();
+
+        let live_manifest = seed_remote_file(&op, "live.txt").await;
+        seed_remote_file(&op, "new.txt").await;
+        tcfs_sync::engine::publish_directory_marker(&op, "data", "empty")
+            .await
+            .unwrap();
+        op.write(
+            "data/index/stale.txt",
+            tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+                .to_json_bytes()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        op.write(
+            "data/index/ghost/.tcfs_dir",
+            tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+                .to_json_bytes()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let daemon = primary_io_test_daemon(&temp, &sync_root, Some(op), None, false);
+        {
+            let mut cache = daemon.state_cache.lock().await;
+            let mut live =
+                test_sync_state(&format!("data/manifests/{live_manifest}"), 1_700_000_000);
+            live.blake3 = "bound-live-content".into();
+            live.status = tcfs_sync::state::FileSyncStatus::Synced;
+            cache.set(&sync_root.join("live.txt"), live);
+            cache.set(
+                &sync_root.join("stale.txt"),
+                test_sync_state("data/index/stale.txt", 1_600_000_000),
+            );
+            cache.flush().unwrap();
+        }
+
+        let response = daemon
+            .list_files(tonic::Request::new(ListFilesRequest {
+                prefix: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let paths: Vec<&str> = response
+            .files
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["empty/", "live.txt", "new.txt"]);
+
+        let live = response
+            .files
+            .iter()
+            .find(|entry| entry.path == "live.txt")
+            .unwrap();
+        assert_eq!(live.size, 0, "remote index owns current file metadata");
+        assert_eq!(live.blake3, "bound-live-content");
+        assert_eq!(live.hydration_state, "synced");
+        assert_eq!(live.version_token, live_manifest);
+
+        let new = response
+            .files
+            .iter()
+            .find(|entry| entry.path == "new.txt")
+            .unwrap();
+        assert_eq!(new.hydration_state, "not_synced");
+        assert!(new.blake3.is_empty());
+        assert!(!new.version_token.is_empty());
+        assert!(paths.iter().all(|path| *path != "stale.txt"));
+        assert!(paths.iter().all(|path| *path != "ghost/"));
+    }
+
     #[test]
     fn logical_rel_path_prefers_sync_root_key_for_manifest_entries() {
         let root = tempfile::tempdir().unwrap();
@@ -5036,6 +6623,28 @@ mod tests {
         assert_eq!(rel, "ci-smoke/0.12.9/hello.txt");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn logical_rel_path_normalizes_sync_root_alias_like_state_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical_root = temp.path().join("canonical");
+        let aliased_root = temp.path().join("alias");
+        std::fs::create_dir(&canonical_root).unwrap();
+        std::os::unix::fs::symlink(&canonical_root, &aliased_root).unwrap();
+        let key = canonical_root.join("nested/hello.txt");
+        let state = test_sync_state("data/manifests/abc123", 1_700_000_000);
+
+        let rel = logical_rel_path_from_state_key(
+            &key.to_string_lossy(),
+            &state,
+            Some(&aliased_root),
+            "data",
+        )
+        .unwrap();
+
+        assert_eq!(rel, "nested/hello.txt");
+    }
+
     #[test]
     fn logical_rel_path_falls_back_to_remote_index_key() {
         let root = tempfile::tempdir().unwrap();
@@ -5048,40 +6657,128 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_empty_root_returns_logical_catch_up_events() {
-        use futures::StreamExt;
+    async fn watch_delete_requires_authoritative_tombstone() {
+        let op = memory_operator();
+        let live_version = seed_remote_file(&op, "live.txt").await;
 
-        let daemon = test_daemon();
-        let tracked = std::path::PathBuf::from("/tmp/tcfs-state-key/ci-smoke/0.12.9/hello.txt");
+        let stale_delete = authoritative_watch_event(
+            &op,
+            "data",
+            "live.txt",
+            "deleted",
+            1_700_000_000,
+            "remote-device".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale_delete.event_type, "modified");
+        assert_eq!(stale_delete.version_token, live_version);
 
+        let missing = match authoritative_watch_event(
+            &op,
+            "data",
+            "missing.txt",
+            "deleted",
+            1_700_000_001,
+            "remote-device".into(),
+        )
+        .await
+        {
+            Ok(_) => panic!("missing index authority must not authorize a deletion"),
+            Err(error) => error,
+        };
+        assert_eq!(missing.code(), tonic::Code::FailedPrecondition);
+        assert!(missing.message().contains("missing (not tombstoned)"));
+
+        op.write(
+            "data/index/deleted.txt",
+            tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+                .to_json_bytes()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let deleted = authoritative_watch_event(
+            &op,
+            "data",
+            "deleted.txt",
+            "modified",
+            1_700_000_002,
+            "remote-device".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted.event_type, "deleted");
+        assert!(deleted.version_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn watch_manifest_resolver_error_terminates_authority() {
+        let op = memory_operator();
+        tcfs_sync::index_entry::write_committed_index_entry(
+            &op,
+            "data",
+            "data/index/corrupt.txt",
+            &tcfs_sync::index_entry::RemoteIndexEntry::new("missing-manifest", 0, 0),
+        )
+        .await
+        .unwrap();
+
+        let error = match authoritative_watch_event(
+            &op,
+            "data",
+            "corrupt.txt",
+            "modified",
+            1_700_000_000,
+            "remote-device".into(),
+        )
+        .await
+        {
+            Ok(_) => panic!("corrupt manifest authority must terminate Watch"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), tonic::Code::Internal);
+        assert!(error
+            .message()
+            .contains("resolve authoritative Watch manifest"));
+    }
+
+    #[tokio::test]
+    async fn watch_rejects_partial_cache_catch_up_without_advancing_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let op = memory_operator();
+        seed_remote_file(&op, "cached.txt").await;
+        seed_remote_file(&op, "remote-only.txt").await;
+        let daemon = primary_io_test_daemon(&temp, &sync_root, Some(op), None, false);
         {
             let mut cache = daemon.state_cache.lock().await;
-            cache.set(
-                &tracked,
-                test_sync_state("data/index/ci-smoke/0.12.9/hello.txt", 1_700_000_000),
-            );
+            let mut stale = test_sync_state("data/manifests/forged-stale-token", 1_700_000_000);
+            stale.device_id = "stale-cache-device".into();
+            cache.set(&sync_root.join("cached.txt"), stale);
             cache.flush().unwrap();
         }
 
-        let mut stream = daemon
+        let error = match daemon
             .watch(tonic::Request::new(WatchRequest {
                 paths: vec![String::new()],
                 since_timestamp: 1,
             }))
             .await
-            .unwrap()
-            .into_inner();
-
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-            .await
-            .expect("watch should emit catch-up event")
-            .expect("watch stream should stay open")
-            .expect("catch-up event should not be an error");
-
-        assert_eq!(event.path, "ci-smoke/0.12.9/hello.txt");
-        assert_eq!(event.filename, "hello.txt");
-        assert_eq!(event.event_type, "modified");
-        assert_eq!(event.size, 123);
+        {
+            Ok(_) => panic!(
+                "partial cache catch-up must not hide the remote-only path or stale cache token"
+            ),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            error
+                .message()
+                .starts_with("authoritative incremental Watch journal is unavailable;"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -5146,7 +6843,7 @@ mod tests {
         let primary_before = std::fs::read(&primary_state_path).unwrap();
 
         let mut config = TcfsConfig::default();
-        config.auth.require_session = false;
+        config.auth.require_session = true;
         config.daemon.socket = temp.path().join("tcfsd.sock");
         config.storage.remote_prefix = Some("data".into());
         config.sync.state_db = temp.path().join("primary.db");
@@ -5173,11 +6870,21 @@ mod tests {
             "neo".into(),
             None,
         );
+        let permissions = tcfs_auth::DevicePermissions {
+            can_pull: true,
+            can_push: true,
+            allowed_prefixes: vec!["git-roam/tool-daemon".into()],
+            ..Default::default()
+        };
+        let token = insert_test_session(&daemon, "root-operator", permissions).await;
 
         let inspected = daemon
-            .list_conflicts(tonic::Request::new(ListConflictsRequest {
-                root_id: root_id.into(),
-            }))
+            .list_conflicts(request_with_bearer(
+                ListConflictsRequest {
+                    root_id: root_id.into(),
+                },
+                &token,
+            ))
             .await
             .expect("inspect registered root")
             .into_inner();
@@ -5192,12 +6899,15 @@ mod tests {
         assert_eq!(inspected.conflicts[0].times_recorded, 6);
 
         let resolved = daemon
-            .resolve_registered_root(tonic::Request::new(ResolveRegisteredRootRequest {
-                root_id: root_id.into(),
-                path: repo.display().to_string(),
-                mode: RegisteredRootResolveMode::GitKeepBothExecute.into(),
-                operator_cli: true,
-            }))
+            .resolve_registered_root(request_with_bearer(
+                ResolveRegisteredRootRequest {
+                    root_id: root_id.into(),
+                    path: repo.display().to_string(),
+                    mode: RegisteredRootResolveMode::GitKeepBothExecute.into(),
+                    operator_cli: true,
+                },
+                &token,
+            ))
             .await
             .expect("resolve registered root")
             .into_inner();
@@ -5230,34 +6940,139 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registered_root_rootless_resolve_rejects_repo_ordinary_missing_and_relative_paths() {
+    async fn registered_root_rootless_repo_rejects_route_and_retired_files_are_uniform() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         init_clean_test_repo(&repo);
         let daemon = test_daemon_with_registered_root(&temp, "named", &repo);
+        let error = daemon
+            .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                path: repo.display().to_string(),
+                resolution: "git_keep_both_dry_run".into(),
+                operator_cli: true,
+            }))
+            .await
+            .expect_err("legacy repo route must not enter a registered root");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("--root"), "{error}");
+        assert!(!error.message().contains("named"), "{error}");
 
-        for (path, resolution, operator_cli) in [
-            (repo.clone(), "git_keep_both_dry_run", true),
-            (repo.join("README.md"), "keep_local", false),
-            (repo.join("deleted.txt"), "keep_remote", false),
-            (PathBuf::from("repo/README.md"), "keep_local", false),
+        let unrelated = temp.path().join("ordinary-missing");
+        let mut expected_response = None;
+        for (path, resolution) in [
+            (repo.join("README.md"), "keep_local"),
+            (repo.join("deleted.txt"), "keep_remote"),
+            (unrelated, "keep_local"),
+            (PathBuf::from("repo/README.md"), "keep_local"),
         ] {
-            let error = daemon
+            let response = daemon
                 .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
                     path: path.display().to_string(),
                     resolution: resolution.into(),
-                    operator_cli,
+                    operator_cli: false,
                 }))
                 .await
-                .expect_err("legacy/rootless RPC must not enter a registered root");
-            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-            assert!(
-                error.message().contains("--root")
-                    || error.message().contains("ambiguous relative path"),
-                "unexpected fence message for {}: {}",
-                path.display(),
-                error.message()
-            );
+                .expect("retired verb returns a uniform response")
+                .into_inner();
+            assert!(!response.success);
+            let observed = (response.resolved_path, response.error);
+            if let Some(expected) = &expected_response {
+                assert_eq!(&observed, expected, "retired verb became a path oracle");
+            } else {
+                expected_response = Some(observed);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_root_retires_unrooted_primary_per_file_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("named-repo");
+        init_clean_test_repo(&repo);
+        let primary_path = temp.path().join("primary-file.txt");
+        std::fs::write(&primary_path, b"primary\n").unwrap();
+        let daemon = test_daemon_with_registered_root(&temp, "named", &repo);
+
+        let mut entry = test_sync_state("data/manifests/primary-file", 42);
+        entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
+        entry.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+            rel_path: "primary-file.txt".into(),
+            local_blake3: "local".into(),
+            remote_blake3: "remote".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            detected_at: 42,
+            times_recorded: 1,
+            remote_manifest_key: Some("data/manifests/primary-file-peer".into()),
+        });
+        {
+            let mut cache = daemon.state_cache.lock().await;
+            cache.set(&primary_path, entry);
+            cache.flush().unwrap();
+        }
+
+        let response = daemon
+            .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                path: primary_path.display().to_string(),
+                resolution: "keep_local".into(),
+                operator_cli: false,
+            }))
+            .await
+            .expect("retired primary per-file route returns a bounded response")
+            .into_inner();
+
+        assert!(!response.success);
+        assert!(response
+            .error
+            .contains("legacy per-file mutation is disabled"));
+        let cache = daemon.state_cache.lock().await;
+        assert!(cache.get(&primary_path).is_some_and(|state| {
+            state.status == tcfs_sync::state::FileSyncStatus::Conflict && state.conflict.is_some()
+        }));
+    }
+
+    #[tokio::test]
+    async fn registered_root_rootless_restricted_session_cannot_probe_enrollment() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let daemon =
+            test_daemon_with_registered_root_session_requirement(&temp, "named", &repo, true);
+        let permissions = tcfs_auth::DevicePermissions {
+            can_push: true,
+            allowed_prefixes: vec!["data".into()],
+            ..Default::default()
+        };
+        let token = insert_test_session(&daemon, "restricted-device", permissions).await;
+        let mut expected_response = None;
+
+        for path in [
+            repo.clone(),
+            repo.join("deleted.txt"),
+            temp.path().join("unrelated-missing"),
+            PathBuf::from("repo/deleted.txt"),
+        ] {
+            let response = daemon
+                .resolve_conflict(request_with_bearer(
+                    ResolveConflictRequest {
+                        path: path.display().to_string(),
+                        resolution: "keep_local".into(),
+                        operator_cli: false,
+                    },
+                    &token,
+                ))
+                .await
+                .expect("authorized retired verb returns a uniform response")
+                .into_inner();
+            assert!(!response.success);
+            let observed = (response.resolved_path, response.error);
+            if let Some(expected) = &expected_response {
+                assert_eq!(&observed, expected, "restricted route became an oracle");
+            } else {
+                expected_response = Some(observed);
+            }
         }
     }
 
@@ -5273,22 +7088,30 @@ mod tests {
         symlink(&repo, &alias).unwrap();
         let daemon = test_daemon_with_registered_root(&temp, "named", &repo);
 
-        for (path, resolution, operator_cli) in [
-            (alias.clone(), "git_keep_both_dry_run", true),
-            (alias.join("deleted.txt"), "keep_remote", false),
-        ] {
-            let error = daemon
-                .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
-                    path: path.display().to_string(),
-                    resolution: resolution.into(),
-                    operator_cli,
-                }))
-                .await
-                .expect_err("symlink alias must not bypass registered-root routing");
-            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-            assert!(error.message().contains("registered root 'named'"));
-            assert!(error.message().contains("--root named"));
-        }
+        let error = daemon
+            .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                path: alias.display().to_string(),
+                resolution: "git_keep_both_dry_run".into(),
+                operator_cli: true,
+            }))
+            .await
+            .expect_err("symlink alias must not bypass registered-root routing");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("--root"));
+
+        let response = daemon
+            .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                path: alias.join("deleted.txt").display().to_string(),
+                resolution: "keep_remote".into(),
+                operator_cli: false,
+            }))
+            .await
+            .expect("retired verb is rejected before alias inspection")
+            .into_inner();
+        assert!(!response.success);
+        assert!(response
+            .error
+            .contains("legacy per-file mutation is disabled"));
     }
 
     #[test]
@@ -5385,6 +7208,62 @@ mod tests {
     }
 
     #[test]
+    fn startup_rejects_custom_master_key_inside_primary_or_named_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let named = temp.path().join("named");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&named).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.sync_root = Some(primary.clone());
+        config.crypto.master_key_file = Some(primary.join("secrets/custom-vault.bin"));
+        let error = validate_registered_roots_config(&config)
+            .expect_err("startup must reject a custom key in the primary root")
+            .to_string();
+        assert!(error.contains("primary sync.sync_root"), "{error}");
+
+        config.sync.sync_root = Some(temp.path().join("other-primary"));
+        config.storage.remote_prefix = Some("roots/primary".into());
+        config.crypto.master_key_file = Some(named.join("custom-vault.bin"));
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: named,
+                remote_prefix: "roots/named".into(),
+                state_path: temp.path().join("reconcile/named.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        let error = validate_registered_roots_config(&config)
+            .expect_err("startup must reject a custom key in a named root")
+            .to_string();
+        assert!(error.contains("registered root 'named'"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_rejects_master_key_through_existing_root_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_root = temp.path().join("real-root");
+        std::fs::create_dir(&real_root).unwrap();
+        let root_alias = temp.path().join("root-alias");
+        symlink(&real_root, &root_alias).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.sync.sync_root = Some(root_alias);
+        config.crypto.master_key_file = Some(real_root.join("custom-vault.bin"));
+
+        let error = validate_registered_roots_config(&config)
+            .expect_err("startup must resolve existing root aliases")
+            .to_string();
+        assert!(error.contains("primary sync.sync_root"), "{error}");
+    }
+
+    #[test]
     fn registered_root_state_directory_rejects_lexical_primary_and_named_overlap() {
         let temp = tempfile::tempdir().unwrap();
         let primary = temp.path().join("primary");
@@ -5440,6 +7319,49 @@ mod tests {
                 "unsafe object key passed prefix fence: {key}"
             );
         }
+    }
+
+    #[test]
+    fn primary_conflict_route_requires_current_prefix_and_conflict_state() {
+        let mut entry = test_sync_state("data/manifests/current", 42);
+        entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
+        entry.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+            rel_path: "docs/file.txt".into(),
+            local_blake3: "local".into(),
+            remote_blake3: "remote".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            detected_at: 42,
+            times_recorded: 1,
+            remote_manifest_key: Some("data/manifests/peer".into()),
+        });
+        assert!(primary_conflict_entry_matches_prefix(&entry, "data"));
+
+        entry.remote_path = "old-prefix/manifests/current".into();
+        assert!(!primary_conflict_entry_matches_prefix(&entry, "data"));
+        entry.remote_path = "data/manifests/current".into();
+        entry.conflict.as_mut().unwrap().remote_manifest_key =
+            Some("named-root/manifests/peer".into());
+        assert!(!primary_conflict_entry_matches_prefix(&entry, "data"));
+        entry.conflict.as_mut().unwrap().remote_manifest_key = Some("data/manifests/peer".into());
+        entry.status = tcfs_sync::state::FileSyncStatus::Synced;
+        assert!(!primary_conflict_entry_matches_prefix(&entry, "data"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_missing_tail_rejects_dangling_symlink_component() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dangling = temp.path().join("dangling");
+        symlink(temp.path().join("missing-target"), &dangling).unwrap();
+        let requested = dangling.join("file.txt");
+        let error = canonicalize_with_missing_tail(&requested)
+            .expect_err("dangling symlink must not become an ordinary missing tail");
+        assert!(error.contains("unresolved symlink"), "{error}");
     }
 
     #[cfg(unix)]
@@ -5580,6 +7502,119 @@ mod tests {
         assert!(error.contains("after canonicalization"), "{error}");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn registered_root_rejects_local_root_alias_below_writable_parent() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected-repo");
+        let alternate = temp.path().join("alternate-repo");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&alternate).unwrap();
+        let selected_marker = selected.join("marker");
+        let alternate_marker = alternate.join("marker");
+        std::fs::write(&selected_marker, b"selected").unwrap();
+        std::fs::write(&alternate_marker, b"alternate").unwrap();
+
+        let writable_parent = temp.path().join("shared-routes");
+        std::fs::create_dir_all(&writable_parent).unwrap();
+        std::fs::set_permissions(&writable_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let configured_alias = writable_parent.join("named");
+        symlink(&selected, &configured_alias).unwrap();
+
+        let state_dir = temp.path().join("reconcile");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state_path = state_dir.join("named.json");
+        std::fs::write(&state_path, b"{}").unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.root_state_dir = Some(state_dir);
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: configured_alias,
+                remote_prefix: "roots/named".into(),
+                state_path,
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+        validate_registered_roots_config(&config)
+            .expect("lexically valid alias passes startup mapping validation");
+
+        let error =
+            canonical_registered_root(&config, "named", config.sync.roots.get("named").unwrap())
+                .expect_err("writable lexical parent must not route a registered root");
+        assert!(error.contains("untrusted original path chain"), "{error}");
+        assert!(error.contains("writable by another principal"), "{error}");
+        assert_eq!(std::fs::read(&selected_marker).unwrap(), b"selected");
+        assert_eq!(std::fs::read(&alternate_marker).unwrap(), b"alternate");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn registered_root_rejects_state_directory_alias_below_writable_parent() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let selected_state_dir = temp.path().join("selected-state");
+        let alternate_state_dir = temp.path().join("alternate-state");
+        std::fs::create_dir_all(&selected_state_dir).unwrap();
+        std::fs::create_dir_all(&alternate_state_dir).unwrap();
+        std::fs::set_permissions(&selected_state_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(&alternate_state_dir, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let selected_state = selected_state_dir.join("named.json");
+        let alternate_state = alternate_state_dir.join("named.json");
+        std::fs::write(&selected_state, b"{\"selected\":true}").unwrap();
+        std::fs::write(&alternate_state, b"{\"alternate\":true}").unwrap();
+        std::fs::set_permissions(&selected_state, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&alternate_state, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let writable_parent = temp.path().join("shared-state-routes");
+        std::fs::create_dir_all(&writable_parent).unwrap();
+        std::fs::set_permissions(&writable_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let configured_state_dir = writable_parent.join("reconcile");
+        symlink(&selected_state_dir, &configured_state_dir).unwrap();
+        let state_path = configured_state_dir.join("named.json");
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.root_state_dir = Some(configured_state_dir);
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: repo,
+                remote_prefix: "roots/named".into(),
+                state_path,
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+        validate_registered_roots_config(&config)
+            .expect("lexically valid state alias passes startup mapping validation");
+
+        let error =
+            canonical_registered_root(&config, "named", config.sync.roots.get("named").unwrap())
+                .expect_err("writable lexical parent must not route a registered state cache");
+        assert!(error.contains("untrusted original path chain"), "{error}");
+        assert!(error.contains("writable by another principal"), "{error}");
+        assert_eq!(
+            std::fs::read(&selected_state).unwrap(),
+            b"{\"selected\":true}"
+        );
+        assert_eq!(
+            std::fs::read(&alternate_state).unwrap(),
+            b"{\"alternate\":true}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn registered_root_state_cache_rejects_hardlinks_and_primary_inode_alias() {
@@ -5619,6 +7654,45 @@ mod tests {
             canonical_registered_root(&config, "named", config.sync.roots.get("named").unwrap())
                 .expect_err("primary and named cache must not share an inode");
         assert!(error.contains("aliases primary state cache"), "{error}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn registered_root_rejects_writable_state_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("trusted/repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let writable_parent = temp.path().join("shared-state-parent");
+        let state_dir = writable_parent.join("reconcile");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::set_permissions(&writable_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state_path = state_dir.join("named.json");
+        std::fs::write(&state_path, b"{}").unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.sync.root_state_dir = Some(state_dir);
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: repo,
+                remote_prefix: "roots/named".into(),
+                state_path,
+                policy: RegisteredRootPolicy::Resolve,
+            },
+        );
+
+        let error =
+            canonical_registered_root(&config, "named", config.sync.roots.get("named").unwrap())
+                .expect_err("a writable state ancestor can redirect the named authority");
+        assert!(error.contains("untrusted"), "{error}");
+        assert!(error.contains("path chain"), "{error}");
+        assert!(error.contains("writable by another principal"), "{error}");
     }
 
     #[cfg(unix)]
@@ -5710,6 +7784,376 @@ mod tests {
     }
 
     #[test]
+    fn registered_root_unauthorized_id_is_indistinguishable_from_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let daemon = test_daemon_with_registered_root(&temp, "secret-root", &repo);
+        let mut session = tcfs_auth::Session::new("device-1", "neo", "test");
+        session.permissions.allowed_prefixes = vec!["roots/other".into()];
+
+        let unauthorized = daemon
+            .authorized_registered_root(&session, "secret-root")
+            .expect_err("known but unauthorized root must be hidden");
+        let unknown = daemon
+            .authorized_registered_root(&session, "missing")
+            .expect_err("unknown root must be hidden");
+
+        assert_eq!(unauthorized.code(), tonic::Code::NotFound);
+        assert_eq!(unauthorized.code(), unknown.code());
+        assert_eq!(unauthorized.message(), unknown.message());
+        for forbidden in [
+            "secret-root",
+            "roots/secret-root",
+            &repo.display().to_string(),
+        ] {
+            assert!(
+                !unauthorized.message().contains(forbidden),
+                "{unauthorized}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_root_auth_bypass_fails_before_route_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let daemon = test_daemon_with_registered_root(&temp, "known", &repo);
+
+        // Preserve the development-only compatibility posture for the primary
+        // cache while named roots fail closed before their registry is read.
+        daemon
+            .list_conflicts(tonic::Request::new(ListConflictsRequest {
+                root_id: String::new(),
+            }))
+            .await
+            .expect("primary conflict inspection may use configured auth bypass");
+
+        let known_list = daemon
+            .list_conflicts(tonic::Request::new(ListConflictsRequest {
+                root_id: "known".into(),
+            }))
+            .await
+            .expect_err("known registered root must reject auth bypass");
+        let unknown_list = daemon
+            .list_conflicts(tonic::Request::new(ListConflictsRequest {
+                root_id: "missing".into(),
+            }))
+            .await
+            .expect_err("unknown registered root must reject auth bypass");
+        let known_resolve = daemon
+            .resolve_registered_root(tonic::Request::new(ResolveRegisteredRootRequest {
+                root_id: "known".into(),
+                path: repo.display().to_string(),
+                mode: RegisteredRootResolveMode::GitKeepBothDryRun.into(),
+                operator_cli: true,
+            }))
+            .await
+            .expect_err("known registered root resolve must reject auth bypass");
+        let unknown_resolve = daemon
+            .resolve_registered_root(tonic::Request::new(ResolveRegisteredRootRequest {
+                root_id: "missing".into(),
+                path: repo.display().to_string(),
+                mode: RegisteredRootResolveMode::GitKeepBothDryRun.into(),
+                operator_cli: true,
+            }))
+            .await
+            .expect_err("unknown registered root resolve must reject auth bypass");
+
+        let expected = (
+            tonic::Code::FailedPrecondition,
+            "registered-root operations require auth.require_session = true",
+        );
+        for error in [known_list, unknown_list, known_resolve, unknown_resolve] {
+            assert_eq!((error.code(), error.message()), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_root_resolution_permissions_match_mode_before_route_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let daemon =
+            test_daemon_with_registered_root_session_requirement(&temp, "named", &repo, true);
+        *daemon.operator.lock().await = Some(memory_operator());
+
+        let permissions = |can_pull, can_push| tcfs_auth::DevicePermissions {
+            can_pull,
+            can_push,
+            allowed_prefixes: vec!["roots/named".into()],
+            ..Default::default()
+        };
+        let request =
+            |root_id: &str, mode: RegisteredRootResolveMode| ResolveRegisteredRootRequest {
+                root_id: root_id.into(),
+                path: repo.display().to_string(),
+                mode: mode.into(),
+                operator_cli: true,
+            };
+
+        let pull_only = insert_test_session(
+            &daemon,
+            "pull-only-root-inspector",
+            permissions(true, false),
+        )
+        .await;
+        let inspected = daemon
+            .resolve_registered_root(request_with_bearer(
+                request("named", RegisteredRootResolveMode::GitKeepBothDryRun),
+                &pull_only,
+            ))
+            .await
+            .expect("pull-only session may inspect with dry-run")
+            .into_inner();
+        assert!(inspected.success, "{}", inspected.error);
+
+        let push_only =
+            insert_test_session(&daemon, "push-only-root-writer", permissions(false, true)).await;
+        let mut dry_run_denials = Vec::new();
+        for root_id in ["named", "missing"] {
+            let error = daemon
+                .resolve_registered_root(request_with_bearer(
+                    request(root_id, RegisteredRootResolveMode::GitKeepBothDryRun),
+                    &push_only,
+                ))
+                .await
+                .expect_err("push-only session must not read through dry-run");
+            dry_run_denials.push((error.code(), error.message().to_string()));
+        }
+        assert_eq!(
+            dry_run_denials[0], dry_run_denials[1],
+            "permission denial must happen before registered-root lookup"
+        );
+        assert_eq!(dry_run_denials[0].0, tonic::Code::PermissionDenied);
+        assert!(dry_run_denials[0].1.contains("pull"));
+
+        let pull_only_execute = daemon
+            .resolve_registered_root(request_with_bearer(
+                request("named", RegisteredRootResolveMode::GitKeepBothExecute),
+                &pull_only,
+            ))
+            .await
+            .expect_err("execute requires push in addition to pull");
+        assert_eq!(pull_only_execute.code(), tonic::Code::PermissionDenied);
+        assert!(pull_only_execute.message().contains("push"));
+
+        let push_only_execute = daemon
+            .resolve_registered_root(request_with_bearer(
+                request("named", RegisteredRootResolveMode::GitKeepBothExecute),
+                &push_only,
+            ))
+            .await
+            .expect_err("execute must not read remote state without pull");
+        assert_eq!(push_only_execute.code(), tonic::Code::PermissionDenied);
+        assert!(push_only_execute.message().contains("pull"));
+
+        let read_write =
+            insert_test_session(&daemon, "read-write-root-operator", permissions(true, true)).await;
+        let executed = daemon
+            .resolve_registered_root(request_with_bearer(
+                request("named", RegisteredRootResolveMode::GitKeepBothExecute),
+                &read_write,
+            ))
+            .await
+            .expect("pull+push session may execute")
+            .into_inner();
+        assert!(executed.success, "{}", executed.error);
+    }
+
+    #[tokio::test]
+    async fn primary_resolution_permissions_match_strategy_before_state_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let repo = std::fs::canonicalize(repo).unwrap();
+        let missing = repo.parent().unwrap().join("missing");
+        let daemon = test_daemon_with_operator_master_and_session_requirement(
+            Some(memory_operator()),
+            None,
+            true,
+        );
+        let mut index_conflict = test_sync_state("data/manifests/index", 42);
+        index_conflict.status = tcfs_sync::state::FileSyncStatus::Conflict;
+        index_conflict.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+            rel_path: ".git/index".into(),
+            local_blake3: "local-index".into(),
+            remote_blake3: "remote-index".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            detected_at: 42,
+            times_recorded: 1,
+            remote_manifest_key: None,
+        });
+        {
+            let mut state = daemon.state_cache.lock().await;
+            state.set(&repo.join(".git/index"), index_conflict);
+            state.flush().unwrap();
+        }
+
+        let permissions = |can_pull, can_push| tcfs_auth::DevicePermissions {
+            can_pull,
+            can_push,
+            allowed_prefixes: vec!["data".into()],
+            ..Default::default()
+        };
+        let request = |path: &Path, resolution: &str, operator_cli| ResolveConflictRequest {
+            path: path.display().to_string(),
+            resolution: resolution.into(),
+            operator_cli,
+        };
+
+        let pull_only = insert_test_session(
+            &daemon,
+            "pull-only-primary-reader",
+            permissions(true, false),
+        )
+        .await;
+        let dry_run = daemon
+            .resolve_conflict(request_with_bearer(
+                request(&repo, "git_keep_both_dry_run", true),
+                &pull_only,
+            ))
+            .await
+            .expect("pull-only session may inspect primary keep-both")
+            .into_inner();
+        assert!(dry_run.success, "{}", dry_run.error);
+
+        for resolution in ["git_keep_both_execute", "keep_both", "keep_local", "defer"] {
+            let error = daemon
+                .resolve_conflict(request_with_bearer(
+                    request(&missing, resolution, true),
+                    &pull_only,
+                ))
+                .await
+                .expect_err("pull-only session must not use a push-authorized strategy");
+            assert_eq!(error.code(), tonic::Code::PermissionDenied);
+            assert!(error.message().contains("push"), "{resolution}: {error}");
+        }
+
+        let push_only = insert_test_session(
+            &daemon,
+            "push-only-primary-writer",
+            permissions(false, true),
+        )
+        .await;
+        for resolution in [
+            "git_keep_both_dry_run",
+            "git_keep_both_execute",
+            "keep_remote",
+            "keep_both",
+        ] {
+            let mut denials = Vec::new();
+            for path in [&repo, &missing] {
+                let error = daemon
+                    .resolve_conflict(request_with_bearer(
+                        request(path, resolution, true),
+                        &push_only,
+                    ))
+                    .await
+                    .expect_err("push-only session must not enter a remote-read strategy");
+                denials.push((error.code(), error.message().to_string()));
+            }
+            assert_eq!(
+                denials[0], denials[1],
+                "{resolution} permission denial must precede state/path lookup"
+            );
+            assert_eq!(denials[0].0, tonic::Code::PermissionDenied);
+            assert!(
+                denials[0].1.contains("pull"),
+                "{resolution}: {:?}",
+                denials[0]
+            );
+        }
+
+        let deferred = daemon
+            .resolve_conflict(request_with_bearer(
+                request(&missing, "defer", false),
+                &push_only,
+            ))
+            .await
+            .expect("legacy defer remains available to a push-authorized session")
+            .into_inner();
+        assert!(deferred.success, "{}", deferred.error);
+    }
+
+    #[tokio::test]
+    async fn pull_only_primary_keep_remote_is_retired_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let operator = memory_operator();
+        let daemon = test_daemon_with_operator_master_and_session_requirement(
+            Some(operator.clone()),
+            None,
+            true,
+        );
+
+        let remote_source = temp.path().join("remote-source.txt");
+        std::fs::write(&remote_source, b"remote bytes").unwrap();
+        let mut upload_state =
+            tcfs_sync::state::StateCache::open(&temp.path().join("upload-state.json")).unwrap();
+        let uploaded = tcfs_sync::engine::upload_file(
+            &operator,
+            &remote_source,
+            "data",
+            &mut upload_state,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let local_path = temp.path().join("primary.txt");
+        std::fs::write(&local_path, b"local bytes").unwrap();
+        let mut entry = test_sync_state(&uploaded.remote_path, 42);
+        entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
+        entry.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+            rel_path: "primary.txt".into(),
+            local_blake3: "local".into(),
+            remote_blake3: uploaded.hash,
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            detected_at: 42,
+            times_recorded: 1,
+            remote_manifest_key: Some(uploaded.remote_path.clone()),
+        });
+        {
+            let mut state = daemon.state_cache.lock().await;
+            state.set(&local_path, entry);
+            state.flush().unwrap();
+        }
+
+        let permissions = tcfs_auth::DevicePermissions {
+            can_pull: true,
+            can_push: false,
+            allowed_prefixes: vec!["data".into()],
+            ..Default::default()
+        };
+        let token = insert_test_session(&daemon, "pull-only-keep-remote", permissions).await;
+        let response = daemon
+            .resolve_conflict(request_with_bearer(
+                ResolveConflictRequest {
+                    path: local_path.display().to_string(),
+                    resolution: "keep_remote".into(),
+                    operator_cli: false,
+                },
+                &token,
+            ))
+            .await
+            .expect("retired primary per-file verb returns a bounded response")
+            .into_inner();
+
+        assert!(!response.success);
+        assert!(response
+            .error
+            .contains("legacy per-file mutation is disabled"));
+        assert_eq!(std::fs::read(&local_path).unwrap(), b"local bytes");
+    }
+
+    #[test]
     fn registered_root_cache_and_git_metadata_fences_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
@@ -5763,7 +8207,7 @@ mod tests {
         }
 
         let mut config = TcfsConfig::default();
-        config.auth.require_session = false;
+        config.auth.require_session = true;
         config.daemon.socket = temp.path().join("tcfsd.sock");
         config.sync.roots.insert(
             "docs".into(),
@@ -5788,14 +8232,24 @@ mod tests {
             "neo".into(),
             None,
         );
+        let permissions = tcfs_auth::DevicePermissions {
+            can_pull: true,
+            can_push: true,
+            allowed_prefixes: vec!["docs".into()],
+            ..Default::default()
+        };
+        let token = insert_test_session(&daemon, "docs-operator", permissions).await;
 
         let error = daemon
-            .resolve_registered_root(tonic::Request::new(ResolveRegisteredRootRequest {
-                root_id: "docs".into(),
-                path: repo.display().to_string(),
-                mode: RegisteredRootResolveMode::GitKeepBothExecute.into(),
-                operator_cli: true,
-            }))
+            .resolve_registered_root(request_with_bearer(
+                ResolveRegisteredRootRequest {
+                    root_id: "docs".into(),
+                    path: repo.display().to_string(),
+                    mode: RegisteredRootResolveMode::GitKeepBothExecute.into(),
+                    operator_cli: true,
+                },
+                &token,
+            ))
             .await
             .expect_err("inspect-only root must reject execute");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
@@ -5822,8 +8276,9 @@ mod tests {
     async fn resolve_conflict_repo_git_keep_both_requires_operator_cli() {
         // BLOCKING 1b: repo-group git keep-both must be refused (fail-closed)
         // when the explicit operator-intent bit is absent. MCP cannot set the
-        // bit; a generic protobuf client can, so authenticated push permission
-        // remains the authorization boundary. Both modes are gated before work.
+        // bit; a generic protobuf client can, so authenticated mode-specific
+        // pull/push permissions remain the authorization boundary. Both modes
+        // are gated before work.
         let daemon = test_daemon();
         for resolution in ["git_keep_both_dry_run", "git_keep_both_execute"] {
             let resp = daemon
@@ -5848,9 +8303,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_conflict_refuses_git_internal_path() {
-        // keep-both PR-1 (S1): keep_remote on a `.git`-internal ref must be
-        // refused with repo-group guidance and ZERO side effects.
+    async fn resolve_conflict_retires_git_internal_path_before_classification() {
+        // Retired verbs are refused uniformly before any path classification.
         let daemon = test_daemon();
         let resp = daemon
             .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
@@ -5862,11 +8316,7 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!resp.success, "keep_remote on a .git path must be refused");
-        assert!(
-            resp.error.contains("git-internal"),
-            "error must name the git-internal refusal, got: {}",
-            resp.error
-        );
+        assert!(resp.error.contains("legacy per-file mutation is disabled"));
         assert!(resp.resolved_path.is_empty());
 
         // keep_both and keep_local on a `.git` path are likewise refused.
@@ -5881,16 +8331,18 @@ mod tests {
                 .unwrap()
                 .into_inner();
             assert!(!resp.success, "{strat} on a .git path must be refused");
-            assert!(resp.error.contains("git-internal"), "strat={strat}");
+            assert!(
+                resp.error.contains("legacy per-file mutation is disabled"),
+                "strat={strat}"
+            );
         }
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn resolve_conflict_refuses_git_internal_symlink_alias() {
-        // A local path spelling with no `.git` component can still resolve into
-        // `.git`; the fence must classify the resolved path and stored
-        // ConflictInfo, not just the raw request string.
+    async fn resolve_conflict_retires_symlink_alias_without_classification() {
+        // The retired verb must return without resolving the alias or using its
+        // recorded conflict as a path/state oracle.
         let daemon = test_daemon();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
@@ -5936,15 +8388,12 @@ mod tests {
 
         assert!(!resp.success);
         assert!(resp.resolved_path.is_empty());
-        assert!(resp.error.contains("git-internal"));
-        assert!(resp.error.contains("per-file"));
+        assert!(resp.error.contains("legacy per-file mutation is disabled"));
     }
 
     #[tokio::test]
-    async fn resolve_conflict_refuses_stored_git_internal_rel_path() {
-        // A cache key can be an ordinary local spelling while the recorded
-        // ConflictInfo carries the authoritative repo-relative `.git` path.
-        // The fence must consult that stored rel_path before keep_* can write.
+    async fn resolve_conflict_retires_without_consulting_stored_git_path() {
+        // A recorded Git rel_path must not change the uniform retired response.
         let daemon = test_daemon();
         let dir = tempfile::tempdir().unwrap();
         let request_path = dir.path().join("visible-conflict");
@@ -5983,13 +8432,18 @@ mod tests {
 
         assert!(!resp.success);
         assert!(resp.resolved_path.is_empty());
-        assert!(resp.error.contains("git-internal"));
+        assert!(resp.error.contains("legacy per-file mutation is disabled"));
+        assert!(daemon
+            .state_cache
+            .lock()
+            .await
+            .get(&request_path)
+            .is_some_and(|entry| entry.conflict.is_some()));
     }
 
     #[tokio::test]
     async fn resolve_conflict_defer_allowed_on_git_internal_path() {
-        // `defer` records intent only (no writes), so it stays allowed even for
-        // a `.git`-internal path — the fence targets keep_* only.
+        // `defer` is a no-op and returns before path or state inspection.
         let daemon = test_daemon();
         let resp = daemon
             .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
@@ -6005,26 +8459,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_conflict_fence_ignores_normal_file_path() {
-        // A NON-`.git` file path must NOT hit the fence: keep_remote proceeds
-        // past the guard and fails later for an ordinary reason (no state /
-        // no remote path), never with the git-internal refusal.
+    async fn resolve_conflict_retires_normal_per_file_mutations() {
+        // The legacy RPC has no daemon-selected root/manifest binding. All
+        // ordinary per-file mutation strategies therefore fail closed too.
         let daemon = test_daemon();
-        let resp = daemon
-            .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
-                path: "notes/todo.txt".into(),
-                resolution: "keep_remote".into(),
-                ..Default::default()
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.success, "no state for the path → still fails");
-        assert!(
-            !resp.error.contains("git-internal"),
-            "a normal file must not be fenced as git-internal, got: {}",
-            resp.error
-        );
+        for resolution in ["keep_local", "keep_remote", "keep_both"] {
+            let resp = daemon
+                .resolve_conflict(tonic::Request::new(ResolveConflictRequest {
+                    path: "notes/todo.txt".into(),
+                    resolution: resolution.into(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(!resp.success, "{resolution} must fail closed");
+            assert!(
+                resp.error.contains("legacy per-file mutation is disabled"),
+                "{resolution}: {}",
+                resp.error
+            );
+        }
     }
 
     #[tokio::test]
@@ -6121,10 +8576,51 @@ mod tests {
 
     #[tokio::test]
     async fn push_then_pull_streams_complete_successfully_over_uds() {
-        let daemon = test_daemon_with_operator(Some(memory_operator()));
+        let primary = tempfile::tempdir().unwrap();
+        let sync_root = primary.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let daemon =
+            primary_io_test_daemon(&primary, &sync_root, Some(memory_operator()), None, false);
         let (socket_dir, server_handle, shutdown) = spawn_test_server(daemon).await;
         let socket_path = socket_dir.path().join("tcfsd.sock");
         let mut client = connect_test_client(&socket_path).await;
+
+        let empty_first = tokio_stream::iter(vec![
+            PushChunk {
+                path: String::new(),
+                data: b"must not be reassigned".to_vec(),
+                offset: 0,
+                last: false,
+            },
+            PushChunk {
+                path: "docs/reassigned.txt".into(),
+                data: Vec::new(),
+                offset: b"must not be reassigned".len() as u64,
+                last: true,
+            },
+        ]);
+        let error = match client.push(tonic::Request::new(empty_first)).await {
+            Ok(_) => panic!("an empty first push path must fail before buffering another path"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("first push chunk"));
+
+        let unterminated = PushChunk {
+            path: "docs/unterminated.txt".into(),
+            data: b"must not publish".to_vec(),
+            offset: 0,
+            last: false,
+        };
+        let error = match client
+            .push(tonic::Request::new(tokio_stream::once(unterminated)))
+            .await
+        {
+            Ok(_) => panic!("EOF before the terminal push chunk must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("before its terminal chunk"));
 
         let push_chunk = PushChunk {
             path: "docs/hello.txt".into(),
@@ -6155,8 +8651,7 @@ mod tests {
         assert!(!push_progress.chunk_hash.is_empty());
         assert!(push_stream.message().await.unwrap().is_none());
 
-        let output_dir = tempfile::tempdir().unwrap();
-        let output_path = output_dir.path().join("downloaded.txt");
+        let output_path = sync_root.join("downloaded.txt");
 
         let mut pull_stream = client
             .pull(tonic::Request::new(PullRequest {
@@ -6188,6 +8683,48 @@ mod tests {
             std::fs::read(&output_path).unwrap(),
             b"hello over grpc".to_vec()
         );
+
+        let listing = client
+            .list_files(tonic::Request::new(ListFilesRequest {
+                prefix: "docs".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let hello = listing
+            .files
+            .iter()
+            .find(|entry| entry.path == "docs/hello.txt")
+            .expect("pushed file must be listed by exact logical path");
+        assert!(!hello.version_token.is_empty());
+
+        let mut exact_stream = client
+            .pull_exact(tonic::Request::new(PullExactRequest {
+                remote_path: "docs/hello.txt".into(),
+                expected_version: hello.version_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let mut exact_bytes = Vec::new();
+        let mut exact_terminal = None;
+        while let Some(progress) = exact_stream.message().await.unwrap() {
+            assert!(progress.error.is_empty(), "exact pull: {}", progress.error);
+            exact_bytes.extend_from_slice(&progress.data);
+            if progress.done {
+                assert!(
+                    exact_terminal.is_none(),
+                    "duplicate PullExact terminal marker"
+                );
+                exact_terminal = Some(progress);
+            }
+        }
+        let exact_terminal = exact_terminal.expect("PullExact must emit a terminal marker");
+        assert!(exact_terminal.exact_content);
+        assert_eq!(exact_terminal.version_token, hello.version_token);
+        assert_eq!(exact_terminal.bytes_received, exact_bytes.len() as u64);
+        assert_eq!(exact_terminal.total_bytes, exact_bytes.len() as u64);
+        assert_eq!(exact_bytes, b"hello over grpc");
 
         shutdown.notify_one();
         let server_result = server_handle.await.unwrap();

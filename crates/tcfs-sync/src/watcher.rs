@@ -151,10 +151,6 @@ fn debounce_loop(
                     if should_ignore(&path, &config.ignore_names) {
                         continue;
                     }
-                    // Skip physical .tc stub files in sync roots.
-                    if path.extension().map(|e| e == "tc").unwrap_or(false) {
-                        continue;
-                    }
                     pending.insert(path, (kind, Instant::now()));
                 }
             }
@@ -174,6 +170,11 @@ fn debounce_loop(
 
 /// Check if a path should be ignored based on any component matching ignore list.
 fn should_ignore(path: &Path, ignore_names: &[String]) -> bool {
+    // Physical stubs and TCFS-owned same-directory temps share this reserved
+    // suffix, so neither an in-progress write nor a crash leftover is emitted.
+    if path.extension().is_some_and(|extension| extension == "tc") {
+        return true;
+    }
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
             let name_str = name.to_string_lossy();
@@ -208,8 +209,13 @@ mod tests {
     }
 
     #[test]
-    fn test_should_ignore_tc_extension() {
-        let path = Path::new("/home/user/tcfs/file.tc");
-        assert_eq!(path.extension().map(|e| e == "tc"), Some(true));
+    fn test_should_ignore_generated_hydration_temps_but_not_final_target() {
+        for temp in [
+            "/home/user/tcfs/.report.txt.tcfs_tmp.22f3d20f-936b-4499-bc71-a071a3a31e05.tc",
+            "/home/user/tcfs/.link.tcfs_symlink_tmp.22f3d20f-936b-4499-bc71-a071a3a31e05.tc",
+        ] {
+            assert!(should_ignore(Path::new(temp), &[]));
+        }
+        assert!(!should_ignore(Path::new("/home/user/tcfs/report.txt"), &[]));
     }
 }

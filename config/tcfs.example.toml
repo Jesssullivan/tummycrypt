@@ -6,8 +6,8 @@
 [daemon]
 # Unix domain socket for gRPC (CLI <-> daemon communication)
 socket = "/run/tcfsd/tcfsd.sock"
-# Optional: TCP listen for remote access (e.g. "0.0.0.0:7777")
-# listen = "127.0.0.1:7777"
+# Plaintext TCP is refused. Tunnel the owner-only Unix socket over SSH.
+# listen = "127.0.0.1:7777" # legacy; tcfsd will fail closed
 # Prometheus metrics endpoint
 metrics_addr = "127.0.0.1:9100"
 log_level = "info"       # trace, debug, info, warn, error

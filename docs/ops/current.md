@@ -14,7 +14,7 @@ product threshold.
 
 | Surface | Proven now | Still open |
 | --- | --- | --- |
-| Git roam | One complete forward repo roam; automatic divergent keep-both without committed-work loss | Authenticated root-targeted operator resolution and the two-repo stop rule |
+| Git roam | One complete forward repo roam; automatic divergent keep-both without committed-work loss; pre-freeze root-targeted keep-both mechanism run cleared the production `.git` loop | PR #551 source landing, residual production-root closure, and the two-repo stop rule |
 | Agent state | One bounded Claude project subtree on neo/honey | Arbitrary sessions, Codex state, prompts, and cross-OS cwd mapping |
 | Hydration | Linux FUSE lifecycle; bounded signed macOS FileProvider lifecycle | Plain-root parity, polished Finder first run, NFS/Windows/iOS parity |
 | Home state | A few explicitly managed paths | Selective product enrollment for home/dotdir classes |
@@ -47,34 +47,30 @@ Current evidence:
 
 - Neo and honey have the same Git commit and byte-identical tracked
   `README.md` and `AGENTS.md`.
-- Honey has three untracked canary/scratch files.
-- Reconcile repeatedly reports six conflicts.
-- The isolated state caches retain eight entries, including stale branch/stash
-  paths.
-- `tcfs conflicts --state` can inspect an isolated cache.
-- `tcfs resolve` still targets the daemon's primary cache and prefix.
-- Honey's safe dry-run stopped at session authentication.
+- Before the TIN-2856 incident freeze, the source branch at `f508836`
+  completed the root-targeted Git keep-both dry-run and execute on Honey.
+- Two manually driven reconcile cycles cleared the 909+ cycle `.git` conflict
+  loop.
+- Deliberate user-content conflicts for `README.md` and `AGENTS.md` remain, as
+  does the stale `roam-canary-wip` ref pair.
+- PR #551/TIN-2853 must still land through exact-head review and CI before the
+  hardened source seam is accepted.
+- TIN-2856 freezes every further live resolver, enrollment/TOTP, deploy, and
+  crypto ceremony. Source review, tests, and landing may continue without a
+  new fleet claim.
 
-Honey already has a persisted 0600 TOTP credential file. Do not request a code
-until root routing is deployed: authentication alone would still mutate the
-wrong state context.
-
-The safe closeout is:
+The residual closeout is:
 
 ```text
-deploy root routing
-  → freeze the named reconcile root
-  → verify TOTP
-  → root-targeted dry-run
-  → execute
-  → resolve/preserve ordinary-file conflicts
-  → first reconcile
-  → second clean reconcile
+land reviewed PR #551 source
+  → wait for TIN-2856 live-work clearance
+  → adjudicate README.md and AGENTS.md
+  → handle the stale roam-canary-wip ref pair
   → git/content/state evidence
   → close TIN-2658
 ```
 
-The full ceremony and root invariants are in
+The full evidence boundary and root invariants are in
 [`../PRODUCT.md`](../PRODUCT.md).
 
 ## Strategy A queue
@@ -93,9 +89,12 @@ The full ceremony and root invariants are in
 4. **TLS.** Move the credential-bearing SeaweedFS/S3 path from the current
    internal plaintext HTTP endpoint to an authenticated TLS hostname and enable
    `storage.enforce_tls`.
-5. **Stable root routing.** Land the daemon-owned root registry and authenticated
-   resolver selection described in PRODUCT.
-6. **TIN-2658 live closure.** Run the bounded ceremony above.
+5. **Stable root routing.** Land the reviewed PR #551 source seam and its
+   daemon-owned authenticated resolver selection described in PRODUCT.
+6. **TIN-2658 residual closure.** After TIN-2856 clears live work, adjudicate
+   the two user-content conflicts and stale ref pair, then capture final
+   Git/content/state convergence evidence. Do not repeat the already completed
+   pre-freeze dry-run/execute sequence merely to recreate evidence.
 7. **Headless auth and enrollment.** Close
    [TIN-2653](https://linear.app/tinyland/issue/TIN-2653/tcfs-auth-session-token-unusable-over-headless-ssh-keychain-write-only)
    and prove persisted invitation/bootstrap state without an auth bypass.

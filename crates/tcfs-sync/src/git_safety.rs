@@ -53,12 +53,34 @@ pub(crate) fn sanitized_git_command() -> std::process::Command {
     #[cfg(not(windows))]
     let null_device = "/dev/null";
     command
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .arg("-c")
         .arg(format!("core.hooksPath={null_device}"))
         .arg("-c")
         .arg("core.fsmonitor=false")
         .arg("-c")
-        .arg("core.logAllRefUpdates=false");
+        .arg("core.logAllRefUpdates=false")
+        .arg("-c")
+        .arg("core.sharedRepository=0");
+    // Git creates loose refs and lock files using the process umask. tcfsd
+    // must not let an inherited permissive service umask turn a sanitized
+    // `update-ref` into group/world-writable repository metadata. Apply this
+    // to the common builder so reconcile's explicit-git-dir mutations receive
+    // the same boundary as descriptor-anchored resolver mutations.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // SAFETY: `umask(2)` is async-signal-safe and does not access Rust
+        // state in the post-fork child.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0o077);
+                Ok(())
+            });
+        }
+    }
     command
 }
 
@@ -450,145 +472,205 @@ fn bundle_head_branch(bundle: &Path) -> Option<String> {
     None
 }
 
-/// RAII guard for the cooperative `.git/tcfs.lock` lock used by the raw `.git`
-/// sync path. Holding this guard means no other TCFS sync is collecting or
-/// applying this repo's `.git`; dropping it removes the lock file so the next
-/// cycle can proceed.
+/// RAII guard for the advisory lock held on the stable `.git/tcfs.lock` inode.
+/// Holding this guard means no other TCFS sync is collecting or applying this
+/// repo's `.git`; dropping it closes the descriptor and releases the kernel
+/// lock without unlinking the shared inode.
 #[derive(Debug)]
 pub struct GitLockGuard {
-    lock_path: std::path::PathBuf,
     _file: std::fs::File,
 }
 
-impl Drop for GitLockGuard {
-    fn drop(&mut self) {
-        // Best-effort cleanup. If this never runs (SIGKILL, power loss), the
-        // leaked lock is recovered by `acquire_git_lock`'s staleness check: a
-        // lock older than `GIT_LOCK_STALE_SECS` whose recorded owner PID is no
-        // longer alive is removed and the acquire retried once.
-        let _ = std::fs::remove_file(&self.lock_path);
-    }
-}
-
-/// Age past which a `tcfs.lock` becomes eligible for the dead-owner staleness
-/// check in [`acquire_git_lock`].
-const GIT_LOCK_STALE_SECS: u64 = 600; // 10 minutes
-
 /// Acquire a cooperative lock on `.git/tcfs.lock` for raw sync mode.
 ///
-/// Uses `create_new` semantics: if the file already exists, another sync is in
-/// progress and this fails — unless the existing lock is STALE (older than
-/// [`GIT_LOCK_STALE_SECS`] AND its recorded owner PID is no longer alive, e.g.
-/// the holder was SIGKILLed before its Drop ran), in which case the stale file
-/// is removed and the acquire retried once. The lock file records
-/// `<pid> <unix-secs>` on acquire to make that check possible. The returned
-/// [`GitLockGuard`] removes the lock file when dropped, so callers hold it
-/// across the collect/apply window to make the `.git` snapshot atomic against
-/// a concurrent commit (TOCTOU guard).
+/// Every caller opens the same stable inode and takes a non-blocking kernel
+/// advisory lock. Process death releases the lock automatically; the inode is
+/// deliberately never removed, avoiding stale-path unlink and guard-drop races
+/// that could otherwise give two resolvers different locked inodes. The file's
+/// `<pid> <unix-secs>` content is diagnostic only and is rewritten after lock
+/// acquisition. Callers hold the returned guard across the collect/apply
+/// window to make the `.git` snapshot atomic against another TCFS operation.
 pub fn acquire_git_lock(git_dir: &Path) -> anyhow::Result<GitLockGuard> {
     let lock_path = git_dir.join("tcfs.lock");
-
-    match try_create_git_lock(&lock_path) {
-        Ok(guard) => Ok(guard),
-        Err(first_err) => {
-            if remove_stale_git_lock(&lock_path) {
-                // Retry once after clearing a stale lock.
-                try_create_git_lock(&lock_path)
-            } else {
-                Err(first_err)
-            }
+    if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            anyhow::bail!(
+                "tcfs.lock must be a regular non-symlink file: {}",
+                lock_path.display()
+            );
         }
     }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&lock_path).map_err(|error| {
+        anyhow::anyhow!("opening tcfs.lock at {}: {error}", lock_path.display())
+    })?;
+    finish_git_lock(file, &lock_path.display().to_string())
 }
 
-/// One `create_new` attempt on the lock file, recording owner PID + acquire
-/// time so a leaked lock can later be detected as stale.
-fn try_create_git_lock(lock_path: &Path) -> anyhow::Result<GitLockGuard> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
+/// Open `.git` relative to an already-open repository directory.
+///
+/// The returned capability pins the authorized metadata directory even if the
+/// enrolled pathname or its `.git` entry is later replaced.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn open_git_directory_at(repo_dir: &std::fs::File) -> anyhow::Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
 
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(lock_path)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "could not acquire tcfs.lock at {} (another sync in progress?): {e}",
-                lock_path.display()
-            )
-        })?;
+    fn openat(
+        parent_fd: std::os::fd::RawFd,
+        name: &CString,
+        flags: libc::c_int,
+        mode: libc::c_uint,
+    ) -> anyhow::Result<std::fs::File> {
+        // SAFETY: `parent_fd` is a live directory descriptor owned by the
+        // caller, `name` is NUL-terminated, and the returned descriptor is
+        // immediately transferred into exactly one `File` owner.
+        let fd = unsafe { libc::openat(parent_fd, name.as_ptr(), flags, mode) };
+        if fd < 0 {
+            return Err(anyhow::anyhow!(std::io::Error::last_os_error()));
+        }
+        // SAFETY: `openat` returned a new owned descriptor above.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
 
+    let dot_git = CString::new(".git").expect("static path contains no NUL");
+    let git_dir = openat(
+        repo_dir.as_raw_fd(),
+        &dot_git,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|error| anyhow::anyhow!("opening authorized .git directory: {error}"))?;
+    if !git_dir
+        .metadata()
+        .map_err(|error| anyhow::anyhow!("inspecting authorized .git directory: {error}"))?
+        .is_dir()
+    {
+        anyhow::bail!("authorized .git entry is not a directory");
+    }
+    Ok(git_dir)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn open_git_directory_at(_repo_dir: &std::fs::File) -> anyhow::Result<std::fs::File> {
+    anyhow::bail!(
+        "registered-root Git mutation requires descriptor-relative metadata on Linux or macOS"
+    )
+}
+
+/// Acquire `tcfs.lock` relative to an already-captured `.git` directory.
+///
+/// This is the registered-root resolver variant. It never resolves the
+/// authorized repository or `.git` pathname: `tcfs.lock` is opened with
+/// `openat(2)` from the captured metadata descriptor and rejects symlinks.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn acquire_git_lock_at(git_dir: &std::fs::File) -> anyhow::Result<GitLockGuard> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    fn openat(
+        parent_fd: std::os::fd::RawFd,
+        name: &CString,
+        flags: libc::c_int,
+        mode: libc::c_uint,
+    ) -> anyhow::Result<std::fs::File> {
+        // SAFETY: `parent_fd` is a live directory descriptor, `name` is a
+        // valid C string, and ownership of the returned descriptor is moved
+        // into exactly one `File`.
+        let fd = unsafe { libc::openat(parent_fd, name.as_ptr(), flags, mode) };
+        if fd < 0 {
+            return Err(anyhow::anyhow!(std::io::Error::last_os_error()));
+        }
+        // SAFETY: `openat` returned a new owned descriptor above.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    let lock_name = CString::new("tcfs.lock").expect("static path contains no NUL");
+    let lock_file = openat(
+        git_dir.as_raw_fd(),
+        &lock_name,
+        libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        0o600,
+    )
+    .map_err(|error| anyhow::anyhow!("opening authorized .git/tcfs.lock: {error}"))?;
+    finish_git_lock(lock_file, "authorized .git/tcfs.lock")
+}
+
+/// Registered-root Git mutation is currently supported only where the
+/// resolver can combine `fchdir(2)` and `openat(2)` with `O_NOFOLLOW`.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn acquire_git_lock_at(_repo_dir: &std::fs::File) -> anyhow::Result<GitLockGuard> {
+    anyhow::bail!(
+        "registered-root Git mutation requires descriptor-relative locking on Linux or macOS"
+    )
+}
+
+fn finish_git_lock(
+    mut file: std::fs::File,
+    lock_description: &str,
+) -> anyhow::Result<GitLockGuard> {
+    use std::io::{Seek, Write};
+
+    let metadata = file
+        .metadata()
+        .map_err(|error| anyhow::anyhow!("inspecting {lock_description}: {error}"))?;
+    if !metadata.is_file() {
+        anyhow::bail!("tcfs.lock is not a regular file: {lock_description}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // SAFETY: `geteuid` has no preconditions and only reads identity.
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid {
+            anyhow::bail!(
+                "tcfs.lock must be owned by effective uid {effective_uid}, got uid {}: {}",
+                metadata.uid(),
+                lock_description
+            );
+        }
+        if metadata.nlink() != 1 {
+            anyhow::bail!(
+                "tcfs.lock must have exactly one hard link, got {}: {}",
+                metadata.nlink(),
+                lock_description
+            );
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| anyhow::anyhow!("securing {lock_description}: {error}"))?;
+    }
+
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "could not acquire tcfs.lock at {lock_description} (another sync is in progress)"
+        ),
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(anyhow::anyhow!("locking {lock_description}: {error}"));
+        }
+    }
+
+    file.set_len(0)
+        .map_err(|error| anyhow::anyhow!("truncating {lock_description}: {error}"))?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|error| anyhow::anyhow!("seeking {lock_description}: {error}"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let _ = writeln!(file, "{} {now}", std::process::id());
+    writeln!(file, "{} {now}", std::process::id())
+        .map_err(|error| anyhow::anyhow!("writing {lock_description}: {error}"))?;
 
-    Ok(GitLockGuard {
-        lock_path: lock_path.to_path_buf(),
-        _file: file,
-    })
-}
-
-/// Remove `lock_path` iff it is stale: older than [`GIT_LOCK_STALE_SECS`] AND
-/// its recorded owner PID is no longer alive. Returns `true` only when the
-/// stale file was actually removed. Any ambiguity (unreadable, unparseable,
-/// young, owner alive or unprobeable) leaves the lock in place (fail-closed:
-/// never steal a lock that might be held).
-fn remove_stale_git_lock(lock_path: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(lock_path) else {
-        return false;
-    };
-    let old_enough = meta
-        .modified()
-        .ok()
-        .and_then(|m| m.elapsed().ok())
-        .map(|age| age.as_secs() > GIT_LOCK_STALE_SECS)
-        .unwrap_or(false);
-    if !old_enough {
-        return false;
-    }
-    let Some(owner_pid) = std::fs::read_to_string(lock_path)
-        .ok()
-        .and_then(|s| s.split_whitespace().next().map(str::to_string))
-        .and_then(|t| t.parse::<i32>().ok())
-    else {
-        return false;
-    };
-    if pid_alive(owner_pid) {
-        return false;
-    }
-    if std::fs::remove_file(lock_path).is_ok() {
-        tracing::warn!(
-            lock = %lock_path.display(),
-            owner_pid,
-            "removed stale tcfs.lock (owner dead, older than 10min)"
-        );
-        true
-    } else {
-        false
-    }
-}
-
-/// True if a process with `pid` exists. Probes with `kill(pid, 0)`, which
-/// signals nothing: success or `EPERM` (exists but not ours) both mean alive.
-#[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    let rc = unsafe { libc::kill(pid, 0) };
-    if rc == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-/// Non-unix fallback: report every PID as alive so a lock is never stolen on
-/// platforms where liveness cannot be probed (fail-closed).
-#[cfg(not(unix))]
-fn pid_alive(_pid: i32) -> bool {
-    true
+    Ok(GitLockGuard { _file: file })
 }
 
 #[cfg(test)]
@@ -613,11 +695,29 @@ mod tests {
             "GIT_OBJECT_DIRECTORY",
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
             "GIT_QUARANTINE_PATH",
-            "GIT_NO_REPLACE_OBJECTS",
             "GIT_CONFIG_COUNT",
         ] {
             assert!(removed.contains(variable), "{variable} was not removed");
         }
+        let explicit = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().to_string(),
+                        value.to_string_lossy().to_string(),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            explicit.get("GIT_NO_REPLACE_OBJECTS").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            explicit.get("GIT_NO_LAZY_FETCH").map(String::as_str),
+            Some("1")
+        );
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
@@ -625,6 +725,77 @@ mod tests {
         assert!(args.iter().any(|arg| arg.starts_with("core.hooksPath=")));
         assert!(args.iter().any(|arg| arg == "core.fsmonitor=false"));
         assert!(args.iter().any(|arg| arg == "core.logAllRefUpdates=false"));
+        assert!(args.iter().any(|arg| arg == "core.sharedRepository=0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sanitized_git_command_forces_private_creation_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_MARKER: &str = "TCFS_TEST_PRIVATE_GIT_UMASK_CHILD";
+        const REPO_ENV: &str = "TCFS_TEST_PRIVATE_GIT_UMASK_REPO";
+        const HEAD_ENV: &str = "TCFS_TEST_PRIVATE_GIT_UMASK_HEAD";
+        const PROBE_REF: &str = "refs/heads/private-umask-probe";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let repo = std::path::PathBuf::from(std::env::var_os(REPO_ENV).unwrap());
+            let head = std::env::var(HEAD_ENV).unwrap();
+
+            // SAFETY: this process runs only this exact test and exits after
+            // the assertion, so changing its process-wide umask cannot race a
+            // sibling test.
+            unsafe {
+                libc::umask(0o000);
+            }
+            let output = sanitized_git_command()
+                .arg("-C")
+                .arg(&repo)
+                .args(["update-ref", PROBE_REF, &head])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "sanitized update-ref failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mode = std::fs::metadata(repo.join(".git").join(PROBE_REF))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode & 0o077, 0, "new ref mode must be private: {mode:o}");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        run_git(&repo, &["config", "user.name", "TCFS Test"]).unwrap();
+        std::fs::write(repo.join("file.txt"), b"base\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]).unwrap();
+        run_git(&repo, &["commit", "--quiet", "--no-gpg-sign", "-m", "base"]).unwrap();
+        let head = local_ref_sha(&repo, "HEAD").unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "git_safety::tests::sanitized_git_command_forces_private_creation_umask",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env(REPO_ENV, &repo)
+            .env(HEAD_ENV, &head)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "private-umask child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -681,51 +852,51 @@ mod tests {
     }
 
     #[test]
-    fn test_git_lock_stale_dead_owner_is_recovered() {
+    fn test_git_lock_stale_content_reuses_stable_inode() {
         let dir = tempfile::tempdir().unwrap();
         let git_dir = dir.path().to_path_buf();
         let lock_path = git_dir.join("tcfs.lock");
 
-        // Leaked lock: dead owner PID (way past any real pid space), mtime
-        // pinned older than the staleness threshold.
+        // Diagnostic contents can outlive their process. Kernel ownership, not
+        // a pathname unlink, determines whether the stable inode is available.
         std::fs::write(&lock_path, "999999999 0\n").unwrap();
-        let old =
-            std::time::SystemTime::now() - std::time::Duration::from_secs(GIT_LOCK_STALE_SECS + 60);
-        let f = std::fs::File::options()
-            .write(true)
-            .open(&lock_path)
-            .unwrap();
-        f.set_times(std::fs::FileTimes::new().set_modified(old))
-            .unwrap();
-        drop(f);
+        #[cfg(unix)]
+        let original_inode = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&lock_path).unwrap().ino()
+        };
 
-        let guard = acquire_git_lock(&git_dir).expect("stale dead-owner lock must be recovered");
+        let guard = acquire_git_lock(&git_dir).expect("unlocked persistent inode must be reusable");
         drop(guard);
-        assert!(!lock_path.exists(), "guard drop must remove the lock");
+        assert!(
+            lock_path.exists(),
+            "guard drop must preserve the stable lock inode"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(&lock_path).unwrap().ino(), original_inode);
+        }
+        drop(acquire_git_lock(&git_dir).expect("released kernel lock must be reusable"));
     }
 
     #[test]
-    fn test_git_lock_live_owner_still_blocks() {
+    fn test_git_lock_advisory_owner_blocks_even_with_stale_contents() {
         let dir = tempfile::tempdir().unwrap();
         let git_dir = dir.path().to_path_buf();
         let lock_path = git_dir.join("tcfs.lock");
 
-        // Lock held by THIS (alive) process, but with an old mtime: age alone
-        // must never be grounds to steal a lock whose owner is alive.
-        std::fs::write(&lock_path, format!("{} 0\n", std::process::id())).unwrap();
-        let old =
-            std::time::SystemTime::now() - std::time::Duration::from_secs(GIT_LOCK_STALE_SECS + 60);
-        let f = std::fs::File::options()
+        std::fs::write(&lock_path, "999999999 0\n").unwrap();
+        let held = std::fs::File::options()
+            .read(true)
             .write(true)
             .open(&lock_path)
             .unwrap();
-        f.set_times(std::fs::FileTimes::new().set_modified(old))
-            .unwrap();
-        drop(f);
+        held.try_lock().unwrap();
 
         assert!(
             acquire_git_lock(&git_dir).is_err(),
-            "live-owner lock must not be stolen"
+            "an advisory owner must never be displaced based on file contents"
         );
         assert!(lock_path.exists());
     }

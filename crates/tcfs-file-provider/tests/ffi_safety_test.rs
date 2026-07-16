@@ -21,6 +21,8 @@ fn error_enum_values() {
     assert_eq!(TcfsError::TcfsErrorInternal as i32, 4);
     assert_eq!(TcfsError::TcfsErrorConflict as i32, 5);
     assert_eq!(TcfsError::TcfsErrorAlreadyExists as i32, 6);
+    assert_eq!(TcfsError::TcfsErrorVersionMismatch as i32, 7);
+    assert_eq!(TcfsError::TcfsErrorSyncAnchorExpired as i32, 8);
 }
 
 // ── tcfs_string_free ─────────────────────────────────────────────────────

@@ -12,9 +12,11 @@ use tcfs_sync::engine::push_tree;
 use tcfs_sync::state::StateCache;
 
 fn memory_operator() -> Operator {
-    Operator::new(opendal::services::Memory::default())
+    let op = Operator::new(opendal::services::Memory::default())
         .expect("memory operator")
-        .finish()
+        .finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+    op
 }
 
 fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {

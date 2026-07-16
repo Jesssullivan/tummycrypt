@@ -255,6 +255,7 @@ impl<'a> InviteSignaturePayload<'a> {
 /// - `i` = invite_id, `n` = nonce, `b` = created_by
 /// - `c` = created_at (unix ts), `x` = expires_at (unix ts)
 /// - `p` = permissions (bitfield: mount=1, push=2, pull=4, admin=8)
+/// - `q` = allowed storage prefixes
 /// - `g` = signature
 /// - `u` = nats_url, `e` = storage_endpoint, `k` = storage_bucket
 /// - `a` = storage_access_key, `s` = storage_secret_key
@@ -268,6 +269,8 @@ struct CompactInvite {
     c: i64,
     x: i64,
     p: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    q: Vec<String>,
     g: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     u: Option<String>,
@@ -302,6 +305,7 @@ impl CompactInvite {
             c: inv.created_at.timestamp(),
             x: inv.expires_at.timestamp(),
             p: perms,
+            q: inv.permissions.allowed_prefixes.clone(),
             g: inv.signature.clone(),
             u: inv.nats_url.clone(),
             e: inv.storage_endpoint.clone(),
@@ -327,7 +331,7 @@ impl CompactInvite {
                 can_push: self.p & 2 != 0,
                 can_pull: self.p & 4 != 0,
                 can_admin: self.p & 8 != 0,
-                allowed_prefixes: vec![],
+                allowed_prefixes: self.q.clone(),
             },
             signature: self.g.clone(),
             nats_url: self.u.clone(),
@@ -409,6 +413,13 @@ pub struct EnrollmentBootstrap {
     pub master_key_base64: Option<String>,
     /// Encryption salt (if passphrase-based E2EE is enabled).
     pub encryption_salt: Option<String>,
+    /// Short-lived session minted from the signed, single-use invite. The
+    /// joining device uses it to enroll its own MFA credential over SSH/UDS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+    /// Unix expiry for `session_token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_expires_at: Option<i64>,
 }
 
 /// Audit record for an invite that has already been redeemed.
@@ -493,28 +504,110 @@ impl InviteRedemptionStore {
     }
 
     pub async fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let redemptions = self.redemptions.read().await;
-        let data = serde_json::to_string_pretty(&*redemptions)?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(path, data).await?;
+        use tokio::io::AsyncWriteExt;
+
+        let data = {
+            let redemptions = self.redemptions.read().await;
+            validate_invite_redemptions(&redemptions)?;
+            serde_json::to_vec_pretty(&*redemptions)?
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invite redemption path has no parent"))?;
+        tokio::fs::create_dir_all(parent).await?;
+        let tmp = parent.join(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("invite-redemptions"),
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            options.mode(0o600);
         }
-        Ok(())
+        let result = async {
+            let mut file = options.open(&tmp).await?;
+            file.write_all(&data).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&tmp, path).await?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        result
     }
 
     pub async fn load_from_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let data = tokio::fs::read_to_string(path).await?;
-        let loaded: HashMap<String, InviteRedemption> = serde_json::from_str(&data)?;
-        let mut redemptions = self.redemptions.write().await;
-        redemptions.clear();
-        redemptions.extend(loaded);
+        let metadata = tokio::fs::symlink_metadata(path).await?;
+        anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "invite redemption store must be a regular, non-symlink file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: geteuid has no preconditions and only reads process identity.
+            let effective_uid = unsafe { libc::geteuid() };
+            anyhow::ensure!(
+                metadata.uid() == effective_uid,
+                "invite redemption store must be owned by daemon uid {effective_uid}"
+            );
+            anyhow::ensure!(
+                metadata.nlink() == 1,
+                "invite redemption store must have exactly one hard link"
+            );
+            anyhow::ensure!(
+                metadata.permissions().mode() & 0o077 == 0,
+                "invite redemption store must be mode 0600 or stricter"
+            );
+        }
+        let data = tokio::fs::read(path).await?;
+        let loaded: HashMap<String, InviteRedemption> = serde_json::from_slice(&data)?;
+        validate_invite_redemptions(&loaded)?;
+        *self.redemptions.write().await = loaded;
         Ok(())
     }
+}
+
+fn validate_invite_redemptions(
+    redemptions: &HashMap<String, InviteRedemption>,
+) -> anyhow::Result<()> {
+    for (key, redemption) in redemptions {
+        anyhow::ensure!(
+            !redemption.invite_id.is_empty()
+                && !redemption.nonce.is_empty()
+                && !redemption.device_name.is_empty()
+                && !redemption.public_key.is_empty()
+                && !redemption.platform.is_empty()
+                && [
+                    redemption.invite_id.as_str(),
+                    redemption.nonce.as_str(),
+                    redemption.device_name.as_str(),
+                    redemption.public_key.as_str(),
+                    redemption.platform.as_str(),
+                ]
+                .iter()
+                .all(|value| !value.chars().any(char::is_control)),
+            "invite redemption store contains an invalid redemption"
+        );
+        anyhow::ensure!(
+            key == &InviteRedemptionStore::key(&redemption.invite_id, &redemption.nonce),
+            "invite redemption store key does not match its redemption"
+        );
+    }
+    Ok(())
 }
 
 // Need hex for nonce encoding
@@ -600,6 +693,7 @@ mod tests {
         let master_key = [42u8; 32];
         let mut invite =
             EnrollmentInvite::new("admin-device", &master_key, 24, DevicePermissions::admin());
+        invite.permissions.allowed_prefixes = vec!["git/team-a".into(), "agent/routes".into()];
         invite.storage_endpoint = Some("http://s3.example.com:8333".into());
         invite.storage_bucket = Some("tcfs".into());
         invite.storage_access_key = Some("AKIAIOSFODNN7EXAMPLE".into());
@@ -627,6 +721,10 @@ mod tests {
         assert_eq!(invite.storage_access_key, decoded.storage_access_key);
         assert_eq!(invite.nats_url, decoded.nats_url);
         assert_eq!(invite.description, decoded.description);
+        assert_eq!(
+            invite.permissions.allowed_prefixes,
+            decoded.permissions.allowed_prefixes
+        );
         assert!(decoded.verify_signature(&master_key));
 
         // Roundtrip via decode_any (auto-detect compact)
@@ -766,5 +864,85 @@ mod tests {
         loaded.load_from_file(&path).await.unwrap();
         assert!(loaded.is_redeemed(&invite.invite_id, &invite.nonce).await);
         assert_eq!(loaded.count().await, 1);
+
+        let replay = loaded
+            .claim(
+                &invite.invite_id,
+                &invite.nonce,
+                "tablet",
+                "age1other",
+                "ios",
+            )
+            .await;
+        assert!(matches!(
+            replay,
+            Err(InviteRedemptionError::AlreadyRedeemed { .. })
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invite_redemption_store_rejects_corrupt_and_non_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invite-redemptions.json");
+        std::fs::write(&path, b"{\"truncated\":").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let restarted = InviteRedemptionStore::new();
+        assert!(restarted.load_from_file(&path).await.is_err());
+        assert!(restarted.load_from_file(dir.path()).await.is_err());
+
+        let malformed = serde_json::json!({
+            "wrong-key": {
+                "invite_id": "invite-a",
+                "nonce": "nonce-a",
+                "redeemed_at": Utc::now(),
+                "device_name": "laptop",
+                "public_key": "age1test",
+                "platform": "linux-x86_64"
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(restarted.load_from_file(&path).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invite_redemption_store_rejects_unsafe_file_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invite-redemptions.json");
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let restarted = InviteRedemptionStore::new();
+        assert!(restarted.load_from_file(&path).await.is_err());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let symlink_path = dir.path().join("invite-redemptions-link.json");
+        std::os::unix::fs::symlink(&path, &symlink_path).unwrap();
+        assert!(restarted.load_from_file(&symlink_path).await.is_err());
+
+        let hardlink_path = dir.path().join("invite-redemptions-hardlink.json");
+        std::fs::hard_link(&path, &hardlink_path).unwrap();
+        assert!(restarted.load_from_file(&path).await.is_err());
     }
 }

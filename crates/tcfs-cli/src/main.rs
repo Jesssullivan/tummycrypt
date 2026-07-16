@@ -334,19 +334,25 @@ enum Commands {
 
     /// Resolve a sync conflict for a file or git repo group
     ///
-    /// When two devices modify the same file without syncing, a conflict is
-    /// detected. Use this command to pick a resolution strategy.
+    /// Repository-group Git keep-both is available through a daemon-owned
+    /// root. Ordinary per-file mutation is retired until it has equivalent
+    /// root and manifest identity; `defer` remains a no-op.
     Resolve {
         /// Path to the conflicted file, or a git repo root for repo-group keep-both
         path: PathBuf,
         /// Stable daemon-enrolled root identity. The daemon selects and fences
         /// this root's local path, remote prefix, state cache, and policy.
+        /// Named-root dry-run requires pull permission; execute requires both
+        /// pull and push. Inspect-only roots permit dry-run but reject execute.
         #[arg(long)]
         root: Option<String>,
-        /// Resolution strategy: keep-local, keep-remote, keep-both, or defer
-        #[arg(long, short = 's', value_parser = ["keep-local", "keep-remote", "keep-both", "defer"])]
+        /// Resolution strategy: keep-both for a Git repo, or defer for an
+        /// ordinary file. Repo dry-run requires pull; execute requires pull
+        /// and push. Ordinary-file mutation is disabled fail-closed.
+        #[arg(long, short = 's', value_parser = ["keep-both", "defer"])]
         strategy: Option<String>,
-        /// Execute repo-group git keep-both. Without this flag, repo mode is a dry-run.
+        /// Execute repo-group git keep-both. Without this flag, repo mode is a
+        /// dry-run. Execute requires both pull and push permission.
         #[arg(long)]
         execute: bool,
     },
@@ -376,9 +382,9 @@ enum Commands {
 
     /// Manage the sync trash (staged deletes)
     ///
-    /// When trash is enabled, deleted files are moved to a .tcfs-trash/ prefix
-    /// instead of being permanently removed. Use these subcommands to list,
-    /// restore, or purge trashed items.
+    /// When trash is enabled, deletion writes an immutable safety copy and
+    /// conditionally tombstones the live index. Purge is logical: evidence is
+    /// retained for reachability-safe GC.
     Trash {
         #[command(subcommand)]
         action: TrashAction,
@@ -386,13 +392,17 @@ enum Commands {
 
     /// Migrate S3 index entries from stale/incorrect prefixes
     ///
-    /// Fixes double-prefixed entries (data/index/data/*) and orphaned entries
-    /// under old prefixes (tcfs/index/*). Run once after upgrading.
+    /// Copies double-prefixed entries (data/index/data/*) and orphaned entries
+    /// under old prefixes (tcfs/index/*). Double-prefixed sources are logically
+    /// tombstoned after an exact copy; orphan-prefix sources are retained.
     #[command(name = "migrate-prefix")]
     MigratePrefix {
         /// Dry-run mode (show what would be migrated without changing anything)
         #[arg(long)]
         dry_run: bool,
+        /// Assert that every old and new TCFS writer for these prefixes is stopped
+        #[arg(long)]
+        writers_quiesced: bool,
     },
 }
 
@@ -523,16 +533,18 @@ enum DeviceAction {
 
 #[derive(Subcommand, Debug)]
 enum KeyAction {
-    /// Rotate FileKeys for all manifests under a prefix (forward secrecy).
+    /// Rotate FileKeys for a legacy manifest-only prefix (forward secrecy).
     ///
     /// Without `--rotate-keys` this is a dry-run that reports the projected
     /// bytes-to-rewrite. With `--rotate-keys` it generates fresh FileKeys,
     /// re-encrypts content under new BLAKE3 addresses, re-wraps to the current
-    /// recipient set, publishes new manifests, and GCs the orphaned old chunks.
+    /// recipient set, publishes new manifests, and submits orphaned old chunks
+    /// to generation-pinned GC. Unversioned backends retain those chunks.
     Rotate {
-        /// Remote prefix under which to rotate (e.g. `projects/secret`). Relative
-        /// to the configured storage prefix; manifests are scanned under
-        /// `<storage_prefix>/manifests/<prefix>`.
+        /// Legacy remote prefix under which to rotate (e.g. `projects/secret`).
+        /// Relative to the configured storage prefix; legacy manifests are
+        /// scanned under `<storage_prefix>/manifests/<prefix>`. Indexed roots
+        /// fail closed until index-first copy-on-write rotation is available.
         prefix: String,
         /// Actually perform the rotation. Without this flag the command only
         /// projects the bytes-to-rewrite and exits (safe dry-run).
@@ -545,12 +557,12 @@ enum KeyAction {
         /// effect without `--rotate-keys`.
         #[arg(long)]
         non_interactive: bool,
-        /// GC orphaned old chunks IMMEDIATELY (grace=0) instead of honoring the
-        /// configured `orphan_chunk_cleanup_grace_secs`. Reference-safe either
-        /// way (only chunks unreferenced by ANY live manifest are swept), but
-        /// the default grace protects a concurrent reader in a multi-writer
-        /// fleet that still holds an old chunk address. Use only when you are
-        /// certain no reader is mid-flight.
+        /// Make orphaned old chunks immediately eligible for GC (grace=0)
+        /// instead of honoring `orphan_chunk_cleanup_grace_secs`. Exact
+        /// generation-pinned deletion is still required; unversioned backends
+        /// retain the chunks. Disabled for indexed/multi-writer roots. Use only
+        /// on a proven single-writer legacy root when no reader can still need
+        /// an old chunk.
         #[arg(long)]
         gc_immediate: bool,
     },
@@ -615,17 +627,20 @@ enum TrashAction {
     Restore {
         /// Original path of the trashed file (as shown by `trash list`)
         path: String,
+        /// Exact generation key from `trash list` (required when generations are ambiguous)
+        #[arg(long)]
+        trash_key: Option<String>,
         /// Remote prefix override
         #[arg(long, short = 'p')]
         prefix: Option<String>,
     },
-    /// Permanently delete old trash entries
+    /// Logically purge old trash entries while retaining recovery evidence
     Purge {
-        /// Delete entries older than N seconds (default: from config trash_retention_secs)
-        #[arg(long)]
+        /// Mark entries older than N seconds purged (default: trash_retention_secs)
+        #[arg(long, conflicts_with = "all")]
         older_than: Option<u64>,
-        /// Purge ALL trash entries regardless of age
-        #[arg(long)]
+        /// Logically purge ALL visible trash entries regardless of age
+        #[arg(long, conflicts_with = "older_than")]
         all: bool,
         /// Remote prefix override
         #[arg(long, short = 'p')]
@@ -929,7 +944,10 @@ async fn main() -> Result<()> {
             state,
         } => cmd_rm(&config, &path, prefix.as_deref(), state.as_deref()).await,
         Commands::Trash { action } => cmd_trash(&config, action).await,
-        Commands::MigratePrefix { dry_run } => cmd_migrate_prefix(&config, dry_run).await,
+        Commands::MigratePrefix {
+            dry_run,
+            writers_quiesced,
+        } => cmd_migrate_prefix(&config, dry_run, writers_quiesced).await,
         Commands::Resolve {
             path,
             root,
@@ -1042,6 +1060,95 @@ fn resolve_state_path(
     // we derive a sibling .json file
     let db = expand_tilde(&config.sync.state_db);
     db.with_extension("json")
+}
+
+/// Serialize explicit state-cache mutations with daemon-side registered-root
+/// operations. Default-primary commands retain their existing daemon/process
+/// coordination; only an operator-selected state path can alias a registered
+/// root cache.
+fn lock_explicit_state_for_mutation(
+    state_path: &Path,
+    state_override: Option<&Path>,
+) -> Result<Option<tcfs_sync::state::StateFileLock>> {
+    state_override
+        .is_some()
+        .then(|| tcfs_sync::state::StateFileLock::acquire(state_path))
+        .transpose()
+        .with_context(|| format!("locking explicit state cache: {}", state_path.display()))
+}
+
+fn validate_sync_selection_excludes_master_key(
+    config: &tcfs_core::config::TcfsConfig,
+    selected_path: &Path,
+) -> Result<()> {
+    tcfs_core::config::validate_sync_selection_excludes_master_key(config, selected_path)
+        .map_err(anyhow::Error::msg)
+}
+
+fn validate_push_selection(
+    config: &tcfs_core::config::TcfsConfig,
+    selected_path: &Path,
+) -> Result<()> {
+    validate_sync_selection_excludes_master_key(config, selected_path)?;
+    let fixed = tcfs_sync::blacklist::Blacklist::default();
+    if let Some(reason) = fixed.check_fixed_ingress_path_components(selected_path) {
+        anyhow::bail!(
+            "selected push path {} is blocked by the fixed security deny-set: {reason}",
+            selected_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn pull_input_is_file_path(manifest_path: &str) -> bool {
+    manifest_path.starts_with('/')
+        || manifest_path.starts_with('.')
+        || Path::new(manifest_path).exists()
+}
+
+fn validate_pull_path(path: &Path, description: &str) -> Result<()> {
+    let fixed = tcfs_sync::blacklist::Blacklist::default();
+    if let Some(reason) = fixed.check_fixed_ingress_path_components(path) {
+        anyhow::bail!(
+            "{description} {} is blocked by the fixed security deny-set: {reason}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_pull_destination(
+    config: &tcfs_core::config::TcfsConfig,
+    destination: &Path,
+) -> Result<()> {
+    validate_pull_path(destination, "pull destination")?;
+    validate_sync_selection_excludes_master_key(config, destination)
+}
+
+/// Validate every pull input whose meaning is known without consulting
+/// storage. A manifest hash may still determine the default output basename;
+/// that target is checked again immediately after resolution and before the
+/// state cache is opened.
+fn validate_pull_preflight(
+    config: &tcfs_core::config::TcfsConfig,
+    manifest_path: &str,
+    local: Option<&Path>,
+) -> Result<()> {
+    validate_pull_path(Path::new(manifest_path), "pull logical path")?;
+    if let Some(destination) = local {
+        validate_pull_destination(config, destination)?;
+    } else if pull_input_is_file_path(manifest_path) {
+        validate_pull_destination(config, Path::new(manifest_path))?;
+    }
+    Ok(())
+}
+
+fn validate_rotation_master_key_path(
+    config: &tcfs_core::config::TcfsConfig,
+    master_key_path: &Path,
+) -> Result<()> {
+    tcfs_core::config::validate_master_key_outside_sync_roots(config, master_key_path)
+        .map_err(anyhow::Error::msg)
 }
 
 /// Resolve the daemon-owned per-folder policy store.
@@ -1356,6 +1463,8 @@ async fn cmd_push_with_operator(
     state_path: &Path,
     device_id: &str,
 ) -> Result<()> {
+    validate_push_selection(config, local)?;
+
     let mut state = tcfs_sync::state::StateCache::open(state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
     let collect_cfg = collect_config_from_sync(config);
@@ -1515,8 +1624,13 @@ async fn cmd_push(
     prefix: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let op = build_operator(config).await?;
+    // Reject before credential discovery or storage access. Keep the same
+    // check in `cmd_push_with_operator` so embedded/test callers cannot bypass
+    // the command preflight.
+    validate_push_selection(config, local)?;
     let state_path = resolve_state_path(config, state_override);
+    let _state_lock = lock_explicit_state_for_mutation(&state_path, state_override)?;
+    let op = build_operator(config).await?;
     let device_id = load_device_id(config);
     cmd_push_with_operator(config, &op, local, prefix, &state_path, &device_id).await
 }
@@ -1532,10 +1646,10 @@ async fn cmd_pull_with_operator(
     state_path: &Path,
     device_id: &str,
 ) -> Result<()> {
+    validate_pull_preflight(config, manifest_path, local)?;
+
     // Detect whether input looks like a file path vs a manifest path
-    let is_file_path = manifest_path.starts_with('/')
-        || manifest_path.starts_with('.')
-        || std::path::Path::new(manifest_path).exists();
+    let is_file_path = pull_input_is_file_path(manifest_path);
 
     // Derive the remote prefix from the manifest path if not provided
     // e.g. "devices/A29247/manifests/abc123" → prefix = "devices/A29247"
@@ -1567,9 +1681,18 @@ async fn cmd_pull_with_operator(
     // Resolve file paths to manifest paths via the S3 index
     let sync_root = config.sync.sync_root.as_deref();
     let resolved_manifest =
-        tcfs_sync::engine::resolve_manifest_path(op, manifest_path, &remote_prefix, sync_root)
+        tcfs_sync::engine::resolve_manifest_reference(op, manifest_path, &remote_prefix, sync_root)
             .await
             .with_context(|| format!("resolving manifest for: {manifest_path}"))?;
+
+    if let Some(resolved_rel_path) = resolved_manifest.rel_path() {
+        validate_pull_path(Path::new(resolved_rel_path), "resolved pull logical path")?;
+    }
+
+    // Explicit `.../manifests/<id>` compatibility reads have no index rel to
+    // preflight here. The shared download boundary validates their parsed
+    // manifest-bound rel_path before local or cache mutation, and cannot
+    // redirect this command away from the independently validated destination.
 
     // Default local destination:
     // - an explicit `local` always wins;
@@ -1582,12 +1705,14 @@ async fn cmd_pull_with_operator(
         None if is_file_path => PathBuf::from(manifest_path),
         None => {
             let hash_basename = resolved_manifest
+                .manifest_path()
                 .split('/')
                 .next_back()
                 .unwrap_or("downloaded");
             PathBuf::from(hash_basename)
         }
     };
+    validate_pull_destination(config, &local_path)?;
 
     println!("Pulling {} → {}", manifest_path, local_path.display(),);
 
@@ -1621,7 +1746,7 @@ async fn cmd_pull_with_operator(
         .as_ref()
         .map(|mk| build_encryption_context(config, device_id, mk));
 
-    let result = tcfs_sync::engine::download_file_with_device(
+    let result = tcfs_sync::engine::download_resolved_file_with_device(
         op,
         &resolved_manifest,
         &local_path,
@@ -1731,9 +1856,13 @@ async fn cmd_pull(
     prefix: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
+    // Reject known-sensitive paths before state locking, credential discovery,
+    // or storage construction. The operator-backed seam repeats this check.
+    validate_pull_preflight(config, manifest_path, local)?;
+    let state_path = resolve_state_path(config, state_override);
+    let _state_lock = lock_explicit_state_for_mutation(&state_path, state_override)?;
     let op = build_operator(config).await?;
     let device_id = load_device_id(config);
-    let state_path = resolve_state_path(config, state_override);
     cmd_pull_with_operator(
         config,
         &op,
@@ -1909,7 +2038,10 @@ async fn inspect_index_entry_with_operator(
     let visible_entry = if let Some(entry) = parsed.visible_entry() {
         let manifest_key =
             tcfs_sync::index_entry::manifest_key(&manifest_prefix, &entry.manifest_hash);
-        let manifest_exists = op.exists(&manifest_key).await.unwrap_or(false);
+        let manifest_exists = op
+            .exists(&manifest_key)
+            .await
+            .with_context(|| format!("checking visible manifest: {manifest_key}"))?;
         Some(IndexInspectVisibleEntry {
             manifest_hash: entry.manifest_hash.clone(),
             manifest_key,
@@ -1926,8 +2058,20 @@ async fn inspect_index_entry_with_operator(
     let pending_entry = if let Some(entry) = parsed.pending_entry() {
         let manifest_key =
             tcfs_sync::index_entry::manifest_key(&manifest_prefix, &entry.manifest_hash);
-        let manifest_exists = op.exists(&manifest_key).await.unwrap_or(false);
-        let staged_manifest_exists = op.exists(&entry.staged_manifest_key).await.unwrap_or(false);
+        let manifest_exists = op
+            .exists(&manifest_key)
+            .await
+            .with_context(|| format!("checking pending manifest: {manifest_key}"))?;
+        tcfs_sync::index_entry::validate_staged_manifest_key(&manifest_prefix, entry)?;
+        let staged_manifest_exists =
+            op.exists(&entry.staged_manifest_key)
+                .await
+                .with_context(|| {
+                    format!(
+                        "checking pending staged manifest: {}",
+                        entry.staged_manifest_key
+                    )
+                })?;
         Some(IndexInspectPendingEntry {
             manifest_hash: entry.manifest_hash.clone(),
             manifest_key,
@@ -2276,9 +2420,426 @@ async fn run_storage_canary_scope_deny_probe(
 
 // ── `tcfs migrate-prefix` ────────────────────────────────────────────────────
 
-async fn cmd_migrate_prefix(config: &tcfs_core::config::TcfsConfig, dry_run: bool) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationInstallOutcome {
+    Created,
+    AlreadyExact,
+    SourceAlreadyRetired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationDryRunOutcome {
+    WouldCopy,
+    AlreadyExact,
+    DestinationConflict,
+    SourceAlreadyRetired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationSourceKind {
+    IndexEntry,
+    DirectoryMarker,
+    AlreadyRetired,
+}
+
+fn canonical_migration_prefix<'a>(value: &'a str, description: &str) -> Result<&'a str> {
+    anyhow::ensure!(
+        !value.is_empty() && value == value.trim_matches('/'),
+        "{description} must be non-empty without leading or trailing slashes: {value:?}"
+    );
+    anyhow::ensure!(
+        !value.contains('\\') && !value.chars().any(char::is_control),
+        "{description} contains an unsafe storage-key character: {value:?}"
+    );
+    for component in value.split('/') {
+        anyhow::ensure!(
+            !component.is_empty() && component != "." && component != "..",
+            "{description} contains an unsafe empty/dot component: {value:?}"
+        );
+    }
+    Ok(value)
+}
+
+fn migration_index_prefix(prefix: &str) -> String {
+    if prefix.is_empty() {
+        "index/".to_string()
+    } else {
+        format!("{prefix}/index/")
+    }
+}
+
+fn migration_index_key(prefix: &str, rel_path: &str) -> String {
+    format!("{}{rel_path}", migration_index_prefix(prefix))
+}
+
+fn migration_rel_from_key<'a>(key: &'a str, index_prefix: &str) -> Result<&'a str> {
+    let rel_path = key
+        .strip_prefix(index_prefix)
+        .filter(|rel_path| !rel_path.is_empty())
+        .with_context(|| {
+            format!("migration source escaped listed index prefix {index_prefix:?}: {key:?}")
+        })?;
+    tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+        .with_context(|| format!("validating canonical migration path: {rel_path:?}"))?;
+    Ok(rel_path)
+}
+
+fn migration_namespace_claim(
+    rel_path: &str,
+) -> Result<Option<(String, tcfs_sync::index_entry::PortableNamespaceRole)>> {
+    use tcfs_sync::index_entry::PortableNamespaceRole;
+
+    if rel_path == ".tcfs_dir" {
+        return Ok(None);
+    }
+    if let Some(parent) = rel_path.strip_suffix("/.tcfs_dir") {
+        tcfs_sync::index_entry::validate_canonical_rel_path(parent)?;
+        return Ok(Some((parent.to_string(), PortableNamespaceRole::Directory)));
+    }
+    tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)?;
+    Ok(Some((rel_path.to_string(), PortableNamespaceRole::File)))
+}
+
+fn validate_migration_source(rel_path: &str, source_bytes: &[u8]) -> Result<MigrationSourceKind> {
+    if rel_path.ends_with("/.tcfs_dir") {
+        if source_bytes == tcfs_sync::index_entry::DIRECTORY_MARKER_BYTES {
+            return Ok(MigrationSourceKind::DirectoryMarker);
+        }
+        let parsed = tcfs_sync::index_entry::parse_index_entry_record(source_bytes)
+            .context("validating logically retired migration directory marker")?;
+        anyhow::ensure!(
+            parsed.state() == tcfs_sync::index_entry::IndexEntryState::Deleted,
+            "migration directory marker is neither canonical nor logically retired"
+        );
+        return Ok(MigrationSourceKind::AlreadyRetired);
+    }
+
+    let parsed = tcfs_sync::index_entry::parse_index_entry_record(source_bytes)
+        .context("validating migration source index entry")?;
+    if parsed.state() == tcfs_sync::index_entry::IndexEntryState::Deleted {
+        Ok(MigrationSourceKind::AlreadyRetired)
+    } else {
+        Ok(MigrationSourceKind::IndexEntry)
+    }
+}
+
+/// Prove that every manifest pointer copied into the target index is already
+/// valid in the target root. Prefix repair deliberately does not rewrite or
+/// relocate immutable manifests: legacy entries whose path binding or object
+/// placement differs require a dedicated rewrite protocol and fail closed.
+async fn validate_migration_source_bindings(
+    op: &opendal::Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    source_kind: MigrationSourceKind,
+    source_bytes: &[u8],
+) -> Result<()> {
+    if source_kind != MigrationSourceKind::IndexEntry {
+        return Ok(());
+    }
+
+    let record = tcfs_sync::index_entry::parse_index_entry_record(source_bytes)
+        .context("parsing migration index record for manifest binding")?;
+    let manifest_prefix = format!("{remote_prefix}/manifests");
+
+    if let Some(current) = record.visible_entry() {
+        let manifest_key =
+            tcfs_sync::index_entry::manifest_key(&manifest_prefix, &current.manifest_hash);
+        let manifest_bytes = op
+            .read(&manifest_key)
+            .await
+            .with_context(|| format!("reading target-root migration manifest: {manifest_key}"))?
+            .to_vec();
+        tcfs_sync::engine::validate_indexed_manifest_entry_binding(
+            &manifest_bytes,
+            &current.manifest_hash,
+            current,
+            rel_path,
+        )
+        .with_context(|| {
+            format!("validating target-root migration manifest binding for {rel_path:?}")
+        })?;
+    }
+
+    if let Some(pending) = record.pending_entry() {
+        tcfs_sync::index_entry::validate_staged_manifest_key(&manifest_prefix, pending)
+            .with_context(|| {
+                format!("validating target-root staged migration key for {rel_path:?}")
+            })?;
+        let staged_bytes = op
+            .read(&pending.staged_manifest_key)
+            .await
+            .with_context(|| {
+                format!(
+                    "reading target-root staged migration manifest: {}",
+                    pending.staged_manifest_key
+                )
+            })?
+            .to_vec();
+        tcfs_sync::engine::validate_indexed_manifest_entry_binding(
+            &staged_bytes,
+            &pending.manifest_hash,
+            &pending.as_remote_entry(),
+            rel_path,
+        )
+        .with_context(|| {
+            format!("validating target-root staged manifest binding for {rel_path:?}")
+        })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn memory_migration_install_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn prove_migration_object_bytes(
+    op: &opendal::Operator,
+    key: &str,
+    expected: &[u8],
+) -> Result<()> {
+    let observed = op
+        .read(key)
+        .await
+        .with_context(|| format!("proving exact migration object bytes: {key}"))?
+        .to_vec();
+    anyhow::ensure!(
+        observed == expected,
+        "migration destination contains different bytes; preserving source: {key}"
+    );
+    Ok(())
+}
+
+/// Atomically install a migration destination or accept an existing object
+/// only when a live read proves it is byte-for-byte identical.
+async fn install_migration_destination(
+    op: &opendal::Operator,
+    new_key: &str,
+    source_bytes: &[u8],
+) -> Result<MigrationInstallOutcome> {
+    if op.info().full_capability().write_with_if_not_exists {
+        let outcome = match op
+            .write_with(new_key, source_bytes.to_vec())
+            .if_not_exists(true)
+            .await
+        {
+            Ok(_) => MigrationInstallOutcome::Created,
+            Err(write_error) => match op.read(new_key).await {
+                Ok(observed) if observed.to_vec() == source_bytes => {
+                    MigrationInstallOutcome::AlreadyExact
+                }
+                Ok(_) => {
+                    anyhow::bail!(
+                        "migration destination already exists with different bytes; preserving source: {new_key}"
+                    )
+                }
+                Err(read_error) if read_error.kind() == opendal::ErrorKind::NotFound => {
+                    return Err(anyhow::Error::new(write_error)).with_context(|| {
+                        format!("atomically creating absent migration destination: {new_key}")
+                    });
+                }
+                Err(read_error) => {
+                    return Err(anyhow::Error::new(read_error)).with_context(|| {
+                        format!(
+                            "checking migration destination after conditional write failed: {new_key}"
+                        )
+                    });
+                }
+            },
+        };
+        prove_migration_object_bytes(op, new_key, source_bytes).await?;
+        return Ok(outcome);
+    }
+
+    // OpenDAL Memory has no external endpoint and no conditional-write
+    // capability. Keep this process-local emulation confined to unit tests.
+    #[cfg(test)]
+    if tcfs_storage::memory_conditional_write_emulation_is_registered_for_tests(op)? {
+        let _guard = memory_migration_install_lock().lock().await;
+        let outcome = match op.read(new_key).await {
+            Ok(observed) if observed.to_vec() == source_bytes => {
+                MigrationInstallOutcome::AlreadyExact
+            }
+            Ok(_) => {
+                anyhow::bail!(
+                    "migration destination already exists with different bytes; preserving source: {new_key}"
+                )
+            }
+            Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
+                op.write(new_key, source_bytes.to_vec())
+                    .await
+                    .with_context(|| {
+                        format!("creating guarded test migration destination: {new_key}")
+                    })?;
+                MigrationInstallOutcome::Created
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)).with_context(|| {
+                    format!("reading guarded test migration destination: {new_key}")
+                });
+            }
+        };
+        prove_migration_object_bytes(op, new_key, source_bytes).await?;
+        return Ok(outcome);
+    }
+
+    anyhow::bail!(
+        "prefix migration requires atomic absent-object creation; refusing unsafe destination write: {new_key}"
+    )
+}
+
+async fn migrate_bound_index_entry(
+    op: &opendal::Operator,
+    old_key: &str,
+    new_key: &str,
+    source_bytes: &[u8],
+) -> Result<MigrationInstallOutcome> {
+    anyhow::ensure!(
+        old_key != new_key,
+        "migration source and destination must differ: {old_key}"
+    );
+    let outcome = install_migration_destination(op, new_key, source_bytes).await?;
+
+    // OpenDAL 0.55 has no ETag-conditional delete. Revalidate both objects so
+    // the command reports a raced source. The caller may then retain the source
+    // or replace an in-root bogus source with an exact-CAS logical tombstone.
+    prove_migration_object_bytes(op, old_key, source_bytes)
+        .await
+        .with_context(|| format!("revalidating retained migration source: {old_key}"))?;
+    prove_migration_object_bytes(op, new_key, source_bytes)
+        .await
+        .with_context(|| format!("revalidating installed migration destination: {new_key}"))?;
+    Ok(outcome)
+}
+
+async fn migrate_index_entry(
+    op: &opendal::Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    old_key: &str,
+    new_key: &str,
+    retire_source: bool,
+) -> Result<MigrationInstallOutcome> {
+    let source_bytes = op
+        .read(old_key)
+        .await
+        .with_context(|| format!("reading migration source: {old_key}"))?
+        .to_vec();
+    let source_kind = validate_migration_source(rel_path, &source_bytes)
+        .with_context(|| format!("validating migration source: {old_key}"))?;
+    // A tombstone is deletion evidence scoped to its existing root, not an
+    // object to publish into a different target namespace. Treat it as an
+    // idempotently retired source in both the double-prefix and orphan lanes.
+    if source_kind == MigrationSourceKind::AlreadyRetired {
+        return Ok(MigrationInstallOutcome::SourceAlreadyRetired);
+    }
+    validate_migration_source_bindings(op, remote_prefix, rel_path, source_kind, &source_bytes)
+        .await
+        .with_context(|| format!("binding migration source before publication: {old_key}"))?;
+    if let Some((logical_path, role)) = migration_namespace_claim(rel_path)? {
+        tcfs_sync::index_entry::admit_portable_namespace_entry(
+            op,
+            remote_prefix,
+            &logical_path,
+            role,
+        )
+        .await
+        .with_context(|| format!("reserving portable namespace for migration: {rel_path:?}"))?;
+    }
+    let outcome = migrate_bound_index_entry(op, old_key, new_key, &source_bytes).await?;
+
+    if retire_source {
+        match source_kind {
+            MigrationSourceKind::IndexEntry => {
+                tcfs_sync::index_entry::tombstone_index_entry_if_exact(
+                    op,
+                    remote_prefix,
+                    old_key,
+                    &source_bytes,
+                )
+                .await
+                .with_context(|| {
+                    format!("logically retiring migrated double-prefix source: {old_key}")
+                })?;
+            }
+            MigrationSourceKind::DirectoryMarker => {
+                tcfs_sync::index_entry::tombstone_directory_marker_if_exact(
+                    op,
+                    remote_prefix,
+                    old_key,
+                    &source_bytes,
+                )
+                .await
+                .with_context(|| {
+                    format!("logically retiring migrated double-prefix directory marker: {old_key}")
+                })?;
+            }
+            MigrationSourceKind::AlreadyRetired => unreachable!("handled before publication"),
+        }
+    }
+
+    Ok(outcome)
+}
+
+async fn inspect_migration_destination(
+    op: &opendal::Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    old_key: &str,
+    new_key: &str,
+) -> Result<MigrationDryRunOutcome> {
+    let source = op
+        .read(old_key)
+        .await
+        .with_context(|| format!("reading migration source: {old_key}"))?
+        .to_vec();
+    let source_kind = validate_migration_source(rel_path, &source)
+        .with_context(|| format!("validating migration source: {old_key}"))?;
+    if source_kind == MigrationSourceKind::AlreadyRetired {
+        return Ok(MigrationDryRunOutcome::SourceAlreadyRetired);
+    }
+    validate_migration_source_bindings(op, remote_prefix, rel_path, source_kind, &source)
+        .await
+        .with_context(|| format!("binding dry-run migration source: {old_key}"))?;
+    match op.read(new_key).await {
+        Ok(destination) if destination.to_vec() == source => {
+            Ok(MigrationDryRunOutcome::AlreadyExact)
+        }
+        Ok(_) => Ok(MigrationDryRunOutcome::DestinationConflict),
+        Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
+            Ok(MigrationDryRunOutcome::WouldCopy)
+        }
+        Err(error) => Err(anyhow::Error::new(error))
+            .with_context(|| format!("checking migration destination: {new_key}")),
+    }
+}
+
+fn require_migration_writers_quiesced(dry_run: bool, writers_quiesced: bool) -> Result<()> {
+    anyhow::ensure!(
+        dry_run || writers_quiesced,
+        "executing prefix migration requires --writers-quiesced after stopping every old and new TCFS writer for the source and target prefixes"
+    );
+    Ok(())
+}
+
+async fn cmd_migrate_prefix(
+    config: &tcfs_core::config::TcfsConfig,
+    dry_run: bool,
+    writers_quiesced: bool,
+) -> Result<()> {
+    require_migration_writers_quiesced(dry_run, writers_quiesced)?;
+    let target =
+        canonical_migration_prefix(config.storage.resolved_prefix(), "migration target prefix")?;
     let op = build_operator(config).await?;
-    let target = config.storage.resolved_prefix();
+
+    if !dry_run {
+        tcfs_storage::ensure_conditional_write_semantics(&op, target)
+            .await
+            .context("verifying conditional writes before executing prefix migration")?;
+    }
 
     println!(
         "Migrating S3 index entries → target prefix: \"{}\"{}\n",
@@ -2286,15 +2847,14 @@ async fn cmd_migrate_prefix(config: &tcfs_core::config::TcfsConfig, dry_run: boo
         if dry_run { " (DRY RUN)" } else { "" }
     );
 
-    let mut migrated = 0u32;
-    let mut deleted = 0u32;
+    let mut copied = 0u32;
+    let mut exact_sources_retained = 0u32;
+    let mut sources_logically_retired = 0u32;
+    let mut sources_already_retired = 0u32;
+    let mut conflicts = 0u32;
 
     // 1. Fix double-prefixed entries: {target}/index/{target}/* → {target}/index/*
-    let double_prefix = format!(
-        "{}/index/{}/",
-        target.trim_end_matches('/'),
-        target.trim_end_matches('/')
-    );
+    let double_prefix = format!("{}{target}/", migration_index_prefix(target));
     let entries = op
         .list_with(&double_prefix)
         .recursive(true)
@@ -2306,22 +2866,64 @@ async fn cmd_migrate_prefix(config: &tcfs_core::config::TcfsConfig, dry_run: boo
         if old_key.ends_with('/') {
             continue;
         }
-        let rel = old_key.strip_prefix(&double_prefix).unwrap_or(&old_key);
-        let new_key = format!("{}/index/{}", target.trim_end_matches('/'), rel);
+        let rel = migration_rel_from_key(&old_key, &double_prefix)?;
+        let new_key = migration_index_key(target, rel);
 
-        println!("  move: {} → {}", old_key, new_key);
-        if !dry_run {
-            let data = op.read(&old_key).await?.to_bytes();
-            op.write(&new_key, data.to_vec()).await?;
-            op.delete(&old_key).await?;
+        if dry_run {
+            match inspect_migration_destination(&op, target, rel, &old_key, &new_key).await? {
+                MigrationDryRunOutcome::WouldCopy => {
+                    println!(
+                        "  copy + logically retire source: {} → {}",
+                        old_key, new_key
+                    );
+                    copied += 1;
+                    sources_logically_retired += 1;
+                }
+                MigrationDryRunOutcome::AlreadyExact => {
+                    println!("  exact destination + logically retire source: {}", old_key);
+                    sources_logically_retired += 1;
+                }
+                MigrationDryRunOutcome::DestinationConflict => {
+                    println!(
+                        "  conflict (destination differs; preserve source): {} → {}",
+                        old_key, new_key
+                    );
+                    conflicts += 1;
+                }
+                MigrationDryRunOutcome::SourceAlreadyRetired => {
+                    println!("  source already logically retired: {}", old_key);
+                    sources_already_retired += 1;
+                }
+            }
+        } else {
+            match migrate_index_entry(&op, target, rel, &old_key, &new_key, true).await? {
+                MigrationInstallOutcome::Created => {
+                    println!(
+                        "  copied + source logically retired: {} → {}",
+                        old_key, new_key
+                    );
+                    copied += 1;
+                    sources_logically_retired += 1;
+                }
+                MigrationInstallOutcome::AlreadyExact => {
+                    println!(
+                        "  exact destination + source logically retired: {}",
+                        old_key
+                    );
+                    sources_logically_retired += 1;
+                }
+                MigrationInstallOutcome::SourceAlreadyRetired => {
+                    println!("  source already logically retired: {}", old_key);
+                    sources_already_retired += 1;
+                }
+            }
         }
-        migrated += 1;
     }
 
     // 2. Migrate orphan prefixes (e.g., tcfs/index/* when target is "data")
-    let bucket = &config.storage.bucket;
+    let bucket = canonical_migration_prefix(&config.storage.bucket, "legacy bucket prefix")?;
     if bucket != target {
-        let orphan_prefix = format!("{}/index/", bucket.trim_end_matches('/'));
+        let orphan_prefix = migration_index_prefix(bucket);
         let entries = op
             .list_with(&orphan_prefix)
             .recursive(true)
@@ -2333,38 +2935,65 @@ async fn cmd_migrate_prefix(config: &tcfs_core::config::TcfsConfig, dry_run: boo
             if old_key.ends_with('/') {
                 continue;
             }
-            let rel = old_key.strip_prefix(&orphan_prefix).unwrap_or(&old_key);
-            let new_key = format!("{}/index/{}", target.trim_end_matches('/'), rel);
+            let rel = migration_rel_from_key(&old_key, &orphan_prefix)?;
+            let new_key = migration_index_key(target, rel);
 
-            // Check if target already has this entry
-            let exists = op.read(&new_key).await.is_ok();
-            if exists {
-                println!("  delete orphan (target exists): {}", old_key);
-                if !dry_run {
-                    op.delete(&old_key).await?;
+            if dry_run {
+                match inspect_migration_destination(&op, target, rel, &old_key, &new_key).await? {
+                    MigrationDryRunOutcome::AlreadyExact => {
+                        println!("  exact orphan destination (retain source): {}", old_key);
+                        exact_sources_retained += 1;
+                    }
+                    MigrationDryRunOutcome::DestinationConflict => {
+                        println!(
+                            "  conflict (destination differs; preserve source): {} → {}",
+                            old_key, new_key
+                        );
+                        conflicts += 1;
+                    }
+                    MigrationDryRunOutcome::WouldCopy => {
+                        println!("  copy orphan (retain source): {} → {}", old_key, new_key);
+                        copied += 1;
+                    }
+                    MigrationDryRunOutcome::SourceAlreadyRetired => {
+                        println!("  orphan source already logically retired: {}", old_key);
+                        sources_already_retired += 1;
+                    }
                 }
-                deleted += 1;
             } else {
-                println!("  move orphan: {} → {}", old_key, new_key);
-                if !dry_run {
-                    let data = op.read(&old_key).await?.to_bytes();
-                    op.write(&new_key, data.to_vec()).await?;
-                    op.delete(&old_key).await?;
+                match migrate_index_entry(&op, target, rel, &old_key, &new_key, false).await? {
+                    MigrationInstallOutcome::Created => {
+                        println!(
+                            "  copied orphan (source retained): {} → {}",
+                            old_key, new_key
+                        );
+                        copied += 1;
+                    }
+                    MigrationInstallOutcome::AlreadyExact => {
+                        println!("  exact orphan destination (source retained): {}", old_key);
+                        exact_sources_retained += 1;
+                    }
+                    MigrationInstallOutcome::SourceAlreadyRetired => {
+                        println!("  orphan source already logically retired: {}", old_key);
+                        sources_already_retired += 1;
+                    }
                 }
-                migrated += 1;
             }
         }
     }
 
     println!(
-        "\n{}: migrated={}, orphans_deleted={}",
+        "\n{}: copied={}, exact_sources_retained={}, sources_logically_retired={}, sources_already_retired={}, conflicts={}",
         if dry_run { "Would process" } else { "Done" },
-        migrated,
-        deleted
+        copied,
+        exact_sources_retained,
+        sources_logically_retired,
+        sources_already_retired,
+        conflicts
     );
     if dry_run {
         println!("Run without --dry-run to apply changes.");
-    } else if migrated > 0 || deleted > 0 {
+    } else if copied > 0 {
         println!("Restart tcfsd to re-populate the state cache.");
     }
 
@@ -2373,69 +3002,145 @@ async fn cmd_migrate_prefix(config: &tcfs_core::config::TcfsConfig, dry_run: boo
 
 // ── `tcfs trash` ─────────────────────────────────────────────────────────────
 
+fn select_trash_entry<'a>(
+    entries: &'a [tcfs_vfs::trash::TrashEntry],
+    original_path: &str,
+    exact_trash_key: Option<&str>,
+) -> Result<&'a tcfs_vfs::trash::TrashEntry> {
+    if let Some(exact_trash_key) = exact_trash_key {
+        return entries
+            .iter()
+            .find(|entry| {
+                entry.original_path == original_path && entry.trash_key == exact_trash_key
+            })
+            .with_context(|| {
+                format!(
+                    "no visible trash generation for {original_path:?} has exact key {exact_trash_key:?}"
+                )
+            });
+    }
+
+    let matching: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.original_path == original_path)
+        .collect();
+    match matching.as_slice() {
+        [] => anyhow::bail!(
+            "no trash entry found for {original_path:?}\nRun `tcfs trash list` to see trashed items."
+        ),
+        [entry] => Ok(*entry),
+        _ => {
+            let keys = matching
+                .iter()
+                .map(|entry| entry.trash_key.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            anyhow::bail!(
+                "multiple trash generations exist for {original_path:?}; retry with one exact `--trash-key` from `tcfs trash list`:\n  {keys}"
+            )
+        }
+    }
+}
+
+fn trash_purge_max_age(all: bool, older_than: Option<u64>, configured: u64) -> Result<u64> {
+    anyhow::ensure!(
+        !(all && older_than.is_some()),
+        "--all conflicts with --older-than"
+    );
+    if all {
+        return Ok(0);
+    }
+    let max_age = older_than.unwrap_or(configured);
+    anyhow::ensure!(
+        max_age > 0,
+        "trash retention is disabled (0 seconds); pass --older-than with a positive duration or explicitly use --all"
+    );
+    Ok(max_age)
+}
+
 async fn cmd_trash(config: &tcfs_core::config::TcfsConfig, action: TrashAction) -> Result<()> {
     let op = build_operator(config).await?;
 
     let resolve_prefix = |p: Option<&str>| -> String {
-        p.map(|s| s.trim_end_matches('/').to_string())
-            .unwrap_or_else(|| {
-                config
-                    .storage
-                    .remote_prefix
-                    .clone()
-                    .unwrap_or_else(|| config.storage.bucket.clone())
-            })
+        p.map(str::to_owned).unwrap_or_else(|| {
+            config
+                .storage
+                .remote_prefix
+                .clone()
+                .unwrap_or_else(|| config.storage.bucket.clone())
+        })
     };
 
     match action {
         TrashAction::List { prefix } => {
             let remote_prefix = resolve_prefix(prefix.as_deref());
-            let entries = tcfs_vfs::trash::list_trash(&op, &remote_prefix).await?;
+            let report = tcfs_vfs::trash::scan_trash(&op, &remote_prefix).await?;
+            let entries = &report.entries;
 
-            if entries.is_empty() {
+            if entries.is_empty() && report.issues.is_empty() {
                 println!("Trash is empty.");
                 return Ok(());
             }
 
-            println!("{:<40} {:<20} TRASH KEY", "ORIGINAL PATH", "TRASHED");
-            println!("{}", "-".repeat(90));
-
-            for entry in &entries {
-                let age = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .saturating_sub(entry.trashed_at);
-                let age_str = format_duration(age);
-
+            if !entries.is_empty() {
                 println!(
-                    "{:<40} {:<20} {}",
-                    truncate_str(&entry.original_path, 39),
-                    format!("{} ago", age_str),
-                    entry.trash_key,
+                    "{:<40} {:<20} {:<14} TRASH KEY",
+                    "ORIGINAL PATH", "TRASHED", "STATE"
                 );
+                println!("{}", "-".repeat(105));
+
+                for entry in entries {
+                    let age = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        .saturating_sub(entry.trashed_at);
+                    let age_str = format_duration(age);
+
+                    println!(
+                        "{:<40} {:<20} {:<14} {}",
+                        truncate_str(&entry.original_path, 39),
+                        format!("{} ago", age_str),
+                        entry.generation_state.as_str(),
+                        entry.trash_key,
+                    );
+                }
+
+                println!("\n{} valid item(s) in trash.", entries.len());
             }
 
-            println!("\n{} item(s) in trash.", entries.len());
+            if !report.issues.is_empty() {
+                eprintln!(
+                    "Warning: retained {} unreadable trash object(s); use an exact --trash-key for known-good recovery.",
+                    report.issues.len()
+                );
+                for issue in &report.issues {
+                    eprintln!("  {:?}: {:?}", issue.trash_key, issue.error);
+                }
+            }
             Ok(())
         }
 
-        TrashAction::Restore { path, prefix } => {
+        TrashAction::Restore {
+            path,
+            trash_key,
+            prefix,
+        } => {
             let remote_prefix = resolve_prefix(prefix.as_deref());
-            let entries = tcfs_vfs::trash::list_trash(&op, &remote_prefix).await?;
+            let entry = if let Some(trash_key) = trash_key.as_deref() {
+                tcfs_vfs::trash::read_exact_trash_entry(&op, &remote_prefix, &path, trash_key)
+                    .await?
+                    .with_context(|| {
+                        format!(
+                            "no visible trash generation for {path:?} has exact key {trash_key:?}"
+                        )
+                    })?
+            } else {
+                let entries = tcfs_vfs::trash::list_trash(&op, &remote_prefix).await?;
+                select_trash_entry(&entries, &path, None)?.clone()
+            };
 
-            // Find matching entry by original path (most recent first)
-            let entry = entries
-                .iter()
-                .find(|e| e.original_path == path)
-                .with_context(|| {
-                    format!(
-                        "no trash entry found for '{}'\nRun `tcfs trash list` to see trashed items.",
-                        path
-                    )
-                })?;
-
-            tcfs_vfs::trash::restore_trash_entry(&op, &remote_prefix, entry).await?;
+            tcfs_vfs::trash::restore_trash_entry(&op, &remote_prefix, &entry).await?;
             println!("Restored: {} → index/{}", path, entry.original_path);
             Ok(())
         }
@@ -2447,33 +3152,42 @@ async fn cmd_trash(config: &tcfs_core::config::TcfsConfig, action: TrashAction) 
         } => {
             let remote_prefix = resolve_prefix(prefix.as_deref());
 
-            let max_age = if all {
-                0 // purge everything
-            } else {
-                older_than.unwrap_or(config.sync.trash_retention_secs)
-            };
+            let max_age = trash_purge_max_age(all, older_than, config.sync.trash_retention_secs)?;
 
             if all {
-                // List first to confirm count
-                let entries = tcfs_vfs::trash::list_trash(&op, &remote_prefix).await?;
-                if entries.is_empty() {
-                    println!("Trash is already empty.");
-                    return Ok(());
-                }
-                println!("Purging ALL {} trash entries...", entries.len());
+                println!(
+                    "Logically purging ALL independently valid trash entries (evidence retained; malformed entries retained)..."
+                );
             } else {
                 println!(
-                    "Purging trash entries older than {}...",
+                    "Logically purging trash entries older than {} (evidence retained)...",
                     format_duration(max_age)
                 );
             }
 
-            let purged = tcfs_vfs::trash::purge_old_trash(&op, &remote_prefix, max_age).await?;
+            let report = tcfs_vfs::trash::purge_old_trash(&op, &remote_prefix, max_age).await?;
 
-            if purged > 0 {
-                println!("Purged {} entry(ies).", purged);
+            if report.purged > 0 {
+                println!(
+                    "Logically purged {} entry(ies); evidence retained.",
+                    report.purged
+                );
             } else {
                 println!("Nothing to purge.");
+            }
+            if !report.issues.is_empty() {
+                eprintln!(
+                    "Warning: retained {} trash object(s) that could not be safely purged:",
+                    report.issues.len()
+                );
+                for issue in &report.issues {
+                    eprintln!("  {:?}: {:?}", issue.trash_key, issue.error);
+                }
+                anyhow::bail!(
+                    "trash purge completed partially: {} purged, {} retained with issues",
+                    report.purged,
+                    report.issues.len()
+                );
             }
             Ok(())
         }
@@ -2495,11 +3209,14 @@ fn format_duration(secs: u64) -> String {
 
 /// Truncate a string to max_len, appending "…" if truncated.
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max_len.saturating_sub(1)])
+    if s.chars().count() <= max_len {
+        return s.to_string();
     }
+    if max_len == 0 {
+        return String::new();
+    }
+    let prefix: String = s.chars().take(max_len - 1).collect();
+    format!("{prefix}…")
 }
 
 // ── `tcfs rm` ────────────────────────────────────────────────────────────────
@@ -2510,8 +3227,9 @@ async fn cmd_rm(
     prefix: Option<&str>,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let op = build_operator(config).await?;
     let state_path = resolve_state_path(config, state_override);
+    let _state_lock = lock_explicit_state_for_mutation(&state_path, state_override)?;
+    let op = build_operator(config).await?;
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
@@ -3183,17 +3901,30 @@ async fn cmd_mount(
                         let pfx = prefix.clone();
                         Some(std::sync::Arc::new(
                         move |rel_path: &str,
-                              hash: &str,
+                              file_hash: &str,
+                              manifest_object_id: &str,
                               size: u64,
                               _chunks: usize,
                               vclock: &tcfs_sync::conflict::VectorClock| {
+                            let rel_path =
+                                match tcfs_vfs::virtual_path_to_canonical_rel_path(rel_path) {
+                                    Ok(rel_path) => rel_path.to_string(),
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            path = %rel_path,
+                                            %error,
+                                            "refusing to publish invalid VFS flush path"
+                                        );
+                                        return;
+                                    }
+                                };
                             let event = tcfs_sync::StateEvent::FileSynced {
                                 device_id: dev.clone(),
-                                rel_path: rel_path.to_string(),
-                                blake3: hash.to_string(),
+                                rel_path,
+                                blake3: file_hash.to_string(),
                                 size,
                                 vclock: vclock.clone(),
-                                manifest_path: format!("{}/manifests/{}", pfx, hash),
+                                manifest_path: format!("{}/manifests/{}", pfx, manifest_object_id),
                                 timestamp: tcfs_sync::StateEvent::now(),
                             };
                             let n = nats.clone();
@@ -3228,6 +3959,7 @@ async fn cmd_mount(
                 allow_other: false,
                 on_flush,
                 device_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "cli".to_string()),
+                encryption_required: config.crypto.enabled,
                 // Load master key from file for FUSE read decryption.
                 // The mount process is separate from the daemon, so it can't
                 // share the daemon's Arc<Mutex<MasterKey>>. Read the key file directly.
@@ -5200,7 +5932,7 @@ struct PreparedKeyRotation {
 }
 
 fn key_rotation_paths(key_path: &Path) -> KeyRotationPaths {
-    let parent = key_path.parent().unwrap_or(Path::new("."));
+    let parent = atomic_write_parent(key_path);
     let file_name = key_path
         .file_name()
         .unwrap_or_default()
@@ -5212,26 +5944,97 @@ fn key_rotation_paths(key_path: &Path) -> KeyRotationPaths {
     }
 }
 
-fn atomic_write_bytes(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let tmp_path = parent.join(format!(
-        ".{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
+const ATOMIC_WRITE_TEMP_ATTEMPTS: usize = 16;
 
-    std::fs::write(&tmp_path, data)
-        .with_context(|| format!("writing temp file: {}", tmp_path.display()))?;
+fn atomic_write_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+fn atomic_write_temp_path(path: &Path, nonce: u128) -> PathBuf {
+    atomic_write_parent(path).join(format!(
+        ".{}.tmp.{nonce:032x}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<()> {
+    std::fs::File::open(parent)
+        .with_context(|| format!("opening parent directory for sync: {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing parent directory: {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn atomic_write_bytes(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+    atomic_write_bytes_with_nonce_source(path, data, mode, rand::random::<u128>)
+}
+
+fn atomic_write_bytes_with_nonce_source(
+    path: &Path,
+    data: &[u8],
+    mode: Option<u32>,
+    mut next_nonce: impl FnMut() -> u128,
+) -> Result<()> {
+    use std::fs::OpenOptions;
 
     #[cfg(unix)]
-    if let Some(mode) = mode {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode))
-            .with_context(|| format!("setting permissions on: {}", tmp_path.display()))?;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let parent = atomic_write_parent(path);
+    for _ in 0..ATOMIC_WRITE_TEMP_ATTEMPTS {
+        let tmp_path = atomic_write_temp_path(path, next_nonce());
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(mode.unwrap_or(0o600));
+
+        let mut file = match options.open(&tmp_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("creating temp file: {}", tmp_path.display()));
+            }
+        };
+
+        let persist_result = (|| -> Result<()> {
+            #[cfg(unix)]
+            if let Some(mode) = mode {
+                file.set_permissions(std::fs::Permissions::from_mode(mode))
+                    .with_context(|| format!("setting permissions on: {}", tmp_path.display()))?;
+            }
+
+            file.write_all(data)
+                .with_context(|| format!("writing temp file: {}", tmp_path.display()))?;
+            file.sync_all()
+                .with_context(|| format!("syncing temp file: {}", tmp_path.display()))?;
+            drop(file);
+
+            std::fs::rename(&tmp_path, path).with_context(|| {
+                format!("renaming {} to {}", tmp_path.display(), path.display())
+            })?;
+            sync_parent_directory(parent)?;
+            Ok(())
+        })();
+
+        if persist_result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        return persist_result;
     }
 
-    std::fs::rename(&tmp_path, path)
-        .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
-    Ok(())
+    anyhow::bail!(
+        "unable to allocate a unique temp file for {} after {} attempts",
+        path.display(),
+        ATOMIC_WRITE_TEMP_ATTEMPTS
+    )
 }
 
 fn write_rotation_state(path: &Path, state: &KeyRotationState) -> Result<()> {
@@ -5302,13 +6105,73 @@ fn write_master_key(path: &Path, key: &tcfs_crypto::MasterKey) -> Result<()> {
 }
 
 fn cleanup_rotation_artifacts(paths: &KeyRotationPaths) {
-    for path in [&paths.pending_key_path, &paths.state_path] {
-        if let Err(e) = std::fs::remove_file(path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("  WARN: failed to remove {}: {e}", path.display());
-            }
+    cleanup_rotation_artifacts_with_sync(paths, sync_parent_directory);
+}
+
+fn cleanup_rotation_artifacts_with_sync(
+    paths: &KeyRotationPaths,
+    mut sync_parent: impl FnMut(&Path) -> Result<()>,
+) {
+    // Remove the state first. A crash between removals then leaves only an
+    // ignorable pending key; leaving state without its pending key would make
+    // the next invocation fail before it can observe the already-installed key.
+    let state_removed = match std::fs::remove_file(&paths.state_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            eprintln!(
+                "  WARN: failed to remove {}: {error}",
+                paths.state_path.display()
+            );
+            false
+        }
+    };
+
+    if !state_removed {
+        return;
+    }
+
+    let parent = atomic_write_parent(&paths.state_path);
+    if let Err(error) = sync_parent(parent) {
+        eprintln!(
+            "  WARN: failed to durably remove rotation state in {}: {error}",
+            parent.display()
+        );
+        return;
+    }
+
+    let pending_removed = match std::fs::remove_file(&paths.pending_key_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            eprintln!(
+                "  WARN: failed to remove {}: {error}",
+                paths.pending_key_path.display()
+            );
+            false
+        }
+    };
+    if pending_removed {
+        if let Err(error) = sync_parent(parent) {
+            eprintln!(
+                "  WARN: failed to durably remove pending rotation key in {}: {error}",
+                parent.display()
+            );
         }
     }
+}
+
+fn finalize_key_rotation(
+    key_path: &Path,
+    new_master: &tcfs_crypto::MasterKey,
+    paths: &KeyRotationPaths,
+) -> Result<()> {
+    // `write_master_key` returns only after syncing both the replacement file
+    // and its parent directory. Keep the resume artifacts until that durable
+    // point so any interrupted final swap remains recoverable.
+    write_master_key(key_path, new_master)?;
+    cleanup_rotation_artifacts(paths);
+    Ok(())
 }
 
 fn generate_new_master_key(
@@ -5402,6 +6265,9 @@ fn prepare_key_rotation(
 
     let old_master = read_master_key(key_path)?;
     let new_master = generate_new_master_key(use_password, non_interactive)?;
+    // Persist the key first, including its directory entry, then the state that
+    // makes it authoritative. `cmd_rotate_key` cannot rewrite remote data until
+    // this function returns, so every remote rewrite has durable recovery data.
     write_master_key(&paths.pending_key_path, &new_master)?;
 
     let state = KeyRotationState::new(manifest_prefix, &paths.pending_key_path);
@@ -5416,8 +6282,165 @@ fn prepare_key_rotation(
     }))
 }
 
+/// Capability proving that an in-place manifest rewrite is confined to a
+/// legacy manifest-only root.
+///
+/// New TCFS manifests are immutable byte-addressed objects selected through
+/// `index/<relative-path>`. Rewriting one at the same object key invalidates
+/// its address, while selecting `manifests/<scope>` confuses object identity
+/// with path identity. Keep the old rotation implementation callable only
+/// after the storage layout has been checked and found unambiguously legacy.
+#[derive(Debug)]
+struct LegacyManifestMutationPermit {
+    storage_prefix: String,
+}
+
+impl LegacyManifestMutationPermit {
+    fn authorize_manifest_prefix(&self, manifest_prefix: &str) -> Result<()> {
+        let expected = rotation_child_prefix(&self.storage_prefix, "manifests");
+        anyhow::ensure!(
+            manifest_prefix.starts_with(&expected),
+            "legacy rotation permit for root {:?} cannot authorize manifest namespace {:?}",
+            self.storage_prefix,
+            manifest_prefix
+        );
+        Ok(())
+    }
+
+    fn authorize_remote_prefix(&self, remote_prefix: &str) -> Result<()> {
+        anyhow::ensure!(
+            normalize_rotation_storage_prefix(remote_prefix) == self.storage_prefix,
+            "legacy rotation permit for root {:?} cannot authorize root {:?}",
+            self.storage_prefix,
+            remote_prefix
+        );
+        Ok(())
+    }
+}
+
+fn normalize_rotation_storage_prefix(storage_prefix: &str) -> String {
+    storage_prefix.trim_matches('/').to_string()
+}
+
+fn rotation_child_prefix(storage_prefix: &str, child: &str) -> String {
+    let storage_prefix = normalize_rotation_storage_prefix(storage_prefix);
+    if storage_prefix.is_empty() {
+        format!("{child}/")
+    } else {
+        format!("{storage_prefix}/{child}/")
+    }
+}
+
+fn immutable_rotation_error(
+    storage_prefix: &str,
+    operation: &str,
+    evidence: &str,
+    gc_immediate: bool,
+) -> anyhow::Error {
+    let root = if storage_prefix.is_empty() {
+        "<bucket-root>"
+    } else {
+        storage_prefix
+    };
+
+    if gc_immediate {
+        anyhow::anyhow!(
+            "--gc-immediate is disabled for indexed/multi-writer root `{root}` ({evidence}). \
+             Refusing {operation} before changing any manifest, chunk, index, key, or rotation \
+             state. Readers can still hold old manifest and chunk addresses. Indexed rotation \
+             requires an index-first copy-on-write protocol: write a new byte-addressed \
+             manifest, commit/repoint the index, retain old objects through the reader grace \
+             period, then garbage-collect."
+        )
+    } else {
+        anyhow::anyhow!(
+            "refusing {operation} for root `{root}`: {evidence}. The legacy rotation path \
+             mutates `manifests/*` in place and scopes by `manifests/<scope>`, which is invalid \
+             for immutable byte-addressed, path-indexed manifests. No manifest, chunk, index, \
+             key, or rotation state was changed. Indexed rotation requires an index-first \
+             copy-on-write protocol: write a new byte-addressed manifest, commit/repoint the \
+             index, retain old objects through the reader grace period, then garbage-collect."
+        )
+    }
+}
+
+/// Prove that a root is safe for the legacy in-place rotation implementation.
+///
+/// A root is rejected when it has any live path-index object. We also reject a
+/// flat manifest object whose key is the content-derived manifest object ID,
+/// even if its index was lost or has not yet been published. Storage listing or
+/// reads fail closed: inability to prove the legacy layout never grants the
+/// mutation capability.
+async fn legacy_manifest_mutation_permit(
+    op: &opendal::Operator,
+    storage_prefix: &str,
+    operation: &str,
+    gc_immediate: bool,
+) -> Result<LegacyManifestMutationPermit> {
+    let storage_prefix = normalize_rotation_storage_prefix(storage_prefix);
+    let index_prefix = rotation_child_prefix(&storage_prefix, "index");
+    let index_entries = op
+        .list_with(&index_prefix)
+        .recursive(true)
+        .await
+        .with_context(|| format!("checking rotation index authority under {index_prefix}"))?;
+    if index_entries
+        .iter()
+        .any(|entry| !entry.metadata().is_dir() && !entry.path().ends_with('/'))
+    {
+        return Err(immutable_rotation_error(
+            &storage_prefix,
+            operation,
+            "live path-index entries select manifest object IDs",
+            gc_immediate,
+        ));
+    }
+
+    let manifest_prefix = rotation_child_prefix(&storage_prefix, "manifests");
+    let manifest_entries = op
+        .list_with(&manifest_prefix)
+        .recursive(true)
+        .await
+        .with_context(|| format!("checking rotation manifest layout under {manifest_prefix}"))?;
+    for entry in manifest_entries {
+        if entry.metadata().is_dir() || entry.path().ends_with('/') {
+            continue;
+        }
+        let entry_path = entry.path().to_string();
+        let Some(object_id) = entry_path.strip_prefix(&manifest_prefix) else {
+            return Err(anyhow::anyhow!(
+                "storage returned manifest object outside requested namespace: {}",
+                entry_path
+            ));
+        };
+        let object_id = object_id.to_string();
+        // Byte-addressed manifests are flat. Nested names are the historical
+        // path-shaped layout and remain eligible for the bounded legacy path.
+        if object_id.contains('/') {
+            continue;
+        }
+        let bytes = op
+            .read(&entry_path)
+            .await
+            .with_context(|| format!("verifying legacy manifest identity: {entry_path}"))?
+            .to_bytes();
+        if tcfs_sync::index_entry::manifest_object_id(&bytes) == object_id {
+            return Err(immutable_rotation_error(
+                &storage_prefix,
+                operation,
+                "a manifest key is its immutable byte-derived object ID",
+                gc_immediate,
+            ));
+        }
+    }
+
+    Ok(LegacyManifestMutationPermit { storage_prefix })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn rotate_manifests_with_resume(
     op: &opendal::Operator,
+    permit: &LegacyManifestMutationPermit,
     manifest_prefix: &str,
     old_master: &tcfs_crypto::MasterKey,
     new_master: &tcfs_crypto::MasterKey,
@@ -5425,6 +6448,8 @@ async fn rotate_manifests_with_resume(
     state_path: &Path,
     max_rotations: Option<u64>,
 ) -> Result<()> {
+    // This check happens before even the local resume ledger is updated.
+    permit.authorize_manifest_prefix(manifest_prefix)?;
     state.reset_scan_progress();
     write_rotation_state(state_path, state)?;
 
@@ -5569,8 +6594,40 @@ async fn cmd_rotate_key(
                 .unwrap_or(Path::new("."))
                 .join("master.key")
         });
+    let key_path = expand_tilde(&key_path);
 
-    let manifest_prefix = format!("{}/manifests/", config.storage.resolved_prefix());
+    // This must precede credential discovery and, critically, every call that
+    // can create `.rotate-pending`, `.rotate-state.json`, or atomic temp
+    // siblings next to the selected key.
+    validate_rotation_master_key_path(config, &key_path)?;
+
+    let cred_store = tcfs_secrets::CredStore::load(&config.secrets, &config.storage)
+        .await
+        .context("loading credentials for S3 access")?;
+
+    let s3 = cred_store
+        .s3
+        .as_ref()
+        .context("no S3 credentials available")?;
+
+    let op = tcfs_storage::operator::build_from_core_config(
+        &config.storage,
+        &s3.access_key_id,
+        s3.secret_access_key.expose_secret(),
+    )?;
+
+    // Freeze immutable/indexed roots before prepare_key_rotation writes a
+    // pending key or resume ledger. The legacy implementation below rewrites
+    // manifest bytes at the same key and therefore needs this capability.
+    let legacy_permit = legacy_manifest_mutation_permit(
+        &op,
+        config.storage.resolved_prefix(),
+        "master-key rotation",
+        false,
+    )
+    .await?;
+
+    let manifest_prefix = rotation_child_prefix(config.storage.resolved_prefix(), "manifests");
     let Some(mut rotation) =
         prepare_key_rotation(&key_path, &manifest_prefix, use_password, non_interactive)?
     else {
@@ -5594,24 +6651,10 @@ async fn cmd_rotate_key(
         );
     }
 
-    let cred_store = tcfs_secrets::CredStore::load(&config.secrets, &config.storage)
-        .await
-        .context("loading credentials for S3 access")?;
-
-    let s3 = cred_store
-        .s3
-        .as_ref()
-        .context("no S3 credentials available")?;
-
-    let op = tcfs_storage::operator::build_from_core_config(
-        &config.storage,
-        &s3.access_key_id,
-        s3.secret_access_key.expose_secret(),
-    )?;
-
     println!("Scanning manifests at: {manifest_prefix}");
     if let Err(e) = rotate_manifests_with_resume(
         &op,
+        &legacy_permit,
         &manifest_prefix,
         &rotation.old_master,
         &rotation.new_master,
@@ -5629,8 +6672,7 @@ async fn cmd_rotate_key(
         return Err(e);
     }
 
-    write_master_key(&key_path, &rotation.new_master)?;
-    cleanup_rotation_artifacts(&rotation.paths);
+    finalize_key_rotation(&key_path, &rotation.new_master, &rotation.paths)?;
 
     println!("\nKey rotation complete:");
     println!("  Manifests rotated: {}", rotation.state.rotated_manifests);
@@ -5685,8 +6727,9 @@ async fn cmd_rotate_key(
 //   3. Re-wraps the new FileKey to the CURRENT (post-revocation) recipient set
 //      resolved from the VERIFIED device registry, honoring `crypto.wrap_mode`.
 //      A device absent from that set gets NO wrap -> cannot decrypt the re-key.
-//   4. Publishes the new manifest, then GCs orphaned old chunks once no live
-//      manifest references them (reference-safe; never deletes referenced data).
+//   4. Publishes the new manifest, then submits orphaned old chunks to
+//      generation-pinned GC once no live manifest references them. Backends
+//      without usable object versions retain the orphans rather than risk loss.
 //
 // Resumable via `.rotate-state.json`: a kill mid-run resumes, skipping manifests
 // already published.
@@ -5932,10 +6975,14 @@ enum RekeyOutcome {
 /// live manifest references them.
 async fn rekey_one_manifest(
     op: &opendal::Operator,
+    permit: &LegacyManifestMutationPermit,
     remote_prefix: &str,
     manifest_path: &str,
     ctx: &tcfs_sync::engine::EncryptionContext,
 ) -> Result<RekeyOutcome> {
+    // Hold the layout capability before writing either replacement chunks or
+    // the legacy in-place manifest object.
+    permit.authorize_remote_prefix(remote_prefix)?;
     let data = op
         .read(manifest_path)
         .await
@@ -6076,12 +7123,13 @@ async fn cmd_key_rotate(
     non_interactive: bool,
     gc_immediate: bool,
 ) -> Result<()> {
-    let storage_prefix = config.storage.resolved_prefix().to_string();
+    let storage_prefix = normalize_rotation_storage_prefix(config.storage.resolved_prefix());
     let scope_clean = scope.trim_matches('/');
+    let root_manifest_prefix = rotation_child_prefix(&storage_prefix, "manifests");
     let manifest_prefix = if scope_clean.is_empty() {
-        format!("{storage_prefix}/manifests/")
+        root_manifest_prefix
     } else {
-        format!("{storage_prefix}/manifests/{scope_clean}/")
+        format!("{root_manifest_prefix}{scope_clean}/")
     };
     let remote_prefix = storage_prefix.clone();
 
@@ -6089,6 +7137,17 @@ async fn cmd_key_rotate(
     let ctx = rotation_encryption_context(config, &master_key);
 
     let op = build_operator(config).await?;
+
+    // This must precede `list_scoped_manifests`: path scope lives in index
+    // keys on modern roots, not beneath the flat byte-addressed manifest
+    // namespace. It also precedes creation or mutation of the resume ledger.
+    let legacy_permit = legacy_manifest_mutation_permit(
+        &op,
+        &storage_prefix,
+        "scoped FileKey rotation",
+        gc_immediate,
+    )
+    .await?;
 
     println!("Scanning manifests under: {manifest_prefix}");
     let manifests = list_scoped_manifests(&op, &manifest_prefix).await?;
@@ -6136,9 +7195,11 @@ async fn cmd_key_rotate(
         println!();
         println!(
             "Dry run -- no changes made. Re-run with --rotate-keys to perform the rotation. \
-             Content is re-encrypted under fresh FileKeys per the existing index (no \
-             re-chunking; file_hash/file_id stay valid), re-wrapped to the current recipient \
-             set, and the orphaned old chunks are GC'd."
+             Legacy content is re-encrypted under fresh FileKeys without re-chunking \
+             (file_hash/file_id stay valid), re-wrapped to the current recipient set, and the \
+             orphaned old chunks become eligible for generation-pinned GC. Unversioned backends \
+             retain them. Indexed roots require index-first copy-on-write rotation and are \
+             rejected before this scan."
         );
         return Ok(());
     }
@@ -6148,7 +7209,8 @@ async fn cmd_key_rotate(
         println!();
         println!(
             "This will re-encrypt {projected_bytes} bytes across {encrypted_count} file(s), \
-             upload new chunks, publish new manifests, and GC the orphaned old chunks."
+             upload new chunks, publish new manifests, and submit orphaned old chunks to \
+             generation-pinned GC."
         );
         let confirm =
             rpassword::prompt_password("Type 'ROTATE' to confirm scoped FileKey rotation: ")
@@ -6193,7 +7255,7 @@ async fn cmd_key_rotate(
             state.already_done_manifests += 1;
             continue;
         }
-        match rekey_one_manifest(&op, &remote_prefix, path, &ctx).await {
+        match rekey_one_manifest(&op, &legacy_permit, &remote_prefix, path, &ctx).await {
             Ok(RekeyOutcome::Rotated { bytes_rewritten }) => {
                 state.rotated_manifests += 1;
                 state.bytes_rewritten += bytes_rewritten;
@@ -6230,8 +7292,9 @@ async fn cmd_key_rotate(
     // GC grace: default to the configured orphan_chunk_cleanup_grace_secs so a
     // concurrent reader in a multi-writer fleet that still holds an old chunk
     // address won't 404 mid-flight. `--gc-immediate` opts into grace=0 (the old
-    // hardcoded behavior). Either way GC is reference-safe: only chunks
-    // unreferenced by ANY live manifest are eligible.
+    // hardcoded behavior). Either way only chunks unreferenced by ANY live
+    // manifest are eligible, and physical deletion still requires an exact
+    // object version so an unversioned backend remains fail-closed.
     let gc_grace = if gc_immediate {
         Duration::from_secs(0)
     } else {
@@ -6241,16 +7304,17 @@ async fn cmd_key_rotate(
     if gc_immediate {
         println!(
             "GC: sweeping chunks no longer referenced by ANY live manifest under {remote_prefix} \
-             (grace=0, immediate) ..."
+             (grace=0, immediately eligible; exact-version delete still required) ..."
         );
     } else {
         println!(
             "GC: sweeping chunks no longer referenced by ANY live manifest under {remote_prefix} \
-             (grace={}s; older orphans only — pass --gc-immediate for grace=0) ...",
+             (grace={}s; older orphans only — on a proven single-writer legacy root, pass \
+             --gc-immediate for grace=0) ...",
             config.sync.orphan_chunk_cleanup_grace_secs
         );
     }
-    let cleanup = tcfs_sync::reconcile::cleanup_orphaned_chunks(
+    let cleanup = tcfs_sync::reconcile::cleanup_legacy_orphaned_chunks(
         &op,
         &remote_prefix,
         gc_grace,
@@ -6259,21 +7323,36 @@ async fn cmd_key_rotate(
     .await
     .context("GC of orphaned chunks after rotation")?;
 
-    let deferred_orphans =
-        cleanup.skipped_within_grace.len() + cleanup.skipped_missing_last_modified.len();
+    let deferred_orphans = cleanup.skipped_within_grace.len()
+        + cleanup.skipped_missing_last_modified.len()
+        + cleanup.skipped_without_atomic_delete.len();
     println!(
-        "  GC: {} orphaned, {} deleted, {} deferred (within grace), {} referenced (kept), {} \
-         errors",
+        "  GC: {} orphaned, {} deleted, {} deferred, {} referenced (kept), {} errors",
         cleanup.orphaned_chunks_found,
         cleanup.deleted_chunks.len(),
         deferred_orphans,
         cleanup.referenced_chunks,
         cleanup.delete_errors.len()
     );
-    if deferred_orphans > 0 && !gc_immediate {
+    if !cleanup.skipped_within_grace.is_empty() && !gc_immediate {
         println!(
-            "       {deferred_orphans} orphaned chunk(s) are within the grace window and will be \
-             swept by a later GC (or now with --gc-immediate)."
+            "       {} orphaned chunk(s) are within the grace window and will be \
+             swept by a later GC (or, on a proven single-writer legacy root, with \
+             --gc-immediate).",
+            cleanup.skipped_within_grace.len()
+        );
+    }
+    if !cleanup.skipped_missing_last_modified.is_empty() {
+        println!(
+            "       {} orphaned chunk(s) lack last-modified metadata and were retained.",
+            cleanup.skipped_missing_last_modified.len()
+        );
+    }
+    if !cleanup.skipped_without_atomic_delete.is_empty() {
+        println!(
+            "       {} orphaned chunk(s) lack generation-pinned delete support and were retained \
+             to avoid racing a concurrent publisher.",
+            cleanup.skipped_without_atomic_delete.len()
         );
     }
     for (hash, err) in &cleanup.delete_errors {
@@ -6483,13 +7562,21 @@ async fn cmd_reconcile(
     execute: bool,
     state_override: Option<&Path>,
 ) -> Result<()> {
-    let op = build_operator(config).await?;
-    let device_id = load_device_id(config);
-
     let local_root = path
         .map(|p| p.to_path_buf())
         .or_else(|| config.sync.sync_root.clone())
         .ok_or_else(|| anyhow::anyhow!("no path specified and no sync_root in config"))?;
+    // Reconcile scans before it executes, so even a dry-run must not admit a
+    // directory containing the configured key into a generated plan.
+    validate_sync_selection_excludes_master_key(config, &local_root)?;
+
+    let state_path = resolve_state_path(config, state_override);
+    let _state_lock = execute
+        .then(|| lock_explicit_state_for_mutation(&state_path, state_override))
+        .transpose()?
+        .flatten();
+    let op = build_operator(config).await?;
+    let device_id = load_device_id(config);
 
     let remote_prefix = prefix.map(|s| s.to_string()).unwrap_or_else(|| {
         config
@@ -6499,15 +7586,6 @@ async fn cmd_reconcile(
             .unwrap_or_else(|| config.storage.bucket.clone())
     });
 
-    let state_path = resolve_state_path(config, state_override);
-    // Serialize an executing, explicitly selected per-root state transaction
-    // with daemon-side registered-root inspection and resolution. Primary
-    // daemon scheduling keeps its existing in-process mutex path. StateCache
-    // flushes by replacing the JSON inode, so the shared lock is a sibling.
-    let _state_lock = (execute && state_override.is_some())
-        .then(|| tcfs_sync::state::StateFileLock::acquire(&state_path))
-        .transpose()
-        .with_context(|| format!("locking state cache: {}", state_path.display()))?;
     let state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
@@ -6690,11 +7768,12 @@ async fn cmd_reconcile(
         .context("cleaning orphaned remote chunks")?;
 
         println!(
-            "Orphan cleanup: {} found, {} deleted, {} within grace, {} missing timestamps, {} errors",
+            "Orphan cleanup: {} found, {} deleted, {} within grace, {} missing timestamps, {} without atomic delete, {} errors",
             cleanup.orphaned_chunks_found,
             cleanup.deleted_chunks.len(),
             cleanup.skipped_within_grace.len(),
             cleanup.skipped_missing_last_modified.len(),
+            cleanup.skipped_without_atomic_delete.len(),
             cleanup.delete_errors.len()
         );
 
@@ -6760,49 +7839,23 @@ async fn cmd_resolve(
         (false, Some(_)) if execute => {
             anyhow::bail!("--execute is only valid for repo-group git keep-both resolution");
         }
-        (false, Some(s)) => s.to_string(),
+        (false, Some("defer")) => "defer".to_string(),
+        (false, Some(other)) => {
+            anyhow::bail!(
+                "ordinary-file resolution strategy '{other}' is retired; inspect with `tcfs conflicts` or use --strategy defer"
+            );
+        }
         (false, None) => {
-            // Interactive mode: reuse the existing interactive resolver.
-            //
-            // keep-both PR-1: fetch the REAL recorded ConflictInfo for this
-            // path from the state cache (device names, content hashes, clocks)
-            // instead of the previous dummy placeholder, so the prompt shows
-            // the actual divergence. If no conflict is recorded for the path we
-            // fall back to a minimal record and say so, rather than lying with
-            // empty hashes.
-            let info = load_conflict_info(config, path).unwrap_or_else(|| {
-                println!(
-                    "No conflict recorded for {} in the state cache — prompting with minimal info.",
-                    path.display()
-                );
-                tcfs_sync::conflict::ConflictInfo {
-                    rel_path: path.to_string_lossy().to_string(),
-                    local_blake3: String::new(),
-                    remote_blake3: String::new(),
-                    local_device: "local".to_string(),
-                    remote_device: "remote".to_string(),
-                    local_vclock: tcfs_sync::conflict::VectorClock::new(),
-                    remote_vclock: tcfs_sync::conflict::VectorClock::new(),
-                    detected_at: 0,
-                    times_recorded: 0,
-                    remote_manifest_key: None,
-                }
-            });
-            match resolve_conflict_interactive(&info) {
-                tcfs_sync::conflict::Resolution::KeepLocal => "keep_local".to_string(),
-                tcfs_sync::conflict::Resolution::KeepRemote => "keep_remote".to_string(),
-                tcfs_sync::conflict::Resolution::KeepBoth => "keep_both".to_string(),
-                tcfs_sync::conflict::Resolution::Defer => {
-                    println!("Conflict deferred.");
-                    return Ok(());
-                }
-            }
+            anyhow::bail!(
+                "ordinary-file mutation is disabled until it is root- and manifest-bound; inspect with `tcfs conflicts` or pass --strategy defer"
+            );
         }
     };
 
     // Named roots use a dedicated RPC. An older daemon returns Unimplemented;
     // it cannot ignore a new request field and accidentally run the recognized
-    // git resolution against its primary cache.
+    // git resolution against its primary cache. Dry-run is authenticated read
+    // access (pull); execute performs the same reads and also requires push.
     let mut client = connect_daemon(&config.daemon.socket).await?;
     if let Some(root_id) = root_id {
         let requested = std::fs::canonicalize(path)
@@ -6863,12 +7916,16 @@ async fn cmd_resolve(
             println!("{}", response.error);
         }
         if !execute {
-            println!("Dry-run only. Re-run with --execute to mutate refs and clear conflicts.");
+            println!(
+                "Dry-run only (pull-authorized inspection). Re-run with --execute using a pull+push session and a resolve-policy root to mutate refs and clear conflicts."
+            );
         }
         return Ok(());
     }
 
-    // Primary/legacy conflict resolution remains on the original RPC.
+    // Primary repository-group conflict resolution remains on the original
+    // RPC. Ordinary-file mutation is rejected locally above and fail-closed by
+    // the daemon for older clients.
     let resp = client
         .resolve_conflict(tonic::Request::new(
             tcfs_core::proto::ResolveConflictRequest {
@@ -6876,7 +7933,9 @@ async fn cmd_resolve(
                 resolution: resolution.clone(),
                 // Explicit operator intent from the human-driven CLI. This is a
                 // client-supplied defense-in-depth hint, not attestation; tcfsd
-                // separately requires an authenticated push session.
+                // separately applies strategy-specific capability checks to
+                // this legacy primary-cache RPC: repo dry-run requires pull
+                // and execute requires pull+push, matching the named-root RPC.
                 operator_cli: true,
             },
         ))
@@ -6893,8 +7952,12 @@ async fn cmd_resolve(
             if !execute {
                 println!("Dry-run only. Re-run with --execute to mutate refs and clear conflicts.");
             }
+        } else if resolution == "defer" {
+            println!(
+                "Conflict deferred; ordinary-file mutation is disabled until it is root- and manifest-bound."
+            );
         } else {
-            println!("Conflict resolved ({}): {}", resolution, path.display());
+            unreachable!("ordinary-file mutation strategies are rejected before the RPC");
         }
         if !is_repo_mode
             && !resp.resolved_path.is_empty()
@@ -6907,28 +7970,6 @@ async fn cmd_resolve(
     }
 
     Ok(())
-}
-
-/// Load the recorded [`ConflictInfo`] for `path` from the state cache, if any.
-///
-/// keep-both PR-1 (piece 5): the interactive `tcfs resolve` prompt used to feed
-/// a dummy placeholder; this reads the real record (device names, hashes,
-/// clocks) directly from the state cache — no daemon RPC.
-fn load_conflict_info(
-    config: &tcfs_core::config::TcfsConfig,
-    path: &Path,
-) -> Option<tcfs_sync::conflict::ConflictInfo> {
-    let state_path = resolve_state_path(config, None);
-    let state = tcfs_sync::state::StateCache::open(&state_path).ok()?;
-    // Prefer an exact key match; fall back to a repo-relative suffix match so
-    // both absolute and relative paths resolve.
-    if let Some(info) = state.get(path).and_then(|s| s.conflict.clone()) {
-        return Some(info);
-    }
-    let key = path.to_string_lossy();
-    state
-        .get_by_rel_path(&key)
-        .and_then(|(_, s)| s.conflict.clone())
 }
 
 // ── `tcfs conflicts` (read-only) ────────────────────────────────────────────
@@ -7262,7 +8303,9 @@ async fn cmd_conflicts(
                             "    resolve: named-root per-file resolution is outside the Strategy-A seam"
                         );
                     } else {
-                        println!("    resolve: tcfs resolve {}", p.rel_path);
+                        println!(
+                            "    resolve: ordinary-file mutation is disabled; inspect or defer only"
+                        );
                     }
                 }
             }
@@ -7270,43 +8313,6 @@ async fn cmd_conflicts(
     }
 
     Ok(())
-}
-
-/// Prompt the user to resolve a sync conflict interactively.
-#[cfg(unix)]
-fn resolve_conflict_interactive(
-    info: &tcfs_sync::conflict::ConflictInfo,
-) -> tcfs_sync::conflict::Resolution {
-    println!();
-    println!("CONFLICT DETECTED: {}", info.rel_path);
-    println!("  Local device:    {}", info.local_device);
-    println!(
-        "  Local hash:      {}",
-        &info.local_blake3[..16.min(info.local_blake3.len())]
-    );
-    println!("  Remote device:   {}", info.remote_device);
-    println!(
-        "  Remote hash:     {}",
-        &info.remote_blake3[..16.min(info.remote_blake3.len())]
-    );
-    println!();
-    println!("  [K]eep local / [R]emote / [B]oth / [D]efer?");
-
-    loop {
-        let mut input = String::new();
-        if std::io::stdin().read_line(&mut input).is_err() {
-            return tcfs_sync::conflict::Resolution::Defer;
-        }
-        match input.trim().to_lowercase().as_str() {
-            "k" | "keep" | "local" => return tcfs_sync::conflict::Resolution::KeepLocal,
-            "r" | "remote" => return tcfs_sync::conflict::Resolution::KeepRemote,
-            "b" | "both" => return tcfs_sync::conflict::Resolution::KeepBoth,
-            "d" | "defer" => return tcfs_sync::conflict::Resolution::Defer,
-            _ => {
-                println!("  Please enter K, R, B, or D:");
-            }
-        }
-    }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────
@@ -7332,11 +8338,359 @@ mod tests {
     use opendal::Operator;
 
     fn memory_op() -> Operator {
-        Operator::new(Memory::default()).unwrap().finish()
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+        op
+    }
+
+    async fn seed_migration_manifest(
+        op: &Operator,
+        prefix: &str,
+        manifest_hash: &str,
+        rel_path: &str,
+        size: u64,
+        chunks: usize,
+    ) {
+        let manifest = tcfs_sync::manifest::SyncManifest {
+            version: 2,
+            file_hash: manifest_hash.to_string(),
+            file_size: size,
+            chunks: (0..chunks).map(|index| format!("chunk-{index}")).collect(),
+            vclock: tcfs_sync::conflict::VectorClock::new(),
+            written_by: "migration-test".into(),
+            written_at: 0,
+            rel_path: Some(rel_path.to_string()),
+            mode: None,
+            mtime: None,
+            encrypted_file_key: None,
+            wrapped_file_keys: Vec::new(),
+        };
+        op.write(
+            &format!("{prefix}/manifests/{manifest_hash}"),
+            manifest.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     fn master_key(fill: u8) -> tcfs_crypto::MasterKey {
         tcfs_crypto::MasterKey::from_bytes([fill; tcfs_crypto::KEY_SIZE])
+    }
+
+    #[test]
+    fn migration_prefix_rejects_empty_or_root_like_scope() {
+        for prefix in ["", "/", "data/", "/data"] {
+            assert!(
+                canonical_migration_prefix(prefix, "test migration prefix").is_err(),
+                "unexpectedly accepted migration prefix {prefix:?}"
+            );
+        }
+        assert_eq!(
+            canonical_migration_prefix("data/nested", "test migration prefix").unwrap(),
+            "data/nested"
+        );
+    }
+
+    #[test]
+    fn executing_migration_requires_explicit_writer_quiescence() {
+        assert!(require_migration_writers_quiesced(true, false).is_ok());
+        assert!(require_migration_writers_quiesced(false, true).is_ok());
+        let error = require_migration_writers_quiesced(false, false).unwrap_err();
+        assert!(format!("{error:#}").contains("--writers-quiesced"));
+
+        let parsed = Cli::try_parse_from(["tcfs", "migrate-prefix", "--writers-quiesced"])
+            .expect("writers-quiesced flag must parse");
+        assert!(matches!(
+            parsed.command,
+            Commands::MigratePrefix {
+                dry_run: false,
+                writers_quiesced: true
+            }
+        ));
+    }
+
+    fn listed_trash_entry(path: &str, key: &str) -> tcfs_vfs::trash::TrashEntry {
+        tcfs_vfs::trash::TrashEntry {
+            original_path: path.to_string(),
+            trashed_at: 1,
+            trash_key: key.to_string(),
+            index_content: String::new(),
+            generation_state: tcfs_vfs::trash::TrashGenerationState::Completed,
+        }
+    }
+
+    #[test]
+    fn trash_restore_requires_exact_key_for_ambiguous_generations() {
+        let first = "data/.tcfs-trash/1-00000000-0000-4000-8000-000000000001/doc.txt";
+        let second = "data/.tcfs-trash/1-00000000-0000-4000-8000-000000000002/doc.txt";
+        let entries = vec![
+            listed_trash_entry("doc.txt", first),
+            listed_trash_entry("doc.txt", second),
+        ];
+
+        let error = select_trash_entry(&entries, "doc.txt", None)
+            .expect_err("path-only restore must reject ambiguous generations");
+        assert!(format!("{error:#}").contains("--trash-key"));
+        assert_eq!(
+            select_trash_entry(&entries, "doc.txt", Some(second))
+                .unwrap()
+                .trash_key,
+            second
+        );
+
+        let parsed =
+            Cli::try_parse_from(["tcfs", "trash", "restore", "doc.txt", "--trash-key", second])
+                .expect("exact trash generation selector must parse");
+        assert!(matches!(
+            parsed.command,
+            Commands::Trash {
+                action: TrashAction::Restore {
+                    trash_key: Some(key),
+                    ..
+                }
+            } if key == second
+        ));
+    }
+
+    #[test]
+    fn trash_retention_zero_requires_explicit_all() {
+        assert_eq!(trash_purge_max_age(true, None, 0).unwrap(), 0);
+        assert_eq!(trash_purge_max_age(false, Some(60), 0).unwrap(), 60);
+        assert!(trash_purge_max_age(true, Some(60), 0).is_err());
+        let error = trash_purge_max_age(false, None, 0).unwrap_err();
+        assert!(format!("{error:#}").contains("explicitly use --all"));
+
+        let parse_error =
+            Cli::try_parse_from(["tcfs", "trash", "purge", "--all", "--older-than", "60"])
+                .expect_err("--all and --older-than must conflict at the CLI boundary");
+        assert!(parse_error.to_string().contains("cannot be used with"));
+    }
+
+    #[tokio::test]
+    async fn migration_destination_race_never_overwrites_or_deletes_source() {
+        let op = memory_op();
+        let old_key = "legacy/index/docs/report.txt";
+        let new_key = "data/index/docs/report.txt";
+        let source = b"manifest_hash=source\nsize=10\nchunks=1".to_vec();
+        let competing = b"manifest_hash=competing\nsize=20\nchunks=2".to_vec();
+        op.write(old_key, source.clone()).await.unwrap();
+
+        // Bind the source, then deterministically inject a competing publisher
+        // in the exact window before the migration's absent-object create.
+        let bound = op.read(old_key).await.unwrap().to_vec();
+        op.write(new_key, competing.clone()).await.unwrap();
+        let error = migrate_bound_index_entry(&op, old_key, new_key, &bound)
+            .await
+            .expect_err("different destination bytes must stop migration");
+
+        assert!(
+            format!("{error:#}").contains("different bytes"),
+            "unexpected migration error: {error:#}"
+        );
+        assert_eq!(op.read(old_key).await.unwrap().to_vec(), source);
+        assert_eq!(op.read(new_key).await.unwrap().to_vec(), competing);
+    }
+
+    #[tokio::test]
+    async fn migration_accepts_exact_destination_and_retains_source() {
+        let op = memory_op();
+        let old_key = "legacy/index/docs/report.txt";
+        let new_key = "data/index/docs/report.txt";
+        let source = b"manifest_hash=source\nsize=10\nchunks=1".to_vec();
+        seed_migration_manifest(&op, "data", "source", "docs/report.txt", 10, 1).await;
+        op.write(old_key, source.clone()).await.unwrap();
+        op.write(new_key, source.clone()).await.unwrap();
+
+        let outcome = migrate_index_entry(&op, "data", "docs/report.txt", old_key, new_key, false)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, MigrationInstallOutcome::AlreadyExact);
+        assert_eq!(op.read(old_key).await.unwrap().to_vec(), source);
+        assert_eq!(op.read(new_key).await.unwrap().to_vec(), source);
+    }
+
+    #[tokio::test]
+    async fn double_prefix_migration_logically_retires_source_and_is_idempotent() {
+        let op = memory_op();
+        let old_key = "data/index/data/docs/report.txt";
+        let new_key = "data/index/docs/report.txt";
+        let source = b"manifest_hash=source\nsize=10\nchunks=1".to_vec();
+        seed_migration_manifest(&op, "data", "source", "docs/report.txt", 10, 1).await;
+        op.write(old_key, source.clone()).await.unwrap();
+
+        let outcome = migrate_index_entry(&op, "data", "docs/report.txt", old_key, new_key, true)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, MigrationInstallOutcome::Created);
+        assert_eq!(op.read(new_key).await.unwrap().to_vec(), source);
+        let retired = tcfs_sync::index_entry::read_index_entry_record_from_store(&op, old_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retired.state(),
+            tcfs_sync::index_entry::IndexEntryState::Deleted
+        );
+
+        let retry = migrate_index_entry(&op, "data", "docs/report.txt", old_key, new_key, true)
+            .await
+            .unwrap();
+        assert_eq!(retry, MigrationInstallOutcome::SourceAlreadyRetired);
+        assert_eq!(op.read(new_key).await.unwrap().to_vec(), source);
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_unbound_manifest_before_destination_publication() {
+        let op = memory_op();
+        let old_key = "data/index/data/docs/report.txt";
+        let new_key = "data/index/docs/report.txt";
+        let source = b"manifest_hash=source\nsize=10\nchunks=1".to_vec();
+        seed_migration_manifest(&op, "data", "source", "data/docs/report.txt", 10, 1).await;
+        op.write(old_key, source.clone()).await.unwrap();
+
+        let error = migrate_index_entry(&op, "data", "docs/report.txt", old_key, new_key, true)
+            .await
+            .expect_err("path-mismatched manifest must fail before destination publication");
+
+        assert!(format!("{error:#}").contains("manifest rel_path mismatch"));
+        assert!(!op.exists(new_key).await.unwrap());
+        assert_eq!(op.read(old_key).await.unwrap().to_vec(), source);
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_pending_staged_manifest_outside_target_root() {
+        let op = memory_op();
+        let old_key = "data/index/data/docs/report.txt";
+        let new_key = "data/index/docs/report.txt";
+        let pending = tcfs_sync::index_entry::PendingIndexEntry::new(
+            "source",
+            10,
+            1,
+            "other/staging/manifests/00000000-0000-4000-8000-000000000000-source.json",
+        );
+        let source = tcfs_sync::index_entry::VersionedIndexEntry::preparing(None, pending)
+            .to_json_bytes()
+            .unwrap();
+        op.write(old_key, source.clone()).await.unwrap();
+
+        let error = migrate_index_entry(&op, "data", "docs/report.txt", old_key, new_key, true)
+            .await
+            .expect_err("cross-root pending staging key must fail before publication");
+
+        assert!(format!("{error:#}").contains("escapes its root staging namespace"));
+        assert!(!op.exists(new_key).await.unwrap());
+        assert_eq!(op.read(old_key).await.unwrap().to_vec(), source);
+    }
+
+    #[tokio::test]
+    async fn orphan_tombstone_is_not_republished_into_target_root() {
+        let op = memory_op();
+        let old_key = "legacy/index/docs/report.txt";
+        let new_key = "data/index/docs/report.txt";
+        let tombstone = tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+            .to_json_bytes()
+            .unwrap();
+        op.write(old_key, tombstone.clone()).await.unwrap();
+
+        let inspected =
+            inspect_migration_destination(&op, "data", "docs/report.txt", old_key, new_key)
+                .await
+                .unwrap();
+        assert_eq!(inspected, MigrationDryRunOutcome::SourceAlreadyRetired);
+        assert!(!op.exists(new_key).await.unwrap());
+
+        let outcome = migrate_index_entry(&op, "data", "docs/report.txt", old_key, new_key, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome, MigrationInstallOutcome::SourceAlreadyRetired);
+        assert_eq!(op.read(old_key).await.unwrap().to_vec(), tombstone);
+        assert!(!op.exists(new_key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn double_prefix_directory_marker_migrates_and_logically_retires_source() {
+        let op = memory_op();
+        let old_key = "data/index/data/empty/.tcfs_dir";
+        let new_key = "data/index/empty/.tcfs_dir";
+        op.write(
+            old_key,
+            tcfs_sync::index_entry::DIRECTORY_MARKER_BYTES.to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let outcome = migrate_index_entry(&op, "data", "empty/.tcfs_dir", old_key, new_key, true)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, MigrationInstallOutcome::Created);
+        assert!(
+            tcfs_sync::index_entry::directory_marker_is_visible(&op, new_key)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !tcfs_sync::index_entry::directory_marker_is_visible(&op, old_key)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn unregistered_memory_accessor_cannot_emulate_migration_absent_write() {
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        let error = install_migration_destination(
+            &op,
+            "data/index/docs/report.txt",
+            b"manifest_hash=source\nsize=10\nchunks=1",
+        )
+        .await
+        .expect_err("scheme alone must not enable migration write emulation");
+        assert!(format!("{error:#}").contains("requires atomic absent-object creation"));
+    }
+
+    #[tokio::test]
+    async fn migration_revalidation_preserves_source_changed_after_snapshot() {
+        let op = memory_op();
+        let old_key = "legacy/index/docs/report.txt";
+        let new_key = "data/index/docs/report.txt";
+        let snapshot = b"manifest_hash=old\nsize=10\nchunks=1".to_vec();
+        let concurrent = b"manifest_hash=new\nsize=20\nchunks=2".to_vec();
+        op.write(old_key, snapshot.clone()).await.unwrap();
+
+        let bound = op.read(old_key).await.unwrap().to_vec();
+        op.write(old_key, concurrent.clone()).await.unwrap();
+        let error = migrate_bound_index_entry(&op, old_key, new_key, &bound)
+            .await
+            .expect_err("changed source must not be deleted");
+
+        assert!(
+            format!("{error:#}").contains("different bytes"),
+            "unexpected migration error: {error:#}"
+        );
+        assert_eq!(op.read(old_key).await.unwrap().to_vec(), concurrent);
+        assert_eq!(op.read(new_key).await.unwrap().to_vec(), snapshot);
+    }
+
+    #[test]
+    fn mount_flush_events_publish_only_canonical_relative_paths() {
+        assert_eq!(
+            tcfs_vfs::virtual_path_to_canonical_rel_path("/notes/todo.txt").unwrap(),
+            "notes/todo.txt"
+        );
+        for invalid in [
+            "notes/todo.txt",
+            "///nested/file",
+            "/../outside",
+            "/.GIT/config",
+        ] {
+            assert!(
+                tcfs_vfs::virtual_path_to_canonical_rel_path(invalid).is_err(),
+                "flush path must be rejected: {invalid:?}"
+            );
+        }
     }
 
     fn mk_conflict(rel: &str) -> tcfs_sync::conflict::ConflictInfo {
@@ -7356,6 +8710,8 @@ mod tests {
 
     #[test]
     fn stable_root_flags_parse_and_conflicts_reject_state_mix() {
+        use clap::CommandFactory;
+
         let cli = Cli::try_parse_from([
             "tcfs",
             "resolve",
@@ -7379,6 +8735,34 @@ mod tests {
         assert_eq!(root.as_deref(), Some("git-roam-tool-daemon"));
         assert_eq!(strategy.as_deref(), Some("keep-both"));
         assert!(execute);
+
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("resolve")
+            .expect("resolve subcommand")
+            .render_long_help()
+            .to_string();
+        let normalized_help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "Named-root dry-run requires pull permission",
+            "execute requires both pull and push",
+            "Inspect-only roots permit dry-run but reject execute",
+            "keep-both for a Git repo",
+            "Ordinary-file mutation is disabled fail-closed",
+        ] {
+            assert!(
+                normalized_help.contains(required),
+                "missing `{required}` from:\n{help}"
+            );
+        }
+
+        for retired in ["keep-local", "keep-remote"] {
+            assert!(
+                Cli::try_parse_from(["tcfs", "resolve", "/ordinary-file", "--strategy", retired,])
+                    .is_err(),
+                "retired strategy {retired} must not remain in shipped CLI help/parser"
+            );
+        }
 
         assert!(
             Cli::try_parse_from([
@@ -7488,6 +8872,233 @@ mod tests {
         config
     }
 
+    #[tokio::test]
+    async fn push_preflight_rejects_direct_custom_key_and_containing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected_root = dir.path().join("selected");
+        std::fs::create_dir(&selected_root).unwrap();
+        let key_path = selected_root.join("custom-key-material.bin");
+        std::fs::write(&key_path, [7u8; tcfs_crypto::KEY_SIZE]).unwrap();
+
+        let mut config = test_config(&selected_root);
+        config.crypto.master_key_file = Some(key_path.clone());
+        let op = memory_op();
+        let state_path = dir.path().join("must-not-open.json");
+
+        for selected in [&key_path, &selected_root] {
+            let error =
+                cmd_push_with_operator(&config, &op, selected, None, &state_path, "test-device")
+                    .await
+                    .expect_err("push must reject a selected path containing the configured key");
+            assert!(
+                error.to_string().contains("crypto.master_key_file"),
+                "{error:#}"
+            );
+        }
+        assert!(
+            !state_path.exists(),
+            "preflight must run before opening the state cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_preflight_applies_fixed_key_artifact_denies_without_configured_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tcfs_core::config::TcfsConfig::default();
+        let op = memory_op();
+        let state_path = dir.path().join("must-not-open.json");
+
+        for name in [
+            "master.key",
+            ".custom-key.rotate-pending",
+            ".custom-key.rotate-state.json",
+            ".custom-key.tmp.0123456789abcdef0123456789abcdef",
+        ] {
+            let selected = dir.path().join(name);
+            std::fs::write(&selected, b"sensitive").unwrap();
+            let error =
+                cmd_push_with_operator(&config, &op, &selected, None, &state_path, "test-device")
+                    .await
+                    .expect_err("direct fixed-deny push must fail before state or storage access");
+            assert!(
+                error.to_string().contains("fixed security deny-set"),
+                "{name}: {error:#}"
+            );
+        }
+        assert!(!state_path.exists());
+    }
+
+    #[tokio::test]
+    async fn pull_preflight_rejects_fixed_logical_paths_without_touching_bytes_or_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tcfs_core::config::TcfsConfig::default();
+        let op = memory_op();
+        let destination = dir.path().join("unchanged.txt");
+        std::fs::write(&destination, b"keep-local-bytes").unwrap();
+
+        for (index, remote_path) in ["master.key", ".rotate-pending", ".env"]
+            .into_iter()
+            .enumerate()
+        {
+            let state_path = dir.path().join(format!("must-not-open-{index}.json"));
+            let error = cmd_pull_with_operator(
+                &config,
+                &op,
+                remote_path,
+                Some(&destination),
+                None,
+                &state_path,
+                "test-device",
+            )
+            .await
+            .expect_err("fixed-deny pull must fail before state or storage access");
+            assert!(
+                error.to_string().contains("fixed security deny-set"),
+                "{remote_path}: {error:#}"
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), b"keep-local-bytes");
+            assert!(!state_path.exists());
+        }
+
+        let command_state = dir.path().join("command-state.db");
+        let error = cmd_pull(
+            &config,
+            ".env",
+            Some(&destination),
+            None,
+            Some(&command_state),
+        )
+        .await
+        .expect_err("command wrapper must reject before locking state or building storage");
+        assert!(error.to_string().contains("fixed security deny-set"));
+        assert!(!command_state.with_extension("json").exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"keep-local-bytes");
+    }
+
+    #[tokio::test]
+    async fn pull_preflight_rejects_custom_master_key_and_containing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let key_path = sync_root.join("custom-key-material.bin");
+        std::fs::write(&key_path, b"keep-key-bytes").unwrap();
+        let mut config = test_config(&sync_root);
+        config.crypto.master_key_file = Some(key_path.clone());
+        let state_override = dir.path().join("must-not-lock.db");
+
+        for destination in [&key_path, &sync_root] {
+            let error = cmd_pull(
+                &config,
+                "data/manifests/safe-reference",
+                Some(destination),
+                None,
+                Some(&state_override),
+            )
+            .await
+            .expect_err("master-key destination must fail before state or storage access");
+            assert!(
+                error.to_string().contains("crypto.master_key_file"),
+                "{error:#}"
+            );
+            assert_eq!(std::fs::read(&key_path).unwrap(), b"keep-key-bytes");
+            assert!(!state_override.with_extension("json").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pull_preflight_rejects_symlink_alias_of_custom_master_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let key_path = sync_root.join("custom-key-material.bin");
+        let alias_path = sync_root.join("key-alias.bin");
+        std::fs::write(&key_path, b"keep-key-bytes").unwrap();
+        std::os::unix::fs::symlink(&key_path, &alias_path).unwrap();
+        let mut config = test_config(&sync_root);
+        config.crypto.master_key_file = Some(key_path.clone());
+        let state_path = dir.path().join("must-not-open.json");
+
+        let error = cmd_pull_with_operator(
+            &config,
+            &memory_op(),
+            "data/manifests/safe-reference",
+            Some(&alias_path),
+            None,
+            &state_path,
+            "test-device",
+        )
+        .await
+        .expect_err("symlink alias of the master key must fail before storage access");
+        assert!(
+            error.to_string().contains("crypto.master_key_file"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read(&key_path).unwrap(), b"keep-key-bytes");
+        assert!(!state_path.exists());
+    }
+
+    #[tokio::test]
+    async fn reconcile_preflight_rejects_root_containing_custom_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        std::fs::create_dir(&sync_root).unwrap();
+        let key_path = sync_root.join("custom-key-material.bin");
+        std::fs::write(&key_path, [7u8; tcfs_crypto::KEY_SIZE]).unwrap();
+
+        let mut config = test_config(&sync_root);
+        config.crypto.master_key_file = Some(key_path);
+        let error = cmd_reconcile(&config, Some(&sync_root), None, false, None)
+            .await
+            .expect_err("reconcile must reject before credential discovery");
+
+        assert!(
+            error.to_string().contains("crypto.master_key_file"),
+            "{error:#}"
+        );
+        assert!(!resolve_state_path(&config, None).exists());
+    }
+
+    #[tokio::test]
+    async fn master_key_rotation_guard_precedes_artifact_and_storage_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary");
+        let named = dir.path().join("named");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&named).unwrap();
+
+        for (root_kind, root) in [("primary", &primary), ("named", &named)] {
+            let key_path = root.join(format!("{root_kind}-custom-key.bin"));
+            std::fs::write(&key_path, [7u8; tcfs_crypto::KEY_SIZE]).unwrap();
+            let paths = key_rotation_paths(&key_path);
+            let mut config = tcfs_core::config::TcfsConfig::default();
+            if root_kind == "primary" {
+                config.sync.sync_root = Some(root.to_path_buf());
+            } else {
+                config.sync.roots.insert(
+                    "named".into(),
+                    tcfs_core::config::RegisteredRootConfig {
+                        local_root: root.to_path_buf(),
+                        remote_prefix: "roots/named".into(),
+                        state_path: dir.path().join("reconcile/named.json"),
+                        policy: tcfs_core::config::RegisteredRootPolicy::InspectOnly,
+                    },
+                );
+            }
+
+            let error = cmd_rotate_key(&config, Some(&key_path), false, true)
+                .await
+                .expect_err("rotation must reject before credential discovery");
+            assert!(error.to_string().contains("master key path"), "{error:#}");
+            assert!(!paths.pending_key_path.exists());
+            assert!(!paths.state_path.exists());
+            assert!(
+                atomic_write_temp_path(&key_path, 0).parent() == key_path.parent(),
+                "test must cover the same adjacent artifact directory"
+            );
+        }
+    }
+
     // ── TIN-2657: CLI/daemon state-path convergence ──────────────────────────
 
     #[test]
@@ -7538,6 +9149,51 @@ mod tests {
             std::path::PathBuf::from(format!("{home}/tcfs-tin2657/state.json")),
             "tilde expands and `.db` normalizes to `.json`"
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_state_writers_fail_before_operator_work_when_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("tree");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let local = sync_root.join("doc.txt");
+        std::fs::write(&local, b"local-only test data").unwrap();
+
+        let mut config = test_config(&sync_root);
+        config.storage.endpoint = "https://should-never-be-contacted.invalid".into();
+        let state_override = dir.path().join("registered-root.json");
+        let state_path = resolve_state_path(&config, Some(&state_override));
+        let _held_lock = tcfs_sync::state::StateFileLock::acquire(&state_path).unwrap();
+
+        let push_error = cmd_push(&config, &local, None, Some(&state_override))
+            .await
+            .unwrap_err();
+        let pull_error = cmd_pull(
+            &config,
+            "data/manifests/should-not-be-read",
+            Some(&local),
+            None,
+            Some(&state_override),
+        )
+        .await
+        .unwrap_err();
+        let rm_error = cmd_rm(&config, &local, None, Some(&state_override))
+            .await
+            .unwrap_err();
+
+        for error in [push_error, pull_error, rm_error] {
+            let chain = format!("{error:#}");
+            assert!(
+                chain.contains("locking explicit state cache")
+                    && chain.contains("is locked by another process"),
+                "explicit state writer must fail at the lock before operator/network work: {chain}"
+            );
+            assert!(
+                !chain.contains("credential discovery")
+                    && !chain.contains("building storage operator"),
+                "lock contention must precede operator construction: {chain}"
+            );
+        }
     }
 
     #[test]
@@ -8260,7 +9916,10 @@ mod tests {
             rel_path: "doc.txt".into(),
             manifest_hash: "hash".into(),
             size: 12,
+            chunks: 1,
             reason: tcfs_sync::reconcile::PullReason::NewRemote,
+            expected_kind: tcfs_sync::index_entry::RemoteEntryKind::RegularFile,
+            expected_symlink_target: None,
         }]);
 
         assert!(!plan_may_orphan_remote_chunks(&plan));
@@ -8395,6 +10054,69 @@ enabled = false
     }
 
     #[tokio::test]
+    async fn direct_manifest_fixed_rel_path_is_rejected_before_destination_or_cache_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("sync");
+        std::fs::create_dir_all(sync_root.join("docs")).unwrap();
+        let source = sync_root.join("docs/readme.txt");
+        std::fs::write(&source, b"direct manifest payload").unwrap();
+
+        let op = memory_op();
+        let state_path = dir.path().join("state.json");
+        let config = test_config(&sync_root);
+        cmd_push_with_operator(&config, &op, &source, None, &state_path, "test-device")
+            .await
+            .unwrap();
+
+        let remote_manifest = tcfs_sync::state::StateCache::open(&state_path)
+            .unwrap()
+            .get(&source)
+            .unwrap()
+            .remote_path
+            .clone();
+        let mut manifest = tcfs_sync::manifest::SyncManifest::from_bytes(
+            &op.read(&remote_manifest).await.unwrap().to_vec(),
+        )
+        .unwrap();
+        manifest.rel_path = Some(".env".into());
+        op.write(&remote_manifest, manifest.to_bytes().unwrap())
+            .await
+            .unwrap();
+
+        let destination = dir.path().join("safe-destination.txt");
+        std::fs::write(&destination, b"keep-local-bytes").unwrap();
+        let error = cmd_pull_with_operator(
+            &config,
+            &op,
+            &remote_manifest,
+            Some(&destination),
+            None,
+            &state_path,
+            "test-device",
+        )
+        .await
+        .expect_err("parsed direct-manifest rel_path must pass the fixed ingress boundary");
+
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains("manifest-bound fixed-deny ingress path"),
+            "{error_chain}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"keep-local-bytes");
+        assert!(
+            tcfs_sync::state::StateCache::open(&state_path)
+                .unwrap()
+                .get(&destination)
+                .is_none(),
+            "rejected direct manifest must not create destination cache state"
+        );
+        assert!(
+            !dir.path().join(".env").exists(),
+            "manifest rel_path must never select an alternate local destination"
+        );
+    }
+
+    #[tokio::test]
     async fn cli_pull_by_file_path_without_dest_writes_to_file_path() {
         // Regression: `tcfs pull <file-path>` with no explicit destination must
         // write back to that file path, not to a hash-named file in the cwd.
@@ -8454,6 +10176,7 @@ enabled = false
             .unwrap();
         tcfs_sync::index_entry::write_committed_index_entry(
             &op,
+            "data",
             "data/index/shared/alpha-test.txt",
             &tcfs_sync::index_entry::RemoteIndexEntry::new("hash123", 46, 1),
         )
@@ -8473,6 +10196,36 @@ enabled = false
     }
 
     #[tokio::test]
+    async fn index_inspect_rejects_pending_staged_manifest_outside_root() {
+        let op = memory_op();
+        let pending = tcfs_sync::index_entry::PendingIndexEntry::new(
+            "hash123",
+            46,
+            1,
+            "other/staging/manifests/550e8400-e29b-41d4-a716-446655440000-hash123.json",
+        );
+        tcfs_sync::index_entry::write_preparing_index_entry(
+            &op,
+            "data",
+            "data/index/shared/alpha-test.txt",
+            None,
+            pending,
+        )
+        .await
+        .unwrap();
+
+        let err = inspect_index_entry_with_operator(&op, "shared/alpha-test.txt", "data")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("escapes its root staging namespace"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn cache_evict_uses_remote_index_manifest_hash() {
         let dir = tempfile::tempdir().unwrap();
         let cache_dir = dir.path().join("cache");
@@ -8485,6 +10238,7 @@ enabled = false
             .unwrap();
         tcfs_sync::index_entry::write_committed_index_entry(
             &op,
+            "data",
             "data/index/shared/alpha-test.txt",
             &tcfs_sync::index_entry::RemoteIndexEntry::new("hash123", 46, 1),
         )
@@ -8624,6 +10378,7 @@ enabled = false
         let op = memory_op();
         tcfs_sync::index_entry::write_committed_index_entry(
             &op,
+            "data",
             "data/index/shared/alpha-test.txt",
             &tcfs_sync::index_entry::RemoteIndexEntry::new("missing", 46, 1),
         )
@@ -9081,6 +10836,86 @@ enabled = false
     }
 
     #[tokio::test]
+    async fn rotation_freezes_indexed_root_before_manifest_mutation() {
+        let op = memory_op();
+        let manifest_path = "data/manifests/legacy-path";
+        let original = b"legacy manifest bytes stay untouched".to_vec();
+        op.write(manifest_path, original.clone()).await.unwrap();
+        op.write(
+            "data/index/docs/report.txt",
+            b"manifest_hash=legacy-path\nsize=36\nchunks=0\n".to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let err = legacy_manifest_mutation_permit(&op, "data", "scoped FileKey rotation", false)
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("live path-index entries"),
+            "unexpected freeze error: {message}"
+        );
+        assert!(
+            message.contains("index-first copy-on-write"),
+            "operator guidance must name the safe protocol: {message}"
+        );
+        assert_eq!(
+            op.read(manifest_path).await.unwrap().to_vec(),
+            original,
+            "layout rejection must not touch manifest bytes"
+        );
+
+        let gc_err = legacy_manifest_mutation_permit(&op, "data", "scoped FileKey rotation", true)
+            .await
+            .unwrap_err();
+        assert!(
+            gc_err
+                .to_string()
+                .contains("--gc-immediate is disabled for indexed/multi-writer root"),
+            "immediate GC needs a distinct fail-closed message: {gc_err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotation_freezes_unindexed_byte_addressed_manifest() {
+        let op = memory_op();
+        let bytes = b"immutable manifest object".to_vec();
+        let object_id = tcfs_sync::index_entry::manifest_object_id(&bytes);
+        let path = format!("data/manifests/{object_id}");
+        op.write(&path, bytes.clone()).await.unwrap();
+
+        let err = legacy_manifest_mutation_permit(&op, "data", "master-key rotation", false)
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("immutable byte-derived object ID"),
+            "byte-address detection must not depend only on a surviving index: {message}"
+        );
+        assert_eq!(op.read(&path).await.unwrap().to_vec(), bytes);
+    }
+
+    #[tokio::test]
+    async fn rotation_permit_accepts_legacy_manifest_only_layout() {
+        let op = memory_op();
+        op.write(
+            "data/manifests/projects/legacy.txt",
+            b"historical path-addressed manifest".to_vec(),
+        )
+        .await
+        .unwrap();
+
+        let permit = legacy_manifest_mutation_permit(&op, "data", "scoped FileKey rotation", false)
+            .await
+            .unwrap();
+        permit
+            .authorize_manifest_prefix("data/manifests/projects/")
+            .unwrap();
+        permit.authorize_remote_prefix("data").unwrap();
+    }
+
+    #[tokio::test]
     async fn cli_unsync_directory_converts_clean_tracked_descendants() {
         let dir = tempfile::tempdir().unwrap();
         let sync_root = dir.path().join("tree");
@@ -9202,6 +11037,160 @@ enabled = false
         );
     }
 
+    #[test]
+    fn atomic_write_normalizes_empty_relative_parent() {
+        assert_eq!(
+            Path::new("master.key").parent(),
+            Some(Path::new("")),
+            "this test must exercise Rust's empty relative parent"
+        );
+        assert_eq!(atomic_write_parent(Path::new("master.key")), Path::new("."));
+        assert_eq!(
+            atomic_write_temp_path(Path::new("master.key"), 1).parent(),
+            Some(Path::new("."))
+        );
+    }
+
+    #[test]
+    fn generated_rotation_artifacts_match_fixed_blacklist_denies() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("custom-key-material.bin");
+        let paths = key_rotation_paths(&key_path);
+        let artifacts = [
+            paths.pending_key_path.clone(),
+            paths.state_path.clone(),
+            atomic_write_temp_path(&key_path, 1),
+            atomic_write_temp_path(&paths.pending_key_path, 2),
+            atomic_write_temp_path(&paths.state_path, 3),
+        ];
+        let fixed = tcfs_sync::blacklist::Blacklist::default();
+
+        for artifact in artifacts {
+            assert!(
+                fixed
+                    .check_fixed_ingress_path_components(&artifact)
+                    .is_some(),
+                "generated sensitive artifact escaped the fixed deny-set: {}",
+                artifact.display()
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_write_retries_collision_without_clobbering_and_sets_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("master.key");
+        let collision_nonce = 7;
+        let success_nonce = 8;
+        let collision_path = atomic_write_temp_path(&target, collision_nonce);
+        let success_path = atomic_write_temp_path(&target, success_nonce);
+        std::fs::write(&collision_path, b"owned-by-someone-else").unwrap();
+
+        let mut nonces = [collision_nonce, success_nonce].into_iter();
+        atomic_write_bytes_with_nonce_source(&target, b"new-key", Some(0o600), || {
+            nonces.next().unwrap()
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-key");
+        assert_eq!(
+            std::fs::read(&collision_path).unwrap(),
+            b"owned-by-someone-else",
+            "create_new collisions must never be truncated or removed"
+        );
+        assert!(!success_path.exists(), "successful temp must be renamed");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_write_removes_temp_when_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("destination-is-a-directory");
+        std::fs::create_dir(&target).unwrap();
+        let nonce = 9;
+        let temp_path = atomic_write_temp_path(&target, nonce);
+
+        let error =
+            atomic_write_bytes_with_nonce_source(&target, b"new-key", Some(0o600), || nonce)
+                .unwrap_err();
+
+        assert!(error.to_string().contains("renaming"), "{error:#}");
+        assert!(!temp_path.exists(), "failed write must clean up its temp");
+        assert!(target.is_dir(), "failed rename must preserve destination");
+    }
+
+    #[test]
+    fn finalize_rotation_installs_key_before_cleaning_resume_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("master.key");
+        let old_master = master_key(0x11);
+        let new_master = master_key(0x22);
+        let paths = key_rotation_paths(&key_path);
+        write_master_key(&key_path, &old_master).unwrap();
+        write_master_key(&paths.pending_key_path, &new_master).unwrap();
+        write_rotation_state(
+            &paths.state_path,
+            &KeyRotationState::new("data/manifests/", &paths.pending_key_path),
+        )
+        .unwrap();
+
+        finalize_key_rotation(&key_path, &new_master, &paths).unwrap();
+
+        assert_eq!(
+            read_master_key(&key_path).unwrap().as_bytes(),
+            new_master.as_bytes()
+        );
+        assert!(!paths.state_path.exists());
+        assert!(!paths.pending_key_path.exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_pending_key_when_state_cannot_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = key_rotation_paths(&dir.path().join("master.key"));
+        std::fs::create_dir(&paths.state_path).unwrap();
+        std::fs::write(&paths.pending_key_path, b"recoverable-pending-key").unwrap();
+
+        cleanup_rotation_artifacts(&paths);
+
+        assert!(paths.state_path.is_dir());
+        assert_eq!(
+            std::fs::read(&paths.pending_key_path).unwrap(),
+            b"recoverable-pending-key",
+            "cleanup must never leave state without its pending key"
+        );
+    }
+
+    #[test]
+    fn cleanup_keeps_pending_key_when_state_removal_cannot_be_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = key_rotation_paths(&dir.path().join("master.key"));
+        std::fs::write(&paths.state_path, b"resume-state").unwrap();
+        std::fs::write(&paths.pending_key_path, b"recoverable-pending-key").unwrap();
+        let mut sync_calls = 0;
+
+        cleanup_rotation_artifacts_with_sync(&paths, |_| {
+            sync_calls += 1;
+            anyhow::bail!("simulated directory sync failure")
+        });
+
+        assert_eq!(sync_calls, 1, "cleanup must stop after the failed sync");
+        assert!(!paths.state_path.exists());
+        assert_eq!(
+            std::fs::read(&paths.pending_key_path).unwrap(),
+            b"recoverable-pending-key",
+            "pending key must remain until state removal is durable"
+        );
+    }
+
     #[tokio::test]
     async fn rotate_manifests_can_resume_after_interruption() {
         let op = memory_op();
@@ -9231,11 +11220,16 @@ enabled = false
         .await
         .unwrap();
 
+        let permit = legacy_manifest_mutation_permit(&op, "data", "master-key rotation", false)
+            .await
+            .unwrap();
+
         let mut state = KeyRotationState::new("data/manifests/", &paths.pending_key_path);
         write_rotation_state(&paths.state_path, &state).unwrap();
 
         let err = rotate_manifests_with_resume(
             &op,
+            &permit,
             "data/manifests/",
             &old_master,
             &new_master,
@@ -9267,6 +11261,7 @@ enabled = false
         let mut resumed_state = read_rotation_state(&paths.state_path).unwrap();
         rotate_manifests_with_resume(
             &op,
+            &permit,
             "data/manifests/",
             &old_master,
             &new_master,
@@ -9461,6 +11456,9 @@ enabled = false
         let plaintext = b"top secret payload that must rotate";
         let manifest_path =
             seed_encrypted_file(&op, "data", "secret/a.txt", plaintext, &writer_ctx).await;
+        let permit = legacy_manifest_mutation_permit(&op, "data", "scoped FileKey rotation", false)
+            .await
+            .unwrap();
 
         // Sanity: the revoked device CAN read pre-rotation content.
         let revoke_reader = per_device_ctx(
@@ -9477,7 +11475,7 @@ enabled = false
 
         // Post-revocation recipient set: ONLY the kept device.
         let rotate_ctx = per_device_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
-        let outcome = rekey_one_manifest(&op, "data", &manifest_path, &rotate_ctx)
+        let outcome = rekey_one_manifest(&op, &permit, "data", &manifest_path, &rotate_ctx)
             .await
             .unwrap();
         assert!(matches!(outcome, RekeyOutcome::Rotated { .. }));
@@ -9529,6 +11527,9 @@ enabled = false
         let ctx = per_device_ctx(&master, vec![recipient_of(&keep)], identity_of(&keep));
         let manifest_path =
             seed_encrypted_file(&op, "data", "secret/a.txt", b"payload one", &ctx).await;
+        let permit = legacy_manifest_mutation_permit(&op, "data", "scoped FileKey rotation", false)
+            .await
+            .unwrap();
 
         // Capture the original chunk address.
         let before = op.read(&manifest_path).await.unwrap().to_vec();
@@ -9539,7 +11540,7 @@ enabled = false
         assert_eq!(chunk_count(&op, "data").await, 1);
 
         // Re-key: writes a NEW chunk; the OLD chunk is still present (orphan).
-        rekey_one_manifest(&op, "data", &manifest_path, &ctx)
+        rekey_one_manifest(&op, &permit, "data", &manifest_path, &ctx)
             .await
             .unwrap();
         let after = op.read(&manifest_path).await.unwrap().to_vec();
@@ -9583,7 +11584,7 @@ enabled = false
 
         // The cleanup call runs cleanly and never deletes a referenced chunk; on
         // a timestamp-bearing backend it would also delete the orphan.
-        let cleanup = tcfs_sync::reconcile::cleanup_orphaned_chunks(
+        let cleanup = tcfs_sync::reconcile::cleanup_legacy_orphaned_chunks(
             &op,
             "data",
             Duration::from_secs(0),
@@ -9616,10 +11617,15 @@ enabled = false
 
         let m_a = seed_encrypted_file(&op, "data", "secret/a.txt", b"alpha", &ctx).await;
         let m_b = seed_encrypted_file(&op, "data", "secret/b.txt", b"bravo", &ctx).await;
+        let permit = legacy_manifest_mutation_permit(&op, "data", "scoped FileKey rotation", false)
+            .await
+            .unwrap();
 
         // Simulate a kill after publishing only manifest A.
         let mut state = ScopedRotationState::new("data/manifests/secret/");
-        rekey_one_manifest(&op, "data", &m_a, &ctx).await.unwrap();
+        rekey_one_manifest(&op, &permit, "data", &m_a, &ctx)
+            .await
+            .unwrap();
         state.mark_done(&m_a);
         state.rotated_manifests += 1;
         let dir = tempfile::tempdir().unwrap();
@@ -9640,7 +11646,9 @@ enabled = false
                 state.already_done_manifests += 1;
                 continue;
             }
-            rekey_one_manifest(&op, "data", path, &ctx).await.unwrap();
+            rekey_one_manifest(&op, &permit, "data", path, &ctx)
+                .await
+                .unwrap();
             state.mark_done(path);
             state.rotated_manifests += 1;
         }
@@ -9707,11 +11715,16 @@ enabled = false
         .await
         .unwrap();
 
+        let permit = legacy_manifest_mutation_permit(&op, "data", "master-key rotation", false)
+            .await
+            .unwrap();
+
         let mut state = KeyRotationState::new("data/manifests/", Path::new("/tmp/pending"));
         let _dir = tempfile::tempdir().unwrap();
         let state_path = _dir.path().join("rotate-state.json");
         rotate_manifests_with_resume(
             &op,
+            &permit,
             "data/manifests/",
             &old_master,
             &new_master,

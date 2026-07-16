@@ -24,6 +24,8 @@ fn memory_vfs(prefix: &str) -> TcfsVfs {
 }
 
 fn memory_vfs_with_op(op: Operator, prefix: &str, cache_dir: PathBuf) -> TcfsVfs {
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op)
+        .expect("register Memory conditional-write emulation");
     TcfsVfs::new(
         op,
         prefix.to_string(),
@@ -32,6 +34,25 @@ fn memory_vfs_with_op(op: Operator, prefix: &str, cache_dir: PathBuf) -> TcfsVfs
         Duration::from_secs(30),
         "test-device".to_string(),
     )
+}
+
+async fn publish_symlink(op: &Operator, prefix: &str, rel_path: &str, target: &str) {
+    let manifest = tcfs_sync::manifest::SymlinkManifest::new(
+        target,
+        tcfs_sync::conflict::VectorClock::new(),
+        "test-device".into(),
+        0,
+        Some(rel_path.into()),
+    );
+    let bytes = manifest.to_bytes().expect("serialize symlink manifest");
+    let object_id = tcfs_sync::index_entry::manifest_object_id(&bytes);
+    let entry = tcfs_sync::index_entry::RemoteIndexEntry::new_symlink(object_id, target);
+    let baseline = tcfs_sync::engine::bind_indexed_publish_baseline(op, prefix, rel_path)
+        .await
+        .expect("bind symlink publish baseline");
+    tcfs_sync::engine::publish_indexed_manifest(op, prefix, rel_path, bytes, entry, baseline)
+        .await
+        .expect("publish symlink");
 }
 
 // ── getattr tests ────────────────────────────────────────────────────────
@@ -58,6 +79,67 @@ async fn readdir_empty_root_returns_empty() {
     let entries = vfs.readdir("/").await.expect("readdir root");
     // Fresh VFS with no index entries should be empty
     assert!(entries.is_empty());
+}
+
+#[tokio::test]
+async fn encrypted_mount_refuses_plaintext_writes_until_key_is_unlocked() {
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op)
+        .expect("register Memory conditional-write emulation");
+    let cache = tempfile::tempdir().unwrap();
+    let key = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let vfs = TcfsVfs::new(
+        op.clone(),
+        "encrypted-gate".into(),
+        cache.path().join("cache"),
+        64 * 1024 * 1024,
+        Duration::from_secs(30),
+        "test-device".into(),
+    )
+    .with_shared_master_key(key.clone())
+    .require_encryption_for_writes(true);
+
+    let error = vfs
+        .create("/", OsStr::new("secret.txt"), 0o600)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("unlocked master key"));
+    assert!(op.list("encrypted-gate/").await.unwrap().is_empty());
+
+    *key.lock().await = Some(tcfs_crypto::MasterKey::from_bytes([7u8; 32]));
+    let (fh, _) = vfs
+        .create("/", OsStr::new("secret.txt"), 0o600)
+        .await
+        .unwrap();
+    vfs.write(fh, 0, b"encrypted content").await.unwrap();
+    *key.lock().await = None;
+    let release_error = vfs.release(fh).await.unwrap_err();
+    assert!(format!("{release_error:#}").contains("unlocked master key"));
+    assert!(op.read("encrypted-gate/index/secret.txt").await.is_err());
+    *key.lock().await = Some(tcfs_crypto::MasterKey::from_bytes([7u8; 32]));
+    vfs.release(fh).await.unwrap();
+    let index = op
+        .read("encrypted-gate/index/secret.txt")
+        .await
+        .unwrap()
+        .to_bytes();
+    let entry = tcfs_sync::index_entry::parse_index_entry(&index).unwrap();
+    let manifest = op
+        .read(&format!("encrypted-gate/manifests/{}", entry.manifest_hash))
+        .await
+        .unwrap()
+        .to_bytes();
+    let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&manifest).unwrap();
+    assert!(manifest.encrypted_file_key.is_some());
+}
+
+#[tokio::test]
+async fn hydration_only_client_rejects_mutations() {
+    let vfs = memory_vfs("read-only").hydration_only();
+    let error = vfs.mkdir("/", OsStr::new("nope"), 0o755).await.unwrap_err();
+    assert!(format!("{error:#}").contains("hydration-only"));
 }
 
 // ── mkdir + readdir tests ────────────────────────────────────────────────
@@ -169,10 +251,7 @@ async fn readdir_getattr_and_readlink_preserve_symlink_entries() {
     let cache = tempfile::tempdir().unwrap();
     let vfs = memory_vfs_with_op(op.clone(), "test", cache.path().join("cache"));
 
-    let entry = tcfs_sync::index_entry::RemoteIndexEntry::new_symlink("linkhash", "target.txt");
-    tcfs_sync::index_entry::write_committed_index_entry(&op, "test/index/link.txt", &entry)
-        .await
-        .expect("write symlink index entry");
+    publish_symlink(&op, "test", "link.txt", "target.txt").await;
 
     let entries = vfs.readdir("/").await.expect("readdir root");
     let link = entries
@@ -189,6 +268,73 @@ async fn readdir_getattr_and_readlink_preserve_symlink_entries() {
     assert_eq!(target, "target.txt");
 }
 
+#[tokio::test]
+async fn readlink_rejects_index_manifest_path_forgery_and_unsafe_target() {
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let cache = tempfile::tempdir().unwrap();
+    let vfs = memory_vfs_with_op(op.clone(), "test", cache.path().join("cache"));
+
+    let manifest = tcfs_sync::manifest::SymlinkManifest::new(
+        "../../.ssh/authorized_keys",
+        tcfs_sync::conflict::VectorClock::new(),
+        "peer".into(),
+        0,
+        Some("different-link.txt".into()),
+    );
+    let bytes = manifest.to_bytes().unwrap();
+    let object_id = tcfs_sync::index_entry::manifest_object_id(&bytes);
+    op.write(&format!("test/manifests/{object_id}"), bytes)
+        .await
+        .unwrap();
+    let forged = tcfs_sync::index_entry::RemoteIndexEntry::new_symlink(
+        object_id,
+        "../../.ssh/authorized_keys",
+    );
+    tcfs_sync::index_entry::write_committed_index_entry(
+        &op,
+        "test",
+        "test/index/link.txt",
+        &forged,
+    )
+    .await
+    .unwrap();
+
+    let error = vfs.readlink("/link.txt").await.unwrap_err();
+    assert!(format!("{error:#}").contains("rel_path mismatch"));
+
+    let unsafe_manifest = tcfs_sync::manifest::SymlinkManifest::new(
+        "../../.ssh/authorized_keys",
+        tcfs_sync::conflict::VectorClock::new(),
+        "peer".into(),
+        0,
+        Some("link.txt".into()),
+    );
+    let unsafe_bytes = unsafe_manifest.to_bytes().unwrap();
+    let unsafe_id = tcfs_sync::index_entry::manifest_object_id(&unsafe_bytes);
+    op.write(
+        &format!("safe-target-check/manifests/{unsafe_id}"),
+        unsafe_bytes,
+    )
+    .await
+    .unwrap();
+    tcfs_sync::index_entry::write_committed_index_entry(
+        &op,
+        "safe-target-check",
+        "safe-target-check/index/link.txt",
+        &tcfs_sync::index_entry::RemoteIndexEntry::new_symlink(
+            unsafe_id,
+            "../../.ssh/authorized_keys",
+        ),
+    )
+    .await
+    .unwrap();
+    let guarded = memory_vfs_with_op(op, "safe-target-check", cache.path().join("guarded-cache"));
+    let error = guarded.readlink("/link.txt").await.unwrap_err();
+    assert!(format!("{error:#}").contains("refusing symlink target"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn pushed_symlink_json_index_reads_through_vfs() {
@@ -203,6 +349,8 @@ async fn pushed_symlink_json_index_reads_through_vfs() {
         .unwrap()
         .finish();
     let prefix = "pushed-symlink-json-contract";
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op)
+        .expect("register Memory conditional-write emulation");
     let mut state =
         tcfs_sync::state::StateCache::open(&tmp.path().join("state.json")).expect("state cache");
     let collect = tcfs_sync::engine::CollectConfig {
@@ -347,6 +495,120 @@ async fn readdir_is_lazy_and_open_hydrates_cache() {
         after_open.total_bytes,
         content.len() as u64,
         "cache should store the hydrated file bytes"
+    );
+}
+
+#[tokio::test]
+async fn identical_content_at_two_paths_keeps_distinct_bound_manifests() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "path-bound-duplicate-content";
+    let content = b"identical bytes must not collapse path-bound metadata";
+    let writer = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("writer-cache"));
+
+    for name in ["a.txt", "b.txt"] {
+        let (fh, _) = writer
+            .create("/", OsStr::new(name), 0o644)
+            .await
+            .expect("create duplicate-content path");
+        writer.write(fh, 0, content).await.expect("write content");
+        writer.release(fh).await.expect("flush bound manifest");
+    }
+
+    let a_index = op
+        .read(&format!("{prefix}/index/a.txt"))
+        .await
+        .expect("read a index")
+        .to_bytes();
+    let b_index = op
+        .read(&format!("{prefix}/index/b.txt"))
+        .await
+        .expect("read b index")
+        .to_bytes();
+    let a_entry = tcfs_sync::index_entry::parse_index_entry(&a_index).expect("parse a index");
+    let b_entry = tcfs_sync::index_entry::parse_index_entry(&b_index).expect("parse b index");
+    assert_ne!(
+        a_entry.manifest_hash, b_entry.manifest_hash,
+        "path-bound manifest object ids must differ even when file bytes match"
+    );
+
+    for (name, entry) in [("a.txt", a_entry), ("b.txt", b_entry)] {
+        let bytes = op
+            .read(&format!("{prefix}/manifests/{}", entry.manifest_hash))
+            .await
+            .expect("read path-bound manifest")
+            .to_bytes();
+        let manifest =
+            tcfs_sync::manifest::SyncManifest::from_bytes(&bytes).expect("parse manifest");
+        assert_eq!(manifest.rel_path.as_deref(), Some(name));
+    }
+
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+    for name in ["a.txt", "b.txt"] {
+        let (fh, hydrated) = reader
+            .open(&format!("/{name}"))
+            .await
+            .expect("hydrate independently bound duplicate-content path");
+        assert_eq!(hydrated, content);
+        reader.release(fh).await.expect("release duplicate path");
+    }
+}
+
+#[tokio::test]
+async fn forged_cross_path_index_binding_fails_closed_before_hydration() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    let prefix = "forged-cross-path-binding";
+    let writer = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("writer-cache"));
+    let (fh, _) = writer
+        .create("/", OsStr::new("source.txt"), 0o644)
+        .await
+        .expect("create source");
+    writer
+        .write(fh, 0, b"source bytes")
+        .await
+        .expect("write source");
+    writer.release(fh).await.expect("flush source");
+
+    let source_index = op
+        .read(&format!("{prefix}/index/source.txt"))
+        .await
+        .expect("read source index")
+        .to_vec();
+    op.write(&format!("{prefix}/index/forged.txt"), source_index)
+        .await
+        .expect("forge cross-path index pointer");
+
+    let reader = memory_vfs_with_op(op, prefix, tmp.path().join("reader-cache"));
+    let error = reader
+        .open("/forged.txt")
+        .await
+        .expect_err("cross-path manifest substitution must fail closed");
+    assert!(
+        format!("{error:#}").contains("manifest rel_path mismatch"),
+        "unexpected error: {error:#}"
+    );
+    let alias_error = reader
+        .open("/forged.txt.tc")
+        .await
+        .expect_err("legacy alias must retain logical-path binding checks");
+    assert!(
+        format!("{alias_error:#}").contains("manifest rel_path mismatch"),
+        "unexpected legacy-alias error: {alias_error:#}"
+    );
+    assert_eq!(
+        reader
+            .disk_cache()
+            .stats()
+            .await
+            .expect("cache stats")
+            .entry_count,
+        0,
+        "failed binding must not populate the plaintext cache"
     );
 }
 
@@ -750,6 +1012,8 @@ async fn sync_push_json_index_hydrates_through_vfs() {
     let op = Operator::new(opendal::services::Memory::default())
         .unwrap()
         .finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op)
+        .expect("register Memory conditional-write emulation");
     let prefix = "sync-json-contract";
     let mut state =
         tcfs_sync::state::StateCache::open(&tmp.path().join("state.json")).expect("state cache");
@@ -804,6 +1068,54 @@ async fn sync_push_json_index_hydrates_through_vfs() {
         .expect("open JSON-indexed remote file");
     assert_eq!(&hydrated, content);
     reader.release(fh).await.expect("release remote file");
+}
+
+#[tokio::test]
+async fn concurrent_vfs_flush_preserves_the_advanced_remote_version() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let op = Operator::new(opendal::services::Memory::default())
+        .unwrap()
+        .finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op)
+        .expect("register Memory conditional-write emulation");
+    let prefix = "vfs-concurrent-flush";
+    let first = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("first-cache"));
+    let second = memory_vfs_with_op(op.clone(), prefix, tmp.path().join("second-cache"));
+
+    let (seed_fh, _) = first
+        .create("/", OsStr::new("doc.txt"), 0o644)
+        .await
+        .expect("create seed");
+    first.write(seed_fh, 0, b"base").await.expect("write seed");
+    first.release(seed_fh).await.expect("publish seed");
+
+    let (second_fh, second_base) = second.open("/doc.txt").await.expect("second opens base");
+    assert_eq!(second_base.as_slice(), b"base");
+    let (first_fh, _) = first.open("/doc.txt").await.expect("first opens base");
+    first
+        .truncate(None, Some(first_fh), 0)
+        .await
+        .expect("truncate first edit");
+    first
+        .write(first_fh, 0, b"first wins")
+        .await
+        .expect("write first edit");
+    first.release(first_fh).await.expect("publish first edit");
+
+    second
+        .truncate(None, Some(second_fh), 0)
+        .await
+        .expect("truncate concurrent edit");
+    second
+        .write(second_fh, 0, b"second loses")
+        .await
+        .expect("write concurrent edit");
+    let error = second.release(second_fh).await.unwrap_err();
+    assert!(format!("{error:#}").contains("concurrent remote file update"));
+
+    let verifier = memory_vfs_with_op(op, prefix, tmp.path().join("verifier-cache"));
+    let (_, bytes) = verifier.open("/doc.txt").await.expect("read winner");
+    assert_eq!(bytes.as_slice(), b"first wins");
 }
 
 #[tokio::test]

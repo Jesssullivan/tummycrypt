@@ -94,6 +94,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 toml = { version = "0.8" }
 unicode-normalization = { version = "0.1" }
+unicode-casefold = { version = "0.2" }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

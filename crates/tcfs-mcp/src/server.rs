@@ -11,8 +11,7 @@ use rmcp::{
 };
 
 use tcfs_core::proto::{
-    tcfs_daemon_client::TcfsDaemonClient, Empty, PullRequest, ResolveConflictRequest,
-    StatusRequest, SyncStatusRequest,
+    tcfs_daemon_client::TcfsDaemonClient, Empty, PullRequest, StatusRequest, SyncStatusRequest,
 };
 use tonic::transport::Channel;
 
@@ -36,14 +35,6 @@ pub struct PullInput {
 pub struct PushInput {
     #[schemars(description = "Local file path to upload to remote storage")]
     pub local_path: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ResolveConflictInput {
-    #[schemars(description = "Relative path of the conflicting file")]
-    pub rel_path: String,
-    #[schemars(description = "Resolution: 'keep_local', 'keep_remote', 'keep_both', or 'defer'")]
-    pub resolution: String,
 }
 
 // ── MCP Server ───────────────────────────────────────────────────────────
@@ -234,58 +225,6 @@ impl TcfsMcp {
         }
     }
 
-    #[tool(
-        description = "Resolve a sync conflict by choosing a resolution strategy. Valid resolutions: keep_local, keep_remote, keep_both, defer"
-    )]
-    async fn resolve_conflict(
-        &self,
-        Parameters(input): Parameters<ResolveConflictInput>,
-    ) -> String {
-        // Repo-group git keep-both (`git_keep_both_dry_run` /
-        // `git_keep_both_execute`) is a live `.git` WRITE path that parks peer
-        // branch heads and ticks the local clock to dominate the fleet. It must
-        // be operator-deliberate and is not exposed through MCP; the shipped
-        // deliberate surface is `tcfs resolve`. Refuse it here (layer 1); tcfsd
-        // requires an explicit operator-intent bit (layer 2), and this tool's
-        // input intentionally does not expose that bit. The bit is not an
-        // authorization boundary; daemon session permissions are.
-        if input.resolution.trim_start().starts_with("git_keep_both") {
-            return serde_json::json!({
-                "error": "repo-group git keep-both is not exposed through MCP: it is a live \
-                          .git write path that parks peer branch heads. Run it \
-                          deliberately from the CLI: `tcfs resolve <repo> --strategy keep-both \
-                          [--execute]`.",
-            })
-            .to_string();
-        }
-        match self.connect().await {
-            Ok(mut client) => {
-                match client
-                    .resolve_conflict(ResolveConflictRequest {
-                        path: input.rel_path.clone(),
-                        resolution: input.resolution.clone(),
-                        // MCP does not expose explicit operator intent. The
-                        // daemon refuses git_keep_both_* when this is false.
-                        operator_cli: false,
-                    })
-                    .await
-                {
-                    Ok(resp) => {
-                        let r = resp.into_inner();
-                        serde_json::json!({
-                            "success": r.success,
-                            "resolved_path": r.resolved_path,
-                            "error": if r.error.is_empty() { None } else { Some(&r.error) },
-                        })
-                        .to_string()
-                    }
-                    Err(e) => format!("{{\"error\": \"resolve_conflict RPC failed: {e}\"}}"),
-                }
-            }
-            Err(e) => format!("{{\"error\": \"{e}\"}}"),
-        }
-    }
-
     #[tool(description = "Show all enrolled devices in the fleet and their sync status")]
     async fn device_status(&self) -> String {
         let registry_path = tcfs_secrets::device::default_registry_path();
@@ -403,7 +342,6 @@ mod tests {
         credential_status_calls: usize,
         sync_status_paths: Vec<String>,
         pull_requests: Vec<PullRequest>,
-        resolve_requests: Vec<ResolveConflictRequest>,
         push_chunks: Vec<PushChunk>,
     }
 
@@ -491,6 +429,8 @@ mod tests {
             Pin<Box<dyn Stream<Item = Result<PushProgress, Status>> + Send + 'static>>;
         type PullStream =
             Pin<Box<dyn Stream<Item = Result<PullProgress, Status>> + Send + 'static>>;
+        type PullExactStream =
+            Pin<Box<dyn Stream<Item = Result<PullProgress, Status>> + Send + 'static>>;
         type HydrateStream =
             Pin<Box<dyn Stream<Item = Result<HydrateProgress, Status>> + Send + 'static>>;
         type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchEvent, Status>> + Send + 'static>>;
@@ -561,14 +501,23 @@ mod tests {
                     total_bytes: 8,
                     done: false,
                     error: String::new(),
+                    ..Default::default()
                 }),
                 Ok(PullProgress {
                     bytes_received: 8,
                     total_bytes: 8,
                     done: true,
                     error: String::new(),
+                    ..Default::default()
                 }),
             ]))))
+        }
+
+        async fn pull_exact(
+            &self,
+            _request: Request<PullExactRequest>,
+        ) -> Result<Response<Self::PullExactStream>, Status> {
+            Err(Status::unimplemented("not used by MCP tests"))
         }
 
         async fn sync_status(
@@ -592,7 +541,6 @@ mod tests {
             request: Request<ResolveConflictRequest>,
         ) -> Result<Response<ResolveConflictResponse>, Status> {
             let req = request.into_inner();
-            self.calls.lock().await.resolve_requests.push(req.clone());
             Ok(Response::new(ResolveConflictResponse {
                 success: true,
                 resolved_path: req.path,
@@ -846,66 +794,6 @@ mod tests {
         harness.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn resolve_conflict_maps_request_and_response() {
-        let harness = spawn_mcp_harness().await;
-
-        let value = parse_json(
-            harness
-                .mcp
-                .resolve_conflict(Parameters(ResolveConflictInput {
-                    rel_path: "docs/report.md".into(),
-                    resolution: "keep_both".into(),
-                }))
-                .await,
-        );
-
-        assert_object_keys(&value, &["error", "resolved_path", "success"]);
-        assert_eq!(value["success"], true);
-        assert_eq!(value["resolved_path"], "docs/report.md");
-        assert!(value["error"].is_null());
-        assert_eq!(
-            harness.calls.lock().await.resolve_requests,
-            vec![ResolveConflictRequest {
-                path: "docs/report.md".into(),
-                resolution: "keep_both".into(),
-                operator_cli: false,
-            }]
-        );
-
-        harness.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn resolve_conflict_rejects_repo_git_keep_both() {
-        // BLOCKING 1a: the repo-group git keep-both write path must be
-        // unreachable from MCP. Both dry-run and execute must be refused BEFORE
-        // any RPC / connection is attempted. Point the client at a bogus socket
-        // that no daemon serves: if the guard short-circuited correctly we get
-        // the MCP-surface refusal; a "failed to connect" error would instead
-        // prove the request leaked toward the daemon.
-        let bogus = std::path::PathBuf::from("/nonexistent/tcfs-keep-both-guard.sock");
-        let mcp = TcfsMcp::new(bogus, None);
-        for resolution in ["git_keep_both_dry_run", "git_keep_both_execute"] {
-            let value = parse_json(
-                mcp.resolve_conflict(Parameters(ResolveConflictInput {
-                    rel_path: "myrepo".into(),
-                    resolution: resolution.into(),
-                }))
-                .await,
-            );
-            let err = value["error"].as_str().unwrap_or_default();
-            assert!(
-                err.contains("not exposed through MCP"),
-                "{resolution} must be refused with MCP guidance, got: {value}"
-            );
-            assert!(
-                !err.contains("connect"),
-                "{resolution} must be refused BEFORE any daemon connection, got: {value}"
-            );
-        }
-    }
-
     #[test]
     fn device_status_reads_registry_and_counts_active_devices() {
         let _env_guard = ENV_LOCK.lock().unwrap();
@@ -1033,14 +921,6 @@ mod tests {
             mcp.pull(Parameters(PullInput {
                 remote_path: "remote/file.txt".into(),
                 local_path: "/tmp/local.txt".into(),
-            }))
-            .await,
-            &socket_path,
-        );
-        assert_daemon_error(
-            mcp.resolve_conflict(Parameters(ResolveConflictInput {
-                rel_path: "docs/report.md".into(),
-                resolution: "keep_local".into(),
             }))
             .await,
             &socket_path,

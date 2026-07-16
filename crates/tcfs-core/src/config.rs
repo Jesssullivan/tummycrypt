@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Top-level daemon configuration (loaded from tcfs.toml)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -155,7 +155,9 @@ pub struct DaemonConfig {
     /// This is consumed by the provisioning script and used by tcfsd only to
     /// identify FileProvider mode; the actual TCP bind address is `listen`.
     pub fileprovider_endpoint: Option<String>,
-    /// TCP listen address for remote gRPC (optional)
+    /// Legacy plaintext TCP listen address. tcfsd refuses this; remote
+    /// operators must tunnel the owner-only Unix socket over SSH until a
+    /// TLS/mTLS transport is configured.
     pub listen: Option<String>,
     /// Prometheus metrics endpoint (default: 127.0.0.1:9100)
     pub metrics_addr: Option<String>,
@@ -290,8 +292,9 @@ pub struct SyncConfig {
     /// Enable sync trash (unlink moves to .tcfs-trash/ instead of deleting).
     /// Default: true.
     pub trash_enabled: bool,
-    /// Trash retention in seconds. Auto-purge entries older than this.
-    /// 0 = never auto-purge. Default: 2592000 (30 days).
+    /// Default age threshold used by explicit `tcfs trash purge`.
+    /// 0 disables age-based purge unless the operator passes a positive
+    /// `--older-than` or explicit `--all`. Default: 2592000 (30 days).
     pub trash_retention_secs: u64,
     /// Periodic reconciliation interval in seconds. 0 = disabled.
     /// Reconciles local sync_root against remote index, applying per-folder policies.
@@ -662,6 +665,179 @@ pub fn expand_tilde(path: &std::path::Path) -> PathBuf {
     }
 }
 
+fn absolute_path(path: &Path) -> Result<PathBuf, String> {
+    let path = expand_tilde(path);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|error| format!("resolving current directory: {error}"))
+    }
+}
+
+fn lexically_normalize_absolute(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("expected an absolute path, got {}", path.display()));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!(
+                        "path escapes its filesystem root during lexical normalization: {}",
+                        path.display()
+                    ));
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if !normalized.is_absolute() {
+        return Err(format!(
+            "path lost its absolute root during normalization: {}",
+            path.display()
+        ));
+    }
+    Ok(normalized)
+}
+
+/// Resolve symlinks in the longest existing prefix, then append and normalize
+/// a missing tail. A dangling symlink is rejected instead of being mistaken
+/// for an ordinary not-yet-created component.
+fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
+    let path = absolute_path(path)?;
+
+    let mut probe = PathBuf::new();
+    for component in path.components() {
+        probe.push(component.as_os_str());
+        match std::fs::symlink_metadata(&probe) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::canonicalize(&probe).map_err(|error| {
+                    format!(
+                        "refusing unresolved symlink component {} in {}: {error}",
+                        probe.display(),
+                        path.display()
+                    )
+                })?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "inspecting path component {} for {}: {error}",
+                    probe.display(),
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    let components = path.components().collect::<Vec<_>>();
+    for split in (1..=components.len()).rev() {
+        let mut prefix = PathBuf::new();
+        for component in &components[..split] {
+            prefix.push(component.as_os_str());
+        }
+        match std::fs::canonicalize(&prefix) {
+            Ok(mut resolved) => {
+                for component in &components[split..] {
+                    resolved.push(component.as_os_str());
+                }
+                return lexically_normalize_absolute(&resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "resolving path prefix {} for {}: {error}",
+                    prefix.display(),
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "no existing ancestor could be resolved for {}",
+        path.display()
+    ))
+}
+
+/// Return whether `path` is equal to or below `root`.
+///
+/// Both a lexical comparison and a longest-existing-prefix canonical
+/// comparison are required. The lexical check catches configured in-root
+/// symlinks even when they currently point elsewhere; the canonical check
+/// catches existing aliases that spell the same directory differently.
+pub fn path_is_within(path: &Path, root: &Path) -> Result<bool, String> {
+    let path_absolute = absolute_path(path)?;
+    let root_absolute = absolute_path(root)?;
+    let path_lexical = lexically_normalize_absolute(&path_absolute)?;
+    let root_lexical = lexically_normalize_absolute(&root_absolute)?;
+    if path_lexical == root_lexical || path_lexical.starts_with(&root_lexical) {
+        return Ok(true);
+    }
+
+    let path_resolved = canonicalize_with_missing_tail(&path_absolute)?;
+    let root_resolved = canonicalize_with_missing_tail(&root_absolute)?;
+    Ok(path_resolved == root_resolved || path_resolved.starts_with(root_resolved))
+}
+
+/// Reject a selected sync path that is the configured master key or contains
+/// it. This is a command-level guard for explicit file/tree pushes and manual
+/// reconcile roots; the static blacklist remains defense-in-depth for the
+/// standard `master.key` and rotation artifact names.
+pub fn validate_sync_selection_excludes_master_key(
+    config: &TcfsConfig,
+    selected_path: &Path,
+) -> Result<(), String> {
+    let Some(master_key_path) = config.crypto.master_key_file.as_deref() else {
+        return Ok(());
+    };
+    if path_is_within(master_key_path, selected_path)? {
+        return Err(format!(
+            "selected sync path {} is equal to or contains configured crypto.master_key_file {}",
+            selected_path.display(),
+            expand_tilde(master_key_path).display()
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a selected master-key path that lies in the primary or any named
+/// sync root. Callers must run this before creating adjacent rotation state,
+/// pending-key, or atomic replacement files.
+pub fn validate_master_key_outside_sync_roots(
+    config: &TcfsConfig,
+    master_key_path: &Path,
+) -> Result<(), String> {
+    if let Some(primary_root) = config.sync.sync_root.as_deref() {
+        if path_is_within(master_key_path, primary_root)? {
+            return Err(format!(
+                "master key path {} is inside primary sync.sync_root {}",
+                expand_tilde(master_key_path).display(),
+                expand_tilde(primary_root).display()
+            ));
+        }
+    }
+
+    for (root_id, root) in &config.sync.roots {
+        if path_is_within(master_key_path, &root.local_root)? {
+            return Err(format!(
+                "master key path {} is inside registered root '{root_id}' local_root {}",
+                expand_tilde(master_key_path).display(),
+                expand_tilde(&root.local_root).display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,5 +1146,103 @@ require_session = false
             !toml_str.contains("per_device_wrapping"),
             "serialized config must not emit the legacy key: {toml_str}"
         );
+    }
+
+    #[test]
+    fn sensitive_path_containment_is_lexically_normalized_for_missing_tails() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sync-root");
+        std::fs::create_dir(&root).unwrap();
+
+        let missing_key = root.join("secrets/../keys/custom-vault.bin");
+        assert!(path_is_within(&missing_key, &root).unwrap());
+        assert!(path_is_within(&root, &root).unwrap());
+        assert!(!path_is_within(&temp.path().join("sync-root-sibling/key"), &root).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sensitive_path_containment_resolves_existing_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_root = temp.path().join("real-root");
+        std::fs::create_dir(&real_root).unwrap();
+        let real_key = real_root.join("custom-vault.bin");
+        std::fs::write(&real_key, b"secret").unwrap();
+
+        let root_alias = temp.path().join("root-alias");
+        symlink(&real_root, &root_alias).unwrap();
+        assert!(path_is_within(&real_key, &root_alias).unwrap());
+
+        let key_alias = temp.path().join("key-alias");
+        symlink(&real_key, &key_alias).unwrap();
+        assert!(path_is_within(&key_alias, &real_root).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sensitive_path_containment_rejects_dangling_symlink_ambiguity() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let dangling = temp.path().join("dangling-key");
+        symlink(temp.path().join("missing-key"), &dangling).unwrap();
+
+        let error = path_is_within(&dangling, &root)
+            .expect_err("an unresolved sensitive-path symlink must fail closed");
+        assert!(error.contains("unresolved symlink"), "{error}");
+    }
+
+    #[test]
+    fn custom_master_key_is_rejected_in_primary_and_registered_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join("primary");
+        let named = temp.path().join("named");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&named).unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.sync.sync_root = Some(primary.clone());
+        let primary_key = primary.join("private/custom-key-material.bin");
+        let error = validate_master_key_outside_sync_roots(&config, &primary_key)
+            .expect_err("custom key inside primary root must be rejected");
+        assert!(error.contains("primary sync.sync_root"), "{error}");
+
+        config.sync.sync_root = Some(temp.path().join("other-primary"));
+        config.sync.roots.insert(
+            "named".into(),
+            RegisteredRootConfig {
+                local_root: named.clone(),
+                remote_prefix: "roots/named".into(),
+                state_path: temp.path().join("reconcile/named.json"),
+                policy: RegisteredRootPolicy::InspectOnly,
+            },
+        );
+        let named_key = named.join("custom-key-material.bin");
+        let error = validate_master_key_outside_sync_roots(&config, &named_key)
+            .expect_err("custom key inside named root must be rejected");
+        assert!(error.contains("registered root 'named'"), "{error}");
+    }
+
+    #[test]
+    fn explicit_sync_selection_rejects_direct_key_and_containing_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let key = selected.join("custom-key-material.bin");
+        std::fs::write(&key, b"secret").unwrap();
+
+        let mut config = TcfsConfig::default();
+        config.crypto.master_key_file = Some(key.clone());
+        assert!(validate_sync_selection_excludes_master_key(&config, &key).is_err());
+        assert!(validate_sync_selection_excludes_master_key(&config, &selected).is_err());
+        assert!(validate_sync_selection_excludes_master_key(
+            &config,
+            &temp.path().join("unrelated")
+        )
+        .is_ok());
     }
 }

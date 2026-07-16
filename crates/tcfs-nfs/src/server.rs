@@ -74,14 +74,17 @@ impl NfsMount {
 /// 4. Mounts the NFS export at the given mountpoint
 /// 5. Returns a handle that blocks until unmounted
 pub async fn serve_and_mount(cfg: NfsMountConfig) -> Result<()> {
-    let vfs = Arc::new(TcfsVfs::new(
-        cfg.op,
-        cfg.prefix,
-        cfg.cache_dir,
-        cfg.cache_max_bytes,
-        Duration::from_secs(cfg.negative_ttl_secs),
-        String::new(), // NFS adapter: no vclock tracking yet
-    ));
+    let vfs = Arc::new(
+        TcfsVfs::new(
+            cfg.op,
+            cfg.prefix,
+            cfg.cache_dir,
+            cfg.cache_max_bytes,
+            Duration::from_secs(cfg.negative_ttl_secs),
+            String::new(), // NFS adapter: no vclock tracking yet
+        )
+        .hydration_only(),
+    );
 
     let adapter = NfsAdapter::new(vfs);
     let bind_addr = format!("127.0.0.1:{}", cfg.port);
@@ -125,14 +128,17 @@ pub async fn serve_and_mount(cfg: NfsMountConfig) -> Result<()> {
 
 /// Start the NFS server without mounting (useful for testing or manual mount).
 pub async fn serve_only(cfg: NfsMountConfig) -> Result<u16> {
-    let vfs = Arc::new(TcfsVfs::new(
-        cfg.op,
-        cfg.prefix,
-        cfg.cache_dir,
-        cfg.cache_max_bytes,
-        Duration::from_secs(cfg.negative_ttl_secs),
-        String::new(), // NFS adapter: no vclock tracking yet
-    ));
+    let vfs = Arc::new(
+        TcfsVfs::new(
+            cfg.op,
+            cfg.prefix,
+            cfg.cache_dir,
+            cfg.cache_max_bytes,
+            Duration::from_secs(cfg.negative_ttl_secs),
+            String::new(), // NFS adapter: no vclock tracking yet
+        )
+        .hydration_only(),
+    );
 
     let adapter = NfsAdapter::new(vfs);
     let bind_addr = format!("127.0.0.1:{}", cfg.port);

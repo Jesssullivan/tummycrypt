@@ -45,17 +45,47 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return progress
         }
 
-        completionHandler(
-            TCFSFileProviderItem(
-                identifier: identifier,
-                parentIdentifier: .rootContainer,
-                filename: identifier.rawValue.components(separatedBy: "/").last ?? identifier.rawValue,
-                isDirectory: false,
-                fileSize: 0
-            ),
-            nil
+        guard let prov = provider else {
+            completionHandler(nil, NSFileProviderError(.serverUnreachable))
+            progress.completedUnitCount = 1
+            return progress
+        }
+
+        let logicalPath = identifier.rawValue.trimmingCharacters(
+            in: CharacterSet(charactersIn: "/")
         )
-        progress.completedUnitCount = 1
+        let parentPath = Self.parentPath(forPath: logicalPath)
+        let parentIdentifier = Self.parentIdentifier(forPath: logicalPath)
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let item = try prov.listItems(path: parentPath).first {
+                    $0.itemId == logicalPath
+                }
+                guard let item else {
+                    completionHandler(nil, NSFileProviderError(.noSuchItem))
+                    progress.completedUnitCount = 1
+                    return
+                }
+                completionHandler(
+                    TCFSFileProviderItem(
+                        identifier: identifier,
+                        parentIdentifier: parentIdentifier,
+                        filename: item.filename,
+                        isDirectory: item.isDirectory,
+                        fileSize: item.fileSize,
+                        modifiedTimestamp: item.modifiedTimestamp,
+                        downloaded: false,
+                        uploaded: true,
+                        versionTag: item.contentHash,
+                        conflictWith: item.conflictWith
+                    ),
+                    nil
+                )
+            } catch {
+                completionHandler(nil, Self.mapError(error))
+            }
+            progress.completedUnitCount = 1
+        }
         return progress
     }
 
@@ -68,6 +98,20 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
+        let requestedVersionToken: String?
+        if let requestedVersion {
+            guard let token = String(data: requestedVersion.contentVersion, encoding: .utf8) else {
+                completionHandler(
+                    nil,
+                    nil,
+                    Self.versionUnavailableError("requested version token is not valid UTF-8")
+                )
+                return progress
+            }
+            requestedVersionToken = token.isEmpty ? nil : token
+        } else {
+            requestedVersionToken = nil
+        }
 
         guard let prov = provider else {
             completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
@@ -80,10 +124,35 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             let itemId = itemIdentifier.rawValue
 
             do {
+                let effectiveVersionToken: String
+                if let requestedVersionToken {
+                    effectiveVersionToken = requestedVersionToken
+                } else {
+                    let parentPath = Self.parentPath(forPath: itemId)
+                    guard
+                        let listedItem = try prov.listItems(path: parentPath).first(where: {
+                            $0.itemId == itemId
+                        }),
+                        !listedItem.contentHash.isEmpty
+                    else {
+                        progress.completedUnitCount = 100
+                        completionHandler(
+                            nil,
+                            nil,
+                            Self.versionUnavailableError(
+                                "no immutable manifest version is available for \(itemId)"
+                            )
+                        )
+                        return
+                    }
+                    effectiveVersionToken = listedItem.contentHash
+                }
+
                 let progressAdapter = HydrationProgressCallback(progress: progress)
-                try prov.hydrateFileWithProgress(
+                try prov.hydrateFileVersionWithProgress(
                     itemId: itemId,
                     destinationPath: tempFile.path,
+                    requestedVersion: effectiveVersionToken,
                     callback: progressAdapter
                 )
                 let attrs = try? FileManager.default.attributesOfItem(atPath: tempFile.path)
@@ -91,20 +160,22 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
                 let item = TCFSFileProviderItem(
                     identifier: itemIdentifier,
-                    parentIdentifier: .rootContainer,
+                    parentIdentifier: Self.parentIdentifier(forPath: itemId),
                     filename: itemId.components(separatedBy: "/").last ?? itemId,
                     isDirectory: false,
                     fileSize: fileSize,
                     downloaded: true,
-                    uploaded: true
+                    uploaded: true,
+                    versionTag: effectiveVersionToken
                 )
                 progress.completedUnitCount = 100
-                self.signalEnumeratorUpdate(for: .rootContainer)
+                self.signalEnumeratorUpdate(for: Self.parentIdentifier(forPath: itemId))
                 completionHandler(tempFile, item, nil)
             } catch {
+                try? FileManager.default.removeItem(at: tempFile)
                 logger.error("fetchContents failed: \(error.localizedDescription)")
                 progress.completedUnitCount = 100
-                completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
+                completionHandler(nil, nil, Self.mapError(error))
             }
         }
 
@@ -125,6 +196,10 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     // MARK: - Write operations
 
+    // FileProvider capabilities hide these actions in Files, but direct
+    // filesystem changes can still invoke the callbacks. Keep them fail-closed
+    // until Rust can condition publication on the exact baseVersion token.
+
     func createItem(
         basedOn itemTemplate: NSFileProviderItem,
         fields: NSFileProviderItemFields,
@@ -134,64 +209,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
-
-        guard let prov = provider else {
-            completionHandler(nil, [], false, NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let parentPath = itemTemplate.parentItemIdentifier == .rootContainer
-                ? "" : itemTemplate.parentItemIdentifier.rawValue
-            let filename = itemTemplate.filename
-
-            if itemTemplate.contentType == .folder {
-                do {
-                    try prov.createDirectory(parentPath: parentPath, dirName: filename)
-                    let dirPath = parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"
-                    let item = TCFSFileProviderItem(
-                        identifier: NSFileProviderItemIdentifier(dirPath),
-                        parentIdentifier: itemTemplate.parentItemIdentifier,
-                        filename: filename,
-                        isDirectory: true,
-                        fileSize: 0
-                    )
-                    progress.completedUnitCount = 100
-                    self.signalEnumeratorUpdate(for: itemTemplate.parentItemIdentifier)
-                    completionHandler(item, [], false, nil)
-                } catch {
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(error))
-                }
-            } else if let contentsURL = url {
-                let accessed = contentsURL.startAccessingSecurityScopedResource()
-                defer { if accessed { contentsURL.stopAccessingSecurityScopedResource() } }
-
-                let remotePath = parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"
-                do {
-                    try prov.uploadFile(localPath: contentsURL.path, remotePath: remotePath)
-                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: contentsURL.path)[.size] as? UInt64) ?? 0
-                    let item = TCFSFileProviderItem(
-                        identifier: NSFileProviderItemIdentifier(remotePath),
-                        parentIdentifier: itemTemplate.parentItemIdentifier,
-                        filename: filename,
-                        isDirectory: false,
-                        fileSize: fileSize,
-                        downloaded: true,
-                        uploaded: true
-                    )
-                    progress.completedUnitCount = 100
-                    self.signalEnumeratorUpdate(for: itemTemplate.parentItemIdentifier)
-                    completionHandler(item, [], false, nil)
-                } catch {
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(error))
-                }
-            } else {
-                completionHandler(nil, [], false, NSFileProviderError(.noSuchItem))
-            }
-        }
-
+        progress.completedUnitCount = 100
+        completionHandler(nil, [], false, NSFileProviderError(.cannotSynchronize))
         return progress
     }
 
@@ -205,43 +224,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
-
-        guard let prov = provider else {
-            completionHandler(nil, [], false, NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            if changedFields.contains(.contents), let contentsURL = newContents {
-                let accessed = contentsURL.startAccessingSecurityScopedResource()
-                defer { if accessed { contentsURL.stopAccessingSecurityScopedResource() } }
-
-                let remotePath = item.itemIdentifier.rawValue
-                do {
-                    try prov.uploadFile(localPath: contentsURL.path, remotePath: remotePath)
-                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: contentsURL.path)[.size] as? UInt64) ?? 0
-                    let updatedItem = TCFSFileProviderItem(
-                        identifier: item.itemIdentifier,
-                        parentIdentifier: item.parentItemIdentifier,
-                        filename: item.filename,
-                        isDirectory: false,
-                        fileSize: fileSize,
-                        downloaded: true,
-                        uploaded: true
-                    )
-                    progress.completedUnitCount = 100
-                    self.signalEnumeratorUpdate(for: item.parentItemIdentifier)
-                    completionHandler(updatedItem, [], false, nil)
-                } catch {
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(error))
-                }
-            } else {
-                progress.completedUnitCount = 100
-                completionHandler(item, [], false, nil)
-            }
-        }
-
+        progress.completedUnitCount = 100
+        completionHandler(nil, [], false, NSFileProviderError(.cannotSynchronize))
         return progress
     }
 
@@ -253,28 +237,27 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
-
-        guard let prov = provider else {
-            completionHandler(NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try prov.deleteItem(itemId: identifier.rawValue)
-                progress.completedUnitCount = 1
-                self.signalEnumeratorUpdate(for: .rootContainer)
-                completionHandler(nil)
-            } catch {
-                progress.completedUnitCount = 1
-                completionHandler(Self.mapError(error))
-            }
-        }
-
+        progress.completedUnitCount = 1
+        completionHandler(NSFileProviderError(.cannotSynchronize))
         return progress
     }
 
     // MARK: - Helpers
+
+    private static func parentPath(forPath path: String) -> String {
+        let components = path
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .split(separator: "/")
+        guard components.count > 1 else { return "" }
+        return components.dropLast().joined(separator: "/")
+    }
+
+    private static func parentIdentifier(
+        forPath path: String
+    ) -> NSFileProviderItemIdentifier {
+        let parent = parentPath(forPath: path)
+        return parent.isEmpty ? .rootContainer : NSFileProviderItemIdentifier(parent)
+    }
 
     private func signalEnumeratorUpdate(for containerIdentifier: NSFileProviderItemIdentifier) {
         manager?.signalEnumerator(for: containerIdentifier) { error in
@@ -282,6 +265,24 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 logger.warning("signalEnumerator failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    private static func versionUnavailableError(_ description: String) -> NSError {
+        // versionNoLongerAvailable is macOS-only. FileProvider requires iOS
+        // extensions to wrap errors without a native representation this way.
+        let underlying = NSError(
+            domain: "io.tinyland.tcfs.ios.fileprovider.version",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: description]
+        )
+        return NSError(
+            domain: NSCocoaErrorDomain,
+            code: CocoaError.Code.xpcConnectionReplyInvalid.rawValue,
+            userInfo: [
+                NSLocalizedDescriptionKey: description,
+                NSUnderlyingErrorKey: underlying,
+            ]
+        )
     }
 
     private static func mapError(_ error: Error) -> NSError {
@@ -292,6 +293,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             case .Conflict:
                 // newerExtensionVersionFound is unavailable on iOS; use serverUnreachable
                 return NSFileProviderError(.serverUnreachable) as NSError
+            case .VersionMismatch:
+                return versionUnavailableError("the requested immutable version is no longer current")
             default:
                 return NSFileProviderError(.serverUnreachable) as NSError
             }

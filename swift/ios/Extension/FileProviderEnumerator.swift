@@ -67,7 +67,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 observer.finishEnumerating(upTo: nil)
             } catch {
                 enumLogger.error("enumerateItems failed: \(error.localizedDescription)")
-                observer.finishEnumerating(upTo: nil)
+                observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
             }
         }
     }
@@ -109,6 +109,8 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 }
             } catch {
                 enumLogger.error("enumerateChanges failed: \(error.localizedDescription)")
+                observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
+                return
             }
 
             let newAnchor = Self.makeAnchor()

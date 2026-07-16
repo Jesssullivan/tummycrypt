@@ -20,7 +20,142 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::conflict::VectorClock;
 
-fn secure_read_file(path: &Path) -> Result<String> {
+fn state_parent_path(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn validate_existing_state_parent(path: &Path) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let parent = state_parent_path(path);
+        let metadata = std::fs::symlink_metadata(parent)
+            .with_context(|| format!("inspecting state parent: {}", parent.display()))?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink() && metadata.is_dir(),
+            "state parent must be a real directory: {}",
+            parent.display()
+        );
+        crate::conflict_git::validate_trusted_configured_path(parent)
+            .with_context(|| format!("validating trusted state parent: {}", parent.display()))?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = path;
+    Ok(())
+}
+
+fn validate_state_parent_if_present(path: &Path) -> Result<()> {
+    let parent = state_parent_path(path);
+    match std::fs::symlink_metadata(parent) {
+        Ok(_) => validate_existing_state_parent(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspecting state parent path: {}", parent.display())),
+    }
+}
+
+fn ensure_trusted_state_parent(path: &Path) -> Result<()> {
+    let parent = state_parent_path(path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(parent)
+            .with_context(|| format!("creating private state directory: {}", parent.display()))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating state directory: {}", parent.display()))?;
+    validate_existing_state_parent(path)
+}
+
+fn reject_state_path_write_acls(path: &Path) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        validate_existing_state_parent(path)?;
+        if path.exists() {
+            crate::path_acl::reject_write_grant_acl(path)
+                .with_context(|| format!("validating state file ACL: {}", path.display()))?;
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = path;
+    Ok(())
+}
+
+fn state_path_entry_exists(path: &Path) -> Result<bool> {
+    validate_state_parent_if_present(path)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspecting private state path: {}", path.display()))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn validate_private_state_unix_fields(
+    path: &Path,
+    owner_uid: u32,
+    link_count: u64,
+    mode: u32,
+    effective_uid: u32,
+) -> Result<()> {
+    anyhow::ensure!(
+        owner_uid == effective_uid,
+        "private state file must be owned by effective uid {effective_uid}, got uid {owner_uid}: {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        link_count == 1,
+        "refusing to read hardlinked state file {} (link count {link_count})",
+        path.display()
+    );
+    anyhow::ensure!(
+        mode & 0o077 == 0,
+        "private state file must be mode 0600 or stricter: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn validate_opened_state_file(file: &std::fs::File, path: &Path) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading private state file metadata: {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "private state path is not a regular file: {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        // SAFETY: `geteuid` has no preconditions and only reads process identity.
+        let effective_uid = unsafe { libc::geteuid() };
+        validate_private_state_unix_fields(
+            path,
+            metadata.uid(),
+            metadata.nlink(),
+            metadata.mode(),
+            effective_uid,
+        )?;
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    crate::path_acl::reject_write_grant_acl_fd(file, path)
+        .with_context(|| format!("validating opened state file ACL: {}", path.display()))?;
+    Ok(())
+}
+
+fn secure_open_state_file(path: &Path) -> Result<std::fs::File> {
+    reject_state_path_write_acls(path)?;
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("inspecting private state file: {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -34,54 +169,35 @@ fn secure_read_file(path: &Path) -> Result<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let mut file = options
+    let file = options
         .open(path)
         .with_context(|| format!("opening private state file for read: {}", path.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("reading private state file metadata: {}", path.display()))?;
-    if !metadata.is_file() {
-        anyhow::bail!(
-            "private state path is not a regular file: {}",
-            path.display()
-        );
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() != 1 {
-            anyhow::bail!(
-                "refusing to read hardlinked state file {} (link count {})",
-                path.display(),
-                metadata.nlink()
-            );
-        }
-    }
+    validate_opened_state_file(&file, path)?;
+    Ok(file)
+}
 
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)
-        .with_context(|| format!("reading private state file: {}", path.display()))?;
+fn read_opened_state_file(mut file: std::fs::File, display_path: &Path) -> Result<Vec<u8>> {
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .with_context(|| format!("reading private state file: {}", display_path.display()))?;
+    validate_opened_state_file(&file, display_path)?;
     Ok(contents)
 }
 
-fn secure_write_file(path: &Path, contents: &[u8], create_new: bool) -> Result<()> {
-    if !create_new {
-        if let Ok(metadata) = std::fs::symlink_metadata(path) {
-            if metadata.file_type().is_symlink() {
-                anyhow::bail!("refusing to write state-cache symlink: {}", path.display());
-            }
-        }
-    }
+fn secure_read_file_bytes(path: &Path) -> Result<Vec<u8>> {
+    read_opened_state_file(secure_open_state_file(path)?, path)
+}
+
+fn secure_read_file(path: &Path) -> Result<String> {
+    String::from_utf8(secure_read_file_bytes(path)?)
+        .with_context(|| format!("decoding private state file as UTF-8: {}", path.display()))
+}
+
+fn secure_write_new_file(path: &Path, contents: &[u8]) -> Result<()> {
+    reject_state_path_write_acls(path)?;
 
     let mut options = std::fs::OpenOptions::new();
-    options.write(true);
-    if create_new {
-        options.create_new(true);
-    } else {
-        // Do not truncate during open: inspect and secure the opened inode
-        // before any existing content can be damaged.
-        options.create(true);
-    }
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -92,28 +208,14 @@ fn secure_write_file(path: &Path, contents: &[u8], create_new: bool) -> Result<(
     let mut file = options
         .open(path)
         .with_context(|| format!("opening private state file: {}", path.display()))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("reading private state file metadata: {}", path.display()))?;
-    if !metadata.is_file() {
-        anyhow::bail!(
-            "private state path is not a regular file: {}",
-            path.display()
-        );
-    }
+    validate_opened_state_file(&file, path)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.nlink() != 1 {
-            anyhow::bail!(
-                "refusing to write hardlinked state file {} (link count {})",
-                path.display(),
-                metadata.nlink()
-            );
-        }
+        use std::os::unix::fs::PermissionsExt;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("securing private state file: {}", path.display()))?;
     }
+    validate_opened_state_file(&file, path)?;
     file.set_len(0)
         .with_context(|| format!("truncating private state file: {}", path.display()))?;
     file.write_all(contents)
@@ -124,10 +226,17 @@ fn secure_write_file(path: &Path, contents: &[u8], create_new: bool) -> Result<(
 }
 
 fn secure_atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    if state_path_entry_exists(path)? {
+        // Validate an existing destination before creating a replacement. Rename
+        // would safely replace a symlink rather than following it, but treating a
+        // pre-placed redirect or hardlink as an ordinary cache generation hides
+        // evidence that the state boundary was tampered with.
+        drop(secure_open_state_file(path)?);
+    }
     let mut tmp_name = path.as_os_str().to_os_string();
     tmp_name.push(format!(".tmp-{}", uuid::Uuid::new_v4()));
     let tmp_path = PathBuf::from(tmp_name);
-    if let Err(error) = secure_write_file(&tmp_path, contents, true) {
+    if let Err(error) = secure_write_new_file(&tmp_path, contents) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(error);
     }
@@ -135,6 +244,25 @@ fn secure_atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(error).with_context(|| format!("renaming state cache: {}", path.display()));
     }
+    sync_parent_directory(path)
+        .with_context(|| format!("syncing state-cache rename directory: {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(parent)
+        .with_context(|| format!("opening parent directory for sync: {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing parent directory: {}", parent.display()))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -175,10 +303,13 @@ impl StateFileLock {
     /// unbounded storage operation; the operator can retry after that cycle.
     pub fn acquire(state_path: &Path) -> Result<Self> {
         let lock_path = Self::lock_path(state_path);
-        if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating state lock dir: {}", parent.display()))?;
-        }
+        ensure_trusted_state_parent(&lock_path).with_context(|| {
+            format!(
+                "preparing trusted state lock parent: {}",
+                lock_path.display()
+            )
+        })?;
+        reject_state_path_write_acls(&lock_path)?;
         let mut options = std::fs::OpenOptions::new();
         options.create(true).truncate(false).write(true);
         #[cfg(unix)]
@@ -191,25 +322,16 @@ impl StateFileLock {
         let file = options
             .open(&lock_path)
             .with_context(|| format!("opening state lock: {}", lock_path.display()))?;
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("reading state lock metadata: {}", lock_path.display()))?;
-        if !metadata.is_file() {
-            anyhow::bail!("state lock is not a regular file: {}", lock_path.display());
-        }
+        validate_opened_state_file(&file, &lock_path)
+            .with_context(|| format!("validating opened state lock: {}", lock_path.display()))?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            if metadata.nlink() != 1 {
-                anyhow::bail!(
-                    "state lock must have exactly one hard link, got {}: {}",
-                    metadata.nlink(),
-                    lock_path.display()
-                );
-            }
+            use std::os::unix::fs::PermissionsExt;
             file.set_permissions(std::fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("securing state lock: {}", lock_path.display()))?;
         }
+        validate_opened_state_file(&file, &lock_path)
+            .with_context(|| format!("revalidating opened state lock: {}", lock_path.display()))?;
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
@@ -432,6 +554,10 @@ pub struct StateCache {
     entries: HashMap<String, SyncState>,
     /// Whether there are unsaved changes
     dirty: bool,
+    /// The in-memory state came from the last known-good backup because the
+    /// primary was content-corrupt or absent. Until a durable primary rewrite
+    /// succeeds, backup rotation must preserve that recovery source verbatim.
+    recovered_from_backup: bool,
     /// Last NATS JetStream sequence processed (for catch-up on restart)
     last_nats_seq: u64,
     /// Device ID for this machine
@@ -445,6 +571,7 @@ pub struct StateCache {
 pub struct StateCacheKeySnapshot {
     entries: HashMap<String, Option<SyncState>>,
     dirty: bool,
+    recovered_from_backup: bool,
 }
 
 impl StateCache {
@@ -454,40 +581,75 @@ impl StateCache {
     /// - new: `{"last_nats_seq": N, "device_id": "...", "entries": {...}}`
     /// - legacy: raw `HashMap<String, SyncState>`
     ///
-    /// If the primary file is corrupt, falls back to `.bak` when present.
+    /// If the securely-read primary content is corrupt, falls back to `.bak`
+    /// when present. Topology, ownership, permission, ACL, and read-I/O errors
+    /// fail closed instead of being reclassified as recoverable corruption.
     pub fn open(db_path: &Path) -> Result<Self> {
-        let (entries, last_nats_seq, device_id) = if db_path.exists() {
-            match Self::load_from_file(db_path) {
-                Ok(data) => data,
-                Err(primary_err) => {
-                    let bak_path = db_path.with_extension("json.bak");
-                    if bak_path.exists() {
+        validate_state_parent_if_present(db_path)?;
+        let bak_path = db_path.with_extension("json.bak");
+        let primary_exists = state_path_entry_exists(db_path)?;
+        let (entries, last_nats_seq, device_id, recovered_from_backup) = if primary_exists {
+            // Security/topology/ACL/read-I/O failures are not content corruption
+            // and must never be converted into a stale-backup rollback.
+            let primary_bytes = secure_read_file_bytes(db_path)
+                .with_context(|| format!("securely reading state cache: {}", db_path.display()))?;
+            match Self::parse_file_bytes(db_path, &primary_bytes) {
+                Ok((entries, last_nats_seq, device_id)) => {
+                    if state_path_entry_exists(&bak_path)? {
+                        drop(secure_open_state_file(&bak_path).with_context(|| {
+                            format!(
+                                "validating existing state-cache backup: {}",
+                                bak_path.display()
+                            )
+                        })?);
+                    }
+                    (entries, last_nats_seq, device_id, false)
+                }
+                Err(primary_parse_err) => {
+                    if state_path_entry_exists(&bak_path)? {
                         tracing::warn!(
                             path = %db_path.display(),
-                            error = %primary_err,
-                            "state cache corrupt, recovering from backup"
+                            error = %primary_parse_err,
+                            "state cache content corrupt, recovering from backup"
                         );
-                        Self::load_from_backup_file(&bak_path).with_context(|| {
-                            format!(
-                                "both state cache and backup failed to load: {}",
-                                db_path.display()
-                            )
-                        })?
+                        let (entries, last_nats_seq, device_id) =
+                            Self::load_from_backup_file(&bak_path).with_context(|| {
+                                format!(
+                                    "state cache content is corrupt and backup failed to load securely: {}",
+                                    db_path.display()
+                                )
+                            })?;
+                        (entries, last_nats_seq, device_id, true)
                     } else {
-                        return Err(primary_err).with_context(|| {
-                            format!("reading state cache: {}", db_path.display())
+                        return Err(primary_parse_err).with_context(|| {
+                            format!("parsing state cache: {}", db_path.display())
                         });
                     }
                 }
             }
+        } else if state_path_entry_exists(&bak_path)? {
+            tracing::warn!(
+                path = %db_path.display(),
+                backup = %bak_path.display(),
+                "state cache primary missing, recovering from backup"
+            );
+            let (entries, last_nats_seq, device_id) = Self::load_from_backup_file(&bak_path)
+                .with_context(|| {
+                    format!(
+                        "state cache primary is missing and backup failed to load: {}",
+                        db_path.display()
+                    )
+                })?;
+            (entries, last_nats_seq, device_id, true)
         } else {
-            (HashMap::new(), 0, String::new())
+            (HashMap::new(), 0, String::new(), false)
         };
 
         Ok(StateCache {
             db_path: db_path.to_path_buf(),
             entries,
             dirty: false,
+            recovered_from_backup,
             last_nats_seq,
             device_id,
             last_flush: Instant::now(),
@@ -503,18 +665,26 @@ impl StateCache {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .map(Path::to_path_buf)
-            .unwrap_or_else(std::env::temp_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     fn load_from_file(path: &Path) -> Result<(HashMap<String, SyncState>, u64, String)> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("reading: {}", path.display()))?;
+        let content = secure_read_file(path)?;
         Self::parse_file_content(path, &content)
     }
 
     fn load_from_backup_file(path: &Path) -> Result<(HashMap<String, SyncState>, u64, String)> {
         let content = secure_read_file(path)?;
         Self::parse_file_content(path, &content)
+    }
+
+    fn parse_file_bytes(
+        path: &Path,
+        content: &[u8],
+    ) -> Result<(HashMap<String, SyncState>, u64, String)> {
+        let content = std::str::from_utf8(content)
+            .with_context(|| format!("decoding state cache as UTF-8: {}", path.display()))?;
+        Self::parse_file_content(path, content)
     }
 
     fn parse_file_content(
@@ -533,7 +703,7 @@ impl StateCache {
     /// Reload entries from disk, merging any new entries written by other processes.
     /// Existing in-memory entries are NOT overwritten (in-memory wins).
     pub fn reload_from_disk(&mut self) -> Result<()> {
-        if !self.db_path.exists() {
+        if !state_path_entry_exists(&self.db_path)? {
             return Ok(());
         }
         let (disk_entries, seq, device_id) = Self::load_from_file(&self.db_path)?;
@@ -658,6 +828,7 @@ impl StateCache {
         StateCacheKeySnapshot {
             entries,
             dirty: self.dirty,
+            recovered_from_backup: self.recovered_from_backup,
         }
     }
 
@@ -674,6 +845,7 @@ impl StateCache {
             }
         }
         self.dirty = snapshot.dirty;
+        self.recovered_from_backup = snapshot.recovered_from_backup;
     }
 
     /// Flush dirty changes to disk using an atomic write (write then rename).
@@ -681,22 +853,32 @@ impl StateCache {
     /// Persists cache metadata alongside entries so restart recovery does not
     /// replay stale NATS state or forget the current device identity.
     pub fn flush(&mut self) -> Result<()> {
-        if !self.dirty {
+        if !self.dirty && !self.recovered_from_backup {
             return Ok(());
         }
 
-        // Ensure parent directory exists
-        if let Some(parent) = self.db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating state dir: {}", parent.display()))?;
-        }
+        ensure_trusted_state_parent(&self.db_path).with_context(|| {
+            format!(
+                "preparing trusted state directory: {}",
+                self.db_path.display()
+            )
+        })?;
 
-        if self.db_path.exists() {
+        if !self.recovered_from_backup && state_path_entry_exists(&self.db_path)? {
             let bak_path = self.db_path.with_extension("json.bak");
-            let previous = std::fs::read(&self.db_path).with_context(|| {
+            let previous = secure_read_file_bytes(&self.db_path).with_context(|| {
                 format!("reading state cache for backup: {}", self.db_path.display())
             })?;
-            secure_write_file(&bak_path, &previous, false)
+            // Never rotate arbitrary bytes into the recovery slot. If a normal
+            // primary changed into content-corrupt state after open, preserve the
+            // last known-good backup and fail this flush closed.
+            Self::parse_file_bytes(&self.db_path, &previous).with_context(|| {
+                format!(
+                    "refusing to back up content-corrupt state cache: {}",
+                    self.db_path.display()
+                )
+            })?;
+            secure_atomic_write(&bak_path, &previous)
                 .with_context(|| format!("writing state cache backup: {}", bak_path.display()))?;
         }
 
@@ -714,13 +896,14 @@ impl StateCache {
         secure_atomic_write(&self.db_path, json.as_bytes())?;
 
         self.dirty = false;
+        self.recovered_from_backup = false;
         self.last_flush = Instant::now();
         Ok(())
     }
 
     /// Flush dirty state when the last successful flush is older than `interval`.
     pub fn flush_if_stale(&mut self, interval: Duration) -> Result<()> {
-        if self.dirty && self.last_flush.elapsed() >= interval {
+        if (self.dirty || self.recovered_from_backup) && self.last_flush.elapsed() >= interval {
             self.flush()
         } else {
             Ok(())
@@ -899,7 +1082,7 @@ impl StateCache {
 
 impl Drop for StateCache {
     fn drop(&mut self) {
-        if self.dirty {
+        if self.dirty || self.recovered_from_backup {
             if let Err(e) = self.flush() {
                 tracing::warn!("failed to flush state cache on drop: {e}");
             }
@@ -1335,6 +1518,29 @@ pub fn make_sync_state_full(
 mod tests {
     use super::*;
 
+    fn write_private_state_file(path: &Path, contents: &[u8]) {
+        std::fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    fn write_recovery_backup(primary_path: &Path, sequence: u64, device_id: &str) -> PathBuf {
+        let backup_path = primary_path.with_extension("json.bak");
+        let on_disk = StateCacheOnDisk {
+            last_nats_seq: sequence,
+            device_id: device_id.to_string(),
+            entries: HashMap::new(),
+        };
+        write_private_state_file(
+            &backup_path,
+            serde_json::to_string(&on_disk).unwrap().as_bytes(),
+        );
+        backup_path
+    }
+
     #[cfg(unix)]
     fn create_fifo(path: &Path) {
         let status = std::process::Command::new("mkfifo")
@@ -1350,6 +1556,186 @@ mod tests {
         let path = dir.path().join("state.json");
         let cache = StateCache::open(&path).unwrap();
         assert!(cache.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn primary_read_rejects_symlink_hardlink_and_permissive_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let symlink_dir = tempfile::tempdir().unwrap();
+        let symlink_target = symlink_dir.path().join("target.json");
+        let symlink_primary = symlink_dir.path().join("state.json");
+        write_private_state_file(&symlink_target, b"{}");
+        symlink(&symlink_target, &symlink_primary).unwrap();
+        write_recovery_backup(&symlink_primary, 7, "must-not-recover");
+        let error = StateCache::open(&symlink_primary)
+            .err()
+            .expect("symlinked primary must fail closed");
+        assert!(
+            format!("{error:#}").contains("state-cache symlink"),
+            "{error:#}"
+        );
+
+        let hardlink_dir = tempfile::tempdir().unwrap();
+        let hardlink_target = hardlink_dir.path().join("target.json");
+        let hardlink_primary = hardlink_dir.path().join("state.json");
+        write_private_state_file(&hardlink_target, b"{}");
+        std::fs::hard_link(&hardlink_target, &hardlink_primary).unwrap();
+        write_recovery_backup(&hardlink_primary, 7, "must-not-recover");
+        let error = StateCache::open(&hardlink_primary)
+            .err()
+            .expect("hardlinked primary must fail closed");
+        assert!(
+            format!("{error:#}").contains("hardlinked state file"),
+            "{error:#}"
+        );
+
+        let permissive_dir = tempfile::tempdir().unwrap();
+        let permissive_primary = permissive_dir.path().join("state.json");
+        write_private_state_file(&permissive_primary, b"{}");
+        std::fs::set_permissions(&permissive_primary, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        write_recovery_backup(&permissive_primary, 7, "must-not-recover");
+        let error = StateCache::open(&permissive_primary)
+            .err()
+            .expect("permissive primary must fail closed");
+        assert!(
+            format!("{error:#}").contains("mode 0600 or stricter"),
+            "{error:#}"
+        );
+
+        let fifo_dir = tempfile::tempdir().unwrap();
+        let fifo_primary = fifo_dir.path().join("state.json");
+        create_fifo(&fifo_primary);
+        write_recovery_backup(&fifo_primary, 7, "must-not-recover");
+        let error = StateCache::open(&fifo_primary)
+            .err()
+            .expect("FIFO primary must fail closed even with a valid backup");
+        assert!(
+            format!("{error:#}").contains("not a regular file"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_primary_symlink_is_not_treated_as_first_start() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        symlink(dir.path().join("missing-target.json"), &path).unwrap();
+
+        let error = StateCache::open(&path)
+            .err()
+            .expect("dangling primary symlink must fail closed");
+        assert!(
+            format!("{error:#}").contains("state-cache symlink"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn state_cache_rejects_unsafe_or_symlinked_parent() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let unsafe_parent = dir.path().join("unsafe-parent");
+        std::fs::create_dir(&unsafe_parent).unwrap();
+        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let unsafe_state = unsafe_parent.join("state.json");
+        let error = StateCache::open(&unsafe_state)
+            .err()
+            .expect("group/world-writable state parent must fail closed");
+        assert!(
+            format!("{error:#}").contains("group/world-writable"),
+            "{error:#}"
+        );
+        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let real_parent = dir.path().join("real-parent");
+        let linked_parent = dir.path().join("linked-parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        let linked_state = linked_parent.join("state.json");
+        let error = StateCache::open(&linked_state)
+            .err()
+            .expect("symlinked state parent must fail closed");
+        assert!(
+            format!("{error:#}").contains("state parent must be a real directory"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrong_owner_policy_is_fail_closed() {
+        // SAFETY: `geteuid` has no preconditions and only reads process identity.
+        let effective_uid = unsafe { libc::geteuid() };
+        let foreign_uid = effective_uid ^ 1;
+        let error = validate_private_state_unix_fields(
+            Path::new("state.json"),
+            foreign_uid,
+            1,
+            0o600,
+            effective_uid,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be owned by effective uid"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_read_remains_bound_to_opened_inode_after_path_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let parked = dir.path().join("opened.json");
+        let trusted = br#"{"last_nats_seq":7,"device_id":"trusted","entries":{}}"#;
+        let forged = br#"{"last_nats_seq":99,"device_id":"forged","entries":{}}"#;
+        write_private_state_file(&path, trusted);
+
+        let opened = secure_open_state_file(&path).unwrap();
+        std::fs::rename(&path, &parked).unwrap();
+        write_private_state_file(&path, forged);
+        let bytes = read_opened_state_file(opened, &path).unwrap();
+
+        assert_eq!(bytes, trusted);
+        assert_eq!(std::fs::read(&path).unwrap(), forged);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reload_and_flush_backup_capture_reject_primary_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let reload_dir = tempfile::tempdir().unwrap();
+        let reload_path = reload_dir.path().join("state.json");
+        let mut cache = StateCache::open(&reload_path).unwrap();
+        let reload_target = reload_dir.path().join("reload-target.json");
+        write_private_state_file(&reload_target, b"{}");
+        symlink(&reload_target, &reload_path).unwrap();
+        let error = cache.reload_from_disk().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("state-cache symlink"),
+            "{error:#}"
+        );
+
+        let flush_dir = tempfile::tempdir().unwrap();
+        let flush_path = flush_dir.path().join("state.json");
+        let mut cache = StateCache::open(&flush_path).unwrap();
+        cache.set_last_nats_seq(1);
+        let flush_target = flush_dir.path().join("flush-target.json");
+        write_private_state_file(&flush_target, b"{}");
+        symlink(&flush_target, &flush_path).unwrap();
+        let error = cache.flush().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("state-cache symlink"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read(&flush_target).unwrap(), b"{}");
+        assert!(!flush_dir.path().join("state.json.bak").exists());
     }
 
     #[cfg(unix)]
@@ -1651,9 +2037,9 @@ mod tests {
         std::fs::write(&outside, b"").unwrap();
         std::fs::hard_link(&outside, StateFileLock::lock_path(&hardlink_state)).unwrap();
         let error = StateFileLock::acquire(&hardlink_state)
-            .expect_err("hardlinked lock path must fail closed")
-            .to_string();
-        assert!(error.contains("exactly one hard link"), "{error}");
+            .expect_err("hardlinked lock path must fail closed");
+        let error = format!("{error:#}");
+        assert!(error.contains("hardlinked state file"), "{error}");
     }
 
     #[tokio::test]
@@ -2221,7 +2607,10 @@ mod tests {
                 status: FileSyncStatus::Synced,
             },
         );
-        std::fs::write(&path, serde_json::to_string_pretty(&entries).unwrap()).unwrap();
+        write_private_state_file(
+            &path,
+            serde_json::to_string_pretty(&entries).unwrap().as_bytes(),
+        );
 
         let cache = StateCache::open(&path).unwrap();
         assert_eq!(cache.len(), 1);
@@ -2288,6 +2677,35 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn flush_never_rotates_content_corrupt_primary_into_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let backup_path = path.with_extension("json.bak");
+        let mut cache = StateCache::open(&path).unwrap();
+
+        cache.set_last_nats_seq(1);
+        cache.flush().unwrap();
+        cache.set_last_nats_seq(2);
+        cache.flush().unwrap();
+        let known_good_backup = std::fs::read(&backup_path).unwrap();
+
+        write_private_state_file(&path, b"corrupt after open");
+        cache.set_last_nats_seq(3);
+        let error = cache
+            .flush()
+            .expect_err("content-corrupt primary must not enter backup rotation");
+        assert!(
+            format!("{error:#}").contains("refusing to back up content-corrupt state cache"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read(&backup_path).unwrap(), known_good_backup);
+
+        // Avoid a second best-effort retry from Drop obscuring this deliberate
+        // corruption fixture with an unrelated warning.
+        cache.dirty = false;
     }
 
     #[cfg(unix)]
@@ -2371,12 +2789,89 @@ mod tests {
             device_id: "recovered".into(),
             entries: HashMap::new(),
         };
-        std::fs::write(&bak_path, serde_json::to_string(&on_disk).unwrap()).unwrap();
-        std::fs::write(&path, "NOT VALID JSON {{{{").unwrap();
+        write_private_state_file(
+            &bak_path,
+            serde_json::to_string(&on_disk).unwrap().as_bytes(),
+        );
+        write_private_state_file(&path, b"NOT VALID JSON {{{{");
 
         let cache = StateCache::open(&path).unwrap();
         assert_eq!(cache.last_nats_seq(), 99);
         assert_eq!(cache.device_id(), "recovered");
+        assert!(cache.recovered_from_backup);
+    }
+
+    #[test]
+    fn first_flush_after_recovery_preserves_known_good_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let bak_path = write_recovery_backup(&path, 99, "recovered");
+        write_private_state_file(&path, b"NOT VALID JSON {{{{");
+
+        let mut cache = StateCache::open(&path).unwrap();
+        assert!(cache.recovered_from_backup);
+        cache.set_last_nats_seq(100);
+        cache.flush().unwrap();
+
+        assert!(!cache.recovered_from_backup);
+        let (_, backup_sequence, backup_device) =
+            StateCache::load_from_backup_file(&bak_path).unwrap();
+        assert_eq!(backup_sequence, 99);
+        assert_eq!(backup_device, "recovered");
+        let repaired = StateCache::open(&path).unwrap();
+        assert_eq!(repaired.last_nats_seq(), 100);
+        assert!(!repaired.recovered_from_backup);
+    }
+
+    #[test]
+    fn missing_primary_recovers_backup_instead_of_starting_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let bak_path = write_recovery_backup(&path, 41, "orphan-recovery");
+
+        let mut cache = StateCache::open(&path).unwrap();
+        assert_eq!(cache.last_nats_seq(), 41);
+        assert_eq!(cache.device_id(), "orphan-recovery");
+        assert!(cache.recovered_from_backup);
+
+        // Recovery itself is sufficient reason for an explicit flush to repair
+        // the missing primary; no unrelated state mutation is required.
+        cache.flush().unwrap();
+        assert!(path.exists());
+        assert!(!cache.recovered_from_backup);
+        let (_, backup_sequence, _) = StateCache::load_from_backup_file(&bak_path).unwrap();
+        assert_eq!(backup_sequence, 41);
+        let repaired = StateCache::open(&path).unwrap();
+        assert_eq!(repaired.last_nats_seq(), 41);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_permissive_backup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let bak_path = dir.path().join("state.json.bak");
+        let on_disk = StateCacheOnDisk {
+            last_nats_seq: 99,
+            device_id: "forged".into(),
+            entries: HashMap::new(),
+        };
+        write_private_state_file(&path, b"corrupt");
+        write_private_state_file(
+            &bak_path,
+            serde_json::to_string(&on_disk).unwrap().as_bytes(),
+        );
+        std::fs::set_permissions(&bak_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = StateCache::open(&path)
+            .err()
+            .expect("permissive recovery backup must fail closed");
+        assert!(
+            format!("{error:#}").contains("mode 0600 or stricter"),
+            "{error:#}"
+        );
     }
 
     #[cfg(unix)]
@@ -2393,9 +2888,9 @@ mod tests {
 
         let symlink_dir = tempfile::tempdir().unwrap();
         let symlink_main = symlink_dir.path().join("state.json");
-        std::fs::write(&symlink_main, "corrupt").unwrap();
+        write_private_state_file(&symlink_main, b"corrupt");
         let symlink_target = symlink_dir.path().join("target.json");
-        std::fs::write(&symlink_target, &valid).unwrap();
+        write_private_state_file(&symlink_target, valid.as_bytes());
         symlink(&symlink_target, symlink_dir.path().join("state.json.bak")).unwrap();
         let error = StateCache::open(&symlink_main)
             .err()
@@ -2404,9 +2899,9 @@ mod tests {
 
         let hardlink_dir = tempfile::tempdir().unwrap();
         let hardlink_main = hardlink_dir.path().join("state.json");
-        std::fs::write(&hardlink_main, "corrupt").unwrap();
+        write_private_state_file(&hardlink_main, b"corrupt");
         let hardlink_target = hardlink_dir.path().join("target.json");
-        std::fs::write(&hardlink_target, &valid).unwrap();
+        write_private_state_file(&hardlink_target, valid.as_bytes());
         std::fs::hard_link(&hardlink_target, hardlink_dir.path().join("state.json.bak")).unwrap();
         let error = StateCache::open(&hardlink_main)
             .err()
@@ -2418,7 +2913,7 @@ mod tests {
     fn corrupt_main_no_backup_is_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        std::fs::write(&path, "GARBAGE").unwrap();
+        write_private_state_file(&path, b"GARBAGE");
 
         let result = StateCache::open(&path);
         assert!(result.is_err());
@@ -2445,6 +2940,30 @@ mod tests {
         cache.flush_if_stale(Duration::ZERO).unwrap();
         assert!(!cache.dirty);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn recovered_backup_is_repaired_by_stale_flush_and_drop() {
+        let stale_dir = tempfile::tempdir().unwrap();
+        let stale_path = stale_dir.path().join("state.json");
+        write_recovery_backup(&stale_path, 17, "stale-recovery");
+        let mut stale_cache = StateCache::open(&stale_path).unwrap();
+        assert!(stale_cache.recovered_from_backup);
+        stale_cache.flush_if_stale(Duration::ZERO).unwrap();
+        assert!(stale_path.exists());
+        assert!(!stale_cache.recovered_from_backup);
+
+        let drop_dir = tempfile::tempdir().unwrap();
+        let drop_path = drop_dir.path().join("state.json");
+        write_recovery_backup(&drop_path, 23, "drop-recovery");
+        {
+            let cache = StateCache::open(&drop_path).unwrap();
+            assert!(cache.recovered_from_backup);
+        }
+        assert!(drop_path.exists());
+        let reopened = StateCache::open(&drop_path).unwrap();
+        assert_eq!(reopened.last_nats_seq(), 23);
+        assert_eq!(reopened.device_id(), "drop-recovery");
     }
 
     #[test]

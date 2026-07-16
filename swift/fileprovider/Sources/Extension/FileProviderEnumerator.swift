@@ -91,9 +91,9 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         let accessor = providerAccessor
         let containerId = containerIdentifier
 
-        // Incremental enumeration: only fetch items changed since the anchor timestamp.
-        // The daemon's Watch RPC returns catch-up events from the state cache,
-        // reducing O(N) full re-enumerate to O(K) where K = actual changes.
+        // Positive cursors are rejected until tcfsd has a complete
+        // authoritative change journal. `.syncAnchorExpired` below makes
+        // fileproviderd discard its cached baseline and drive a full listing.
         DispatchQueue.global(qos: .userInitiated).async {
             guard let prov = accessor() else {
                 observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
@@ -120,36 +120,18 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             }
 
             guard result == TCFS_ERROR_TCFS_ERROR_NONE else {
-                if containerId == .workingSet {
-                    enumLogger.warning(
-                        "enumerateChanges: incremental failed (\(result.rawValue)), importing working set"
-                    )
-                    let enumeration = Self.enumerateProviderItems(
-                        provider: prov,
-                        path: "",
-                        parentIdentifier: .rootContainer,
-                        recursive: true
-                    )
-                    if enumeration.result == TCFS_ERROR_TCFS_ERROR_NONE {
-                        if !enumeration.items.isEmpty {
-                            observer.didUpdate(enumeration.items)
-                        }
-                        enumLogger.info(
-                            "enumerateChanges: working-set fallback returned \(enumeration.items.count) items"
-                        )
-                        observer.finishEnumeratingChanges(upTo: Self.makeAnchor(), moreComing: false)
-                        return
-                    }
-                    enumLogger.warning(
-                        "enumerateChanges: working-set fallback failed (\(enumeration.result.rawValue))"
+                enumLogger.warning(
+                    "enumerateChanges: incremental authority failed (\(result.rawValue)); preserving anchor and requesting full re-enumerate"
+                )
+                if result == TCFS_ERROR_TCFS_ERROR_SYNC_ANCHOR_EXPIRED {
+                    observer.finishEnumeratingWithError(
+                        NSFileProviderError(.syncAnchorExpired)
                     )
                 } else {
-                    enumLogger.warning(
-                        "enumerateChanges: incremental failed (\(result.rawValue)), requesting full re-enumerate"
+                    observer.finishEnumeratingWithError(
+                        NSFileProviderError(.serverUnreachable)
                     )
                 }
-                let newAnchor = Self.makeAnchor()
-                observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
                 return
             }
 
@@ -157,7 +139,6 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             var deletedIds: [NSFileProviderItemIdentifier] = []
             var updatedIds = Set<String>()
             var maxTimestamp: Int64 = sinceTimestamp
-            var usedFullImport = false
 
             if let events = outEvents, outCount > 0 {
                 let count = Int(outCount)
@@ -166,11 +147,22 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     let itemPath = event.path.map { String(cString: $0) } ?? ""
                     let filename = event.filename.map { String(cString: $0) } ?? ""
                     let eventType = event.event_type.map { String(cString: $0) } ?? ""
-                    let contentHash = event.content_hash.map { String(cString: $0) } ?? "1"
+                    let contentHash = event.content_hash.map { String(cString: $0) } ?? ""
                     let itemIdentifier = Self.normalizedItemIdentifier(
                         itemPath,
                         isDirectory: event.is_directory
                     )
+
+                    if eventType != "deleted" && !event.is_directory && contentHash.isEmpty {
+                        enumLogger.error(
+                            "enumerateChanges: file update lacks an exact version token"
+                        )
+                        tcfs_change_events_free(outEvents, outCount)
+                        observer.finishEnumeratingWithError(
+                            NSFileProviderError(.serverUnreachable)
+                        )
+                        return
+                    }
 
                     maxTimestamp = max(maxTimestamp, event.timestamp)
 
@@ -204,26 +196,6 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 tcfs_change_events_free(outEvents, outCount)
             }
 
-            if containerId == .workingSet && updatedItems.isEmpty && deletedIds.isEmpty {
-                let enumeration = Self.enumerateProviderItems(
-                    provider: prov,
-                    path: "",
-                    parentIdentifier: .rootContainer,
-                    recursive: true
-                )
-                if enumeration.result != TCFS_ERROR_TCFS_ERROR_NONE {
-                    enumLogger.warning(
-                        "enumerateChanges: working-set full import failed (\(enumeration.result.rawValue))"
-                    )
-                    let newAnchor = Self.makeAnchor()
-                    observer.finishEnumeratingChanges(upTo: newAnchor, moreComing: false)
-                    return
-                }
-                updatedItems = enumeration.items
-                usedFullImport = true
-                enumLogger.info("enumerateChanges: working-set full import returned \(updatedItems.count) items")
-            }
-
             enumLogger.info("enumerateChanges: \(updatedItems.count) updated, \(deletedIds.count) deleted (since \(sinceTimestamp))")
 
             if !updatedItems.isEmpty {
@@ -232,13 +204,12 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             if !deletedIds.isEmpty {
                 observer.didDeleteItems(withIdentifiers: deletedIds)
             }
-            // Use max event timestamp as anchor to avoid skipping events
-            // that arrive between anchor creation and next enumerateChanges
+            // A positive timestamp is deliberately expired by tcfsd on the
+            // next call until a complete journal exists. No partial cache
+            // snapshot is ever promoted to a successful baseline here.
             let newAnchor: NSFileProviderSyncAnchor
             if outCount > 0 {
                 newAnchor = Self.makeAnchorFromTimestamp(maxTimestamp)
-            } else if usedFullImport {
-                newAnchor = Self.makeAnchor()
             } else {
                 newAnchor = anchor
             }
@@ -247,14 +218,11 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        completionHandler(Self.makeAnchor())
-    }
-
-    /// Sync anchor from current timestamp (milliseconds since epoch).
-    private static func makeAnchor() -> NSFileProviderSyncAnchor {
-        var timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
-        let data = Data(bytes: &timestamp, count: MemoryLayout<UInt64>.size)
-        return NSFileProviderSyncAnchor(data)
+        // A wall-clock timestamp is not a journal cursor. Advertising one here
+        // would make fileproviderd immediately replay it into tcfsd, which must
+        // expire every positive cursor until a durable journal exists. Keep the
+        // baseline explicitly absent so the system uses authoritative listings.
+        completionHandler(nil)
     }
 
     /// Sync anchor from a specific Unix timestamp (seconds).
@@ -272,7 +240,7 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         return Int64(millis / 1000)
     }
 
-    private static func enumerateProviderItems(
+    static func enumerateProviderItems(
         provider prov: OpaquePointer,
         path: String,
         parentIdentifier: NSFileProviderItemIdentifier,
@@ -311,9 +279,17 @@ class TCFSFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
             let itemId = item.item_id.map { String(cString: $0) } ?? ""
             let filename = item.filename.map { String(cString: $0) } ?? ""
-            let contentHash = item.content_hash.map { String(cString: $0) } ?? "1"
+            let contentHash = item.content_hash.map { String(cString: $0) } ?? ""
             let hydration = item.hydration_state.map { String(cString: $0) } ?? ""
             let itemIdentifier = normalizedItemIdentifier(itemId, isDirectory: item.is_directory)
+
+            if !item.is_directory && contentHash.isEmpty {
+                enumLogger.error(
+                    "enumerateProviderItems: file \(itemIdentifier, privacy: .public) lacks an exact version token"
+                )
+                tcfs_file_items_free(outItems, outCount)
+                return (TCFS_ERROR_TCFS_ERROR_STORAGE, [])
+            }
 
             if !hydration.isEmpty {
                 enumLogger.info(

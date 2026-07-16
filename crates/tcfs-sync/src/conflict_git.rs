@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::engine::{self, OptionalEncryption};
 use crate::git_safety;
+use crate::index_entry::RemoteEntryKind;
 use crate::state::{FileSyncStatus, StateCache};
 
 /// User-visible mode for repo-group keep-both resolution.
@@ -32,10 +33,27 @@ impl GitKeepBothMode {
     }
 }
 
-fn git_output(repo_root: &Path, args: &[&str]) -> Result<String> {
-    let output = git_safety::sanitized_git_command()
+fn repo_git_command(
+    repo_root: &Path,
+    anchor: Option<&GitRepoAnchor>,
+) -> Result<std::process::Command> {
+    if let Some(anchor) = anchor {
+        anchor.root_git_command()
+    } else {
+        let mut command = git_safety::sanitized_git_command();
+        command.arg("-c").arg("core.fsync=reference");
+        command.current_dir(repo_root);
+        Ok(command)
+    }
+}
+
+fn git_output_at(
+    repo_root: &Path,
+    anchor: Option<&GitRepoAnchor>,
+    args: &[&str],
+) -> Result<String> {
+    let output = repo_git_command(repo_root, anchor)?
         .args(args)
-        .current_dir(repo_root)
         .output()
         .with_context(|| format!("running sanitized git {args:?}"))?;
     if !output.status.success() {
@@ -48,12 +66,251 @@ fn git_output(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_same_principal_git_entry(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    description: &str,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` has no preconditions and only reads process identity.
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        bail!(
+            "{description} must be owned by tcfsd effective uid {effective_uid}, got uid {}: {}",
+            metadata.uid(),
+            path.display()
+        );
+    }
+    if metadata.mode() & 0o022 != 0 {
+        bail!(
+            "{description} must not be group/world-writable for registered-root Git resolution: {}",
+            path.display()
+        );
+    }
+    crate::path_acl::reject_write_grant_acl(path)
+        .with_context(|| format!("validating registered-root Git ACL: {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn require_same_principal_git_entry(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+    _description: &str,
+) -> Result<()> {
+    bail!("registered-root Git trust validation is supported only on Linux and macOS")
+}
+
+/// Validate that every canonical ancestor is owned by the daemon effective
+/// user or root and cannot be renamed by another principal. Root-owned sticky
+/// boundaries (for example `/tmp`) are accepted only when the next child is
+/// itself owned by the daemon user or root.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn validate_trusted_ancestor_chain(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let canonical_path = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing trusted path: {}", path.display()))?;
+    // SAFETY: `geteuid` has no preconditions and only reads process identity.
+    let effective_uid = unsafe { libc::geteuid() };
+    let chain = canonical_path.ancestors().collect::<Vec<_>>();
+    for index in (1..chain.len()).rev() {
+        let ancestor = chain[index];
+        let next_child = chain[index - 1];
+        let metadata = std::fs::symlink_metadata(ancestor)
+            .with_context(|| format!("inspecting trusted path ancestor: {}", ancestor.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!(
+                "trusted path ancestor must be a real directory: {}",
+                ancestor.display()
+            );
+        }
+        if metadata.uid() != effective_uid && metadata.uid() != 0 {
+            bail!(
+                "trusted path ancestor must be owned by effective uid {effective_uid} or root, got uid {}: {}",
+                metadata.uid(),
+                ancestor.display()
+            );
+        }
+        crate::path_acl::reject_write_grant_acl(ancestor).with_context(|| {
+            format!(
+                "validating trusted path ancestor ACL: {}",
+                ancestor.display()
+            )
+        })?;
+        if metadata.mode() & 0o022 == 0 {
+            continue;
+        }
+
+        let sticky_root_directory = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
+        let child_metadata = std::fs::symlink_metadata(next_child).with_context(|| {
+            format!(
+                "inspecting child below sticky trusted path ancestor: {}",
+                next_child.display()
+            )
+        })?;
+        let protected_child = !child_metadata.file_type().is_symlink()
+            && (child_metadata.uid() == effective_uid || child_metadata.uid() == 0);
+        if !sticky_root_directory || !protected_child {
+            bail!(
+                "trusted path ancestor is writable by another principal without a protected root-owned sticky boundary: {}",
+                ancestor.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn validate_trusted_ancestor_chain(_path: &Path) -> Result<()> {
+    bail!("registered-root trusted-ancestor validation is supported only on Linux and macOS")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn configured_component_requires_acl(file_type: &std::fs::FileType) -> bool {
+    file_type.is_dir() || (cfg!(target_os = "macos") && file_type.is_symlink())
+}
+
+/// Validate both the original configured spelling of a directory path and its
+/// canonical destination.
+///
+/// Canonical-only validation loses the security properties of an alias such
+/// as `/writable/route -> /safe/repo`: another principal can replace `route`
+/// even when the destination itself is pristine. This walk lstat(2)s every
+/// lexical component before canonicalization, accepts only root/euid-owned
+/// directories and symlinks, and permits a writable parent only when it is a
+/// root-owned sticky boundary protecting the next root/euid-owned entry. The
+/// final canonical target and its ancestor chain are then validated too.
+/// Root-owned platform aliases such as macOS `/var -> /private/var` remain
+/// valid because the symlink and its parent are not mutable by another user.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn validate_trusted_configured_path(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    let absolute = std::path::absolute(path)
+        .with_context(|| format!("making configured path absolute: {}", path.display()))?;
+    let mut current = PathBuf::new();
+    let mut prefixes = Vec::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) => {
+                bail!(
+                    "configured path contains an unsupported platform prefix: {}",
+                    absolute.display()
+                );
+            }
+            Component::RootDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+                prefixes.push(current.clone());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                bail!(
+                    "configured path must not contain parent traversal: {}",
+                    absolute.display()
+                );
+            }
+        }
+    }
+    if prefixes.is_empty() {
+        bail!("configured path is empty");
+    }
+
+    // SAFETY: `geteuid` has no preconditions and only reads process identity.
+    let effective_uid = unsafe { libc::geteuid() };
+    for (index, prefix) in prefixes.iter().enumerate() {
+        let metadata = std::fs::symlink_metadata(prefix).with_context(|| {
+            format!(
+                "inspecting original configured path component: {}",
+                prefix.display()
+            )
+        })?;
+        let file_type = metadata.file_type();
+        if !metadata.is_dir() && !file_type.is_symlink() {
+            bail!(
+                "configured path component must be a real directory or protected symlink: {}",
+                prefix.display()
+            );
+        }
+        if metadata.uid() != effective_uid && metadata.uid() != 0 {
+            bail!(
+                "configured path component must be owned by effective uid {effective_uid} or root, got uid {}: {}",
+                metadata.uid(),
+                prefix.display()
+            );
+        }
+        // macOS extended ACLs can be attached to the lexical symlink itself.
+        // Inspect them with acl_get_link_np before canonicalization so an
+        // allow-write entry on a root/euid-owned route cannot hide behind an
+        // otherwise pristine destination. Linux lgetxattr behavior for
+        // symlink ACL namespaces varies by filesystem, so Linux retains the
+        // directory-only check and relies on owner/sticky-boundary protection
+        // for lexical symlinks.
+        if configured_component_requires_acl(&file_type) {
+            crate::path_acl::reject_write_grant_acl(prefix).with_context(|| {
+                format!(
+                    "validating configured path component ACL: {}",
+                    prefix.display()
+                )
+            })?;
+        }
+        if !metadata.is_dir() || metadata.mode() & 0o022 == 0 {
+            continue;
+        }
+
+        let Some(next_prefix) = prefixes.get(index + 1) else {
+            bail!(
+                "configured directory is group/world-writable: {}",
+                prefix.display()
+            );
+        };
+        let next_metadata = std::fs::symlink_metadata(next_prefix).with_context(|| {
+            format!(
+                "inspecting entry below sticky configured path boundary: {}",
+                next_prefix.display()
+            )
+        })?;
+        let sticky_root_directory = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
+        let protected_child = next_metadata.uid() == effective_uid || next_metadata.uid() == 0;
+        if !sticky_root_directory || !protected_child {
+            bail!(
+                "configured path component is writable by another principal without a protected root-owned sticky boundary: {}",
+                prefix.display()
+            );
+        }
+    }
+
+    let canonical = absolute
+        .canonicalize()
+        .with_context(|| format!("canonicalizing configured path: {}", absolute.display()))?;
+    let final_metadata = std::fs::symlink_metadata(&canonical)
+        .with_context(|| format!("inspecting configured path target: {}", canonical.display()))?;
+    if final_metadata.file_type().is_symlink() || !final_metadata.is_dir() {
+        bail!(
+            "configured path target must be a real directory: {}",
+            canonical.display()
+        );
+    }
+    require_same_principal_git_entry(&canonical, &final_metadata, "configured path target")?;
+    validate_trusted_ancestor_chain(&canonical)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn validate_trusted_configured_path(_path: &Path) -> Result<()> {
+    bail!("configured-path trust validation is supported only on Linux and macOS")
+}
+
 fn require_real_git_directory(path: &Path, description: &str) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("inspecting {description}: {}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         bail!("{description} must be a real directory: {}", path.display());
     }
+    require_same_principal_git_entry(path, &metadata, description)?;
     Ok(())
 }
 
@@ -63,6 +320,7 @@ fn validate_real_git_directory_if_present(path: &Path, description: &str) -> Res
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 bail!("{description} must be a real directory: {}", path.display());
             }
+            require_same_principal_git_entry(path, &metadata, description)?;
             reject_redirects_under_git_dir(path, description)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -80,6 +338,7 @@ fn require_real_git_file_if_present(path: &Path, description: &str) -> Result<()
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 bail!("{description} must be a real file: {}", path.display());
             }
+            require_same_principal_git_entry(path, &metadata, description)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -104,6 +363,7 @@ fn reject_redirects_under_git_dir(path: &Path, description: &str) -> Result<()> 
                 entry_path.display()
             );
         }
+        require_same_principal_git_entry(&entry_path, &metadata, description)?;
         if metadata.is_dir() {
             reject_redirects_under_git_dir(&entry_path, description)?;
         } else if !metadata.is_file() {
@@ -124,12 +384,28 @@ fn reject_redirects_under_git_dir(path: &Path, description: &str) -> Result<()> 
 /// variables can redirect otherwise normal-looking commands. Every probe and
 /// every resolver command uses the same sanitized command builder.
 pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
-    let repo_root = repo_root
-        .canonicalize()
-        .with_context(|| format!("canonicalizing git repo root: {}", repo_root.display()))?;
+    validate_standalone_repo_topology_at(repo_root, None)
+}
+
+fn validate_standalone_repo_topology_at(
+    repo_root: &Path,
+    anchor: Option<&GitRepoAnchor>,
+) -> Result<()> {
+    let repo_root = if let Some(anchor) = anchor {
+        anchor.revalidate()?;
+        anchor.canonical_root.clone()
+    } else {
+        repo_root
+            .canonicalize()
+            .with_context(|| format!("canonicalizing git repo root: {}", repo_root.display()))?
+    };
     if !repo_root.is_dir() {
         bail!("git repo root is not a directory: {}", repo_root.display());
     }
+    validate_trusted_ancestor_chain(&repo_root)?;
+    let repo_metadata = std::fs::symlink_metadata(&repo_root)
+        .with_context(|| format!("inspecting git repo root: {}", repo_root.display()))?;
+    require_same_principal_git_entry(&repo_root, &repo_metadata, "Git repo root")?;
 
     let git_dir_path = repo_root.join(".git");
     let metadata = std::fs::symlink_metadata(&git_dir_path)
@@ -140,6 +416,7 @@ pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
             git_dir_path.display()
         );
     }
+    require_same_principal_git_entry(&git_dir_path, &metadata, "Git metadata directory")?;
     let git_dir = git_dir_path
         .canonicalize()
         .with_context(|| format!("canonicalizing git directory: {}", git_dir_path.display()))?;
@@ -189,6 +466,7 @@ pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
                     alternates.display()
                 );
             }
+            require_same_principal_git_entry(&alternates, &metadata, "Git alternates file")?;
             let contents = std::fs::read_to_string(&alternates)
                 .with_context(|| format!("reading git alternates: {}", alternates.display()))?;
             if contents.lines().any(|line| !line.trim().is_empty()) {
@@ -204,7 +482,67 @@ pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
         }
     }
 
-    let reported_top = git_output(&repo_root, &["rev-parse", "--show-toplevel"])?;
+    let effective_config = repo_git_command(&repo_root, anchor)?
+        .args(["config", "--null", "--name-only", "--list"])
+        .output()
+        .context("inspecting effective Git config for resolver safety")?;
+    if !effective_config.status.success() {
+        bail!(
+            "effective Git config inspection failed: {}",
+            String::from_utf8_lossy(&effective_config.stderr)
+        );
+    }
+    for key in effective_config
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+    {
+        let key = String::from_utf8_lossy(key).trim().to_ascii_lowercase();
+        let remote_promisor = key.starts_with("remote.")
+            && (key.ends_with(".promisor") || key.ends_with(".partialclonefilter"));
+        if key == "extensions.partialclone"
+            || key == "extensions.refstorage"
+            || remote_promisor
+            || key == "protocol.ext.allow"
+            || key == "core.alternaterefscommand"
+            || key.starts_with("fsck.")
+        {
+            bail!("effective Git config key {key} is outside the registered-root resolver seam");
+        }
+    }
+
+    // The sanitized builder appends `core.sharedRepository=0` as a final
+    // defense, so this query always includes one safe command-scope value.
+    // Reject every additional non-false value from repository/global/system
+    // config: shared-repository mode can make Git itself recreate refs with
+    // group/world write permission after our topology preflight.
+    let shared_repository = repo_git_command(&repo_root, anchor)?
+        .args(["config", "--null", "--get-all", "core.sharedRepository"])
+        .output()
+        .context("inspecting effective Git shared-repository mode")?;
+    match shared_repository.status.code() {
+        Some(0) => {
+            for value in shared_repository
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|value| !value.is_empty())
+            {
+                let value = String::from_utf8_lossy(value).trim().to_ascii_lowercase();
+                if !matches!(value.as_str(), "0" | "false" | "no" | "off") {
+                    bail!(
+                        "effective core.sharedRepository={value} is outside the same-principal registered-root resolver seam"
+                    );
+                }
+            }
+        }
+        Some(1) => {}
+        _ => bail!(
+            "effective Git shared-repository inspection failed: {}",
+            String::from_utf8_lossy(&shared_repository.stderr)
+        ),
+    }
+
+    let reported_top = git_output_at(&repo_root, anchor, &["rev-parse", "--show-toplevel"])?;
     let reported_top = PathBuf::from(reported_top)
         .canonicalize()
         .context("canonicalizing Git-reported worktree root")?;
@@ -216,7 +554,7 @@ pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
         );
     }
 
-    let reported_git_dir = git_output(&repo_root, &["rev-parse", "--absolute-git-dir"])?;
+    let reported_git_dir = git_output_at(&repo_root, anchor, &["rev-parse", "--absolute-git-dir"])?;
     let reported_git_dir = PathBuf::from(reported_git_dir)
         .canonicalize()
         .context("canonicalizing Git-reported git dir")?;
@@ -228,8 +566,9 @@ pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
         );
     }
 
-    let reported_common_dir = git_output(
+    let reported_common_dir = git_output_at(
         &repo_root,
+        anchor,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     let reported_common_dir = PathBuf::from(reported_common_dir)
@@ -243,13 +582,17 @@ pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
         );
     }
 
-    let is_bare = git_output(&repo_root, &["rev-parse", "--is-bare-repository"])?;
+    let is_bare = git_output_at(&repo_root, anchor, &["rev-parse", "--is-bare-repository"])?;
     if is_bare != "false" {
         bail!("bare Git repositories are outside the standalone resolver seam");
     }
-    let inside_worktree = git_output(&repo_root, &["rev-parse", "--is-inside-work-tree"])?;
+    let inside_worktree =
+        git_output_at(&repo_root, anchor, &["rev-parse", "--is-inside-work-tree"])?;
     if inside_worktree != "true" {
         bail!("Git does not report the enrolled root as a working tree");
+    }
+    if let Some(anchor) = anchor {
+        anchor.revalidate()?;
     }
     Ok(())
 }
@@ -317,6 +660,296 @@ struct GitConflictCandidate {
 struct AppliedParkRef {
     ref_name: String,
     previous_sha: Option<String>,
+    /// Exact value written by this transaction. Rollback uses it as Git's old
+    /// value CAS so it cannot erase a concurrent operator update.
+    written_sha: String,
+}
+
+/// Stable filesystem capability captured by the daemon immediately after it
+/// authorizes a canonical repository root.
+///
+/// Every Git child in the registered-root resolver enters this descriptor via
+/// child-side `fchdir(2)`. The canonical pathname is retained only for
+/// operator messages, conflict-cache matching, and read-only identity checks;
+/// it is never used as a Git mutation cwd after authorization.
+pub struct GitRepoAnchor {
+    canonical_root: PathBuf,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    directory: std::fs::File,
+    git_directory: std::fs::File,
+    #[cfg(test)]
+    before_update_ref: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_conflict_state_flush: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for GitRepoAnchor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GitRepoAnchor")
+            .field("canonical_root", &self.canonical_root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GitRepoAnchor {
+    pub fn capture(repo_root: &Path) -> Result<Self> {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = repo_root;
+            bail!(
+                "registered-root Git resolution requires descriptor-anchored commands on Linux or macOS"
+            );
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let canonical_root = repo_root
+                .canonicalize()
+                .with_context(|| format!("canonicalizing repo root: {}", repo_root.display()))?;
+            let mut options = std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            let directory = options.open(&canonical_root).with_context(|| {
+                format!(
+                    "opening authorized repo root capability: {}",
+                    canonical_root.display()
+                )
+            })?;
+            let git_directory = git_safety::open_git_directory_at(&directory)?;
+            let anchor = Self {
+                canonical_root,
+                directory,
+                git_directory,
+                #[cfg(test)]
+                before_update_ref: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                after_conflict_state_flush: std::sync::Mutex::new(None),
+            };
+            anchor.revalidate()?;
+            Ok(anchor)
+        }
+    }
+
+    fn revalidate(&self) -> Result<()> {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!(
+                "registered-root Git resolution requires descriptor identity checks on Linux or macOS"
+            );
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+            let current = self.canonical_root.canonicalize().with_context(|| {
+                format!(
+                    "revalidating authorized repo root: {}",
+                    self.canonical_root.display()
+                )
+            })?;
+            if current != self.canonical_root {
+                bail!(
+                    "registered repo root changed after authorization: {} now resolves to {}",
+                    self.canonical_root.display(),
+                    current.display()
+                );
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            let current_directory = options.open(&current).with_context(|| {
+                format!(
+                    "reopening authorized repo root identity: {}",
+                    current.display()
+                )
+            })?;
+            let authorized_metadata = self
+                .directory
+                .metadata()
+                .context("inspecting authorized repo root descriptor")?;
+            let current_metadata = current_directory
+                .metadata()
+                .context("inspecting current repo root descriptor")?;
+            if authorized_metadata.dev() != current_metadata.dev()
+                || authorized_metadata.ino() != current_metadata.ino()
+            {
+                bail!(
+                    "registered repo root was replaced after authorization: {}",
+                    self.canonical_root.display()
+                );
+            }
+            let current_git_directory = git_safety::open_git_directory_at(&current_directory)?;
+            let authorized_git_metadata = self
+                .git_directory
+                .metadata()
+                .context("inspecting authorized Git metadata descriptor")?;
+            let current_git_metadata = current_git_directory
+                .metadata()
+                .context("inspecting current Git metadata descriptor")?;
+            if authorized_git_metadata.dev() != current_git_metadata.dev()
+                || authorized_git_metadata.ino() != current_git_metadata.ino()
+            {
+                bail!(
+                    "registered repo Git metadata was replaced after authorization: {}",
+                    self.canonical_root.join(".git").display()
+                );
+            }
+            Ok(())
+        }
+    }
+
+    /// Git command rooted in the captured worktree. This variant is for
+    /// read-only worktree/topology inspection only; mutations use
+    /// [`Self::metadata_git_command`].
+    fn root_git_command(&self) -> Result<std::process::Command> {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("registered-root Git resolution requires child-side fchdir on Linux or macOS");
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+
+            let directory_fd = self.directory.as_raw_fd();
+            let mut command = git_safety::sanitized_git_command();
+            // SAFETY: `fchdir` is async-signal-safe and the descriptor remains
+            // alive for the full child spawn. Git discovery after the cwd
+            // change is read-only on this command path; root and `.git`
+            // identity are both revalidated immediately before mutation.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fchdir(directory_fd) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+            Ok(command)
+        }
+    }
+
+    fn local_ref_sha(&self, ref_name: &str) -> Option<String> {
+        let output = self
+            .metadata_git_command()
+            .ok()?
+            .args(["rev-parse", "--verify", "--quiet", ref_name])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        git_safety::parse_ref_sha(&output.stdout)
+    }
+
+    fn run_git(&self, args: &[&str]) -> Result<()> {
+        let output = self
+            .metadata_git_command()?
+            .args(args)
+            .output()
+            .with_context(|| format!("running descriptor-anchored git {args:?}"))?;
+        if !output.status.success() {
+            bail!(
+                "descriptor-anchored git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    /// Git command rooted directly in the captured metadata directory.
+    /// `GIT_DIR=.` and `GIT_COMMON_DIR=.` prevent a swapped `.git` entry or a
+    /// late `commondir` file from redirecting ref/object operations elsewhere.
+    fn metadata_git_command(&self) -> Result<std::process::Command> {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("registered-root Git resolution requires metadata fchdir on Linux or macOS");
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+
+            let git_directory_fd = self.git_directory.as_raw_fd();
+            let mut command = git_safety::sanitized_git_command();
+            command
+                .arg("-c")
+                .arg("core.fsync=reference")
+                .env("GIT_DIR", ".")
+                .env("GIT_COMMON_DIR", ".");
+            // SAFETY: only async-signal-safe `fchdir` runs in this callback.
+            // The common sanitized builder already installs the private child
+            // umask. This metadata command set does not need a worktree and
+            // resolves all Git state from the captured `.git` cwd.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::fchdir(git_directory_fd) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+            Ok(command)
+        }
+    }
+
+    #[cfg(test)]
+    fn set_before_update_ref_hook(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.before_update_ref.lock().expect("test hook lock") = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_before_update_ref_hook(&self) {
+        let hook = self
+            .before_update_ref
+            .lock()
+            .expect("test hook lock")
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn run_before_update_ref_hook(&self) {}
+
+    #[cfg(test)]
+    fn set_after_conflict_state_flush_hook(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .after_conflict_state_flush
+            .lock()
+            .expect("test hook lock") = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_after_conflict_state_flush_hook(&self) {
+        let hook = self
+            .after_conflict_state_flush
+            .lock()
+            .expect("test hook lock")
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn run_after_conflict_state_flush_hook(&self) {}
+
+    fn acquire_git_lock(&self) -> Result<git_safety::GitLockGuard> {
+        git_safety::acquire_git_lock_at(&self.git_directory)
+    }
 }
 
 /// Resolve a raw `.git` divergent conflict group by parking the remote branch
@@ -331,19 +964,26 @@ pub async fn resolve_repo_keep_both(
     op: &Operator,
     state: &mut StateCache,
     repo_root: &Path,
+    authorized_anchor: Option<&GitRepoAnchor>,
     remote_prefix: &str,
     device_id: &str,
     undo_state_dir: &Path,
     mode: GitKeepBothMode,
     encryption: OptionalEncryption<'_>,
 ) -> Result<GitKeepBothResult> {
-    let repo_root = repo_root
-        .canonicalize()
-        .with_context(|| format!("canonicalizing repo root: {}", repo_root.display()))?;
+    let owned_anchor = authorized_anchor
+        .is_none()
+        .then(|| GitRepoAnchor::capture(repo_root))
+        .transpose()?;
+    let anchor = authorized_anchor
+        .or(owned_anchor.as_ref())
+        .expect("an authorized or locally captured repository anchor is always present");
+    anchor.revalidate()?;
+    let repo_root = anchor.canonical_root.clone();
     let git_dir = repo_root.join(".git");
-    validate_standalone_repo_topology(&repo_root)?;
+    validate_standalone_repo_topology_at(&repo_root, Some(anchor))?;
 
-    let candidates = collect_repo_conflicts(state, &repo_root)?;
+    let candidates = collect_repo_conflicts(state, &repo_root, remote_prefix)?;
     if candidates.is_empty() {
         return Ok(GitKeepBothResult {
             repo_root,
@@ -357,8 +997,10 @@ pub async fn resolve_repo_keep_both(
     if !safety.blocking.is_empty() {
         bail!("git repository is busy: {}", safety.blocking.join("; "));
     }
-    ensure_clean_worktree(&repo_root)?;
-    run_git(&repo_root, &["fsck", "--full"]).context("pre-resolution git fsck")?;
+    ensure_clean_worktree(&repo_root, Some(anchor))?;
+    anchor
+        .run_git(&["fsck", "--full"])
+        .context("pre-resolution git fsck")?;
 
     let mut parked_refs = Vec::new();
     for candidate in &candidates {
@@ -377,6 +1019,7 @@ pub async fn resolve_repo_keep_both(
             op,
             remote_manifest_key,
             remote_prefix,
+            &candidate.rel_path,
             device_id,
             encryption,
         )
@@ -387,8 +1030,10 @@ pub async fn resolve_repo_keep_both(
                 candidate.rel_path, remote_manifest_key
             )
         })?;
-        ensure_commit_present(&repo_root, &remote_sha)?;
-        let local_sha = git_safety::local_ref_sha(&repo_root, head_ref)
+        anchor.revalidate()?;
+        ensure_commit_present_at(anchor, &remote_sha)?;
+        let local_sha = anchor
+            .local_ref_sha(head_ref)
             .ok_or_else(|| anyhow!("local ref is missing: {}", head_ref))?;
         if local_sha == remote_sha {
             bail!(
@@ -396,7 +1041,7 @@ pub async fn resolve_repo_keep_both(
                 head_ref
             );
         }
-        let park_ref = park_ref_for_available(&repo_root, remote_device, head_ref, &remote_sha)?;
+        let park_ref = park_ref_for_available_at(anchor, remote_device, head_ref, &remote_sha)?;
         parked_refs.push(GitKeepBothParkedRef {
             conflict_rel_path: candidate.rel_path.clone(),
             head_ref: head_ref.clone(),
@@ -408,6 +1053,7 @@ pub async fn resolve_repo_keep_both(
     }
 
     if mode == GitKeepBothMode::DryRun {
+        anchor.revalidate()?;
         return Ok(GitKeepBothResult {
             repo_root,
             mode,
@@ -416,40 +1062,45 @@ pub async fn resolve_repo_keep_both(
         });
     }
 
-    let _guard = git_safety::acquire_git_lock(&git_dir)
+    anchor.revalidate()?;
+    let _guard = anchor
+        .acquire_git_lock()
         .with_context(|| format!("acquiring {}", git_dir.join("tcfs.lock").display()))?;
 
     // Re-check after acquiring the cooperative lock. The lock protects TCFS
     // peers; a local git command may still have started immediately before the
     // lock landed.
-    validate_standalone_repo_topology(&repo_root)
+    anchor.revalidate()?;
+    validate_standalone_repo_topology_at(&repo_root, Some(anchor))
         .context("git topology changed before locked execute")?;
     let safety = git_safety::git_is_safe(&git_dir);
     if !safety.blocking.is_empty() {
         bail!("git repository became busy: {}", safety.blocking.join("; "));
     }
-    ensure_clean_worktree(&repo_root)?;
-    run_git(&repo_root, &["fsck", "--full"]).context("locked pre-resolution git fsck")?;
+    ensure_clean_worktree(&repo_root, Some(anchor))?;
+    anchor
+        .run_git(&["fsck", "--full"])
+        .context("locked pre-resolution git fsck")?;
 
     for parked in &parked_refs {
-        ensure_local_ref_still_pinned(&repo_root, parked)?;
-        ensure_selected_park_ref_available(&repo_root, &parked.park_ref, &parked.remote_sha)?;
+        ensure_local_ref_still_pinned_at(anchor, parked)?;
+        ensure_selected_park_ref_available_at(anchor, &parked.park_ref, &parked.remote_sha)?;
     }
 
     // The undo bundle captures `--all` refs before we park anything. It is only
     // meaningful when refs actually change, so skip it for a pure keep-local
     // group (no write-only cost). It is written under the machine-local state
     // dir, never in-tree (BLOCKING 2 / design S6).
+    anchor.revalidate()?;
     let undo_bundle = if parked_refs.is_empty() {
         None
     } else {
-        Some(write_undo_bundle(&repo_root, undo_state_dir)?)
+        Some(write_undo_bundle_at(anchor, undo_state_dir)?)
     };
     let mut applied = Vec::new();
     for parked in &parked_refs {
-        if git_safety::local_ref_sha(&repo_root, &parked.park_ref).as_deref()
-            == Some(parked.remote_sha.as_str())
-        {
+        anchor.revalidate()?;
+        if anchor.local_ref_sha(&parked.park_ref).as_deref() == Some(parked.remote_sha.as_str()) {
             continue;
         }
         let zero = zero_oid_like(&parked.remote_sha);
@@ -459,19 +1110,43 @@ pub async fn resolve_repo_keep_both(
             parked.remote_sha.as_str(),
             zero.as_str(),
         ];
-        if let Err(err) = run_git(&repo_root, &args) {
-            rollback_refs(&repo_root, &applied);
+        anchor.run_before_update_ref_hook();
+        if let Err(err) = anchor.run_git(&args) {
+            rollback_refs_at(anchor, &applied).context("rolling back previously parked refs")?;
             return Err(err).with_context(|| format!("parking {}", parked.head_ref));
         }
         applied.push(AppliedParkRef {
             ref_name: parked.park_ref.clone(),
             previous_sha: None,
+            written_sha: parked.remote_sha.clone(),
         });
+        if let Err(error) = anchor.revalidate() {
+            rollback_refs_at(anchor, &applied)
+                .context("rolling back refs after authorized root identity changed")?;
+            return Err(error)
+                .context("registered repo root changed immediately after parking a ref");
+        }
+        if let Err(error) = durably_confirm_parked_ref(anchor, &parked.park_ref, &parked.remote_sha)
+        {
+            rollback_refs_at(anchor, &applied)
+                .context("rolling back refs after durability barrier failed")?;
+            return Err(error).context("durably committing parked ref before clearing state");
+        }
     }
 
-    if let Err(err) = run_git(&repo_root, &["fsck", "--full"]) {
-        rollback_refs(&repo_root, &applied);
+    if let Err(error) = anchor.revalidate() {
+        rollback_refs_at(anchor, &applied)
+            .context("rolling back refs after authorized root identity changed")?;
+        return Err(error).context("registered repo root changed before post-resolution git fsck");
+    }
+    if let Err(err) = anchor.run_git(&["fsck", "--full"]) {
+        rollback_refs_at(anchor, &applied).context("rolling back refs after git fsck failed")?;
         return Err(err).context("post-resolution git fsck");
+    }
+    if let Err(error) = anchor.revalidate() {
+        rollback_refs_at(anchor, &applied)
+            .context("rolling back refs after authorized root identity changed")?;
+        return Err(error).context("registered repo root changed after post-resolution git fsck");
     }
 
     let state_snapshot = state.snapshot_cache_keys(
@@ -479,6 +1154,22 @@ pub async fn resolve_repo_keep_both(
             .iter()
             .map(|candidate| candidate.cache_key.as_str()),
     );
+    let original_conflict_entries = candidates
+        .iter()
+        .map(|candidate| {
+            state
+                .conflicts()
+                .into_iter()
+                .find(|(cache_key, _)| *cache_key == candidate.cache_key)
+                .map(|(cache_key, entry)| (PathBuf::from(cache_key), entry.clone()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "conflict state vanished before mutation: {}",
+                        candidate.cache_key
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
     for candidate in &candidates {
         let mut resolved_vclock = candidate.resolved_vclock.clone();
         resolved_vclock.tick(device_id);
@@ -487,18 +1178,58 @@ pub async fn resolve_repo_keep_both(
             resolved_vclock,
             device_id.to_string(),
         ) {
-            rollback_refs(&repo_root, &applied);
-            state.restore_cache_key_snapshot(&state_snapshot);
-            bail!(
+            let error = anyhow!(
                 "state entry vanished while clearing conflict: {}",
                 candidate.cache_key
             );
+            return Err(recover_after_state_mutation(
+                anchor,
+                &applied,
+                state,
+                &state_snapshot,
+                &original_conflict_entries,
+                error,
+                "rolling back refs after conflict state disappeared",
+                "flushing restored conflict state after resolver failure",
+            ));
         }
     }
+    if let Err(err) = anchor.revalidate() {
+        return Err(recover_after_state_mutation(
+            anchor,
+            &applied,
+            state,
+            &state_snapshot,
+            &original_conflict_entries,
+            err.context("registered repo root changed before conflict-state flush"),
+            "rolling back refs after authorized root identity changed",
+            "restoring conflict state after authorized root identity changed",
+        ));
+    }
     if let Err(err) = state.flush() {
-        rollback_refs(&repo_root, &applied);
-        state.restore_cache_key_snapshot(&state_snapshot);
-        return Err(err).context("flushing resolved git conflicts");
+        return Err(recover_after_state_mutation(
+            anchor,
+            &applied,
+            state,
+            &state_snapshot,
+            &original_conflict_entries,
+            err.context("flushing resolved git conflicts"),
+            "rolling back refs after conflict-state flush failed",
+            "restoring conflict state after failed resolution flush",
+        ));
+    }
+    anchor.run_after_conflict_state_flush_hook();
+    if let Err(err) = anchor.revalidate() {
+        return Err(recover_after_state_mutation(
+            anchor,
+            &applied,
+            state,
+            &state_snapshot,
+            &original_conflict_entries,
+            err.context("registered repo root changed after conflict-state flush"),
+            "rolling back refs after authorized root identity changed",
+            "restoring conflict state after authorized root identity changed",
+        ));
     }
 
     Ok(GitKeepBothResult {
@@ -509,9 +1240,24 @@ pub async fn resolve_repo_keep_both(
     })
 }
 
+fn object_key_is_within_prefix(key: &str, prefix: &str) -> bool {
+    let Some(suffix) = key
+        .strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+    else {
+        return false;
+    };
+    !suffix.is_empty()
+        && !suffix.contains('\\')
+        && suffix
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 fn collect_repo_conflicts(
     state: &StateCache,
     repo_root: &Path,
+    remote_prefix: &str,
 ) -> Result<Vec<GitConflictCandidate>> {
     let mut out = Vec::new();
     for (cache_key, entry) in state.conflicts() {
@@ -528,6 +1274,20 @@ fn collect_repo_conflicts(
         };
         if root.canonicalize().ok().as_deref() != Some(repo_root) {
             continue;
+        }
+        if !object_key_is_within_prefix(&entry.remote_path, remote_prefix) {
+            bail!(
+                "git conflict {} has a remote_path outside the selected storage prefix",
+                rel_path
+            );
+        }
+        if let Some(remote_manifest_key) = conflict.remote_manifest_key.as_deref() {
+            if !object_key_is_within_prefix(remote_manifest_key, remote_prefix) {
+                bail!(
+                    "git conflict {} has a remote_manifest_key outside the selected storage prefix",
+                    rel_path
+                );
+            }
         }
         let mut resolved_vclock = conflict.local_vclock.clone();
         resolved_vclock.merge(&conflict.remote_vclock);
@@ -593,30 +1353,39 @@ async fn read_remote_ref_sha(
     op: &Operator,
     remote_manifest_key: &str,
     remote_prefix: &str,
+    expected_rel_path: &str,
     device_id: &str,
     encryption: OptionalEncryption<'_>,
 ) -> Result<String> {
-    let temp_path = std::env::temp_dir().join(format!("tcfs-remote-ref-{}", Uuid::new_v4()));
-    let download = engine::download_file_with_device(
+    let temp_dir = tempfile::tempdir().context("creating private remote-ref download directory")?;
+    let temp_path = temp_dir.path().join("payload");
+    let snapshot =
+        engine::resolve_exact_indexed_manifest_snapshot(op, expected_rel_path, remote_prefix)
+            .await
+            .context("resolving exact remote-ref index")?
+            .context("remote-ref index entry disappeared")?;
+    anyhow::ensure!(
+        snapshot.manifest_path() == remote_manifest_key,
+        "remote-ref index moved since conflict classification"
+    );
+    anyhow::ensure!(
+        snapshot.kind() == RemoteEntryKind::RegularFile,
+        "remote-ref index no longer selects a regular file"
+    );
+    engine::hydrate_indexed_snapshot_with_device(
         op,
-        remote_manifest_key,
+        &snapshot,
         &temp_path,
-        remote_prefix,
         None,
         device_id,
         None,
         encryption,
+        &engine::ExpectedLocalFingerprint::Absent,
     )
-    .await;
-    let bytes = match download {
-        Ok(_) => std::fs::read(&temp_path)
-            .with_context(|| format!("reading downloaded ref {}", temp_path.display()))?,
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(err);
-        }
-    };
-    let _ = std::fs::remove_file(&temp_path);
+    .await
+    .context("downloading checked remote ref")?;
+    let bytes = std::fs::read(&temp_path)
+        .with_context(|| format!("reading downloaded ref {}", temp_path.display()))?;
     git_safety::parse_ref_sha(&bytes).ok_or_else(|| anyhow!("remote ref content is not a SHA"))
 }
 
@@ -637,14 +1406,14 @@ fn park_ref_for(remote_device: &str, head_ref: &str) -> Result<String> {
     Ok(format!("refs/tcfs/theirs/{safe_device}/heads/{branch}"))
 }
 
-fn park_ref_for_available(
-    repo_root: &Path,
+fn park_ref_for_available_at(
+    anchor: &GitRepoAnchor,
     remote_device: &str,
     head_ref: &str,
     sha: &str,
 ) -> Result<String> {
     let base = park_ref_for(remote_device, head_ref)?;
-    available_park_ref(repo_root, &base, sha)
+    available_park_ref_at(anchor, &base, sha)
 }
 
 /// Namespace a ref under `refs/tcfs/theirs/<device>/**` so its target objects
@@ -678,7 +1447,8 @@ pub(crate) fn theirs_ref_name(device: &str, ref_name: &str) -> Option<String> {
 /// already exists at a different sha, choose the documented `-<sha12>` suffix;
 /// no-op if the selected ref already points at `sha` (idempotent re-run),
 /// otherwise `update-ref <selected_ref> <sha> <zero-oid>`.
-pub(crate) fn park_ref_create_only(repo_root: &Path, park_ref: &str, sha: &str) -> Result<String> {
+#[cfg(test)]
+fn park_ref_create_only(repo_root: &Path, park_ref: &str, sha: &str) -> Result<String> {
     let park_ref = available_park_ref(repo_root, park_ref, sha)?;
     if git_safety::local_ref_sha(repo_root, &park_ref).as_deref() == Some(sha) {
         return Ok(park_ref);
@@ -689,15 +1459,312 @@ pub(crate) fn park_ref_create_only(repo_root: &Path, park_ref: &str, sha: &str) 
     Ok(park_ref)
 }
 
-fn ensure_clean_worktree(repo_root: &Path) -> Result<()> {
-    let out = git_safety::sanitized_git_command()
-        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
-        .current_dir(repo_root)
+fn ensure_clean_worktree(repo_root: &Path, anchor: Option<&GitRepoAnchor>) -> Result<()> {
+    use std::io::Write;
+
+    let source_git_dir = repo_root.join(".git");
+    let replace_refs = repo_git_command(repo_root, anchor)?
+        .args(["for-each-ref", "--format=%(refname)", "refs/replace/"])
         .output()
-        .context("running git status")?;
+        .context("inspecting Git replace refs")?;
+    if !replace_refs.status.success() {
+        bail!(
+            "Git replace-ref inspection failed: {}",
+            String::from_utf8_lossy(&replace_refs.stderr)
+        );
+    }
+    if !replace_refs.stdout.is_empty() {
+        bail!("Git replace refs are outside the registered-root resolver seam");
+    }
+
+    let shadow_git_dir = tempfile::Builder::new()
+        .prefix("tcfs-git-status-")
+        .tempdir()
+        .context("creating isolated Git status metadata")?;
+    std::fs::create_dir(shadow_git_dir.path().join("objects"))
+        .context("creating isolated Git objects directory")?;
+    std::fs::create_dir(shadow_git_dir.path().join("refs"))
+        .context("creating isolated Git refs directory")?;
+
+    std::fs::copy(
+        source_git_dir.join("index"),
+        shadow_git_dir.path().join("index"),
+    )
+    .context("copying Git index into isolated status metadata")?;
+    let head_sha = match anchor {
+        Some(anchor) => anchor.local_ref_sha("HEAD"),
+        None => git_safety::local_ref_sha(repo_root, "HEAD"),
+    }
+    .ok_or_else(|| anyhow!("Git HEAD is missing or invalid"))?;
+    std::fs::write(shadow_git_dir.path().join("HEAD"), format!("{head_sha}\n"))
+        .context("writing isolated Git HEAD")?;
+
+    let object_format = git_output_at(repo_root, anchor, &["rev-parse", "--show-object-format"])?;
+    let shadow_config = match object_format.as_str() {
+        "sha1" => "[core]\nrepositoryformatversion = 0\nbare = false\nlogallrefupdates = false\n"
+            .to_string(),
+        "sha256" => "[core]\nrepositoryformatversion = 1\nbare = false\nlogallrefupdates = false\n[extensions]\nobjectFormat = sha256\n"
+            .to_string(),
+        other => bail!("unsupported Git object format for clean-worktree check: {other}"),
+    };
+    std::fs::write(shadow_git_dir.path().join("config"), shadow_config)
+        .context("writing isolated Git status config")?;
+
+    let source_objects = source_git_dir
+        .join("objects")
+        .canonicalize()
+        .context("canonicalizing Git object directory for isolated status")?;
+    let isolated_git = || -> Result<std::process::Command> {
+        #[cfg(windows)]
+        let null_device = "NUL";
+        #[cfg(not(windows))]
+        let null_device = "/dev/null";
+
+        let mut command = repo_git_command(repo_root, anchor)?;
+        command
+            .env("GIT_DIR", shadow_git_dir.path())
+            .env("GIT_COMMON_DIR", shadow_git_dir.path())
+            .env(
+                "GIT_WORK_TREE",
+                if anchor.is_some() {
+                    Path::new(".")
+                } else {
+                    repo_root
+                },
+            )
+            .env("GIT_OBJECT_DIRECTORY", &source_objects)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", null_device)
+            .env("GIT_CONFIG_GLOBAL", null_device)
+            .env("GIT_OPTIONAL_LOCKS", "0");
+        Ok(command)
+    };
+
+    let index_flags = isolated_git()?
+        .args(["ls-files", "-v", "-z"])
+        .output()
+        .context("inspecting isolated Git index flags")?;
+    if !index_flags.status.success() {
+        bail!(
+            "isolated Git index inspection failed: {}",
+            String::from_utf8_lossy(&index_flags.stderr)
+        );
+    }
+    if index_flags.stdout.split(|byte| *byte == 0).any(|record| {
+        record
+            .first()
+            .is_some_and(|tag| *tag == b'S' || tag.is_ascii_lowercase())
+    }) {
+        bail!("Git index contains skip-worktree or assume-unchanged entries");
+    }
+
+    let staged = isolated_git()?
+        .args(["ls-files", "--stage", "-z"])
+        .output()
+        .context("inspecting isolated Git index modes")?;
+    if !staged.status.success() {
+        bail!(
+            "isolated Git mode inspection failed: {}",
+            String::from_utf8_lossy(&staged.stderr)
+        );
+    }
+    if staged
+        .stdout
+        .split(|byte| *byte == 0)
+        .any(|record| record.starts_with(b"160000 "))
+    {
+        bail!("Git submodules are outside the registered-root resolver seam");
+    }
+
+    // The isolated metadata intentionally ignores local config. Reject local
+    // config that can route attributes elsewhere (directly or through an
+    // include), rather than silently computing status under different
+    // attribute rules. Filter commands themselves are handled by the active
+    // attribute check below.
+    for config_path in [
+        source_git_dir.join("config"),
+        source_git_dir.join("config.worktree"),
+    ] {
+        match std::fs::symlink_metadata(&config_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    bail!(
+                        "Git config must be a regular non-symlink file: {}",
+                        config_path.display()
+                    );
+                }
+                require_same_principal_git_entry(&config_path, &metadata, "Git config file")?;
+                let config_keys = git_safety::sanitized_git_command()
+                    .args(["config", "--file"])
+                    .arg(&config_path)
+                    .args(["--null", "--name-only", "--list"])
+                    .output()
+                    .with_context(|| format!("inspecting Git config: {}", config_path.display()))?;
+                if !config_keys.status.success() {
+                    bail!(
+                        "Git config inspection failed for {}: {}",
+                        config_path.display(),
+                        String::from_utf8_lossy(&config_keys.stderr)
+                    );
+                }
+                for key in config_keys
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|key| !key.is_empty())
+                {
+                    let key = String::from_utf8_lossy(key).to_ascii_lowercase();
+                    if key == "core.attributesfile"
+                        || key == "include.path"
+                        || (key.starts_with("includeif.") && key.ends_with(".path"))
+                    {
+                        bail!(
+                            "Git config key {key} can change attribute routing and is outside the registered-root resolver seam"
+                        );
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspecting {}", config_path.display()));
+            }
+        }
+    }
+
+    // Global and system config can also route attributes through
+    // core.attributesFile. Query only that inert config value under the real
+    // repository context; do not load or execute any configured filter.
+    let effective_attributes_file = repo_git_command(repo_root, anchor)?
+        .args(["config", "--path", "--get-all", "core.attributesFile"])
+        .output()
+        .context("inspecting effective Git attribute-file routing")?;
+    match effective_attributes_file.status.code() {
+        Some(0) => {
+            if !effective_attributes_file.stdout.is_empty() {
+                bail!("effective core.attributesFile is outside the registered-root resolver seam");
+            }
+        }
+        Some(1) => {}
+        _ => bail!(
+            "effective Git attribute-file inspection failed: {}",
+            String::from_utf8_lossy(&effective_attributes_file.stderr)
+        ),
+    }
+
+    // A repository-defined clean/process filter can make raw worktree bytes
+    // appear clean only after executing a command from `.git/config`. The
+    // isolated status intentionally cannot execute that command, so accepting
+    // such a tree could produce a false-clean result. Fail closed on active
+    // filter or working-tree-encoding attributes before running status.
+    let tracked = isolated_git()?
+        .args(["ls-files", "-z"])
+        .output()
+        .context("listing tracked paths for isolated Git attribute inspection")?;
+    if !tracked.status.success() {
+        bail!(
+            "isolated Git tracked-path inspection failed: {}",
+            String::from_utf8_lossy(&tracked.stderr)
+        );
+    }
+    let mut attribute_command = isolated_git()?;
+    attribute_command
+        .args([
+            "check-attr",
+            "-z",
+            "--stdin",
+            "filter",
+            "working-tree-encoding",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut attribute_child = attribute_command
+        .spawn()
+        .context("starting isolated Git attribute inspection")?;
+    attribute_child
+        .stdin
+        .take()
+        .context("opening isolated Git attribute stdin")?
+        .write_all(&tracked.stdout)
+        .context("sending tracked paths to isolated Git attribute inspection")?;
+    let attributes = attribute_child
+        .wait_with_output()
+        .context("waiting for isolated Git attribute inspection")?;
+    if !attributes.status.success() {
+        bail!(
+            "isolated Git attribute inspection failed: {}",
+            String::from_utf8_lossy(&attributes.stderr)
+        );
+    }
+    let fields = attributes
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
+    let mut triples = fields.chunks_exact(3);
+    for triple in &mut triples {
+        let [path, attribute, value] = triple else {
+            unreachable!("chunks_exact(3) always yields triples")
+        };
+        let sensitive = *attribute == b"filter" || *attribute == b"working-tree-encoding";
+        let specified = *value != b"unspecified" && *value != b"unset";
+        if sensitive && specified {
+            bail!(
+                "tracked path {} uses Git attribute {}={}; custom clean filters and working-tree encodings are outside the registered-root resolver seam",
+                String::from_utf8_lossy(path),
+                String::from_utf8_lossy(attribute),
+                String::from_utf8_lossy(value)
+            );
+        }
+    }
+    if !triples.remainder().is_empty() {
+        bail!("isolated Git attribute inspection returned malformed output");
+    }
+
+    // The shadow metadata does not load the roamed `.git/info/attributes`.
+    // Refuse any active entries there so that omission cannot become another
+    // false-clean path.
+    let info_attributes = source_git_dir.join("info/attributes");
+    match std::fs::symlink_metadata(&info_attributes) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!(
+                    "Git info attributes must be a regular non-symlink file: {}",
+                    info_attributes.display()
+                );
+            }
+            require_same_principal_git_entry(
+                &info_attributes,
+                &metadata,
+                "Git info attributes file",
+            )?;
+            let contents = std::fs::read_to_string(&info_attributes).with_context(|| {
+                format!("reading Git info attributes: {}", info_attributes.display())
+            })?;
+            if contents
+                .lines()
+                .map(str::trim)
+                .any(|line| !line.is_empty() && !line.starts_with('#'))
+            {
+                bail!(
+                    "Git info attributes are outside the registered-root resolver seam: {}",
+                    info_attributes.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting {}", info_attributes.display()));
+        }
+    }
+
+    let out = isolated_git()?
+        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
+        .arg("--ignore-submodules=all")
+        .output()
+        .context("running isolated git status")?;
     if !out.status.success() {
         bail!(
-            "git status failed: {}",
+            "isolated git status failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
@@ -707,11 +1774,19 @@ fn ensure_clean_worktree(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn ensure_commit_present(repo_root: &Path, sha: &str) -> Result<()> {
     run_git(repo_root, &["cat-file", "-e", &format!("{sha}^{{commit}}")])
         .with_context(|| format!("remote commit object is missing locally: {sha}"))
 }
 
+fn ensure_commit_present_at(anchor: &GitRepoAnchor, sha: &str) -> Result<()> {
+    anchor
+        .run_git(&["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .with_context(|| format!("remote commit object is missing locally: {sha}"))
+}
+
+#[cfg(test)]
 fn ensure_local_ref_still_pinned(repo_root: &Path, parked: &GitKeepBothParkedRef) -> Result<()> {
     let Some(current) = git_safety::local_ref_sha(repo_root, &parked.head_ref) else {
         bail!("local ref vanished before execute: {}", parked.head_ref);
@@ -727,6 +1802,25 @@ fn ensure_local_ref_still_pinned(repo_root: &Path, parked: &GitKeepBothParkedRef
     Ok(())
 }
 
+fn ensure_local_ref_still_pinned_at(
+    anchor: &GitRepoAnchor,
+    parked: &GitKeepBothParkedRef,
+) -> Result<()> {
+    let Some(current) = anchor.local_ref_sha(&parked.head_ref) else {
+        bail!("local ref vanished before execute: {}", parked.head_ref);
+    };
+    if current != parked.local_sha {
+        bail!(
+            "local ref moved before execute: {} was {}, now {}; rerun reconcile",
+            parked.head_ref,
+            parked.local_sha,
+            current
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn available_park_ref(repo_root: &Path, park_ref: &str, remote_sha: &str) -> Result<String> {
     if let Some(existing) = git_safety::local_ref_sha(repo_root, park_ref) {
         if existing == remote_sha {
@@ -748,12 +1842,37 @@ fn available_park_ref(repo_root: &Path, park_ref: &str, remote_sha: &str) -> Res
     Ok(park_ref.to_string())
 }
 
-fn ensure_selected_park_ref_available(
-    repo_root: &Path,
+fn available_park_ref_at(
+    anchor: &GitRepoAnchor,
+    park_ref: &str,
+    remote_sha: &str,
+) -> Result<String> {
+    if let Some(existing) = anchor.local_ref_sha(park_ref) {
+        if existing == remote_sha {
+            return Ok(park_ref.to_string());
+        }
+        let min_suffix_len = remote_sha.len().min(12);
+        for suffix_len in min_suffix_len..=remote_sha.len() {
+            let suffixed = format!("{park_ref}-{}", &remote_sha[..suffix_len]);
+            match anchor.local_ref_sha(&suffixed) {
+                Some(existing) if existing == remote_sha => return Ok(suffixed),
+                Some(_) => continue,
+                None => return Ok(suffixed),
+            }
+        }
+        bail!(
+            "no available park ref for {remote_sha}: base {park_ref} and every SHA-prefixed suffix are occupied"
+        );
+    }
+    Ok(park_ref.to_string())
+}
+
+fn ensure_selected_park_ref_available_at(
+    anchor: &GitRepoAnchor,
     park_ref: &str,
     remote_sha: &str,
 ) -> Result<()> {
-    if let Some(existing) = git_safety::local_ref_sha(repo_root, park_ref) {
+    if let Some(existing) = anchor.local_ref_sha(park_ref) {
         if existing != remote_sha {
             bail!(
                 "park ref {park_ref} already exists at {existing}; refusing to overwrite with {remote_sha}"
@@ -765,6 +1884,46 @@ fn ensure_selected_park_ref_available(
 
 fn zero_oid_like(oid: &str) -> String {
     "0".repeat(oid.len())
+}
+
+fn sync_directory_chain(mut directory: &Path, stop_at: &Path) -> Result<()> {
+    loop {
+        std::fs::File::open(directory)
+            .with_context(|| format!("opening durability directory: {}", directory.display()))?
+            .sync_all()
+            .with_context(|| format!("syncing durability directory: {}", directory.display()))?;
+        if directory == stop_at {
+            return Ok(());
+        }
+        directory = directory.parent().ok_or_else(|| {
+            anyhow!(
+                "durability path escaped stop directory: {}",
+                stop_at.display()
+            )
+        })?;
+    }
+}
+
+fn durably_confirm_parked_ref(
+    anchor: &GitRepoAnchor,
+    ref_name: &str,
+    expected_sha: &str,
+) -> Result<()> {
+    if anchor.local_ref_sha(ref_name).as_deref() != Some(expected_sha) {
+        bail!("parked ref readback mismatch after update-ref: {ref_name}");
+    }
+    let git_dir = anchor.canonical_root.join(".git");
+    let ref_path = git_dir.join(ref_name);
+    std::fs::File::open(&ref_path)
+        .with_context(|| format!("opening parked ref for durability: {}", ref_path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing parked ref: {}", ref_path.display()))?;
+    sync_directory_chain(
+        ref_path
+            .parent()
+            .context("parked ref has no parent directory")?,
+        &git_dir,
+    )
 }
 
 /// Write the pre-resolution `git bundle --all` escape hatch under the
@@ -808,10 +1967,20 @@ fn ensure_private_undo_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn write_undo_bundle(repo_root: &Path, state_dir: &Path) -> Result<PathBuf> {
+fn write_undo_bundle_at(anchor: &GitRepoAnchor, state_dir: &Path) -> Result<PathBuf> {
+    write_undo_bundle_inner(&anchor.canonical_root, Some(anchor), state_dir)
+}
+
+fn write_undo_bundle_inner(
+    repo_root: &Path,
+    anchor: Option<&GitRepoAnchor>,
+    state_dir: &Path,
+) -> Result<PathBuf> {
     let repo_hex = blake3::hash(repo_root.to_string_lossy().as_bytes()).to_hex();
     std::fs::create_dir_all(state_dir)
         .with_context(|| format!("creating state dir {}", state_dir.display()))?;
+    crate::path_acl::reject_write_grant_acl(state_dir)
+        .with_context(|| format!("validating undo state-dir ACL: {}", state_dir.display()))?;
     let undo_base = state_dir.join("keep-both-undo");
     ensure_private_undo_dir(&undo_base)?;
     let undo_dir = undo_base.join(&repo_hex[..16]);
@@ -839,9 +2008,12 @@ pub(crate) fn write_undo_bundle(repo_root: &Path, state_dir: &Path) -> Result<Pa
     // Stream Git's bundle output into the already-private inode. Letting Git
     // create the pathname would expose full repository history at the process
     // umask until a later chmod.
-    let output = git_safety::sanitized_git_command()
+    let mut bundle_command = match anchor {
+        Some(anchor) => anchor.metadata_git_command()?,
+        None => repo_git_command(repo_root, None)?,
+    };
+    let output = bundle_command
         .args(["bundle", "create", "-", "--all"])
-        .current_dir(repo_root)
         .stdout(Stdio::from(file))
         .output()
         .context("creating undo bundle")?;
@@ -860,23 +2032,129 @@ pub(crate) fn write_undo_bundle(repo_root: &Path, state_dir: &Path) -> Result<Pa
     sync_file
         .sync_all()
         .with_context(|| format!("syncing undo bundle {}", bundle.display()))?;
-    if let Err(error) = run_git(repo_root, &["bundle", "verify", &bundle_str]) {
+    sync_directory_chain(&undo_dir, state_dir)
+        .context("syncing undo-bundle directory chain before ref mutation")?;
+    let verification = match anchor {
+        Some(anchor) => anchor.run_git(&["bundle", "verify", &bundle_str]),
+        None => run_git(repo_root, &["bundle", "verify", &bundle_str]),
+    };
+    if let Err(error) = verification {
         let _ = std::fs::remove_file(&bundle);
         return Err(error).context("verifying undo bundle");
     }
     Ok(bundle)
 }
 
+#[cfg(test)]
 fn rollback_refs(repo_root: &Path, refs: &[AppliedParkRef]) {
     for r in refs.iter().rev() {
         match r.previous_sha.as_deref() {
             Some(previous) => {
-                let _ = run_git(repo_root, &["update-ref", r.ref_name.as_str(), previous]);
+                let _ = run_git(
+                    repo_root,
+                    &[
+                        "update-ref",
+                        r.ref_name.as_str(),
+                        previous,
+                        r.written_sha.as_str(),
+                    ],
+                );
             }
             None => {
-                let _ = run_git(repo_root, &["update-ref", "-d", r.ref_name.as_str()]);
+                let _ = run_git(
+                    repo_root,
+                    &[
+                        "update-ref",
+                        "-d",
+                        r.ref_name.as_str(),
+                        r.written_sha.as_str(),
+                    ],
+                );
             }
         }
+    }
+}
+
+fn rollback_refs_at(anchor: &GitRepoAnchor, refs: &[AppliedParkRef]) -> Result<()> {
+    let mut failures = Vec::new();
+    for applied_ref in refs.iter().rev() {
+        let result = match applied_ref.previous_sha.as_deref() {
+            Some(previous) => anchor.run_git(&[
+                "update-ref",
+                applied_ref.ref_name.as_str(),
+                previous,
+                applied_ref.written_sha.as_str(),
+            ]),
+            None => anchor.run_git(&[
+                "update-ref",
+                "-d",
+                applied_ref.ref_name.as_str(),
+                applied_ref.written_sha.as_str(),
+            ]),
+        };
+        if let Err(error) = result {
+            failures.push(format!("{}: {error:#}", applied_ref.ref_name));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("Git ref rollback failed: {}", failures.join("; "))
+    }
+}
+
+fn restore_and_flush_state(
+    state: &mut StateCache,
+    snapshot: &crate::state::StateCacheKeySnapshot,
+    original_entries: &[(PathBuf, crate::state::SyncState)],
+) -> Result<()> {
+    state.restore_cache_key_snapshot(snapshot);
+    // `restore_cache_key_snapshot` deliberately restores the old dirty bit.
+    // Re-set each original candidate so a recovery after an already-successful
+    // resolved-state flush is forced back to disk rather than becoming a
+    // dirty=false no-op.
+    for (cache_key, entry) in original_entries {
+        state.set(cache_key, entry.clone());
+    }
+    state.flush().context("flushing restored conflict state")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_after_state_mutation(
+    anchor: &GitRepoAnchor,
+    refs: &[AppliedParkRef],
+    state: &mut StateCache,
+    snapshot: &crate::state::StateCacheKeySnapshot,
+    original_entries: &[(PathBuf, crate::state::SyncState)],
+    operation_error: anyhow::Error,
+    rollback_context: &str,
+    restore_context: &str,
+) -> anyhow::Error {
+    let rollback_error = rollback_refs_at(anchor, refs)
+        .with_context(|| rollback_context.to_string())
+        .err();
+    // State is independent of Git ref rollback. Always restore and durably
+    // flush it even when a compare-and-swap rollback rejects a concurrent ref
+    // update, otherwise a failed resolver can leave its conflict cleared.
+    let restore_error = restore_and_flush_state(state, snapshot, original_entries)
+        .with_context(|| restore_context.to_string())
+        .err();
+
+    let mut recovery_failures = Vec::new();
+    if let Some(error) = rollback_error {
+        recovery_failures.push(format!("{error:#}"));
+    }
+    if let Some(error) = restore_error {
+        recovery_failures.push(format!("{error:#}"));
+    }
+
+    if recovery_failures.is_empty() {
+        operation_error
+    } else {
+        anyhow!(
+            "{operation_error:#}; recovery failures: {}",
+            recovery_failures.join("; ")
+        )
     }
 }
 
@@ -900,6 +2178,28 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Result<()> {
 mod tests {
     use super::*;
     use opendal::services::Memory;
+
+    fn memory_op() -> Operator {
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        crate::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+        op
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn configured_lexical_symlink_requires_acl_inspection() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let route = dir.path().join("route");
+        symlink(&target, &route).unwrap();
+        let file_type = std::fs::symlink_metadata(&route).unwrap().file_type();
+
+        assert!(file_type.is_symlink());
+        assert!(configured_component_requires_acl(&file_type));
+    }
 
     #[test]
     fn park_ref_sanitizes_device_and_preserves_branch() {
@@ -960,6 +2260,89 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn standalone_topology_rejects_shared_writable_root_and_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root_case = tempfile::tempdir().unwrap();
+        let root_repo = root_case.path().join("repo");
+        init_repo(&root_repo);
+        std::fs::set_permissions(&root_repo, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let root_error = validate_standalone_repo_topology(&root_repo)
+            .expect_err("group-writable root must fail closed");
+        assert!(
+            root_error.to_string().contains("group/world-writable"),
+            "{root_error:#}"
+        );
+
+        let metadata_case = tempfile::tempdir().unwrap();
+        let metadata_repo = metadata_case.path().join("repo");
+        init_repo(&metadata_repo);
+        std::fs::set_permissions(
+            metadata_repo.join(".git/refs"),
+            std::fs::Permissions::from_mode(0o775),
+        )
+        .unwrap();
+        let metadata_error = validate_standalone_repo_topology(&metadata_repo)
+            .expect_err("group-writable refs directory must fail closed");
+        assert!(
+            metadata_error.to_string().contains("group/world-writable"),
+            "{metadata_error:#}"
+        );
+
+        let ancestor_case = tempfile::tempdir().unwrap();
+        let shared_parent = ancestor_case.path().join("shared-parent");
+        let ancestor_repo = shared_parent.join("repo");
+        init_repo(&ancestor_repo);
+        std::fs::set_permissions(&shared_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let ancestor_error = validate_standalone_repo_topology(&ancestor_repo)
+            .expect_err("untrusted writable ancestor must fail closed");
+        assert!(
+            ancestor_error.to_string().contains("trusted path ancestor"),
+            "{ancestor_error:#}"
+        );
+
+        let shared_repository_case = tempfile::tempdir().unwrap();
+        let shared_repository_repo = shared_repository_case.path().join("repo");
+        init_repo(&shared_repository_repo);
+        git_safety::run_git(
+            &shared_repository_repo,
+            &["config", "core.sharedRepository", "group"],
+        )
+        .unwrap();
+        let shared_repository_error = validate_standalone_repo_topology(&shared_repository_repo)
+            .expect_err("Git shared-repository mode must fail closed");
+        assert!(
+            shared_repository_error
+                .to_string()
+                .contains("core.sharedRepository"),
+            "{shared_repository_error:#}"
+        );
+
+        let ref_backend_case = tempfile::tempdir().unwrap();
+        let ref_backend_repo = ref_backend_case.path().join("repo");
+        init_repo(&ref_backend_repo);
+        git_safety::run_git(
+            &ref_backend_repo,
+            &["config", "core.repositoryFormatVersion", "1"],
+        )
+        .unwrap();
+        git_safety::run_git(
+            &ref_backend_repo,
+            &["config", "extensions.refStorage", "reftable"],
+        )
+        .unwrap();
+        let ref_backend_error = validate_standalone_repo_topology(&ref_backend_repo)
+            .expect_err("non-files reference backend must fail closed");
+        assert!(
+            ref_backend_error
+                .to_string()
+                .contains("extensions.refstorage"),
+            "{ref_backend_error:#}"
+        );
+    }
+
     #[test]
     fn standalone_topology_rejects_external_core_worktree() {
         let temp = tempfile::tempdir().unwrap();
@@ -976,6 +2359,51 @@ mod tests {
             error.to_string().contains("worktree") || error.to_string().contains("show-toplevel"),
             "{error:#}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn object_probe_disables_promisor_remote_helpers() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        let marker = temp.path().join("remote-helper-ran");
+        let remote = format!("ext::touch {}", marker.display());
+        for (key, value) in [
+            ("core.repositoryformatversion", "1"),
+            ("extensions.partialClone", "origin"),
+            ("remote.origin.promisor", "true"),
+            ("remote.origin.partialclonefilter", "blob:none"),
+            ("protocol.ext.allow", "always"),
+            ("remote.origin.url", remote.as_str()),
+        ] {
+            git_safety::run_git(&repo, &["config", key, value]).unwrap();
+        }
+        let missing = "1111111111111111111111111111111111111111";
+
+        let ordinary = std::process::Command::new("git")
+            .env_remove("GIT_NO_LAZY_FETCH")
+            .args(["cat-file", "-e", &format!("{missing}^{{commit}}")])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(!ordinary.status.success());
+        assert!(
+            marker.exists(),
+            "fixture must prove the ordinary object probe invokes the helper"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let error = ensure_commit_present(&repo, missing).expect_err("missing object must fail");
+        assert!(error.to_string().contains("missing locally"), "{error:#}");
+        assert!(
+            !marker.exists(),
+            "sanitized object probe must disable promisor lazy fetch"
+        );
+
+        let error = validate_standalone_repo_topology(&repo)
+            .expect_err("partial-clone resolver config must fail closed");
+        assert!(error.to_string().contains("partialclone"), "{error:#}");
     }
 
     #[cfg(unix)]
@@ -1025,7 +2453,7 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_refuses_missing_remote_manifest_key() {
-        let op = Operator::new(Memory::default()).unwrap().finish();
+        let op = memory_op();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1073,6 +2501,7 @@ mod tests {
             &op,
             &mut state,
             &repo,
+            None,
             "data",
             "neo",
             dir.path(),
@@ -1128,8 +2557,474 @@ mod tests {
 
         std::fs::write(repo.join("untracked.txt"), b"wip").unwrap();
 
-        let err = ensure_clean_worktree(&repo).unwrap_err();
+        let err = ensure_clean_worktree(&repo, None).unwrap_err();
         assert!(err.to_string().contains("dirty"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn dry_run_rejects_repo_replaced_after_authorization() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let moved_repo = dir.path().join("authorized-repo-moved-aside");
+        init_repo(&repo);
+        commit(&repo, "tracked.txt", "authorized repository\n", "base");
+
+        let anchor = GitRepoAnchor::capture(&repo).expect("capture authorized repo identity");
+        std::fs::rename(&repo, &moved_repo).expect("move authorized repo aside");
+        init_repo(&repo);
+        commit(
+            &repo,
+            "tracked.txt",
+            "replacement repository\n",
+            "replacement",
+        );
+
+        let mut state = StateCache::open(&dir.path().join("state.json")).unwrap();
+        let error = resolve_repo_keep_both(
+            &op,
+            &mut state,
+            &repo,
+            Some(&anchor),
+            "data",
+            "neo",
+            dir.path(),
+            GitKeepBothMode::DryRun,
+            None,
+        )
+        .await
+        .expect_err("same-path replacement must invalidate the authorized identity");
+
+        assert!(
+            error.to_string().contains("replaced after authorization"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn execute_race_fixture() -> (
+        Operator,
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        StateCache,
+        GitRepoAnchor,
+        String,
+        String,
+    ) {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state-dir");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let base = dir.path().join("base");
+        init_repo(&base);
+        commit(&base, "file.txt", "base", "base");
+        let winner = dir.path().join("winner");
+        let loser = dir.path().join("loser");
+        for destination in [&winner, &loser] {
+            git_safety::run_git(
+                dir.path(),
+                &[
+                    "clone",
+                    "--quiet",
+                    &base.to_string_lossy(),
+                    &destination.to_string_lossy(),
+                ],
+            )
+            .unwrap();
+            init_repo(destination);
+        }
+        let winner_head = commit(&winner, "file.txt", "winner work", "winner");
+        let loser_head = commit(&loser, "file.txt", "loser work", "loser");
+        git_safety::run_git(
+            &winner,
+            &[
+                "fetch",
+                "--quiet",
+                &loser.to_string_lossy(),
+                "refs/heads/main",
+            ],
+        )
+        .unwrap();
+
+        let ref_blob = dir.path().join("loser-ref-blob");
+        std::fs::write(&ref_blob, format!("{loser_head}\n")).unwrap();
+        let mut upload_state = StateCache::open(&dir.path().join("upload-state.json")).unwrap();
+        let upload = engine::upload_file_with_device(
+            &op,
+            &ref_blob,
+            "data",
+            &mut upload_state,
+            None,
+            "loser",
+            Some("winner/.git/refs/heads/main"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let state_path = dir.path().join("state.json");
+        let ref_key = winner.join(".git/refs/heads/main");
+        let mut local = crate::conflict::VectorClock::new();
+        local.tick("winner");
+        let mut remote = crate::conflict::VectorClock::new();
+        remote.tick("loser");
+        let mut state = StateCache::open(&state_path).unwrap();
+        state.set(
+            &ref_key,
+            conflict_state(
+                "winner/.git/refs/heads/main",
+                Some(upload.remote_path),
+                &local,
+                &remote,
+            ),
+        );
+        state.flush().unwrap();
+        let anchor = GitRepoAnchor::capture(&winner).unwrap();
+
+        (
+            op,
+            dir,
+            state_dir,
+            state_path,
+            winner,
+            state,
+            anchor,
+            winner_head,
+            loser_head,
+        )
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn execute_root_swap_before_update_ref_is_anchored_and_rolled_back() {
+        let (op, dir, state_dir, state_path, winner, mut state, mut anchor, winner_head, _) =
+            execute_race_fixture().await;
+        let authorized_repo = dir.path().join("authorized-repo-moved-aside");
+        let replacement = winner.clone();
+        let moved_for_hook = authorized_repo.clone();
+        anchor.set_before_update_ref_hook(move || {
+            std::fs::rename(&replacement, &moved_for_hook).unwrap();
+            init_repo(&replacement);
+            commit(
+                &replacement,
+                "file.txt",
+                "replacement repository",
+                "replacement",
+            );
+        });
+
+        let error = resolve_repo_keep_both(
+            &op,
+            &mut state,
+            &winner,
+            Some(&anchor),
+            "data",
+            "winner",
+            &state_dir,
+            GitKeepBothMode::Execute,
+            None,
+        )
+        .await
+        .expect_err("same-path replacement must invalidate execute");
+        assert!(format!("{error:#}").contains("replaced"), "{error:#}");
+
+        let park_ref = "refs/tcfs/theirs/loser/heads/main";
+        assert_eq!(
+            git_safety::local_ref_sha(&authorized_repo, "refs/heads/main").as_deref(),
+            Some(winner_head.as_str()),
+            "authorized head must be preserved"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&authorized_repo, park_ref),
+            None,
+            "authorized repo's temporary park ref must be rolled back"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&winner, park_ref),
+            None,
+            "replacement repo must never be mutated"
+        );
+        assert_eq!(state.conflicts().len(), 1, "in-memory conflict retained");
+        assert_eq!(
+            StateCache::open(&state_path).unwrap().conflicts().len(),
+            1,
+            "on-disk conflict retained"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn rollback_failure_after_state_mutation_still_restores_conflict_durably() {
+        let (
+            op,
+            dir,
+            state_dir,
+            state_path,
+            winner,
+            mut state,
+            mut anchor,
+            winner_head,
+            loser_head,
+        ) = execute_race_fixture().await;
+        let moved_repo = dir.path().join("repo-moved-after-state-mutation");
+        let winner_for_hook = winner.clone();
+        let moved_for_hook = moved_repo.clone();
+        let winner_head_for_hook = winner_head.clone();
+        let loser_head_for_hook = loser_head.clone();
+        anchor.set_after_conflict_state_flush_hook(move || {
+            // Simulate a concurrent operator moving the newly parked ref. The
+            // resolver's rollback CAS must reject deleting this newer value.
+            git_safety::run_git(
+                &winner_for_hook,
+                &[
+                    "update-ref",
+                    "refs/tcfs/theirs/loser/heads/main",
+                    winner_head_for_hook.as_str(),
+                    loser_head_for_hook.as_str(),
+                ],
+            )
+            .unwrap();
+            // Force the real post-flush identity check to fail after the
+            // cleared conflict has already been written to disk.
+            std::fs::rename(&winner_for_hook, &moved_for_hook).unwrap();
+        });
+
+        let error = resolve_repo_keep_both(
+            &op,
+            &mut state,
+            &winner,
+            Some(&anchor),
+            "data",
+            "winner",
+            &state_dir,
+            GitKeepBothMode::Execute,
+            None,
+        )
+        .await
+        .expect_err("post-state identity failure must abort resolution");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("registered repo root changed after conflict-state flush"),
+            "primary failure must be reported: {error}"
+        );
+        assert!(
+            error.contains("Git ref rollback failed"),
+            "rollback CAS failure must be reported: {error}"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&moved_repo, "refs/tcfs/theirs/loser/heads/main").as_deref(),
+            Some(winner_head.as_str()),
+            "rollback must preserve the concurrent ref update"
+        );
+        assert_eq!(state.conflicts().len(), 1, "in-memory conflict restored");
+        assert_eq!(
+            StateCache::open(&state_path).unwrap().conflicts().len(),
+            1,
+            "on-disk conflict restored despite ref rollback failure"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn execute_git_dir_commondir_swap_cannot_redirect_update_ref() {
+        let (op, dir, state_dir, state_path, winner, mut state, mut anchor, _, _) =
+            execute_race_fixture().await;
+        let external = dir.path().join("loser");
+        let authorized_git = dir.path().join("authorized-git-moved-aside");
+        let winner_for_hook = winner.clone();
+        let moved_for_hook = authorized_git.clone();
+        let external_git = external.join(".git");
+        anchor.set_before_update_ref_hook(move || {
+            std::fs::rename(winner_for_hook.join(".git"), &moved_for_hook).unwrap();
+            std::fs::create_dir(winner_for_hook.join(".git")).unwrap();
+            std::fs::write(winner_for_hook.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+            std::fs::write(
+                winner_for_hook.join(".git/commondir"),
+                format!("{}\n", external_git.display()),
+            )
+            .unwrap();
+        });
+
+        let error = resolve_repo_keep_both(
+            &op,
+            &mut state,
+            &winner,
+            Some(&anchor),
+            "data",
+            "winner",
+            &state_dir,
+            GitKeepBothMode::Execute,
+            None,
+        )
+        .await
+        .expect_err("same-path .git replacement must invalidate execute");
+        assert!(
+            format!("{error:#}").contains("Git metadata was replaced"),
+            "{error:#}"
+        );
+
+        let park_ref = "refs/tcfs/theirs/loser/heads/main";
+        let old_ref = authorized_git.join("refs/tcfs/theirs/loser/heads/main");
+        assert!(
+            !old_ref.exists(),
+            "authorized metadata's temporary park ref must be rolled back"
+        );
+        assert_eq!(
+            git_safety::local_ref_sha(&external, park_ref),
+            None,
+            "commondir target repo must never be mutated"
+        );
+        assert_eq!(state.conflicts().len(), 1, "in-memory conflict retained");
+        assert_eq!(
+            StateCache::open(&state_path).unwrap().conflicts().len(),
+            1,
+            "on-disk conflict retained"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_worktree_check_rejects_repo_carried_filter_without_execution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_safety::run_git(&repo, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.name", "TCFS Test"]).unwrap();
+        let marker = dir.path().join("filter-executed");
+        let filter = dir.path().join("filter-probe.sh");
+        std::fs::write(
+            &filter,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nprintf 'filtered\\n'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&filter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        git_safety::run_git(
+            &repo,
+            &["config", "filter.probe.clean", &filter.to_string_lossy()],
+        )
+        .unwrap();
+        std::fs::write(repo.join(".gitattributes"), b"tracked.txt filter=probe\n").unwrap();
+        std::fs::write(repo.join("tracked.txt"), b"initial raw bytes\n").unwrap();
+        git_safety::run_git(&repo, &["add", ".gitattributes", "tracked.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "base", "--quiet"]).unwrap();
+        assert!(marker.exists(), "git add must establish the filtered blob");
+        std::fs::remove_file(&marker).unwrap();
+
+        // Keep the raw file size equal to the index's cached worktree size so
+        // Git cannot short-circuit on size alone, then force an unmistakably
+        // stale mtime. Ordinary status must inspect the bytes and run the
+        // repository-carried filter; the constant filter output matches the
+        // blob stored by `git add`, producing a deterministic false-clean.
+        let tracked = repo.join("tracked.txt");
+        let cached_worktree_size = std::fs::metadata(&tracked).unwrap().len();
+        std::fs::write(&tracked, b"different raw txt\n").unwrap();
+        assert_eq!(
+            std::fs::metadata(&tracked).unwrap().len(),
+            cached_worktree_size
+        );
+        std::fs::File::options()
+            .write(true)
+            .open(&tracked)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .unwrap();
+
+        // Positive control: repository-aware status executes the filter while
+        // inspecting the changed path. The production path must reject the
+        // active attribute before any such repository-carried code can run.
+        let unsafe_status = git_safety::sanitized_git_command()
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(unsafe_status.status.success());
+        assert!(
+            unsafe_status.stdout.is_empty(),
+            "repository-carried clean filter must make the changed raw bytes appear falsely clean"
+        );
+        assert!(marker.exists(), "fixture must exercise the unsafe Git path");
+        std::fs::remove_file(&marker).unwrap();
+
+        let error = ensure_clean_worktree(&repo, None).expect_err("filtered tree must fail closed");
+        assert!(error.to_string().contains("filter"), "{error:#}");
+        assert!(
+            !marker.exists(),
+            "isolated status must not execute a filter from roamed .git/config"
+        );
+    }
+
+    #[test]
+    fn clean_worktree_check_rejects_replace_ref_false_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_safety::run_git(&repo, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.name", "TCFS Test"]).unwrap();
+        std::fs::write(repo.join("tracked.txt"), b"base\n").unwrap();
+        git_safety::run_git(&repo, &["add", "tracked.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "base", "--quiet"]).unwrap();
+        let base = git_safety::local_ref_sha(&repo, "HEAD").unwrap();
+        std::fs::write(repo.join("tracked.txt"), b"replacement\n").unwrap();
+        git_safety::run_git(&repo, &["add", "tracked.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "replacement", "--quiet"]).unwrap();
+        let replacement = git_safety::local_ref_sha(&repo, "HEAD").unwrap();
+        git_safety::run_git(&repo, &["reset", "--hard", "--quiet", &base]).unwrap();
+        git_safety::run_git(&repo, &["replace", &base, &replacement]).unwrap();
+
+        let ordinary = std::process::Command::new("git")
+            .env_remove("GIT_NO_REPLACE_OBJECTS")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "status",
+                "--porcelain=v1",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(ordinary.status.success());
+        assert!(
+            !ordinary.stdout.is_empty(),
+            "replace-ref fixture must make ordinary status dirty"
+        );
+
+        let error = ensure_clean_worktree(&repo, None).expect_err("replace refs must fail closed");
+        assert!(error.to_string().contains("replace refs"), "{error:#}");
+    }
+
+    #[test]
+    fn clean_worktree_check_rejects_hidden_index_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_safety::run_git(&repo, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.name", "TCFS Test"]).unwrap();
+        std::fs::write(repo.join("tracked.txt"), b"base\n").unwrap();
+        git_safety::run_git(&repo, &["add", "tracked.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "base", "--quiet"]).unwrap();
+        git_safety::run_git(
+            &repo,
+            &["update-index", "--assume-unchanged", "tracked.txt"],
+        )
+        .unwrap();
+
+        let error = ensure_clean_worktree(&repo, None)
+            .expect_err("assume-unchanged entries must fail closed");
+        assert!(error.to_string().contains("assume-unchanged"), "{error:#}");
     }
 
     #[test]
@@ -1229,6 +3124,32 @@ mod tests {
             &[AppliedParkRef {
                 ref_name: park_ref.into(),
                 previous_sha: Some(first.clone()),
+                written_sha: second,
+            }],
+        );
+
+        assert_eq!(git_safety::local_ref_sha(&repo, park_ref), Some(first));
+    }
+
+    #[test]
+    fn rollback_does_not_delete_concurrently_changed_park_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_repo(&repo);
+        let first = commit(&repo, "file.txt", "one", "one");
+        let second = commit(&repo, "file.txt", "two", "two");
+        let park_ref = "refs/tcfs/theirs/honey/heads/main";
+        git_safety::run_git(&repo, &["update-ref", park_ref, &second]).unwrap();
+
+        // Another actor changes the ref after TCFS wrote it but before TCFS
+        // attempts rollback. The old-value CAS must preserve that update.
+        git_safety::run_git(&repo, &["update-ref", park_ref, &first, &second]).unwrap();
+        rollback_refs(
+            &repo,
+            &[AppliedParkRef {
+                ref_name: park_ref.into(),
+                previous_sha: None,
+                written_sha: second,
             }],
         );
 
@@ -1280,6 +3201,79 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn remote_ref_read_binds_manifest_identity_kind_and_path() {
+        let op = memory_op();
+        let dir = tempfile::tempdir().unwrap();
+        let rel_path = "repo/.git/refs/heads/main";
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let ref_blob = dir.path().join("remote-ref");
+        std::fs::write(&ref_blob, format!("{sha}\n")).unwrap();
+        let mut upload_state = StateCache::open(&dir.path().join("upload-state.json")).unwrap();
+        let upload = engine::upload_file_with_device(
+            &op,
+            &ref_blob,
+            "data",
+            &mut upload_state,
+            None,
+            "remote",
+            Some(rel_path),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read_remote_ref_sha(&op, &upload.remote_path, "data", rel_path, "local", None)
+                .await
+                .unwrap(),
+            sha
+        );
+        assert!(
+            read_remote_ref_sha(
+                &op,
+                &upload.remote_path,
+                "data",
+                "repo/.git/refs/heads/other",
+                "local",
+                None,
+            )
+            .await
+            .is_err(),
+            "a manifest for another ref path must fail closed"
+        );
+
+        let manifest_bytes = op.read(&upload.remote_path).await.unwrap().to_vec();
+        let forged_key = "data/manifests/forged-manifest-object";
+        op.write(forged_key, manifest_bytes).await.unwrap();
+        assert!(
+            read_remote_ref_sha(&op, forged_key, "data", rel_path, "local", None)
+                .await
+                .is_err(),
+            "manifest bytes stored under the wrong object id must fail closed"
+        );
+
+        let symlink = crate::manifest::SymlinkManifest::new(
+            "target",
+            crate::conflict::VectorClock::new(),
+            "remote".into(),
+            1,
+            Some(rel_path.into()),
+        );
+        let symlink_bytes = symlink.to_bytes().unwrap();
+        let symlink_key = format!(
+            "data/manifests/{}",
+            crate::index_entry::manifest_object_id(&symlink_bytes)
+        );
+        op.write(&symlink_key, symlink_bytes).await.unwrap();
+        assert!(
+            read_remote_ref_sha(&op, &symlink_key, "data", rel_path, "local", None)
+                .await
+                .is_err(),
+            "a symlink manifest must not enter the regular Git ref read lane"
+        );
+    }
+
     /// End-to-end Execute over two genuinely divergent `.git` repos (winner +
     /// loser, sharing a base, neither a fast-forward of the other). Exercises
     /// the real resolver — a no-op/stub resolver would leave the theirs-ref
@@ -1288,7 +3282,7 @@ mod tests {
     /// kept-local, and asserts idempotency (CHANGES-NEEDED 3).
     #[tokio::test]
     async fn execute_parks_theirs_keeps_local_and_is_idempotent() {
-        let op = Operator::new(Memory::default()).unwrap().finish();
+        let op = memory_op();
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state-dir");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -1352,7 +3346,7 @@ mod tests {
             &mut up_state,
             None,
             "loser",
-            Some("loser/.git/refs/heads/main"),
+            Some("winner/.git/refs/heads/main"),
             None,
         )
         .await
@@ -1391,6 +3385,7 @@ mod tests {
             &op,
             &mut state,
             &winner,
+            None,
             "data",
             "winner",
             &state_dir,
@@ -1480,6 +3475,7 @@ mod tests {
             &op,
             &mut state,
             &winner,
+            None,
             "data",
             "winner",
             &state_dir,
@@ -1514,7 +3510,7 @@ mod tests {
         use crate::conflict::{ConflictInfo, VectorClock};
         use crate::reconcile::{execute_plan, ReconcileAction, ReconcilePlan, ReconcileSummary};
 
-        let op = Operator::new(Memory::default()).unwrap().finish();
+        let op = memory_op();
         let dir = tempfile::tempdir().unwrap();
         let local_root = dir.path();
         let repo = local_root.join("repo");
@@ -1581,7 +3577,8 @@ mod tests {
 
         // The seam: the keep-both resolver's candidate scan must see it.
         let repo_root = repo.canonicalize().unwrap();
-        let candidates = collect_repo_conflicts(&state, &repo_root).expect("collect candidates");
+        let candidates =
+            collect_repo_conflicts(&state, &repo_root, "data").expect("collect candidates");
         assert_eq!(
             candidates.len(),
             1,
@@ -1594,5 +3591,12 @@ mod tests {
             }
             other => panic!("head ref must be a Park candidate, got {other:?}"),
         }
+
+        let mut stale = state.get(&ref_path).cloned().expect("recorded conflict");
+        stale.remote_path = "old-prefix/manifests/head".into();
+        state.set(&ref_path, stale);
+        let error = collect_repo_conflicts(&state, &repo_root, "data")
+            .expect_err("stale-prefix Git conflicts must fail closed");
+        assert!(error.to_string().contains("selected storage prefix"));
     }
 }

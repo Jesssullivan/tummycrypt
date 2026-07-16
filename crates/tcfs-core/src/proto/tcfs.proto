@@ -8,6 +8,9 @@ service TcfsDaemon {
   rpc Unmount(UnmountRequest) returns (UnmountResponse);
   rpc Push(stream PushChunk) returns (stream PushProgress);
   rpc Pull(PullRequest) returns (stream PullProgress);
+  // Exact FileProvider reads use a distinct RPC so older daemons fail with
+  // UNIMPLEMENTED instead of silently ignoring an exact-path request field.
+  rpc PullExact(PullExactRequest) returns (stream PullProgress);
   // Called by mount or desktop integrations when a remote-backed file is opened.
   rpc Hydrate(HydrateRequest) returns (stream HydrateProgress);
   rpc Unsync(UnsyncRequest) returns (UnsyncResponse);
@@ -90,11 +93,28 @@ message PullRequest {
   string remote_path = 1;
   string local_path = 2;
 }
+message PullExactRequest {
+  string remote_path = 1;
+  // Field 2 is deliberately reserved. An older daemon decodes this request as
+  // PullRequest with an empty local_path and must reject it before filesystem
+  // I/O; exact FileProvider reads never disclose a client-local destination.
+  reserved 2;
+  reserved "local_path";
+  string expected_version = 3;
+}
 message PullProgress {
   uint64 bytes_received = 1;
   uint64 total_bytes = 2;
   bool done = 3;
   string error = 4;
+  // PullExact streams client-owned content in bounded chunks. Legacy Pull
+  // leaves this field empty and continues writing only to daemon-owned paths.
+  bytes data = 5;
+  // Set only on PullExact's terminal message. Clients must reject a terminal
+  // response without this marker, including the zero-byte-file case.
+  bool exact_content = 6;
+  // Immutable manifest object ID selected and rechecked by PullExact.
+  string version_token = 7;
 }
 
 message HydrateRequest {
@@ -146,24 +166,29 @@ message FileEntry {
   // Hydration state: "not_synced" (placeholder), "synced" (downloaded),
   // "active" (downloading/uploading), "conflict", "locked"
   string hydration_state = 7;
+  // Immutable manifest object ID selected by the authoritative remote index.
+  string version_token = 8;
 }
 
 message WatchRequest {
   repeated string paths = 1;
-  // Only return events newer than this timestamp (0 = all events).
-  // Maps to FileProvider sync anchor for incremental enumeration.
+  // Zero starts a live-only subscription. Positive timestamp catch-up is
+  // rejected until tcfsd has a complete authoritative change journal with a
+  // safe cursor; state-cache timestamps must not masquerade as such a journal.
   int64 since_timestamp = 2;
 }
 message WatchEvent {
   string path = 1;
   string event_type = 2;      // "created", "modified", "deleted", "renamed"
   int64 timestamp = 3;
-  // Enriched metadata (populated from state cache when available)
+  // Metadata rebound to the current exact remote index authority.
   string filename = 4;
   uint64 size = 5;
   string blake3 = 6;
   bool is_directory = 7;
   string device_id = 8;       // Origin device for remote (NATS) events
+  // Immutable manifest object ID for non-deletion file events when known.
+  string version_token = 9;
 }
 
 message CredentialStatusResponse {
@@ -200,10 +225,11 @@ message ResolveConflictRequest {
   string path = 1;
   string resolution = 2;
   // Explicit operator-intent hint (the legacy field name is retained for wire
-  // compatibility). The shipped `tcfs resolve` CLI sets it; MCP does not expose
-  // it. This client-supplied bit is defense in depth, not attestation or an
-  // authorization boundary: the daemon also requires an authenticated session
-  // with push permission.
+  // compatibility). The shipped `tcfs resolve` CLI sets it for repository
+  // keep-both; MCP exposes no conflict-resolution tool. This client-supplied
+  // bit is defense in depth, not attestation or an authorization boundary: the
+  // daemon also requires an authenticated session with pull permission for
+  // dry-run and both pull and push permission for execute.
   bool operator_cli = 3;
   // Field 4 was briefly used by an unshipped stable-root prototype. Never put
   // routing identity on this legacy RPC: an old daemon would ignore it and

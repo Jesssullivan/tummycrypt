@@ -28,3 +28,4 @@ required-features = ["fuse"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tcfs-sync = { path = "../tcfs-sync" }

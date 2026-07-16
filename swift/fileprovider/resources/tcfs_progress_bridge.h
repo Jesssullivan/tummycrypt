@@ -15,4 +15,13 @@ enum TcfsError tcfs_provider_fetch_with_progress(
     const void *callback_context
 );
 
+enum TcfsError tcfs_provider_fetch_versioned_with_progress(
+    struct TcfsProvider *provider,
+    const char *item_id,
+    const char *dest_path,
+    const char *requested_version,
+    TcfsProgressCallback callback,
+    const void *callback_context
+);
+
 #endif /* TCFS_PROGRESS_BRIDGE_H */

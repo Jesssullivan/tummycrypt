@@ -550,6 +550,12 @@ public protocol TcfsProviderHandleProtocol : AnyObject {
     func hydrateFile(itemId: String, destinationPath: String) throws 
     
     /**
+     * Hydrate only the immutable manifest version exposed during enumeration.
+     * A stale non-empty token fails before manifest, chunk, or destination I/O.
+     */
+    func hydrateFileVersionWithProgress(itemId: String, destinationPath: String, requestedVersion: String, callback: ProgressCallback) throws
+
+    /**
      * Hydrate a file with progress reporting.
      *
      * Same as `hydrate_file` but calls the progress callback after each chunk.
@@ -564,7 +570,10 @@ public protocol TcfsProviderHandleProtocol : AnyObject {
     /**
      * Process a device enrollment invite (from QR code or deep link).
      *
-     * Returns credentials extracted from the invite for auto-configuration.
+     * Direct iOS enrollment cannot verify admin-signed invites today because
+     * the new device does not yet have the fleet signing key. Until the
+     * pairing flow supplies a verifiable trust path, fail closed instead of
+     * extracting brokered credentials from an attacker-controlled payload.
      */
     func processEnrollmentInvite(inviteData: String) throws  -> EnrollmentResult
     
@@ -732,6 +741,20 @@ open func hydrateFile(itemId: String, destinationPath: String)throws  {try rustC
 }
     
     /**
+     * Hydrate only the immutable manifest version exposed during enumeration.
+     * A stale non-empty token fails before manifest, chunk, or destination I/O.
+     */
+open func hydrateFileVersionWithProgress(itemId: String, destinationPath: String, requestedVersion: String, callback: ProgressCallback)throws  {try rustCallWithError(FfiConverterTypeProviderError.lift) {
+    uniffi_tcfs_file_provider_fn_method_tcfsproviderhandle_hydrate_file_version_with_progress(self.uniffiClonePointer(),
+        FfiConverterString.lower(itemId),
+        FfiConverterString.lower(destinationPath),
+        FfiConverterString.lower(requestedVersion),
+        FfiConverterCallbackInterfaceProgressCallback.lower(callback),$0
+    )
+}
+}
+
+    /**
      * Hydrate a file with progress reporting.
      *
      * Same as `hydrate_file` but calls the progress callback after each chunk.
@@ -759,7 +782,10 @@ open func listItems(path: String)throws  -> [FileItem] {
     /**
      * Process a device enrollment invite (from QR code or deep link).
      *
-     * Returns credentials extracted from the invite for auto-configuration.
+     * Direct iOS enrollment cannot verify admin-signed invites today because
+     * the new device does not yet have the fleet signing key. Until the
+     * pairing flow supplies a verifiable trust path, fail closed instead of
+     * extracting brokered credentials from an attacker-controlled payload.
      */
 open func processEnrollmentInvite(inviteData: String)throws  -> EnrollmentResult {
     return try  FfiConverterTypeEnrollmentResult.lift(try rustCallWithError(FfiConverterTypeProviderError.lift) {
@@ -1064,6 +1090,9 @@ public struct FileItem {
     public var fileSize: UInt64
     public var modifiedTimestamp: Int64
     public var isDirectory: Bool
+    /**
+     * Opaque FileProvider version token (selected manifest object ID).
+     */
     public var contentHash: String
     /**
      * If non-empty, this file has a conflict with the named device.
@@ -1072,7 +1101,10 @@ public struct FileItem {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(itemId: String, filename: String, fileSize: UInt64, modifiedTimestamp: Int64, isDirectory: Bool, contentHash: String, 
+    public init(itemId: String, filename: String, fileSize: UInt64, modifiedTimestamp: Int64, isDirectory: Bool,
+        /**
+         * Opaque FileProvider version token (selected manifest object ID).
+         */contentHash: String,
         /**
          * If non-empty, this file has a conflict with the named device.
          */conflictWith: String) {
@@ -1174,6 +1206,9 @@ public func FfiConverterTypeFileItem_lower(_ value: FileItem) -> RustBuffer {
  * Configuration for the TCFS provider.
  *
  * On iOS, these values come from the Keychain via the Swift layer.
+ * `s3_endpoint` must use HTTPS. This record intentionally exposes no
+ * plaintext opt-in; lower-level development tests can use the process-only
+ * `TCFS_STORAGE_ALLOW_INSECURE_HTTP` escape hatch.
  */
 public struct ProviderConfig {
     public var s3Endpoint: String
@@ -1500,6 +1535,8 @@ public enum ProviderError {
     )
     case Conflict(path: String
     )
+    case VersionMismatch(requested: String, current: String
+    )
     case Auth(message: String
     )
 }
@@ -1536,7 +1573,11 @@ public struct FfiConverterTypeProviderError: FfiConverterRustBuffer {
         case 6: return .Conflict(
             path: try FfiConverterString.read(from: &buf)
             )
-        case 7: return .Auth(
+        case 7: return .VersionMismatch(
+            requested: try FfiConverterString.read(from: &buf),
+            current: try FfiConverterString.read(from: &buf)
+            )
+        case 8: return .Auth(
             message: try FfiConverterString.read(from: &buf)
             )
 
@@ -1581,8 +1622,14 @@ public struct FfiConverterTypeProviderError: FfiConverterRustBuffer {
             FfiConverterString.write(path, into: &buf)
             
         
-        case let .Auth(message):
+        case let .VersionMismatch(requested,current):
             writeInt(&buf, Int32(7))
+            FfiConverterString.write(requested, into: &buf)
+            FfiConverterString.write(current, into: &buf)
+
+
+        case let .Auth(message):
+            writeInt(&buf, Int32(8))
             FfiConverterString.write(message, into: &buf)
             
         }
@@ -1820,13 +1867,16 @@ private var initializationResult: InitializationResult = {
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_hydrate_file() != 360) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_hydrate_file_version_with_progress() != 44467) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_hydrate_file_with_progress() != 9551) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_list_items() != 37548) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_process_enrollment_invite() != 53679) {
+    if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_process_enrollment_invite() != 20043) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tcfs_file_provider_checksum_method_tcfsproviderhandle_upload_file() != 28793) {

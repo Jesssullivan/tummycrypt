@@ -21,6 +21,7 @@ base64 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 async-trait = "0.1"
 libc = "0.2"
 
