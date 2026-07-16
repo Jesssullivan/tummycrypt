@@ -80,3 +80,16 @@ former exhaustive May 2026 table at commit
 
 Do not delete or edit packet contents as documentation cleanup. Add a new packet
 or update this ledger when a stronger proof lands.
+
+## Packets after 2026-05-31
+
+Later proof records increasingly live in Linear rather than this tree:
+
+- The forward-roam zero-diff `neo → honey` proof (2026-06-09) and the G5
+  divergent keep-both closure (2026-07-08) are recorded under
+  [TIN-1620](https://linear.app/tinyland/issue/TIN-1620).
+- The TIN-2658 production-loop work (2026-07-14) is recorded on
+  [TIN-2658](https://linear.app/tinyland/issue/TIN-2658).
+- Untagged v0.12.15 ([#514](https://github.com/Jesssullivan/tummycrypt/pull/514))
+  and v0.12.16 ([#522](https://github.com/Jesssullivan/tummycrypt/pull/522))
+  shipped roam-critical work that is not visible in `gh release list`.

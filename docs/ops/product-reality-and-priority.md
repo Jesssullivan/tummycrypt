@@ -1,3 +1,5 @@
+> Superseded for live status by [docs/ops/current.md](current.md) — retained as a dated record.
+
 # Product Reality And Priority
 
 > 2026-07-06 update: this document is historical posture, not the current
