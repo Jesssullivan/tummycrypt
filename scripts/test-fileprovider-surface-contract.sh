@@ -76,7 +76,10 @@ for decoration in conflict locked pinned excluded; do
   assert_contains "$PLIST" "io.tinyland.tcfs.fileprovider.decoration.${decoration}"
 done
 
-assert_contains "$EXTENSION_SWIFT" "tcfs_provider_fetch_with_progress"
+assert_contains "$EXTENSION_SWIFT" "tcfs_provider_fetch_versioned_with_progress"
+assert_contains "$EXTENSION_SWIFT" "lookupProviderItem"
+assert_contains "$EXTENSION_SWIFT" ".versionNoLongerAvailable"
+assert_contains "$REPO_ROOT/swift/fileprovider/Sources/Extension/FileProviderEnumerator.swift" ".syncAnchorExpired"
 assert_contains "$EXTENSION_SWIFT" "prog.totalUnitCount = Int64(total)"
 assert_contains "$EXTENSION_SWIFT" "prog.completedUnitCount = Int64(completed)"
 assert_contains "$EXTENSION_SWIFT" "Unmanaged<Progress>.fromOpaque(progressPtr).release()"

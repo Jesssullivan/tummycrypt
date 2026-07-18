@@ -66,6 +66,12 @@ jobs:
       - name: cargo test tcfs-sync (nats + crypto features)
         run: cargo test -p tcfs-sync --features nats,crypto
 
+      - name: Feature-isolated consumer tests
+        run: |
+          cargo test -p tcfs-file-provider --no-default-features --features grpc --locked
+          cargo test -p tcfs-file-provider --no-default-features --features uniffi --locked
+          cargo test -p tcfs-dbus --features grpc --locked
+
       - name: Wire-up integration tests (prove modules are connected)
         run: |
           cargo test -p tcfs-e2e --test blacklist_wireup -- --nocapture
@@ -87,6 +93,24 @@ jobs:
 
       - name: Build tcfs CLI (no FUSE — macOS/Windows compat)
         run: cargo build -p tcfs-cli --no-default-features
+
+  cloudfilter-windows:
+    name: CloudFilter compile (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Compile Windows CloudFilter targets
+        run: cargo check -p tcfs-cloudfilter --all-targets --locked
 
   nix:
     name: Nix Build

@@ -86,26 +86,34 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return progress
         }
 
-        // For non-root items, return the item as a placeholder (not downloaded).
-        // This tells fileproviderd the content needs to be fetched via fetchContents.
         let rawPath = identifier.rawValue
-        let isDir = rawPath.hasSuffix("/")
         let parentId = Self.parentIdentifier(forPath: rawPath)
-        let name = rawPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            .components(separatedBy: "/").last ?? rawPath
+        guard let prov = provider else {
+            completionHandler(nil, NSFileProviderError(.serverUnreachable))
+            progress.completedUnitCount = 1
+            return progress
+        }
 
-        completionHandler(
-            TCFSFileProviderItem(
+        // Item lookup must preserve the opaque manifest token exposed by
+        // enumeration. Synthesizing an empty/default version here lets
+        // fileproviderd later request content without the version it observed.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let lookup = Self.lookupProviderItem(
+                provider: prov,
                 identifier: identifier,
-                parentIdentifier: parentId,
-                filename: name,
-                isDirectory: isDir,
-                fileSize: 0,
-                downloaded: false
-            ),
-            nil
-        )
-        progress.completedUnitCount = 1
+                parentIdentifier: parentId
+            )
+            progress.completedUnitCount = 1
+            guard lookup.result == TCFS_ERROR_TCFS_ERROR_NONE else {
+                completionHandler(nil, Self.mapError(lookup.result))
+                return
+            }
+            guard let item = lookup.item else {
+                completionHandler(nil, NSFileProviderError(.noSuchItem))
+                return
+            }
+            completionHandler(item, nil)
+        }
         return progress
     }
 
@@ -120,6 +128,16 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         // Start with estimated size; updated by callback as real size is known
         let progress = Progress(totalUnitCount: 0)
         let itemId = itemIdentifier.rawValue
+        let requestedVersionToken: String?
+        if let requestedVersion {
+            guard let token = String(data: requestedVersion.contentVersion, encoding: .utf8) else {
+                completionHandler(nil, nil, NSFileProviderError(.versionNoLongerAvailable))
+                return progress
+            }
+            requestedVersionToken = token.isEmpty ? nil : token
+        } else {
+            requestedVersionToken = nil
+        }
 
         logger.error("fetchContents start for \(itemId, privacy: .public)")
 
@@ -129,16 +147,48 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return progress
         }
 
-        // Capture progress for the C callback closure
-        let progressPtr = Unmanaged.passRetained(progress).toOpaque()
-
         DispatchQueue.global(qos: .userInitiated).async {
             let tempDir = FileManager.default.temporaryDirectory
             let tempFile = tempDir.appendingPathComponent(UUID().uuidString)
 
+            // A nil/empty requested version means "latest" in FileProvider.
+            // Resolve that latest version through the same authoritative
+            // enumeration surface, then pass its non-empty token into Rust so
+            // the read is still conditional on the metadata snapshot observed.
+            let effectiveVersionToken: String
+            if let requestedVersionToken {
+                effectiveVersionToken = requestedVersionToken
+            } else {
+                let parentId = Self.parentIdentifier(forPath: itemId)
+                let lookup = Self.lookupProviderItem(
+                    provider: prov,
+                    identifier: itemIdentifier,
+                    parentIdentifier: parentId
+                )
+                guard lookup.result == TCFS_ERROR_TCFS_ERROR_NONE else {
+                    progress.completedUnitCount = progress.totalUnitCount
+                    completionHandler(nil, nil, Self.mapError(lookup.result))
+                    return
+                }
+                guard
+                    let item = lookup.item,
+                    let token = String(data: item.itemVersion.contentVersion, encoding: .utf8),
+                    !token.isEmpty
+                else {
+                    progress.completedUnitCount = progress.totalUnitCount
+                    completionHandler(nil, nil, NSFileProviderError(.versionNoLongerAvailable))
+                    return
+                }
+                effectiveVersionToken = token
+            }
+
             logger.error(
                 "fetchContents fetching \(itemId, privacy: .public) to \(tempFile.path, privacy: .public)"
             )
+
+            // Capture progress for the C callback closure only after lookup
+            // succeeds, so early fail-closed returns do not leak the retain.
+            let progressPtr = Unmanaged.passRetained(progress).toOpaque()
 
             // C callback that updates NSProgress from Rust's chunk loop
             let callback: @convention(c) (UInt64, UInt64, UnsafeRawPointer?) -> Void = {
@@ -151,11 +201,13 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
             let result = itemId.withCString { idPtr in
                 tempFile.path.withCString { destPtr in
-                    tcfs_provider_fetch_with_progress(
-                        prov, idPtr, destPtr,
-                        callback,
-                        progressPtr
-                    )
+                    effectiveVersionToken.withCString { versionPtr in
+                        tcfs_provider_fetch_versioned_with_progress(
+                            prov, idPtr, destPtr, versionPtr,
+                            callback,
+                            progressPtr
+                        )
+                    }
                 }
             }
 
@@ -178,12 +230,14 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     isDirectory: false,
                     fileSize: fileSize,
                     downloaded: true,
-                    uploaded: true
+                    uploaded: true,
+                    versionTag: effectiveVersionToken
                 )
                 progress.completedUnitCount = progress.totalUnitCount
                 self.signalEnumeratorUpdate(for: parentId)
                 completionHandler(tempFile, item, nil)
             } else {
+                try? FileManager.default.removeItem(at: tempFile)
                 let backendError = Self.providerLastError(prov)
                 logger.error(
                     "fetchContents failed for \(itemId, privacy: .public): code=\(result.rawValue), backend=\(backendError, privacy: .public)"
@@ -256,7 +310,28 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         return identifier.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
+    private static func lookupProviderItem(
+        provider: OpaquePointer,
+        identifier: NSFileProviderItemIdentifier,
+        parentIdentifier: NSFileProviderItemIdentifier
+    ) -> (result: TcfsError, item: NSFileProviderItem?) {
+        let enumeration = TCFSFileProviderEnumerator.enumerateProviderItems(
+            provider: provider,
+            path: logicalParentPath(parentIdentifier),
+            parentIdentifier: parentIdentifier,
+            recursive: false
+        )
+        return (
+            enumeration.result,
+            enumeration.items.first { $0.itemIdentifier == identifier }
+        )
+    }
+
     // MARK: - Write operations
+
+    // FileProvider capabilities hide these actions in Finder, but direct
+    // filesystem changes can still invoke the callbacks. Keep them fail-closed
+    // until Rust can condition publication on the exact baseVersion token.
 
     func createItem(
         basedOn itemTemplate: NSFileProviderItem,
@@ -267,75 +342,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
-
-        guard let prov = provider else {
-            completionHandler(nil, [], false, NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let parentPath = Self.logicalParentPath(itemTemplate.parentItemIdentifier)
-            let filename = itemTemplate.filename
-
-            if itemTemplate.contentType == .folder {
-                // Create directory
-                let result = parentPath.withCString { parentPtr in
-                    filename.withCString { namePtr in
-                        tcfs_provider_create_dir(prov, parentPtr, namePtr)
-                    }
-                }
-
-                if result == TCFS_ERROR_TCFS_ERROR_NONE {
-                    let dirPath = parentPath.isEmpty ? "\(filename)/" : "\(parentPath)/\(filename)/"
-                    let item = TCFSFileProviderItem(
-                        identifier: NSFileProviderItemIdentifier(dirPath),
-                        parentIdentifier: itemTemplate.parentItemIdentifier,
-                        filename: filename,
-                        isDirectory: true,
-                        fileSize: 0
-                    )
-                    progress.completedUnitCount = 100
-                    self.signalEnumeratorUpdate(for: itemTemplate.parentItemIdentifier)
-                    completionHandler(item, [], false, nil)
-                } else {
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(result))
-                }
-            } else if let contentsURL = url {
-                // Upload file
-                let accessed = contentsURL.startAccessingSecurityScopedResource()
-                defer { if accessed { contentsURL.stopAccessingSecurityScopedResource() } }
-
-                let remotePath = parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"
-                let result = contentsURL.path.withCString { localPtr in
-                    remotePath.withCString { remotePtr in
-                        tcfs_provider_upload(prov, localPtr, remotePtr)
-                    }
-                }
-
-                if result == TCFS_ERROR_TCFS_ERROR_NONE {
-                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: contentsURL.path)[.size] as? UInt64) ?? 0
-                    let item = TCFSFileProviderItem(
-                        identifier: NSFileProviderItemIdentifier(remotePath),
-                        parentIdentifier: itemTemplate.parentItemIdentifier,
-                        filename: filename,
-                        isDirectory: false,
-                        fileSize: fileSize,
-                        downloaded: true,
-                        uploaded: true
-                    )
-                    progress.completedUnitCount = 100
-                    self.signalEnumeratorUpdate(for: itemTemplate.parentItemIdentifier)
-                    completionHandler(item, [], false, nil)
-                } else {
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(result))
-                }
-            } else {
-                completionHandler(nil, [], false, NSFileProviderError(.noSuchItem))
-            }
-        }
-
+        progress.completedUnitCount = 100
+        completionHandler(nil, [], false, NSFileProviderError(.cannotSynchronize))
         return progress
     }
 
@@ -349,140 +357,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
-
-        guard let prov = provider else {
-            completionHandler(nil, [], false, NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            if changedFields.contains(.filename) {
-                let oldPath = item.itemIdentifier.rawValue
-                let parentPath = Self.logicalParentPath(item.parentItemIdentifier)
-                let newRemotePath = parentPath.isEmpty ? item.filename : "\(parentPath)/\(item.filename)"
-
-                if oldPath == newRemotePath {
-                    progress.completedUnitCount = 100
-                    completionHandler(item, [], false, nil)
-                    return
-                }
-
-                if item.contentType == .folder {
-                    logger.error("rename unsupported for directory \(oldPath, privacy: .public)")
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, NSFileProviderError(.serverUnreachable))
-                    return
-                }
-
-                var sourceURL: URL
-                var tempURL: URL?
-                var accessedSecurityScope = false
-
-                if changedFields.contains(.contents), let contentsURL = newContents {
-                    sourceURL = contentsURL
-                    accessedSecurityScope = contentsURL.startAccessingSecurityScopedResource()
-                } else {
-                    let fetchedURL = FileManager.default.temporaryDirectory
-                        .appendingPathComponent(UUID().uuidString)
-                    let fetchResult = oldPath.withCString { oldPtr in
-                        fetchedURL.path.withCString { destPtr in
-                            tcfs_provider_fetch(prov, oldPtr, destPtr)
-                        }
-                    }
-                    if fetchResult != TCFS_ERROR_TCFS_ERROR_NONE {
-                        progress.completedUnitCount = 100
-                        completionHandler(nil, [], false, Self.mapError(fetchResult))
-                        return
-                    }
-                    sourceURL = fetchedURL
-                    tempURL = fetchedURL
-                }
-
-                defer {
-                    if accessedSecurityScope {
-                        sourceURL.stopAccessingSecurityScopedResource()
-                    }
-                    if let tempURL {
-                        try? FileManager.default.removeItem(at: tempURL)
-                    }
-                }
-
-                let uploadResult = sourceURL.path.withCString { localPtr in
-                    newRemotePath.withCString { remotePtr in
-                        tcfs_provider_upload(prov, localPtr, remotePtr)
-                    }
-                }
-                if uploadResult != TCFS_ERROR_TCFS_ERROR_NONE {
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(uploadResult))
-                    return
-                }
-
-                let deleteResult = oldPath.withCString { oldPtr in
-                    tcfs_provider_delete(prov, oldPtr)
-                }
-                if deleteResult != TCFS_ERROR_TCFS_ERROR_NONE {
-                    logger.error(
-                        "rename copied \(oldPath, privacy: .public) to \(newRemotePath, privacy: .public), but old path delete failed: \(deleteResult.rawValue)"
-                    )
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(deleteResult))
-                    return
-                }
-
-                let fileSize = (try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? UInt64) ?? 0
-                let renamedItem = TCFSFileProviderItem(
-                    identifier: NSFileProviderItemIdentifier(newRemotePath),
-                    parentIdentifier: item.parentItemIdentifier,
-                    filename: item.filename,
-                    isDirectory: false,
-                    fileSize: fileSize,
-                    downloaded: true,
-                    uploaded: true
-                )
-                progress.completedUnitCount = 100
-                self.signalEnumeratorUpdate(for: item.parentItemIdentifier)
-                completionHandler(renamedItem, [], false, nil)
-                return
-            }
-
-            // Handle content modification (re-upload)
-            if changedFields.contains(.contents), let contentsURL = newContents {
-                let accessed = contentsURL.startAccessingSecurityScopedResource()
-                defer { if accessed { contentsURL.stopAccessingSecurityScopedResource() } }
-
-                let remotePath = item.itemIdentifier.rawValue
-                let result = contentsURL.path.withCString { localPtr in
-                    remotePath.withCString { remotePtr in
-                        tcfs_provider_upload(prov, localPtr, remotePtr)
-                    }
-                }
-
-                if result == TCFS_ERROR_TCFS_ERROR_NONE {
-                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: contentsURL.path)[.size] as? UInt64) ?? 0
-                    let updatedItem = TCFSFileProviderItem(
-                        identifier: item.itemIdentifier,
-                        parentIdentifier: item.parentItemIdentifier,
-                        filename: item.filename,
-                        isDirectory: false,
-                        fileSize: fileSize,
-                        downloaded: true,
-                        uploaded: true
-                    )
-                    progress.completedUnitCount = 100
-                    self.signalEnumeratorUpdate(for: item.parentItemIdentifier)
-                    completionHandler(updatedItem, [], false, nil)
-                } else {
-                    progress.completedUnitCount = 100
-                    completionHandler(nil, [], false, Self.mapError(result))
-                }
-            } else {
-                // No content or filename change — return item as-is
-                progress.completedUnitCount = 100
-                completionHandler(item, [], false, nil)
-            }
-        }
-
+        progress.completedUnitCount = 100
+        completionHandler(nil, [], false, NSFileProviderError(.cannotSynchronize))
         return progress
     }
 
@@ -494,26 +370,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
-
-        guard let prov = provider else {
-            completionHandler(NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = identifier.rawValue.withCString { idPtr in
-                tcfs_provider_delete(prov, idPtr)
-            }
-
-            progress.completedUnitCount = 1
-            if result == TCFS_ERROR_TCFS_ERROR_NONE {
-                self.signalEnumeratorUpdate(for: .rootContainer)
-                completionHandler(nil)
-            } else {
-                completionHandler(Self.mapError(result))
-            }
-        }
-
+        progress.completedUnitCount = 1
+        completionHandler(NSFileProviderError(.cannotSynchronize))
         return progress
     }
 
@@ -536,6 +394,8 @@ class TCFSFileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return NSFileProviderError(.noSuchItem) as NSError
         case TCFS_ERROR_TCFS_ERROR_CONFLICT:
             return NSFileProviderError(.newerExtensionVersionFound) as NSError
+        case TCFS_ERROR_TCFS_ERROR_VERSION_MISMATCH:
+            return NSFileProviderError(.versionNoLongerAvailable) as NSError
         case TCFS_ERROR_TCFS_ERROR_ALREADY_EXISTS:
             return NSFileProviderError(.filenameCollision) as NSError
         default:

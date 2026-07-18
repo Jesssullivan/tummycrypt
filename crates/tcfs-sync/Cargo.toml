@@ -23,6 +23,7 @@ notify = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 unicode-normalization = { workspace = true }
+unicode-casefold = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -31,6 +32,7 @@ rayon = { workspace = true }
 uuid = { workspace = true }
 glob = { workspace = true }
 libc = "0.2"
+tempfile = { workspace = true }
 
 [features]
 default = []
@@ -43,7 +45,6 @@ full = ["dep:rocksdb", "nats", "crypto"]
 
 [dev-dependencies]
 proptest = { workspace = true }
-tempfile = { workspace = true }
 tokio-test = { workspace = true }
 age = { workspace = true }
 secrecy = { workspace = true }

@@ -627,6 +627,9 @@ pub struct MountConfig {
     /// Type-erased: the inner type is `Option<tcfs_crypto::MasterKey>` but tcfs-fuse
     /// doesn't depend on tcfs-crypto — the VFS handles the actual crypto.
     pub master_key: Option<tcfs_vfs::SharedMasterKey>,
+    /// When true, writes fail while the shared key is locked instead of
+    /// downgrading to plaintext.
+    pub encryption_required: bool,
 }
 
 /// Mount the FUSE filesystem and block until unmounted.
@@ -652,6 +655,7 @@ pub async fn mount(
         vfs.set_on_flush(cb);
     }
     // Wire shared master key from daemon (injected after gRPC unlock)
+    let vfs = vfs.require_encryption_for_writes(cfg.encryption_required);
     let vfs = if let Some(mk) = cfg.master_key {
         Arc::new(vfs.with_shared_master_key(mk))
     } else {

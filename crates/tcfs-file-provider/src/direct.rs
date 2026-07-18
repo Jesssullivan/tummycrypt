@@ -11,10 +11,14 @@ use std::sync::Mutex;
 
 use crate::TcfsProgressCallback;
 
+use anyhow::Context;
 use base64::Engine;
 use secrecy::SecretString;
 
 use crate::{to_c_string, TcfsError, TcfsFileItem};
+
+const FILE_PROVIDER_READ_ONLY_ERROR: &str =
+    "TCFS FileProvider is read-only until exact version-token conditional publication is available";
 
 /// Opaque provider handle wrapping a tokio runtime + OpenDAL operator.
 ///
@@ -23,6 +27,9 @@ pub struct TcfsProvider {
     runtime: tokio::runtime::Runtime,
     operator: opendal::Operator,
     remote_prefix: String,
+    /// Retained by the test-only publication harness while the production
+    /// FileProvider mutation surface is deliberately read-only.
+    #[cfg_attr(not(test), allow(dead_code))]
     device_id: String,
     /// Master key for E2EE (None = plaintext mode for backwards compatibility)
     master_key: Option<tcfs_crypto::MasterKey>,
@@ -41,24 +48,90 @@ impl TcfsProvider {
             *last_error = Some(error.into());
         }
     }
+
+    fn reject_file_provider_mutation(&self) -> TcfsError {
+        self.clear_last_error();
+        self.set_last_error(FILE_PROVIDER_READ_ONLY_ERROR);
+        TcfsError::TcfsErrorConflict
+    }
 }
 
-fn parse_manifest_hash_from_index(bytes: &[u8]) -> anyhow::Result<String> {
-    Ok(tcfs_sync::index_entry::parse_index_entry(bytes)?.manifest_hash)
+fn parse_visible_entry_from_index(
+    bytes: &[u8],
+) -> anyhow::Result<Option<tcfs_sync::index_entry::RemoteIndexEntry>> {
+    let record = tcfs_sync::index_entry::parse_index_entry_record(bytes)?;
+    Ok(record.visible_entry().cloned())
 }
 
-fn parse_file_size_from_index(bytes: &[u8]) -> anyhow::Result<u64> {
-    Ok(tcfs_sync::index_entry::parse_index_entry(bytes)?.size)
+fn validate_assembled_file(
+    manifest: &tcfs_sync::manifest::SyncManifest,
+    assembled: &[u8],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        assembled.len() as u64 == manifest.file_size,
+        "assembled file size mismatch: expected {}, got {}",
+        manifest.file_size,
+        assembled.len()
+    );
+    let actual = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(assembled));
+    anyhow::ensure!(
+        actual == manifest.file_hash,
+        "assembled file integrity failure: expected {}, got {}",
+        manifest.file_hash,
+        actual
+    );
+    Ok(())
 }
 
-fn file_size_from_index(prov: &TcfsProvider, index_key: &str, fallback: u64) -> u64 {
-    prov.runtime
-        .block_on(async {
-            let data = prov.operator.read(index_key).await?;
-            let bytes = data.to_bytes();
-            parse_file_size_from_index(&bytes)
-        })
-        .unwrap_or(fallback)
+fn visible_entry_from_index(
+    prov: &TcfsProvider,
+    index_key: &str,
+) -> anyhow::Result<Option<tcfs_sync::index_entry::RemoteIndexEntry>> {
+    prov.runtime.block_on(async {
+        let data = prov.operator.read(index_key).await?;
+        let bytes = data.to_bytes();
+        parse_visible_entry_from_index(&bytes)
+    })
+}
+
+/// Return whether an index subtree contains any logically visible entry.
+///
+/// Version-4 tombstones intentionally retain their object keys, so a physical
+/// listing prefix alone is not evidence that FileProvider should expose a
+/// directory. Preparing entries retain in-flight authority and keep their
+/// ancestors discoverable until publication resolves.
+async fn index_prefix_has_visible_entries(
+    operator: &opendal::Operator,
+    index_prefix: &str,
+) -> anyhow::Result<bool> {
+    let entries = operator
+        .list_with(index_prefix)
+        .recursive(true)
+        .await
+        .with_context(|| format!("listing logical index subtree: {index_prefix}"))?;
+
+    for entry in entries {
+        let key = entry.path();
+        if key.ends_with('/') {
+            continue;
+        }
+        if key.ends_with("/.tcfs_dir") {
+            if tcfs_sync::index_entry::directory_marker_is_visible(operator, key).await? {
+                return Ok(true);
+            }
+            continue;
+        }
+        let Some(record) =
+            tcfs_sync::index_entry::read_index_entry_record_from_store(operator, key).await?
+        else {
+            continue;
+        };
+        if record.visible_entry().is_some() || record.pending_entry().is_some() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn master_key_from_bytes(bytes: &[u8]) -> anyhow::Result<tcfs_crypto::MasterKey> {
@@ -75,49 +148,153 @@ fn master_key_from_bytes(bytes: &[u8]) -> anyhow::Result<tcfs_crypto::MasterKey>
     Ok(tcfs_crypto::MasterKey::from_bytes(key))
 }
 
-fn derive_master_key_from_config(config: &serde_json::Value) -> Option<tcfs_crypto::MasterKey> {
-    if let Some(encoded) = config["master_key_base64"]
+fn required_encryption_flag(config: &serde_json::Value) -> anyhow::Result<bool> {
+    for key in [
+        "encryption_required",
+        "require_encryption",
+        "crypto_required",
+    ] {
+        let Some(value) = config.get(key) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let enabled = value
+            .as_bool()
+            .with_context(|| format!("{key} must be a boolean"))?;
+        if enabled {
+            return Ok(true);
+        }
+    }
+
+    for section_name in ["crypto", "encryption"] {
+        let Some(section) = config.get(section_name) else {
+            continue;
+        };
+        match section {
+            serde_json::Value::Null | serde_json::Value::Bool(false) => {}
+            serde_json::Value::Bool(true) => return Ok(true),
+            serde_json::Value::String(mode)
+                if matches!(mode.as_str(), "plaintext" | "disabled" | "none") => {}
+            serde_json::Value::String(mode) if matches!(mode.as_str(), "required" | "enabled") => {
+                return Ok(true);
+            }
+            serde_json::Value::Object(values) => {
+                for key in ["required", "enabled"] {
+                    let Some(value) = values.get(key) else {
+                        continue;
+                    };
+                    let enabled = value
+                        .as_bool()
+                        .with_context(|| format!("{section_name}.{key} must be a boolean"))?;
+                    if enabled {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => anyhow::bail!("{section_name} must be a boolean, a supported mode, or an object"),
+        }
+    }
+    Ok(false)
+}
+
+fn configured_nonempty_string<'a>(
+    config: &'a serde_json::Value,
+    key: &str,
+) -> anyhow::Result<Option<&'a str>> {
+    let Some(value) = config.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value
         .as_str()
-        .filter(|s| !s.is_empty())
-    {
+        .with_context(|| format!("{key} must be a string"))?;
+    if value.is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        !value.trim().is_empty(),
+        "{key} must not be whitespace-only"
+    );
+    Ok(Some(value))
+}
+
+fn configured_u32(config: &serde_json::Value, key: &str, default: u32) -> anyhow::Result<u32> {
+    let Some(value) = config.get(key) else {
+        return Ok(default);
+    };
+    if value.is_null() {
+        return Ok(default);
+    }
+    let value = value
+        .as_u64()
+        .with_context(|| format!("{key} must be an unsigned integer"))?;
+    u32::try_from(value).with_context(|| format!("{key} exceeds u32 range"))
+}
+
+fn derive_master_key_from_config(
+    config: &serde_json::Value,
+) -> anyhow::Result<Option<tcfs_crypto::MasterKey>> {
+    let encryption_required = required_encryption_flag(config)?;
+
+    if let Some(encoded) = configured_nonempty_string(config, "master_key_base64")? {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(encoded.trim())
-            .ok()?;
-        return master_key_from_bytes(&decoded).ok();
+            .context("decoding master_key_base64")?;
+        return master_key_from_bytes(&decoded)
+            .context("validating master_key_base64")
+            .map(Some);
     }
 
-    if let Some(path) = config["master_key_file"].as_str().filter(|s| !s.is_empty()) {
-        let bytes = std::fs::read(path).ok()?;
-        return master_key_from_bytes(&bytes).ok();
+    if let Some(path) = configured_nonempty_string(config, "master_key_file")? {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading configured master_key_file: {path}"))?;
+        return master_key_from_bytes(&bytes)
+            .with_context(|| format!("validating configured master_key_file: {path}"))
+            .map(Some);
     }
 
-    let passphrase = config["encryption_passphrase"]
-        .as_str()
-        .filter(|s| !s.is_empty())?;
+    let Some(passphrase) = configured_nonempty_string(config, "encryption_passphrase")? else {
+        anyhow::ensure!(
+            !encryption_required,
+            "encryption is required but no master key or passphrase is configured"
+        );
+        return Ok(None);
+    };
 
     if passphrase.split_whitespace().count() >= 12 {
-        return tcfs_crypto::mnemonic_to_master_key(passphrase).ok();
+        return tcfs_crypto::mnemonic_to_master_key(passphrase)
+            .context("deriving master key from configured mnemonic")
+            .map(Some);
     }
 
-    let salt_str = config["encryption_salt"]
-        .as_str()
-        .unwrap_or("tcfs-default-salt!");
+    let salt_str = match config.get("encryption_salt") {
+        None | Some(serde_json::Value::Null) => "tcfs-default-salt!",
+        Some(value) => value.as_str().context("encryption_salt must be a string")?,
+    };
     let mut salt = [0u8; 16];
     let salt_bytes = salt_str.as_bytes();
     let copy_len = salt_bytes.len().min(16);
     salt[..copy_len].copy_from_slice(&salt_bytes[..copy_len]);
 
     let params = tcfs_crypto::kdf::KdfParams {
-        mem_cost_kib: config["argon2_mem_cost_kib"].as_u64().unwrap_or(65536) as u32,
-        time_cost: config["argon2_time_cost"].as_u64().unwrap_or(3) as u32,
-        parallelism: config["argon2_parallelism"].as_u64().unwrap_or(4) as u32,
+        mem_cost_kib: configured_u32(config, "argon2_mem_cost_kib", 65536)?,
+        time_cost: configured_u32(config, "argon2_time_cost", 3)?,
+        parallelism: configured_u32(config, "argon2_parallelism", 4)?,
     };
 
-    tcfs_crypto::derive_master_key(&SecretString::from(passphrase.to_string()), &salt, &params).ok()
+    tcfs_crypto::derive_master_key(&SecretString::from(passphrase.to_string()), &salt, &params)
+        .context("deriving master key from configured passphrase")
+        .map(Some)
 }
 
 fn error_code_for_fetch_error(error: &anyhow::Error) -> TcfsError {
-    if error.chain().any(|cause| {
+    if crate::is_file_provider_version_mismatch(error) {
+        TcfsError::TcfsErrorVersionMismatch
+    } else if error.chain().any(|cause| {
         cause
             .downcast_ref::<opendal::Error>()
             .is_some_and(|e| e.kind() == opendal::ErrorKind::NotFound)
@@ -189,8 +366,13 @@ pub unsafe extern "C" fn tcfs_provider_new(config_json: *const c_char) -> *mut T
         // Derive master key from encryption_passphrase if provided (enables E2EE).
         // Mnemonic recovery phrases must use the same derivation path as `tcfs init`;
         // generic passphrases keep the per-vault salt and Argon2 params.
-        let master_key = derive_master_key_from_config(&config);
-
+        let master_key = match derive_master_key_from_config(&config) {
+            Ok(master_key) => master_key,
+            Err(error) => {
+                tracing::error!(error = %format!("{error:#}"), "refusing invalid FileProvider encryption configuration");
+                return ptr::null_mut();
+            }
+        };
         // Single-threaded tokio runtime to avoid deadlock with fileproviderd.
         // Multi-threaded runtime spawns worker threads that contend with XPC
         // file coordination locks, causing EDEADLK. Single-threaded runs all
@@ -284,6 +466,11 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
             if remainder.is_empty() {
                 continue;
             }
+            // The reserved marker makes its parent directory visible; it is
+            // never itself a FileProvider child.
+            if remainder == ".tcfs_dir" {
+                continue;
+            }
 
             // Extract the immediate child name:
             // "roles/common/tasks/main.yml" → "roles"  (directory)
@@ -306,10 +493,35 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
                 format!("{}/{}", rel_path.trim_matches('/'), child_name)
             };
 
-            let file_size = if is_dir {
-                0
+            let (file_size, version_token) = if is_dir {
+                let child_prefix = format!("{prefix}{child_name}/");
+                match prov.runtime.block_on(index_prefix_has_visible_entries(
+                    &prov.operator,
+                    &child_prefix,
+                )) {
+                    Ok(true) => (0, String::new()),
+                    Ok(false) => continue,
+                    Err(error) => {
+                        let message = format!(
+                            "checking visible FileProvider directory {child_prefix}: {error:#}"
+                        );
+                        tracing::error!(error = %message, "FileProvider enumeration failed closed");
+                        prov.set_last_error(message);
+                        return TcfsError::TcfsErrorStorage;
+                    }
+                }
             } else {
-                file_size_from_index(prov, entry_path, entry.metadata().content_length())
+                match visible_entry_from_index(prov, entry_path) {
+                    Ok(Some(entry)) => (entry.size, entry.manifest_hash),
+                    Ok(None) => continue,
+                    Err(error) => {
+                        let message =
+                            format!("reading visible index entry {entry_path}: {error:#}");
+                        tracing::error!(error = %message, "FileProvider enumeration failed closed");
+                        prov.set_last_error(message);
+                        return TcfsError::TcfsErrorStorage;
+                    }
+                }
             };
 
             // item_id is the relative path (e.g. "ansible/roles") — NOT the
@@ -322,7 +534,10 @@ pub unsafe extern "C" fn tcfs_provider_enumerate(
                 file_size,
                 modified_timestamp: 0,
                 is_directory: is_dir,
-                content_hash: to_c_string(""),
+                // The Apple item version is the immutable manifest object ID,
+                // not the plaintext content hash. Metadata-only manifest
+                // changes must produce a distinct FileProvider version.
+                content_hash: to_c_string(&version_token),
                 hydration_state: to_c_string("not_synced"),
             });
         }
@@ -354,6 +569,33 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
     item_id: *const c_char,
     dest_path: *const c_char,
 ) -> TcfsError {
+    unsafe { tcfs_provider_fetch_versioned_impl(provider, item_id, dest_path, ptr::null()) }
+}
+
+/// Fetch a file only if `requested_version` still names the manifest selected
+/// by the exact current index entry. An empty token requests the current
+/// version; a non-empty stale token fails before reading manifest or chunk data.
+///
+/// # Safety
+///
+/// All pointers must be valid null-terminated UTF-8 strings. `requested_version`
+/// may be null to request the current version without a conditional check.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_fetch_versioned(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+    dest_path: *const c_char,
+    requested_version: *const c_char,
+) -> TcfsError {
+    unsafe { tcfs_provider_fetch_versioned_impl(provider, item_id, dest_path, requested_version) }
+}
+
+unsafe fn tcfs_provider_fetch_versioned_impl(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+    dest_path: *const c_char,
+    requested_version: *const c_char,
+) -> TcfsError {
     if provider.is_null() || item_id.is_null() || dest_path.is_null() {
         return TcfsError::TcfsErrorInvalidArg;
     }
@@ -362,6 +604,11 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
         let prov = unsafe { &*provider };
         let c_item = unsafe { CStr::from_ptr(item_id) };
         let c_dest = unsafe { CStr::from_ptr(dest_path) };
+        let c_requested_version = if requested_version.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(requested_version) })
+        };
         prov.clear_last_error();
 
         let item_str = match c_item.to_str() {
@@ -372,6 +619,10 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
             Ok(s) => s,
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
+        let requested_version = match c_requested_version.map(CStr::to_str).transpose() {
+            Ok(version) => version.filter(|version| !version.is_empty()),
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
 
         let fetch_result = prov.runtime.block_on(async {
             // Reconstruct full S3 key from relative item_id
@@ -380,20 +631,56 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
                 prov.remote_prefix.trim_end_matches('/'),
                 item_str.trim_start_matches('/')
             );
-            // Read the index entry to get manifest hash
-            let data = prov.operator.read(&index_key).await?;
-            let bytes = data.to_bytes();
-            let manifest_hash = parse_manifest_hash_from_index(&bytes)?;
+            let rel_path = item_str.trim_start_matches('/');
+            if requested_version.is_some() {
+                let selected = tcfs_sync::engine::read_exact_visible_index_selection(
+                    &prov.operator,
+                    rel_path,
+                    prov.remote_prefix.trim_end_matches('/'),
+                )
+                .await?
+                .ok_or_else(|| {
+                    opendal::Error::new(
+                        opendal::ErrorKind::NotFound,
+                        "no exact visible index version for FileProvider item",
+                    )
+                    .with_context("path", item_str.to_string())
+                })?;
+                crate::ensure_file_provider_version(requested_version, &selected.manifest_hash)?;
+            }
+            // Read the index entry to get the bound manifest object.
+            let manifest_prefix = format!("{}/manifests", prov.remote_prefix.trim_end_matches('/'));
+            let index_entry = tcfs_sync::index_entry::resolve_visible_index_entry(
+                &prov.operator,
+                &index_key,
+                &manifest_prefix,
+            )
+            .await?
+            .ok_or_else(|| {
+                opendal::Error::new(
+                    opendal::ErrorKind::NotFound,
+                    "no visible committed manifest for FileProvider item",
+                )
+                .with_context("path", item_str.to_string())
+            })?;
+
+            crate::ensure_file_provider_version(requested_version, &index_entry.manifest_hash)?;
 
             let manifest_path = format!(
                 "{}/manifests/{}",
                 prov.remote_prefix.trim_end_matches('/'),
-                manifest_hash
+                index_entry.manifest_hash
             );
 
             let manifest_bytes = prov.operator.read(&manifest_path).await?;
-            let manifest =
-                tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())?;
+            let manifest_bytes = manifest_bytes.to_bytes();
+            tcfs_sync::engine::validate_indexed_manifest_entry_binding(
+                &manifest_bytes,
+                &index_entry.manifest_hash,
+                &index_entry,
+                rel_path,
+            )?;
+            let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes)?;
 
             // Fail CLOSED on PerDevice/v3 manifests: this direct backend only
             // unwraps master-wrapped keys. A `wrapped_file_keys` manifest with no
@@ -445,6 +732,7 @@ pub unsafe extern "C" fn tcfs_provider_fetch(
                 }
             }
 
+            validate_assembled_file(&manifest, &assembled)?;
             tokio::fs::write(dest_str, &assembled).await?;
             Ok::<(), anyhow::Error>(())
         });
@@ -482,6 +770,53 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
     callback: TcfsProgressCallback,
     context: *const std::ffi::c_void,
 ) -> TcfsError {
+    unsafe {
+        tcfs_provider_fetch_versioned_with_progress_impl(
+            provider,
+            item_id,
+            dest_path,
+            ptr::null(),
+            callback,
+            context,
+        )
+    }
+}
+
+/// Progress-reporting conditional fetch; see [`tcfs_provider_fetch_versioned`].
+///
+/// # Safety
+///
+/// String pointers must be valid null-terminated UTF-8. `requested_version`
+/// may be null. `context` must remain valid until this synchronous call returns.
+#[no_mangle]
+pub unsafe extern "C" fn tcfs_provider_fetch_versioned_with_progress(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+    dest_path: *const c_char,
+    requested_version: *const c_char,
+    callback: TcfsProgressCallback,
+    context: *const std::ffi::c_void,
+) -> TcfsError {
+    unsafe {
+        tcfs_provider_fetch_versioned_with_progress_impl(
+            provider,
+            item_id,
+            dest_path,
+            requested_version,
+            callback,
+            context,
+        )
+    }
+}
+
+unsafe fn tcfs_provider_fetch_versioned_with_progress_impl(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+    dest_path: *const c_char,
+    requested_version: *const c_char,
+    callback: TcfsProgressCallback,
+    context: *const std::ffi::c_void,
+) -> TcfsError {
     if provider.is_null() || item_id.is_null() || dest_path.is_null() {
         return TcfsError::TcfsErrorInvalidArg;
     }
@@ -493,6 +828,11 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
         let prov = unsafe { &*provider };
         let c_item = unsafe { CStr::from_ptr(item_id) };
         let c_dest = unsafe { CStr::from_ptr(dest_path) };
+        let c_requested_version = if requested_version.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(requested_version) })
+        };
         prov.clear_last_error();
 
         let item_str = match c_item.to_str() {
@@ -503,6 +843,10 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
             Ok(s) => s,
             Err(_) => return TcfsError::TcfsErrorInvalidArg,
         };
+        let requested_version = match c_requested_version.map(CStr::to_str).transpose() {
+            Ok(version) => version.filter(|version| !version.is_empty()),
+            Err(_) => return TcfsError::TcfsErrorInvalidArg,
+        };
 
         let fetch_result = prov.runtime.block_on(async {
             let index_key = format!(
@@ -510,18 +854,54 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
                 prov.remote_prefix.trim_end_matches('/'),
                 item_str.trim_start_matches('/')
             );
-            let data = prov.operator.read(&index_key).await?;
-            let bytes = data.to_bytes();
-            let manifest_hash = parse_manifest_hash_from_index(&bytes)?;
+            let rel_path = item_str.trim_start_matches('/');
+            if requested_version.is_some() {
+                let selected = tcfs_sync::engine::read_exact_visible_index_selection(
+                    &prov.operator,
+                    rel_path,
+                    prov.remote_prefix.trim_end_matches('/'),
+                )
+                .await?
+                .ok_or_else(|| {
+                    opendal::Error::new(
+                        opendal::ErrorKind::NotFound,
+                        "no exact visible index version for FileProvider item",
+                    )
+                    .with_context("path", item_str.to_string())
+                })?;
+                crate::ensure_file_provider_version(requested_version, &selected.manifest_hash)?;
+            }
+            let manifest_prefix = format!("{}/manifests", prov.remote_prefix.trim_end_matches('/'));
+            let index_entry = tcfs_sync::index_entry::resolve_visible_index_entry(
+                &prov.operator,
+                &index_key,
+                &manifest_prefix,
+            )
+            .await?
+            .ok_or_else(|| {
+                opendal::Error::new(
+                    opendal::ErrorKind::NotFound,
+                    "no visible committed manifest for FileProvider item",
+                )
+                .with_context("path", item_str.to_string())
+            })?;
+
+            crate::ensure_file_provider_version(requested_version, &index_entry.manifest_hash)?;
 
             let manifest_path = format!(
                 "{}/manifests/{}",
                 prov.remote_prefix.trim_end_matches('/'),
-                manifest_hash
+                index_entry.manifest_hash
             );
             let manifest_bytes = prov.operator.read(&manifest_path).await?;
-            let manifest =
-                tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes.to_bytes())?;
+            let manifest_bytes = manifest_bytes.to_bytes();
+            tcfs_sync::engine::validate_indexed_manifest_entry_binding(
+                &manifest_bytes,
+                &index_entry.manifest_hash,
+                &index_entry,
+                rel_path,
+            )?;
+            let manifest = tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes)?;
 
             // Fail CLOSED on PerDevice/v3 manifests only (see fetch path above);
             // Dual/v2 reads via the master wrap (TIN-1898).
@@ -581,6 +961,7 @@ pub unsafe extern "C" fn tcfs_provider_fetch_with_progress(
                 }
             }
 
+            validate_assembled_file(&manifest, &assembled)?;
             tokio::fs::write(dest_str, &assembled).await?;
             Ok::<(), anyhow::Error>(())
         });
@@ -618,6 +999,24 @@ pub unsafe extern "C" fn tcfs_provider_upload(
     if provider.is_null() || local_path.is_null() || remote_rel.is_null() {
         return TcfsError::TcfsErrorInvalidArg;
     }
+    if unsafe { CStr::from_ptr(local_path) }.to_str().is_err()
+        || unsafe { CStr::from_ptr(remote_rel) }.to_str().is_err()
+    {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    unsafe { &*provider }.reject_file_provider_mutation()
+}
+
+#[cfg(test)]
+unsafe fn tcfs_provider_upload_for_test(
+    provider: *mut TcfsProvider,
+    local_path: *const c_char,
+    remote_rel: *const c_char,
+) -> TcfsError {
+    if provider.is_null() || local_path.is_null() || remote_rel.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
 
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let prov = unsafe { &*provider };
@@ -636,6 +1035,13 @@ pub unsafe extern "C" fn tcfs_provider_upload(
         let upload_result = prov.runtime.block_on(async {
             let data = tokio::fs::read(local_str).await?;
             let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(&data));
+            let rel_path = remote_str.trim_start_matches('/');
+            let publish_baseline = tcfs_sync::engine::bind_indexed_publish_baseline(
+                &prov.operator,
+                &prov.remote_prefix,
+                rel_path,
+            )
+            .await?;
 
             // Generate per-file encryption key if E2EE is enabled
             let file_key = prov
@@ -674,27 +1080,26 @@ pub unsafe extern "C" fn tcfs_provider_upload(
 
             // Build vclock: read existing manifest if present and merge
             let mut vclock = tcfs_sync::conflict::VectorClock::new();
-            let existing_index_key = format!(
-                "{}/index/{}",
-                prov.remote_prefix.trim_end_matches('/'),
-                remote_str.trim_start_matches('/')
-            );
-            if let Ok(existing_data) = prov.operator.read(&existing_index_key).await {
-                let existing_bytes = existing_data.to_bytes();
-                if let Ok(hash) = parse_manifest_hash_from_index(&existing_bytes) {
-                    let manifest_path = format!(
-                        "{}/manifests/{}",
-                        prov.remote_prefix.trim_end_matches('/'),
-                        hash
-                    );
-                    if let Ok(mb) = prov.operator.read(&manifest_path).await {
-                        if let Ok(existing_manifest) =
-                            tcfs_sync::manifest::SyncManifest::from_bytes(&mb.to_bytes())
-                        {
-                            vclock.merge(&existing_manifest.vclock);
-                        }
-                    }
-                }
+            if let Some(existing_entry) = publish_baseline.current() {
+                let manifest_path = format!(
+                    "{}/manifests/{}",
+                    prov.remote_prefix.trim_end_matches('/'),
+                    existing_entry.manifest_hash
+                );
+                let manifest_bytes = prov.operator.read(&manifest_path).await?.to_bytes();
+                tcfs_sync::engine::validate_indexed_manifest_entry_binding(
+                    &manifest_bytes,
+                    &existing_entry.manifest_hash,
+                    existing_entry,
+                    rel_path,
+                )?;
+                anyhow::ensure!(
+                    existing_entry.kind == tcfs_sync::index_entry::RemoteEntryKind::RegularFile,
+                    "cannot upload a regular file over a remote symlink index entry: {rel_path}"
+                );
+                let existing_manifest =
+                    tcfs_sync::manifest::SyncManifest::from_bytes(&manifest_bytes)?;
+                vclock.merge(&existing_manifest.vclock);
             }
             vclock.tick(&prov.device_id);
 
@@ -720,36 +1125,27 @@ pub unsafe extern "C" fn tcfs_provider_upload(
                 vclock,
                 written_by: prov.device_id.clone(),
                 written_at,
-                rel_path: Some(remote_str.to_string()),
+                rel_path: Some(rel_path.to_string()),
                 mode: None,
                 mtime: None,
                 encrypted_file_key,
                 wrapped_file_keys: Vec::new(),
             };
 
-            let manifest_json = serde_json::to_vec_pretty(&manifest)?;
-            let manifest_key = format!(
-                "{}/manifests/{}",
-                prov.remote_prefix.trim_end_matches('/'),
-                file_hash
-            );
-            prov.operator.write(&manifest_key, manifest_json).await?;
-
-            // Write index entry
-            let index_key = format!(
-                "{}/index/{}",
-                prov.remote_prefix.trim_end_matches('/'),
-                remote_str.trim_start_matches('/')
-            );
+            let manifest_json = manifest.to_bytes()?;
+            let manifest_object_id = tcfs_sync::index_entry::manifest_object_id(&manifest_json);
             let index_entry = tcfs_sync::index_entry::RemoteIndexEntry::new(
-                file_hash,
+                manifest_object_id,
                 data.len() as u64,
                 chunks.len(),
             );
-            tcfs_sync::index_entry::write_committed_index_entry(
+            tcfs_sync::engine::publish_indexed_manifest(
                 &prov.operator,
-                &index_key,
-                &index_entry,
+                &prov.remote_prefix,
+                rel_path,
+                manifest_json,
+                index_entry,
+                publish_baseline,
             )
             .await?;
 
@@ -773,6 +1169,21 @@ pub unsafe extern "C" fn tcfs_provider_upload(
 /// - `item_id` must be a valid null-terminated UTF-8 C string.
 #[no_mangle]
 pub unsafe extern "C" fn tcfs_provider_delete(
+    provider: *mut TcfsProvider,
+    item_id: *const c_char,
+) -> TcfsError {
+    if provider.is_null() || item_id.is_null() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+    if unsafe { CStr::from_ptr(item_id) }.to_str().is_err() {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
+
+    unsafe { &*provider }.reject_file_provider_mutation()
+}
+
+#[cfg(test)]
+unsafe fn tcfs_provider_delete_for_test(
     provider: *mut TcfsProvider,
     item_id: *const c_char,
 ) -> TcfsError {
@@ -845,43 +1256,13 @@ pub unsafe extern "C" fn tcfs_provider_create_dir(
     if provider.is_null() || parent_path.is_null() || dir_name.is_null() {
         return TcfsError::TcfsErrorInvalidArg;
     }
+    if unsafe { CStr::from_ptr(parent_path) }.to_str().is_err()
+        || unsafe { CStr::from_ptr(dir_name) }.to_str().is_err()
+    {
+        return TcfsError::TcfsErrorInvalidArg;
+    }
 
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let prov = unsafe { &*provider };
-        let c_parent = unsafe { CStr::from_ptr(parent_path) };
-        let c_name = unsafe { CStr::from_ptr(dir_name) };
-
-        let parent_str = match c_parent.to_str() {
-            Ok(s) => s,
-            Err(_) => return TcfsError::TcfsErrorInvalidArg,
-        };
-        let name_str = match c_name.to_str() {
-            Ok(s) => s,
-            Err(_) => return TcfsError::TcfsErrorInvalidArg,
-        };
-
-        let dir_path = format!(
-            "{}/index/{}{}/",
-            prov.remote_prefix.trim_end_matches('/'),
-            if parent_str.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", parent_str.trim_matches('/'))
-            },
-            name_str.trim_matches('/')
-        );
-
-        let create_result = prov
-            .runtime
-            .block_on(prov.operator.write(&dir_path, Vec::<u8>::new()));
-
-        match create_result {
-            Ok(_) => TcfsError::TcfsErrorNone,
-            Err(_) => TcfsError::TcfsErrorStorage,
-        }
-    }));
-
-    result.unwrap_or(TcfsError::TcfsErrorInternal)
+    unsafe { &*provider }.reject_file_provider_mutation()
 }
 
 /// Enumerate changes since a given timestamp.
@@ -956,6 +1337,14 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    fn memory_operator() -> opendal::Operator {
+        let op = opendal::Operator::new(opendal::services::Memory::default())
+            .expect("memory operator")
+            .finish();
+        tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+        op
+    }
+
     #[test]
     fn mnemonic_config_uses_recovery_derivation() {
         let (words, expected) = tcfs_crypto::generate_mnemonic().unwrap();
@@ -964,7 +1353,7 @@ mod tests {
             "encryption_salt": "ignored-for-mnemonic",
         });
 
-        let actual = derive_master_key_from_config(&config).unwrap();
+        let actual = derive_master_key_from_config(&config).unwrap().unwrap();
         assert_eq!(actual.as_bytes(), expected.as_bytes());
     }
 
@@ -977,8 +1366,27 @@ mod tests {
             "encryption_salt": "stale salt",
         });
 
-        let actual = derive_master_key_from_config(&config).unwrap();
+        let actual = derive_master_key_from_config(&config).unwrap().unwrap();
         assert_eq!(actual.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn malformed_configured_master_key_fails_before_remote_mutation() {
+        let operator = memory_operator();
+        let config = serde_json::json!({
+            "master_key_base64": "not-valid-base64%%%",
+            "encryption_required": true,
+        });
+
+        let error = derive_master_key_from_config(&config)
+            .expect_err("invalid configured key must not become plaintext mode");
+
+        assert!(format!("{error:#}").contains("decoding master_key_base64"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(runtime.block_on(operator.list("")).unwrap().is_empty());
     }
 
     /// Create a TcfsProvider backed by opendal::services::Memory (no network).
@@ -988,9 +1396,7 @@ mod tests {
             .build()
             .expect("test runtime");
 
-        let operator = opendal::Operator::new(opendal::services::Memory::default())
-            .expect("memory operator")
-            .finish();
+        let operator = memory_operator();
 
         let provider = TcfsProvider {
             runtime,
@@ -1002,6 +1408,42 @@ mod tests {
         };
 
         Box::into_raw(Box::new(provider))
+    }
+
+    #[test]
+    fn file_provider_mutations_fail_closed_without_remote_mutation() {
+        let prov = memory_provider("guard");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        std::fs::write(&source, b"must never be uploaded").unwrap();
+
+        unsafe {
+            let c_local = CString::new(source.to_str().unwrap()).unwrap();
+            let c_remote = CString::new("guarded.txt").unwrap();
+            let error = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            assert_eq!(error, TcfsError::TcfsErrorConflict);
+
+            let error = tcfs_provider_delete(prov, c_remote.as_ptr());
+            assert_eq!(error, TcfsError::TcfsErrorConflict);
+
+            let parent = CString::new("").unwrap();
+            let child = CString::new("new-dir").unwrap();
+            let error = tcfs_provider_create_dir(prov, parent.as_ptr(), child.as_ptr());
+            assert_eq!(error, TcfsError::TcfsErrorConflict);
+
+            let last_error = tcfs_provider_last_error(prov);
+            assert!(!last_error.is_null());
+            assert!(CStr::from_ptr(last_error)
+                .to_string_lossy()
+                .contains("read-only"));
+            crate::tcfs_string_free(last_error);
+            assert!((*prov)
+                .runtime
+                .block_on((*prov).operator.list(""))
+                .unwrap()
+                .is_empty());
+            tcfs_provider_free(prov);
+        }
     }
 
     /// Helper: call enumerate and return (items_ptr, count).
@@ -1031,6 +1473,112 @@ mod tests {
         }
     }
 
+    #[test]
+    fn enumerate_skips_deleted_index_records_as_logical_absence() {
+        let prov = memory_provider("deleted-list");
+        unsafe {
+            (*prov)
+                .runtime
+                .block_on(async {
+                    (*prov)
+                        .operator
+                        .write(
+                            "deleted-list/index/gone.txt",
+                            tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+                                .to_json_bytes()
+                                .unwrap(),
+                        )
+                        .await?;
+                    (*prov)
+                        .operator
+                        .write(
+                            "deleted-list/index/visible.txt",
+                            tcfs_sync::index_entry::RemoteIndexEntry::new("visible-object", 7, 1)
+                                .to_legacy_bytes(),
+                        )
+                        .await?;
+                    Ok::<(), anyhow::Error>(())
+                })
+                .unwrap();
+
+            let (err, items, count) = enumerate(prov, "");
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(count, 1);
+            let item = &*items;
+            assert_eq!(
+                CStr::from_ptr(item.filename).to_string_lossy(),
+                "visible.txt"
+            );
+            assert_eq!(item.file_size, 7);
+            assert_eq!(
+                CStr::from_ptr(item.content_hash).to_string_lossy(),
+                "visible-object"
+            );
+
+            crate::tcfs_file_items_free(items, count);
+            tcfs_provider_free(prov);
+        }
+    }
+
+    #[test]
+    fn enumerate_hides_directories_backed_only_by_tombstones() {
+        let prov = memory_provider("deleted-tree");
+        unsafe {
+            (*prov)
+                .runtime
+                .block_on(async {
+                    let tombstone = tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+                        .to_json_bytes()
+                        .unwrap();
+                    (*prov)
+                        .operator
+                        .write("deleted-tree/index/ghost/gone.txt", tombstone.clone())
+                        .await?;
+                    (*prov)
+                        .operator
+                        .write("deleted-tree/index/ghost-empty/.tcfs_dir", tombstone)
+                        .await?;
+                    (*prov)
+                        .operator
+                        .write(
+                            "deleted-tree/index/live/present.txt",
+                            tcfs_sync::index_entry::RemoteIndexEntry::new("visible-object", 7, 1)
+                                .to_legacy_bytes(),
+                        )
+                        .await?;
+                    (*prov)
+                        .operator
+                        .write(
+                            "deleted-tree/index/live-empty/.tcfs_dir",
+                            tcfs_sync::index_entry::DIRECTORY_MARKER_BYTES.to_vec(),
+                        )
+                        .await?;
+                    Ok::<(), anyhow::Error>(())
+                })
+                .unwrap();
+
+            let (err, items, count) = enumerate(prov, "");
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            let mut names = (0..count)
+                .map(|index| {
+                    CStr::from_ptr((*items.add(index)).filename)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            assert_eq!(names, vec!["live", "live-empty"]);
+
+            crate::tcfs_file_items_free(items, count);
+
+            let (err, marker_items, marker_count) = enumerate(prov, "live-empty");
+            assert_eq!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(marker_count, 0);
+            crate::tcfs_file_items_free(marker_items, marker_count);
+            tcfs_provider_free(prov);
+        }
+    }
+
     // ── Upload + Enumerate ───────────────────────────────────────────────
 
     #[test]
@@ -1043,7 +1591,7 @@ mod tests {
         unsafe {
             let c_local = CString::new(file.to_str().unwrap()).unwrap();
             let c_remote = CString::new("hello.txt").unwrap();
-            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            let err = tcfs_provider_upload_for_test(prov, c_local.as_ptr(), c_remote.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
             // Enumerate root should show the file
@@ -1078,7 +1626,7 @@ mod tests {
         unsafe {
             let c_local = CString::new(src.to_str().unwrap()).unwrap();
             let c_remote = CString::new("source.bin").unwrap();
-            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            let err = tcfs_provider_upload_for_test(prov, c_local.as_ptr(), c_remote.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
             // Fetch to a different location
@@ -1096,6 +1644,98 @@ mod tests {
         }
     }
 
+    #[test]
+    fn versioned_fetch_rejects_stale_manifest_before_destination_io() {
+        let prov = memory_provider("versioned-fetch");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, b"version-bound content").unwrap();
+
+        unsafe {
+            let c_source = CString::new(source.to_str().unwrap()).unwrap();
+            let c_item = CString::new("nested/source.bin").unwrap();
+            assert_eq!(
+                tcfs_provider_upload_for_test(prov, c_source.as_ptr(), c_item.as_ptr()),
+                TcfsError::TcfsErrorNone
+            );
+
+            let (enumerate_error, items, count) = enumerate(prov, "nested");
+            assert_eq!(enumerate_error, TcfsError::TcfsErrorNone);
+            assert_eq!(count, 1);
+            let current_version = CStr::from_ptr((*items).content_hash)
+                .to_string_lossy()
+                .into_owned();
+            assert!(!current_version.is_empty());
+            crate::tcfs_file_items_free(items, count);
+
+            let destination = dir.path().join("destination.bin");
+            std::fs::write(&destination, b"keep-local-bytes").unwrap();
+            let c_destination = CString::new(destination.to_str().unwrap()).unwrap();
+            let stale = CString::new("stale-manifest-id").unwrap();
+            assert_eq!(
+                tcfs_provider_fetch_versioned(
+                    prov,
+                    c_item.as_ptr(),
+                    c_destination.as_ptr(),
+                    stale.as_ptr(),
+                ),
+                TcfsError::TcfsErrorVersionMismatch
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), b"keep-local-bytes");
+
+            let current = CString::new(current_version).unwrap();
+            assert_eq!(
+                tcfs_provider_fetch_versioned(
+                    prov,
+                    c_item.as_ptr(),
+                    c_destination.as_ptr(),
+                    current.as_ptr(),
+                ),
+                TcfsError::TcfsErrorNone
+            );
+            assert_eq!(
+                std::fs::read(destination).unwrap(),
+                b"version-bound content"
+            );
+            tcfs_provider_free(prov);
+        }
+    }
+
+    #[test]
+    fn versioned_fetch_rejects_stale_before_missing_manifest_io() {
+        let prov = memory_provider("versioned-missing-manifest");
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("destination.bin");
+        std::fs::write(&destination, b"keep-local-bytes").unwrap();
+
+        unsafe {
+            (*prov)
+                .runtime
+                .block_on(
+                    (*prov).operator.write(
+                        "versioned-missing-manifest/index/file.bin",
+                        tcfs_sync::index_entry::RemoteIndexEntry::new(
+                            "missing-current-manifest",
+                            7,
+                            1,
+                        )
+                        .to_legacy_bytes(),
+                    ),
+                )
+                .unwrap();
+
+            let item = CString::new("file.bin").unwrap();
+            let dest = CString::new(destination.to_str().unwrap()).unwrap();
+            let stale = CString::new("stale-manifest").unwrap();
+            assert_eq!(
+                tcfs_provider_fetch_versioned(prov, item.as_ptr(), dest.as_ptr(), stale.as_ptr()),
+                TcfsError::TcfsErrorVersionMismatch
+            );
+            assert_eq!(std::fs::read(destination).unwrap(), b"keep-local-bytes");
+            tcfs_provider_free(prov);
+        }
+    }
+
     // ── Upload + Delete ──────────────────────────────────────────────────
 
     #[test]
@@ -1109,7 +1749,7 @@ mod tests {
         unsafe {
             let c_local = CString::new(file.to_str().unwrap()).unwrap();
             let c_remote = CString::new("to_delete.txt").unwrap();
-            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            let err = tcfs_provider_upload_for_test(prov, c_local.as_ptr(), c_remote.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
             // Verify it exists
@@ -1118,7 +1758,7 @@ mod tests {
 
             // Delete
             let c_item = CString::new("to_delete.txt").unwrap();
-            let err = tcfs_provider_delete(prov, c_item.as_ptr());
+            let err = tcfs_provider_delete_for_test(prov, c_item.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
             // Should be gone
@@ -1144,15 +1784,30 @@ mod tests {
         unsafe {
             let c_a_local = CString::new(a.to_str().unwrap()).unwrap();
             let c_a_remote = CString::new("a.txt").unwrap();
-            let err = tcfs_provider_upload(prov, c_a_local.as_ptr(), c_a_remote.as_ptr());
+            let err = tcfs_provider_upload_for_test(prov, c_a_local.as_ptr(), c_a_remote.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
             let c_b_local = CString::new(b.to_str().unwrap()).unwrap();
             let c_b_remote = CString::new("b.txt").unwrap();
-            let err = tcfs_provider_upload(prov, c_b_local.as_ptr(), c_b_remote.as_ptr());
+            let err = tcfs_provider_upload_for_test(prov, c_b_local.as_ptr(), c_b_remote.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
-            let err = tcfs_provider_delete(prov, c_a_remote.as_ptr());
+            for (remote, output_name) in [
+                (&c_a_remote, "a-before-delete.txt"),
+                (&c_b_remote, "b-before-delete.txt"),
+            ] {
+                let fetched = dir.path().join(output_name);
+                let c_fetched = CString::new(fetched.to_str().unwrap()).unwrap();
+                let err = tcfs_provider_fetch(prov, remote.as_ptr(), c_fetched.as_ptr());
+                assert_eq!(
+                    err,
+                    TcfsError::TcfsErrorNone,
+                    "each duplicate-content path must retain its own bound manifest"
+                );
+                assert_eq!(std::fs::read(fetched).unwrap(), data);
+            }
+
+            let err = tcfs_provider_delete_for_test(prov, c_a_remote.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
             let fetched = dir.path().join("b-fetched.txt");
@@ -1187,7 +1842,7 @@ mod tests {
                 let local = dir.path().join(name);
                 let c_local = CString::new(local.to_str().unwrap()).unwrap();
                 let c_remote = CString::new(*name).unwrap();
-                let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+                let err = tcfs_provider_upload_for_test(prov, c_local.as_ptr(), c_remote.as_ptr());
                 assert_eq!(err, TcfsError::TcfsErrorNone);
             }
 
@@ -1221,8 +1876,7 @@ mod tests {
             let c_item = CString::new("does-not-exist.txt").unwrap();
             let c_dest = CString::new(dest.to_str().unwrap()).unwrap();
             let err = tcfs_provider_fetch(prov, c_item.as_ptr(), c_dest.as_ptr());
-            // Should fail (storage error or not found)
-            assert_ne!(err, TcfsError::TcfsErrorNone);
+            assert_eq!(err, TcfsError::TcfsErrorNotFound);
             let last_error = tcfs_provider_last_error(prov);
             assert!(!last_error.is_null());
             let message = CStr::from_ptr(last_error).to_string_lossy();
@@ -1271,7 +1925,7 @@ mod tests {
         unsafe {
             let c_local = CString::new(src.to_str().unwrap()).unwrap();
             let c_remote = CString::new("progress_test.bin").unwrap();
-            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            let err = tcfs_provider_upload_for_test(prov, c_local.as_ptr(), c_remote.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
             // Fetch with progress callback — use atomic counters to avoid static mut
@@ -1331,7 +1985,7 @@ mod tests {
             // Upload into a subdirectory
             let c_local = CString::new(file.to_str().unwrap()).unwrap();
             let c_remote = CString::new("docs/readme.md").unwrap();
-            let err = tcfs_provider_upload(prov, c_local.as_ptr(), c_remote.as_ptr());
+            let err = tcfs_provider_upload_for_test(prov, c_local.as_ptr(), c_remote.as_ptr());
             assert_eq!(err, TcfsError::TcfsErrorNone);
 
             // Enumerate root — should show "docs" as a directory
@@ -1500,14 +2154,78 @@ mod tests {
         });
     }
 
+    #[test]
+    fn fetch_rejects_index_size_and_chunk_count_mismatches_before_destination_write() {
+        for (prefix, expected_size, expected_chunks, use_progress, expected_error) in [
+            ("bad-size", 999, 1, false, "size mismatch"),
+            ("bad-chunks", 7, 2, true, "chunk-count mismatch"),
+        ] {
+            let operator = memory_operator();
+            let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
+            let content = b"payload";
+            let rel_path = "bound.txt";
+            seed_encrypted_file(&operator, prefix, rel_path, content, &master, true, false);
+
+            let object_id = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(content));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime
+                .block_on(
+                    operator.write(
+                        &format!("{prefix}/index/{rel_path}"),
+                        tcfs_sync::index_entry::RemoteIndexEntry::new(
+                            object_id,
+                            expected_size,
+                            expected_chunks,
+                        )
+                        .to_legacy_bytes(),
+                    ),
+                )
+                .unwrap();
+
+            let provider = master_provider_on(operator, prefix, master);
+            let temp = tempfile::tempdir().unwrap();
+            let destination = temp.path().join("destination.txt");
+            std::fs::write(&destination, b"keep-local-bytes").unwrap();
+            unsafe {
+                let item_id = CString::new(rel_path).unwrap();
+                let destination_c = CString::new(destination.to_str().unwrap()).unwrap();
+                let error = if use_progress {
+                    tcfs_provider_fetch_with_progress(
+                        provider,
+                        item_id.as_ptr(),
+                        destination_c.as_ptr(),
+                        None,
+                        ptr::null(),
+                    )
+                } else {
+                    tcfs_provider_fetch(provider, item_id.as_ptr(), destination_c.as_ptr())
+                };
+
+                assert_eq!(error, TcfsError::TcfsErrorStorage);
+                assert_eq!(std::fs::read(&destination).unwrap(), b"keep-local-bytes");
+                let message = tcfs_provider_last_error(provider);
+                assert!(!message.is_null());
+                assert!(
+                    CStr::from_ptr(message)
+                        .to_string_lossy()
+                        .contains(expected_error),
+                    "expected {expected_error}"
+                );
+                crate::tcfs_string_free(message);
+                tcfs_provider_free(provider);
+            }
+        }
+    }
+
     /// A Dual/v2 manifest (master + per-device wraps) is READABLE via the
     /// master-only direct backend through the master wrap — fetch succeeds and
     /// the plaintext round-trips. This is the core TIN-1898 fix.
     #[test]
     fn dual_manifest_reads_via_master_wrap_on_direct_backend() {
-        let operator = opendal::Operator::new(opendal::services::Memory::default())
-            .expect("memory operator")
-            .finish();
+        let operator = memory_operator();
         let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
         let prefix = "dual";
         let content = b"dual manifest readable via master fallback on the FP direct backend";
@@ -1535,9 +2253,7 @@ mod tests {
     /// materialized (never raw ciphertext).
     #[test]
     fn per_device_manifest_fails_closed_on_direct_backend() {
-        let operator = opendal::Operator::new(opendal::services::Memory::default())
-            .expect("memory operator")
-            .finish();
+        let operator = memory_operator();
         let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
         let prefix = "pd";
         let content = b"per-device-only payload that the master-only backend cannot read";
@@ -1567,9 +2283,7 @@ mod tests {
     /// regression guard for the default `wrap_mode=master` path.
     #[test]
     fn master_only_manifest_reads_unchanged_on_direct_backend() {
-        let operator = opendal::Operator::new(opendal::services::Memory::default())
-            .expect("memory operator")
-            .finish();
+        let operator = memory_operator();
         let master = tcfs_crypto::MasterKey::from_bytes([9u8; tcfs_crypto::KEY_SIZE]);
         let prefix = "mo";
         let content = b"plain master-only payload, unchanged";

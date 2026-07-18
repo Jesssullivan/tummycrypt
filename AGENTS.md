@@ -73,7 +73,7 @@ task dev
 | `tcfsd` | lib+bin | Daemon: gRPC over Unix socket, FUSE, metrics, systemd. Lib surface exposed for integration tests (see `tcfsd::daemon::test_support`). |
 | `tcfs-cli` | lib+bin | CLI: push, pull, mount, device, status, unsync. Lib surface exposes ordering-sensitive command helpers for integration tests. |
 | `tcfs-tui` | bin | Terminal UI: ratatui 5-tab dashboard |
-| `tcfs-mcp` | bin | MCP server: 8 tools, rmcp 0.16, stdio transport |
+| `tcfs-mcp` | bin | MCP server: 7 non-resolution tools, rmcp 0.16, stdio transport |
 | `tests/e2e` | test | End-to-end integration test crate |
 
 ## Key Patterns

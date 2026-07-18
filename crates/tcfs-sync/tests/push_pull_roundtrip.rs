@@ -9,9 +9,11 @@ use std::path::Path;
 use tempfile::TempDir;
 
 fn memory_operator() -> Operator {
-    Operator::new(opendal::services::Memory::default())
+    let op = Operator::new(opendal::services::Memory::default())
         .expect("memory operator")
-        .finish()
+        .finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+    op
 }
 
 fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {
@@ -647,7 +649,7 @@ async fn roundtrip_preserves_readonly_permission() {
 }
 
 #[tokio::test]
-async fn delete_removes_index_and_manifest() {
+async fn delete_tombstones_index_and_retains_manifest_evidence() {
     let tmp = TempDir::new().unwrap();
     let op = memory_operator();
     let prefix = "test/delete";
@@ -705,14 +707,21 @@ async fn delete_removes_index_and_manifest() {
     .await
     .expect("delete should succeed");
 
-    // Verify index and manifest are gone
+    // Deletion authority is a durable tombstone. Immutable manifest evidence
+    // remains until version-pinned reachability-safe GC.
     assert!(
-        !op.exists(&index_key).await.unwrap(),
-        "index entry should be gone after delete"
+        op.exists(&index_key).await.unwrap(),
+        "index tombstone should remain after delete"
+    );
+    assert_eq!(
+        tcfs_sync::index_entry::read_exact_index_path_state(&op, prefix, "to-delete.txt")
+            .await
+            .unwrap(),
+        tcfs_sync::index_entry::ExactIndexPathState::Deleted
     );
     assert!(
-        !op.exists(&upload.remote_path).await.unwrap(),
-        "manifest should be gone after delete"
+        op.exists(&upload.remote_path).await.unwrap(),
+        "manifest evidence should remain after delete"
     );
 
     // Verify state cache entry is gone

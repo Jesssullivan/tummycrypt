@@ -145,7 +145,7 @@ impl StubMeta {
 
     /// Build a stub for a file that has been pushed to remote storage.
     pub fn for_upload(
-        manifest_hash: &str,
+        content_hash: &str,
         size: u64,
         chunks: usize,
         remote_prefix: &str,
@@ -155,7 +155,7 @@ impl StubMeta {
             chunks,
             compressed: false,
             fetched: false,
-            oid: format!("blake3:{}", manifest_hash),
+            oid: format!("blake3:{}", content_hash),
             origin: format!("seaweedfs://{}/{}", remote_prefix, rel_path),
             size,
         }
@@ -225,6 +225,29 @@ impl IndexEntry {
             prefix.trim_end_matches('/'),
             self.manifest_hash
         )
+    }
+
+    /// Reconstruct the complete remote authority carried by this entry.
+    pub fn as_remote_entry(&self) -> tcfs_sync::index_entry::RemoteIndexEntry {
+        tcfs_sync::index_entry::RemoteIndexEntry {
+            manifest_hash: self.manifest_hash.clone(),
+            size: self.size,
+            chunks: self.chunks,
+            kind: self.kind,
+            symlink_target: self.symlink_target.clone(),
+        }
+    }
+}
+
+impl From<tcfs_sync::index_entry::RemoteIndexEntry> for IndexEntry {
+    fn from(entry: tcfs_sync::index_entry::RemoteIndexEntry) -> Self {
+        Self {
+            manifest_hash: entry.manifest_hash,
+            size: entry.size,
+            chunks: entry.chunks,
+            kind: entry.kind,
+            symlink_target: entry.symlink_target,
+        }
     }
 }
 

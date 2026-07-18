@@ -1,7 +1,9 @@
 # Divergent `.git` keep-both: operator resolution for genuinely diverged repos
 
-- **Status:** Design-of-record — PR-1 through PR-4 are merged; live divergent
-  fleet canary pending deploy
+- **Status:** Design-of-record — PR-1 through PR-4 are merged and the automatic
+  guard is live-proven; an earlier daemon-routed operator mechanism ran on
+  Honey before the freeze, while exact hardened-head and whole-root closure
+  remain gated by TIN-2853/TIN-2856/TIN-2658
 - **Date:** 2026-07-02
 - **Code baseline:** all `file:line` references verified at `origin/main` `c40f075` (#513 merged)
 - **Predecessors:** #513 (`.git`-aware FF conflict resolution), #506 harness
@@ -12,6 +14,11 @@
 - **Tickets:** TIN-1549 (conflict/status UX), G5-git-5 (repo-roam-test-plan §7)
 
 ---
+
+> **Reading note (2026-07-15):** Sections 1–7 preserve the design-time
+> analysis and proposed acceptance language from the `c40f075` baseline; their
+> present tense is historical, not current product truth. Use **Implementation
+> status** and its final **Security note** below for shipped behavior.
 
 ## 1. Problem
 
@@ -513,7 +520,10 @@ ordinary files.
 
 ---
 
-## 7. Linear-ready summary
+## 7. Historical pre-implementation Linear summary
+
+The numbered text below records the 2026-07-02 proposal context; current status
+is authoritative in the implementation-status section that follows.
 
 1. Post-#513, genuinely diverged `.git` repos stay Conflict forever (record-only arm, `reconcile.rs:1737-1746`) with no operator verb; the only existing verb (per-file `ResolveConflict`) actively corrupts `.git` groups (`grpc.rs:1650-1825`) and the NATS auto path (`daemon.rs:1808-1836`) is a live splice vector — G5-git-5.
 2. Design: operator-invoked repo-group keep-both that parks the losing side's heads as `refs/tcfs/theirs/<device>/**` via `git update-ref` against objects that already roam while refs conflict (`git_safety.rs:187-203`), gated fail-closed on object presence, lock+quiesce, fsck before/after, pin re-verify, state-dir undo bundle, single clock-tick commit point; loser-side pre-overwrite parking guard makes "no committed work lost" hold on both machines and closes convergence.
@@ -523,17 +533,21 @@ ordinary files.
 
 ---
 
-## Implementation status (updated 2026-07-05)
+## Implementation status (updated 2026-07-15)
 
-This design is now the design-of-record; PR-1 through PR-4 are merged. The
-remaining work is fleet deploy plus the live divergent keep-both canary.
+This design is now the design-of-record; PR-1 through PR-4 are merged and the
+automatic loser-guard canary is live-proven. An earlier TIN-2853 mechanism head
+reached root-targeted operator execution on Honey before the freeze. The exact
+hardened head and the complete dry-run → execute → convergence → second-cycle
+evidence chain remain gated by TIN-2853 landing and TIN-2856 clearance before
+TIN-2658 can close.
 
 | Rung | PR | Merge commit | Status |
 |------|----|--------------|--------|
 | **PR-1** — fence per-file `.git` resolution (CLI+MCP) + `tcfs conflicts` read verb | #526 | `afd84b2` | ✅ merged |
 | (hardening) — fence paths + persistence | #527 | `449846e` | ✅ merged |
 | **PR-2** — executor hard-respects a foreign `.git/tcfs.lock`; `ConflictInfo.remote_manifest_key` | #528 | `1e41a23` | ✅ merged |
-| **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, **operator-CLI-only** (MCP/auto excluded via the `operator_cli` provenance gate) | #529 | `831d363b` | ✅ merged |
+| **PR-3** — repo-group keep-both resolver (`resolve_repo_keep_both`): parks losing heads at `refs/tcfs/theirs/<device>/**`, fsck-gated both sides, dry-run default, state-dir undo bundle, authenticated authorization (subsequently tightened to the mode matrix below) plus an explicit operator-intent hint (MCP excludes conflict resolution) | #529 | `831d363b` | ✅ merged |
 | **PR-4** — loser-side no-loss guard (pre-overwrite parking; flips harness G5-git-13 / T10/T11 live after deploy/canary) | #534 | `4c61da4` | ✅ merged + LIVE-PROVEN 2026-07-08 |
 
 **PR-4 is merged AND live-proven.** The two-machine live-convergence proof
@@ -548,13 +562,14 @@ The run drove out four product defects first: **TIN-2584** (divergence silently
 absorbed — dominated clock structurally conflict-unreachable; **FIXED #540**) and
 **TIN-2652** (plan-path conflicts recorded `status=synced`, invisible to the
 resolver; **FIXED #541**) both had to land to make the conflict recordable and
-resolver-visible; **TIN-2653** (headless session token write-only) and
-**TIN-2657** (daemon remaps `sync.state_db` → `state.json`, so `tcfs resolve`
-reads a different file than the CLI) remain **OPEN** and block the operator
-resolve VERB — but not the automatic loser-guard convergence path the canary
-accepts on. The convergence is therefore proven via the guard; the operator VERB
-(`tcfs resolve … --execute`) is honestly not yet claimed.
+resolver-visible; **TIN-2657** was fixed by #545, while **TIN-2653** (headless
+session token write-only) remains open. The live root also needs the daemon-
+trusted routing seam in TIN-2853, and all attended execution is frozen by
+TIN-2856. None of those gaps invalidate the automatic loser-guard convergence
+proof. An earlier mechanism run exists, but production acceptance for this
+exact hardened operator verb and its whole-root convergence chain is honestly
+not yet claimed.
 
 **Ratified operator §6 answers (2026-07-05):** parking namespace default = `refs/tcfs/theirs/**` (not real branches); bare `keep-local`/`keep-remote` = omitted (park-first only); dirty-tree = hard refuse; ticket routing = new ticket for the verb + TIN-1549 keeps the `tcfs conflicts`/banner UX surface. Bundle retention and escalation cadence remain open (non-blocking; PR-4-adjacent).
 
-**Security note (from the PR-3 adversarial review, #529):** the repo-group execute path is reachable **only** via the operator CLI (`operator_cli` proto flag); MCP rejects `git_keep_both*` before connect and the daemon refuses the dispatch without the flag — the agent/auto/NATS threat is closed. The undo bundle is written to the machine-local state dir (never in-tree), with `.git/tcfs-undo/**` fail-closed in the blacklist as belt-and-suspenders.
+**Security note (corrected 2026-07-15):** both the legacy primary-cache and dedicated registered-root repo-group RPCs require pull for dry-run and pull+push for execute. Registered `inspect-only` policy allows dry-run and rejects execute. Legacy per-file `keep-remote`, `keep-local`, and `keep-both` are retired fail-closed before path or state lookup because the RPC cannot bind them to daemon-selected root and manifest identity; `defer` remains a push-authorized no-op. Both repo-group routes also require the client-supplied `operator_cli` intent hint. MCP exposes no conflict-resolution tool. The hint is defense in depth, not unforgeable provenance or an authorization boundary for generic protobuf clients. The undo bundle is written to the machine-local state dir (never in-tree), with `.git/tcfs-undo/**` fail-closed in the blacklist as belt-and-suspenders.

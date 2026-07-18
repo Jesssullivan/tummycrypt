@@ -8,9 +8,12 @@ use tcfs_vfs::TcfsVfs;
 
 /// Create an opendal operator backed by in-memory storage.
 pub fn memory_operator() -> Operator {
-    Operator::new(opendal::services::Memory::default())
+    let op = Operator::new(opendal::services::Memory::default())
         .expect("memory operator")
-        .finish()
+        .finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op)
+        .expect("register Memory conditional-write emulation");
+    op
 }
 
 /// Write a file with the given content and return its path.

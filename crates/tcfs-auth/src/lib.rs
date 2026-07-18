@@ -42,4 +42,7 @@ pub use enrollment::{
     InviteRedemptionError, InviteRedemptionStore,
 };
 pub use provider::{AuthChallenge, AuthProvider, AuthResponse, VerifyResult};
-pub use session::{DevicePermissions, RateLimitConfig, RateLimiter, Session, SessionStore};
+pub use session::{
+    DeviceAuthorization, DeviceAuthorizationStore, DevicePermissions, RateLimitConfig, RateLimiter,
+    Session, SessionStore,
+};

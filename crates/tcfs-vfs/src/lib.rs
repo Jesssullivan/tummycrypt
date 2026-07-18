@@ -30,7 +30,7 @@ pub mod vfs;
 pub use vfs::VirtualFilesystem;
 
 // Concrete implementation
-pub use driver::{OnFlushCallback, TcfsVfs, UnsyncResult};
+pub use driver::{virtual_path_to_canonical_rel_path, OnFlushCallback, TcfsVfs, UnsyncResult};
 
 // Types
 pub use types::{VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs};

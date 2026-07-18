@@ -56,7 +56,7 @@ The client runs on user machines and consists of:
     ratatui~0.30, connecting to the daemon via gRPC. Five tabs: Dashboard,
     Config, Mounts, Secrets, Conflicts.
   \item[\code{tcfs-mcp} (MCP server)] Model Context Protocol server for AI
-    agent integration. Eight tools over stdio JSON-RPC transport.
+    agent integration. Seven non-resolution tools over stdio JSON-RPC transport.
 \end{description}
 
 \subsection{Server Side (Kubernetes Model)}
@@ -101,7 +101,7 @@ crates plus an end-to-end test crate:
   \code{tcfsd}            & binary  & Daemon: gRPC, Linux FUSE, metrics, systemd \\
   \code{tcfs-cli}         & binary  & CLI: push, pull, mount, status, unsync \\
   \code{tcfs-tui}         & binary  & TUI: ratatui dashboard \\
-  \code{tcfs-mcp}         & binary  & MCP server: 8 tools, stdio transport \\
+  \code{tcfs-mcp}         & binary  & MCP server: 7 non-resolution tools, stdio transport \\
   \bottomrule
 \end{longtable}
 

@@ -40,6 +40,44 @@ pub enum TcfsError {
     TcfsErrorConflict = 5,
     /// Item already exists at the target path.
     TcfsErrorAlreadyExists = 6,
+    /// The requested immutable manifest version is no longer current.
+    TcfsErrorVersionMismatch = 7,
+    /// Incremental change history cannot safely continue from this anchor.
+    TcfsErrorSyncAnchorExpired = 8,
+}
+
+/// Exact FileProvider reads bind the version exposed during enumeration to the
+/// immutable manifest selected immediately before hydration. Keeping this as a
+/// typed error lets every backend distinguish a stale Apple version token from
+/// storage corruption and from true logical absence.
+#[derive(Debug, thiserror::Error)]
+#[error("requested FileProvider version {requested} is no longer current (current: {current})")]
+pub(crate) struct FileProviderVersionMismatch {
+    requested: String,
+    current: String,
+}
+
+pub(crate) fn ensure_file_provider_version(
+    requested: Option<&str>,
+    current_manifest_id: &str,
+) -> anyhow::Result<()> {
+    let Some(requested) = requested.filter(|token| !token.is_empty()) else {
+        return Ok(());
+    };
+    if requested == current_manifest_id {
+        return Ok(());
+    }
+    Err(FileProviderVersionMismatch {
+        requested: requested.to_string(),
+        current: current_manifest_id.to_string(),
+    }
+    .into())
+}
+
+pub(crate) fn is_file_provider_version_mismatch(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<FileProviderVersionMismatch>())
 }
 
 /// A file item returned by directory enumeration.
@@ -58,7 +96,7 @@ pub struct TcfsFileItem {
     pub modified_timestamp: i64,
     /// Whether this item is a directory.
     pub is_directory: bool,
-    /// Content hash (BLAKE3 hex, UTF-8 C string).
+    /// Opaque FileProvider version token (selected manifest object ID).
     pub content_hash: *mut c_char,
     /// Hydration state: "synced", "not_synced", "active", "locked", "conflict" (UTF-8 C string).
     pub hydration_state: *mut c_char,
@@ -80,7 +118,8 @@ pub struct TcfsChangeEvent {
     pub timestamp: i64,
     /// File size in bytes (0 for deleted items).
     pub file_size: u64,
-    /// Content hash (BLAKE3 hex, UTF-8 C string, empty for deleted items).
+    /// Opaque FileProvider version token (selected manifest object ID; empty
+    /// for deleted items and directories).
     pub content_hash: *mut c_char,
     /// Whether this item is a directory.
     pub is_directory: bool,

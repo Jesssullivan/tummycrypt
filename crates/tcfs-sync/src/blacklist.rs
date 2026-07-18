@@ -91,8 +91,15 @@ const STUB_EXTENSIONS: &[&str] = &["tc", "tcf"];
 /// (TIN-1737 / Gate G0.)
 const SECURITY_DIRS: &[&str] = &[".ssh", ".gnupg", "sops-nix"];
 
-/// Exact file names that are ALWAYS excluded for security (credential files).
-const SECURITY_FILES: &[&str] = &[".credentials.json", "auth.json", ".netrc", ".pgpass"];
+/// Exact file names that are ALWAYS excluded for security (credential files
+/// and the conventional TCFS master-key name).
+const SECURITY_FILES: &[&str] = &[
+    ".credentials.json",
+    "auth.json",
+    ".netrc",
+    ".pgpass",
+    "master.key",
+];
 
 /// Live database file suffixes that are ALWAYS excluded. Syncing an open-WAL
 /// SQLite/DB file is a corruption hazard, so these are denied until a
@@ -112,17 +119,37 @@ const SECURITY_DB_SUFFIXES: &[&str] = &[
 /// Returns a stable static label when the name is a secret/credential/live-DB
 /// file. Checked before user glob patterns so it cannot be overridden.
 fn security_file_reason(name: &str) -> Option<&'static str> {
+    let folded = name.to_ascii_lowercase();
     for &f in SECURITY_FILES {
-        if name == f {
+        if folded == f.to_ascii_lowercase() {
             return Some(f);
         }
     }
+    // Master-key rotation artifacts are derived from a configurable key file
+    // name, so match the stable suffixes rather than only `master.key`.
+    if folded.ends_with(".rotate-pending") {
+        return Some("tcfs-rotation-pending-key");
+    }
+    if folded.ends_with(".rotate-state.json") {
+        return Some("tcfs-rotation-state");
+    }
+    // `atomic_write_bytes` uses a hidden same-directory sibling named
+    // `.<target>.tmp.<32 lowercase hex digits>`. Fence the shape independent
+    // of the configured target name, including temps for pending/state files.
+    if let Some((target, nonce)) = folded.rsplit_once(".tmp.") {
+        if target.starts_with('.')
+            && nonce.len() == 32
+            && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Some("tcfs-atomic-write-temp");
+        }
+    }
     // dotenv: `.env`, `.env.local`, `service.env`
-    if name == ".env" || name.starts_with(".env.") || name.ends_with(".env") {
+    if folded == ".env" || folded.starts_with(".env.") || folded.ends_with(".env") {
         return Some("dotenv");
     }
     for &suf in SECURITY_DB_SUFFIXES {
-        if name.ends_with(suf) {
+        if folded.ends_with(suf) {
             return Some("live-db");
         }
     }
@@ -140,10 +167,10 @@ fn has_git_worktrees_segment(path: &Path) -> bool {
     for component in path.components() {
         match component {
             std::path::Component::Normal(name) => {
-                if prev_was_dot_git && name == "worktrees" {
+                if prev_was_dot_git && name.eq_ignore_ascii_case("worktrees") {
                     return true;
                 }
-                prev_was_dot_git = name == ".git";
+                prev_was_dot_git = name.eq_ignore_ascii_case(".git");
             }
             _ => prev_was_dot_git = false,
         }
@@ -161,10 +188,10 @@ fn has_git_tcfs_undo_segment(path: &Path) -> bool {
     for component in path.components() {
         match component {
             std::path::Component::Normal(name) => {
-                if prev_was_dot_git && name == "tcfs-undo" {
+                if prev_was_dot_git && name.eq_ignore_ascii_case("tcfs-undo") {
                     return true;
                 }
-                prev_was_dot_git = name == ".git";
+                prev_was_dot_git = name.eq_ignore_ascii_case(".git");
             }
             _ => prev_was_dot_git = false,
         }
@@ -184,13 +211,13 @@ fn is_git_lockfile_path(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    if !name.ends_with(".lock") {
+    if !name.to_ascii_lowercase().ends_with(".lock") {
         return false;
     }
     // The lockfile must be strictly inside a `.git` directory: some component
     // before the final one is named `.git`.
     path.components()
-        .any(|c| matches!(c, std::path::Component::Normal(n) if n == ".git"))
+        .any(|c| matches!(c, std::path::Component::Normal(n) if n.eq_ignore_ascii_case(".git")))
 }
 
 /// Centralized exclusion filter for the sync pipeline.
@@ -270,7 +297,7 @@ impl Blacklist {
         // is disabled when `sync_hidden_dirs` is true (e.g. agent dotdirs).
         // (TIN-1737 / Gate G0.)
         for &d in SECURITY_DIRS {
-            if name == d {
+            if name.eq_ignore_ascii_case(d) {
                 return Some(BlacklistReason::Security(d));
             }
         }
@@ -279,21 +306,34 @@ impl Blacklist {
         }
 
         // Built-in directory exclusions
-        if is_dir && BUILTIN_DIRS.contains(&name) {
+        if is_dir
+            && BUILTIN_DIRS
+                .iter()
+                .any(|entry| name.eq_ignore_ascii_case(entry))
+        {
             return Some(BlacklistReason::BuiltIn(
-                BUILTIN_DIRS.iter().find(|&&b| b == name).unwrap(),
+                BUILTIN_DIRS
+                    .iter()
+                    .find(|&&entry| name.eq_ignore_ascii_case(entry))
+                    .unwrap(),
             ));
         }
 
         // Built-in file exclusions
-        if BUILTIN_FILES.contains(&name) {
+        if BUILTIN_FILES
+            .iter()
+            .any(|entry| name.eq_ignore_ascii_case(entry))
+        {
             return Some(BlacklistReason::BuiltIn(
-                BUILTIN_FILES.iter().find(|&&b| b == name).unwrap(),
+                BUILTIN_FILES
+                    .iter()
+                    .find(|&&entry| name.eq_ignore_ascii_case(entry))
+                    .unwrap(),
             ));
         }
 
         // VFS internal marker
-        if name == VFS_MARKER {
+        if name.eq_ignore_ascii_case(VFS_MARKER) {
             return Some(BlacklistReason::VfsMarker);
         }
 
@@ -313,7 +353,7 @@ impl Blacklist {
 
         // .git — worktree fence first, then the config-gated dir rule (before
         // the hidden dir rule).
-        if name == ".git" {
+        if name.eq_ignore_ascii_case(".git") {
             // Fail-closed worktree fence: a non-directory named `.git` is a
             // linked worktree's (or submodule's) gitfile pointer. Never roam
             // it, regardless of `sync_git_dirs` / `git_sync_mode`
@@ -427,7 +467,38 @@ impl Blacklist {
             if let std::path::Component::Normal(name) = component {
                 if let Some(name_str) = name.to_str() {
                     for &dir in SECURITY_DIRS {
-                        if name_str == dir {
+                        if name_str.eq_ignore_ascii_case(dir) {
+                            return Some(BlacklistReason::Security(dir));
+                        }
+                    }
+                    if let Some(label) = security_file_reason(name_str) {
+                        return Some(BlacklistReason::Security(label));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check every config-independent ingress fence. Unlike the ordinary
+    /// configured blacklist, this guard is safe to apply to a serialized plan:
+    /// credentials/live databases, linked-worktree admin data, Git lockfiles,
+    /// and legacy in-tree undo bundles are never valid hydration payloads.
+    pub fn check_fixed_ingress_path_components(&self, path: &Path) -> Option<BlacklistReason> {
+        if has_git_worktrees_segment(path) {
+            return Some(BlacklistReason::GitWorktreesAdmin);
+        }
+        if is_git_lockfile_path(path) {
+            return Some(BlacklistReason::GitLockFile);
+        }
+        if has_git_tcfs_undo_segment(path) {
+            return Some(BlacklistReason::GitTcfsUndo);
+        }
+        for component in path.components() {
+            if let std::path::Component::Normal(name) = component {
+                if let Some(name_str) = name.to_str() {
+                    for &dir in SECURITY_DIRS {
+                        if name_str.eq_ignore_ascii_case(dir) {
                             return Some(BlacklistReason::Security(dir));
                         }
                     }
@@ -603,7 +674,13 @@ mod tests {
     #[test]
     fn test_security_credential_files_denied() {
         let bl = default_blacklist();
-        for file in [".credentials.json", "auth.json", ".netrc", ".pgpass"] {
+        for file in [
+            ".credentials.json",
+            "auth.json",
+            ".netrc",
+            ".pgpass",
+            "master.key",
+        ] {
             assert!(
                 matches!(
                     bl.check_name(file, false),
@@ -611,6 +688,60 @@ mod tests {
                 ),
                 "expected {file} to be security-denied"
             );
+        }
+    }
+
+    #[test]
+    fn master_key_rotation_artifacts_are_fixed_security_denies() {
+        let bl = Blacklist::new(&[], true, true, "raw");
+        let artifacts = [
+            ".custom-vault-key.rotate-pending",
+            ".custom-vault-key.rotate-state.json",
+            ".custom-vault-key.tmp.0123456789abcdef0123456789abcdef",
+            "..custom-vault-key.rotate-pending.tmp.abcdef0123456789abcdef0123456789",
+            "..custom-vault-key.rotate-state.json.tmp.0123456789abcdef0123456789abcdef",
+        ];
+
+        for name in artifacts {
+            assert!(
+                matches!(
+                    bl.check_name(name, false),
+                    Some(BlacklistReason::Security(_))
+                ),
+                "hidden-dir-enabled collection must fence {name}"
+            );
+
+            let path = Path::new("broad-home-root/.config/tcfs").join(name);
+            assert!(
+                matches!(
+                    bl.check_path_components(&path),
+                    Some(BlacklistReason::Security(_))
+                ),
+                "component collection guard must fence {}",
+                path.display()
+            );
+            assert!(
+                matches!(
+                    bl.check_fixed_ingress_path_components(&path),
+                    Some(BlacklistReason::Security(_))
+                ),
+                "fixed ingress deny-set must fence {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_temp_shape_does_not_overblock_unrelated_files() {
+        let bl = Blacklist::new(&[], true, true, "raw");
+        for name in [
+            "visible.tmp.0123456789abcdef0123456789abcdef",
+            ".hidden.tmp.short",
+            ".hidden.tmp.0123456789abcdef0123456789abcdeg",
+            "notes.rotate-pending.txt",
+            "notes.rotate-state.json.bak",
+        ] {
+            assert_eq!(bl.check_name(name, false), None, "unexpected deny: {name}");
         }
     }
 
@@ -840,6 +971,24 @@ mod tests {
         );
         // As a directory it follows the normal .git-dir policy instead.
         assert_eq!(bl.check(Path::new("repo/vendor/dep/.git"), true), None);
+    }
+
+    #[test]
+    fn fixed_ingress_fences_are_case_insensitive() {
+        let bl = Blacklist::new(&[], true, true, "raw");
+        for path in [
+            "home/.SSH/id_ed25519",
+            "home/AUTH.JSON",
+            "repo/.GIT/WORKTREES/wt/HEAD",
+            "repo/.GIT/INDEX.LOCK",
+            "repo/.GIT/TCFS-UNDO/history.bundle",
+        ] {
+            assert!(
+                bl.check_fixed_ingress_path_components(Path::new(path))
+                    .is_some(),
+                "case alias must remain fenced: {path}"
+            );
+        }
     }
 
     #[test]

@@ -9,8 +9,8 @@ and the named fleet evidence in [`ops/current.md`](ops/current.md).
 
 TCFS will first make the bounded `neo`/`honey` beachhead trustworthy. It
 will then generalize enrolled roam roots. Only after those two stages pass
-their evidence gates will it widen into hydratable home state and client
-breadth.
+their evidence gates will it become a shippable Linux/Rocky substrate with one
+honest Finder client, then selectively widen home-state and client breadth.
 
 This is not a mechanism-first roadmap. Each stage ends in a user workflow that
 can be repeated from packaged software and leaves a durable evidence packet.
@@ -45,9 +45,11 @@ cache and prefix. A client-side `--state` escape hatch would point at the
 right bytes but discard the daemon's authority and cannot safely bind the
 prefix, path, or policy.
 
-The accepted minimal design is a versioned set of trusted, daemon-owned root
-descriptors rendered through configuration. Ordinary reconcile and resolve
-clients may select an ID; they may not create or rewrite its tuple.
+The target B0 design is a versioned set of trusted, daemon-owned root
+descriptors rendered through configuration. Ordinary reconcile and file
+resolution clients may eventually select an ID; they may not create or rewrite
+its tuple. PR #551 is deliberately narrower: it adds an unversioned,
+conflict-only precursor for named inspection and Git keep-both resolution.
 
 ```text
 stable root_id
@@ -61,7 +63,8 @@ The same `root_id` may map to different local paths on macOS and Linux. Its
 remote prefix is the fleet-wide convergence identity. The descriptor is local,
 contains no credentials, and is loaded from the daemon's trusted configuration.
 
-Required invariants:
+Required invariants for the complete B0 lifecycle (not claims that every item
+is implemented by PR #551):
 
 1. Root IDs use a bounded, validated slug and cannot contain path traversal.
 2. State files are configured through the trusted descriptor and normalized by
@@ -72,13 +75,56 @@ Required invariants:
    symlink-aware validation.
 5. Reconcile and resolve take the same state-adjacent operation lock so two
    processes cannot overwrite the same JSON state cache.
-6. Session authentication, the `push` permission, registered-prefix
+6. Named-root operations require real daemon session enforcement; an
+   auth-disabled synthetic administrator never receives registered-root
+   authority.
+7. The daemon captures the authorized repository's stable filesystem identity,
+   binds Git mutation subprocesses and cooperative lock acquisition to that
+   handle, and revalidates the configured pathname across async waits and state
+   persistence. A same-path replacement is never selected as the mutation
+   target.
+8. Session authentication, mode-specific permission checks, registered-prefix
    authorization, the Git corruption fence, encryption context, and
-   undo-bundle rules remain in the daemon path. The existing `operator_cli`
-   request hint and MCP refusal are defense in depth, not an authorization
-   boundary by themselves.
-7. Dry-run and execute report the root ID, registered prefix, and plan summary
+   undo-bundle rules remain in the daemon path. Named dry-run requires `pull`;
+   execute requires both `pull` and `push`. An inspect-only root permits the
+   pull-authorized dry-run but rejects execute even for a pull+push session.
+   The existing `operator_cli` request hint and exclusion of conflict
+   resolution from MCP are defense in depth, not an authorization boundary by
+   themselves.
+9. Dry-run and execute report the root ID, registered prefix, and plan summary
    so evidence proves which trusted root was touched.
+
+The legacy primary-cache RPC now follows the same repo-group capability split:
+Git dry-run requires `pull`, while execute requires both `pull` and `push`.
+The unrooted legacy per-file mutations (`keep-remote`, `keep-local`, and
+`keep-both`) are disabled fail-closed because they cannot bind a requested
+pathname to a daemon-selected root and indexed manifest. `defer` remains a
+push-authorized no-op. Ordinary-file resolution waits for the broader root
+lifecycle and manifest-identity design to supply that missing authority.
+
+PR #551's entire named registered-root surface, including read-only
+`conflicts --root`, is implemented only on Linux and macOS; trusted route
+selection fails closed on every other platform. Every Git keep-both mutation,
+including the legacy primary-cache route, captures the repository and `.git`
+directory and binds Git mutation to those descriptors with child-side
+`fchdir` and descriptor-relative `openat`; it also fails closed elsewhere.
+
+This precursor accepts only an ordinary files-ref repository. Reftable and an
+enabled `core.sharedRepository` mode are rejected. The enrolled local root,
+critical Git metadata, state directory, and state cache must each be owned by
+the exact tcfsd effective UID. The root, critical metadata, and state directory
+must not be group/world writable, and the cache must have no group/world access
+(mode 0600 or stricter). Every canonical ancestor must be a real directory
+owned by that effective UID or root and not writable by another principal. A
+root-owned sticky directory is accepted only as a protected boundary whose
+next child is real and owned by the effective UID or root. Shared repositories
+and system services pointed at another user's root are outside this seam. This
+is not a Windows/CFAPI or privileged cross-user root-resolution support claim.
+
+The `.git/tcfs.lock` advisory lock serializes TCFS writers only. Native Git
+busy markers are checked before mutation, but a same-euid process can still
+modify the repository in place; races with native same-euid Git are outside
+this precursor's concurrency guarantee.
 
 The existing scratch implementation that opens a caller-selected cache and
 runs keep-both inside the CLI is therefore a research artifact, not a landing
@@ -88,42 +134,57 @@ ordinary file conflicts remain.
 
 ### Minimal A surface
 
-```bash
-tcfs reconcile --root git-roam-tool-daemon --execute
+Status on 2026-07-14: PR #551 implements named conflict inspection and the
+bounded Git keep-both resolve path. It does **not** implement
+`reconcile --root`, named-root ordinary-file resolution, or Lab
+enrollment/rendering. Those lifecycle surfaces remain staged under TIN-2859
+and its B0a/B0b/B0c children.
 
+```bash
+# Source-proven by PR #551
 tcfs conflicts --root git-roam-tool-daemon
 tcfs resolve --root git-roam-tool-daemon \
   . --strategy keep-both
 tcfs resolve --root git-roam-tool-daemon \
   . --strategy keep-both --execute
+
+# Staged B0b surface; not implemented yet
+tcfs reconcile --root git-roam-tool-daemon --execute
 ```
 
-Lab renders the existing `extraReconcileRoots` tuple into daemon config.
-`reconcile --root` and `resolve --root` select that trusted tuple;
-`conflicts` is read-only. A future privileged root-add/update surface belongs
-to B. Explicit state-file inspection may remain a diagnostic command, but it
-is not a mutation route.
+For the implemented named resolver, an authenticated pull-only session may run
+the dry-run. Execute requires the same pull authorization plus push permission
+and a root with `policy = "resolve"`; `policy = "inspect-only"` never permits
+execute. These are source-tested semantics, not evidence that a new live auth
+or resolver ceremony occurred during the TIN-2856 freeze.
 
-## TIN-2658 closure ceremony
+Lab must eventually render the existing `extraReconcileRoots` tuple into
+daemon config. Today `resolve --root` selects the daemon-trusted tuple and
+`conflicts --root` is read-only; `reconcile --root` remains staged. A future
+privileged root-add/update surface belongs to B. `conflicts --state` remains a
+diagnostic command. Legacy `push`, `pull`, `rm`, and executing `reconcile` with
+an explicit `--state` are still mutation routes; PR #551 serializes them with
+the same state lock, but they are not named-root authorization surfaces.
 
-After the root-routing build is deployed to both hosts:
+## TIN-2658 live evidence and residual closure
 
-1. Freeze the named root's scheduled reconcile on `honey`.
-2. Record the root descriptor, version, Git status, conflict groups, state
-   cache fingerprint, and remote prefix.
-3. Verify TOTP and obtain the short-lived session through the normal SSH path.
-4. Run root-targeted keep-both dry-run and preserve its plan.
-5. Execute the same plan while the root lock is held.
-6. Resolve or explicitly preserve every ordinary-file conflict; do not call a
-   Git-only result full convergence.
-7. Re-enable reconcile and capture the first convergence cycle.
-8. Capture a second cycle with zero conflicts and unchanged intended content.
-9. Run `git fsck`, verify parked peer refs and undo bundle, and compare tracked
-   bytes on both hosts.
-10. Attach the packet to TIN-2658 and only then close the issue.
+The live Honey keep-both sequence ran on 2026-07-14 before the TIN-2856
+incident freeze:
 
-The six-digit TOTP code should be generated immediately before steps 3–5; it is
-not needed while the root target is still ambiguous.
+1. The named timer was stopped and root-targeted dry-run/execute completed.
+2. Scratch files were moved aside reversibly.
+3. The first cycle pushed the kept Git internals; the second recorded zero
+   `.git` conflicts, breaking the 909+ cycle loop.
+4. Two deliberate user-content conflicts (`README.md`, `AGENTS.md`) and one
+   stale `roam-canary-wip` ref pair remain.
+5. PR #551/TIN-2853 must still land through exact-head review and CI before the
+   source seam is accepted.
+
+TIN-2658 therefore remains In Review rather than Done. TIN-2856 blocks any
+further live resolver, enrollment/TOTP, deploy, or crypto ceremony. When that
+freeze clears, closure requires explicit content decisions, stale-ref handling,
+and final Git/content/state convergence evidence; Git-only success is not a
+whole-root convergence claim.
 
 ## B — Roam Roots
 
@@ -143,18 +204,23 @@ B succeeds when a fresh host can discover its authorized roots, map them to
 valid local paths, hydrate one, work, unsync it, and recover without editing a
 unit file or copying a state cache.
 
-## C — Hydratable Home and client breadth
+## C — Shippable Substrate and Clients
 
-Then widen the classes and clients:
+Turn the proven root lifecycle into a supportable product before widening the
+matrix:
 
-- agent sessions, prompts, and selected dot-directories;
-- repository collections and user-chosen home subtrees;
-- live linked-worktree reconstruction and recovery proof;
+- Rocky 10/10.1 RPM packaging, service policy, signed artifacts, clean install,
+  upgrade, rollback, uninstall, and vendor acceptance through Rockies;
 - polished Finder/FileProvider status, progress, recovery, and first run;
+- one shared root/session/hydrate/unsync/recovery conformance contract across
+  the Linux substrate and Finder client;
+- stable support diagnostics, privacy boundaries, update/revocation policy,
+  and a versioned vendor protocol/ABI contract;
+- agent sessions, prompts, selected dot-directories, repository collections,
+  and user-chosen home subtrees;
+- live linked-worktree reconstruction and recovery proof;
 - NFS parity and a justified FUSE-free Linux story;
 - Windows CFAPI and iOS lifecycle proofs;
-- Rocky 10/10.1 RPM packaging, service policy, upgrade, rollback, and vendor
-  acceptance through Rockies;
 - capacity, performance, and APFS-versus-TCFS benchmark packets that measure
   the TCFS path rather than presenting an APFS baseline as a TCFS result.
 

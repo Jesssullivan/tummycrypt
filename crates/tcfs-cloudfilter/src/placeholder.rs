@@ -87,7 +87,12 @@ pub async fn populate_root(
     op: &opendal::Operator,
     remote_prefix: &str,
 ) -> Result<usize> {
-    let index_prefix = format!("{}/index/", remote_prefix.trim_end_matches('/'));
+    let remote_prefix = remote_prefix.trim_end_matches('/');
+    let index_prefix = if remote_prefix.is_empty() {
+        "index/".to_string()
+    } else {
+        format!("{remote_prefix}/index/")
+    };
 
     info!(
         root = %sync_root.display(),
@@ -96,7 +101,8 @@ pub async fn populate_root(
     );
 
     let entries = op
-        .list(&index_prefix)
+        .list_with(&index_prefix)
+        .recursive(true)
         .await
         .context("listing remote index")?;
 
@@ -104,47 +110,53 @@ pub async fn populate_root(
     for entry in entries {
         // Use entry.path() for the full S3 key path
         let entry_path = entry.path();
-        let rel_path = entry_path.strip_prefix(&index_prefix).unwrap_or(entry_path);
+        let rel_path = entry_path.strip_prefix(&index_prefix).with_context(|| {
+            format!(
+                "remote placeholder listing escaped index prefix {index_prefix:?}: {entry_path:?}"
+            )
+        })?;
 
         if rel_path.is_empty() || rel_path.ends_with('/') {
-            continue; // skip directory markers
+            continue;
         }
-
-        // Read index entry to get metadata
-        let data = match op.read(entry_path).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(path = %entry_path, "skipping unreadable index entry: {e}");
-                continue;
-            }
-        };
-
-        let text = String::from_utf8_lossy(&data.to_bytes());
-        // Parse index entry: "manifest_hash=...\nsize=...\nchunks=...\n" format
-        let mut manifest_hash = String::new();
-        let mut size = 0u64;
-        for line in text.lines() {
-            if let Some(val) = line.strip_prefix("manifest_hash=") {
-                manifest_hash = val.to_string();
-            } else if let Some(val) = line.strip_prefix("size=") {
-                size = val.parse().unwrap_or(0);
-            }
-        }
-
-        if manifest_hash.is_empty() {
+        tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+            .with_context(|| format!("validating remote placeholder path: {rel_path:?}"))?;
+        if rel_path == ".tcfs_dir" || rel_path.ends_with("/.tcfs_dir") {
+            // Validate the reserved object instead of silently accepting a
+            // corrupt marker. Directories are created as parents of visible
+            // file placeholders, so the marker itself has no CFAPI entry.
+            tcfs_sync::index_entry::directory_marker_is_visible(op, entry_path)
+                .await
+                .with_context(|| format!("validating directory marker: {entry_path}"))?;
             continue;
         }
 
+        // Parse both legacy and versioned entries. A physical object carrying
+        // a v4 tombstone (or a preparing record with no current value) is not
+        // a visible placeholder. Corrupt records fail the population pass
+        // rather than being silently omitted.
+        let Some(record) =
+            tcfs_sync::index_entry::read_index_entry_record_from_store(op, entry_path)
+                .await
+                .with_context(|| format!("reading remote placeholder index entry: {entry_path}"))?
+        else {
+            // The object disappeared after LIST; absence is not a placeholder.
+            continue;
+        };
+        let Some(index_entry) = record.visible_entry() else {
+            continue;
+        };
+
         let info = PlaceholderInfo {
             relative_path: std::path::PathBuf::from(rel_path),
-            file_size: size,
+            file_size: index_entry.size,
             modified: std::time::SystemTime::now(),
-            content_hash: manifest_hash.clone(),
-            manifest_path: format!(
-                "{}/manifests/{}",
-                remote_prefix.trim_end_matches('/'),
-                manifest_hash
-            ),
+            content_hash: index_entry.manifest_hash.clone(),
+            manifest_path: if remote_prefix.is_empty() {
+                format!("manifests/{}", index_entry.manifest_hash)
+            } else {
+                format!("{remote_prefix}/manifests/{}", index_entry.manifest_hash)
+            },
             is_directory: false,
         };
 

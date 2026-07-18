@@ -10,6 +10,21 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+fn safe_permission_prefix(value: &str) -> Option<&str> {
+    let value = value.trim_matches('/');
+    if value.is_empty()
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 /// Per-device permission set.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevicePermissions {
@@ -62,7 +77,159 @@ impl DevicePermissions {
         if self.allowed_prefixes.is_empty() {
             return true; // No restrictions
         }
-        self.allowed_prefixes.iter().any(|p| prefix.starts_with(p))
+        let Some(requested) = safe_permission_prefix(prefix) else {
+            return false;
+        };
+        self.allowed_prefixes.iter().any(|allowed| {
+            let Some(allowed) = safe_permission_prefix(allowed) else {
+                return false;
+            };
+            requested == allowed
+                || requested
+                    .strip_prefix(allowed)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    }
+}
+
+/// Persisted authorization assigned when an enrollment invite is redeemed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAuthorization {
+    pub device_name: String,
+    pub permissions: DevicePermissions,
+}
+
+/// Device identity to enrollment-authority mapping used when minting sessions.
+/// Unknown devices intentionally have no implicit default permissions.
+#[derive(Clone, Default)]
+pub struct DeviceAuthorizationStore {
+    authorizations: Arc<RwLock<HashMap<String, DeviceAuthorization>>>,
+}
+
+fn validate_device_authorizations(
+    authorizations: &HashMap<String, DeviceAuthorization>,
+) -> anyhow::Result<()> {
+    for (device_id, authorization) in authorizations {
+        anyhow::ensure!(
+            !device_id.is_empty()
+                && !device_id.chars().any(char::is_control)
+                && !authorization.device_name.is_empty()
+                && !authorization.device_name.chars().any(char::is_control),
+            "device authorization contains an invalid device identity"
+        );
+        anyhow::ensure!(
+            authorization
+                .permissions
+                .allowed_prefixes
+                .iter()
+                .all(|prefix| safe_permission_prefix(prefix).is_some()),
+            "device authorization contains an invalid allowed prefix"
+        );
+    }
+    Ok(())
+}
+
+impl DeviceAuthorizationStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn authorize(
+        &self,
+        device_id: impl Into<String>,
+        device_name: impl Into<String>,
+        permissions: DevicePermissions,
+    ) {
+        self.authorizations.write().await.insert(
+            device_id.into(),
+            DeviceAuthorization {
+                device_name: device_name.into(),
+                permissions,
+            },
+        );
+    }
+
+    pub async fn get(&self, device_id: &str) -> Option<DeviceAuthorization> {
+        self.authorizations.read().await.get(device_id).cloned()
+    }
+
+    pub async fn revoke(&self, device_id: &str) {
+        self.authorizations.write().await.remove(device_id);
+    }
+
+    pub async fn count(&self) -> usize {
+        self.authorizations.read().await.len()
+    }
+
+    /// Atomically persist the authorization map with owner-only permissions.
+    pub async fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let data = {
+            let authorizations = self.authorizations.read().await;
+            validate_device_authorizations(&authorizations)?;
+            serde_json::to_vec_pretty(&*authorizations)?
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("authorization path has no parent"))?;
+        tokio::fs::create_dir_all(parent).await?;
+        let tmp = parent.join(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("device-authorizations"),
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp).await?;
+        file.write_all(&data).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&tmp, path).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    pub async fn load_from_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let metadata = tokio::fs::symlink_metadata(path).await?;
+        anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "device authorization store must be a regular, non-symlink file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: geteuid has no preconditions and only reads process identity.
+            let effective_uid = unsafe { libc::geteuid() };
+            anyhow::ensure!(
+                metadata.uid() == effective_uid,
+                "device authorization store must be owned by daemon uid {effective_uid}"
+            );
+            anyhow::ensure!(
+                metadata.nlink() == 1,
+                "device authorization store must have exactly one hard link"
+            );
+            anyhow::ensure!(
+                metadata.permissions().mode() & 0o077 == 0,
+                "device authorization store must be mode 0600 or stricter"
+            );
+        }
+        let data = tokio::fs::read(path).await?;
+        let loaded: HashMap<String, DeviceAuthorization> = serde_json::from_slice(&data)?;
+        validate_device_authorizations(&loaded)?;
+        *self.authorizations.write().await = loaded;
+        Ok(())
     }
 }
 
@@ -333,6 +500,8 @@ impl SessionStore {
 
     /// Save active (non-expired) sessions to a JSON file.
     pub async fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
         // Only persist valid sessions
         let sessions = self.sessions.read().await;
         let valid: HashMap<String, Session> = sessions
@@ -340,22 +509,61 @@ impl SessionStore {
             .filter(|(_, s)| s.is_valid())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let data = serde_json::to_string_pretty(&valid)?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.ok();
-        }
-        tokio::fs::write(path, data).await?;
+        drop(sessions);
+        let data = serde_json::to_vec_pretty(&valid)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("session path has no parent"))?;
+        tokio::fs::create_dir_all(parent).await?;
+        let tmp = parent.join(format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("sessions"),
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            options.mode(0o600);
         }
+        let mut file = options.open(&tmp).await?;
+        file.write_all(&data).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&tmp, path).await?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
         tracing::debug!(path = %path.display(), count = valid.len(), "saved sessions (mode 0600)");
         Ok(())
     }
 
     /// Load sessions from a JSON file, discarding any that have expired.
     pub async fn load_from_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let metadata = tokio::fs::symlink_metadata(path).await?;
+        anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "session store must be a regular, non-symlink file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            // SAFETY: geteuid has no preconditions and only reads process identity.
+            let effective_uid = unsafe { libc::geteuid() };
+            anyhow::ensure!(
+                metadata.uid() == effective_uid,
+                "session store must be owned by daemon uid {effective_uid}"
+            );
+            anyhow::ensure!(
+                metadata.nlink() == 1,
+                "session store must have one hard link"
+            );
+            anyhow::ensure!(
+                metadata.permissions().mode() & 0o077 == 0,
+                "session store must be mode 0600 or stricter"
+            );
+        }
         let data = tokio::fs::read_to_string(path).await?;
         let loaded: HashMap<String, Session> = serde_json::from_str(&data)?;
         let mut sessions = self.sessions.write().await;
@@ -442,7 +650,72 @@ mod tests {
             ..Default::default()
         };
         assert!(restricted.can_access_prefix("git/crush-dots"));
+        assert!(restricted.can_access_prefix("git"));
+        assert!(!restricted.can_access_prefix("git-malicious"));
+        assert!(!restricted.can_access_prefix("git/../secrets"));
         assert!(!restricted.can_access_prefix("secrets/keys"));
+    }
+
+    #[tokio::test]
+    async fn device_authorization_store_roundtrips_scoped_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-authorizations.json");
+        let store = DeviceAuthorizationStore::new();
+        let permissions = DevicePermissions {
+            can_mount: true,
+            can_push: false,
+            can_pull: true,
+            can_admin: false,
+            allowed_prefixes: vec!["git/team-a".into()],
+        };
+        store
+            .authorize("device-a", "read-only laptop", permissions.clone())
+            .await;
+        store.save_to_file(&path).await.unwrap();
+
+        let restored = DeviceAuthorizationStore::new();
+        restored.load_from_file(&path).await.unwrap();
+        let authorization = restored.get("device-a").await.unwrap();
+        assert_eq!(authorization.device_name, "read-only laptop");
+        assert!(!authorization.permissions.can_push);
+        assert_eq!(
+            authorization.permissions.allowed_prefixes,
+            permissions.allowed_prefixes
+        );
+        assert!(restored.get("unknown-device").await.is_none());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn device_authorization_store_rejects_unsafe_file_and_scope() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-authorizations.json");
+        std::fs::write(
+            &path,
+            r#"{"device-a":{"device_name":"laptop","permissions":{"can_mount":true,"can_push":true,"can_pull":true,"can_admin":false,"allowed_prefixes":["../escape"]}}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store = DeviceAuthorizationStore::new();
+        assert!(store.load_from_file(&path).await.is_err());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.load_from_file(&path).await.is_err());
+
+        let symlink_path = dir.path().join("authorizations-link.json");
+        std::os::unix::fs::symlink(&path, &symlink_path).unwrap();
+        assert!(store.load_from_file(&symlink_path).await.is_err());
     }
 
     #[tokio::test]

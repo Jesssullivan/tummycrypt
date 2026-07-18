@@ -81,6 +81,15 @@
         tcfsd = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tcfsd";
+          # Registered-root safety tests create real fixture repositories.
+          nativeCheckInputs = [ pkgs.git ];
+          # Linux Nix user namespaces expose sandbox-owned ancestors as uid
+          # 65534 and report ENOTSUP for POSIX ACL probes. Those semantics are
+          # intentionally rejected by tcfsd's production path validator, so a
+          # sandbox check cannot faithfully exercise the state-cache tests.
+          # Keep the fail-closed validator unchanged; Linux unit tests run in
+          # the ordinary Cargo CI lane, while Darwin retains this checkPhase.
+          doCheck = !pkgs.stdenv.isLinux;
           # Vendor OpenSSL on macOS to avoid dyld Team ID mismatch
           # when launchd loads the binary (Nix store openssl has different
           # code signature than the daemon binary).
@@ -96,6 +105,12 @@
           # keep-both CLI tests (TIN-2658) run real `git` repos in checkPhase;
           # the build sandbox has no ambient git.
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.gitMinimal ];
+          # Stable-root CLI tests exercise the same fail-closed ancestry and
+          # ACL checks as tcfsd. Linux Nix user namespaces expose sandbox
+          # ancestors as uid 65534 and cannot faithfully run those checks;
+          # ordinary Linux Cargo CI remains authoritative, while Darwin keeps
+          # the derivation checkPhase.
+          doCheck = !pkgs.stdenv.isLinux;
           meta.mainProgram = "tcfs";
         });
 

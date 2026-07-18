@@ -22,6 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -32,12 +33,18 @@ use opendal::Operator;
 use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
-use tcfs_sync::conflict::VectorClock;
-use tcfs_sync::index_entry::{write_committed_index_entry, RemoteEntryKind, RemoteIndexEntry};
-use tcfs_sync::manifest::SyncManifest;
+use tcfs_sync::conflict::{compare_clocks, SyncOutcome, VectorClock};
+use tcfs_sync::engine::{
+    bind_indexed_publish_baseline, publish_directory_marker, publish_indexed_manifest,
+    validate_indexed_manifest_entry_binding,
+};
+use tcfs_sync::index_entry::{
+    manifest_key, manifest_object_id, parse_index_entry, RemoteEntryKind, RemoteIndexEntry,
+};
+use tcfs_sync::manifest::{SymlinkManifest, SyncManifest};
 
 use crate::cache::DiskCache;
-use crate::hydrate::fetch_cached;
+use crate::hydrate::fetch_cached_from_manifest_bytes;
 use crate::negative_cache::NegativeCache;
 use crate::stub::IndexEntry;
 use crate::types::{VfsAttr, VfsDirEntry, VfsFileType, VfsStatFs};
@@ -51,8 +58,20 @@ const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024 * 1024;
 /// in S3 `list()` results. Filtered out of readdir output.
 const DIR_MARKER: &str = ".tcfs_dir";
 
-/// Content stored in directory marker index entries.
-const DIR_MARKER_CONTENT: &[u8] = b"type=directory\n";
+/// Convert the VFS callback's mount-absolute path into the one canonical
+/// relative path admitted by the remote index namespace.
+///
+/// Exactly one transport slash is removed. Repeated slashes, an already
+/// relative path, traversal, non-NFC spelling, and reserved Git aliases are
+/// rejected instead of being silently normalized into another object name.
+pub fn virtual_path_to_canonical_rel_path(vpath: &str) -> Result<&str> {
+    let rel_path = vpath
+        .strip_prefix('/')
+        .context("VFS callback path must begin with exactly one '/' transport separator")?;
+    tcfs_sync::index_entry::validate_canonical_rel_path(rel_path)
+        .context("invalid VFS callback path")?;
+    Ok(rel_path)
+}
 
 /// Positive directory hints learned from `readdir`.
 ///
@@ -71,10 +90,32 @@ struct FileHandle {
     modified: bool,
 }
 
+/// An index entry paired with the logical path that selected it.
+///
+/// Legacy physical stub aliases (for example, `file.txt.tc`) resolve through
+/// the unsuffixed index path, while exact remote `.tc` filenames retain their
+/// suffix. Keeping that lookup provenance is required for manifest binding.
+#[derive(Debug)]
+struct ResolvedIndexEntry {
+    entry: IndexEntry,
+    logical_rel_path: String,
+}
+
+/// Result of consulting one exact physical index key.
+///
+/// A durable tombstone is authoritative absence and must block the legacy
+/// `.tc`/`.tcf` suffix fallback. Physical absence alone may use that fallback.
+enum ExactIndexLookup {
+    Missing,
+    Tombstoned,
+    Visible(IndexEntry),
+}
+
 /// Callback invoked after a file is flushed to remote storage.
-/// Parameters: (virtual_path, file_hash, size_bytes, chunk_count, vclock)
+/// Parameters: (virtual_path, file_hash, manifest_object_id, size_bytes,
+/// chunk_count, vclock)
 pub type OnFlushCallback =
-    Arc<dyn Fn(&str, &str, u64, usize, &VectorClock) + Send + Sync + 'static>;
+    Arc<dyn Fn(&str, &str, &str, u64, usize, &VectorClock) + Send + Sync + 'static>;
 
 /// Result of an unsync (dehydration) operation.
 #[derive(Debug)]
@@ -114,6 +155,12 @@ pub struct TcfsVfs {
     /// Shared Arc allows the daemon to inject the key after FUSE mount starts
     /// (unlock happens via gRPC after daemon is already serving).
     master_key: Arc<tokio::sync::Mutex<Option<tcfs_crypto::MasterKey>>>,
+    /// Fail writes while the key is locked instead of silently publishing
+    /// plaintext into a root configured for encryption.
+    encryption_required_for_writes: bool,
+    /// Client surfaces without mutation parity (currently NFS) remain
+    /// hydration-only until their write contract is proven.
+    writes_enabled: bool,
     /// If true, unlink moves index entries to .tcfs-trash/ instead of deleting.
     trash_enabled: bool,
     /// Recently observed remote directories from list results.
@@ -154,6 +201,8 @@ impl TcfsVfs {
             device_id,
             vclocks: Arc::new(Mutex::new(HashMap::new())),
             master_key: Arc::new(tokio::sync::Mutex::new(None)),
+            encryption_required_for_writes: false,
+            writes_enabled: true,
             trash_enabled: false,
             known_dirs: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -173,6 +222,33 @@ impl TcfsVfs {
     ) -> Self {
         self.master_key = mk;
         self
+    }
+
+    pub fn require_encryption_for_writes(mut self, required: bool) -> Self {
+        self.encryption_required_for_writes = required;
+        self
+    }
+
+    pub fn hydration_only(mut self) -> Self {
+        self.writes_enabled = false;
+        self
+    }
+
+    async fn encryption_key_for_write(&self) -> Result<Option<tcfs_crypto::MasterKey>> {
+        anyhow::ensure!(
+            self.writes_enabled,
+            "EROFS: this TCFS client is hydration-only until write parity is proven"
+        );
+        let key = self.master_key.lock().await.clone();
+        anyhow::ensure!(
+            !self.encryption_required_for_writes || key.is_some(),
+            "EACCES: encrypted TCFS writes require an unlocked master key"
+        );
+        Ok(key)
+    }
+
+    async fn ensure_write_ready(&self) -> Result<()> {
+        self.encryption_key_for_write().await.map(|_| ())
     }
 
     /// Set a callback invoked after each flush_to_remote.
@@ -257,7 +333,39 @@ impl TcfsVfs {
     async fn flush_to_remote(&self, vpath: &str, data: &[u8]) -> Result<()> {
         use tracing::info;
 
+        let master_key = self.encryption_key_for_write().await?;
+
         let prefix = self.prefix.trim_end_matches('/');
+        let rel_path = virtual_path_to_canonical_rel_path(vpath)?;
+        let publish_baseline = bind_indexed_publish_baseline(&self.op, prefix, rel_path).await?;
+        let remote_entry = publish_baseline.current().cloned();
+
+        // Bind conflict classification to the same index identity consumed by
+        // publication. Hydration records the clock selected by the index; a
+        // local edit ticks that clock, so an independently advanced remote is
+        // concurrent and must not be erased by a flush.
+        let remote_manifest = if let Some(entry) = remote_entry.as_ref() {
+            anyhow::ensure!(
+                entry.kind == RemoteEntryKind::RegularFile,
+                "cannot flush a regular file over a remote symlink: {rel_path}"
+            );
+            let manifest_path = manifest_key(&format!("{prefix}/manifests"), &entry.manifest_hash);
+            let bytes = self
+                .op
+                .read(&manifest_path)
+                .await
+                .with_context(|| format!("reading remote manifest before flush: {manifest_path}"))?
+                .to_bytes();
+            validate_indexed_manifest_entry_binding(&bytes, &entry.manifest_hash, entry, rel_path)
+                .with_context(|| {
+                    format!("validating remote manifest before flush: {manifest_path}")
+                })?;
+            Some(SyncManifest::from_bytes(&bytes).with_context(|| {
+                format!("parsing remote manifest before flush: {manifest_path}")
+            })?)
+        } else {
+            None
+        };
 
         // 1. Chunk the data using FastCDC (content-defined boundaries)
         let sizes = tcfs_chunks::ChunkSizes::for_path(std::path::Path::new(vpath));
@@ -265,10 +373,7 @@ impl TcfsVfs {
         let file_hash = tcfs_chunks::hash_to_hex(&tcfs_chunks::hash_bytes(data));
 
         // 2. Generate per-file encryption key if master key is available
-        let mk_guard = self.master_key.lock().await;
-        let has_master_key = mk_guard.is_some();
-        drop(mk_guard);
-        let file_key = if has_master_key {
+        let file_key = if master_key.is_some() {
             Some(tcfs_crypto::generate_file_key())
         } else {
             None
@@ -312,8 +417,7 @@ impl TcfsVfs {
         }
 
         // 4. Wrap file key with master key for manifest storage
-        let mk_guard = self.master_key.lock().await;
-        let encrypted_file_key = match (mk_guard.as_ref(), &file_key) {
+        let encrypted_file_key = match (master_key.as_ref(), &file_key) {
             (Some(mk), Some(fk)) => {
                 let wrapped = tcfs_crypto::wrap_key(mk, fk).context("wrapping file key")?;
                 Some(base64::Engine::encode(
@@ -323,8 +427,6 @@ impl TcfsVfs {
             }
             _ => None,
         };
-        drop(mk_guard);
-
         // 5. Build vector clock and create v2 manifest with conflict metadata
         let mut vclock = {
             let vclocks = self.vclocks.lock().await;
@@ -332,6 +434,31 @@ impl TcfsVfs {
         };
         if !self.device_id.is_empty() {
             vclock.tick(&self.device_id);
+        }
+        if let Some(remote_manifest) = remote_manifest.as_ref() {
+            match compare_clocks(
+                &vclock,
+                &remote_manifest.vclock,
+                &file_hash,
+                &remote_manifest.file_hash,
+                rel_path,
+                &self.device_id,
+                &remote_manifest.written_by,
+            ) {
+                SyncOutcome::LocalNewer | SyncOutcome::UpToDate => {
+                    vclock.merge(&remote_manifest.vclock);
+                }
+                SyncOutcome::RemoteNewer => {
+                    anyhow::bail!(
+                        "remote file advanced before VFS flush; refusing to overwrite: {rel_path}"
+                    );
+                }
+                SyncOutcome::Conflict(_) => {
+                    anyhow::bail!(
+                        "concurrent remote file update detected before VFS flush: {rel_path}"
+                    );
+                }
+            }
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -345,35 +472,37 @@ impl TcfsVfs {
             vclock: vclock.clone(),
             written_by: self.device_id.clone(),
             written_at: now,
-            rel_path: Some(vpath.to_string()),
+            rel_path: Some(rel_path.to_string()),
             mode: None,
             mtime: None,
             encrypted_file_key,
             wrapped_file_keys: Vec::new(),
         };
-        let manifest_key = format!("{}/manifests/{}", prefix, file_hash);
-        self.op
-            .write(
-                &manifest_key,
-                manifest.to_bytes().context("serializing manifest")?,
-            )
-            .await
-            .context("uploading manifest")?;
-        // Store updated vclock for future writes to this path
+        let manifest_bytes = manifest.to_bytes().context("serializing manifest")?;
+        let manifest_object_id = manifest_object_id(&manifest_bytes);
+        let manifest_key = format!("{}/manifests/{}", prefix, manifest_object_id);
+        // 4. Update index entry
+        let index_entry = RemoteIndexEntry::new(
+            manifest_object_id.clone(),
+            data.len() as u64,
+            chunk_hashes.len(),
+        );
+        publish_indexed_manifest(
+            &self.op,
+            prefix,
+            rel_path,
+            manifest_bytes,
+            index_entry,
+            publish_baseline,
+        )
+        .await
+        .context("publishing bound manifest and index entry")?;
+
+        // Store updated vclock only after the exact-baseline CAS succeeds.
         {
             let mut vclocks = self.vclocks.lock().await;
             vclocks.insert(vpath.to_string(), vclock.clone());
         }
-
-        // 4. Update index entry
-        let index_key = self
-            .index_key_for(vpath)
-            .context("cannot compute index key")?;
-        let index_entry =
-            RemoteIndexEntry::new(file_hash.clone(), data.len() as u64, chunk_hashes.len());
-        write_committed_index_entry(&self.op, &index_key, &index_entry)
-            .await
-            .context("writing index entry")?;
 
         info!(
             path = %vpath,
@@ -391,6 +520,7 @@ impl TcfsVfs {
             cb(
                 vpath,
                 &file_hash,
+                &manifest_object_id,
                 data.len() as u64,
                 chunk_hashes.len(),
                 &vclock,
@@ -426,11 +556,12 @@ impl TcfsVfs {
     /// This is only a fallback after the exact `.tc` key was absent, because
     /// real source trees can legitimately contain files ending in `.tc`.
     fn legacy_stub_index_key_for(&self, vpath: &str) -> Option<String> {
+        self.index_key_for_rel(Self::legacy_stub_rel_path(vpath)?)
+    }
+
+    fn legacy_stub_rel_path(vpath: &str) -> Option<&str> {
         let rel = vpath.trim_start_matches('/');
-        let real = rel
-            .strip_suffix(".tc")
-            .or_else(|| rel.strip_suffix(".tcf"))?;
-        self.index_key_for_rel(real)
+        rel.strip_suffix(".tc").or_else(|| rel.strip_suffix(".tcf"))
     }
 
     /// The index prefix for directory listing: `{prefix}/index/{rel_dir}/`
@@ -480,63 +611,111 @@ impl TcfsVfs {
             .collect()
     }
 
-    async fn get_index_entry_at_key(&self, vpath: &str, key: String) -> Option<IndexEntry> {
+    async fn get_index_entry_at_key(&self, vpath: &str, key: String) -> Result<ExactIndexLookup> {
         debug!(vpath = %vpath, key = %key, "get_index_entry: reading S3 key");
-        let data = match self.op.read(&key).await {
-            Ok(d) => d,
-            Err(e) => {
-                debug!(vpath = %vpath, key = %key, error = %e, "get_index_entry: index key not present");
-                return None;
-            }
+        let manifest_prefix = if self.prefix.trim_end_matches('/').is_empty() {
+            "manifests".to_string()
+        } else {
+            format!("{}/manifests", self.prefix.trim_end_matches('/'))
         };
-        let text = match String::from_utf8(data.to_bytes().to_vec()) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(vpath = %vpath, key = %key, error = %e, "get_index_entry: non-UTF8 data");
-                return None;
-            }
+        let Some(record) =
+            tcfs_sync::index_entry::read_index_entry_record_from_store(&self.op, &key)
+                .await
+                .with_context(|| format!("reading exact index entry for {vpath}: {key}"))?
+        else {
+            return Ok(ExactIndexLookup::Missing);
         };
-        debug!(vpath = %vpath, key = %key, text_len = text.len(), "get_index_entry: parsing");
-        match IndexEntry::parse(&text) {
-            Ok(entry) => Some(entry),
-            Err(e) => {
-                if text.trim().is_empty() {
-                    debug!(vpath = %vpath, key = %key, "get_index_entry: empty index object treated as non-file entry");
-                } else {
-                    tracing::warn!(vpath = %vpath, key = %key, error = %e, text_len = text.len(), "get_index_entry: parse failed");
-                }
-                None
-            }
+        if record.state() == tcfs_sync::index_entry::IndexEntryState::Deleted {
+            return Ok(ExactIndexLookup::Tombstoned);
         }
-    }
 
-    /// Fetch and parse an IndexEntry for a virtual path using its exact key.
-    async fn get_index_entry(&self, vpath: &str) -> Option<IndexEntry> {
-        let key = self.index_key_for(vpath)?;
-        self.get_index_entry_at_key(vpath, key).await
+        let entry =
+            tcfs_sync::index_entry::resolve_visible_index_entry(&self.op, &key, &manifest_prefix)
+                .await
+                .with_context(|| format!("resolving exact index entry for {vpath}: {key}"))?
+                .with_context(|| {
+                    format!("exact index entry has no visible value for {vpath}: {key}")
+                })?;
+        Ok(ExactIndexLookup::Visible(entry.into()))
     }
 
     /// Fetch an IndexEntry using exact lookup first, then legacy stub fallback.
-    async fn get_index_entry_with_legacy_stub_fallback(&self, vpath: &str) -> Option<IndexEntry> {
-        if let Some(entry) = self.get_index_entry(vpath).await {
-            return Some(entry);
+    async fn get_index_entry_with_legacy_stub_fallback(
+        &self,
+        vpath: &str,
+    ) -> Result<Option<ResolvedIndexEntry>> {
+        let Some(exact_key) = self.index_key_for(vpath) else {
+            return Ok(None);
+        };
+        match self.get_index_entry_at_key(vpath, exact_key).await? {
+            ExactIndexLookup::Visible(entry) => {
+                return Ok(Some(ResolvedIndexEntry {
+                    entry,
+                    logical_rel_path: vpath.trim_start_matches('/').to_string(),
+                }));
+            }
+            ExactIndexLookup::Tombstoned => return Ok(None),
+            ExactIndexLookup::Missing => {}
         }
 
-        let key = self.legacy_stub_index_key_for(vpath)?;
-        self.get_index_entry_at_key(vpath, key).await
+        let Some(logical_rel_path) = Self::legacy_stub_rel_path(vpath) else {
+            return Ok(None);
+        };
+        let Some(key) = self.legacy_stub_index_key_for(vpath) else {
+            return Ok(None);
+        };
+        let entry = match self.get_index_entry_at_key(vpath, key).await? {
+            ExactIndexLookup::Visible(entry) => entry,
+            ExactIndexLookup::Missing | ExactIndexLookup::Tombstoned => return Ok(None),
+        };
+        Ok(Some(ResolvedIndexEntry {
+            entry,
+            logical_rel_path: logical_rel_path.to_string(),
+        }))
     }
 
     /// Fetch attributes from an index entry by its S3 key.
-    async fn read_index_entry_attr(&self, index_key: &str) -> Option<VfsAttr> {
-        match self.op.read(index_key).await {
-            Ok(data) => {
-                let text = String::from_utf8(data.to_bytes().to_vec()).unwrap_or_default();
-                IndexEntry::parse(&text)
-                    .ok()
-                    .map(|entry| self.attr_for_index_entry(&entry))
-            }
-            Err(_) => None,
+    async fn read_index_entry_attr(&self, index_key: &str) -> Result<Option<VfsAttr>> {
+        match self
+            .get_index_entry_at_key(index_key, index_key.to_string())
+            .await?
+        {
+            ExactIndexLookup::Visible(entry) => Ok(Some(self.attr_for_index_entry(&entry))),
+            ExactIndexLookup::Missing | ExactIndexLookup::Tombstoned => Ok(None),
         }
+    }
+
+    /// Return whether an index subtree contains any logically visible entry.
+    /// Physical v4 tombstones intentionally remain in object storage and must
+    /// not keep directories visible by their key alone.
+    async fn index_prefix_has_visible_entries(&self, index_prefix: &str) -> Result<bool> {
+        let entries = self
+            .op
+            .list_with(index_prefix)
+            .recursive(true)
+            .await
+            .with_context(|| format!("listing logical index subtree: {index_prefix}"))?;
+        for entry in entries {
+            let key = entry.path();
+            if key.ends_with('/') {
+                continue;
+            }
+            if key.ends_with("/.tcfs_dir") {
+                if tcfs_sync::index_entry::directory_marker_is_visible(&self.op, key).await? {
+                    return Ok(true);
+                }
+                continue;
+            }
+            let Some(record) =
+                tcfs_sync::index_entry::read_index_entry_record_from_store(&self.op, key).await?
+            else {
+                continue;
+            };
+            if record.visible_entry().is_some() || record.pending_entry().is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Synthesize file attributes.
@@ -633,8 +812,13 @@ impl TcfsVfs {
                 if seen_dirs.contains(&dir_name) {
                     continue;
                 }
+                let child_path = Self::child_virtual_path(path, &dir_name);
+                let child_prefix = self.index_prefix_for_dir(&child_path);
+                if !self.index_prefix_has_visible_entries(&child_prefix).await? {
+                    continue;
+                }
                 seen_dirs.insert(dir_name.clone());
-                discovered_dir_paths.push(Self::child_virtual_path(path, &dir_name));
+                discovered_dir_paths.push(child_path);
                 entries.push(VfsDirEntry {
                     name: dir_name,
                     kind: VfsFileType::Directory,
@@ -660,12 +844,12 @@ impl TcfsVfs {
                 continue;
             }
 
-            let Some(parsed_attr) = self.read_index_entry_attr(&full_path).await else {
+            let Some(parsed_attr) = self.read_index_entry_attr(&full_path).await? else {
                 debug!(
                     path = %path,
                     name = %clean_name,
                     key = %full_path,
-                    "readdir: skipping unreadable or non-index leaf object"
+                    "readdir: skipping missing or tombstoned index leaf object"
                 );
                 continue;
             };
@@ -687,21 +871,20 @@ impl TcfsVfs {
             let prefixes = self.discover_prefixes().await;
             for pfx in prefixes {
                 let probe = format!("{}/index/", pfx);
-                if let Ok(idx_entries) = self.op.list(&probe).await {
-                    if !idx_entries.is_empty() && !seen_dirs.contains(&pfx) {
-                        seen_dirs.insert(pfx.clone());
-                        self.remember_dir_hints([Self::child_virtual_path(path, &pfx)])
-                            .await;
-                        entries.push(VfsDirEntry {
-                            name: pfx,
-                            kind: VfsFileType::Directory,
-                            attr: if with_attrs {
-                                Some(self.dir_attr())
-                            } else {
-                                None
-                            },
-                        });
-                    }
+                if self.index_prefix_has_visible_entries(&probe).await? && !seen_dirs.contains(&pfx)
+                {
+                    seen_dirs.insert(pfx.clone());
+                    self.remember_dir_hints([Self::child_virtual_path(path, &pfx)])
+                        .await;
+                    entries.push(VfsDirEntry {
+                        name: pfx,
+                        kind: VfsFileType::Directory,
+                        attr: if with_attrs {
+                            Some(self.dir_attr())
+                        } else {
+                            None
+                        },
+                    });
                 }
             }
         }
@@ -729,18 +912,17 @@ impl VirtualFilesystem for TcfsVfs {
 
         // File: exact index lookup first; legacy physical-stub fallback only
         // when the exact `.tc`/`.tcf` filename is absent.
-        if let Some(entry) = self.get_index_entry_with_legacy_stub_fallback(path).await {
-            return Ok(self.attr_for_index_entry(&entry));
+        if let Some(resolved) = self.get_index_entry_with_legacy_stub_fallback(path).await? {
+            return Ok(self.attr_for_index_entry(&resolved.entry));
         }
 
         // Directory: check if any index entries exist under it
         let dir_prefix = self.index_prefix_for_dir(path);
-        match self.op.list(&dir_prefix).await {
-            Ok(entries) if !entries.is_empty() => Ok(self.dir_attr()),
-            _ => {
-                self.negative_cache.insert(path);
-                anyhow::bail!("ENOENT: {}", path);
-            }
+        if self.index_prefix_has_visible_entries(&dir_prefix).await? {
+            Ok(self.dir_attr())
+        } else {
+            self.negative_cache.insert(path);
+            anyhow::bail!("ENOENT: {}", path);
         }
     }
 
@@ -765,23 +947,43 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn readlink(&self, path: &str) -> Result<String> {
-        let entry = self
+        let resolved = self
             .get_index_entry_with_legacy_stub_fallback(path)
-            .await
+            .await?
             .context(format!("index entry not found: {}", path))?;
+        let entry = &resolved.entry;
         if entry.kind != RemoteEntryKind::Symlink {
             anyhow::bail!("EINVAL: not a symlink: {}", path);
         }
-        entry
-            .symlink_target
-            .context(format!("symlink index entry missing target: {}", path))
+        let manifest_path = entry.manifest_path(&self.prefix);
+        let manifest_bytes = self
+            .op
+            .read(&manifest_path)
+            .await
+            .with_context(|| format!("reading symlink manifest: {manifest_path}"))?
+            .to_bytes();
+        validate_indexed_manifest_entry_binding(
+            &manifest_bytes,
+            &entry.manifest_hash,
+            &entry.as_remote_entry(),
+            &resolved.logical_rel_path,
+        )
+        .with_context(|| format!("validating symlink manifest binding for {path}"))?;
+        let manifest = SymlinkManifest::from_bytes(&manifest_bytes)
+            .with_context(|| format!("parsing symlink manifest for {path}"))?;
+        tcfs_sync::engine::validate_indexed_symlink_target(
+            Path::new(path),
+            &manifest.symlink_target,
+        )?;
+        Ok(manifest.symlink_target)
     }
 
     async fn open(&self, path: &str) -> Result<(u64, Vec<u8>)> {
-        let entry = self
+        let resolved = self
             .get_index_entry_with_legacy_stub_fallback(path)
-            .await
+            .await?
             .context(format!("index entry not found: {}", path))?;
+        let entry = &resolved.entry;
 
         if entry.kind == RemoteEntryKind::Symlink {
             anyhow::bail!("ELOOP: open called on symlink: {}", path);
@@ -792,20 +994,45 @@ impl VirtualFilesystem for TcfsVfs {
 
         debug!(path = %path, manifest = %manifest_path, "hydrating on open");
 
+        // Bind the index-selected object, kind, and path before consulting the
+        // plaintext cache. A valid object for another path must not hydrate
+        // through a forged or stale index entry.
+        let manifest_bytes = self
+            .op
+            .read(&manifest_path)
+            .await
+            .with_context(|| format!("reading manifest binding: {manifest_path}"))?
+            .to_bytes();
+        validate_indexed_manifest_entry_binding(
+            &manifest_bytes,
+            &entry.manifest_hash,
+            &entry.as_remote_entry(),
+            &resolved.logical_rel_path,
+        )
+        .with_context(|| format!("validating manifest binding for {path}"))?;
+        let bound_manifest = SyncManifest::from_bytes(&manifest_bytes)
+            .with_context(|| format!("parsing manifest clock for {path}"))?;
+
         // Read master key from shared mutex (may be injected after mount via gRPC unlock)
         let mk_guard = self.master_key.lock().await;
         let mk_bytes: Option<[u8; 32]> = mk_guard.as_ref().map(|k| *k.as_bytes());
         drop(mk_guard);
 
-        let data = fetch_cached(
+        let data = fetch_cached_from_manifest_bytes(
             &self.op,
             &manifest_path,
+            &manifest_bytes,
             prefix,
             &self.disk_cache,
             mk_bytes.as_ref(),
         )
         .await
         .with_context(|| format!("hydration failed: {}", path))?;
+
+        self.vclocks
+            .lock()
+            .await
+            .insert(path.to_string(), bound_manifest.vclock);
 
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
         self.handles.write().await.insert(
@@ -842,7 +1069,12 @@ impl VirtualFilesystem for TcfsVfs {
             if h.modified {
                 // Flush modified content to SeaweedFS
                 debug!(path = %h.path, bytes = h.data.len(), "flushing modified file to S3");
-                self.flush_to_remote(&h.path, &h.data).await?;
+                if let Err(error) = self.flush_to_remote(&h.path, &h.data).await {
+                    // A key lock or transient storage failure must not discard
+                    // the only buffered copy. Keep the handle retryable.
+                    self.handles.write().await.insert(fh, h);
+                    return Err(error);
+                }
             }
         }
 
@@ -850,6 +1082,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32> {
+        self.ensure_write_ready().await?;
         let mut handles = self.handles.write().await;
         let handle = handles
             .get_mut(&fh)
@@ -877,6 +1110,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn truncate(&self, path: Option<&str>, fh: Option<u64>, size: u64) -> Result<VfsAttr> {
+        self.ensure_write_ready().await?;
         if size as usize > MAX_WRITE_SIZE {
             anyhow::bail!(
                 "EFBIG: truncate would exceed maximum file size ({} bytes, limit {} bytes)",
@@ -918,6 +1152,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn create(&self, parent: &str, name: &OsStr, _mode: u32) -> Result<(u64, VfsAttr)> {
+        self.ensure_write_ready().await?;
         let name_str = name.to_str().context("non-UTF-8 filename")?;
         let vpath = if parent == "/" {
             format!("/{}", name_str)
@@ -945,6 +1180,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn unlink(&self, parent: &str, name: &OsStr) -> Result<()> {
+        self.ensure_write_ready().await?;
         let name_str = name.to_str().context("non-UTF-8 filename")?;
         let vpath = if parent == "/" {
             format!("/{}", name_str)
@@ -961,9 +1197,16 @@ impl VirtualFilesystem for TcfsVfs {
                     .await
                     .context("moving index entry to trash")?;
             } else {
-                // Permanent delete
-                debug!(path = %vpath, key = %key, "deleting index entry");
-                self.op.delete(&key).await.context("deleting index entry")?;
+                // Logical delete with compare-and-swap. The durable tombstone
+                // avoids deleting a concurrent publisher's replacement.
+                debug!(path = %vpath, key = %key, "tombstoning index entry");
+                tcfs_sync::index_entry::tombstone_index_entry(
+                    &self.op,
+                    self.prefix.trim_end_matches('/'),
+                    &key,
+                )
+                .await
+                .context("tombstoning index entry")?;
             }
         }
 
@@ -971,6 +1214,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn mkdir(&self, parent: &str, name: &OsStr, _mode: u32) -> Result<VfsAttr> {
+        self.ensure_write_ready().await?;
         let name_str = name.to_str().context("non-UTF-8 directory name")?;
         let vpath = if parent == "/" {
             format!("/{}", name_str)
@@ -981,9 +1225,8 @@ impl VirtualFilesystem for TcfsVfs {
         debug!(path = %vpath, "creating directory");
 
         // Write directory marker so getattr/readdir can find empty directories
-        let marker_key = self.dir_marker_key(&vpath);
-        self.op
-            .write(&marker_key, DIR_MARKER_CONTENT.to_vec())
+        let rel_path = vpath.trim_start_matches('/');
+        publish_directory_marker(&self.op, &self.prefix, rel_path)
             .await
             .context("writing directory marker")?;
 
@@ -1001,6 +1244,7 @@ impl VirtualFilesystem for TcfsVfs {
         to_parent: &str,
         to_name: &OsStr,
     ) -> Result<()> {
+        self.ensure_write_ready().await?;
         let from_str = from_name.to_str().context("non-UTF-8 source name")?;
         let to_str = to_name.to_str().context("non-UTF-8 target name")?;
 
@@ -1025,21 +1269,75 @@ impl VirtualFilesystem for TcfsVfs {
             .index_key_for(&to_path)
             .context("cannot compute target index key")?;
 
-        let data = self
+        let index_bytes = self
             .op
             .read(&from_key)
             .await
             .with_context(|| format!("reading source index: {}", from_key))?;
-
-        self.op
-            .write(&to_key, data.to_vec())
+        let source_index_bytes = index_bytes.to_bytes();
+        let mut index_entry = parse_index_entry(&source_index_bytes)
+            .with_context(|| format!("parsing source index: {from_key}"))?;
+        let from_rel_path = from_path.trim_start_matches('/');
+        let to_rel_path = to_path.trim_start_matches('/');
+        let publish_baseline =
+            bind_indexed_publish_baseline(&self.op, &self.prefix, to_rel_path).await?;
+        let source_manifest_key = manifest_key(
+            &format!("{}/manifests", self.prefix.trim_end_matches('/')),
+            &index_entry.manifest_hash,
+        );
+        let source_manifest_bytes = self
+            .op
+            .read(&source_manifest_key)
             .await
-            .with_context(|| format!("writing target index: {}", to_key))?;
+            .with_context(|| format!("reading source manifest: {source_manifest_key}"))?
+            .to_bytes();
+        validate_indexed_manifest_entry_binding(
+            &source_manifest_bytes,
+            &index_entry.manifest_hash,
+            &index_entry,
+            from_rel_path,
+        )
+        .with_context(|| format!("validating source manifest binding: {from_path}"))?;
 
-        self.op
-            .delete(&from_key)
-            .await
-            .with_context(|| format!("deleting source index: {}", from_key))?;
+        let rebound_manifest = match index_entry.kind {
+            RemoteEntryKind::RegularFile => {
+                let mut manifest = SyncManifest::from_bytes(&source_manifest_bytes)
+                    .context("parsing regular manifest for rename")?;
+                manifest.rel_path = Some(to_rel_path.to_string());
+                manifest
+                    .to_bytes()
+                    .context("serializing path-rebound regular manifest")?
+            }
+            RemoteEntryKind::Symlink => {
+                let mut manifest = SymlinkManifest::from_bytes(&source_manifest_bytes)
+                    .context("parsing symlink manifest for rename")?;
+                manifest.rel_path = Some(to_rel_path.to_string());
+                manifest
+                    .to_bytes()
+                    .context("serializing path-rebound symlink manifest")?
+            }
+        };
+        let rebound_object_id = manifest_object_id(&rebound_manifest);
+        index_entry.manifest_hash = rebound_object_id;
+        publish_indexed_manifest(
+            &self.op,
+            &self.prefix,
+            to_rel_path,
+            rebound_manifest,
+            index_entry,
+            publish_baseline,
+        )
+        .await
+        .with_context(|| format!("publishing target index: {to_key}"))?;
+
+        tcfs_sync::index_entry::tombstone_index_entry_if_exact(
+            &self.op,
+            self.prefix.trim_end_matches('/'),
+            &from_key,
+            &source_index_bytes,
+        )
+        .await
+        .with_context(|| format!("tombstoning exact source index: {from_key}"))?;
 
         // Update any open file handles pointing to the old path
         {
@@ -1058,6 +1356,7 @@ impl VirtualFilesystem for TcfsVfs {
     }
 
     async fn rmdir(&self, parent: &str, name: &OsStr) -> Result<()> {
+        self.ensure_write_ready().await?;
         let name_str = name.to_str().context("non-UTF-8 directory name")?;
         let vpath = if parent == "/" {
             format!("/{}", name_str)
@@ -1075,24 +1374,50 @@ impl VirtualFilesystem for TcfsVfs {
             .await
             .context("listing directory for rmdir")?;
 
-        let real_entries: Vec<_> = entries
-            .iter()
-            .filter(|e| {
-                let rel = e.path().trim_start_matches(&dir_prefix);
-                !rel.is_empty() && rel.trim_end_matches('/') != DIR_MARKER
-            })
-            .collect();
-
-        if !real_entries.is_empty() {
-            anyhow::bail!("ENOTEMPTY: directory not empty: {}", vpath);
+        let marker_key = self.dir_marker_key(&vpath);
+        for entry in entries {
+            let key = entry.path();
+            if key == marker_key {
+                continue;
+            }
+            if key.ends_with('/') {
+                if self.index_prefix_has_visible_entries(key).await? {
+                    anyhow::bail!("ENOTEMPTY: directory not empty: {}", vpath);
+                }
+                continue;
+            }
+            if key.ends_with("/.tcfs_dir") {
+                if tcfs_sync::index_entry::directory_marker_is_visible(&self.op, key).await? {
+                    anyhow::bail!("ENOTEMPTY: directory not empty: {}", vpath);
+                }
+                continue;
+            }
+            let Some(record) =
+                tcfs_sync::index_entry::read_index_entry_record_from_store(&self.op, key).await?
+            else {
+                continue;
+            };
+            if record.visible_entry().is_some() || record.pending_entry().is_some() {
+                anyhow::bail!("ENOTEMPTY: directory not empty: {}", vpath);
+            }
         }
 
-        // Delete the directory marker
-        let marker_key = self.dir_marker_key(&vpath);
-        self.op
-            .delete(&marker_key)
+        // Atomically hide the directory marker without removing a concurrent
+        // replacement or discarding its durable evidence.
+        let marker_bytes = self
+            .op
+            .read(&marker_key)
             .await
-            .context("deleting directory marker")?;
+            .context("reading directory marker before tombstone")?
+            .to_vec();
+        tcfs_sync::index_entry::tombstone_directory_marker_if_exact(
+            &self.op,
+            self.prefix.trim_end_matches('/'),
+            &marker_key,
+            &marker_bytes,
+        )
+        .await
+        .context("tombstoning directory marker")?;
 
         Ok(())
     }
@@ -1111,7 +1436,13 @@ impl VirtualFilesystem for TcfsVfs {
             return Ok(());
         }
 
-        self.flush_to_remote(&path, &data).await
+        self.flush_to_remote(&path, &data).await?;
+        if let Some(handle) = self.handles.write().await.get_mut(&fh) {
+            if handle.data == data {
+                handle.modified = false;
+            }
+        }
+        Ok(())
     }
 
     async fn statfs(&self) -> Result<VfsStatFs> {
@@ -1130,6 +1461,7 @@ mod tests {
         let op = Operator::new(opendal::services::Memory::default())
             .unwrap()
             .finish();
+        tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
         TcfsVfs::new(
             op,
             prefix.to_string(),
@@ -1205,6 +1537,58 @@ mod tests {
         assert_eq!(
             vfs.legacy_stub_index_key_for("/doc.pdf.tcf"),
             Some("data/index/doc.pdf".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_exact_tc_entry_never_falls_back_to_unsuffixed_legacy_key() {
+        let vfs = make_vfs("data");
+        vfs.op
+            .write("data/index/src/main.rs.tc", b"{not-json".to_vec())
+            .await
+            .unwrap();
+        vfs.op
+            .write(
+                "data/index/src/main.rs",
+                b"manifest_hash=legacy\nsize=1\nchunks=1".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        let error = vfs
+            .get_index_entry_with_legacy_stub_fallback("/src/main.rs.tc")
+            .await
+            .expect_err("corrupt exact entry must fail closed before legacy fallback");
+
+        assert!(format!("{error:#}").contains("parsing versioned index entry"));
+    }
+
+    #[tokio::test]
+    async fn tombstoned_exact_tc_entry_blocks_unsuffixed_legacy_fallback() {
+        let vfs = make_vfs("data");
+        let tombstone = tcfs_sync::index_entry::VersionedIndexEntry::deleted()
+            .to_json_bytes()
+            .unwrap();
+        vfs.op
+            .write("data/index/src/main.rs.tc", tombstone)
+            .await
+            .unwrap();
+        vfs.op
+            .write(
+                "data/index/src/main.rs",
+                b"manifest_hash=legacy\nsize=1\nchunks=1".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        let resolved = vfs
+            .get_index_entry_with_legacy_stub_fallback("/src/main.rs.tc")
+            .await
+            .unwrap();
+
+        assert!(
+            resolved.is_none(),
+            "an exact deletion tombstone must not expose the legacy unsuffixed entry"
         );
     }
 

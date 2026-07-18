@@ -16,7 +16,7 @@ direct = ["dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:tcfs-sy
 ## gRPC backend — delegates metadata/watch operations to tcfsd daemon and
 ## downloads file content in-process so FileProvider temp files are written by
 ## the extension, not by the daemon.
-grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream", "dep:futures", "dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:tcfs-sync", "tcfs-sync/crypto", "dep:tcfs-secrets", "dep:opendal", "dep:base64"]
+grpc = ["dep:tonic", "dep:tower", "dep:hyper-util", "dep:tokio-stream", "dep:futures", "dep:tcfs-storage", "dep:tcfs-chunks", "dep:tcfs-crypto", "dep:tcfs-sync", "tcfs-sync/crypto", "dep:tcfs-secrets", "dep:opendal", "dep:secrecy", "dep:base64", "dep:tempfile"]
 ## UniFFI bindings for iOS (proc-macro based, no UDL needed)
 uniffi = ["direct", "dep:uniffi", "dep:tcfs-auth", "dep:blake3"]
 
@@ -35,6 +35,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }

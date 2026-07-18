@@ -6,10 +6,26 @@ use anyhow::{Context, Result};
 use opendal::services::Memory;
 use opendal::Operator;
 use tcfs_fuse::{mount, MountConfig};
+use tcfs_sync::index_entry::IndexEntryState;
 use tempfile::TempDir;
 
 fn memory_operator() -> Operator {
-    Operator::new(Memory::default()).unwrap().finish()
+    let op = Operator::new(Memory::default()).unwrap().finish();
+    tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+    op
+}
+
+async fn assert_tombstoned(op: &Operator, index_key: &str) -> Result<()> {
+    let record = tcfs_sync::index_entry::read_index_entry_record_from_store(op, index_key)
+        .await?
+        .with_context(|| format!("missing durable index tombstone: {index_key}"))?;
+    anyhow::ensure!(
+        record.state() == IndexEntryState::Deleted
+            && record.visible_entry().is_none()
+            && record.pending_entry().is_none(),
+        "expected logically deleted index entry at {index_key}"
+    );
+    Ok(())
 }
 
 fn skip_reason() -> Option<&'static str> {
@@ -117,6 +133,7 @@ async fn spawn_mount(
                 on_flush: None,
                 device_id: "test-device".into(),
                 master_key: None,
+                encryption_required: false,
             },
             None,
         )
@@ -300,13 +317,14 @@ async fn mount_lifecycle_updates_remote_state_across_rename_and_delete() -> Resu
 
     let renamed_file = docs_dir.join("new.txt");
     rename_path(old_file, renamed_file.clone()).await?;
-    assert!(
-        op.read(&old_key).await.is_err(),
-        "old remote index entry should be removed after rename"
-    );
-    assert!(
-        op.read(&new_key).await.is_ok(),
-        "expected new remote index entry after rename"
+    assert_tombstoned(&op, &old_key).await?;
+    let renamed_record = tcfs_sync::index_entry::read_index_entry_record_from_store(&op, &new_key)
+        .await?
+        .context("missing new remote index entry after rename")?;
+    assert_eq!(
+        renamed_record.state(),
+        IndexEntryState::Committed,
+        "rename target should be live"
     );
 
     unmount_fuse(&mountpoint).await?;
@@ -344,14 +362,8 @@ async fn mount_lifecycle_updates_remote_state_across_rename_and_delete() -> Resu
         .context("second lifecycle mount failed")?;
     wait_for_mount_state(&mountpoint, false).await?;
 
-    assert!(
-        op.read(&new_key).await.is_err(),
-        "renamed remote index entry should be removed after unlink"
-    );
-    assert!(
-        op.read(&dir_key).await.is_err(),
-        "directory marker should be removed after rmdir"
-    );
+    assert_tombstoned(&op, &new_key).await?;
+    assert_tombstoned(&op, &dir_key).await?;
 
     Ok(())
 }

@@ -11,11 +11,122 @@ intent rather than the current supported/proven surface.
 
 ## [Unreleased]
 
+### Added
+
+- Daemon-trusted stable-root routing for isolated conflict caches: clients can
+  inspect a named root and run the bounded Git keep-both dry-run/execute flow
+  without supplying a state path or storage prefix. Registered roots inherit
+  the global storage transport. An earlier mechanism build was enrolled and
+  exercised on Honey before the TIN-2856 incident freeze; this exact hardening
+  head remains source-only, and that earlier run is not evidence for it. The
+  entire named-root precursor, including read-only `conflicts --root`, is
+  Linux/macOS-only and fails closed on every other platform.
+
 ### Security
 
+- Registered-root authorization now hides known-but-unauthorized IDs behind
+  the same not-found response as unknown IDs, before path-bearing validation.
+- Registered-root RPCs now require real session enforcement and fail closed
+  when `auth.require_session = false`; the development-only synthetic admin
+  bypass is excluded from every named-root operation, while existing legacy
+  auth-disabled daemon behavior is unchanged.
+- Registered-root Git keep-both dry-run requires pull permission; execute
+  requires both pull and push. Inspect-only policy permits a pull-authorized
+  dry-run but rejects execute even for a pull+push session.
+- Legacy primary-cache Git resolution now checks capabilities by data flow:
+  dry-run requires pull and execute requires pull+push. The unrooted legacy
+  per-file mutation strategies (`keep-local`, `keep-remote`, and `keep-both`)
+  are retired fail-closed; `defer` remains a push-authorized no-op until
+  ordinary-file resolution has daemon-owned root and manifest identity.
+- Registered-root conflict operations reject stale cache keys outside the
+  authorized storage prefix. This precursor owns only repository-group Git
+  keep-both mutation; ordinary per-file mutation is disabled on both primary
+  and named roots.
+- The shipped CLI no longer advertises retired ordinary-file strategies, and
+  the unrooted `resolve_conflict` MCP mutation tool is removed. Older direct
+  gRPC clients receive one uniform fail-closed response before path or state
+  lookup.
+- Git keep-both captures the authorized repository's filesystem identity,
+  binds Git mutation subprocesses and lock acquisition to captured repository
+  and `.git` directory handles, and revalidates the configured pathname across
+  storage, state-lock, mutation, and state-flush boundaries so a same-path
+  replacement is never mutated. This applies to every Git keep-both mutation,
+  including the legacy primary-cache route; all such mutation is
+  Linux/macOS-only and fails closed elsewhere. The seam accepts only the
+  ordinary files-ref backend and rejects reftable, enabled
+  `core.sharedRepository`, and shared-writable repositories.
+- Named-root routing requires the local root, critical Git metadata, state
+  directory, and state cache to be owned by the exact tcfsd effective UID.
+  Roots, metadata, and state directories must not be group/world writable;
+  the cache must be mode 0600 or stricter. Canonical ancestors must be owned
+  by that UID or root and not writable by another principal, except for a
+  protected root-owned sticky boundary such as `/tmp`.
+- Git keep-both cleanliness checks use isolated metadata, disable lazy fetch
+  and replacement refs, and reject executable filter/attribute and partial
+  clone routing. The cooperative Git lock uses one persistent advisory-locked
+  inode and serializes TCFS writers only. Native Git busy markers remain a
+  fail-closed preflight, but same-euid native Git races are outside the
+  resolver's concurrency guarantee.
+- CLI `push`, `pull`, `rm`, and executing `reconcile` serialize explicit
+  `--state` cache mutations with daemon-side registered-root operations before
+  constructing storage clients. These remain legacy mutation routes, not
+  named-root authorization surfaces; only `conflicts --state` is diagnostic.
 - Credential-bearing S3/SeaweedFS clients now require HTTPS by default across
   daemon, CLI, direct mount, and FileProvider operator construction. Plaintext
   compatibility requires an explicit development/test opt-in.
+- On Linux/macOS, JSON sync-state reads now fail closed on symlinks, hardlinks,
+  permissive modes, unsafe parent chains, ACL grants, and non-content I/O
+  failures. A missing or content-corrupt primary may recover only from a
+  securely opened, valid backup; the first durable repair preserves that
+  known-good backup.
+- tcfsd now keeps policy, auth, and pending-delete authority only in its
+  persistent owner-only data directory, holds a process-lifetime singleton
+  lock before opening caches or sockets, and refuses the former shared `/tmp`
+  fallback. Automatic remote deletes use a durable ledger plus atomic
+  rename-without-replacement so recovery never overwrites a recreated path.
+- Indexed publication now verifies live create-if-absent, same-ETag update,
+  and stale-read semantics before remote mutation; configured client-side
+  concurrency limits cannot serialize the verification race.
+- Portable remote paths now acquire monotonic per-component namespace
+  reservations, atomically excluding Unicode/case aliases and concurrent
+  file-versus-directory claims across publishers.
+- Remote file, directory-marker, rename-source, and trash removal now uses
+  conditional version-4 tombstones instead of proof followed by unconditional
+  delete. Consumers distinguish physical absence from a durable deletion:
+  only a freshly rechecked v4 tombstone may authorize local byte removal.
+  Trash restore/purge uses one exclusive immutable lifecycle claim per exact
+  generation, makes interrupted restores retryable, validates current and
+  staged manifest bindings before either tombstoning or republication, and
+  retains its evidence. Trash-backed v4 tombstones bind the exact generation
+  key and evidence digest at the deletion linearization point; the later
+  completion marker is independently verifiable, so a lost response stays
+  recoverable while a failed compare-and-swap remains indeterminate. Historical
+  timestamp-only generations remain explicitly restorable. Retention begins at
+  the storage timestamp of the delete-completion marker (or its exact bound
+  tombstone), uses one cleaned fixed storage-clock guard, and retains legacy
+  generations without a provable deletion time unless the operator requests
+  `--all`. Trash scans validate legacy payload/manifest bindings, report and
+  retain malformed objects without blocking valid listing rows or
+  independently proved purge claims; purge returns a structured partial
+  report and the CLI exits unsuccessfully after reporting any retained issue.
+  Exact-key restore bypasses unrelated scan issues, and `trash purge --all`
+  conflicts with `--older-than`.
+  Executing prefix migration now requires an explicit quiesced-writer
+  assertion and manifest-binding validation; exact double-prefixed sources are
+  logically retired while orphan-prefix evidence remains for reachability-safe
+  physical GC.
+- FileProvider reads now use a distinct exact-path RPC, so an older daemon
+  returns `UNIMPLEMENTED` before mutation instead of silently falling back to a
+  same-basename object. Manual hydrators bind index size and chunk count before
+  local mutation, and deleted index tombstones are treated as logical absence.
+  VFS, daemon listing, Apple providers, and Windows placeholder discovery now
+  exclude physical tombstone objects while propagating corrupt index state.
+  Apple write capabilities and callbacks plus the C, gRPC, and UniFFI mutation
+  entry points are explicitly read-only and reject before I/O until an opaque
+  exact-version conditional publication protocol is available. Incomplete or
+  skipped daemon push streams now terminate with an error rather than success,
+  and the gRPC-backed direct reader rejects malformed or missing required
+  encryption key material before constructing storage or daemon clients.
 
 ## [0.12.17] - 2026-07-09
 

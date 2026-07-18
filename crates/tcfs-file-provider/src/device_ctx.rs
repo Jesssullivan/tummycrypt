@@ -373,6 +373,14 @@ mod tests {
         tcfs_crypto::MasterKey::from_bytes([7u8; 32])
     }
 
+    fn memory_op() -> opendal::Operator {
+        let op = opendal::Operator::new(opendal::services::Memory::default())
+            .unwrap()
+            .finish();
+        tcfs_sync::index_entry::register_memory_index_emulation_for_tests(&op).unwrap();
+        op
+    }
+
     /// Materialize a device registry + this device's age secret in `dir`,
     /// returning (device_id, public_key). Mirrors the on-disk layout the daemon
     /// and `build_encryption_context` expect: `<dir>/devices.json` plus
@@ -528,9 +536,7 @@ mod tests {
     async fn per_device_manifest_roundtrips_via_fp_context_and_fails_closed() {
         let tmp = tempfile::TempDir::new().unwrap();
         let _pub = provision_device(tmp.path(), "device-a");
-        let op = opendal::Operator::new(opendal::services::Memory::default())
-            .unwrap()
-            .finish();
+        let op = memory_op();
         let prefix = "test/fp-per-device";
         let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
 
@@ -620,9 +626,7 @@ mod tests {
     #[tokio::test]
     async fn master_only_manifest_reads_unchanged_via_fp_context() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let op = opendal::Operator::new(opendal::services::Memory::default())
-            .unwrap()
-            .finish();
+        let op = memory_op();
         let prefix = "test/fp-master-only";
         let mut state = tcfs_sync::state::StateCache::open(&tmp.path().join("state.db")).unwrap();
 

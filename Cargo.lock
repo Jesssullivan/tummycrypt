@@ -5127,6 +5127,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "chrono",
+ "libc",
  "qrcode",
  "rand 0.8.5",
  "secrecy",
@@ -5342,6 +5343,7 @@ dependencies = [
  "futures-util",
  "libc",
  "opendal",
+ "tcfs-sync",
  "tcfs-vfs",
  "tempfile",
  "tokio",
@@ -5453,6 +5455,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5485,6 +5488,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "unicode-casefold",
  "unicode-normalization",
  "uuid",
 ]
@@ -5530,6 +5534,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5547,6 +5552,7 @@ dependencies = [
  "dirs 6.0.0",
  "futures",
  "hyper-util",
+ "libc",
  "notify",
  "opendal",
  "openssl",
@@ -6271,6 +6277,12 @@ name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+
+[[package]]
+name = "unicode-casefold"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f66b1c8f8caa2ab31dc6d3f35386f16efdab89668f93411e565ac368908e8f"
 
 [[package]]
 name = "unicode-ident"
