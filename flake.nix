@@ -83,6 +83,22 @@
           pname = "tcfsd";
           # Registered-root safety tests create real fixture repositories.
           nativeCheckInputs = [ pkgs.git ];
+          # Linux Nix sandboxes point the standard temp variables at /build.
+          # State-cache tests deliberately reject writable non-sticky ancestors,
+          # so give them a private scratch root beneath this derivation's trusted
+          # output path without weakening the production path validator.
+          preCheck = ''
+            export TCFS_CHECK_TMPDIR="$out/.tcfs-check-tmp"
+            mkdir -p "$TCFS_CHECK_TMPDIR"
+            chmod 0700 "$TCFS_CHECK_TMPDIR"
+            export TMPDIR="$TCFS_CHECK_TMPDIR"
+            export TMP="$TCFS_CHECK_TMPDIR"
+            export TEMP="$TCFS_CHECK_TMPDIR"
+            export TEMPDIR="$TCFS_CHECK_TMPDIR"
+          '';
+          postCheck = ''
+            rm -rf "$TCFS_CHECK_TMPDIR"
+          '';
           # Vendor OpenSSL on macOS to avoid dyld Team ID mismatch
           # when launchd loads the binary (Nix store openssl has different
           # code signature than the daemon binary).
