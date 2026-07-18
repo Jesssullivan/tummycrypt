@@ -219,12 +219,16 @@ ssh jess@$TARGET 'cd <target-path> && echo "target-side" >> CONFLICT.txt && git 
 tcfs reconcile -c ~/.config/tcfs/roam-$REPO.toml --path /path/to/$REPO --prefix $PREFIX --execute \
   2>&1 | tee $EVID/R5-conflict.log
 
-# Option M (canonical state) — manual resolve works:
-tcfs conflicts                                   # conflict visible
-tcfs resolve <conflict-id> --keep-both           # 🔀 [DECISION] winner per direction
-# Option N (nix isolated state) — resolve verb is BLIND; use:
-#   tcfs conflicts --state ~/.local/state/tcfsd/reconcile/$REPO.json
-#   and assert the AUTOMATIC loser-guard auto-parked the loser (no manual resolve verb)
+# Option M (canonical primary state) — inspect, dry-run, then execute:
+tcfs conflicts
+tcfs resolve /path/to/$REPO --strategy keep-both
+tcfs resolve /path/to/$REPO --strategy keep-both --execute
+
+# Option N (registered isolated state) — the daemon selects the enrolled root
+# descriptor; no client state path or remote prefix is accepted for mutation:
+tcfs conflicts --root <root-id>
+tcfs resolve /path/to/$REPO --root <root-id> --strategy keep-both
+tcfs resolve /path/to/$REPO --root <root-id> --strategy keep-both --execute
 
 # after keep-both: both .git states preserved, each fsck-clean and each fingerprint-able
 git -C /path/to/$REPO fsck --full --strict

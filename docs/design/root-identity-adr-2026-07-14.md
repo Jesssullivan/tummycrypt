@@ -1,10 +1,23 @@
 # ADR: Roots are named identities (interim registry = the reconcile-state dir)
 
 - **Date:** 2026-07-14
-- **Status:** Accepted (interim; durable form lands with TIN-1556)
+- **Status:** Superseded by TIN-2853 / PR #551
 - **Refs:** TIN-2658 (per-root reconcile conflicts unresolvable), TIN-1556 (root
-  scale-out + `root_id`), per-root state isolation (`docs/ops`, git-divergent
-  keep-both design)
+  scale-out + `root_id`), TIN-2853 (daemon-trusted stable-root routing),
+  PR #551, per-root state isolation (`docs/ops`, git-divergent keep-both design)
+
+## Supersession
+
+This ADR records the rejected CLI-local interim design. TIN-2853 / PR #551
+replaces it with daemon-selected registered-root descriptors: mutating resolve
+accepts a bounded root identity and never a client-supplied state path or remote
+prefix. The operator ratified the fail-closed retirement of unrooted
+`keep_local`, `keep_remote`, and `keep_both` mutation paths, plus removal of the
+unrooted MCP `resolve_conflict` tool, on 2026-07-16.
+
+`tcfs conflicts --state` remains a legacy read-only diagnostic surface. It does
+not authorize mutation. The historical decision below is retained only to
+explain why the daemon-trusted boundary replaced the CLI-local approach.
 
 ## Context
 
