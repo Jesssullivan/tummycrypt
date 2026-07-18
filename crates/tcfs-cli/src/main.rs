@@ -269,6 +269,11 @@ enum Commands {
         /// Use passphrase for the new key (instead of generating a mnemonic)
         #[arg(long)]
         password: bool,
+        /// Path to a file holding the EXACT new master key: 32 raw bytes, or
+        /// 64 hex chars (optional trailing newline). Bypasses mnemonic/passphrase
+        /// generation — for externally derived keys (TIN-2856).
+        #[arg(long, conflicts_with = "password")]
+        new_key_file: Option<PathBuf>,
         /// Non-interactive mode (generate and print mnemonic without prompt)
         #[arg(long)]
         non_interactive: bool,
@@ -901,8 +906,18 @@ async fn main() -> Result<()> {
         Commands::RotateKey {
             old_key_file,
             password,
+            new_key_file,
             non_interactive,
-        } => cmd_rotate_key(&config, old_key_file.as_deref(), password, non_interactive).await,
+        } => {
+            cmd_rotate_key(
+                &config,
+                old_key_file.as_deref(),
+                password,
+                new_key_file.as_deref(),
+                non_interactive,
+            )
+            .await
+        }
         Commands::Key { action } => match action {
             KeyAction::Rotate {
                 prefix,
@@ -1150,7 +1165,6 @@ fn validate_rotation_master_key_path(
     tcfs_core::config::validate_master_key_outside_sync_roots(config, master_key_path)
         .map_err(anyhow::Error::msg)
 }
-
 /// Resolve the daemon-owned per-folder policy store.
 fn policy_store_path() -> PathBuf {
     dirs::data_dir()
@@ -6174,6 +6188,46 @@ fn finalize_key_rotation(
     Ok(())
 }
 
+/// Read the EXACT new master key from a file (TIN-2856): either exactly 32 raw
+/// bytes, or 64 hex chars with optional trailing whitespace (e.g. a newline).
+/// Used when the operator pre-derives the key externally (the fleet unlock
+/// wrapper re-derives the daemon key as SHA-256 of the passphrase file on every
+/// unlock, so rotate-key must adopt that exact key instead of minting its own).
+fn read_exact_new_master_key(path: &Path) -> Result<tcfs_crypto::MasterKey> {
+    use tcfs_crypto::KEY_SIZE;
+
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading new master key: {}", path.display()))?;
+
+    if bytes.len() == KEY_SIZE {
+        let mut key_bytes = [0u8; KEY_SIZE];
+        key_bytes.copy_from_slice(&bytes);
+        return Ok(tcfs_crypto::MasterKey::from_bytes(key_bytes));
+    }
+
+    // Not raw-sized: accept a hex digest (`sha256sum` column, `echo <hex>`).
+    let hex = std::str::from_utf8(&bytes)
+        .ok()
+        .map(str::trim_end)
+        .filter(|s| s.len() == KEY_SIZE * 2 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    let Some(hex) = hex else {
+        anyhow::bail!(
+            "new master key file {} must be exactly {} raw bytes or {} hex chars \
+             (optionally newline-terminated); got {} bytes",
+            path.display(),
+            KEY_SIZE,
+            KEY_SIZE * 2,
+            bytes.len()
+        );
+    };
+
+    let mut key_bytes = [0u8; KEY_SIZE];
+    for (i, byte) in key_bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).context("parsing hex master key")?;
+    }
+    Ok(tcfs_crypto::MasterKey::from_bytes(key_bytes))
+}
+
 fn generate_new_master_key(
     use_password: bool,
     non_interactive: bool,
@@ -6225,6 +6279,7 @@ fn prepare_key_rotation(
     manifest_prefix: &str,
     use_password: bool,
     non_interactive: bool,
+    new_key_file: Option<&Path>,
 ) -> Result<Option<PreparedKeyRotation>> {
     let paths = key_rotation_paths(key_path);
 
@@ -6244,6 +6299,23 @@ fn prepare_key_rotation(
                 paths.pending_key_path.display()
             )
         })?;
+
+        // TIN-2856: resuming with an explicit --new-key-file must target the
+        // SAME key the pending rotation already committed to; anything else
+        // would silently rotate the fleet to a key the operator did not supply.
+        if let Some(new_key_file) = new_key_file {
+            let supplied = read_exact_new_master_key(new_key_file)?;
+            if supplied.as_bytes() != new_master.as_bytes() {
+                anyhow::bail!(
+                    "pending rotation key {} does not match --new-key-file {}; \
+                     finish the pending rotation (or remove its state/pending files) \
+                     before rotating to a different key",
+                    paths.pending_key_path.display(),
+                    new_key_file.display()
+                );
+            }
+        }
+
         let current_master = read_master_key(key_path)?;
 
         if current_master.as_bytes() == new_master.as_bytes() {
@@ -6264,7 +6336,14 @@ fn prepare_key_rotation(
     }
 
     let old_master = read_master_key(key_path)?;
-    let new_master = generate_new_master_key(use_password, non_interactive)?;
+    let new_master = match new_key_file {
+        Some(path) => {
+            let key = read_exact_new_master_key(path)?;
+            println!("New master key loaded exactly from: {}", path.display());
+            key
+        }
+        None => generate_new_master_key(use_password, non_interactive)?,
+    };
     // Persist the key first, including its directory entry, then the state that
     // makes it authoritative. `cmd_rotate_key` cannot rewrite remote data until
     // this function returns, so every remote rewrite has durable recovery data.
@@ -6583,6 +6662,7 @@ async fn cmd_rotate_key(
     config: &tcfs_core::config::TcfsConfig,
     old_key_file: Option<&Path>,
     use_password: bool,
+    new_key_file: Option<&Path>,
     non_interactive: bool,
 ) -> Result<()> {
     let key_path = old_key_file
@@ -6628,8 +6708,13 @@ async fn cmd_rotate_key(
     .await?;
 
     let manifest_prefix = rotation_child_prefix(config.storage.resolved_prefix(), "manifests");
-    let Some(mut rotation) =
-        prepare_key_rotation(&key_path, &manifest_prefix, use_password, non_interactive)?
+    let Some(mut rotation) = prepare_key_rotation(
+        &key_path,
+        &manifest_prefix,
+        use_password,
+        non_interactive,
+        new_key_file,
+    )?
     else {
         println!(
             "Key rotation was already finalized; cleaned stale resume state for {}",
@@ -9086,7 +9171,7 @@ mod tests {
                 );
             }
 
-            let error = cmd_rotate_key(&config, Some(&key_path), false, true)
+            let error = cmd_rotate_key(&config, Some(&key_path), false, None, true)
                 .await
                 .expect_err("rotation must reject before credential discovery");
             assert!(error.to_string().contains("master key path"), "{error:#}");
@@ -11299,10 +11384,133 @@ enabled = false
         )
         .unwrap();
 
-        let prepared = prepare_key_rotation(&key_path, "data/manifests/", false, true).unwrap();
+        let prepared =
+            prepare_key_rotation(&key_path, "data/manifests/", false, true, None).unwrap();
         assert!(prepared.is_none());
         assert!(!paths.state_path.exists());
         assert!(!paths.pending_key_path.exists());
+    }
+
+    // ── TIN-2856: rotate-key --new-key-file (exact externally-derived key) ──
+
+    #[test]
+    fn rotate_key_new_key_file_parses_raw_32_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.key");
+        std::fs::write(&path, [0x5au8; tcfs_crypto::KEY_SIZE]).unwrap();
+
+        let key = read_exact_new_master_key(&path).unwrap();
+        assert_eq!(key.as_bytes(), &[0x5au8; tcfs_crypto::KEY_SIZE]);
+    }
+
+    #[test]
+    fn rotate_key_new_key_file_parses_hex_with_optional_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.key.hex");
+        let expected: Vec<u8> = (0..tcfs_crypto::KEY_SIZE as u8).collect();
+        let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
+
+        // `sha256sum`-style: hex digest with a trailing newline.
+        std::fs::write(&path, format!("{hex}\n")).unwrap();
+        let key = read_exact_new_master_key(&path).unwrap();
+        assert_eq!(key.as_bytes().as_slice(), expected.as_slice());
+
+        // Bare 64-char hex (no newline) parses identically.
+        std::fs::write(&path, &hex).unwrap();
+        let key = read_exact_new_master_key(&path).unwrap();
+        assert_eq!(key.as_bytes().as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn rotate_key_new_key_file_rejects_wrong_length_and_non_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.key");
+
+        // 31 raw bytes: neither raw-sized nor hex-sized.
+        std::fs::write(&path, [0u8; 31]).unwrap();
+        let err = read_exact_new_master_key(&path).unwrap_err();
+        assert!(err.to_string().contains("32 raw bytes"));
+
+        // 64 chars but not hex.
+        std::fs::write(&path, "zz".repeat(32)).unwrap();
+        assert!(read_exact_new_master_key(&path).is_err());
+
+        // 62 hex chars (one byte short).
+        std::fs::write(&path, "ab".repeat(31)).unwrap();
+        assert!(read_exact_new_master_key(&path).is_err());
+    }
+
+    #[test]
+    fn rotate_key_new_key_file_conflicts_with_password_flag() {
+        let err = Cli::try_parse_from([
+            "tcfs",
+            "rotate-key",
+            "--password",
+            "--new-key-file",
+            "/tmp/k",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        // Each flag alone still parses.
+        assert!(Cli::try_parse_from(["tcfs", "rotate-key", "--new-key-file", "/tmp/k"]).is_ok());
+        assert!(Cli::try_parse_from(["tcfs", "rotate-key", "--password"]).is_ok());
+    }
+
+    #[test]
+    fn prepare_key_rotation_uses_exact_new_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("master.key");
+        write_master_key(&key_path, &master_key(0x11)).unwrap();
+
+        let new_key_path = dir.path().join("new.key");
+        std::fs::write(&new_key_path, [0x77u8; tcfs_crypto::KEY_SIZE]).unwrap();
+
+        let prepared = prepare_key_rotation(
+            &key_path,
+            "data/manifests/",
+            false,
+            true,
+            Some(&new_key_path),
+        )
+        .unwrap()
+        .expect("fresh rotation prepared");
+        assert!(!prepared.resumed);
+        assert_eq!(
+            prepared.new_master.as_bytes(),
+            &[0x77u8; tcfs_crypto::KEY_SIZE]
+        );
+        // The pending key file carries the exact key, so an interrupted run
+        // resumes to (and finally swaps in) the operator-supplied key.
+        let pending = read_master_key(&prepared.paths.pending_key_path).unwrap();
+        assert_eq!(pending.as_bytes(), &[0x77u8; tcfs_crypto::KEY_SIZE]);
+    }
+
+    #[test]
+    fn prepare_key_rotation_rejects_mismatched_new_key_file_on_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("master.key");
+        let paths = key_rotation_paths(&key_path);
+        write_master_key(&key_path, &master_key(0x11)).unwrap();
+        write_master_key(&paths.pending_key_path, &master_key(0x22)).unwrap();
+        write_rotation_state(
+            &paths.state_path,
+            &KeyRotationState::new("data/manifests/", &paths.pending_key_path),
+        )
+        .unwrap();
+
+        let other_key_path = dir.path().join("other.key");
+        std::fs::write(&other_key_path, [0x33u8; tcfs_crypto::KEY_SIZE]).unwrap();
+
+        let err = prepare_key_rotation(
+            &key_path,
+            "data/manifests/",
+            false,
+            true,
+            Some(&other_key_path),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match --new-key-file"));
     }
 
     // ── TIN-1899: scoped per-device key rotation tests ──────────────────────

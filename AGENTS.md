@@ -1,5 +1,27 @@
 # tcfs Development Context
 
+## Program context — where truth lives
+
+This file covers build/test/navigation only. For what is true and what ships
+next, read these in order (each owns a distinct layer; none is duplicated here):
+
+1. [docs/VISION.md](docs/VISION.md) — north star + the claim-tier legend.
+2. [docs/PRODUCT.md](docs/PRODUCT.md) — the accepted A→B→C delivery sequence,
+   stable-root design, repository ownership.
+3. [docs/ops/current.md](docs/ops/current.md) — the authoritative live
+   blocker/proof boundary (see its own precedence preamble).
+4. [docs/platform-support.md](docs/platform-support.md) — per-client maturity.
+5. [docs/release/evidence/README.md](docs/release/evidence/README.md) —
+   evidence corpus index.
+
+Tracked work: Linear initiative "Tummycrypt — Daily Driver Track"
+(https://linear.app/tinyland/initiative/tummycrypt-daily-driver-track-95eeeb5e7493),
+umbrella "Cordillera - Tinyland Remote-Everything Program"
+(https://linear.app/tinyland/initiative/cordillera-tinyland-remote-everything-program-15f56b187c19).
+Sibling repos: tinyland-inc/rockies (OS adoption seed, TIN-2300),
+tinyland-inc/lab (fleet deploy/pins), Jesssullivan/prompts-enqueue
+(program ledger, prompts 47/60).
+
 ## Quick Start
 
 ```bash

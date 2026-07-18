@@ -104,9 +104,15 @@ The full evidence boundary and root invariants are in
    second cycle.
 9. **Fleet coherence.** Bring sting to the selected release and root topology;
    leave Bumble as the tracker-defined formal third-host acceptance.
-10. **Truth cleanup.** Keep the five-document product spine current and rebase
-   or supersede stale vision PR
-   [#543](https://github.com/Jesssullivan/tummycrypt/pull/543).
+10. **Truth cleanup.** Keep the five-document product spine current:
+   [docs/VISION.md](../VISION.md), [docs/PRODUCT.md](../PRODUCT.md),
+   docs/ops/current.md (this document),
+   [docs/platform-support.md](../platform-support.md), and
+   [docs/release/evidence/README.md](../release/evidence/README.md). Stale
+   vision PR [#543](https://github.com/Jesssullivan/tummycrypt/pull/543)
+   closed unmerged; the vision landed via
+   [#549](https://github.com/Jesssullivan/tummycrypt/pull/549)
+   (commit `3e86016`).
 
 ## Gates that remain red
 

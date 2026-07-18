@@ -1,3 +1,5 @@
+> Superseded for live status by [docs/ops/current.md](../ops/current.md) — retained as a dated record.
+
 # RFC 0001: Fleet Sync Integration for Lab Machines
 
 **Status**: Implemented (v0.3.0)
