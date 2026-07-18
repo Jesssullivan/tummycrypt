@@ -3638,7 +3638,20 @@ mod tests {
             String::from_utf8_lossy(&head_before).starts_with("ref:"),
             "fixture sanity: local HEAD is a symbolic ref"
         );
-        let logs_head_before = std::fs::read(winner.join(".git/logs/HEAD")).unwrap();
+        // TCFS Git commands deliberately set core.logAllRefUpdates=false, so
+        // build the conflicted reflog fixture explicitly instead of inheriting
+        // a user/global Git policy. Keep the line syntactically valid so fsck
+        // can traverse it during the resolver proof.
+        let logs_head = winner.join(".git/logs/HEAD");
+        std::fs::create_dir_all(logs_head.parent().unwrap()).unwrap();
+        std::fs::write(
+            &logs_head,
+            format!(
+                "{head_w} {head_w} TCFS Test <tcfs@example.invalid> 0 +0000\tfixture\n"
+            ),
+        )
+        .unwrap();
+        let logs_head_before = std::fs::read(&logs_head).unwrap();
 
         let result = resolve_repo_keep_both(
             &op,
