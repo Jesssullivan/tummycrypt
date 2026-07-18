@@ -4893,7 +4893,24 @@ mod tests {
     }
 
     fn run_test_git(repo: &Path, args: &[&str]) {
+        #[cfg(windows)]
+        let null_device = "NUL";
+        #[cfg(not(windows))]
+        let null_device = "/dev/null";
         let output = std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_CONFIG")
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env("GIT_CONFIG_GLOBAL", null_device)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .arg("-c")
+            .arg(format!("core.hooksPath={null_device}"))
+            .arg("-c")
+            .arg("commit.gpgSign=false")
+            .arg("-c")
+            .arg("tag.gpgSign=false")
             .args(args)
             .current_dir(repo)
             .output()
