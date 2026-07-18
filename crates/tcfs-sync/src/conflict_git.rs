@@ -70,6 +70,13 @@ fn validate_real_git_directory_if_present(path: &Path, description: &str) -> Res
             return Err(error)
                 .with_context(|| format!("inspecting {description}: {}", path.display()));
         }
+
+        let mut stale = state.get(&ref_path).cloned().expect("recorded conflict");
+        stale.remote_path = "old-prefix/manifests/head".into();
+        state.set(&ref_path, stale);
+        let error = collect_repo_conflicts(&state, &repo_root, "data")
+            .expect_err("stale-prefix Git conflicts must fail closed");
+        assert!(error.to_string().contains("selected storage prefix"));
     }
     Ok(())
 }
@@ -201,6 +208,35 @@ pub fn validate_standalone_repo_topology(repo_root: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error).with_context(|| format!("inspecting {}", alternates.display()));
+        }
+    }
+
+    let effective_config = git_safety::sanitized_git_command()
+        .args(["config", "--null", "--name-only", "--list"])
+        .current_dir(&repo_root)
+        .output()
+        .context("inspecting effective Git config for resolver safety")?;
+    if !effective_config.status.success() {
+        bail!(
+            "effective Git config inspection failed: {}",
+            String::from_utf8_lossy(&effective_config.stderr)
+        );
+    }
+    for key in effective_config
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+    {
+        let key = String::from_utf8_lossy(key).to_ascii_lowercase();
+        let remote_promisor = key.starts_with("remote.")
+            && (key.ends_with(".promisor") || key.ends_with(".partialclonefilter"));
+        if key == "extensions.partialclone"
+            || remote_promisor
+            || key == "protocol.ext.allow"
+            || key == "core.alternaterefscommand"
+            || key.starts_with("fsck.")
+        {
+            bail!("effective Git config key {key} is outside the registered-root resolver seam");
         }
     }
 
@@ -343,7 +379,7 @@ pub async fn resolve_repo_keep_both(
     let git_dir = repo_root.join(".git");
     validate_standalone_repo_topology(&repo_root)?;
 
-    let candidates = collect_repo_conflicts(state, &repo_root)?;
+    let candidates = collect_repo_conflicts(state, &repo_root, remote_prefix)?;
     if candidates.is_empty() {
         return Ok(GitKeepBothResult {
             repo_root,
@@ -509,9 +545,24 @@ pub async fn resolve_repo_keep_both(
     })
 }
 
+fn object_key_is_within_prefix(key: &str, prefix: &str) -> bool {
+    let Some(suffix) = key
+        .strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+    else {
+        return false;
+    };
+    !suffix.is_empty()
+        && !suffix.contains('\\')
+        && suffix
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 fn collect_repo_conflicts(
     state: &StateCache,
     repo_root: &Path,
+    remote_prefix: &str,
 ) -> Result<Vec<GitConflictCandidate>> {
     let mut out = Vec::new();
     for (cache_key, entry) in state.conflicts() {
@@ -528,6 +579,20 @@ fn collect_repo_conflicts(
         };
         if root.canonicalize().ok().as_deref() != Some(repo_root) {
             continue;
+        }
+        if !object_key_is_within_prefix(&entry.remote_path, remote_prefix) {
+            bail!(
+                "git conflict {} has a remote_path outside the selected storage prefix",
+                rel_path
+            );
+        }
+        if let Some(remote_manifest_key) = conflict.remote_manifest_key.as_deref() {
+            if !object_key_is_within_prefix(remote_manifest_key, remote_prefix) {
+                bail!(
+                    "git conflict {} has a remote_manifest_key outside the selected storage prefix",
+                    rel_path
+                );
+            }
         }
         let mut resolved_vclock = conflict.local_vclock.clone();
         resolved_vclock.merge(&conflict.remote_vclock);
@@ -690,14 +755,296 @@ pub(crate) fn park_ref_create_only(repo_root: &Path, park_ref: &str, sha: &str) 
 }
 
 fn ensure_clean_worktree(repo_root: &Path) -> Result<()> {
-    let out = git_safety::sanitized_git_command()
-        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
+    use std::io::Write;
+
+    let source_git_dir = repo_root.join(".git");
+    let replace_refs = git_safety::sanitized_git_command()
+        .args(["for-each-ref", "--format=%(refname)", "refs/replace/"])
         .current_dir(repo_root)
         .output()
-        .context("running git status")?;
+        .context("inspecting Git replace refs")?;
+    if !replace_refs.status.success() {
+        bail!(
+            "Git replace-ref inspection failed: {}",
+            String::from_utf8_lossy(&replace_refs.stderr)
+        );
+    }
+    if !replace_refs.stdout.is_empty() {
+        bail!("Git replace refs are outside the registered-root resolver seam");
+    }
+
+    let shadow_git_dir = tempfile::Builder::new()
+        .prefix("tcfs-git-status-")
+        .tempdir()
+        .context("creating isolated Git status metadata")?;
+    std::fs::create_dir(shadow_git_dir.path().join("objects"))
+        .context("creating isolated Git objects directory")?;
+    std::fs::create_dir(shadow_git_dir.path().join("refs"))
+        .context("creating isolated Git refs directory")?;
+
+    std::fs::copy(
+        source_git_dir.join("index"),
+        shadow_git_dir.path().join("index"),
+    )
+    .context("copying Git index into isolated status metadata")?;
+    let head_sha = git_safety::local_ref_sha(repo_root, "HEAD")
+        .ok_or_else(|| anyhow!("Git HEAD is missing or invalid"))?;
+    std::fs::write(shadow_git_dir.path().join("HEAD"), format!("{head_sha}\n"))
+        .context("writing isolated Git HEAD")?;
+
+    let object_format = git_output(repo_root, &["rev-parse", "--show-object-format"])?;
+    let shadow_config = match object_format.as_str() {
+        "sha1" => "[core]\nrepositoryformatversion = 0\nbare = false\nlogallrefupdates = false\n"
+            .to_string(),
+        "sha256" => "[core]\nrepositoryformatversion = 1\nbare = false\nlogallrefupdates = false\n[extensions]\nobjectFormat = sha256\n"
+            .to_string(),
+        other => bail!("unsupported Git object format for clean-worktree check: {other}"),
+    };
+    std::fs::write(shadow_git_dir.path().join("config"), shadow_config)
+        .context("writing isolated Git status config")?;
+
+    let source_objects = source_git_dir
+        .join("objects")
+        .canonicalize()
+        .context("canonicalizing Git object directory for isolated status")?;
+    let isolated_git = || {
+        #[cfg(windows)]
+        let null_device = "NUL";
+        #[cfg(not(windows))]
+        let null_device = "/dev/null";
+
+        let mut command = git_safety::sanitized_git_command();
+        command
+            .env("GIT_DIR", shadow_git_dir.path())
+            .env("GIT_WORK_TREE", repo_root)
+            .env("GIT_OBJECT_DIRECTORY", &source_objects)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", null_device)
+            .env("GIT_CONFIG_GLOBAL", null_device)
+            .env("GIT_OPTIONAL_LOCKS", "0");
+        command
+    };
+
+    let index_flags = isolated_git()
+        .args(["ls-files", "-v", "-z"])
+        .output()
+        .context("inspecting isolated Git index flags")?;
+    if !index_flags.status.success() {
+        bail!(
+            "isolated Git index inspection failed: {}",
+            String::from_utf8_lossy(&index_flags.stderr)
+        );
+    }
+    if index_flags.stdout.split(|byte| *byte == 0).any(|record| {
+        record
+            .first()
+            .is_some_and(|tag| *tag == b'S' || tag.is_ascii_lowercase())
+    }) {
+        bail!("Git index contains skip-worktree or assume-unchanged entries");
+    }
+
+    let staged = isolated_git()
+        .args(["ls-files", "--stage", "-z"])
+        .output()
+        .context("inspecting isolated Git index modes")?;
+    if !staged.status.success() {
+        bail!(
+            "isolated Git mode inspection failed: {}",
+            String::from_utf8_lossy(&staged.stderr)
+        );
+    }
+    if staged
+        .stdout
+        .split(|byte| *byte == 0)
+        .any(|record| record.starts_with(b"160000 "))
+    {
+        bail!("Git submodules are outside the registered-root resolver seam");
+    }
+
+    // The isolated metadata intentionally ignores local config. Reject local
+    // config that can route attributes elsewhere (directly or through an
+    // include), rather than silently computing status under different
+    // attribute rules. Filter commands themselves are handled by the active
+    // attribute check below.
+    for config_path in [
+        source_git_dir.join("config"),
+        source_git_dir.join("config.worktree"),
+    ] {
+        match std::fs::symlink_metadata(&config_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    bail!(
+                        "Git config must be a regular non-symlink file: {}",
+                        config_path.display()
+                    );
+                }
+                let config_keys = git_safety::sanitized_git_command()
+                    .args(["config", "--file"])
+                    .arg(&config_path)
+                    .args(["--null", "--name-only", "--list"])
+                    .output()
+                    .with_context(|| format!("inspecting Git config: {}", config_path.display()))?;
+                if !config_keys.status.success() {
+                    bail!(
+                        "Git config inspection failed for {}: {}",
+                        config_path.display(),
+                        String::from_utf8_lossy(&config_keys.stderr)
+                    );
+                }
+                for key in config_keys
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|key| !key.is_empty())
+                {
+                    let key = String::from_utf8_lossy(key).to_ascii_lowercase();
+                    if key == "core.attributesfile"
+                        || key == "include.path"
+                        || (key.starts_with("includeif.") && key.ends_with(".path"))
+                    {
+                        bail!(
+                            "Git config key {key} can change attribute routing and is outside the registered-root resolver seam"
+                        );
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspecting {}", config_path.display()));
+            }
+        }
+    }
+
+    // Global and system config can also route attributes through
+    // core.attributesFile. Query only that inert config value under the real
+    // repository context; do not load or execute any configured filter.
+    let effective_attributes_file = git_safety::sanitized_git_command()
+        .args(["config", "--path", "--get-all", "core.attributesFile"])
+        .current_dir(repo_root)
+        .output()
+        .context("inspecting effective Git attribute-file routing")?;
+    match effective_attributes_file.status.code() {
+        Some(0) => {
+            if !effective_attributes_file.stdout.is_empty() {
+                bail!("effective core.attributesFile is outside the registered-root resolver seam");
+            }
+        }
+        Some(1) => {}
+        _ => bail!(
+            "effective Git attribute-file inspection failed: {}",
+            String::from_utf8_lossy(&effective_attributes_file.stderr)
+        ),
+    }
+
+    // A repository-defined clean/process filter can make raw worktree bytes
+    // appear clean only after executing a command from `.git/config`. The
+    // isolated status intentionally cannot execute that command, so accepting
+    // such a tree could produce a false-clean result. Fail closed on active
+    // filter or working-tree-encoding attributes before running status.
+    let tracked = isolated_git()
+        .args(["ls-files", "-z"])
+        .output()
+        .context("listing tracked paths for isolated Git attribute inspection")?;
+    if !tracked.status.success() {
+        bail!(
+            "isolated Git tracked-path inspection failed: {}",
+            String::from_utf8_lossy(&tracked.stderr)
+        );
+    }
+    let mut attribute_command = isolated_git();
+    attribute_command
+        .args([
+            "check-attr",
+            "-z",
+            "--stdin",
+            "filter",
+            "working-tree-encoding",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut attribute_child = attribute_command
+        .spawn()
+        .context("starting isolated Git attribute inspection")?;
+    attribute_child
+        .stdin
+        .take()
+        .context("opening isolated Git attribute stdin")?
+        .write_all(&tracked.stdout)
+        .context("sending tracked paths to isolated Git attribute inspection")?;
+    let attributes = attribute_child
+        .wait_with_output()
+        .context("waiting for isolated Git attribute inspection")?;
+    if !attributes.status.success() {
+        bail!(
+            "isolated Git attribute inspection failed: {}",
+            String::from_utf8_lossy(&attributes.stderr)
+        );
+    }
+    let fields = attributes
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
+    let mut triples = fields.chunks_exact(3);
+    for triple in &mut triples {
+        let [path, attribute, value] = triple else {
+            unreachable!("chunks_exact(3) always yields triples")
+        };
+        let sensitive = *attribute == b"filter" || *attribute == b"working-tree-encoding";
+        let specified = *value != b"unspecified" && *value != b"unset";
+        if sensitive && specified {
+            bail!(
+                "tracked path {} uses Git attribute {}={}; custom clean filters and working-tree encodings are outside the registered-root resolver seam",
+                String::from_utf8_lossy(path),
+                String::from_utf8_lossy(attribute),
+                String::from_utf8_lossy(value)
+            );
+        }
+    }
+    if !triples.remainder().is_empty() {
+        bail!("isolated Git attribute inspection returned malformed output");
+    }
+
+    // The shadow metadata does not load the roamed `.git/info/attributes`.
+    // Refuse any active entries there so that omission cannot become another
+    // false-clean path.
+    let info_attributes = source_git_dir.join("info/attributes");
+    match std::fs::symlink_metadata(&info_attributes) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!(
+                    "Git info attributes must be a regular non-symlink file: {}",
+                    info_attributes.display()
+                );
+            }
+            let contents = std::fs::read_to_string(&info_attributes).with_context(|| {
+                format!("reading Git info attributes: {}", info_attributes.display())
+            })?;
+            if contents
+                .lines()
+                .map(str::trim)
+                .any(|line| !line.is_empty() && !line.starts_with('#'))
+            {
+                bail!(
+                    "Git info attributes are outside the registered-root resolver seam: {}",
+                    info_attributes.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting {}", info_attributes.display()));
+        }
+    }
+
+    let out = isolated_git()
+        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
+        .arg("--ignore-submodules=all")
+        .output()
+        .context("running isolated git status")?;
     if !out.status.success() {
         bail!(
-            "git status failed: {}",
+            "isolated git status failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
@@ -901,6 +1248,128 @@ mod tests {
     use super::*;
     use opendal::services::Memory;
 
+    #[cfg(unix)]
+    #[test]
+    fn clean_worktree_check_rejects_repo_carried_filter_without_execution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_safety::run_git(&repo, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.name", "TCFS Test"]).unwrap();
+        std::fs::write(repo.join(".gitattributes"), b"tracked.txt filter=probe\n").unwrap();
+        std::fs::write(repo.join("tracked.txt"), b"base\n").unwrap();
+        git_safety::run_git(&repo, &["add", ".gitattributes", "tracked.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "base", "--quiet"]).unwrap();
+
+        let marker = dir.path().join("filter-executed");
+        let filter = dir.path().join("filter-probe.sh");
+        std::fs::write(
+            &filter,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nprintf 'filtered\\n'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&filter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        git_safety::run_git(
+            &repo,
+            &["config", "filter.probe.clean", &filter.to_string_lossy()],
+        )
+        .unwrap();
+
+        // Positive control: raw bytes still equal the committed blob, but the
+        // repository-aware status executes the filter and reports the tree
+        // dirty. An isolated status that merely drops the filter definition
+        // would incorrectly report this fixture clean.
+        let unsafe_status = git_safety::sanitized_git_command()
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(unsafe_status.status.success());
+        assert!(
+            !unsafe_status.stdout.is_empty(),
+            "fixture must be false-clean without its filter"
+        );
+        assert!(marker.exists(), "fixture must exercise the unsafe Git path");
+        std::fs::remove_file(&marker).unwrap();
+
+        let error = ensure_clean_worktree(&repo).expect_err("filtered tree must fail closed");
+        assert!(error.to_string().contains("filter"), "{error:#}");
+        assert!(
+            !marker.exists(),
+            "isolated status must not execute a filter from roamed .git/config"
+        );
+    }
+
+    #[test]
+    fn clean_worktree_check_rejects_replace_ref_false_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_safety::run_git(&repo, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.name", "TCFS Test"]).unwrap();
+        std::fs::write(repo.join("tracked.txt"), b"base\n").unwrap();
+        git_safety::run_git(&repo, &["add", "tracked.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "base", "--quiet"]).unwrap();
+        let base = git_safety::local_ref_sha(&repo, "HEAD").unwrap();
+        std::fs::write(repo.join("tracked.txt"), b"replacement\n").unwrap();
+        git_safety::run_git(&repo, &["add", "tracked.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "replacement", "--quiet"]).unwrap();
+        let replacement = git_safety::local_ref_sha(&repo, "HEAD").unwrap();
+        git_safety::run_git(&repo, &["reset", "--hard", "--quiet", &base]).unwrap();
+        git_safety::run_git(&repo, &["replace", &base, &replacement]).unwrap();
+
+        let ordinary = std::process::Command::new("git")
+            .env_remove("GIT_NO_REPLACE_OBJECTS")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "status",
+                "--porcelain=v1",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(ordinary.status.success());
+        assert!(
+            !ordinary.stdout.is_empty(),
+            "replace-ref fixture must make ordinary status dirty"
+        );
+
+        let error = ensure_clean_worktree(&repo).expect_err("replace refs must fail closed");
+        assert!(error.to_string().contains("replace refs"), "{error:#}");
+    }
+
+    #[test]
+    fn clean_worktree_check_rejects_hidden_index_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_safety::run_git(&repo, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]).unwrap();
+        git_safety::run_git(&repo, &["config", "user.name", "TCFS Test"]).unwrap();
+        std::fs::write(repo.join("tracked.txt"), b"base\n").unwrap();
+        git_safety::run_git(&repo, &["add", "tracked.txt"]).unwrap();
+        git_safety::run_git(&repo, &["commit", "-m", "base", "--quiet"]).unwrap();
+        git_safety::run_git(
+            &repo,
+            &["update-index", "--assume-unchanged", "tracked.txt"],
+        )
+        .unwrap();
+
+        let error =
+            ensure_clean_worktree(&repo).expect_err("assume-unchanged entries must fail closed");
+        assert!(error.to_string().contains("assume-unchanged"), "{error:#}");
+    }
+
     #[test]
     fn park_ref_sanitizes_device_and_preserves_branch() {
         assert_eq!(
@@ -976,6 +1445,51 @@ mod tests {
             error.to_string().contains("worktree") || error.to_string().contains("show-toplevel"),
             "{error:#}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn object_probe_disables_promisor_remote_helpers() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        let marker = temp.path().join("remote-helper-ran");
+        let remote = format!("ext::touch {}", marker.display());
+        for (key, value) in [
+            ("core.repositoryformatversion", "1"),
+            ("extensions.partialClone", "origin"),
+            ("remote.origin.promisor", "true"),
+            ("remote.origin.partialclonefilter", "blob:none"),
+            ("protocol.ext.allow", "always"),
+            ("remote.origin.url", remote.as_str()),
+        ] {
+            git_safety::run_git(&repo, &["config", key, value]).unwrap();
+        }
+        let missing = "1111111111111111111111111111111111111111";
+
+        let ordinary = std::process::Command::new("git")
+            .env_remove("GIT_NO_LAZY_FETCH")
+            .args(["cat-file", "-e", &format!("{missing}^{{commit}}")])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(!ordinary.status.success());
+        assert!(
+            marker.exists(),
+            "fixture must prove the ordinary object probe invokes the helper"
+        );
+        std::fs::remove_file(&marker).unwrap();
+
+        let error = ensure_commit_present(&repo, missing).expect_err("missing object must fail");
+        assert!(error.to_string().contains("missing locally"), "{error:#}");
+        assert!(
+            !marker.exists(),
+            "sanitized object probe must disable promisor lazy fetch"
+        );
+
+        let error = validate_standalone_repo_topology(&repo)
+            .expect_err("partial-clone resolver config must fail closed");
+        assert!(error.to_string().contains("partialclone"), "{error:#}");
     }
 
     #[cfg(unix)]
@@ -1581,7 +2095,8 @@ mod tests {
 
         // The seam: the keep-both resolver's candidate scan must see it.
         let repo_root = repo.canonicalize().unwrap();
-        let candidates = collect_repo_conflicts(&state, &repo_root).expect("collect candidates");
+        let candidates =
+            collect_repo_conflicts(&state, &repo_root, "data").expect("collect candidates");
         assert_eq!(
             candidates.len(),
             1,

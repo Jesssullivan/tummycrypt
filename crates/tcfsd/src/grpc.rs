@@ -198,6 +198,34 @@ fn canonicalize_with_missing_tail(path: &Path) -> std::result::Result<PathBuf, S
         return Err(format!("expected an absolute path, got {}", path.display()));
     }
 
+    // `canonicalize()` reports a dangling symlink as NotFound. Do not then
+    // treat that symlink name as an ordinary missing tail: a later target could
+    // redirect the mutation outside the authorized root.
+    let mut probe = PathBuf::new();
+    for component in path.components() {
+        probe.push(component.as_os_str());
+        match std::fs::symlink_metadata(&probe) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::canonicalize(&probe).map_err(|error| {
+                    format!(
+                        "refusing unresolved symlink component {} in {}: {error}",
+                        probe.display(),
+                        path.display()
+                    )
+                })?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "inspecting path component {} for {}: {error}",
+                    probe.display(),
+                    path.display()
+                ));
+            }
+        }
+    }
+
     let components = path.components().collect::<Vec<_>>();
     for split in (1..=components.len()).rev() {
         let mut prefix = PathBuf::new();
@@ -228,38 +256,77 @@ fn canonicalize_with_missing_tail(path: &Path) -> std::result::Result<PathBuf, S
     ))
 }
 
-fn registered_root_containing_rootless_path(
-    config: &TcfsConfig,
-    path: &Path,
-) -> std::result::Result<Option<String>, String> {
-    if config.sync.roots.is_empty() {
-        return Ok(None);
-    }
-    if !path.is_absolute() {
+fn revalidate_canonical_path(
+    requested: &Path,
+    expected: &Path,
+) -> std::result::Result<PathBuf, String> {
+    let current = canonicalize_with_missing_tail(requested)?;
+    if current != expected {
         return Err(format!(
-            "rootless conflict resolution uses an ambiguous relative path while registered roots are enrolled: {}; use an absolute primary-root path or `tcfs resolve <repo> --root <id>`",
-            path.display()
+            "path routing changed after authorization: {}",
+            requested.display()
         ));
     }
+    Ok(current)
+}
 
-    let request_lexical = lexically_normalize_absolute(path)?;
-    let request_resolved = canonicalize_with_missing_tail(path)?;
-    for (root_id, root) in &config.sync.roots {
+fn rootless_path_may_belong_to_registered_root(config: &TcfsConfig, path: &Path) -> bool {
+    if config.sync.roots.is_empty() {
+        return false;
+    }
+    if !path.is_absolute() {
+        return true;
+    }
+
+    let Ok(request_lexical) = lexically_normalize_absolute(path) else {
+        return true;
+    };
+    let Ok(request_resolved) = canonicalize_with_missing_tail(path) else {
+        return true;
+    };
+    for root in config.sync.roots.values() {
         let root_path = tcfs_core::config::expand_tilde(&root.local_root);
-        let root_lexical = lexically_normalize_absolute(&root_path)
-            .map_err(|error| format!("invalid registered root '{root_id}' local_root: {error}"))?;
+        let Ok(root_lexical) = lexically_normalize_absolute(&root_path) else {
+            return true;
+        };
         if request_lexical == root_lexical || request_lexical.starts_with(&root_lexical) {
-            return Ok(Some(root_id.clone()));
+            return true;
         }
 
-        let root_resolved = canonicalize_with_missing_tail(&root_path).map_err(|error| {
-            format!("resolving registered root '{root_id}' local_root: {error}")
-        })?;
+        let Ok(root_resolved) = canonicalize_with_missing_tail(&root_path) else {
+            return true;
+        };
         if request_resolved == root_resolved || request_resolved.starts_with(&root_resolved) {
-            return Ok(Some(root_id.clone()));
+            return true;
         }
     }
-    Ok(None)
+    false
+}
+
+fn rootless_path_is_within_primary_sync_root(config: &TcfsConfig, path: &Path) -> bool {
+    let Some(root) = config.sync.sync_root.as_deref() else {
+        return false;
+    };
+    let root = tcfs_core::config::expand_tilde(root);
+    if !path.is_absolute() || !root.is_absolute() {
+        return false;
+    }
+    let (Ok(path_lexical), Ok(root_lexical)) = (
+        lexically_normalize_absolute(path),
+        lexically_normalize_absolute(&root),
+    ) else {
+        return false;
+    };
+    if path_lexical != root_lexical && !path_lexical.starts_with(&root_lexical) {
+        return false;
+    }
+    let (Ok(path_resolved), Ok(root_resolved)) = (
+        canonicalize_with_missing_tail(path),
+        canonicalize_with_missing_tail(&root),
+    ) else {
+        return false;
+    };
+    path_resolved == root_resolved || path_resolved.starts_with(root_resolved)
 }
 
 fn remote_prefixes_overlap(left: &str, right: &str) -> bool {
@@ -624,6 +691,49 @@ fn canonical_registered_root(
         ));
     }
 
+    #[test]
+    fn primary_conflict_route_requires_current_prefix_and_conflict_state() {
+        let mut entry = test_sync_state("data/manifests/current", 42);
+        entry.status = tcfs_sync::state::FileSyncStatus::Conflict;
+        entry.conflict = Some(tcfs_sync::conflict::ConflictInfo {
+            rel_path: "docs/file.txt".into(),
+            local_blake3: "local".into(),
+            remote_blake3: "remote".into(),
+            local_device: "neo".into(),
+            remote_device: "honey".into(),
+            local_vclock: tcfs_sync::conflict::VectorClock::new(),
+            remote_vclock: tcfs_sync::conflict::VectorClock::new(),
+            detected_at: 42,
+            times_recorded: 1,
+            remote_manifest_key: Some("data/manifests/peer".into()),
+        });
+        assert!(primary_conflict_entry_matches_prefix(&entry, "data"));
+
+        entry.remote_path = "old-prefix/manifests/current".into();
+        assert!(!primary_conflict_entry_matches_prefix(&entry, "data"));
+        entry.remote_path = "data/manifests/current".into();
+        entry.conflict.as_mut().unwrap().remote_manifest_key =
+            Some("named-root/manifests/peer".into());
+        assert!(!primary_conflict_entry_matches_prefix(&entry, "data"));
+        entry.conflict.as_mut().unwrap().remote_manifest_key = Some("data/manifests/peer".into());
+        entry.status = tcfs_sync::state::FileSyncStatus::Synced;
+        assert!(!primary_conflict_entry_matches_prefix(&entry, "data"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_missing_tail_rejects_dangling_symlink_component() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dangling = temp.path().join("dangling");
+        symlink(temp.path().join("missing-target"), &dangling).unwrap();
+        let requested = dangling.join("file.txt");
+        let error = canonicalize_with_missing_tail(&requested)
+            .expect_err("dangling symlink must not become an ordinary missing tail");
+        assert!(error.contains("unresolved symlink"), "{error}");
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -705,11 +815,48 @@ fn object_key_is_within_prefix(key: &str, prefix: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
+fn primary_conflict_entry_matches_prefix(
+    entry: &tcfs_sync::state::SyncState,
+    prefix: &str,
+) -> bool {
+    if entry.status != tcfs_sync::state::FileSyncStatus::Conflict
+        || !object_key_is_within_prefix(&entry.remote_path, prefix)
+    {
+        return false;
+    }
+    let Some(conflict) = entry.conflict.as_ref() else {
+        return false;
+    };
+    let rel_path = Path::new(&conflict.rel_path);
+    if conflict.rel_path.is_empty()
+        || conflict.rel_path.contains('\\')
+        || rel_path.is_absolute()
+        || has_parent_component(rel_path)
+    {
+        return false;
+    }
+    conflict
+        .remote_manifest_key
+        .as_deref()
+        .is_none_or(|key| object_key_is_within_prefix(key, prefix))
+}
+
 fn check_registered_prefix_permission(
     session: &tcfs_auth::Session,
     prefix: &str,
 ) -> std::result::Result<(), tonic::Status> {
-    let allowed = session.permissions.allowed_prefixes.is_empty()
+    if registered_prefix_allowed(session, prefix) {
+        Ok(())
+    } else {
+        Err(tonic::Status::permission_denied(format!(
+            "device {} is not authorized for the requested storage scope",
+            session.device_id
+        )))
+    }
+}
+
+fn registered_prefix_allowed(session: &tcfs_auth::Session, prefix: &str) -> bool {
+    session.permissions.allowed_prefixes.is_empty()
         || session.permissions.allowed_prefixes.iter().any(|allowed| {
             let allowed = allowed.trim_matches('/');
             !allowed.is_empty()
@@ -717,15 +864,7 @@ fn check_registered_prefix_permission(
                     || prefix
                         .strip_prefix(allowed)
                         .is_some_and(|suffix| suffix.starts_with('/')))
-        });
-    if allowed {
-        Ok(())
-    } else {
-        Err(tonic::Status::permission_denied(format!(
-            "device {} is not authorized for prefix '{prefix}'",
-            session.device_id
-        )))
-    }
+        })
 }
 
 fn validate_conflict_cache_route(
@@ -1159,6 +1298,25 @@ impl TcfsDaemonImpl {
             .map_err(tonic::Status::failed_precondition)
     }
 
+    /// Resolve a registered root only after its configured prefix is known to
+    /// be in the caller's scope. Unknown and unauthorized IDs deliberately
+    /// share one response so the registry cannot be enumerated.
+    fn authorized_registered_root(
+        &self,
+        session: &tcfs_auth::Session,
+        root_id: &str,
+    ) -> std::result::Result<RegisteredRootRoute, tonic::Status> {
+        validate_root_id(root_id).map_err(tonic::Status::invalid_argument)?;
+        let not_found = || tonic::Status::not_found("registered root was not found");
+        let Some(root) = self.config.sync.roots.get(root_id) else {
+            return Err(not_found());
+        };
+        if !registered_prefix_allowed(session, &root.remote_prefix) {
+            return Err(not_found());
+        }
+        self.registered_root(root_id)
+    }
+
     async fn resolve_registered_git_keep_both_repo(
         &self,
         route: &RegisteredRootRoute,
@@ -1204,6 +1362,8 @@ impl TcfsDaemonImpl {
                 .as_ref()
                 .map(|mk| build_encryption_context(&self.config, &self.device_id, mk))
         };
+        let primary_prefix = self.config.storage.resolved_prefix().to_string();
+        let canonical_requested_path = canonicalize_with_missing_tail(&path).ok();
 
         // Coordinate with `tcfs reconcile --state <this cache>` for the full
         // read/resolve/flush transaction. The lock is deliberately held across
@@ -2198,12 +2358,13 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let prefix = self.config.storage.resolved_prefix().to_string();
         let manifest_path = format!("{prefix}/manifests/{blake3_hex}");
 
-        let op = self.operator.lock().await;
-        let op = op
-            .as_ref()
-            .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
-        let op = op.clone();
-        drop(self.operator.lock().await);
+        let op = {
+            let operator = self.operator.lock().await;
+            operator
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+        };
 
         let total_bytes = meta.size;
         let _lock_guard = self.path_locks.lock(&real_path).await;
@@ -2556,8 +2717,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }));
         }
 
-        let route = self.registered_root(&root_id)?;
-        check_registered_prefix_permission(&session, &route.remote_prefix)?;
+        let route = self.authorized_registered_root(&session, &root_id)?;
         let _state_lock = tcfs_sync::state::StateFileLock::acquire(&route.state_path)
             .map_err(|error| tonic::Status::aborted(error.to_string()))?;
         let state = tcfs_sync::state::StateCache::open(&route.state_path)
@@ -2581,8 +2741,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         let session = self.require_session(&request).await?;
         Self::check_permission(&session, "push")?;
         let req = request.into_inner();
-        let route = self.registered_root(&req.root_id)?;
-        check_registered_prefix_permission(&session, &route.remote_prefix)?;
+        let route = self.authorized_registered_root(&session, &req.root_id)?;
 
         let mode = match RegisteredRootResolveMode::try_from(req.mode) {
             Ok(RegisteredRootResolveMode::GitKeepBothDryRun) => {
@@ -2628,16 +2787,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Self::check_permission(&session, "push")?;
         let req = request.into_inner();
         let path = std::path::PathBuf::from(&req.path);
-
-        if let Some(root_id) = registered_root_containing_rootless_path(&self.config, &path)
-            .map_err(tonic::Status::failed_precondition)?
-        {
-            return Err(tonic::Status::failed_precondition(format!(
-                "rootless ResolveConflict path {} belongs to registered root '{root_id}'; the legacy primary-cache RPC is fenced here. Use `tcfs resolve {} --root {root_id}` so tcfsd selects the named cache and prefix atomically.",
-                path.display(),
-                path.display()
-            )));
-        }
+        check_registered_prefix_permission(&session, self.config.storage.resolved_prefix())?;
 
         let resolution = match req.resolution.as_str() {
             "keep_local"
@@ -2662,13 +2812,56 @@ impl TcfsDaemon for TcfsDaemonImpl {
         // fence below also consults the stored ConflictInfo rel_path, which is
         // the authoritative repo-relative path when the request arrived through
         // a symlink alias or another local spelling.
-        let state_entry = {
+        let (state_entry, primary_repo_conflict) = {
             let mut cache = self.state_cache.lock().await;
             if let Err(e) = cache.reload_from_disk() {
                 tracing::warn!("failed to reload state cache: {e}");
             }
-            cache.get(&path).cloned()
+            let state_entry = cache.get(&path).cloned();
+            let git_dir = canonical_requested_path
+                .as_deref()
+                .unwrap_or(&path)
+                .join(".git");
+            let primary_repo_conflict = cache.conflicts().iter().any(|(cache_key, entry)| {
+                Path::new(cache_key).starts_with(&git_dir)
+                    && primary_conflict_entry_matches_prefix(entry, &primary_prefix)
+            });
+            (state_entry, primary_repo_conflict)
         };
+        let primary_state_conflict = state_entry
+            .as_ref()
+            .is_some_and(|entry| primary_conflict_entry_matches_prefix(entry, &primary_prefix));
+
+        // Once named roots exist, legacy per-file strategies that mutate a
+        // client-selected local pathname remain fenced. Binding those writes
+        // across async storage I/O requires a daemon-owned root/dirfd primitive;
+        // the conflict-only registered-root seam intentionally does not claim
+        // that B0 lifecycle yet. keep_local changes remote/state only, and the
+        // named Git keep-both RPC owns its canonical repo root separately.
+        if !self.config.sync.roots.is_empty()
+            && matches!(resolution.as_str(), "keep_remote" | "keep_both")
+        {
+            return Err(tonic::Status::failed_precondition(
+                "legacy primary-cache conflict route is unavailable for this path; use an authorized absolute primary path or `tcfs resolve <repo> --root <id>`",
+            ));
+        }
+
+        if !self.config.sync.roots.is_empty() {
+            let primary_route_proven = if self.config.sync.sync_root.is_some() {
+                rootless_path_is_within_primary_sync_root(&self.config, &path)
+            } else if repo_keep_both_mode(&resolution).is_some() {
+                primary_repo_conflict
+            } else {
+                primary_state_conflict
+            };
+            if rootless_path_may_belong_to_registered_root(&self.config, &path)
+                || !primary_route_proven
+            {
+                return Err(tonic::Status::failed_precondition(
+                    "legacy primary-cache conflict route is unavailable for this path; use an authorized absolute primary path or `tcfs resolve <repo> --root <id>`",
+                ));
+            }
+        }
 
         if let Some(mode) = repo_keep_both_mode(&resolution) {
             // Operator-deliberate invariant: repo-group git keep-both is a live
@@ -2698,7 +2891,23 @@ impl TcfsDaemon for TcfsDaemonImpl {
                             .to_string(),
                 }));
             }
-            return self.resolve_git_keep_both_repo(&path, mode).await;
+            let primary_path_allowed = self.config.sync.sync_root.is_none()
+                || rootless_path_is_within_primary_sync_root(&self.config, &path);
+            if !primary_path_allowed
+                || rootless_path_may_belong_to_registered_root(&self.config, &path)
+                || !primary_repo_conflict
+                || canonical_requested_path.as_deref() != Some(path.as_path())
+            {
+                return Err(tonic::Status::failed_precondition(
+                    "legacy primary-cache conflict route is unavailable for this path; use an authorized absolute primary path or `tcfs resolve <repo> --root <id>`",
+                ));
+            }
+            let repo_path = canonical_requested_path.as_deref().ok_or_else(|| {
+                tonic::Status::failed_precondition(
+                    "legacy primary-cache conflict route is unavailable for this path; use an authorized absolute primary path or `tcfs resolve <repo> --root <id>`",
+                )
+            })?;
+            return self.resolve_git_keep_both_repo(repo_path, mode).await;
         }
 
         // keep-both PR-1 (safety invariant S1): per-file conflict resolution
@@ -2726,6 +2935,20 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }));
         }
 
+        if resolution != "defer" {
+            let primary_path_allowed = self.config.sync.sync_root.is_none()
+                || rootless_path_is_within_primary_sync_root(&self.config, &path);
+            if !primary_path_allowed
+                || rootless_path_may_belong_to_registered_root(&self.config, &path)
+                || !primary_state_conflict
+                || canonical_requested_path.as_deref() != Some(path.as_path())
+            {
+                return Err(tonic::Status::failed_precondition(
+                    "legacy primary-cache conflict route is unavailable for this path; use an authorized absolute primary path or `tcfs resolve <repo> --root <id>`",
+                ));
+            }
+        }
+
         info!(
             path = %req.path,
             resolution = %resolution,
@@ -2744,12 +2967,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }
             "keep_local" => {
                 // Read local state, tick vclock, build new manifest, upload
-                let local_state = {
-                    let cache = self.state_cache.lock().await;
-                    cache.get(&path).cloned()
-                };
-
-                let local_state = match local_state {
+                let local_state = match state_entry.clone() {
                     Some(s) => s,
                     None => {
                         return Ok(tonic::Response::new(ResolveConflictResponse {
@@ -2820,13 +3038,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }
             "keep_remote" => {
                 // Download remote version to local path
-                let (remote_path, prefix) = {
-                    let cache = self.state_cache.lock().await;
-                    let entry = cache.get(&path);
-                    let remote = entry.map(|e| e.remote_path.clone()).unwrap_or_default();
-                    let prefix = self.config.storage.resolved_prefix().to_string();
-                    (remote, prefix)
-                };
+                let remote_path = state_entry
+                    .as_ref()
+                    .map(|entry| entry.remote_path.clone())
+                    .unwrap_or_default();
+                let prefix = primary_prefix.clone();
 
                 if remote_path.is_empty() {
                     return Ok(tonic::Response::new(ResolveConflictResponse {
@@ -2836,19 +3052,26 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     }));
                 }
 
-                let op = self.operator.lock().await;
-                let op = op
-                    .as_ref()
-                    .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
-                let op = op.clone();
-                drop(self.operator.lock().await);
+                let op = {
+                    let operator = self.operator.lock().await;
+                    operator
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+                };
+
+                let expected_path = canonical_requested_path.as_deref().ok_or_else(|| {
+                    tonic::Status::failed_precondition("primary local path is unavailable")
+                })?;
+                let local_path = revalidate_canonical_path(&path, expected_path)
+                    .map_err(tonic::Status::failed_precondition)?;
 
                 let result = {
                     let mut cache = self.state_cache.lock().await;
                     tcfs_sync::engine::download_file_with_device(
                         &op,
                         &remote_path,
-                        &path,
+                        &local_path,
                         &prefix,
                         None,
                         &self.device_id,
@@ -2884,13 +3107,11 @@ impl TcfsDaemon for TcfsDaemonImpl {
             }
             "keep_both" => {
                 // Rename local file to {stem}.conflict-{device_id}{ext}, then download remote
-                let (remote_path, prefix) = {
-                    let cache = self.state_cache.lock().await;
-                    let entry = cache.get(&path);
-                    let remote = entry.map(|e| e.remote_path.clone()).unwrap_or_default();
-                    let prefix = self.config.storage.resolved_prefix().to_string();
-                    (remote, prefix)
-                };
+                let remote_path = state_entry
+                    .as_ref()
+                    .map(|entry| entry.remote_path.clone())
+                    .unwrap_or_default();
+                let prefix = primary_prefix.clone();
 
                 if remote_path.is_empty() {
                     return Ok(tonic::Response::new(ResolveConflictResponse {
@@ -2901,8 +3122,13 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 }
 
                 // Rename local file
+                let expected_path = canonical_requested_path.as_deref().ok_or_else(|| {
+                    tonic::Status::failed_precondition("primary local path is unavailable")
+                })?;
+                let local_path = revalidate_canonical_path(&path, expected_path)
+                    .map_err(tonic::Status::failed_precondition)?;
                 let conflict_path = {
-                    let p = std::path::Path::new(&req.path);
+                    let p = local_path.as_path();
                     let stem = p.file_stem().unwrap_or_default().to_string_lossy();
                     let ext = p
                         .extension()
@@ -2915,8 +3141,8 @@ impl TcfsDaemon for TcfsDaemonImpl {
                         .to_string()
                 };
 
-                if path.exists() {
-                    if let Err(e) = std::fs::rename(&path, &conflict_path) {
+                if local_path.exists() {
+                    if let Err(e) = std::fs::rename(&local_path, &conflict_path) {
                         return Ok(tonic::Response::new(ResolveConflictResponse {
                             success: false,
                             resolved_path: String::new(),
@@ -2926,19 +3152,28 @@ impl TcfsDaemon for TcfsDaemonImpl {
                 }
 
                 // Download remote to original path
-                let op = self.operator.lock().await;
-                let op = op
-                    .as_ref()
-                    .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?;
-                let op = op.clone();
-                drop(self.operator.lock().await);
+                let op = {
+                    let operator = self.operator.lock().await;
+                    operator
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| tonic::Status::unavailable("no storage operator"))?
+                };
+
+                let local_path = match revalidate_canonical_path(&path, expected_path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let _ = std::fs::rename(&conflict_path, expected_path);
+                        return Err(tonic::Status::failed_precondition(error));
+                    }
+                };
 
                 let result = {
                     let mut cache = self.state_cache.lock().await;
                     tcfs_sync::engine::download_file_with_device(
                         &op,
                         &remote_path,
-                        &path,
+                        &local_path,
                         &prefix,
                         None,
                         &self.device_id,
@@ -2987,7 +3222,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
                     }
                     Err(e) => {
                         // Try to rename back on failure
-                        let _ = std::fs::rename(&conflict_path, &path);
+                        let _ = std::fs::rename(&conflict_path, &local_path);
                         Ok(tonic::Response::new(ResolveConflictResponse {
                             success: false,
                             resolved_path: String::new(),
@@ -4128,10 +4363,11 @@ mod tests {
         test_daemon_with_operator(None)
     }
 
-    fn test_daemon_with_registered_root(
+    fn test_daemon_with_registered_root_session_requirement(
         temp: &tempfile::TempDir,
         root_id: &str,
         local_root: &Path,
+        require_session: bool,
     ) -> TcfsDaemonImpl {
         let reconcile_dir = temp.path().join("reconcile");
         std::fs::create_dir_all(&reconcile_dir).unwrap();
@@ -4141,7 +4377,7 @@ mod tests {
         state.flush().unwrap();
 
         let mut config = TcfsConfig::default();
-        config.auth.require_session = false;
+        config.auth.require_session = require_session;
         config.daemon.socket = temp.path().join("tcfsd.sock");
         config.storage.remote_prefix = Some("data".into());
         config.sync.state_db = temp.path().join("primary.db");
@@ -4169,6 +4405,14 @@ mod tests {
             "test-device".into(),
             None,
         )
+    }
+
+    fn test_daemon_with_registered_root(
+        temp: &tempfile::TempDir,
+        root_id: &str,
+        local_root: &Path,
+    ) -> TcfsDaemonImpl {
+        test_daemon_with_registered_root_session_requirement(temp, root_id, local_root, false)
     }
 
     fn memory_operator() -> Operator {
@@ -5235,11 +5479,14 @@ mod tests {
         let repo = temp.path().join("repo");
         init_clean_test_repo(&repo);
         let daemon = test_daemon_with_registered_root(&temp, "named", &repo);
+        let unrelated = temp.path().join("ordinary-missing");
+        let mut expected_error = None;
 
         for (path, resolution, operator_cli) in [
             (repo.clone(), "git_keep_both_dry_run", true),
             (repo.join("README.md"), "keep_local", false),
             (repo.join("deleted.txt"), "keep_remote", false),
+            (unrelated, "keep_local", false),
             (PathBuf::from("repo/README.md"), "keep_local", false),
         ] {
             let error = daemon
@@ -5251,13 +5498,63 @@ mod tests {
                 .await
                 .expect_err("legacy/rootless RPC must not enter a registered root");
             assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(error.message().contains("--root"), "{error}");
+            assert!(!error.message().contains("named"), "{error}");
             assert!(
-                error.message().contains("--root")
-                    || error.message().contains("ambiguous relative path"),
-                "unexpected fence message for {}: {}",
-                path.display(),
-                error.message()
+                !error.message().contains(&path.display().to_string()),
+                "{error}"
             );
+            let observed = (error.code(), error.message().to_string());
+            if let Some(expected) = &expected_error {
+                assert_eq!(&observed, expected, "rootless route became an oracle");
+            } else {
+                expected_error = Some(observed);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_root_rootless_restricted_session_cannot_probe_enrollment() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let daemon =
+            test_daemon_with_registered_root_session_requirement(&temp, "named", &repo, true);
+        let mut permissions = tcfs_auth::DevicePermissions::default();
+        permissions.can_push = true;
+        permissions.allowed_prefixes = vec!["data".into()];
+        let token = insert_test_session(&daemon, "restricted-device", permissions).await;
+        let mut expected_error = None;
+
+        for path in [
+            repo.clone(),
+            repo.join("deleted.txt"),
+            temp.path().join("unrelated-missing"),
+            PathBuf::from("repo/deleted.txt"),
+        ] {
+            let error = daemon
+                .resolve_conflict(request_with_bearer(
+                    ResolveConflictRequest {
+                        path: path.display().to_string(),
+                        resolution: "keep_local".into(),
+                        operator_cli: false,
+                    },
+                    &token,
+                ))
+                .await
+                .expect_err("restricted rootless route must fail without revealing enrollment");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(!error.message().contains("named"), "{error}");
+            assert!(
+                !error.message().contains(&path.display().to_string()),
+                "{error}"
+            );
+            let observed = (error.code(), error.message().to_string());
+            if let Some(expected) = &expected_error {
+                assert_eq!(&observed, expected, "restricted route became an oracle");
+            } else {
+                expected_error = Some(observed);
+            }
         }
     }
 
@@ -5286,8 +5583,9 @@ mod tests {
                 .await
                 .expect_err("symlink alias must not bypass registered-root routing");
             assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-            assert!(error.message().contains("registered root 'named'"));
-            assert!(error.message().contains("--root named"));
+            assert!(error.message().contains("--root"));
+            assert!(!error.message().contains("named"));
+            assert!(!error.message().contains(&path.display().to_string()));
         }
     }
 
@@ -5707,6 +6005,37 @@ mod tests {
         assert!(!error.message().contains("secret-root"), "{error}");
         assert!(!error.message().contains("missing"), "{error}");
         assert!(!error.message().contains("available"), "{error}");
+    }
+
+    #[test]
+    fn registered_root_unauthorized_id_is_indistinguishable_from_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_clean_test_repo(&repo);
+        let daemon = test_daemon_with_registered_root(&temp, "secret-root", &repo);
+        let mut session = tcfs_auth::Session::new("device-1", "neo", "test");
+        session.permissions.allowed_prefixes = vec!["roots/other".into()];
+
+        let unauthorized = daemon
+            .authorized_registered_root(&session, "secret-root")
+            .expect_err("known but unauthorized root must be hidden");
+        let unknown = daemon
+            .authorized_registered_root(&session, "missing")
+            .expect_err("unknown root must be hidden");
+
+        assert_eq!(unauthorized.code(), tonic::Code::NotFound);
+        assert_eq!(unauthorized.code(), unknown.code());
+        assert_eq!(unauthorized.message(), unknown.message());
+        for forbidden in [
+            "secret-root",
+            "roots/secret-root",
+            &repo.display().to_string(),
+        ] {
+            assert!(
+                !unauthorized.message().contains(forbidden),
+                "{unauthorized}"
+            );
+        }
     }
 
     #[test]

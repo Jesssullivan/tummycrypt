@@ -810,22 +810,23 @@ fn git_ref_barrier_hit(rel_path: &str, local_root: &Path, barred: &BTreeSet<Path
         .is_some_and(|root| barred.contains(&root))
 }
 
-/// True when `rel_path` is a ref-class `.git` path whose enclosing repo is held
-/// by a live FOREIGN `.git/tcfs.lock` holder this run — the action must be
-/// deferred (keep-both PR-2, S3). Only ref-class paths (`refs/**`,
-/// `packed-refs`, `HEAD`, submodule ref-class) gate on the lock; object-class
-/// (`.git/objects/**`) and normal-file writes are content-addressed / atomic
-/// and proceed as today.
-fn git_ref_foreign_lock_hit(
+/// True when `rel_path` is a mutable, non-object `.git` path whose enclosing
+/// repo could not be locked this run. Native Git busy markers and a foreign
+/// TCFS advisory holder both defer refs, index, reflogs, and other mutable Git
+/// metadata. Content-addressed `.git/objects/**` and normal files may proceed.
+fn git_mutation_lock_hit(
     rel_path: &str,
     local_root: &Path,
-    foreign_locked: &BTreeSet<PathBuf>,
+    blocked_repos: &BTreeSet<PathBuf>,
 ) -> bool {
-    if foreign_locked.is_empty() || !is_git_ref_class_path(rel_path) {
+    if blocked_repos.is_empty()
+        || !is_git_internal_path(rel_path)
+        || is_git_object_class_path(rel_path)
+    {
         return false;
     }
     git_safety::repo_root_for_git_path(local_root, rel_path)
-        .is_some_and(|root| foreign_locked.contains(&root))
+        .is_some_and(|root| blocked_repos.contains(&root))
 }
 
 /// Extract the plan-time head-ref pins carried by a `.git` fast-forward action
@@ -1125,6 +1126,23 @@ fn git_dir_update_ref_cas(
             "git update-ref CAS failed for {ref_name}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+
+        let index_plan = plan_of(vec![git_pull_new_remote("repo/.git/index")]);
+        assert!(
+            !new_remote_pull_fast_path_safe(&index_plan),
+            "mutable non-object Git metadata must go through the locked executor path"
+        );
+
+        let refs_dir_plan = plan_of(vec![
+            git_pull_new_remote("repo/.git/objects/ab/cdef01234567"),
+            ReconcileAction::CreateDirectory {
+                rel_path: "repo/.git/refs/tcfs".to_string(),
+            },
+        ]);
+        assert!(
+            !new_remote_pull_fast_path_safe(&refs_dir_plan),
+            "non-object Git directories must not bypass lock acquisition"
+        );
     }
     Ok(())
 }
@@ -1151,26 +1169,21 @@ fn git_dir_delete_ref_cas(git_dir: &Path, ref_name: &str, expected_old: &str) ->
 /// repo's lock cannot be taken. A lock held by a FOREIGN live holder — another
 /// sync cycle or process, a PID `acquire_git_lock` could neither acquire nor
 /// steal as stale — means the cooperative lock fences nothing if we still write
-/// ref-class paths. Those repos are surfaced in `foreign_locked_repos` so the
-/// executor DEFERS their ref-class `.git` actions this run.
+/// Git mutation. Those repos are surfaced in `blocked_git_repos` so the
+/// executor defers every non-object `.git` action this run.
 struct GitLockAcquisition {
     /// Held guards; dropping the vec (with the owning struct) releases all locks.
     guards: Vec<git_safety::GitLockGuard>,
-    /// Repo roots whose `.git/tcfs.lock` is held by a live foreign holder that
-    /// could not be acquired or stolen-as-stale this run. Ref-class writes for
-    /// these repos are deferred (recorded, not errored); the next cycle
-    /// re-plans them once the holder releases. A STALE (dead-owner, aged) lock
-    /// is stolen by `acquire_git_lock` and returns `Ok`, so a leaked lock never
-    /// lands a repo here — no deadlock on a leaked lock.
-    foreign_locked_repos: BTreeSet<PathBuf>,
+    /// Repo roots unavailable for cooperative mutation because native Git is
+    /// busy or another TCFS process holds the advisory lock. Every non-object
+    /// `.git` action for these repos is deferred until a later reconcile.
+    blocked_git_repos: BTreeSet<PathBuf>,
 }
 
 /// Acquire cooperative `.git/tcfs.lock` guards for every repo that has a
 /// `.git/*` write action in `plan`. Returns the held guards plus the set of
-/// repos whose lock is held by a live foreign holder (ref-class writes there
-/// must defer, keep-both PR-2). Repos whose `.git` is mid-operation are skipped
-/// (logged) and keep today's behavior — a busy repo simply re-reconciles next
-/// cycle.
+/// repos unavailable because native Git is busy or a foreign holder owns the
+/// advisory lock. Non-object `.git` mutations for either case must defer.
 fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLockAcquisition {
     let mut repos: BTreeSet<PathBuf> = BTreeSet::new();
     for action in &plan.actions {
@@ -1178,7 +1191,8 @@ fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLoc
             ReconcileAction::Push { rel_path, .. }
             | ReconcileAction::Pull { rel_path, .. }
             | ReconcileAction::DeleteLocal { rel_path, .. }
-            | ReconcileAction::DeleteRemote { rel_path } => rel_path.as_str(),
+            | ReconcileAction::DeleteRemote { rel_path }
+            | ReconcileAction::CreateDirectory { rel_path } => rel_path.as_str(),
             _ => continue,
         };
         if !is_git_internal_path(rel) {
@@ -1190,7 +1204,7 @@ fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLoc
     }
 
     let mut guards = Vec::new();
-    let mut foreign_locked_repos: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut blocked_git_repos: BTreeSet<PathBuf> = BTreeSet::new();
     for repo_root in repos {
         let git_dir = repo_root.join(".git");
         if !git_dir.is_dir() {
@@ -1201,8 +1215,9 @@ fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLoc
             warn!(
                 repo = %repo_root.display(),
                 blocking = ?safety.blocking,
-                "git ff: repo busy, skipping tcfs.lock acquire this cycle"
+                "git ff: repo busy; deferring non-object .git mutations this cycle"
             );
+            blocked_git_repos.insert(repo_root);
             continue;
         }
         match git_safety::acquire_git_lock(&git_dir) {
@@ -1217,15 +1232,15 @@ fn acquire_git_locks_for_plan(plan: &ReconcilePlan, local_root: &Path) -> GitLoc
                 warn!(
                     repo = %repo_root.display(),
                     error = %format!("{e:#}"),
-                    "git ff: foreign holder owns tcfs.lock; deferring ref-class writes for this repo"
+                    "git ff: foreign holder owns tcfs.lock; deferring non-object .git mutations for this repo"
                 );
-                foreign_locked_repos.insert(repo_root);
+                blocked_git_repos.insert(repo_root);
             }
         }
     }
     GitLockAcquisition {
         guards,
-        foreign_locked_repos,
+        blocked_git_repos,
     }
 }
 
@@ -1989,10 +2004,12 @@ fn new_remote_pull_fast_path_safe(plan: &ReconcilePlan) -> bool {
             }
         )
     }) && plan.actions.iter().all(|action| {
-        !matches!(
-            action,
-            ReconcileAction::Pull { rel_path, .. } if is_git_ref_class_path(rel_path)
-        )
+        let rel_path = match action {
+            ReconcileAction::Pull { rel_path, .. }
+            | ReconcileAction::CreateDirectory { rel_path } => rel_path,
+            _ => return true,
+        };
+        !is_git_internal_path(rel_path) || is_git_object_class_path(rel_path)
     })
 }
 
@@ -2038,14 +2055,14 @@ pub async fn execute_plan(
     // window. This stops a concurrent commit (which rewrites refs/index mid-run)
     // from tearing the push. keep-both PR-2 (S3): if a repo's lock is held by a
     // live FOREIGN holder, the cooperative lock fences nothing were we to write
-    // ref-class paths anyway — so those repos' ref-class actions DEFER this run
-    // (see `git_ref_foreign_lock_hit` below); object-class and normal-file
-    // writes still proceed. A STALE (dead-owner, aged) lock is stolen on
-    // acquire, so a leaked lock never deadlocks a repo. Repos mid-`.git`
-    // operation keep today's behavior (skipped, re-reconciled next cycle).
+    // non-object `.git` paths anyway — so those repos' refs, index, reflogs,
+    // and other mutable metadata DEFER this run (see `git_mutation_lock_hit`
+    // below); object-class and normal-file writes still proceed. Native Git
+    // busy markers enter the same deferred set. A stale diagnostic file with
+    // no advisory owner is reusable and never deadlocks a repo.
     // Guards live for the duration of this function and drop (release) on return.
     let git_lock_acq = acquire_git_locks_for_plan(plan, local_root);
-    let foreign_locked_repos = &git_lock_acq.foreign_locked_repos;
+    let blocked_git_repos = &git_lock_acq.blocked_git_repos;
     let _git_locks = &git_lock_acq.guards;
 
     // Objects-before-refs BARRIER (per repo, both directions): the plan orders
@@ -2069,20 +2086,19 @@ pub async fn execute_plan(
             ReconcileAction::Push { rel_path, .. }
             | ReconcileAction::Pull { rel_path, .. }
             | ReconcileAction::DeleteLocal { rel_path, .. }
-            | ReconcileAction::DeleteRemote { rel_path } => Some(rel_path),
+            | ReconcileAction::DeleteRemote { rel_path }
+            | ReconcileAction::CreateDirectory { rel_path } => Some(rel_path),
             _ => None,
         };
         if let Some(rel_path) = git_write_rel_path {
-            // keep-both PR-2 (S3): a live FOREIGN holder owns this repo's
-            // `.git/tcfs.lock`. Writing ref-class paths while another sync holds
-            // the lock races it, so DEFER this repo's ref-class actions this run
-            // (recorded, not errored); the next cycle re-plans them once the
-            // holder releases. Object-class and normal-file writes are
-            // unaffected — only ref-class paths gate on the lock.
-            if git_ref_foreign_lock_hit(rel_path, local_root, foreign_locked_repos) {
+            // A live foreign holder or native Git busy marker means TCFS does
+            // not own this repo's mutation window. Defer every non-object
+            // `.git` action; content-addressed objects and normal files remain
+            // safe to apply independently.
+            if git_mutation_lock_hit(rel_path, local_root, blocked_git_repos) {
                 info!(
                     path = %rel_path,
-                    "git lock: foreign holder owns .git/tcfs.lock; deferring ref action"
+                    "git lock: repo mutation window unavailable; deferring .git action"
                 );
                 result.deferred_git_refs.push(rel_path.clone());
                 continue;
@@ -4322,7 +4338,7 @@ mod tests {
         init_git_repo(&repo);
         let base = commit_file(&repo, "file.txt", "base", "base");
         let current = commit_file(&repo, "file.txt", "tagged work", "tagged");
-        git_safety::run_git(&repo, &["tag", "v1", &current]).unwrap();
+        git_safety::run_git(&repo, &["tag", "--no-sign", "v1", &current]).unwrap();
         git_safety::run_git(&repo, &["checkout", "--quiet", "-b", "incoming", &base]).unwrap();
         let incoming = commit_file(&repo, "file.txt", "incoming work", "incoming");
         git_safety::run_git(&repo, &["checkout", "--quiet", "main"]).unwrap();
@@ -4504,7 +4520,7 @@ mod tests {
         let repo = local_root.join("repo");
         init_git_repo(&repo);
         let tagged = commit_file(&repo, "file.txt", "tagged work", "tagged");
-        git_safety::run_git(&repo, &["tag", "v1", &tagged]).unwrap();
+        git_safety::run_git(&repo, &["tag", "--no-sign", "v1", &tagged]).unwrap();
 
         let rel_path = "repo/.git/refs/tags/v1";
         let local_path = local_root.join(rel_path);
@@ -4917,16 +4933,18 @@ mod tests {
         }
     }
 
-    /// Backdate a lock file's mtime past the staleness threshold, so the ONLY
-    /// variable between the live-owner and dead-owner tests is owner liveness.
-    fn age_lock(lock_path: &Path) {
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        let f = std::fs::File::options()
+    /// Hold the stable lock inode through an independent descriptor, modeling
+    /// another process without relying on diagnostic PID/mtime contents.
+    fn hold_foreign_git_lock(lock_path: &Path) -> std::fs::File {
+        let file = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
             .write(true)
             .open(lock_path)
             .unwrap();
-        f.set_times(std::fs::FileTimes::new().set_modified(old))
-            .unwrap();
+        file.try_lock().unwrap();
+        file
     }
 
     /// (test a) A FOREIGN live holder of `.git/tcfs.lock` forces this repo's
@@ -4934,21 +4952,18 @@ mod tests {
     /// writes are unaffected. Fail-before: without the foreign-lock plumbing the
     /// executor took no note of the held lock and wrote refs anyway.
     #[test]
-    fn foreign_live_lock_defers_ref_class_writes_only() {
+    fn foreign_live_lock_defers_non_object_git_mutations() {
         let dir = tempfile::tempdir().unwrap();
         let local_root = dir.path();
         let git_dir = local_root.join("repo/.git");
         std::fs::create_dir_all(&git_dir).unwrap();
 
-        // Simulate a live FOREIGN holder: lock owned by PID 1 (init/launchd —
-        // always alive, genuinely not this process), backdated past staleness so
-        // youth is not what keeps it held. A live owner is never stolen.
         let lock_path = git_dir.join("tcfs.lock");
-        std::fs::write(&lock_path, "1 0\n").unwrap();
-        age_lock(&lock_path);
+        let _foreign_lock = hold_foreign_git_lock(&lock_path);
 
         let plan = plan_of(vec![
             git_push("repo/.git/refs/heads/main"), // ref-class → defers
+            git_push("repo/.git/index"),           // mutable metadata → defers
             git_push("repo/.git/objects/ab/cdef01234567"), // object-class → runs
             git_push("repo/notes.txt"),            // normal file → runs
         ]);
@@ -4957,7 +4972,7 @@ mod tests {
         let repo_root = local_root.join("repo");
 
         assert!(
-            acq.foreign_locked_repos.contains(&repo_root),
+            acq.blocked_git_repos.contains(&repo_root),
             "a live foreign tcfs.lock holder must mark the repo foreign-locked"
         );
         assert!(
@@ -4969,27 +4984,66 @@ mod tests {
             "the foreign holder's lock must be left in place"
         );
 
-        // Only ref-class paths in the foreign-locked repo defer.
+        // Every non-object .git mutation in the blocked repo defers.
         assert!(
-            git_ref_foreign_lock_hit(
+            git_mutation_lock_hit(
                 "repo/.git/refs/heads/main",
                 local_root,
-                &acq.foreign_locked_repos
+                &acq.blocked_git_repos
             ),
             "ref-class write must defer under a foreign lock"
         );
         assert!(
-            !git_ref_foreign_lock_hit(
+            git_mutation_lock_hit("repo/.git/index", local_root, &acq.blocked_git_repos),
+            "index write must defer under a foreign lock"
+        );
+        assert!(
+            !git_mutation_lock_hit(
                 "repo/.git/objects/ab/cdef01234567",
                 local_root,
-                &acq.foreign_locked_repos
+                &acq.blocked_git_repos
             ),
             "object-class write proceeds (content-addressed, never conflicts)"
         );
         assert!(
-            !git_ref_foreign_lock_hit("repo/notes.txt", local_root, &acq.foreign_locked_repos),
+            !git_mutation_lock_hit("repo/notes.txt", local_root, &acq.blocked_git_repos),
             "normal-file write proceeds"
         );
+    }
+
+    #[test]
+    fn native_git_busy_marker_defers_non_object_git_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_root = dir.path();
+        let git_dir = local_root.join("repo/.git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("index.lock"), b"busy").unwrap();
+
+        let plan = plan_of(vec![
+            git_push("repo/.git/refs/heads/main"),
+            git_push("repo/.git/index"),
+            git_push("repo/.git/objects/ab/cdef01234567"),
+        ]);
+        let acq = acquire_git_locks_for_plan(&plan, local_root);
+        let repo_root = local_root.join("repo");
+
+        assert!(acq.guards.is_empty());
+        assert!(acq.blocked_git_repos.contains(&repo_root));
+        assert!(git_mutation_lock_hit(
+            "repo/.git/refs/heads/main",
+            local_root,
+            &acq.blocked_git_repos
+        ));
+        assert!(git_mutation_lock_hit(
+            "repo/.git/index",
+            local_root,
+            &acq.blocked_git_repos
+        ));
+        assert!(!git_mutation_lock_hit(
+            "repo/.git/objects/ab/cdef01234567",
+            local_root,
+            &acq.blocked_git_repos
+        ));
     }
 
     /// (test c) The all-NewRemote concurrent pull fast path returns before
@@ -5035,8 +5089,7 @@ mod tests {
         std::fs::create_dir_all(&git_dir).unwrap();
 
         let lock_path = git_dir.join("tcfs.lock");
-        std::fs::write(&lock_path, "1 0\n").unwrap();
-        age_lock(&lock_path);
+        let _foreign_lock = hold_foreign_git_lock(&lock_path);
 
         let plan = plan_of(vec![
             ReconcileAction::DeleteLocal {
@@ -5051,30 +5104,25 @@ mod tests {
         let repo_root = local_root.join("repo");
 
         assert!(
-            acq.foreign_locked_repos.contains(&repo_root),
+            acq.blocked_git_repos.contains(&repo_root),
             "delete-only ref-class plans must still mark the repo foreign-locked"
         );
         assert!(
-            git_ref_foreign_lock_hit(
+            git_mutation_lock_hit(
                 "repo/.git/refs/heads/main",
                 local_root,
-                &acq.foreign_locked_repos
+                &acq.blocked_git_repos
             ),
             "local ref delete must defer under a foreign lock"
         );
         assert!(
-            git_ref_foreign_lock_hit(
-                "repo/.git/packed-refs",
-                local_root,
-                &acq.foreign_locked_repos
-            ),
+            git_mutation_lock_hit("repo/.git/packed-refs", local_root, &acq.blocked_git_repos),
             "remote packed-refs delete must defer under a foreign lock"
         );
     }
 
-    /// (test b) A STALE lock (dead owner, aged past the threshold) is stolen on
-    /// acquire and yields a held guard — a leaked lock must NEVER deadlock this
-    /// repo's ref-class writes. Same fixture as (a) but a dead PID.
+    /// (test b) Stale diagnostic contents without a live advisory owner do not
+    /// deadlock this repo's ref-class writes. The persistent inode is reused.
     #[test]
     fn stale_dead_lock_is_stealable_no_deadlock() {
         let dir = tempfile::tempdir().unwrap();
@@ -5082,30 +5130,27 @@ mod tests {
         let git_dir = local_root.join("repo/.git");
         std::fs::create_dir_all(&git_dir).unwrap();
 
-        // Leaked lock: dead owner PID (far past any real pid space), aged past
-        // the staleness threshold. Must be stolen, not treated as foreign-held.
         let lock_path = git_dir.join("tcfs.lock");
         std::fs::write(&lock_path, "999999999 0\n").unwrap();
-        age_lock(&lock_path);
 
         let plan = plan_of(vec![git_push("repo/.git/refs/heads/main")]);
         let acq = acquire_git_locks_for_plan(&plan, local_root);
         let repo_root = local_root.join("repo");
 
         assert!(
-            !acq.foreign_locked_repos.contains(&repo_root),
-            "a stale dead-owner lock must be stolen, not deferred as foreign-held"
+            !acq.blocked_git_repos.contains(&repo_root),
+            "stale contents without an advisory owner must not be treated as locked"
         );
         assert_eq!(
             acq.guards.len(),
             1,
-            "stealing the stale lock yields exactly one held guard (no deadlock)"
+            "reusing the persistent inode yields exactly one held guard"
         );
         assert!(
-            !git_ref_foreign_lock_hit(
+            !git_mutation_lock_hit(
                 "repo/.git/refs/heads/main",
                 local_root,
-                &acq.foreign_locked_repos
+                &acq.blocked_git_repos
             ),
             "ref-class writes proceed once the stale lock is stolen"
         );

@@ -21,6 +21,11 @@ intent rather than the current supported/proven surface.
 
 ### Security
 
+- Registered-root authorization now hides known-but-unauthorized IDs behind
+  the same not-found response as unknown IDs, before path-bearing validation.
+- Git keep-both cleanliness checks use isolated metadata that cannot load
+  roamed filter commands, and the cooperative Git lock now uses one persistent
+  advisory-locked inode instead of pathname unlink/recreate ownership.
 - Credential-bearing S3/SeaweedFS clients now require HTTPS by default across
   daemon, CLI, direct mount, and FileProvider operator construction. Plaintext
   compatibility requires an explicit development/test opt-in.

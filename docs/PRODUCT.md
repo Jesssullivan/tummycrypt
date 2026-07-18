@@ -45,9 +45,11 @@ cache and prefix. A client-side `--state` escape hatch would point at the
 right bytes but discard the daemon's authority and cannot safely bind the
 prefix, path, or policy.
 
-The accepted minimal design is a versioned set of trusted, daemon-owned root
-descriptors rendered through configuration. Ordinary reconcile and resolve
-clients may select an ID; they may not create or rewrite its tuple.
+The target B0 design is a versioned set of trusted, daemon-owned root
+descriptors rendered through configuration. Ordinary reconcile and file
+resolution clients may eventually select an ID; they may not create or rewrite
+its tuple. PR #551 is deliberately narrower: it adds an unversioned,
+conflict-only precursor for named inspection and Git keep-both resolution.
 
 ```text
 stable root_id
@@ -61,7 +63,8 @@ The same `root_id` may map to different local paths on macOS and Linux. Its
 remote prefix is the fleet-wide convergence identity. The descriptor is local,
 contains no credentials, and is loaded from the daemon's trusted configuration.
 
-Required invariants:
+Required invariants for the complete B0 lifecycle (not claims that every item
+is implemented by PR #551):
 
 1. Root IDs use a bounded, validated slug and cannot contain path traversal.
 2. State files are configured through the trusted descriptor and normalized by
