@@ -3585,7 +3585,8 @@ mod tests {
         .unwrap();
         ensure_commit_present(&winner, &head_l).unwrap();
 
-        // Loser's branch-head ref content as a PR-2 remote manifest.
+        // Loser's branch-head ref content published at the winner's logical
+        // path, matching the conflict entry that the resolver indexes below.
         let ref_blob = dir.path().join("loser-ref-blob");
         std::fs::write(&ref_blob, format!("{head_l}\n")).unwrap();
         let mut up_state = StateCache::open(&dir.path().join("upload-state.json")).unwrap();
@@ -3596,7 +3597,7 @@ mod tests {
             &mut up_state,
             None,
             "loser",
-            Some("loser/.git/refs/heads/main"),
+            Some("winner/.git/refs/heads/main"),
             None,
         )
         .await
