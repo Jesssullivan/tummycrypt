@@ -105,6 +105,12 @@
           # keep-both CLI tests (TIN-2658) run real `git` repos in checkPhase;
           # the build sandbox has no ambient git.
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.gitMinimal ];
+          # Stable-root CLI tests exercise the same fail-closed ancestry and
+          # ACL checks as tcfsd. Linux Nix user namespaces expose sandbox
+          # ancestors as uid 65534 and cannot faithfully run those checks;
+          # ordinary Linux Cargo CI remains authoritative, while Darwin keeps
+          # the derivation checkPhase.
+          doCheck = !pkgs.stdenv.isLinux;
           meta.mainProgram = "tcfs";
         });
 
