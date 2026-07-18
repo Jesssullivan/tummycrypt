@@ -3646,9 +3646,7 @@ mod tests {
         std::fs::create_dir_all(logs_head.parent().unwrap()).unwrap();
         std::fs::write(
             &logs_head,
-            format!(
-                "{head_w} {head_w} TCFS Test <tcfs@example.invalid> 0 +0000\tfixture\n"
-            ),
+            format!("{head_w} {head_w} TCFS Test <tcfs@example.invalid> 0 +0000\tfixture\n"),
         )
         .unwrap();
         let logs_head_before = std::fs::read(&logs_head).unwrap();
