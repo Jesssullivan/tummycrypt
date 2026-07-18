@@ -140,6 +140,12 @@ mod linux {
         let path_c = c_path(path)?;
 
         for name in ACL_XATTRS {
+            // POSIX default ACLs apply only to directories. Linux reports
+            // EOPNOTSUPP when probing system.posix_acl_default on a regular
+            // file even when the filesystem fully supports access ACLs.
+            if name == ACL_XATTRS[1] && !before.is_dir() {
+                continue;
+            }
             // SAFETY: both pointers reference NUL-terminated byte strings for
             // the duration of the call. A null value buffer with size zero is
             // the documented size/presence probe and does not write memory.
@@ -186,6 +192,11 @@ mod linux {
         })?;
 
         for name in ACL_XATTRS {
+            // See the pathname probe above: default ACLs are meaningful only
+            // for directories, and Linux rejects this xattr on regular files.
+            if name == ACL_XATTRS[1] && !before.is_dir() {
+                continue;
+            }
             // SAFETY: file owns a live descriptor and name is a static,
             // NUL-terminated xattr name. The null buffer is a size/presence
             // probe and cannot be written through.
@@ -591,5 +602,11 @@ mod tests {
         reject_write_grant_acl(temp.path()).unwrap();
         let directory = std::fs::File::open(temp.path()).unwrap();
         reject_write_grant_acl_fd(&directory, temp.path()).unwrap();
+
+        let regular_path = temp.path().join("state.json");
+        std::fs::write(&regular_path, b"{}").unwrap();
+        reject_write_grant_acl(&regular_path).unwrap();
+        let regular_file = std::fs::File::open(&regular_path).unwrap();
+        reject_write_grant_acl_fd(&regular_file, &regular_path).unwrap();
     }
 }

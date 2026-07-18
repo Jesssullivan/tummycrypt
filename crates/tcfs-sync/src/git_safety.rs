@@ -60,6 +60,10 @@ pub(crate) fn sanitized_git_command() -> std::process::Command {
         .arg("-c")
         .arg("core.fsmonitor=false")
         .arg("-c")
+        .arg("commit.gpgSign=false")
+        .arg("-c")
+        .arg("tag.gpgSign=false")
+        .arg("-c")
         .arg("core.logAllRefUpdates=false")
         .arg("-c")
         .arg("core.sharedRepository=0");
@@ -724,6 +728,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(args.iter().any(|arg| arg.starts_with("core.hooksPath=")));
         assert!(args.iter().any(|arg| arg == "core.fsmonitor=false"));
+        assert!(args.iter().any(|arg| arg == "commit.gpgSign=false"));
+        assert!(args.iter().any(|arg| arg == "tag.gpgSign=false"));
         assert!(args.iter().any(|arg| arg == "core.logAllRefUpdates=false"));
         assert!(args.iter().any(|arg| arg == "core.sharedRepository=0"));
     }
