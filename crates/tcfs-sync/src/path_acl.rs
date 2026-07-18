@@ -137,6 +137,14 @@ mod linux {
         // ACL boundary remains fail-closed when used independently.
         let before = std::fs::symlink_metadata(path)
             .with_context(|| format!("inspecting ACL path metadata: {}", path.display()))?;
+        // Linux symlink permissions are ignored and POSIX ACL xattrs are not
+        // supported on the link inode. Topology callers still reject the
+        // symlink itself; treating its inapplicable ACL surface as empty lets
+        // them return that precise fail-closed topology error.
+        if before.file_type().is_symlink() {
+            revalidate_path_identity(path, &before, "symlink ACL classification")?;
+            return Ok(());
+        }
         let path_c = c_path(path)?;
 
         for name in ACL_XATTRS {

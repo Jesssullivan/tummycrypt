@@ -3537,7 +3537,7 @@ mod tests {
     /// the group clears.
     #[tokio::test]
     async fn head_conflict_resolves_keep_local_alongside_parked_branch() {
-        let op = Operator::new(Memory::default()).unwrap().finish();
+        let op = memory_op();
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state-dir");
         std::fs::create_dir_all(&state_dir).unwrap();
