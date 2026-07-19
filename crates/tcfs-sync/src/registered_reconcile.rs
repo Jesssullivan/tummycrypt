@@ -12,8 +12,8 @@ use serde::{Deserialize, Deserializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::marker::PhantomData;
-use std::path::Path;
-use tcfs_core::config::RegisteredRootPlanContractV1;
+use std::path::{Path, PathBuf};
+use tcfs_core::config::{RegisteredRootPlanContractV1, RootStateContractV1};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::blacklist::Blacklist;
@@ -328,12 +328,31 @@ impl StrictPrimaryStateBytesDigestV1 {
 }
 
 /// Strict, quiet, primary-only registered-root state.
-#[derive(Clone)]
 pub struct StrictPrimaryStateSnapshotV1 {
     raw_bytes_digest: StrictPrimaryStateBytesDigestV1,
+    selected_state_path: PathBuf,
+    canonical_local_root: PathBuf,
+    remote_prefix: String,
+    namespace_claims: BTreeMap<String, StrictStateNamespaceClaimV1>,
     entries: BTreeMap<String, BoundStrictSyncStateV1>,
     last_nats_seq: u64,
     device_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StrictStateNamespaceClaimV1 {
+    exact_path: String,
+    role: PortableNamespaceRole,
+}
+
+impl StrictStateNamespaceClaimV1 {
+    pub(crate) fn exact_path(&self) -> &str {
+        &self.exact_path
+    }
+
+    pub(crate) const fn role(&self) -> PortableNamespaceRole {
+        self.role
+    }
 }
 
 impl fmt::Debug for StrictPrimaryStateSnapshotV1 {
@@ -341,6 +360,10 @@ impl fmt::Debug for StrictPrimaryStateSnapshotV1 {
         formatter
             .debug_struct("StrictPrimaryStateSnapshotV1")
             .field("raw_bytes_digest", &self.raw_bytes_digest)
+            .field("selected_state_path", &self.selected_state_path)
+            .field("canonical_local_root", &self.canonical_local_root)
+            .field("remote_prefix", &self.remote_prefix)
+            .field("namespace_claim_count", &self.namespace_claims.len())
             .field("entry_count", &self.entries.len())
             .field("last_nats_seq", &self.last_nats_seq)
             .field("device_id", &self.device_id)
@@ -351,6 +374,26 @@ impl fmt::Debug for StrictPrimaryStateSnapshotV1 {
 impl StrictPrimaryStateSnapshotV1 {
     pub const fn raw_bytes_digest(&self) -> StrictPrimaryStateBytesDigestV1 {
         self.raw_bytes_digest
+    }
+
+    pub(crate) fn selected_state_path(&self) -> &Path {
+        &self.selected_state_path
+    }
+
+    pub(crate) fn canonical_local_root(&self) -> &Path {
+        &self.canonical_local_root
+    }
+
+    pub(crate) fn remote_prefix(&self) -> &str {
+        &self.remote_prefix
+    }
+
+    pub(crate) fn namespace_claims(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&str, &StrictStateNamespaceClaimV1)> {
+        self.namespace_claims
+            .iter()
+            .map(|(folded_path, claim)| (folded_path.as_str(), claim))
     }
 
     pub const fn entries(&self) -> &BTreeMap<String, BoundStrictSyncStateV1> {
@@ -377,9 +420,41 @@ pub enum StrictPrimaryStateIncompleteV1 {
         locked_keys: Vec<String>,
     },
     InvalidRootBinding,
+    NamespaceResourceLimit {
+        resource: StrictStateNamespaceResourceV1,
+    },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictStateNamespaceResourceV1 {
+    GeneratedClaims,
+    GeneratedClaimBytes,
+    RetainedClaims,
+    RetainedClaimBytes,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("strict state namespace claim resource limit exceeded: {0:?}")]
+struct StrictStateNamespaceResourceLimitErrorV1(StrictStateNamespaceResourceV1);
+
+impl StrictStateNamespaceResourceLimitErrorV1 {
+    const fn resource(&self) -> StrictStateNamespaceResourceV1 {
+        self.0
+    }
+}
+
+fn strict_state_binding_incomplete_v1(error: &anyhow::Error) -> StrictPrimaryStateIncompleteV1 {
+    error
+        .downcast_ref::<StrictStateNamespaceResourceLimitErrorV1>()
+        .map_or(
+            StrictPrimaryStateIncompleteV1::InvalidRootBinding,
+            |limit| StrictPrimaryStateIncompleteV1::NamespaceResourceLimit {
+                resource: limit.resource(),
+            },
+        )
+}
+
+#[derive(Debug)]
 pub enum StrictPrimaryStateReadV1 {
     Complete(StrictPrimaryStateSnapshotV1),
     Incomplete(StrictPrimaryStateIncompleteV1),
@@ -498,16 +573,16 @@ fn read_and_bind_strict_primary_state_inner_v1(
             },
         ));
     }
-    let entries = match bind_strict_state_entries_v1(
+    let bound = match bind_strict_state_entries_v1(
         raw_entries,
         canonical_local_root,
         canonical_remote_prefix,
         binding_mode,
     ) {
         Ok(entries) => entries,
-        Err(_) => {
+        Err(error) => {
             return Ok(StrictPrimaryStateReadV1::Incomplete(
-                StrictPrimaryStateIncompleteV1::InvalidRootBinding,
+                strict_state_binding_incomplete_v1(&error),
             ));
         }
     };
@@ -517,11 +592,21 @@ fn read_and_bind_strict_primary_state_inner_v1(
     Ok(StrictPrimaryStateReadV1::Complete(
         StrictPrimaryStateSnapshotV1 {
             raw_bytes_digest: raw_digest,
-            entries,
+            selected_state_path: state_path.to_owned(),
+            canonical_local_root: canonical_local_root.to_owned(),
+            remote_prefix: bound.remote_prefix,
+            namespace_claims: bound.namespace_claims,
+            entries: bound.entries,
             last_nats_seq: wire.last_nats_seq,
             device_id: wire.device_id,
         },
     ))
+}
+
+struct BoundStrictStateEntriesV1 {
+    remote_prefix: String,
+    namespace_claims: BTreeMap<String, StrictStateNamespaceClaimV1>,
+    entries: BTreeMap<String, BoundStrictSyncStateV1>,
 }
 
 fn bind_strict_state_entries_v1(
@@ -529,7 +614,7 @@ fn bind_strict_state_entries_v1(
     canonical_local_root: &Path,
     canonical_remote_prefix: &str,
     binding_mode: StrictStateRootBindingModeV1,
-) -> Result<BTreeMap<String, BoundStrictSyncStateV1>> {
+) -> Result<BoundStrictStateEntriesV1> {
     anyhow::ensure!(
         canonical_local_root.is_absolute(),
         "strict state root binding requires an absolute local root"
@@ -559,7 +644,12 @@ fn bind_strict_state_entries_v1(
     );
     validate_registered_remote_storage_key_bounds_v1(prefix, "strict state remote prefix")?;
 
-    let mut namespace_claims: BTreeMap<String, (String, PortableNamespaceRole)> = BTreeMap::new();
+    let mut namespace_claims = BTreeMap::new();
+    let mut namespace_budget = StrictStateNamespaceBudgetV1::default();
+    // The retained state-side map is required for ordered cross-source
+    // composition. Its state-owned, fingerprinted ceilings prevent one valid
+    // primary from amplifying into an unbounded claim set.
+    let namespace_contract = RegisteredRootPlanContractV1::strict_v1().state_contract();
     let mut entries = BTreeMap::new();
     for (cache_key, state) in raw_entries {
         let rel_path = bind_strict_cache_key_v1(&cache_key, canonical_local_root, binding_mode)?;
@@ -583,7 +673,12 @@ fn bind_strict_state_entries_v1(
             validate_exact_manifest_key_v1(prefix, conflict_manifest_key)?;
         }
 
-        reserve_state_namespace_claims_v1(&rel_path, &mut namespace_claims)?;
+        reserve_state_namespace_claims_v1(
+            &rel_path,
+            &mut namespace_claims,
+            &mut namespace_budget,
+            namespace_contract,
+        )?;
         let index_key = format!("{prefix}/index/{rel_path}");
         validate_registered_remote_storage_key_bounds_v1(&index_key, "strict state index key")?;
         let entry = BoundStrictSyncStateV1 {
@@ -597,7 +692,11 @@ fn bind_strict_state_entries_v1(
             "strict state cache contains duplicate bound paths"
         );
     }
-    Ok(entries)
+    Ok(BoundStrictStateEntriesV1 {
+        remote_prefix: prefix.to_owned(),
+        namespace_claims,
+        entries,
+    })
 }
 
 fn bind_strict_cache_key_v1(
@@ -658,9 +757,72 @@ fn validate_exact_manifest_key_v1<'a>(remote_prefix: &str, key: &'a str) -> Resu
     Ok(key)
 }
 
+#[derive(Default)]
+struct StrictStateNamespaceBudgetV1 {
+    generated_claims: u64,
+    generated_claim_bytes: u64,
+    retained_claims: u64,
+    retained_claim_bytes: u64,
+}
+
+fn checked_state_namespace_increment_v1(
+    value: &mut u64,
+    increment: u64,
+    maximum: u64,
+    resource: StrictStateNamespaceResourceV1,
+) -> Result<()> {
+    *value = value
+        .checked_add(increment)
+        .filter(|next| *next <= maximum)
+        .ok_or(StrictStateNamespaceResourceLimitErrorV1(resource))?;
+    Ok(())
+}
+
+impl StrictStateNamespaceBudgetV1 {
+    fn observe_generated_claim(
+        &mut self,
+        claim_bytes: u64,
+        contract: RootStateContractV1,
+    ) -> Result<()> {
+        checked_state_namespace_increment_v1(
+            &mut self.generated_claims,
+            1,
+            contract.max_generated_claim_observations(),
+            StrictStateNamespaceResourceV1::GeneratedClaims,
+        )?;
+        checked_state_namespace_increment_v1(
+            &mut self.generated_claim_bytes,
+            claim_bytes,
+            contract.max_generated_claim_bytes(),
+            StrictStateNamespaceResourceV1::GeneratedClaimBytes,
+        )
+    }
+
+    fn observe_retained_claim(
+        &mut self,
+        claim_bytes: u64,
+        contract: RootStateContractV1,
+    ) -> Result<()> {
+        checked_state_namespace_increment_v1(
+            &mut self.retained_claims,
+            1,
+            contract.max_retained_unique_claims(),
+            StrictStateNamespaceResourceV1::RetainedClaims,
+        )?;
+        checked_state_namespace_increment_v1(
+            &mut self.retained_claim_bytes,
+            claim_bytes,
+            contract.max_retained_unique_claim_bytes(),
+            StrictStateNamespaceResourceV1::RetainedClaimBytes,
+        )
+    }
+}
+
 fn reserve_state_namespace_claims_v1(
     rel_path: &str,
-    claims: &mut BTreeMap<String, (String, PortableNamespaceRole)>,
+    claims: &mut BTreeMap<String, StrictStateNamespaceClaimV1>,
+    budget: &mut StrictStateNamespaceBudgetV1,
+    contract: RootStateContractV1,
 ) -> Result<()> {
     let components: Vec<&str> = rel_path.split('/').collect();
     for end in 1..=components.len() {
@@ -671,13 +833,28 @@ fn reserve_state_namespace_claims_v1(
             PortableNamespaceRole::Directory
         };
         let folded_path = portable_casefold_path(&exact_path)?;
-        if let Some((existing_path, existing_role)) = claims.get(&folded_path) {
+        let claim_bytes = u64::try_from(exact_path.len())
+            .ok()
+            .and_then(|exact_bytes| {
+                u64::try_from(folded_path.len())
+                    .ok()
+                    .and_then(|folded_bytes| exact_bytes.checked_add(folded_bytes))
+            })
+            .ok_or(StrictStateNamespaceResourceLimitErrorV1(
+                StrictStateNamespaceResourceV1::GeneratedClaimBytes,
+            ))?;
+        budget.observe_generated_claim(claim_bytes, contract)?;
+        if let Some(existing) = claims.get(&folded_path) {
             anyhow::ensure!(
-                existing_path == &exact_path && *existing_role == role,
+                existing.exact_path == exact_path && existing.role == role,
                 "strict state namespace has a portable spelling or role collision"
             );
         } else {
-            claims.insert(folded_path, (exact_path, role));
+            budget.observe_retained_claim(claim_bytes, contract)?;
+            claims.insert(
+                folded_path,
+                StrictStateNamespaceClaimV1 { exact_path, role },
+            );
         }
     }
     Ok(())
@@ -2545,6 +2722,122 @@ mod tests {
                 }
             ) if active_keys == vec![active_key] && locked_keys.is_empty()
         ));
+    }
+
+    #[test]
+    fn empty_strict_primary_retains_exact_route_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let local_root = dir.path().join("root");
+        std::fs::create_dir(&local_root).unwrap();
+        let local_root = std::fs::canonicalize(local_root).unwrap();
+        write_private(
+            &state_path,
+            br#"{"last_nats_seq":0,"device_id":"sting","entries":{}}"#,
+        );
+        let state_path = std::fs::canonicalize(state_path).unwrap();
+
+        for prefix in ["roots-a", "roots-b"] {
+            let snapshot =
+                match read_and_bind_strict_primary_state_v1(&state_path, &local_root, prefix)
+                    .unwrap()
+                {
+                    StrictPrimaryStateReadV1::Complete(snapshot) => snapshot,
+                    other => panic!("expected empty strict state snapshot, got {other:?}"),
+                };
+            assert_eq!(snapshot.selected_state_path(), state_path);
+            assert_eq!(snapshot.canonical_local_root(), local_root);
+            assert_eq!(snapshot.remote_prefix(), prefix);
+            assert_eq!(snapshot.entries().len(), 0);
+            assert_eq!(snapshot.namespace_claims().len(), 0);
+        }
+    }
+
+    #[test]
+    fn strict_state_namespace_claim_budget_is_fingerprinted_and_charged_before_dedupe() {
+        type ObserveClaimV1 =
+            fn(&mut StrictStateNamespaceBudgetV1, u64, RootStateContractV1) -> Result<()>;
+
+        fn assert_typed_limit_v1(error: &anyhow::Error, expected: StrictStateNamespaceResourceV1) {
+            assert_eq!(
+                error
+                    .downcast_ref::<StrictStateNamespaceResourceLimitErrorV1>()
+                    .unwrap()
+                    .resource(),
+                expected
+            );
+            assert_eq!(
+                strict_state_binding_incomplete_v1(error),
+                StrictPrimaryStateIncompleteV1::NamespaceResourceLimit { resource: expected }
+            );
+        }
+
+        let contract = RegisteredRootPlanContractV1::strict_v1().state_contract();
+        let mut claims = BTreeMap::new();
+        let mut budget = StrictStateNamespaceBudgetV1::default();
+        reserve_state_namespace_claims_v1("parent/first", &mut claims, &mut budget, contract)
+            .unwrap();
+        reserve_state_namespace_claims_v1("parent/second", &mut claims, &mut budget, contract)
+            .unwrap();
+        assert_eq!(budget.generated_claims, 4);
+        assert_eq!(budget.retained_claims, 3);
+        assert_eq!(claims.len(), 3);
+
+        let rows: [(
+            StrictStateNamespaceResourceV1,
+            StrictStateNamespaceBudgetV1,
+            ObserveClaimV1,
+            u64,
+        ); 4] = [
+            (
+                StrictStateNamespaceResourceV1::GeneratedClaims,
+                StrictStateNamespaceBudgetV1 {
+                    generated_claims: contract.max_generated_claim_observations() - 1,
+                    ..StrictStateNamespaceBudgetV1::default()
+                },
+                StrictStateNamespaceBudgetV1::observe_generated_claim,
+                0,
+            ),
+            (
+                StrictStateNamespaceResourceV1::GeneratedClaimBytes,
+                StrictStateNamespaceBudgetV1 {
+                    generated_claim_bytes: contract.max_generated_claim_bytes() - 1,
+                    ..StrictStateNamespaceBudgetV1::default()
+                },
+                StrictStateNamespaceBudgetV1::observe_generated_claim,
+                1,
+            ),
+            (
+                StrictStateNamespaceResourceV1::RetainedClaims,
+                StrictStateNamespaceBudgetV1 {
+                    retained_claims: contract.max_retained_unique_claims() - 1,
+                    ..StrictStateNamespaceBudgetV1::default()
+                },
+                StrictStateNamespaceBudgetV1::observe_retained_claim,
+                0,
+            ),
+            (
+                StrictStateNamespaceResourceV1::RetainedClaimBytes,
+                StrictStateNamespaceBudgetV1 {
+                    retained_claim_bytes: contract.max_retained_unique_claim_bytes() - 1,
+                    ..StrictStateNamespaceBudgetV1::default()
+                },
+                StrictStateNamespaceBudgetV1::observe_retained_claim,
+                1,
+            ),
+        ];
+        for (resource, mut exact, observe, increment) in rows {
+            observe(&mut exact, increment, contract)
+                .expect("the exact state claim resource ceiling is accepted");
+            let error = observe(&mut exact, increment, contract)
+                .expect_err("one claim beyond the state resource ceiling is rejected");
+            assert_typed_limit_v1(&error, resource);
+        }
+
+        assert_eq!(
+            strict_state_binding_incomplete_v1(&anyhow::anyhow!("invalid binding")),
+            StrictPrimaryStateIncompleteV1::InvalidRootBinding
+        );
     }
 
     #[cfg(target_os = "linux")]

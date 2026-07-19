@@ -1337,6 +1337,41 @@ impl RootStateContractV1 {
             Self::ImmutablePrimarySemanticExactV1 => "immutable-primary-semantic-exact-v1",
         }
     }
+
+    /// Maximum exact byte length of one accepted state primary.
+    pub const fn max_primary_bytes(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 64 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum generated namespace-claim observations before deduplication.
+    pub const fn max_generated_claim_observations(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 4_000_000,
+        }
+    }
+
+    /// Maximum exact-plus-folded bytes across generated state claims.
+    pub const fn max_generated_claim_bytes(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum compatible unique namespace claims retained from state.
+    pub const fn max_retained_unique_claims(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 2_000_000,
+        }
+    }
+
+    /// Maximum exact-plus-folded bytes retained for unique state claims.
+    pub const fn max_retained_unique_claim_bytes(self) -> u64 {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => 512 * 1024 * 1024,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1987,6 +2022,11 @@ struct RegisteredRootPlanContractFingerprintFieldsV1 {
     local_snapshot_max_regular_file_bytes: u64,
     local_snapshot_max_total_hashed_bytes: u64,
     local_snapshot_hash_buffer_bytes: u64,
+    state_max_primary_bytes: u64,
+    state_max_generated_claim_observations: u64,
+    state_max_generated_claim_bytes: u64,
+    state_max_retained_unique_claims: u64,
+    state_max_retained_unique_claim_bytes: u64,
     remote_max_listing_rows_per_pass: u64,
     remote_max_listing_key_bytes_per_pass: u64,
     remote_max_storage_key_bytes: u64,
@@ -2050,6 +2090,11 @@ fn registered_root_plan_contract_fingerprint_fields_v1(
         local_snapshot_max_regular_file_bytes: contract.local_snapshot.max_regular_file_bytes(),
         local_snapshot_max_total_hashed_bytes: contract.local_snapshot.max_total_hashed_bytes(),
         local_snapshot_hash_buffer_bytes: contract.local_snapshot.hash_buffer_bytes(),
+        state_max_primary_bytes: contract.state.max_primary_bytes(),
+        state_max_generated_claim_observations: contract.state.max_generated_claim_observations(),
+        state_max_generated_claim_bytes: contract.state.max_generated_claim_bytes(),
+        state_max_retained_unique_claims: contract.state.max_retained_unique_claims(),
+        state_max_retained_unique_claim_bytes: contract.state.max_retained_unique_claim_bytes(),
         remote_max_listing_rows_per_pass: contract.remote.max_listing_rows_per_pass(),
         remote_max_listing_key_bytes_per_pass: contract.remote.max_listing_key_bytes_per_pass(),
         remote_max_storage_key_bytes: contract.remote.max_storage_key_bytes(),
@@ -2097,7 +2142,7 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
 ) -> RegisteredRootPlanContractFingerprintV1 {
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.registered-root-plan-contract.b3v1",
-        fields.canonical_names.len() + 30,
+        fields.canonical_names.len() + 35,
     );
     for (tag, value) in fields.canonical_names {
         encoder.field(tag, value.as_bytes());
@@ -2129,6 +2174,28 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
             encoder.field(
                 "local_snapshot_hash_buffer_bytes",
                 &fields.local_snapshot_hash_buffer_bytes.to_be_bytes(),
+            );
+        }
+        if tag == "state_policy" {
+            encoder.field(
+                "state_max_primary_bytes",
+                &fields.state_max_primary_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "state_max_generated_claim_observations",
+                &fields.state_max_generated_claim_observations.to_be_bytes(),
+            );
+            encoder.field(
+                "state_max_generated_claim_bytes",
+                &fields.state_max_generated_claim_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "state_max_retained_unique_claims",
+                &fields.state_max_retained_unique_claims.to_be_bytes(),
+            );
+            encoder.field(
+                "state_max_retained_unique_claim_bytes",
+                &fields.state_max_retained_unique_claim_bytes.to_be_bytes(),
             );
         }
         if tag == "remote_observation_model" {
@@ -3321,6 +3388,12 @@ resolution_policy = "inspect-only"
             contract.state_contract(),
             RootStateContractV1::ImmutablePrimarySemanticExactV1
         );
+        let state = contract.state_contract();
+        assert_eq!(state.max_primary_bytes(), 64 * 1024 * 1024);
+        assert_eq!(state.max_generated_claim_observations(), 4_000_000);
+        assert_eq!(state.max_generated_claim_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(state.max_retained_unique_claims(), 2_000_000);
+        assert_eq!(state.max_retained_unique_claim_bytes(), 512 * 1024 * 1024);
         assert_eq!(
             contract.remote_contract(),
             RootRemoteContractV1::RawCommittedManifestBoundV1
@@ -3402,7 +3475,7 @@ resolution_policy = "inspect-only"
         );
         assert_eq!(
             fingerprint.to_string(),
-            "b3v1:0a3dbb43186967c1978104b72a5dbc750ba913842b1c491267def62f8db05d1f"
+            "b3v1:aabbbd421e6d9d487b59e244faa8d8a1ebf75311ec7cfa2dd7954b5a960850c4"
         );
     }
 
@@ -3450,6 +3523,14 @@ resolution_policy = "inspect-only"
             8 * 1024 * 1024 * 1024 * 1024
         );
         assert_eq!(fields.local_snapshot_hash_buffer_bytes, 64 * 1024);
+        assert_eq!(fields.state_max_primary_bytes, 64 * 1024 * 1024);
+        assert_eq!(fields.state_max_generated_claim_observations, 4_000_000);
+        assert_eq!(fields.state_max_generated_claim_bytes, 1024 * 1024 * 1024);
+        assert_eq!(fields.state_max_retained_unique_claims, 2_000_000);
+        assert_eq!(
+            fields.state_max_retained_unique_claim_bytes,
+            512 * 1024 * 1024
+        );
         assert_eq!(fields.remote_max_listing_rows_per_pass, 4_000_000);
         assert_eq!(
             fields.remote_max_listing_key_bytes_per_pass,
@@ -3572,6 +3653,25 @@ resolution_policy = "inspect-only"
             baseline,
             fingerprint_registered_root_plan_contract_fields_v1(observation_model_mutation)
         );
+
+        macro_rules! assert_state_resource_is_bound {
+            ($field:ident) => {{
+                let mut mutation = fields;
+                mutation.$field += 1;
+                assert_ne!(
+                    baseline,
+                    fingerprint_registered_root_plan_contract_fields_v1(mutation),
+                    "state contract fingerprint omitted {}",
+                    stringify!($field)
+                );
+            }};
+        }
+
+        assert_state_resource_is_bound!(state_max_primary_bytes);
+        assert_state_resource_is_bound!(state_max_generated_claim_observations);
+        assert_state_resource_is_bound!(state_max_generated_claim_bytes);
+        assert_state_resource_is_bound!(state_max_retained_unique_claims);
+        assert_state_resource_is_bound!(state_max_retained_unique_claim_bytes);
 
         macro_rules! assert_remote_resource_is_bound {
             ($field:ident) => {{

@@ -486,6 +486,16 @@ pub(crate) struct RevalidatedStrictLocalSnapshotV1 {
 }
 
 impl RevalidatedStrictLocalSnapshotV1 {
+    pub(crate) fn canonical_local_root(&self) -> &Path {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.canonical_local_root()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
     pub(crate) fn snapshot(&self) -> &CompleteStrictLocalSnapshotV1 {
         #[cfg(target_os = "linux")]
         {
@@ -915,11 +925,16 @@ mod supported {
     }
 
     pub(super) struct RevalidatedSupportedSnapshotV1 {
+        canonical_local_root: PathBuf,
         _root: File,
         snapshot: CompleteStrictLocalSnapshotV1,
     }
 
     impl RevalidatedSupportedSnapshotV1 {
+        pub(super) fn canonical_local_root(&self) -> &Path {
+            &self.canonical_local_root
+        }
+
         pub(super) fn snapshot(&self) -> &CompleteStrictLocalSnapshotV1 {
             &self.snapshot
         }
@@ -1018,6 +1033,7 @@ mod supported {
             &held.entries,
         );
         Ok(RevalidatedSupportedSnapshotV1 {
+            canonical_local_root: held.canonical_local_root,
             _root: held.root,
             snapshot: CompleteStrictLocalSnapshotV1 {
                 profile: held.profile,

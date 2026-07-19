@@ -234,6 +234,13 @@ impl BoundRemoteIndexObjectV1 {
         }
     }
 
+    const fn claim_origin(&self) -> RemoteNamespaceClaimOriginsV1 {
+        match self {
+            Self::Committed(_) | Self::LiveMarker(_) => RemoteNamespaceClaimOriginsV1::CURRENT,
+            Self::Deleted(_) | Self::DeletedMarker(_) => RemoteNamespaceClaimOriginsV1::HISTORICAL,
+        }
+    }
+
     fn committed(&self) -> Option<&RawCommittedIndexEntryV1> {
         match self {
             Self::Committed(index) => Some(index),
@@ -256,6 +263,54 @@ struct RetainedRemoteNamespaceClaimV1 {
     folded_path: String,
     exact_path: String,
     role: PortableNamespaceRole,
+    origins: RemoteNamespaceClaimOriginsV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteNamespaceClaimOriginsV1 {
+    current: bool,
+    historical: bool,
+    reservation: bool,
+}
+
+impl RemoteNamespaceClaimOriginsV1 {
+    const CURRENT: Self = Self {
+        current: true,
+        historical: false,
+        reservation: false,
+    };
+    const HISTORICAL: Self = Self {
+        current: false,
+        historical: true,
+        reservation: false,
+    };
+    const RESERVATION: Self = Self {
+        current: false,
+        historical: false,
+        reservation: true,
+    };
+
+    fn merge(&mut self, other: Self) {
+        self.current |= other.current;
+        self.historical |= other.historical;
+        self.reservation |= other.reservation;
+    }
+
+    pub(crate) const fn current(self) -> bool {
+        self.current
+    }
+
+    pub(crate) const fn historical(self) -> bool {
+        self.historical
+    }
+
+    pub(crate) const fn reservation(self) -> bool {
+        self.reservation
+    }
+
+    pub(crate) const fn is_empty(self) -> bool {
+        !self.current && !self.historical && !self.reservation
+    }
 }
 
 /// One sequential list-and-bind pass over a registered remote namespace.
@@ -298,6 +353,31 @@ impl MatchingTwoPassBoundRemoteEvidenceV1 {
 
     pub(crate) fn claim_count(&self) -> usize {
         self.evidence.claims.len()
+    }
+
+    /// Iterate the unique retained claims in ascending folded-path order.
+    ///
+    /// Held-window composition relies on this ordering for its O(1)-extra-
+    /// memory three-way merge. Construction therefore remains a direct
+    /// `BTreeMap::into_iter()` projection, and tests pin the invariant.
+    pub(crate) fn namespace_safety_claims(
+        &self,
+    ) -> impl ExactSizeIterator<
+        Item = (
+            &str,
+            &str,
+            PortableNamespaceRole,
+            RemoteNamespaceClaimOriginsV1,
+        ),
+    > {
+        self.evidence.claims.iter().map(|claim| {
+            (
+                claim.folded_path.as_str(),
+                claim.exact_path.as_str(),
+                claim.role,
+                claim.origins,
+            )
+        })
     }
 }
 
@@ -531,6 +611,7 @@ struct BoundRemotePassBudgetV1 {
 struct RetainedRemoteNamespaceClaimValueV1 {
     exact_path: String,
     role: PortableNamespaceRole,
+    origins: RemoteNamespaceClaimOriginsV1,
 }
 
 fn bound_pass_resource_limit(
@@ -616,6 +697,7 @@ impl BoundRemotePassBudgetV1 {
         &mut self,
         pass: RemoteNamespaceListingPassV1,
         claim: &PortableNamespaceReservationV1,
+        origin: RemoteNamespaceClaimOriginsV1,
         claims: &mut BTreeMap<String, RetainedRemoteNamespaceClaimValueV1>,
         contract: RootRemoteContractV1,
     ) -> Result<(), StrictBoundRemoteObservationIncompleteV1> {
@@ -642,7 +724,7 @@ impl BoundRemotePassBudgetV1 {
             BoundRemotePassResourceV1::GeneratedClaimBytes,
         )?;
 
-        if let Some(existing) = claims.get(claim.folded_path()) {
+        if let Some(existing) = claims.get_mut(claim.folded_path()) {
             if existing.exact_path != claim.exact_path() {
                 return Err(StrictBoundRemoteObservationIncompleteV1::Claim {
                     pass,
@@ -655,6 +737,7 @@ impl BoundRemotePassBudgetV1 {
                     reason: RemoteNamespaceClaimConflictV1::FileDirectoryRole,
                 });
             }
+            existing.origins.merge(origin);
             return Ok(());
         }
 
@@ -677,6 +760,7 @@ impl BoundRemotePassBudgetV1 {
             RetainedRemoteNamespaceClaimValueV1 {
                 exact_path: claim.exact_path().to_owned(),
                 role: claim.role(),
+                origins: origin,
             },
         );
         Ok(())
@@ -689,6 +773,7 @@ fn observe_claim_chain_v1(
     claims: &mut BTreeMap<String, RetainedRemoteNamespaceClaimValueV1>,
     rel_path: &str,
     role: PortableNamespaceRole,
+    origin: RemoteNamespaceClaimOriginsV1,
     contract: RootRemoteContractV1,
 ) -> Result<(), StrictBoundRemoteObservationIncompleteV1> {
     let generated = namespace_claims_for_path(rel_path, role).map_err(|_| {
@@ -698,7 +783,7 @@ fn observe_claim_chain_v1(
         }
     })?;
     for claim in &generated {
-        budget.observe_claim(pass, claim, claims, contract)?;
+        budget.observe_claim(pass, claim, origin, claims, contract)?;
     }
     Ok(())
 }
@@ -1188,6 +1273,7 @@ async fn read_fully_drained_bound_remote_pass_v1(
             &mut claims,
             observed.logical_path(),
             observed.role(),
+            observed.claim_origin(),
             contract,
         ) {
             return Ok(Err(incomplete));
@@ -1247,6 +1333,7 @@ async fn read_fully_drained_bound_remote_pass_v1(
             &mut claims,
             reservation.exact_path(),
             reservation.role(),
+            RemoteNamespaceClaimOriginsV1::RESERVATION,
             contract,
         ) {
             return Ok(Err(incomplete));
@@ -1311,11 +1398,19 @@ async fn read_fully_drained_bound_remote_pass_v1(
     let claims = claims
         .into_iter()
         .map(
-            |(folded_path, RetainedRemoteNamespaceClaimValueV1 { exact_path, role })| {
+            |(
+                folded_path,
+                RetainedRemoteNamespaceClaimValueV1 {
+                    exact_path,
+                    role,
+                    origins,
+                },
+            )| {
                 RetainedRemoteNamespaceClaimV1 {
                     folded_path,
                     exact_path,
                     role,
+                    origins,
                 }
             },
         )
@@ -1474,9 +1569,12 @@ pub(crate) async fn list_remote_namespace_keys_two_pass_v1(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::index_entry::{manifest_object_id, namespace_reservation_object_id};
+    use crate::index_entry::{
+        manifest_object_id, namespace_reservation_object_id, portable_casefold_path,
+        DIRECTORY_MARKER_BYTES,
+    };
     use opendal::raw::{oio, Access, AccessorInfo, OpList, OpRead, OpStat, RpList, RpRead, RpStat};
     use opendal::services::Memory;
     use opendal::{Buffer, Capability, Error, ErrorKind, Metadata, OperatorBuilder};
@@ -1821,6 +1919,137 @@ mod tests {
                 corpus_rows(second_reservation_keys),
             ),
         ]
+    }
+
+    #[derive(Clone, Debug)]
+    pub(crate) enum RemoteNamespaceFixtureRowV1 {
+        CurrentFile(String),
+        DeletedFile(String),
+        CurrentDirectory(String),
+        DeletedDirectory(String),
+        Reservation {
+            exact_path: String,
+            role: PortableNamespaceRole,
+        },
+    }
+
+    /// Build one conditional scripted backend that the production two-pass
+    /// reader can consume. Callers select semantic rows, not raw evidence
+    /// constructors, so tests cannot bypass list/body/binding acquisition.
+    pub(crate) fn matching_remote_fixture_operator_v1(
+        rows: &[RemoteNamespaceFixtureRowV1],
+    ) -> Operator {
+        let mut index_keys = Vec::new();
+        let mut reservation_keys = Vec::new();
+        let mut objects = Vec::new();
+        for (ordinal, row) in rows.iter().enumerate() {
+            let etag = format!("fixture-{ordinal}");
+            match row {
+                RemoteNamespaceFixtureRowV1::CurrentFile(rel_path) => {
+                    let manifest_bytes = regular_manifest_json(rel_path);
+                    let manifest_id = manifest_object_id(&manifest_bytes);
+                    let index_key = format!("roots/index/{rel_path}");
+                    index_keys.push(index_key.clone());
+                    objects.push((
+                        index_key,
+                        bound_object(committed_index_json(&manifest_id), &etag),
+                    ));
+                    objects.push((
+                        format!("roots/manifests/{manifest_id}"),
+                        bound_object(manifest_bytes, &format!("manifest-{ordinal}")),
+                    ));
+                }
+                RemoteNamespaceFixtureRowV1::DeletedFile(rel_path) => {
+                    let index_key = format!("roots/index/{rel_path}");
+                    index_keys.push(index_key.clone());
+                    objects.push((index_key, bound_object(deleted_index_json(None), &etag)));
+                }
+                RemoteNamespaceFixtureRowV1::CurrentDirectory(rel_path) => {
+                    let index_key = format!("roots/index/{rel_path}/.tcfs_dir");
+                    index_keys.push(index_key.clone());
+                    objects.push((
+                        index_key,
+                        bound_object(DIRECTORY_MARKER_BYTES.to_vec(), &etag),
+                    ));
+                }
+                RemoteNamespaceFixtureRowV1::DeletedDirectory(rel_path) => {
+                    let index_key = format!("roots/index/{rel_path}/.tcfs_dir");
+                    index_keys.push(index_key.clone());
+                    objects.push((index_key, bound_object(deleted_index_json(None), &etag)));
+                }
+                RemoteNamespaceFixtureRowV1::Reservation { exact_path, role } => {
+                    let folded_path = portable_casefold_path(exact_path)
+                        .expect("remote fixture reservation path must be canonical");
+                    let reservation_id = namespace_reservation_object_id(&folded_path);
+                    let reservation_key = format!("roots/.tcfs-namespace/v1/{reservation_id}");
+                    reservation_keys.push(reservation_key.clone());
+                    let role = match role {
+                        PortableNamespaceRole::File => "file",
+                        PortableNamespaceRole::Directory => "directory",
+                    };
+                    objects.push((
+                        reservation_key,
+                        bound_object(
+                            canonical_reservation_json(exact_path, &folded_path, role),
+                            &etag,
+                        ),
+                    ));
+                }
+            }
+        }
+        let (op, backend) =
+            scripted_list_operator(two_bound_pass_list_calls(&index_keys, &reservation_keys));
+        for (key, object) in objects {
+            install_bound_object(&backend, key, object);
+        }
+        op
+    }
+
+    pub(crate) fn missing_remote_index_fixture_operator_v1(rel_path: &str) -> Operator {
+        let index_key = format!("roots/index/{rel_path}");
+        scripted_list_operator(two_bound_pass_list_calls(
+            std::slice::from_ref(&index_key),
+            &[],
+        ))
+        .0
+    }
+
+    #[tokio::test]
+    async fn fixture_reader_merges_current_historical_and_reservation_origins() {
+        let op = matching_remote_fixture_operator_v1(&[
+            RemoteNamespaceFixtureRowV1::CurrentFile("path/child".to_owned()),
+            RemoteNamespaceFixtureRowV1::DeletedDirectory("path".to_owned()),
+            RemoteNamespaceFixtureRowV1::Reservation {
+                exact_path: "path".to_owned(),
+                role: PortableNamespaceRole::Directory,
+            },
+        ]);
+        let evidence = match read_bound_remote_observation_two_pass_v1(&op, "roots")
+            .await
+            .unwrap()
+        {
+            StrictBoundRemoteObservationReadV1::Matched(evidence) => evidence,
+            other => panic!("expected matching fixture evidence, got {other:?}"),
+        };
+        let (_, exact_path, role, origins) = evidence
+            .namespace_safety_claims()
+            .find(|(folded_path, _, _, _)| *folded_path == "path")
+            .expect("fixture must retain its shared ancestor claim");
+        assert_eq!(exact_path, "path");
+        assert_eq!(role, PortableNamespaceRole::Directory);
+        assert!(origins.current());
+        assert!(origins.historical());
+        assert!(origins.reservation());
+        assert!(!origins.is_empty());
+
+        let folded_paths = evidence
+            .namespace_safety_claims()
+            .map(|(folded_path, _, _, _)| folded_path)
+            .collect::<Vec<_>>();
+        assert!(
+            folded_paths.windows(2).all(|pair| pair[0] < pair[1]),
+            "remote claim iterator must remain sorted and unique"
+        );
     }
 
     fn observe_one_row(
@@ -2927,7 +3156,13 @@ mod tests {
         };
         let mut exact_claims = BTreeMap::new();
         assert_eq!(
-            exact.observe_claim(pass, &claim, &mut exact_claims, contract),
+            exact.observe_claim(
+                pass,
+                &claim,
+                RemoteNamespaceClaimOriginsV1::CURRENT,
+                &mut exact_claims,
+                contract,
+            ),
             Ok(())
         );
         assert_eq!(
@@ -2949,7 +3184,13 @@ mod tests {
 
         let retained_before = exact.retained_claims;
         assert_eq!(
-            exact.observe_claim(pass, &claim, &mut exact_claims, contract),
+            exact.observe_claim(
+                pass,
+                &claim,
+                RemoteNamespaceClaimOriginsV1::CURRENT,
+                &mut exact_claims,
+                contract,
+            ),
             Err(StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
                 pass,
                 resource: BoundRemotePassResourceV1::GeneratedClaims,
@@ -2962,7 +3203,13 @@ mod tests {
             ..BoundRemotePassBudgetV1::default()
         };
         assert_eq!(
-            generated_bytes_over.observe_claim(pass, &claim, &mut BTreeMap::new(), contract),
+            generated_bytes_over.observe_claim(
+                pass,
+                &claim,
+                RemoteNamespaceClaimOriginsV1::CURRENT,
+                &mut BTreeMap::new(),
+                contract,
+            ),
             Err(StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
                 pass,
                 resource: BoundRemotePassResourceV1::GeneratedClaimBytes,
@@ -2974,7 +3221,13 @@ mod tests {
             ..BoundRemotePassBudgetV1::default()
         };
         assert_eq!(
-            retained_count_over.observe_claim(pass, &claim, &mut BTreeMap::new(), contract),
+            retained_count_over.observe_claim(
+                pass,
+                &claim,
+                RemoteNamespaceClaimOriginsV1::CURRENT,
+                &mut BTreeMap::new(),
+                contract,
+            ),
             Err(StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
                 pass,
                 resource: BoundRemotePassResourceV1::RetainedClaims,
@@ -2986,7 +3239,13 @@ mod tests {
             ..BoundRemotePassBudgetV1::default()
         };
         assert_eq!(
-            retained_bytes_over.observe_claim(pass, &claim, &mut BTreeMap::new(), contract),
+            retained_bytes_over.observe_claim(
+                pass,
+                &claim,
+                RemoteNamespaceClaimOriginsV1::CURRENT,
+                &mut BTreeMap::new(),
+                contract,
+            ),
             Err(StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
                 pass,
                 resource: BoundRemotePassResourceV1::RetainedClaimBytes,
@@ -2996,16 +3255,32 @@ mod tests {
         let mut duplicate_budget = BoundRemotePassBudgetV1::default();
         let mut duplicate_claims = BTreeMap::new();
         duplicate_budget
-            .observe_claim(pass, &claim, &mut duplicate_claims, contract)
+            .observe_claim(
+                pass,
+                &claim,
+                RemoteNamespaceClaimOriginsV1::CURRENT,
+                &mut duplicate_claims,
+                contract,
+            )
             .unwrap();
         duplicate_budget
-            .observe_claim(pass, &claim, &mut duplicate_claims, contract)
+            .observe_claim(
+                pass,
+                &claim,
+                RemoteNamespaceClaimOriginsV1::HISTORICAL,
+                &mut duplicate_claims,
+                contract,
+            )
             .unwrap();
         assert_eq!(duplicate_budget.generated_claims, 2);
         assert_eq!(duplicate_budget.generated_claim_bytes, claim_bytes * 2);
         assert_eq!(duplicate_budget.retained_claims, 1);
         assert_eq!(duplicate_budget.retained_claim_bytes, claim_bytes);
         assert_eq!(duplicate_claims.len(), 1);
+        let origins = duplicate_claims.get("path").unwrap().origins;
+        assert!(origins.current());
+        assert!(origins.historical());
+        assert!(!origins.reservation());
     }
 
     #[tokio::test]
@@ -3356,7 +3631,7 @@ mod tests {
                     index_objects: true,
                     reservations: false,
                     manifests: false,
-                    claims: false,
+                    claims: true,
                 }
             )
         );

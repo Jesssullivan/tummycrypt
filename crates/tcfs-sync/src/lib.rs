@@ -22,6 +22,11 @@ pub mod registered_reconcile;
 // list+bind work in each non-atomic source-only evidence pass.
 #[allow(dead_code)]
 pub(crate) mod registered_remote_observation;
+// Held-window composition of selected-root observation evidence. This remains
+// namespace-safety history only: it has no plan digest, action conversion, or
+// serialization surface.
+#[allow(dead_code)]
+pub(crate) mod registered_source_composition;
 pub mod scheduler;
 pub mod state;
 pub mod watcher;

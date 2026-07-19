@@ -17,6 +17,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tcfs_core::config::RegisteredRootPlanContractV1;
 
 use crate::conflict::VectorClock;
 
@@ -188,17 +189,18 @@ fn secure_read_file_bytes(path: &Path) -> Result<Vec<u8>> {
     read_opened_state_file(secure_open_state_file(path)?, path)
 }
 
-const REGISTERED_ROOT_STATE_MAX_BYTES_V1: u64 = 64 * 1024 * 1024;
-
 fn secure_read_file_bytes_bounded_v1(path: &Path) -> Result<Vec<u8>> {
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .state_contract()
+        .max_primary_bytes();
     let mut file = secure_open_state_file(path)?;
     let metadata = file
         .metadata()
         .with_context(|| format!("reading private state file metadata: {}", path.display()))?;
     anyhow::ensure!(
-        metadata.len() <= REGISTERED_ROOT_STATE_MAX_BYTES_V1,
+        metadata.len() <= max_bytes,
         "registered-root V1 state primary exceeds {} bytes: {}",
-        REGISTERED_ROOT_STATE_MAX_BYTES_V1,
+        max_bytes,
         path.display()
     );
 
@@ -207,15 +209,15 @@ fn secure_read_file_bytes_bounded_v1(path: &Path) -> Result<Vec<u8>> {
             .context("registered-root V1 state primary length does not fit memory")?,
     );
     (&mut file)
-        .take(REGISTERED_ROOT_STATE_MAX_BYTES_V1 + 1)
+        .take(max_bytes + 1)
         .read_to_end(&mut contents)
         .with_context(|| format!("reading private state file: {}", path.display()))?;
     anyhow::ensure!(
         u64::try_from(contents.len())
             .context("registered-root V1 state primary read length does not fit u64")?
-            <= REGISTERED_ROOT_STATE_MAX_BYTES_V1,
+            <= max_bytes,
         "registered-root V1 state primary grew beyond {} bytes while reading: {}",
-        REGISTERED_ROOT_STATE_MAX_BYTES_V1,
+        max_bytes,
         path.display()
     );
     validate_opened_state_file(&file, path)?;

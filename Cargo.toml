@@ -152,6 +152,7 @@ proptest = { version = "1" }
 tempfile = { version = "3" }
 tokio-test = { version = "0.4" }
 divan = { version = "0.1" }
+static_assertions = { version = "1" }
 
 [profile.release]
 opt-level = 3

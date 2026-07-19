@@ -48,3 +48,4 @@ proptest = { workspace = true }
 tokio-test = { workspace = true }
 age = { workspace = true }
 secrecy = { workspace = true }
+static_assertions = { workspace = true }
