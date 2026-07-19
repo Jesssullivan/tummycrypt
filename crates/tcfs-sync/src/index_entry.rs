@@ -371,7 +371,7 @@ fn namespace_claims_for_path(
     Ok(claims)
 }
 
-fn namespace_logical_entry_from_index_path(
+pub(crate) fn namespace_logical_entry_from_index_path(
     rel_path: &str,
 ) -> Result<(String, PortableNamespaceRole)> {
     if let Some(parent) = rel_path
@@ -1645,7 +1645,7 @@ pub(crate) fn validate_canonical_namespace_remote_prefix(remote_prefix: &str) ->
     Ok(remote_prefix)
 }
 
-fn namespace_index_prefix(remote_prefix: &str) -> String {
+pub(crate) fn namespace_index_prefix(remote_prefix: &str) -> String {
     if remote_prefix.is_empty() {
         "index/".to_owned()
     } else {
@@ -1653,7 +1653,7 @@ fn namespace_index_prefix(remote_prefix: &str) -> String {
     }
 }
 
-fn namespace_reservation_prefix(remote_prefix: &str) -> String {
+pub(crate) fn namespace_reservation_prefix(remote_prefix: &str) -> String {
     if remote_prefix.is_empty() {
         ".tcfs-namespace/v1/".to_owned()
     } else {

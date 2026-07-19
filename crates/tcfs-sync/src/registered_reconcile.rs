@@ -1310,7 +1310,7 @@ impl StrictRegularManifestV1 {
     }
 }
 
-fn validate_registered_remote_logical_path_bounds_v1(rel_path: &str) -> Result<()> {
+pub(crate) fn validate_registered_remote_logical_path_bounds_v1(rel_path: &str) -> Result<()> {
     validate_namespace_logical_path(rel_path)?;
     let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
     anyhow::ensure!(

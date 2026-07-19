@@ -17,6 +17,11 @@ pub mod reconcile;
 #[allow(dead_code)]
 pub(crate) mod registered_local_snapshot;
 pub mod registered_reconcile;
+// Diagnostic key-only repeated listing; never a complete namespace snapshot
+// or plan-digest input. The bound reader must discard this artifact and rerun
+// fresh list+bind work inside each complete source-only pass.
+#[allow(dead_code)]
+pub(crate) mod registered_remote_observation;
 pub mod scheduler;
 pub mod state;
 pub mod watcher;
