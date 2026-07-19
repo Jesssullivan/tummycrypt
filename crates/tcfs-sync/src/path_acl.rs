@@ -82,11 +82,7 @@ fn metadata_identity(metadata: &std::fs::Metadata) -> (u64, u64, u32) {
     #[allow(clippy::unnecessary_cast)]
     let file_type = metadata.mode() & (libc::S_IFMT as u32);
 
-    (
-        metadata.dev(),
-        metadata.ino(),
-        file_type,
-    )
+    (metadata.dev(), metadata.ino(), file_type)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
