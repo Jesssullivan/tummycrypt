@@ -76,6 +76,10 @@ intent rather than the current supported/proven surface.
   strip userinfo, path, query, and fragment components. CLI, MCP, and daemon
   parse failures no longer echo offending TOML source lines into operator
   output or system logs.
+- CLI-generated signed enrollment invites now carry only the URL-normalized
+  HTTP(S) origin in `storage_endpoint`; userinfo, path, query, and fragment are
+  omitted, malformed or unsupported schemes fail closed, and bucket and remote
+  prefix remain dedicated fields.
 - Credential-bearing S3/SeaweedFS clients now require HTTPS by default across
   daemon, CLI, direct mount, and FileProvider operator construction. Plaintext
   compatibility requires an explicit development/test opt-in.
