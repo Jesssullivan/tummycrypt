@@ -365,7 +365,7 @@ pub(crate) fn validate_namespace_logical_path(rel_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn namespace_claims_for_path(
+pub(crate) fn namespace_claims_for_path(
     rel_path: &str,
     leaf_role: PortableNamespaceRole,
 ) -> Result<Vec<PortableNamespaceReservationV1>> {
