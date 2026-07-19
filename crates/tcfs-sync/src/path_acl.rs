@@ -81,7 +81,7 @@ fn metadata_identity(metadata: &std::fs::Metadata) -> (u64, u64, u32) {
     (
         metadata.dev(),
         metadata.ino(),
-        metadata.mode() & libc::S_IFMT as u32,
+        metadata.mode() & libc::S_IFMT,
     )
 }
 
@@ -129,6 +129,7 @@ mod linux {
     ///   - the Nix Linux build sandbox installs a seccomp filter that fails
     ///     the entire xattr syscall family with ENOTSUP (so an ACL applied
     ///     from outside the sandbox would be invisible to this probe).
+    ///
     /// On local ACL-supporting filesystems (verified: XFS, kernel 6.19) the
     /// probes genuinely return ENODATA when no ACL is set, so fail-closed
     /// here does not reject ordinary trusted paths (TIN-2853).
