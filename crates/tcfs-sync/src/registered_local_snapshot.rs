@@ -10,8 +10,11 @@
 //! 2. records a descriptor-relative identity inventory;
 //! 3. captures every included leaf while checking its descriptor and parent
 //!    identities before and after the read;
-//! 4. records a second identity inventory and requires exact equality; and
-//! 5. reopens the configured root and requires the original root identity.
+//! 4. records a second identity inventory and requires exact equality;
+//! 5. keeps the configured-root descriptor alive while state and remote inputs
+//!    are acquired;
+//! 6. records inventory C through that same descriptor; and
+//! 7. reopens the configured route and requires the original root identity.
 //!
 //! Acquisition identities make races fail closed but are intentionally absent
 //! from the portable semantic digest. Descriptor, size, mtime, and ctime
@@ -427,6 +430,124 @@ impl StrictLocalSnapshotReadV1 {
     }
 }
 
+/// One provisional local observation whose configured-root descriptor remains
+/// live.
+///
+/// The provisional snapshot deliberately exposes no digest. Only
+/// [`PendingStrictLocalSnapshotV1::revalidate_inventory_c`] can turn it into a
+/// complete snapshot, after inventory C and the configured-route identity
+/// check succeed.
+pub(crate) struct PendingStrictLocalSnapshotV1 {
+    #[cfg(target_os = "linux")]
+    inner: Box<supported::PendingSupportedSnapshotV1>,
+    #[cfg(not(target_os = "linux"))]
+    unsupported: std::convert::Infallible,
+}
+
+impl PendingStrictLocalSnapshotV1 {
+    /// Exact canonical spelling whose descriptor is held by this acquisition.
+    pub(crate) fn canonical_local_root(&self) -> &Path {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.canonical_local_root()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
+    /// Revalidate the local acquisition only after all external reads finish.
+    pub(crate) fn revalidate_inventory_c(self) -> Result<StrictLocalSnapshotFinishV1> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(match supported::finish_supported(*self.inner) {
+                Ok(snapshot) => {
+                    StrictLocalSnapshotFinishV1::Complete(RevalidatedStrictLocalSnapshotV1 {
+                        inner: Box::new(snapshot),
+                    })
+                }
+                Err(failure) => StrictLocalSnapshotFinishV1::Incomplete(failure.into_public()),
+            })
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+}
+
+/// Inventory-C-validated local input that still owns the original root
+/// descriptor. Cross-input composition may inspect the complete snapshot while
+/// retaining the capability; compatibility callers explicitly consume it.
+pub(crate) struct RevalidatedStrictLocalSnapshotV1 {
+    #[cfg(target_os = "linux")]
+    inner: Box<supported::RevalidatedSupportedSnapshotV1>,
+    #[cfg(not(target_os = "linux"))]
+    unsupported: std::convert::Infallible,
+}
+
+impl RevalidatedStrictLocalSnapshotV1 {
+    pub(crate) fn snapshot(&self) -> &CompleteStrictLocalSnapshotV1 {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.snapshot()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
+    fn into_snapshot(self) -> CompleteStrictLocalSnapshotV1 {
+        #[cfg(target_os = "linux")]
+        {
+            (*self.inner).into_snapshot()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+}
+
+/// Starting a strict acquisition either yields a held root capability or a
+/// typed, digest-less failure.
+pub(crate) enum StrictLocalSnapshotHoldReadV1 {
+    Pending(PendingStrictLocalSnapshotV1),
+    Incomplete(StrictLocalSnapshotIncompleteV1),
+}
+
+pub(crate) enum StrictLocalSnapshotFinishV1 {
+    Complete(RevalidatedStrictLocalSnapshotV1),
+    Incomplete(StrictLocalSnapshotIncompleteV1),
+}
+
+pub(crate) fn begin_strict_local_snapshot_v1(
+    canonical_local_root: &Path,
+    profile: RootProfileV1,
+) -> Result<StrictLocalSnapshotHoldReadV1> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (canonical_local_root, profile);
+        return Ok(StrictLocalSnapshotHoldReadV1::Incomplete(
+            CaptureFailure::root(
+                StrictLocalSnapshotIncompleteKindV1::UnsupportedPlatform,
+                "platform-check",
+            )
+            .into_public(),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Ok(
+            match supported::begin_supported(canonical_local_root, profile) {
+                Ok(held) => StrictLocalSnapshotHoldReadV1::Pending(PendingStrictLocalSnapshotV1 {
+                    inner: Box::new(held),
+                }),
+                Err(failure) => StrictLocalSnapshotHoldReadV1::Incomplete(failure.into_public()),
+            },
+        )
+    }
+}
+
 #[derive(Debug)]
 struct CaptureFailure {
     kind: StrictLocalSnapshotIncompleteKindV1,
@@ -474,23 +595,19 @@ pub fn capture_strict_local_snapshot_v1(
     canonical_local_root: &Path,
     profile: RootProfileV1,
 ) -> Result<StrictLocalSnapshotReadV1> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (canonical_local_root, profile);
-        return Ok(StrictLocalSnapshotReadV1::Incomplete(
-            CaptureFailure::root(
-                StrictLocalSnapshotIncompleteKindV1::UnsupportedPlatform,
-                "platform-check",
-            )
-            .into_public(),
-        ));
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        match capture_supported(canonical_local_root, profile) {
-            Ok(snapshot) => Ok(StrictLocalSnapshotReadV1::Complete(snapshot)),
-            Err(failure) => Ok(StrictLocalSnapshotReadV1::Incomplete(failure.into_public())),
+    match begin_strict_local_snapshot_v1(canonical_local_root, profile)? {
+        StrictLocalSnapshotHoldReadV1::Pending(pending) => {
+            match pending.revalidate_inventory_c()? {
+                StrictLocalSnapshotFinishV1::Complete(revalidated) => Ok(
+                    StrictLocalSnapshotReadV1::Complete(revalidated.into_snapshot()),
+                ),
+                StrictLocalSnapshotFinishV1::Incomplete(incomplete) => {
+                    Ok(StrictLocalSnapshotReadV1::Incomplete(incomplete))
+                }
+            }
+        }
+        StrictLocalSnapshotHoldReadV1::Incomplete(incomplete) => {
+            Ok(StrictLocalSnapshotReadV1::Incomplete(incomplete))
         }
     }
 }
@@ -542,7 +659,7 @@ fn local_snapshot_acquisition_fingerprint_v1() -> StrictLocalSnapshotAcquisition
     );
     encoder.field(
         "stability",
-        b"inventory-a-leaf-bracket-inventory-b-reopen-v1",
+        b"inventory-a-leaf-bracket-inventory-b-initial-reopen-held-read-inventory-c-final-reopen-v1",
     );
     encoder.field("namespace", b"portable-nfc-casefold-file-directory-role-v1");
     encoder.field("regular", b"raw-blake3-exact-size-eof-mode-mtime-v1");
@@ -780,10 +897,42 @@ mod supported {
         }
     }
 
-    pub(super) fn capture_supported(
+    pub(super) struct PendingSupportedSnapshotV1 {
+        canonical_local_root: PathBuf,
+        profile: RootProfileV1,
+        root: File,
+        root_identity: StableIdentity,
+        root_mount_id: u64,
+        inventory_a: IdentityInventory,
+        namespace_claims: BTreeMap<String, StrictLocalNamespaceClaimV1>,
+        entries: BTreeMap<String, StrictLocalEntryV1>,
+    }
+
+    impl PendingSupportedSnapshotV1 {
+        pub(super) fn canonical_local_root(&self) -> &Path {
+            &self.canonical_local_root
+        }
+    }
+
+    pub(super) struct RevalidatedSupportedSnapshotV1 {
+        _root: File,
+        snapshot: CompleteStrictLocalSnapshotV1,
+    }
+
+    impl RevalidatedSupportedSnapshotV1 {
+        pub(super) fn snapshot(&self) -> &CompleteStrictLocalSnapshotV1 {
+            &self.snapshot
+        }
+
+        pub(super) fn into_snapshot(self) -> CompleteStrictLocalSnapshotV1 {
+            self.snapshot
+        }
+    }
+
+    pub(super) fn begin_supported(
         canonical_local_root: &Path,
         profile: RootProfileV1,
-    ) -> std::result::Result<CompleteStrictLocalSnapshotV1, CaptureFailure> {
+    ) -> std::result::Result<PendingSupportedSnapshotV1, CaptureFailure> {
         validate_configured_root(canonical_local_root)?;
         crate::conflict_git::validate_trusted_configured_path(canonical_local_root).map_err(
             |_| {
@@ -812,48 +961,107 @@ mod supported {
         verify_inventory_tree(&root, root_identity, root_mount_id, profile, &inventory_a)?;
 
         run_test_hook(TestHookPoint::RootPathBeforeReopen);
-        validate_configured_root(canonical_local_root)?;
-        crate::conflict_git::validate_trusted_configured_path(canonical_local_root).map_err(
-            |_| {
-                CaptureFailure::root(
-                    StrictLocalSnapshotIncompleteKindV1::ConfiguredRootTrustRejected,
-                    "revalidate-configured-root-trust",
-                )
-            },
+        verify_configured_root_route(
+            canonical_local_root,
+            root_identity,
+            root_mount_id,
+            "revalidate-initial-configured-root-trust",
+            "initial-reopen-configured-root",
+            "initial-restat-configured-root",
+            "initial-restatx-configured-root",
+            "compare-initial-reopened-root-identity",
         )?;
-        let reopened = open_absolute_directory(canonical_local_root, "reopen-configured-root")?;
-        let reopened_identity =
-            fstat_identity(reopened.as_raw_fd(), None, "restat-configured-root")?;
-        let reopened_mount_id =
-            statx_mount_id(reopened.as_raw_fd(), None, "restatx-configured-root")?;
-        if reopened_identity != root_identity || reopened_mount_id != root_mount_id {
-            return Err(CaptureFailure::root(
-                StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead,
-                "compare-reopened-root-identity",
-            ));
-        }
 
-        let policy = profile.policy();
+        Ok(PendingSupportedSnapshotV1 {
+            canonical_local_root: canonical_local_root.to_owned(),
+            profile,
+            root,
+            root_identity,
+            root_mount_id,
+            inventory_a,
+            namespace_claims,
+            entries,
+        })
+    }
+
+    pub(super) fn finish_supported(
+        held: PendingSupportedSnapshotV1,
+    ) -> std::result::Result<RevalidatedSupportedSnapshotV1, CaptureFailure> {
+        verify_inventory_tree(
+            &held.root,
+            held.root_identity,
+            held.root_mount_id,
+            held.profile,
+            &held.inventory_a,
+        )?;
+
+        verify_configured_root_route(
+            &held.canonical_local_root,
+            held.root_identity,
+            held.root_mount_id,
+            "revalidate-final-configured-root-trust",
+            "final-reopen-configured-root",
+            "final-restat-configured-root",
+            "final-restatx-configured-root",
+            "compare-final-reopened-root-identity",
+        )?;
+
+        let policy = held.profile.policy();
         let profile_settings_fingerprint = policy.settings_fingerprint();
         let plan_contract_fingerprint = RegisteredRootPlanContractV1::strict_v1().fingerprint();
         let acquisition_fingerprint = local_snapshot_acquisition_fingerprint_v1();
         let semantic_encoding_fingerprint = local_snapshot_semantic_encoding_fingerprint_v1();
         let digest = semantic_snapshot_digest_v1(
-            profile,
+            held.profile,
             profile_settings_fingerprint,
             semantic_encoding_fingerprint,
-            &entries,
+            &held.entries,
         );
-        Ok(CompleteStrictLocalSnapshotV1 {
-            profile,
-            profile_settings_fingerprint,
-            plan_contract_fingerprint,
-            acquisition_fingerprint,
-            semantic_encoding_fingerprint,
-            namespace_claims,
-            entries,
-            digest,
+        Ok(RevalidatedSupportedSnapshotV1 {
+            _root: held.root,
+            snapshot: CompleteStrictLocalSnapshotV1 {
+                profile: held.profile,
+                profile_settings_fingerprint,
+                plan_contract_fingerprint,
+                acquisition_fingerprint,
+                semantic_encoding_fingerprint,
+                namespace_claims: held.namespace_claims,
+                entries: held.entries,
+                digest,
+            },
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verify_configured_root_route(
+        canonical_local_root: &Path,
+        expected_identity: StableIdentity,
+        expected_mount_id: u64,
+        trust_operation: &'static str,
+        open_operation: &'static str,
+        stat_operation: &'static str,
+        statx_operation: &'static str,
+        compare_operation: &'static str,
+    ) -> std::result::Result<(), CaptureFailure> {
+        validate_configured_root(canonical_local_root)?;
+        crate::conflict_git::validate_trusted_configured_path(canonical_local_root).map_err(
+            |_| {
+                CaptureFailure::root(
+                    StrictLocalSnapshotIncompleteKindV1::ConfiguredRootTrustRejected,
+                    trust_operation,
+                )
+            },
+        )?;
+        let reopened = open_absolute_directory(canonical_local_root, open_operation)?;
+        let reopened_identity = fstat_identity(reopened.as_raw_fd(), None, stat_operation)?;
+        let reopened_mount_id = statx_mount_id(reopened.as_raw_fd(), None, statx_operation)?;
+        if reopened_identity != expected_identity || reopened_mount_id != expected_mount_id {
+            return Err(CaptureFailure::root(
+                StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead,
+                compare_operation,
+            ));
+        }
+        Ok(())
     }
 
     fn validate_configured_root(path: &Path) -> std::result::Result<(), CaptureFailure> {
@@ -2255,9 +2463,6 @@ mod supported {
     fn run_test_hook(_point: TestHookPoint) {}
 }
 
-#[cfg(target_os = "linux")]
-use supported::capture_supported;
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::supported::{install_test_hook, openat_descendant_identity, TestHookPoint};
@@ -2285,6 +2490,27 @@ mod tests {
             StrictLocalSnapshotReadV1::Incomplete(incomplete) => {
                 panic!("expected complete snapshot, got {incomplete:?}")
             }
+        }
+    }
+
+    fn pending(root: &Path, profile: RootProfileV1) -> PendingStrictLocalSnapshotV1 {
+        match begin_strict_local_snapshot_v1(root, profile).unwrap() {
+            StrictLocalSnapshotHoldReadV1::Pending(pending) => pending,
+            StrictLocalSnapshotHoldReadV1::Incomplete(incomplete) => {
+                panic!("expected pending snapshot, got {incomplete:?}")
+            }
+        }
+    }
+
+    fn finish_incomplete(pending: PendingStrictLocalSnapshotV1) -> StrictLocalSnapshotIncompleteV1 {
+        match pending.revalidate_inventory_c().unwrap() {
+            StrictLocalSnapshotFinishV1::Complete(complete) => {
+                panic!(
+                    "expected incomplete snapshot, got {:?}",
+                    complete.snapshot()
+                )
+            }
+            StrictLocalSnapshotFinishV1::Incomplete(incomplete) => incomplete,
         }
     }
 
@@ -2602,6 +2828,53 @@ mod tests {
             incomplete_kind(&root, RootProfileV1::AgentStaticV1),
             StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead
         );
+    }
+
+    #[test]
+    fn mutation_during_held_external_read_window_is_incomplete() {
+        let (_temporary, root) = canonical_root();
+        let payload = root.join("payload");
+        fs::write(&payload, b"before").unwrap();
+        let pending = pending(&root, RootProfileV1::AgentStaticV1);
+        assert_eq!(pending.canonical_local_root(), root);
+
+        fs::write(&payload, b"after!").unwrap();
+        assert_eq!(
+            finish_incomplete(pending).kind(),
+            StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead
+        );
+    }
+
+    #[test]
+    fn configured_route_replacement_during_held_window_is_incomplete() {
+        let (_temporary, root) = canonical_root();
+        fs::write(root.join("payload"), b"stable").unwrap();
+        let pending = pending(&root, RootProfileV1::AgentStaticV1);
+
+        let original = root.with_extension("original");
+        fs::rename(&root, &original).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("payload"), b"stable").unwrap();
+
+        let incomplete = finish_incomplete(pending);
+        assert_eq!(
+            incomplete.kind(),
+            StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead
+        );
+        assert_eq!(
+            incomplete.operation(),
+            // Renaming the original directory changes the identity observed
+            // through the still-held descriptor, so inventory C rejects before
+            // the final route reopen is even needed.
+            "compare-verify-root-before-walk"
+        );
+    }
+
+    #[test]
+    fn pending_and_revalidated_capabilities_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PendingStrictLocalSnapshotV1>();
+        assert_send_sync::<RevalidatedStrictLocalSnapshotV1>();
     }
 
     #[test]

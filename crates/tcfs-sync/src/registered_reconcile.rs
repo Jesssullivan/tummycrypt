@@ -24,6 +24,7 @@ use crate::index_entry::{
     DeletionEvidence, IndexEntryState, PortableNamespaceRole, RawObjectReadV1, RawObjectSnapshotV1,
     RemoteEntryKind,
 };
+use crate::registered_local_snapshot::PendingStrictLocalSnapshotV1;
 use crate::state::{
     read_primary_state_bytes_read_only_v1, FileSyncStatus, ReadOnlyPrimaryStateBytesV1,
 };
@@ -377,6 +378,49 @@ pub fn read_and_bind_strict_primary_state_v1(
     canonical_local_root: &Path,
     canonical_remote_prefix: &str,
 ) -> Result<StrictPrimaryStateReadV1> {
+    read_and_bind_strict_primary_state_inner_v1(
+        state_path,
+        canonical_local_root,
+        canonical_remote_prefix,
+        StrictStateRootBindingModeV1::PathnameProbed,
+    )
+}
+
+/// Bind state lexically to the exact spelling owned by a still-live root
+/// capability.
+///
+/// The pending capability authenticates and retains the selected root
+/// spelling. Descendant topology and file/directory role proof remain a
+/// mandatory cross-input composition step. Probing cache-key parents by
+/// pathname here would reintroduce a second, racy authority path and would
+/// reject valid remote-only paths whose parents do not exist locally yet.
+#[allow(dead_code)] // Becomes live when the strict remote-universe constructor lands.
+pub(crate) fn read_and_bind_strict_primary_state_for_pending_root_v1(
+    state_path: &Path,
+    pending_local: &PendingStrictLocalSnapshotV1,
+    canonical_remote_prefix: &str,
+) -> Result<StrictPrimaryStateReadV1> {
+    read_and_bind_strict_primary_state_inner_v1(
+        state_path,
+        pending_local.canonical_local_root(),
+        canonical_remote_prefix,
+        StrictStateRootBindingModeV1::HeldDescriptor,
+    )
+}
+
+#[allow(dead_code)] // HeldDescriptor is exercised now and composed in the next source-only slice.
+#[derive(Clone, Copy)]
+enum StrictStateRootBindingModeV1 {
+    PathnameProbed,
+    HeldDescriptor,
+}
+
+fn read_and_bind_strict_primary_state_inner_v1(
+    state_path: &Path,
+    canonical_local_root: &Path,
+    canonical_remote_prefix: &str,
+    binding_mode: StrictStateRootBindingModeV1,
+) -> Result<StrictPrimaryStateReadV1> {
     let raw_snapshot = match read_primary_state_bytes_read_only_v1(state_path)? {
         ReadOnlyPrimaryStateBytesV1::Missing => {
             return Ok(StrictPrimaryStateReadV1::Incomplete(
@@ -441,6 +485,7 @@ pub fn read_and_bind_strict_primary_state_v1(
         raw_entries,
         canonical_local_root,
         canonical_remote_prefix,
+        binding_mode,
     ) {
         Ok(entries) => entries,
         Err(_) => {
@@ -466,23 +511,26 @@ fn bind_strict_state_entries_v1(
     raw_entries: BTreeMap<String, StrictSyncStateV1>,
     canonical_local_root: &Path,
     canonical_remote_prefix: &str,
+    binding_mode: StrictStateRootBindingModeV1,
 ) -> Result<BTreeMap<String, BoundStrictSyncStateV1>> {
     anyhow::ensure!(
         canonical_local_root.is_absolute(),
         "strict state root binding requires an absolute local root"
     );
-    let observed_root = std::fs::canonicalize(canonical_local_root)
-        .context("canonicalizing strict state local root")?;
-    anyhow::ensure!(
-        observed_root == canonical_local_root,
-        "strict state local root input is not its canonical spelling"
-    );
-    anyhow::ensure!(
-        std::fs::symlink_metadata(canonical_local_root)
-            .context("inspecting strict state local root")?
-            .is_dir(),
-        "strict state local root is not a directory"
-    );
+    if matches!(binding_mode, StrictStateRootBindingModeV1::PathnameProbed) {
+        let observed_root = std::fs::canonicalize(canonical_local_root)
+            .context("canonicalizing strict state local root")?;
+        anyhow::ensure!(
+            observed_root == canonical_local_root,
+            "strict state local root input is not its canonical spelling"
+        );
+        anyhow::ensure!(
+            std::fs::symlink_metadata(canonical_local_root)
+                .context("inspecting strict state local root")?
+                .is_dir(),
+            "strict state local root is not a directory"
+        );
+    }
     canonical_local_root
         .to_str()
         .context("strict state local root is not valid UTF-8")?;
@@ -496,7 +544,7 @@ fn bind_strict_state_entries_v1(
     let mut namespace_claims: BTreeMap<String, (String, PortableNamespaceRole)> = BTreeMap::new();
     let mut entries = BTreeMap::new();
     for (cache_key, state) in raw_entries {
-        let rel_path = bind_strict_cache_key_v1(&cache_key, canonical_local_root)?;
+        let rel_path = bind_strict_cache_key_v1(&cache_key, canonical_local_root, binding_mode)?;
         if Blacklist::default()
             .check_fixed_ingress_path_components(Path::new(&rel_path))
             .is_some()
@@ -533,7 +581,11 @@ fn bind_strict_state_entries_v1(
     Ok(entries)
 }
 
-fn bind_strict_cache_key_v1(cache_key: &str, canonical_local_root: &Path) -> Result<String> {
+fn bind_strict_cache_key_v1(
+    cache_key: &str,
+    canonical_local_root: &Path,
+    binding_mode: StrictStateRootBindingModeV1,
+) -> Result<String> {
     anyhow::ensure!(
         !cache_key.is_empty()
             && !cache_key.ends_with('/')
@@ -559,14 +611,17 @@ fn bind_strict_cache_key_v1(cache_key: &str, canonical_local_root: &Path) -> Res
         canonical_local_root.join(&rel_path) == cache_path,
         "strict state cache key does not round-trip through its selected root"
     );
-    let parent = cache_path
-        .parent()
-        .context("strict state cache key has no parent")?;
-    anyhow::ensure!(
-        std::fs::canonicalize(parent).context("canonicalizing strict state cache-key parent")?
-            == parent,
-        "strict state cache-key parent is missing or uses an alternate path"
-    );
+    if matches!(binding_mode, StrictStateRootBindingModeV1::PathnameProbed) {
+        let parent = cache_path
+            .parent()
+            .context("strict state cache key has no parent")?;
+        anyhow::ensure!(
+            std::fs::canonicalize(parent)
+                .context("canonicalizing strict state cache-key parent")?
+                == parent,
+            "strict state cache-key parent is missing or uses an alternate path"
+        );
+    }
     Ok(rel_path)
 }
 
@@ -1799,6 +1854,65 @@ mod tests {
                     locked_keys
                 }
             ) if active_keys == vec![active_key] && locked_keys.is_empty()
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_root_binds_missing_local_parent_without_pathname_reprobe() {
+        use crate::registered_local_snapshot::{
+            begin_strict_local_snapshot_v1, StrictLocalSnapshotFinishV1,
+            StrictLocalSnapshotHoldReadV1,
+        };
+        use tcfs_core::config::RootProfileV1;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let local_root = dir.path().join("root");
+        std::fs::create_dir(&local_root).unwrap();
+        let local_root = std::fs::canonicalize(local_root).unwrap();
+        let old_key = local_root.join("file").to_string_lossy().into_owned();
+        let new_key = local_root
+            .join("remote-only/child")
+            .to_string_lossy()
+            .into_owned();
+        let state = String::from_utf8(valid_state_json(&local_root, "synced"))
+            .unwrap()
+            .replacen(&old_key, &new_key, 1);
+        write_private(&state_path, state.as_bytes());
+
+        assert!(matches!(
+            read_and_bind_strict_primary_state_v1(&state_path, &local_root, "roots").unwrap(),
+            StrictPrimaryStateReadV1::Incomplete(
+                StrictPrimaryStateIncompleteV1::InvalidRootBinding
+            )
+        ));
+
+        let pending = match begin_strict_local_snapshot_v1(
+            &local_root,
+            RootProfileV1::AgentStaticV1,
+        )
+        .unwrap()
+        {
+            StrictLocalSnapshotHoldReadV1::Pending(pending) => pending,
+            StrictLocalSnapshotHoldReadV1::Incomplete(incomplete) => {
+                panic!("expected pending local snapshot, got {incomplete:?}")
+            }
+        };
+        let snapshot = match read_and_bind_strict_primary_state_for_pending_root_v1(
+            &state_path,
+            &pending,
+            "roots",
+        )
+        .unwrap()
+        {
+            StrictPrimaryStateReadV1::Complete(snapshot) => snapshot,
+            other => panic!("expected held-root state snapshot, got {other:?}"),
+        };
+        assert!(snapshot.entries().contains_key("remote-only/child"));
+        assert!(matches!(
+            pending.revalidate_inventory_c().unwrap(),
+            StrictLocalSnapshotFinishV1::Complete(_)
         ));
     }
 
