@@ -279,6 +279,23 @@ pub struct StateFileLock {
     _file: std::fs::File,
 }
 
+/// Result of probing the existing writer lock without creating or modifying it.
+///
+/// Read-only status surfaces use this instead of [`StateFileLock::acquire`]:
+/// creating or chmodding a sidecar is itself an unexpected write for an
+/// inventory RPC. When the lock is absent, callers must securely read a stable
+/// state-file descriptor and probe again afterward; writers create this
+/// persistent sibling before replacing the state cache.
+#[derive(Debug)]
+pub enum ExistingStateFileLock {
+    /// No lock inode exists. No file was created.
+    Missing,
+    /// The existing lock is held by this guard until it is dropped.
+    Acquired(StateFileLock),
+    /// Another process currently holds the existing lock.
+    Contended,
+}
+
 impl Drop for StateFileLock {
     fn drop(&mut self) {
         // Be explicit instead of relying only on descriptor close semantics;
@@ -343,14 +360,61 @@ impl StateFileLock {
                 .with_context(|| format!("locking state cache via {}", lock_path.display())),
         }
     }
+
+    /// Try to acquire an existing state-cache lock without creating, truncating,
+    /// chmodding, or otherwise modifying the lock inode.
+    ///
+    /// A missing lock is a typed result rather than a request to create one.
+    /// This is intended for observational APIs; writers must continue to use
+    /// [`StateFileLock::acquire`].
+    pub fn try_acquire_existing(state_path: &Path) -> Result<ExistingStateFileLock> {
+        let lock_path = Self::lock_path(state_path);
+        validate_state_parent_if_present(&lock_path).with_context(|| {
+            format!(
+                "validating existing state lock parent: {}",
+                lock_path.display()
+            )
+        })?;
+        reject_state_path_write_acls(&lock_path)?;
+
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = match options.open(&lock_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ExistingStateFileLock::Missing);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("opening existing state lock: {}", lock_path.display())
+                });
+            }
+        };
+        validate_opened_state_file(&file, &lock_path)
+            .with_context(|| format!("validating existing state lock: {}", lock_path.display()))?;
+
+        match file.try_lock() {
+            Ok(()) => Ok(ExistingStateFileLock::Acquired(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(ExistingStateFileLock::Contended),
+            Err(std::fs::TryLockError::Error(error)) => Err(error).with_context(|| {
+                format!("locking existing state cache via {}", lock_path.display())
+            }),
+        }
+    }
 }
 
 // ── FileSyncStatus ──────────────────────────────────────────────────────────
 
-/// Per-file sync status, modeled after odrive's FileSyncState.
+/// Persisted per-file sync status, modeled after odrive's FileSyncState.
 ///
-/// Unlike `SyncState` (which is persisted), this is a transient runtime status
-/// that reflects what is happening to a file *right now*.
+/// `Active` and `Locked` can describe an in-flight operation, but the enum is a
+/// field of persisted [`SyncState`]. Inventory APIs therefore report these as
+/// counts from one durable cache snapshot, never as live task telemetry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSyncStatus {
@@ -528,7 +592,7 @@ pub struct SyncState {
     /// Set by the sync engine, cleared by `tcfs resolve`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<crate::conflict::ConflictInfo>,
-    /// Runtime sync status (transient — reflects current operation state).
+    /// Persisted sync status captured in the state-cache snapshot.
     #[serde(default)]
     pub status: FileSyncStatus,
 }
@@ -564,6 +628,65 @@ pub struct StateCache {
     device_id: String,
     /// When the cache was last flushed, used by periodic best-effort flushing.
     last_flush: Instant,
+}
+
+/// Immutable view of one primary JSON state cache.
+///
+/// Unlike [`StateCache::open`], this loader never creates an empty cache,
+/// consults a recovery backup, marks recovery state, flushes, or writes on
+/// drop. It exists for status/inventory RPCs whose read-only contract requires
+/// the primary cache to remain byte-identical.
+#[derive(Debug, Clone)]
+pub struct StateCacheSnapshot {
+    entries: HashMap<String, SyncState>,
+    last_nats_seq: u64,
+    device_id: String,
+}
+
+impl StateCacheSnapshot {
+    /// Securely read only the primary cache.
+    ///
+    /// `Ok(None)` means the primary is absent, even when a `.bak` file exists.
+    /// Corrupt primary content is an error and is never replaced from backup.
+    pub fn read_primary(db_path: &Path) -> Result<Option<Self>> {
+        if !state_path_entry_exists(db_path)? {
+            return Ok(None);
+        }
+
+        let primary_bytes = secure_read_file_bytes(db_path)
+            .with_context(|| format!("securely reading state snapshot: {}", db_path.display()))?;
+        let (entries, last_nats_seq, device_id) =
+            StateCache::parse_file_bytes(db_path, &primary_bytes)
+                .with_context(|| format!("parsing state snapshot: {}", db_path.display()))?;
+        Ok(Some(Self {
+            entries,
+            last_nats_seq,
+            device_id,
+        }))
+    }
+
+    /// Iterate over every cache entry without exposing mutation.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &SyncState)> {
+        self.entries
+            .iter()
+            .map(|(cache_key, state)| (cache_key.as_str(), state))
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn last_nats_seq(&self) -> u64 {
+        self.last_nats_seq
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
 }
 
 /// In-memory rollback snapshot for a bounded set of state-cache keys.
@@ -2016,6 +2139,46 @@ mod tests {
         StateFileLock::acquire(&state_path).expect("lock releases on drop");
     }
 
+    #[test]
+    fn existing_state_lock_probe_never_creates_or_modifies_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let lock_path = StateFileLock::lock_path(&state_path);
+
+        assert!(matches!(
+            StateFileLock::try_acquire_existing(&state_path).unwrap(),
+            ExistingStateFileLock::Missing
+        ));
+        assert!(
+            !lock_path.exists(),
+            "read-only lock probe must not create a sidecar"
+        );
+
+        write_private_state_file(&lock_path, b"lock-sentinel");
+        let before = std::fs::read(&lock_path).unwrap();
+        let probe = StateFileLock::try_acquire_existing(&state_path).unwrap();
+        assert!(matches!(probe, ExistingStateFileLock::Acquired(_)));
+        assert_eq!(std::fs::read(&lock_path).unwrap(), before);
+    }
+
+    #[test]
+    fn existing_state_lock_probe_reports_contention_without_string_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let writer = StateFileLock::acquire(&state_path).expect("writer lock");
+
+        assert!(matches!(
+            StateFileLock::try_acquire_existing(&state_path).unwrap(),
+            ExistingStateFileLock::Contended
+        ));
+
+        drop(writer);
+        assert!(matches!(
+            StateFileLock::try_acquire_existing(&state_path).unwrap(),
+            ExistingStateFileLock::Acquired(_)
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn state_file_lock_rejects_fifo_without_blocking_and_hardlink_alias() {
@@ -2799,6 +2962,88 @@ mod tests {
         assert_eq!(cache.last_nats_seq(), 99);
         assert_eq!(cache.device_id(), "recovered");
         assert!(cache.recovered_from_backup);
+    }
+
+    #[test]
+    fn immutable_snapshot_never_recovers_a_missing_primary_from_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let bak_path = write_recovery_backup(&path, 41, "snapshot-backup");
+        let backup_before = std::fs::read(&bak_path).unwrap();
+
+        let snapshot = StateCacheSnapshot::read_primary(&path).unwrap();
+
+        assert!(snapshot.is_none());
+        assert!(!path.exists(), "snapshot read must not repair the primary");
+        assert_eq!(std::fs::read(&bak_path).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn immutable_snapshot_never_recovers_a_corrupt_primary_from_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let bak_path = write_recovery_backup(&path, 99, "snapshot-backup");
+        write_private_state_file(&path, b"NOT VALID JSON {{{{");
+        let primary_before = std::fs::read(&path).unwrap();
+        let backup_before = std::fs::read(&bak_path).unwrap();
+
+        let error = StateCacheSnapshot::read_primary(&path)
+            .expect_err("corrupt primary must fail without recovery");
+
+        assert!(format!("{error:#}").contains("parsing state snapshot"));
+        assert_eq!(std::fs::read(&path).unwrap(), primary_before);
+        assert_eq!(std::fs::read(&bak_path).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn immutable_snapshot_reads_current_and_legacy_formats_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let current_path = dir.path().join("current.json");
+        let legacy_path = dir.path().join("legacy.json");
+        let entry = SyncState {
+            blake3: "hash".into(),
+            size: 7,
+            mtime: 11,
+            chunk_count: 1,
+            remote_path: "roots/work/index/file.txt".into(),
+            last_synced: 13,
+            vclock: VectorClock::new(),
+            device_id: "device-a".into(),
+            conflict: None,
+            status: FileSyncStatus::Synced,
+        };
+        let entries = HashMap::from([("/srv/work/file.txt".to_string(), entry)]);
+        let current = StateCacheOnDisk {
+            last_nats_seq: 17,
+            device_id: "device-a".into(),
+            entries: entries.clone(),
+        };
+        write_private_state_file(
+            &current_path,
+            serde_json::to_string(&current).unwrap().as_bytes(),
+        );
+        write_private_state_file(
+            &legacy_path,
+            serde_json::to_string(&entries).unwrap().as_bytes(),
+        );
+        let current_before = std::fs::read(&current_path).unwrap();
+        let legacy_before = std::fs::read(&legacy_path).unwrap();
+
+        let current_snapshot = StateCacheSnapshot::read_primary(&current_path)
+            .unwrap()
+            .expect("current snapshot");
+        let legacy_snapshot = StateCacheSnapshot::read_primary(&legacy_path)
+            .unwrap()
+            .expect("legacy snapshot");
+
+        assert_eq!(current_snapshot.len(), 1);
+        assert_eq!(current_snapshot.last_nats_seq(), 17);
+        assert_eq!(current_snapshot.device_id(), "device-a");
+        assert_eq!(legacy_snapshot.len(), 1);
+        assert_eq!(legacy_snapshot.last_nats_seq(), 0);
+        assert!(legacy_snapshot.device_id().is_empty());
+        assert_eq!(std::fs::read(&current_path).unwrap(), current_before);
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_before);
     }
 
     #[test]
