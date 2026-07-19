@@ -78,10 +78,14 @@ fn c_path(path: &Path) -> Result<std::ffi::CString> {
 fn metadata_identity(metadata: &std::fs::Metadata) -> (u64, u64, u32) {
     use std::os::unix::fs::MetadataExt;
 
+    // Darwin exposes S_IFMT as u16, while Linux exposes it as u32.
+    #[allow(clippy::unnecessary_cast)]
+    let file_type = metadata.mode() & (libc::S_IFMT as u32);
+
     (
         metadata.dev(),
         metadata.ino(),
-        metadata.mode() & libc::S_IFMT,
+        file_type,
     )
 }
 
