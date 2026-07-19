@@ -35,15 +35,14 @@ pub fn parse_remote_spec(spec: &str) -> anyhow::Result<(String, String, String)>
         ("http", rest)
     } else {
         anyhow::bail!(
-            "remote spec must start with seaweedfs://, seaweedfs+http://, or seaweedfs+https:// — got: {}",
-            spec
+            "remote spec must start with seaweedfs://, seaweedfs+http://, or seaweedfs+https://"
         );
     };
 
     // Split host:port from /bucket[/prefix]
     let slash = rest
         .find('/')
-        .ok_or_else(|| anyhow::anyhow!("remote spec must include /bucket — got: {}", spec))?;
+        .ok_or_else(|| anyhow::anyhow!("remote spec must include /bucket"))?;
 
     let host = &rest[..slash]; // e.g. "dees-appu-bearts:8333"
     let path = &rest[slash + 1..]; // e.g. "tcfs-test" or "tcfs-test/subdir"
@@ -51,7 +50,7 @@ pub fn parse_remote_spec(spec: &str) -> anyhow::Result<(String, String, String)>
     // First path component = bucket, remainder = prefix
     let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
     if bucket.is_empty() {
-        anyhow::bail!("remote spec must include a bucket — got: {}", spec);
+        anyhow::bail!("remote spec must include a bucket");
     }
 
     Ok((
@@ -125,5 +124,28 @@ mod tests {
     #[test]
     fn test_parse_remote_spec_empty_bucket() {
         assert!(parse_remote_spec("seaweedfs://host:8333/").is_err());
+    }
+
+    #[test]
+    fn parse_remote_spec_errors_never_echo_caller_input() {
+        for spec in [
+            "custom-secret://user:SCHEME-secret@host/bucket?token=SCHEME-query",
+            "seaweedfs+https://user:NO-BUCKET-secret@host",
+            "seaweedfs+https://user:EMPTY-secret@host/",
+        ] {
+            let rendered = format!("{:#}", parse_remote_spec(spec).unwrap_err());
+            for forbidden in [
+                "custom-secret",
+                "SCHEME-secret",
+                "SCHEME-query",
+                "NO-BUCKET-secret",
+                "EMPTY-secret",
+            ] {
+                assert!(
+                    !rendered.contains(forbidden),
+                    "remote-spec error leaked {forbidden}: {rendered}"
+                );
+            }
+        }
     }
 }

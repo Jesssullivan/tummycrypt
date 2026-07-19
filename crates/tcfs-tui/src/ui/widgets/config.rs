@@ -3,6 +3,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
+use tcfs_core::config::{sanitize_http_endpoint_for_display, sanitize_nats_endpoint_for_display};
 
 use crate::app::App;
 
@@ -25,7 +26,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     kv(&mut lines, "Log Format", &c.daemon.log_format);
 
     section_header(&mut lines, "Storage");
-    kv(&mut lines, "Endpoint", &c.storage.endpoint);
+    let storage_endpoint = sanitize_http_endpoint_for_display(&c.storage.endpoint);
+    kv(&mut lines, "Endpoint", &storage_endpoint);
     kv(&mut lines, "Region", &c.storage.region);
     kv(&mut lines, "Bucket", &c.storage.bucket);
     kv(
@@ -64,7 +66,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     );
 
     section_header(&mut lines, "Sync");
-    kv(&mut lines, "NATS URL", &c.sync.nats_url);
+    let nats_url = sanitize_nats_endpoint_for_display(&c.sync.nats_url);
+    kv(&mut lines, "NATS URL", &nats_url);
     kv(
         &mut lines,
         "NATS TLS",

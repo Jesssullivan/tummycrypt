@@ -3,6 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 use ratatui::Frame;
+use tcfs_core::config::sanitize_http_endpoint_for_display;
 
 use crate::app::App;
 
@@ -66,7 +67,7 @@ fn draw_status_card(f: &mut Frame, app: &App, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::styled("  Endpoint: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(&s.storage_endpoint),
+                    Span::raw(sanitize_http_endpoint_for_display(&s.storage_endpoint)),
                 ]),
                 Line::from(vec![
                     Span::styled("  Storage:  ", Style::default().fg(Color::DarkGray)),
