@@ -1304,6 +1304,20 @@ impl RootLocalSnapshotContractV1 {
         }
     }
 
+    /// Maximum byte length of one regular file admitted for hashing.
+    pub const fn max_regular_file_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 1024 * 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum aggregate regular-file bytes hashed for one snapshot.
+    pub const fn max_total_hashed_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 8 * 1024 * 1024 * 1024 * 1024,
+        }
+    }
+
     /// Fixed regular-file hashing buffer size.
     pub const fn hash_buffer_bytes(self) -> u64 {
         match self {
@@ -1730,6 +1744,8 @@ struct RegisteredRootPlanContractFingerprintFieldsV1 {
     local_snapshot_max_entries: u64,
     local_snapshot_max_retained_path_bytes: u64,
     local_snapshot_max_symlink_target_bytes: u64,
+    local_snapshot_max_regular_file_bytes: u64,
+    local_snapshot_max_total_hashed_bytes: u64,
     local_snapshot_hash_buffer_bytes: u64,
 }
 
@@ -1764,6 +1780,8 @@ fn registered_root_plan_contract_fingerprint_fields_v1(
         local_snapshot_max_entries: contract.local_snapshot.max_entries(),
         local_snapshot_max_retained_path_bytes: contract.local_snapshot.max_retained_path_bytes(),
         local_snapshot_max_symlink_target_bytes: contract.local_snapshot.max_symlink_target_bytes(),
+        local_snapshot_max_regular_file_bytes: contract.local_snapshot.max_regular_file_bytes(),
+        local_snapshot_max_total_hashed_bytes: contract.local_snapshot.max_total_hashed_bytes(),
         local_snapshot_hash_buffer_bytes: contract.local_snapshot.hash_buffer_bytes(),
     }
 }
@@ -1773,7 +1791,7 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
 ) -> RegisteredRootPlanContractFingerprintV1 {
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.registered-root-plan-contract.b3v1",
-        fields.canonical_names.len() + 5,
+        fields.canonical_names.len() + 7,
     );
     for (tag, value) in fields.canonical_names {
         encoder.field(tag, value.as_bytes());
@@ -1793,6 +1811,14 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
             encoder.field(
                 "local_snapshot_max_symlink_target_bytes",
                 &fields.local_snapshot_max_symlink_target_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_regular_file_bytes",
+                &fields.local_snapshot_max_regular_file_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_total_hashed_bytes",
+                &fields.local_snapshot_max_total_hashed_bytes.to_be_bytes(),
             );
             encoder.field(
                 "local_snapshot_hash_buffer_bytes",
@@ -2866,6 +2892,14 @@ resolution_policy = "inspect-only"
         assert_eq!(local_snapshot.max_entries(), 1_000_000);
         assert_eq!(local_snapshot.max_retained_path_bytes(), 256 * 1024 * 1024);
         assert_eq!(local_snapshot.max_symlink_target_bytes(), 1023);
+        assert_eq!(
+            local_snapshot.max_regular_file_bytes(),
+            1024 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            local_snapshot.max_total_hashed_bytes(),
+            8 * 1024 * 1024 * 1024 * 1024
+        );
         assert_eq!(local_snapshot.hash_buffer_bytes(), 64 * 1024);
         assert_eq!(
             contract.state_contract(),
@@ -2900,7 +2934,7 @@ resolution_policy = "inspect-only"
         );
         assert_eq!(
             fingerprint.to_string(),
-            "b3v1:af0bce82d5ebee4249f45ad7824e9e12a7628ffb4ec764c1865d079b1fac4d6a"
+            "b3v1:db9a3d9899a427c952789afdd850d6ffafca84770b99d6f02d3efcca6b3a0327"
         );
     }
 
@@ -2935,6 +2969,14 @@ resolution_policy = "inspect-only"
             256 * 1024 * 1024
         );
         assert_eq!(fields.local_snapshot_max_symlink_target_bytes, 1023);
+        assert_eq!(
+            fields.local_snapshot_max_regular_file_bytes,
+            1024 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            fields.local_snapshot_max_total_hashed_bytes,
+            8 * 1024 * 1024 * 1024 * 1024
+        );
         assert_eq!(fields.local_snapshot_hash_buffer_bytes, 64 * 1024);
 
         let baseline = fingerprint_registered_root_plan_contract_fields_v1(fields);
@@ -2979,6 +3021,20 @@ resolution_policy = "inspect-only"
         assert_ne!(
             baseline,
             fingerprint_registered_root_plan_contract_fields_v1(target_bytes_mutation)
+        );
+
+        let mut regular_file_bytes_mutation = fields;
+        regular_file_bytes_mutation.local_snapshot_max_regular_file_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(regular_file_bytes_mutation)
+        );
+
+        let mut total_hashed_bytes_mutation = fields;
+        total_hashed_bytes_mutation.local_snapshot_max_total_hashed_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(total_hashed_bytes_mutation)
         );
 
         let mut buffer_bytes_mutation = fields;
