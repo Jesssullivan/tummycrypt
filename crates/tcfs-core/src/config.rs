@@ -1,3 +1,4 @@
+use crate::fixed_ingress::{FixedIngressPolicySchemaFingerprintV1, FixedIngressPolicyV1};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1037,11 +1038,12 @@ impl RootHiddenPathPolicyV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootExclusionPolicyV1 {
-    /// Exactly the config-independent checks implemented by
-    /// `Blacklist::check_fixed_ingress_path_components`.
+    /// Exactly the config-independent checks owned by
+    /// [`FixedIngressPolicyV1`].
     ///
-    /// Changing that function's membership or semantics requires a new
-    /// profile/policy version and canonical name.
+    /// The profile settings fingerprint also binds that policy's schema
+    /// fingerprint, so changing membership, matcher semantics, labels, or
+    /// order changes profile identity even if this canonical name is retained.
     FixedIngressPathComponentsV1,
 }
 
@@ -1540,22 +1542,31 @@ impl fmt::Debug for RegisteredRootPlanContractFingerprintV1 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RootProfileSettingsFingerprintFieldsV1 {
+    canonical_names: [(&'static str, &'static str); 7],
+    fixed_ingress_schema: FixedIngressPolicySchemaFingerprintV1,
+}
+
 fn root_profile_settings_fingerprint_fields_v1(
     profile: RootProfileV1,
     settings: RootProfileSettingsV1,
-) -> [(&'static str, &'static str); 7] {
-    [
-        ("profile", profile.canonical_name()),
-        ("hidden_path_policy", settings.hidden_paths.canonical_name()),
-        ("exclusion_policy", settings.exclusions.canonical_name()),
-        ("git_policy", settings.git.canonical_name()),
-        ("symlink_policy", settings.symlinks.canonical_name()),
-        (
-            "empty_directory_policy",
-            settings.empty_directories.canonical_name(),
-        ),
-        ("metadata_policy", settings.metadata.canonical_name()),
-    ]
+) -> RootProfileSettingsFingerprintFieldsV1 {
+    RootProfileSettingsFingerprintFieldsV1 {
+        canonical_names: [
+            ("profile", profile.canonical_name()),
+            ("hidden_path_policy", settings.hidden_paths.canonical_name()),
+            ("exclusion_policy", settings.exclusions.canonical_name()),
+            ("git_policy", settings.git.canonical_name()),
+            ("symlink_policy", settings.symlinks.canonical_name()),
+            (
+                "empty_directory_policy",
+                settings.empty_directories.canonical_name(),
+            ),
+            ("metadata_policy", settings.metadata.canonical_name()),
+        ],
+        fixed_ingress_schema: FixedIngressPolicyV1::strict_v1().schema_fingerprint(),
+    }
 }
 
 fn fingerprint_root_profile_settings_v1(
@@ -1565,11 +1576,15 @@ fn fingerprint_root_profile_settings_v1(
     let fields = root_profile_settings_fingerprint_fields_v1(profile, settings);
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.root-profile-settings.b3v1",
-        fields.len(),
+        fields.canonical_names.len() + 1,
     );
-    for (tag, value) in fields {
+    for (tag, value) in fields.canonical_names {
         encoder.field(tag, value.as_bytes());
     }
+    encoder.field(
+        "fixed_ingress_policy_schema",
+        fields.fixed_ingress_schema.as_bytes(),
+    );
     RootProfileSettingsFingerprintV1(encoder.finish())
 }
 
@@ -2550,19 +2565,20 @@ resolution_policy = "inspect-only"
         assert_ne!(git_fingerprint, agent_fingerprint);
         assert_eq!(
             git_fingerprint.to_string(),
-            "b3v1:ceedf3bc0437f2dce0ae5228efd0b5949dafaf47bbd23f99a27eb9183c8ee794"
+            "b3v1:9aa6b15f0ef417e3d05ce69509a73f122aa0dc82c2b5f67da35168609f2145b2"
         );
         assert_eq!(
             agent_fingerprint.to_string(),
-            "b3v1:86c7ae197c9b320a8cf93bd7559d6352ee4b9dceded70f9249dc9deba4918294"
+            "b3v1:cd9e9cc1c9bd0359d273861d84f3145347df6a61defbe229664ff27e450b6351"
         );
     }
 
     #[test]
     fn root_profile_fingerprint_schema_binds_every_policy_field() {
         let git = RootProfileV1::GitRawV1.policy();
+        let git_fields = root_profile_settings_fingerprint_fields_v1(git.profile(), git.settings());
         assert_eq!(
-            root_profile_settings_fingerprint_fields_v1(git.profile(), git.settings(),),
+            git_fields.canonical_names,
             [
                 ("profile", "git-raw-v1"),
                 ("hidden_path_policy", "include-v1"),
@@ -2573,10 +2589,20 @@ resolution_policy = "inspect-only"
                 ("metadata_policy", "regular-file-manifest-mode-and-mtime-v1",),
             ]
         );
+        assert_eq!(
+            git_fields.fixed_ingress_schema,
+            FixedIngressPolicyV1::strict_v1().schema_fingerprint()
+        );
+        assert_eq!(
+            git.settings().exclusion_policy().canonical_name(),
+            FixedIngressPolicyV1::strict_v1().canonical_name()
+        );
 
         let agent = RootProfileV1::AgentStaticV1.policy();
+        let agent_fields =
+            root_profile_settings_fingerprint_fields_v1(agent.profile(), agent.settings());
         assert_eq!(
-            root_profile_settings_fingerprint_fields_v1(agent.profile(), agent.settings(),),
+            agent_fields.canonical_names,
             [
                 ("profile", "agent-static-v1"),
                 ("hidden_path_policy", "include-v1"),
@@ -2586,6 +2612,14 @@ resolution_policy = "inspect-only"
                 ("empty_directory_policy", "ignore-v1"),
                 ("metadata_policy", "regular-file-manifest-mode-and-mtime-v1",),
             ]
+        );
+        assert_eq!(
+            agent_fields.fixed_ingress_schema,
+            FixedIngressPolicyV1::strict_v1().schema_fingerprint()
+        );
+        assert_eq!(
+            git_fields.fixed_ingress_schema,
+            agent_fields.fixed_ingress_schema
         );
     }
 

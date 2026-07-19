@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod error;
+pub mod fixed_ingress;
 pub mod types;
 
 pub use error::{TcfsError, TcfsResult};

@@ -12,6 +12,7 @@ pub mod nats;
 pub mod path_acl;
 pub mod policy;
 pub mod reconcile;
+pub mod registered_reconcile;
 pub mod scheduler;
 pub mod state;
 pub mod watcher;

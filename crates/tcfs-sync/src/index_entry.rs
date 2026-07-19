@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use futures::TryStreamExt;
 use opendal::{ErrorKind, Operator};
 use serde::{Deserialize, Serialize};
 use unicode_casefold::UnicodeCaseFold;
@@ -337,7 +338,7 @@ impl PortableNamespaceReservationV1 {
     }
 }
 
-fn validate_namespace_logical_path(rel_path: &str) -> Result<()> {
+pub(crate) fn validate_namespace_logical_path(rel_path: &str) -> Result<()> {
     validate_canonical_rel_path(rel_path)?;
     anyhow::ensure!(
         !rel_path
@@ -1344,6 +1345,77 @@ struct IndexEntrySnapshot {
     cas_etag: Option<String>,
 }
 
+/// Storage-native identity used to bind one observational raw-object read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RawObjectReadBindingV1 {
+    Version {
+        version: String,
+        etag: Option<String>,
+    },
+    Etag {
+        etag: String,
+    },
+}
+
+impl RawObjectReadBindingV1 {
+    pub(crate) fn version(&self) -> Option<&str> {
+        match self {
+            Self::Version { version, .. } => Some(version),
+            Self::Etag { .. } => None,
+        }
+    }
+
+    pub(crate) fn etag(&self) -> Option<&str> {
+        match self {
+            Self::Version { etag, .. } => etag.as_deref(),
+            Self::Etag { etag } => Some(etag),
+        }
+    }
+}
+
+/// Result of proving whether one exact storage object can be read by identity.
+///
+/// `Unbound` deliberately carries no bytes: a backend without version- or
+/// ETag-bound reads cannot contribute object content to a complete plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RawObjectReadV1 {
+    Bound(RawObjectSnapshotV1),
+    Unbound,
+}
+
+/// Exact bytes and identity from one read-only storage-object observation.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct RawObjectSnapshotV1 {
+    raw_bytes: Vec<u8>,
+    raw_blake3: blake3::Hash,
+    binding: RawObjectReadBindingV1,
+}
+
+impl std::fmt::Debug for RawObjectSnapshotV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RawObjectSnapshotV1")
+            .field("raw_bytes_len", &self.raw_bytes.len())
+            .field("raw_blake3", &self.raw_blake3)
+            .field("binding", &self.binding)
+            .finish()
+    }
+}
+
+impl RawObjectSnapshotV1 {
+    pub(crate) fn raw_bytes(&self) -> &[u8] {
+        &self.raw_bytes
+    }
+
+    pub(crate) const fn binding(&self) -> &RawObjectReadBindingV1 {
+        &self.binding
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<u8>, blake3::Hash, RawObjectReadBindingV1) {
+        (self.raw_bytes, self.raw_blake3, self.binding)
+    }
+}
+
 /// Exact index-object identity carried from conflict resolution into publish.
 /// Production variants are backed by storage-native conditional writes; the
 /// in-memory variant exists only so unit tests can exercise the state machine.
@@ -1561,7 +1633,7 @@ fn memory_index_write_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn validate_canonical_namespace_remote_prefix(remote_prefix: &str) -> Result<&str> {
+pub(crate) fn validate_canonical_namespace_remote_prefix(remote_prefix: &str) -> Result<&str> {
     anyhow::ensure!(
         remote_prefix == remote_prefix.trim_end_matches('/'),
         "portable namespace remote prefix must be canonical without a trailing slash: {remote_prefix:?}"
@@ -1914,6 +1986,172 @@ pub(crate) async fn write_immutable_manifest_object_if_absent(
         "existing immutable manifest object does not match its byte address",
     )
     .await
+}
+
+/// Read one exact storage object without invoking compatibility recovery or
+/// any write-capability probe.
+///
+/// Version-bound reads are preferred, followed by ETag-bound reads. A backend
+/// without either identity is represented explicitly as `Unbound`; callers
+/// must not silently promote that observation into a complete plan.
+pub(crate) async fn read_raw_object_snapshot_v1(
+    op: &Operator,
+    object_key: &str,
+    max_bytes: u64,
+) -> Result<Option<RawObjectReadV1>> {
+    anyhow::ensure!(
+        max_bytes > 0,
+        "read-only object snapshot bound must be nonzero: {object_key}"
+    );
+    let metadata = match op.stat(object_key).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::anyhow!(error))
+                .with_context(|| format!("statting read-only object snapshot: {object_key}"));
+        }
+    };
+    anyhow::ensure!(
+        metadata.is_file(),
+        "read-only object snapshot is not a file: {object_key}"
+    );
+    anyhow::ensure!(
+        metadata.content_length() > 0,
+        "read-only object snapshot is empty: {object_key}"
+    );
+    anyhow::ensure!(
+        metadata.content_length() <= max_bytes,
+        "read-only object snapshot exceeds {max_bytes} bytes: {object_key}"
+    );
+
+    let etag = metadata
+        .etag()
+        .filter(|etag| !etag.is_empty())
+        .map(str::to_owned);
+    let version = metadata
+        .version()
+        .filter(|version| !version.is_empty() && *version != "null")
+        .map(str::to_owned);
+    let capability = op.info().full_capability();
+    let version = version.filter(|_| capability.read_with_version);
+    let etag_for_read = etag
+        .as_deref()
+        .filter(|_| capability.read_with_if_match)
+        .map(str::to_owned);
+    if version.is_none() && etag_for_read.is_none() {
+        return Ok(Some(RawObjectReadV1::Unbound));
+    }
+    let (reader_result, binding) = if let Some(version) = version.as_deref() {
+        let reader = if let Some(etag) = etag_for_read.as_deref() {
+            op.reader_with(object_key)
+                .version(version)
+                .if_match(etag)
+                .await
+        } else {
+            op.reader_with(object_key).version(version).await
+        };
+        (
+            reader,
+            RawObjectReadBindingV1::Version {
+                version: version.to_owned(),
+                etag: etag.clone(),
+            },
+        )
+    } else if let Some(etag) = etag_for_read.as_deref() {
+        (
+            op.reader_with(object_key).if_match(etag).await,
+            RawObjectReadBindingV1::Etag {
+                etag: etag.to_owned(),
+            },
+        )
+    } else {
+        unreachable!("unbound storage reads return before fetching object bytes")
+    };
+
+    let reader = match reader_result {
+        Ok(reader) => reader,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConditionNotMatch
+            ) =>
+        {
+            bail!("object changed after read-only snapshot stat: {object_key}");
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(error))
+                .with_context(|| format!("reading read-only object snapshot: {object_key}"));
+        }
+    };
+    // An exact `0..stat_length` range can silently accept a truncated prefix
+    // if a broken provider reuses an ETag while the object grows. Keep the
+    // conditional identity on one open-ended reader, consume it incrementally,
+    // and retain at most max+1 bytes so growth is detected without unbounded
+    // application allocation.
+    let mut stream = match reader.into_stream(..).await {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConditionNotMatch
+            ) =>
+        {
+            bail!("object changed after read-only snapshot stat: {object_key}");
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(error))
+                .with_context(|| format!("opening read-only object snapshot: {object_key}"));
+        }
+    };
+    let max_plus_one = max_bytes
+        .checked_add(1)
+        .context("read-only object snapshot bound cannot be incremented")?;
+    let max_bytes_usize = usize::try_from(max_bytes)
+        .context("read-only object snapshot bound does not fit memory")?;
+    let max_plus_one_usize = usize::try_from(max_plus_one)
+        .context("read-only object snapshot detection bound does not fit memory")?;
+    let initial_capacity = usize::try_from(metadata.content_length())
+        .context("read-only object metadata length does not fit memory")?;
+    let mut raw_bytes = Vec::with_capacity(initial_capacity);
+    loop {
+        let buffer = match stream.try_next().await {
+            Ok(Some(buffer)) => buffer,
+            Ok(None) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound | ErrorKind::ConditionNotMatch
+                ) =>
+            {
+                bail!("object changed after read-only snapshot stat: {object_key}");
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!(error))
+                    .with_context(|| format!("streaming read-only object snapshot: {object_key}"));
+            }
+        };
+        for chunk in buffer {
+            let retained = raw_bytes.len();
+            let remaining = max_plus_one_usize.saturating_sub(retained);
+            let copy_len = remaining.min(chunk.len());
+            raw_bytes.extend_from_slice(&chunk[..copy_len]);
+            anyhow::ensure!(
+                raw_bytes.len() <= max_bytes_usize && copy_len == chunk.len(),
+                "object exceeded read-only snapshot bound while reading: {object_key}"
+            );
+        }
+    }
+    anyhow::ensure!(
+        u64::try_from(raw_bytes.len()).context("read-only object length does not fit u64")?
+            == metadata.content_length(),
+        "object length changed during read-only snapshot: {object_key}"
+    );
+    let raw_blake3 = blake3::hash(&raw_bytes);
+    Ok(Some(RawObjectReadV1::Bound(RawObjectSnapshotV1 {
+        raw_bytes,
+        raw_blake3,
+        binding,
+    })))
 }
 
 async fn read_raw_index_snapshot_from_store(
@@ -2569,13 +2807,157 @@ mod tests {
         resolve_visible_index_entry_with_hook, validate_canonical_rel_path, IndexEntryState,
         ParsedIndexEntry, PendingIndexEntry, RemoteIndexEntry, VersionedIndexEntry,
     };
+    use opendal::raw::{Access, AccessorInfo, OpRead, OpStat, RpRead, RpStat};
     use opendal::services::Memory;
-    use opendal::Operator;
+    use opendal::{Buffer, Capability, EntryMode, ErrorKind, Metadata, Operator, OperatorBuilder};
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     fn memory_op() -> Operator {
         let op = Operator::new(Memory::default()).unwrap().finish();
         super::register_memory_index_emulation_for_tests(&op).unwrap();
         op
+    }
+
+    #[derive(Clone, Debug)]
+    struct SnapshotTestObject {
+        bytes: Vec<u8>,
+        etag: Option<String>,
+        version: Option<String>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct SnapshotTestRead {
+        offset: u64,
+        size: Option<u64>,
+        if_match: Option<String>,
+        version: Option<String>,
+    }
+
+    #[derive(Debug)]
+    struct SnapshotTestState {
+        current: SnapshotTestObject,
+        versions: BTreeMap<String, SnapshotTestObject>,
+        replace_after_next_stat: Option<SnapshotTestObject>,
+        reads: Vec<SnapshotTestRead>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct SnapshotTestBackend {
+        state: Arc<Mutex<SnapshotTestState>>,
+        info: Arc<AccessorInfo>,
+    }
+
+    impl SnapshotTestBackend {
+        fn reads(&self) -> Vec<SnapshotTestRead> {
+            self.state.lock().unwrap().reads.clone()
+        }
+    }
+
+    impl Access for SnapshotTestBackend {
+        type Reader = Buffer;
+        type Writer = ();
+        type Lister = ();
+        type Deleter = ();
+
+        fn info(&self) -> Arc<AccessorInfo> {
+            self.info.clone()
+        }
+
+        async fn stat(&self, _path: &str, _: OpStat) -> opendal::Result<RpStat> {
+            let mut state = self.state.lock().unwrap();
+            let observed = state.current.clone();
+            if let Some(replacement) = state.replace_after_next_stat.take() {
+                state.current = replacement;
+            }
+            let mut metadata =
+                Metadata::new(EntryMode::FILE).with_content_length(observed.bytes.len() as u64);
+            if let Some(etag) = observed.etag {
+                metadata = metadata.with_etag(etag);
+            }
+            if let Some(version) = observed.version {
+                metadata = metadata.with_version(version);
+            }
+            Ok(RpStat::new(metadata))
+        }
+
+        async fn read(&self, _path: &str, args: OpRead) -> opendal::Result<(RpRead, Buffer)> {
+            let mut state = self.state.lock().unwrap();
+            let range = args.range();
+            state.reads.push(SnapshotTestRead {
+                offset: range.offset(),
+                size: range.size(),
+                if_match: args.if_match().map(str::to_owned),
+                version: args.version().map(str::to_owned),
+            });
+            let selected = match args.version() {
+                Some(version) => state.versions.get(version).cloned(),
+                None => Some(state.current.clone()),
+            }
+            .ok_or_else(|| {
+                opendal::Error::new(ErrorKind::NotFound, "snapshot-test version is missing")
+            })?;
+            if args
+                .if_match()
+                .is_some_and(|expected| selected.etag.as_deref() != Some(expected))
+            {
+                return Err(opendal::Error::new(
+                    ErrorKind::ConditionNotMatch,
+                    "snapshot-test rejected stale ETag",
+                ));
+            }
+
+            let start = usize::try_from(range.offset()).unwrap_or(usize::MAX);
+            let requested = range
+                .size()
+                .and_then(|size| usize::try_from(size).ok())
+                .unwrap_or(usize::MAX);
+            let end = start.saturating_add(requested).min(selected.bytes.len());
+            let bytes = if start <= end {
+                selected.bytes[start..end].to_vec()
+            } else {
+                Vec::new()
+            };
+            Ok((
+                RpRead::new().with_size(Some(bytes.len() as u64)),
+                Buffer::from(bytes),
+            ))
+        }
+    }
+
+    fn snapshot_test_operator(
+        current: SnapshotTestObject,
+        replacement: Option<SnapshotTestObject>,
+        advertise_version: bool,
+        advertise_etag: bool,
+    ) -> (Operator, SnapshotTestBackend) {
+        let mut versions = BTreeMap::new();
+        for object in std::iter::once(&current).chain(replacement.as_ref()) {
+            if let Some(version) = object.version.as_ref() {
+                versions.insert(version.clone(), object.clone());
+            }
+        }
+        let info = AccessorInfo::default();
+        info.set_scheme("snapshot-test")
+            .set_root("/")
+            .set_name("snapshot-test")
+            .set_native_capability(Capability {
+                stat: true,
+                read: true,
+                read_with_if_match: advertise_etag,
+                read_with_version: advertise_version,
+                ..Default::default()
+            });
+        let backend = SnapshotTestBackend {
+            state: Arc::new(Mutex::new(SnapshotTestState {
+                current,
+                versions,
+                replace_after_next_stat: replacement,
+                reads: Vec::new(),
+            })),
+            info: Arc::new(info),
+        };
+        (OperatorBuilder::new(backend.clone()).finish(), backend)
     }
 
     async fn write_committed_index_entry(
@@ -2619,6 +3001,197 @@ mod tests {
         .unwrap_err();
         assert!(format!("{error:#}").contains("verifying conditional-write semantics"));
         assert!(!unregistered.exists("data/index/doc.txt").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn read_only_raw_object_snapshot_is_exact_unbound_and_non_mutating() {
+        let op = memory_op();
+        assert!(super::read_raw_object_snapshot_v1(&op, "object", 1024)
+            .await
+            .unwrap()
+            .is_none());
+
+        let expected = b"raw-object-sentinel";
+        op.write("object", expected.to_vec()).await.unwrap();
+        let before = op.read("object").await.unwrap().to_vec();
+        assert_eq!(
+            super::read_raw_object_snapshot_v1(&op, "object", 1024)
+                .await
+                .unwrap(),
+            Some(super::RawObjectReadV1::Unbound)
+        );
+        assert_eq!(op.read("object").await.unwrap().to_vec(), before);
+    }
+
+    #[tokio::test]
+    async fn read_only_raw_object_snapshot_rejects_oversized_metadata_before_read() {
+        let op = memory_op();
+        op.write("object", b"five".to_vec()).await.unwrap();
+        let error = super::read_raw_object_snapshot_v1(&op, "object", 3)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("exceeds 3 bytes"));
+    }
+
+    #[tokio::test]
+    async fn read_only_raw_object_snapshot_prefers_version_and_pins_stat_generation() {
+        let (op, backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"old".to_vec(),
+                etag: Some("etag-1".to_owned()),
+                version: Some("version-1".to_owned()),
+            },
+            Some(SnapshotTestObject {
+                bytes: b"newer".to_vec(),
+                etag: Some("etag-2".to_owned()),
+                version: Some("version-2".to_owned()),
+            }),
+            true,
+            true,
+        );
+
+        let snapshot = match super::read_raw_object_snapshot_v1(&op, "object", 32)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            super::RawObjectReadV1::Bound(snapshot) => snapshot,
+            super::RawObjectReadV1::Unbound => panic!("expected version-bound snapshot"),
+        };
+        assert_eq!(snapshot.raw_bytes(), b"old");
+        assert_eq!(
+            snapshot.binding(),
+            &super::RawObjectReadBindingV1::Version {
+                version: "version-1".to_owned(),
+                etag: Some("etag-1".to_owned()),
+            }
+        );
+        assert_eq!(
+            backend.reads(),
+            vec![SnapshotTestRead {
+                offset: 0,
+                size: None,
+                if_match: Some("etag-1".to_owned()),
+                version: Some("version-1".to_owned()),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_raw_object_snapshot_uses_etag_and_rejects_stat_read_mutation() {
+        let stable = SnapshotTestObject {
+            bytes: b"same".to_vec(),
+            etag: Some("etag-1".to_owned()),
+            version: None,
+        };
+        let (op, _) = snapshot_test_operator(stable.clone(), None, false, true);
+        let snapshot = match super::read_raw_object_snapshot_v1(&op, "object", 16)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            super::RawObjectReadV1::Bound(snapshot) => snapshot,
+            super::RawObjectReadV1::Unbound => panic!("expected ETag-bound snapshot"),
+        };
+        assert_eq!(
+            snapshot.binding(),
+            &super::RawObjectReadBindingV1::Etag {
+                etag: "etag-1".to_owned()
+            }
+        );
+
+        let (mutated_op, _) = snapshot_test_operator(
+            stable,
+            Some(SnapshotTestObject {
+                bytes: b"diff".to_vec(),
+                etag: Some("etag-2".to_owned()),
+                version: None,
+            }),
+            false,
+            true,
+        );
+        let error = super::read_raw_object_snapshot_v1(&mutated_op, "object", 16)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("changed after read-only snapshot stat"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_raw_object_snapshot_rejects_oversize_and_same_identity_growth() {
+        let (oversized_op, oversized_backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: vec![0; 5],
+                etag: Some("etag-1".to_owned()),
+                version: None,
+            },
+            None,
+            false,
+            true,
+        );
+        assert!(
+            super::read_raw_object_snapshot_v1(&oversized_op, "object", 4)
+                .await
+                .is_err()
+        );
+        assert!(oversized_backend.reads().is_empty());
+
+        let (bounded_op, bounded_backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: vec![0; 4],
+                etag: Some("same-etag".to_owned()),
+                version: None,
+            },
+            None,
+            false,
+            true,
+        );
+        let snapshot = super::read_raw_object_snapshot_v1(&bounded_op, "object", 4)
+            .await
+            .unwrap();
+        assert!(matches!(snapshot, Some(super::RawObjectReadV1::Bound(_))));
+        assert_eq!(
+            bounded_backend.reads(),
+            vec![SnapshotTestRead {
+                offset: 0,
+                size: None,
+                if_match: Some("same-etag".to_owned()),
+                version: None,
+            }]
+        );
+
+        let (grown_op, grown_backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: vec![0; 4],
+                etag: Some("reused-etag".to_owned()),
+                version: None,
+            },
+            Some(SnapshotTestObject {
+                bytes: vec![0; 128],
+                etag: Some("reused-etag".to_owned()),
+                version: None,
+            }),
+            false,
+            true,
+        );
+        let error = super::read_raw_object_snapshot_v1(&grown_op, "object", 4)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("exceeded read-only snapshot bound"),
+            "{error:#}"
+        );
+        assert_eq!(
+            grown_backend.reads(),
+            vec![SnapshotTestRead {
+                offset: 0,
+                size: None,
+                if_match: Some("reused-etag".to_owned()),
+                version: None,
+            }]
+        );
     }
 
     #[tokio::test]
