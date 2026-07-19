@@ -20,6 +20,7 @@ use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use tcfs_core::config::sanitize_http_endpoint_for_display;
 
 #[cfg(unix)]
 use tonic::metadata::MetadataValue;
@@ -655,7 +656,7 @@ enum TrashAction {
 
 #[derive(Subcommand, Debug)]
 enum ConfigAction {
-    /// Print the active configuration (merged defaults + config file)
+    /// Print a redacted diagnostic view (not suitable for config reuse)
     Show,
     /// Render the macOS FileProvider bootstrap JSON from the active config
     Fileprovider {
@@ -1012,7 +1013,12 @@ async fn load_config(path: &Path) -> Result<tcfs_core::config::TcfsConfig> {
         let content = tokio::fs::read_to_string(path)
             .await
             .with_context(|| format!("reading config: {}", path.display()))?;
-        toml::from_str(&content).with_context(|| format!("parsing config: {}", path.display()))
+        toml::from_str(&content).map_err(|_| {
+            anyhow::anyhow!(
+                "parsing config {} failed; check TOML syntax and field types",
+                path.display()
+            )
+        })
     } else {
         Ok(tcfs_core::config::TcfsConfig::default())
     }
@@ -1488,13 +1494,14 @@ async fn cmd_push_with_operator(
     let remote_prefix = prefix
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_else(|| config.storage.resolved_prefix().to_string());
+    let storage_endpoint_display = sanitize_http_endpoint_for_display(&config.storage.endpoint);
 
     println!(
         "Pushing {} → {}:{} (endpoint: {}{})",
         local.display(),
         config.storage.bucket,
         remote_prefix,
-        config.storage.endpoint,
+        storage_endpoint_display,
         if device_id.is_empty() {
             String::new()
         } else {
@@ -2300,9 +2307,10 @@ async fn run_storage_canary_with_operator(
 ) -> Result<StorageCanaryReport> {
     let key = storage_canary_key(prefix, nonce);
     let list_prefix = storage_canary_list_prefix(prefix);
+    let endpoint_display = sanitize_http_endpoint_for_display(&config.storage.endpoint);
     let payload = format!(
         "tcfs storage canary\nendpoint={}\nbucket={}\nprefix={}\nkey={}\nnonce={}\n",
-        config.storage.endpoint, config.storage.bucket, prefix, key, nonce
+        endpoint_display, config.storage.bucket, prefix, key, nonce
     )
     .into_bytes();
 
@@ -2364,7 +2372,7 @@ async fn run_storage_canary_with_operator(
     };
 
     Ok(StorageCanaryReport {
-        endpoint: config.storage.endpoint.clone(),
+        endpoint: endpoint_display,
         bucket: config.storage.bucket.clone(),
         prefix: prefix.to_string(),
         key,
@@ -3328,7 +3336,7 @@ async fn cmd_status(config: &tcfs_core::config::TcfsConfig) -> Result<()> {
     }
     println!(
         "  storage:       {} [{}]",
-        status.storage_endpoint,
+        sanitize_http_endpoint_for_display(&status.storage_endpoint),
         if status.storage_ok {
             "ok"
         } else {
@@ -3581,18 +3589,27 @@ async fn connect_daemon_with_token(
 // ── `tcfs config show` ────────────────────────────────────────────────────────
 
 fn cmd_config_show(config: &tcfs_core::config::TcfsConfig, config_path: &Path) -> Result<()> {
-    if config_path.exists() {
-        println!("# Configuration from: {}", config_path.display());
+    print!("{}", render_config_show(config, config_path)?);
+    Ok(())
+}
+
+fn render_config_show(
+    config: &tcfs_core::config::TcfsConfig,
+    config_path: &Path,
+) -> Result<String> {
+    let source = if config_path.exists() {
+        format!("# Configuration from: {}", config_path.display())
     } else {
-        println!(
+        format!(
             "# Configuration: defaults (no file at {})",
             config_path.display()
-        );
-    }
-    println!();
-    let rendered = toml::to_string_pretty(config).context("serializing config to TOML")?;
-    print!("{rendered}");
-    Ok(())
+        )
+    };
+    let rendered =
+        toml::to_string_pretty(&config.redacted()).context("serializing config to TOML")?;
+    Ok(format!(
+        "# Redacted diagnostic view; not suitable for reuse as configuration\n{source}\n\n{rendered}"
+    ))
 }
 
 async fn cmd_config_fileprovider(
@@ -3821,7 +3838,11 @@ async fn cmd_mount(
 
             match resp {
                 Ok(r) if r.get_ref().success => {
-                    println!("Mounted via daemon: {} → {}", remote, mountpoint.display());
+                    println!(
+                        "Mounted via daemon: {} → {}",
+                        mount_remote_endpoint_for_display(remote),
+                        mountpoint.display()
+                    );
                     return Ok(());
                 }
                 Ok(r) => {
@@ -3872,10 +3893,8 @@ async fn cmd_mount(
 
     let backend = if use_nfs { "NFS loopback" } else { "FUSE" };
     println!(
-        "Mounting {}:{} (prefix: {}) → {} [{}]",
-        endpoint,
-        bucket,
-        if prefix.is_empty() { "(root)" } else { &prefix },
+        "Mounting {} → {} [{}]",
+        sanitize_http_endpoint_for_display(&endpoint),
         mountpoint.display(),
         backend,
     );
@@ -4004,6 +4023,12 @@ async fn cmd_mount(
         .await
         .context("FUSE mount failed")
     }
+}
+
+fn mount_remote_endpoint_for_display(remote: &str) -> String {
+    tcfs_storage::parse_remote_spec(remote)
+        .map(|(endpoint, _, _)| sanitize_http_endpoint_for_display(&endpoint))
+        .unwrap_or_else(|_| sanitize_http_endpoint_for_display(remote))
 }
 
 // ── `tcfs unmount` ───────────────────────────────────────────────────────────
@@ -5758,6 +5783,23 @@ async fn cmd_auth_revoke(
 // ── `tcfs device invite` ─────────────────────────────────────────────────
 
 #[cfg(unix)]
+fn populate_invite_routing_metadata(
+    invite: &mut tcfs_auth::enrollment::EnrollmentInvite,
+    config: &tcfs_core::config::TcfsConfig,
+) -> Result<()> {
+    invite.storage_endpoint = Some(
+        tcfs_core::config::http_endpoint_origin(&config.storage.endpoint).ok_or_else(|| {
+            anyhow::anyhow!(
+                "storage endpoint must be an absolute HTTP(S) URL before creating a device invite"
+            )
+        })?,
+    );
+    invite.storage_bucket = Some(config.storage.bucket.clone());
+    invite.remote_prefix = Some(config.storage.resolved_prefix().to_string());
+    Ok(())
+}
+
+#[cfg(unix)]
 async fn cmd_device_invite(
     config: &tcfs_core::config::TcfsConfig,
     expiry_hours: u64,
@@ -5809,9 +5851,7 @@ async fn cmd_device_invite(
 
     // Include non-secret routing metadata. Secret bootstrap material is brokered
     // by tcfsd during DeviceEnroll and wrapped to the joining device public key.
-    invite.storage_endpoint = Some(config.storage.endpoint.clone());
-    invite.storage_bucket = Some(config.storage.bucket.clone());
-    invite.remote_prefix = Some(config.storage.resolved_prefix().to_string());
+    populate_invite_routing_metadata(&mut invite, config)?;
 
     invite.refresh_signature(&signing_key);
 
@@ -5827,7 +5867,8 @@ async fn cmd_device_invite(
     println!("Expires: {} hours from now", expiry_hours);
     println!(
         "Storage: {} (bucket: {})",
-        config.storage.endpoint, config.storage.bucket
+        sanitize_http_endpoint_for_display(&config.storage.endpoint),
+        config.storage.bucket
     );
     println!("Credentials: not embedded in invite; daemon wraps bootstrap during enrollment");
     println!(
@@ -7705,7 +7746,7 @@ async fn cmd_reconcile(
     println!(
         "Reconciling {} ↔ {}:{}/",
         local_root.display(),
-        config.storage.endpoint,
+        sanitize_http_endpoint_for_display(&config.storage.endpoint),
         remote_prefix
     );
 
@@ -8865,6 +8906,218 @@ mod tests {
             .is_err(),
             "a named root must never be combined with a client state path"
         );
+    }
+
+    #[test]
+    fn config_show_never_serializes_nats_token_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "# display source marker\n").unwrap();
+
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        let token = "TIN2860-left-sentinel.middle-sentinel.right-sentinel";
+        config.sync.nats_token = Some(token.into());
+        config.storage.endpoint =
+            "https://s3-user:S3-secret@storage.example.test:8333/S3-path-secret?signature=S3-query#S3-fragment"
+                .into();
+        config.sync.nats_url =
+            "nats://nats-user:NATS-secret@nats.example.test:4222/NATS-path-secret?token=NATS-query#NATS-fragment"
+                .into();
+        config.daemon.fileprovider_endpoint = Some(
+            "https://fp-user:FP-secret@fp.example.test/FP-path-secret?token=FP-query#FP-fragment"
+                .into(),
+        );
+        let output = render_config_show(&config, &config_path).unwrap();
+
+        for forbidden in [
+            token,
+            "TIN2860-left-sentinel",
+            "middle-sentinel",
+            "right-sentinel",
+            "s3-user",
+            "S3-secret",
+            "S3-path-secret",
+            "S3-query",
+            "S3-fragment",
+            "nats-user",
+            "NATS-secret",
+            "NATS-path-secret",
+            "NATS-query",
+            "NATS-fragment",
+            "fp-user",
+            "FP-secret",
+            "FP-path-secret",
+            "FP-query",
+            "FP-fragment",
+        ] {
+            assert!(
+                !output.contains(forbidden),
+                "CLI config output leaked token material: {output}"
+            );
+        }
+
+        let (_, rendered) = output
+            .split_once("\n\n")
+            .expect("config output must separate its source header from TOML");
+        let value: toml::Value =
+            toml::from_str(rendered).expect("CLI config output must remain valid TOML");
+        assert_eq!(value["sync"]["nats_token_configured"].as_bool(), Some(true));
+        assert!(value["sync"].get("nats_token").is_none());
+        assert_eq!(
+            value["storage"]["endpoint"].as_str(),
+            Some("https://storage.example.test:8333")
+        );
+        assert_eq!(
+            value["sync"]["nats_url"].as_str(),
+            Some("nats://nats.example.test:4222")
+        );
+        assert_eq!(
+            value["daemon"]["fileprovider_endpoint"].as_str(),
+            Some("https://fp.example.test")
+        );
+        assert!(
+            output.contains("# Redacted diagnostic view; not suitable for reuse as configuration")
+        );
+    }
+
+    #[test]
+    fn mount_display_is_origin_only() {
+        let remote = "seaweedfs+https://mount-user:MOUNT-secret@storage.example.test:8333/bucket/MOUNT-path?token=MOUNT-query#MOUNT-fragment";
+        let rendered = mount_remote_endpoint_for_display(remote);
+        assert_eq!(rendered, "https://storage.example.test:8333");
+        for forbidden in [
+            "mount-user",
+            "MOUNT-secret",
+            "bucket",
+            "MOUNT-path",
+            "MOUNT-query",
+            "MOUNT-fragment",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "mount display leaked {forbidden}: {rendered}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_invite_routing_metadata_is_origin_only() {
+        use tcfs_auth::enrollment::EnrollmentInvite;
+        use tcfs_auth::session::DevicePermissions;
+
+        let signing_key = [7_u8; tcfs_crypto::KEY_SIZE];
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        config.storage.endpoint =
+            "https://invite-user:INVITE-secret@storage.example.test:8333/INVITE-path?token=INVITE-query#INVITE-fragment"
+                .into();
+        config.storage.bucket = "invite-bucket".into();
+        config.storage.remote_prefix = Some("invite-prefix".into());
+
+        let mut invite = EnrollmentInvite::new(
+            "source-device",
+            &signing_key,
+            1,
+            DevicePermissions::default(),
+        );
+        populate_invite_routing_metadata(&mut invite, &config).unwrap();
+        invite.refresh_signature(&signing_key);
+
+        let encoded = invite.encode_compact().unwrap();
+        let decoded = EnrollmentInvite::decode_compact(&encoded).unwrap();
+        assert_eq!(
+            decoded.storage_endpoint.as_deref(),
+            Some("https://storage.example.test:8333")
+        );
+        assert_eq!(decoded.storage_bucket.as_deref(), Some("invite-bucket"));
+        assert_eq!(decoded.remote_prefix.as_deref(), Some("invite-prefix"));
+        for forbidden in [
+            "invite-user",
+            "INVITE-secret",
+            "INVITE-path",
+            "INVITE-query",
+            "INVITE-fragment",
+        ] {
+            assert!(
+                !decoded
+                    .storage_endpoint
+                    .as_deref()
+                    .unwrap()
+                    .contains(forbidden),
+                "decoded invite leaked {forbidden}: {decoded:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_invite_rejects_invalid_endpoint_without_echoing_input() {
+        use tcfs_auth::enrollment::EnrollmentInvite;
+        use tcfs_auth::session::DevicePermissions;
+
+        let signing_key = [7_u8; tcfs_crypto::KEY_SIZE];
+        for endpoint in [
+            "not-an-endpoint-with-INVALID-secret?token=INVALID-query",
+            "ftp://invite-user:FTP-secret@storage.example.test/FTP-path?token=FTP-query",
+        ] {
+            let mut config = tcfs_core::config::TcfsConfig::default();
+            config.storage.endpoint = endpoint.into();
+            let mut invite = EnrollmentInvite::new(
+                "source-device",
+                &signing_key,
+                1,
+                DevicePermissions::default(),
+            );
+
+            let rendered = populate_invite_routing_metadata(&mut invite, &config)
+                .unwrap_err()
+                .to_string();
+            assert!(invite.storage_endpoint.is_none());
+            assert!(invite.storage_bucket.is_none());
+            assert!(invite.remote_prefix.is_none());
+            for forbidden in [
+                "INVALID-secret",
+                "INVALID-query",
+                "invite-user",
+                "FTP-secret",
+                "FTP-path",
+                "FTP-query",
+            ] {
+                assert!(
+                    !rendered.contains(forbidden),
+                    "invite validation error leaked {forbidden}: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn load_config_parse_error_never_echoes_offending_source_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let malformed = r#"
+[sync]
+nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
+"#;
+        std::fs::write(&config_path, malformed).unwrap();
+
+        let error = load_config(&config_path)
+            .await
+            .expect_err("malformed token type must fail config loading");
+        let rendered = format!("{error:#}");
+
+        for forbidden in [
+            "TIN2860-malformed-left",
+            "malformed-middle",
+            "malformed-right",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "CLI parse error leaked config source material: {rendered}"
+            );
+        }
+        assert!(rendered.contains(&config_path.display().to_string()));
+        assert!(rendered.contains("check TOML syntax and field types"));
     }
 
     #[test]
@@ -10390,7 +10643,10 @@ enabled = false
     #[tokio::test]
     async fn storage_canary_writes_reads_deletes_and_verifies() {
         let dir = tempfile::tempdir().unwrap();
-        let config = test_config(dir.path());
+        let mut config = test_config(dir.path());
+        config.storage.endpoint =
+            "https://canary-user:CANARY-secret@storage.example.test:8333/CANARY-path?signature=CANARY-query#CANARY-fragment"
+                .into();
         let op = memory_op();
 
         let report = run_storage_canary_with_operator(
@@ -10406,6 +10662,20 @@ enabled = false
 
         assert_eq!(report.key, "data/.tcfs-canary/test-nonce.txt");
         assert_eq!(report.list_prefix, "data/");
+        assert_eq!(report.endpoint, "https://storage.example.test:8333");
+        for forbidden in [
+            "canary-user",
+            "CANARY-secret",
+            "CANARY-path",
+            "CANARY-query",
+            "CANARY-fragment",
+        ] {
+            assert!(
+                !report.endpoint.contains(forbidden),
+                "canary report leaked {forbidden}: {}",
+                report.endpoint
+            );
+        }
         assert!(report.listed);
         assert!(report.list_count >= 1);
         assert!(report.deleted);
