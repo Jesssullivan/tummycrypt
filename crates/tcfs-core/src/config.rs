@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use url::{Host, Url};
 
 /// Top-level daemon configuration (loaded from tcfs.toml)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -16,6 +17,435 @@ pub struct TcfsConfig {
     /// Warn if the config file is world-readable (default: true)
     #[serde(default = "default_true")]
     pub config_file_mode_check: bool,
+}
+
+/// Configuration view safe for operator and diagnostic display surfaces.
+///
+/// This deliberately does not implement `Deserialize` and does not replace
+/// [`TcfsConfig`]'s runtime/persistence serialization. The current config
+/// schema has one inline credential, `sync.nats_token`. Endpoint outputs are
+/// origin-only (scheme, normalized host/IP, and parsed non-default port) and
+/// strip userinfo, path, query, and fragment components. Credential/key paths
+/// and the KDF salt are configuration metadata rather than secret contents.
+/// Keep each display section allowlisted so future runtime fields do not enter
+/// a diagnostic serializer by default.
+#[derive(Debug, Serialize)]
+pub struct RedactedConfig<'a> {
+    daemon: RedactedDaemonConfig<'a>,
+    storage: RedactedStorageConfig<'a>,
+    secrets: RedactedSecretsConfig<'a>,
+    sync: RedactedSyncConfig<'a>,
+    fuse: RedactedFuseConfig<'a>,
+    crypto: RedactedCryptoConfig<'a>,
+    sops: RedactedSopsConfig<'a>,
+    auth: RedactedAuthConfig<'a>,
+    config_file_mode_check: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedDaemonConfig<'a> {
+    socket: &'a PathBuf,
+    fileprovider_socket: &'a Option<PathBuf>,
+    fileprovider_endpoint: Option<String>,
+    listen: &'a Option<String>,
+    metrics_addr: &'a Option<String>,
+    log_level: &'a str,
+    log_format: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedStorageConfig<'a> {
+    endpoint: String,
+    region: &'a str,
+    bucket: &'a str,
+    remote_prefix: &'a Option<String>,
+    credentials_file: &'a Option<PathBuf>,
+    enforce_tls: bool,
+    ca_cert_path: &'a Option<PathBuf>,
+    max_concurrent_ops: usize,
+    s3_connect_timeout_secs: u64,
+    s3_pool_idle_timeout_secs: u64,
+    s3_pool_max_idle_per_host: usize,
+    s3_http1_only: bool,
+    max_upload_bytes_per_sec: u64,
+    max_download_bytes_per_sec: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedSecretsConfig<'a> {
+    age_identity: &'a Option<PathBuf>,
+    kdbx_path: &'a Option<PathBuf>,
+    sops_dir: &'a Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedSyncConfig<'a> {
+    nats_url: String,
+    nats_tls: bool,
+    nats_token_configured: bool,
+    nats_ca_cert: &'a Option<PathBuf>,
+    state_db: &'a PathBuf,
+    workers: usize,
+    max_retries: u32,
+    device_identity: &'a Option<PathBuf>,
+    device_name: &'a Option<String>,
+    conflict_mode: &'a str,
+    sync_git_dirs: bool,
+    git_sync_mode: &'a str,
+    sync_hidden_dirs: bool,
+    exclude_patterns: &'a [String],
+    sync_symlinks: bool,
+    sync_empty_dirs: bool,
+    sync_root: &'a Option<PathBuf>,
+    auto_unsync_max_age_secs: u64,
+    auto_unsync_interval_secs: u64,
+    auto_unsync_dry_run: bool,
+    auto_unsync_disk_pressure_pct: f64,
+    auto_unsync_max_per_sweep: usize,
+    auto_download_threshold: u64,
+    trash_enabled: bool,
+    trash_retention_secs: u64,
+    reconcile_interval_secs: u64,
+    orphan_chunk_cleanup_grace_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedFuseConfig<'a> {
+    negative_cache_ttl_secs: u64,
+    cache_dir: &'a PathBuf,
+    cache_max_mb: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedCryptoConfig<'a> {
+    enabled: bool,
+    argon2_mem_cost_kib: u32,
+    argon2_time_cost: u32,
+    argon2_parallelism: u32,
+    master_key_file: &'a Option<PathBuf>,
+    device_identity: &'a Option<PathBuf>,
+    passphrase_file: &'a Option<PathBuf>,
+    kdf_salt: &'a Option<String>,
+    wrap_mode: &'a WrapMode,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedSopsConfig<'a> {
+    enabled: bool,
+    sops_dir: &'a PathBuf,
+    sync_prefix: &'a str,
+    machine_id: &'a Option<String>,
+    backup_dir: &'a PathBuf,
+    watch: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedAuthConfig<'a> {
+    enabled: bool,
+    require_session: bool,
+    session_expiry_hours: u64,
+    methods: &'a [String],
+    totp: RedactedAuthTotpConfig<'a>,
+    webauthn: RedactedAuthWebAuthnConfig<'a>,
+    enrollment: RedactedAuthEnrollmentConfig,
+    rate_limit: RedactedAuthRateLimitConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedAuthTotpConfig<'a> {
+    issuer: &'a str,
+    digits: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedAuthWebAuthnConfig<'a> {
+    relying_party_id: &'a str,
+    relying_party_name: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedAuthEnrollmentConfig {
+    qr_code: bool,
+    auto_discovery: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedAuthRateLimitConfig {
+    max_attempts: u32,
+    lockout_secs: u64,
+    backoff_multiplier: u32,
+}
+
+const REDACTED_INVALID_ENDPOINT: &str = "<invalid-or-non-base-url:redacted>";
+
+/// Preserve only a URL's scheme, normalized host/IP, and parsed non-default port.
+///
+/// Userinfo, path, query, and fragment components are intentionally omitted.
+/// Unparseable, hostless, opaque, relative, and unsupported-scheme values are
+/// represented by a constant because echoing any raw component would recreate
+/// the credential leak this display contract prevents.
+fn sanitize_endpoint_for_display(raw: &str, allowed_schemes: &[&str]) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+
+    let Ok(endpoint) = Url::parse(raw) else {
+        return REDACTED_INVALID_ENDPOINT.to_owned();
+    };
+    if endpoint.cannot_be_a_base() || !allowed_schemes.contains(&endpoint.scheme()) {
+        return REDACTED_INVALID_ENDPOINT.to_owned();
+    }
+
+    let host = match endpoint.host() {
+        Some(Host::Domain(host)) => host.to_owned(),
+        Some(Host::Ipv4(host)) => host.to_string(),
+        Some(Host::Ipv6(host)) => format!("[{host}]"),
+        None => return REDACTED_INVALID_ENDPOINT.to_owned(),
+    };
+    let port = endpoint
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!("{}://{host}{port}", endpoint.scheme())
+}
+
+impl TcfsConfig {
+    /// Borrow a serialization-only view that omits inline credentials.
+    pub fn redacted(&self) -> RedactedConfig<'_> {
+        // These patterns are intentionally exhaustive: adding a runtime config
+        // field must force an explicit decision about diagnostic display.
+        let TcfsConfig {
+            daemon,
+            storage,
+            secrets,
+            sync,
+            fuse,
+            crypto,
+            sops,
+            auth,
+            config_file_mode_check,
+        } = self;
+
+        let DaemonConfig {
+            socket,
+            fileprovider_socket,
+            fileprovider_endpoint,
+            listen,
+            metrics_addr,
+            log_level,
+            log_format,
+        } = daemon;
+        let StorageConfig {
+            endpoint,
+            region,
+            bucket,
+            remote_prefix,
+            credentials_file,
+            enforce_tls,
+            ca_cert_path,
+            max_concurrent_ops,
+            s3_connect_timeout_secs,
+            s3_pool_idle_timeout_secs,
+            s3_pool_max_idle_per_host,
+            s3_http1_only,
+            max_upload_bytes_per_sec,
+            max_download_bytes_per_sec,
+        } = storage;
+        let SecretsConfig {
+            age_identity,
+            kdbx_path,
+            sops_dir: secrets_sops_dir,
+        } = secrets;
+        let SyncConfig {
+            nats_url,
+            nats_tls,
+            nats_token,
+            nats_ca_cert,
+            state_db,
+            workers,
+            max_retries,
+            device_identity: sync_device_identity,
+            device_name,
+            conflict_mode,
+            sync_git_dirs,
+            git_sync_mode,
+            sync_hidden_dirs,
+            exclude_patterns,
+            sync_symlinks,
+            sync_empty_dirs,
+            sync_root,
+            auto_unsync_max_age_secs,
+            auto_unsync_interval_secs,
+            auto_unsync_dry_run,
+            auto_unsync_disk_pressure_pct,
+            auto_unsync_max_per_sweep,
+            auto_download_threshold,
+            trash_enabled,
+            trash_retention_secs,
+            reconcile_interval_secs,
+            orphan_chunk_cleanup_grace_secs,
+        } = sync;
+        let FuseConfig {
+            negative_cache_ttl_secs,
+            cache_dir,
+            cache_max_mb,
+        } = fuse;
+        let CryptoConfig {
+            enabled: crypto_enabled,
+            argon2_mem_cost_kib,
+            argon2_time_cost,
+            argon2_parallelism,
+            master_key_file,
+            device_identity: crypto_device_identity,
+            passphrase_file,
+            kdf_salt,
+            wrap_mode,
+        } = crypto;
+        let SopsConfig {
+            enabled: sops_enabled,
+            sops_dir,
+            sync_prefix,
+            machine_id,
+            backup_dir,
+            watch,
+        } = sops;
+        let AuthConfig {
+            enabled: auth_enabled,
+            require_session,
+            session_expiry_hours,
+            methods,
+            totp,
+            webauthn,
+            enrollment,
+            rate_limit,
+        } = auth;
+        let AuthTotpConfig { issuer, digits } = totp;
+        let AuthWebAuthnConfig {
+            relying_party_id,
+            relying_party_name,
+        } = webauthn;
+        let AuthEnrollmentConfig {
+            qr_code,
+            auto_discovery,
+        } = enrollment;
+        let AuthRateLimitConfig {
+            max_attempts,
+            lockout_secs,
+            backoff_multiplier,
+        } = rate_limit;
+
+        RedactedConfig {
+            daemon: RedactedDaemonConfig {
+                socket,
+                fileprovider_socket,
+                fileprovider_endpoint: fileprovider_endpoint
+                    .as_deref()
+                    .map(|endpoint| sanitize_endpoint_for_display(endpoint, &["http", "https"])),
+                listen,
+                metrics_addr,
+                log_level,
+                log_format,
+            },
+            storage: RedactedStorageConfig {
+                endpoint: sanitize_endpoint_for_display(endpoint, &["http", "https"]),
+                region,
+                bucket,
+                remote_prefix,
+                credentials_file,
+                enforce_tls: *enforce_tls,
+                ca_cert_path,
+                max_concurrent_ops: *max_concurrent_ops,
+                s3_connect_timeout_secs: *s3_connect_timeout_secs,
+                s3_pool_idle_timeout_secs: *s3_pool_idle_timeout_secs,
+                s3_pool_max_idle_per_host: *s3_pool_max_idle_per_host,
+                s3_http1_only: *s3_http1_only,
+                max_upload_bytes_per_sec: *max_upload_bytes_per_sec,
+                max_download_bytes_per_sec: *max_download_bytes_per_sec,
+            },
+            secrets: RedactedSecretsConfig {
+                age_identity,
+                kdbx_path,
+                sops_dir: secrets_sops_dir,
+            },
+            sync: RedactedSyncConfig {
+                nats_url: sanitize_endpoint_for_display(nats_url, &["nats", "tls"]),
+                nats_tls: *nats_tls,
+                nats_token_configured: nats_token.is_some(),
+                nats_ca_cert,
+                state_db,
+                workers: *workers,
+                max_retries: *max_retries,
+                device_identity: sync_device_identity,
+                device_name,
+                conflict_mode,
+                sync_git_dirs: *sync_git_dirs,
+                git_sync_mode,
+                sync_hidden_dirs: *sync_hidden_dirs,
+                exclude_patterns,
+                sync_symlinks: *sync_symlinks,
+                sync_empty_dirs: *sync_empty_dirs,
+                sync_root,
+                auto_unsync_max_age_secs: *auto_unsync_max_age_secs,
+                auto_unsync_interval_secs: *auto_unsync_interval_secs,
+                auto_unsync_dry_run: *auto_unsync_dry_run,
+                auto_unsync_disk_pressure_pct: *auto_unsync_disk_pressure_pct,
+                auto_unsync_max_per_sweep: *auto_unsync_max_per_sweep,
+                auto_download_threshold: *auto_download_threshold,
+                trash_enabled: *trash_enabled,
+                trash_retention_secs: *trash_retention_secs,
+                reconcile_interval_secs: *reconcile_interval_secs,
+                orphan_chunk_cleanup_grace_secs: *orphan_chunk_cleanup_grace_secs,
+            },
+            fuse: RedactedFuseConfig {
+                negative_cache_ttl_secs: *negative_cache_ttl_secs,
+                cache_dir,
+                cache_max_mb: *cache_max_mb,
+            },
+            crypto: RedactedCryptoConfig {
+                enabled: *crypto_enabled,
+                argon2_mem_cost_kib: *argon2_mem_cost_kib,
+                argon2_time_cost: *argon2_time_cost,
+                argon2_parallelism: *argon2_parallelism,
+                master_key_file,
+                device_identity: crypto_device_identity,
+                passphrase_file,
+                kdf_salt,
+                wrap_mode,
+            },
+            sops: RedactedSopsConfig {
+                enabled: *sops_enabled,
+                sops_dir,
+                sync_prefix,
+                machine_id,
+                backup_dir,
+                watch: *watch,
+            },
+            auth: RedactedAuthConfig {
+                enabled: *auth_enabled,
+                require_session: *require_session,
+                session_expiry_hours: *session_expiry_hours,
+                methods,
+                totp: RedactedAuthTotpConfig {
+                    issuer,
+                    digits: *digits,
+                },
+                webauthn: RedactedAuthWebAuthnConfig {
+                    relying_party_id,
+                    relying_party_name,
+                },
+                enrollment: RedactedAuthEnrollmentConfig {
+                    qr_code: *qr_code,
+                    auto_discovery: *auto_discovery,
+                },
+                rate_limit: RedactedAuthRateLimitConfig {
+                    max_attempts: *max_attempts,
+                    lockout_secs: *lockout_secs,
+                    backoff_multiplier: *backoff_multiplier,
+                },
+            },
+            config_file_mode_check: *config_file_mode_check,
+        }
+    }
 }
 
 /// Authentication and session configuration
@@ -731,6 +1161,151 @@ endpoint = "http://192.168.1.100:8333"
         assert_eq!(config.daemon.socket, parsed.daemon.socket);
         assert_eq!(config.storage.endpoint, parsed.storage.endpoint);
         assert_eq!(config.sync.nats_url, parsed.sync.nats_url);
+    }
+
+    #[test]
+    fn raw_config_roundtrip_retains_nats_token_but_redacted_view_omits_it() {
+        const TOKEN: &str = "raw-roundtrip-token-sentinel";
+
+        let mut config = TcfsConfig::default();
+        config.sync.nats_token = Some(TOKEN.into());
+
+        let raw = toml::to_string(&config).unwrap();
+        assert!(raw.contains("nats_token"));
+        assert!(raw.contains(TOKEN));
+
+        let parsed: TcfsConfig = toml::from_str(&raw).unwrap();
+        assert_eq!(parsed.sync.nats_token.as_deref(), Some(TOKEN));
+
+        let redacted = toml::to_string(&config.redacted()).unwrap();
+        assert!(!redacted.contains(TOKEN));
+        let redacted: toml::Value = toml::from_str(&redacted).unwrap();
+        assert!(redacted["sync"].get("nats_token").is_none());
+        assert_eq!(
+            redacted["sync"]["nats_token_configured"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn redacted_view_sanitizes_url_credentials_and_unparseable_values() {
+        let mut config = TcfsConfig::default();
+        config.storage.endpoint =
+            "https://s3-user:S3-secret@storage.example.test:8333/S3-path-secret?signature=S3-query#S3-fragment"
+                .into();
+        config.sync.nats_url =
+            "nats://nats-user:NATS-secret@nats.example.test:4222/NATS-path-secret?token=NATS-query#NATS-fragment"
+                .into();
+        config.daemon.fileprovider_endpoint = Some(
+            "https://fp-user:FP-secret@fp.example.test/FP-path-secret?token=FP-query#FP-fragment"
+                .into(),
+        );
+        config.sync.nats_token = Some("inline-token-sentinel".into());
+
+        let rendered = toml::to_string(&config.redacted()).unwrap();
+        for forbidden in [
+            "s3-user",
+            "S3-secret",
+            "S3-path-secret",
+            "S3-query",
+            "S3-fragment",
+            "nats-user",
+            "NATS-secret",
+            "NATS-path-secret",
+            "NATS-query",
+            "NATS-fragment",
+            "fp-user",
+            "FP-secret",
+            "FP-path-secret",
+            "FP-query",
+            "FP-fragment",
+            "inline-token-sentinel",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "leaked {forbidden}: {rendered}"
+            );
+        }
+
+        let value: toml::Value = toml::from_str(&rendered).unwrap();
+        assert_eq!(
+            value["storage"]["endpoint"].as_str(),
+            Some("https://storage.example.test:8333")
+        );
+        assert_eq!(
+            value["sync"]["nats_url"].as_str(),
+            Some("nats://nats.example.test:4222")
+        );
+        assert_eq!(
+            value["daemon"]["fileprovider_endpoint"].as_str(),
+            Some("https://fp.example.test")
+        );
+        assert_eq!(value["sync"]["nats_token_configured"].as_bool(), Some(true));
+        assert!(value["sync"].get("nats_token").is_none());
+
+        config.storage.endpoint = "host-with-secret=S3-unparseable-sentinel".into();
+        config.sync.nats_url = "host-with-secret=NATS-unparseable-sentinel".into();
+        let rendered = toml::to_string(&config.redacted()).unwrap();
+        assert!(!rendered.contains("S3-unparseable-sentinel"));
+        assert!(!rendered.contains("NATS-unparseable-sentinel"));
+        let value: toml::Value = toml::from_str(&rendered).unwrap();
+        assert_eq!(
+            value["storage"]["endpoint"].as_str(),
+            Some(REDACTED_INVALID_ENDPOINT)
+        );
+        assert_eq!(
+            value["sync"]["nats_url"].as_str(),
+            Some(REDACTED_INVALID_ENDPOINT)
+        );
+    }
+
+    #[test]
+    fn endpoint_display_contract_is_origin_only_and_scheme_bounded() {
+        let http = &["http", "https"];
+        let nats = &["nats", "tls"];
+
+        assert_eq!(
+            sanitize_endpoint_for_display(
+                "https://user%40name:pass%3Aword@example.test:8333/%50%41%54%48_SECRET?sig=QUERY_SECRET#FRAGMENT_SECRET",
+                http,
+            ),
+            "https://example.test:8333"
+        );
+        assert_eq!(
+            sanitize_endpoint_for_display(
+                "nats://user:pass@nats.example.test:4222/PATH_SECRET?token=QUERY_SECRET",
+                nats,
+            ),
+            "nats://nats.example.test:4222"
+        );
+        assert_eq!(
+            sanitize_endpoint_for_display("https://[2001:db8::1]:8333/private", http),
+            "https://[2001:db8::1]:8333"
+        );
+        assert_eq!(
+            sanitize_endpoint_for_display("https://safe.example.test:8443/", http),
+            "https://safe.example.test:8443"
+        );
+        assert_eq!(
+            sanitize_endpoint_for_display("/relative/PATH_SECRET?token=QUERY_SECRET", http),
+            REDACTED_INVALID_ENDPOINT
+        );
+        assert_eq!(
+            sanitize_endpoint_for_display("mailto:OPAQUE_SECRET@example.test", http),
+            REDACTED_INVALID_ENDPOINT
+        );
+        assert_eq!(
+            sanitize_endpoint_for_display("nats:///MISSING_HOST_SECRET", nats),
+            REDACTED_INVALID_ENDPOINT
+        );
+        assert_eq!(
+            sanitize_endpoint_for_display("://MALFORMED_SECRET", http),
+            REDACTED_INVALID_ENDPOINT
+        );
+        assert_eq!(
+            sanitize_endpoint_for_display("ftp://user:pass@example.test/DISALLOWED_SECRET", http,),
+            REDACTED_INVALID_ENDPOINT
+        );
     }
 
     #[test]

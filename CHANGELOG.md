@@ -13,6 +13,11 @@ intent rather than the current supported/proven surface.
 
 ### Security
 
+- CLI and MCP configuration display now replaces the inline NATS token with a
+  `nats_token_configured` boolean. Displayed endpoint URLs are origin-only and
+  strip userinfo, path, query, and fragment components. CLI, MCP, and daemon
+  parse failures no longer echo offending TOML source lines into operator
+  output or system logs.
 - Credential-bearing S3/SeaweedFS clients now require HTTPS by default across
   daemon, CLI, direct mount, and FileProvider operator construction. Plaintext
   compatibility requires an explicit development/test opt-in.

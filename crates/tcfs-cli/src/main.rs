@@ -626,7 +626,7 @@ enum TrashAction {
 
 #[derive(Subcommand, Debug)]
 enum ConfigAction {
-    /// Print the active configuration (merged defaults + config file)
+    /// Print a redacted diagnostic view (not reusable as configuration)
     Show,
     /// Render the macOS FileProvider bootstrap JSON from the active config
     Fileprovider {
@@ -960,7 +960,12 @@ async fn load_config(path: &Path) -> Result<tcfs_core::config::TcfsConfig> {
         let content = tokio::fs::read_to_string(path)
             .await
             .with_context(|| format!("reading config: {}", path.display()))?;
-        toml::from_str(&content).with_context(|| format!("parsing config: {}", path.display()))
+        toml::from_str(&content).map_err(|_| {
+            anyhow::anyhow!(
+                "parsing config {} failed; check TOML syntax and field types",
+                path.display()
+            )
+        })
     } else {
         Ok(tcfs_core::config::TcfsConfig::default())
     }
@@ -2830,18 +2835,27 @@ async fn connect_daemon_with_token(
 // ── `tcfs config show` ────────────────────────────────────────────────────────
 
 fn cmd_config_show(config: &tcfs_core::config::TcfsConfig, config_path: &Path) -> Result<()> {
-    if config_path.exists() {
-        println!("# Configuration from: {}", config_path.display());
+    print!("{}", render_config_show(config, config_path)?);
+    Ok(())
+}
+
+fn render_config_show(
+    config: &tcfs_core::config::TcfsConfig,
+    config_path: &Path,
+) -> Result<String> {
+    let source = if config_path.exists() {
+        format!("# Configuration from: {}", config_path.display())
     } else {
-        println!(
+        format!(
             "# Configuration: defaults (no file at {})",
             config_path.display()
-        );
-    }
-    println!();
-    let rendered = toml::to_string_pretty(config).context("serializing config to TOML")?;
-    print!("{rendered}");
-    Ok(())
+        )
+    };
+    let rendered =
+        toml::to_string_pretty(&config.redacted()).context("serializing config to TOML")?;
+    Ok(format!(
+        "# Redacted diagnostic view; not loadable as configuration\n{source}\n\n{rendered}"
+    ))
 }
 
 async fn cmd_config_fileprovider(
@@ -7172,6 +7186,105 @@ mod tests {
             times_recorded: 3,
             remote_manifest_key: None,
         }
+    }
+
+    #[test]
+    fn config_show_never_serializes_nats_token_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "# display source marker\n").unwrap();
+
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        let token = "TIN2860-left-sentinel.middle-sentinel.right-sentinel";
+        config.sync.nats_token = Some(token.into());
+        config.storage.endpoint =
+            "https://s3-user:S3-secret@storage.example.test:8333/S3-path-secret?signature=S3-query#S3-fragment"
+                .into();
+        config.sync.nats_url =
+            "nats://nats-user:NATS-secret@nats.example.test:4222/NATS-path-secret?token=NATS-query#NATS-fragment"
+                .into();
+        config.daemon.fileprovider_endpoint = Some(
+            "https://fp-user:FP-secret@fp.example.test/FP-path-secret?token=FP-query#FP-fragment"
+                .into(),
+        );
+        let output = render_config_show(&config, &config_path).unwrap();
+
+        for forbidden in [
+            token,
+            "TIN2860-left-sentinel",
+            "middle-sentinel",
+            "right-sentinel",
+            "s3-user",
+            "S3-secret",
+            "S3-path-secret",
+            "S3-query",
+            "S3-fragment",
+            "nats-user",
+            "NATS-secret",
+            "NATS-path-secret",
+            "NATS-query",
+            "NATS-fragment",
+            "fp-user",
+            "FP-secret",
+            "FP-path-secret",
+            "FP-query",
+            "FP-fragment",
+        ] {
+            assert!(
+                !output.contains(forbidden),
+                "CLI config output leaked token material: {output}"
+            );
+        }
+
+        let (_, rendered) = output
+            .split_once("\n\n")
+            .expect("config output must separate its source header from TOML");
+        let value: toml::Value =
+            toml::from_str(rendered).expect("CLI config output must remain valid TOML");
+        assert_eq!(value["sync"]["nats_token_configured"].as_bool(), Some(true));
+        assert!(value["sync"].get("nats_token").is_none());
+        assert_eq!(
+            value["storage"]["endpoint"].as_str(),
+            Some("https://storage.example.test:8333")
+        );
+        assert_eq!(
+            value["sync"]["nats_url"].as_str(),
+            Some("nats://nats.example.test:4222")
+        );
+        assert_eq!(
+            value["daemon"]["fileprovider_endpoint"].as_str(),
+            Some("https://fp.example.test")
+        );
+        assert!(output.contains("# Redacted diagnostic view; not loadable as configuration"));
+    }
+
+    #[tokio::test]
+    async fn load_config_parse_error_never_echoes_offending_source_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let malformed = r#"
+[sync]
+nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
+"#;
+        std::fs::write(&config_path, malformed).unwrap();
+
+        let error = load_config(&config_path)
+            .await
+            .expect_err("malformed token type must fail config loading");
+        let rendered = format!("{error:#}");
+
+        for forbidden in [
+            "TIN2860-malformed-left",
+            "malformed-middle",
+            "malformed-right",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "CLI parse error leaked config source material: {rendered}"
+            );
+        }
+        assert!(rendered.contains(&config_path.display().to_string()));
+        assert!(rendered.contains("check TOML syntax and field types"));
     }
 
     #[test]
