@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use url::{Host, Url};
 
@@ -109,6 +110,7 @@ struct RedactedSyncConfig<'a> {
     reconcile_interval_secs: u64,
     orphan_chunk_cleanup_grace_secs: u64,
     roots: BTreeMap<&'a str, RedactedRegisteredRootConfig<'a>>,
+    root_registry: BTreeMap<&'a str, RedactedRegisteredRootV1Config<'a>>,
     root_state_dir: &'a Option<PathBuf>,
 }
 
@@ -118,6 +120,30 @@ struct RedactedRegisteredRootConfig<'a> {
     remote_prefix: &'a str,
     state_path: &'a PathBuf,
     policy: &'a RegisteredRootPolicy,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedRegisteredRootV1Config<'a> {
+    spec: RedactedRootSpecV1Config<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binding: Option<RedactedRootBindingV1Config<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedRootSpecV1Config<'a> {
+    version: u32,
+    remote_prefix: &'a str,
+    profile: &'a RootProfileV1,
+    generation: NonZeroU64,
+}
+
+#[derive(Debug, Serialize)]
+struct RedactedRootBindingV1Config<'a> {
+    version: u32,
+    local_root: &'a PathBuf,
+    state_path: &'a PathBuf,
+    lifecycle_policy: &'a RootLifecyclePolicyV1,
+    resolution_policy: &'a RegisteredRootPolicy,
 }
 
 #[derive(Debug, Serialize)]
@@ -327,6 +353,7 @@ impl TcfsConfig {
             reconcile_interval_secs,
             orphan_chunk_cleanup_grace_secs,
             roots,
+            root_registry,
             root_state_dir,
         } = sync;
         let FuseConfig {
@@ -397,6 +424,46 @@ impl TcfsConfig {
                 )
             })
             .collect();
+        let redacted_root_registry = root_registry
+            .iter()
+            .map(|(root_id, root)| {
+                let RegisteredRootV1Config { spec, binding } = root;
+                let RootSpecV1Config {
+                    version,
+                    remote_prefix,
+                    profile,
+                    generation,
+                } = spec;
+                let binding = binding.as_ref().map(|binding| {
+                    let RootBindingV1Config {
+                        version,
+                        local_root,
+                        state_path,
+                        lifecycle_policy,
+                        resolution_policy,
+                    } = binding;
+                    RedactedRootBindingV1Config {
+                        version: *version,
+                        local_root,
+                        state_path,
+                        lifecycle_policy,
+                        resolution_policy,
+                    }
+                });
+                (
+                    root_id.as_str(),
+                    RedactedRegisteredRootV1Config {
+                        spec: RedactedRootSpecV1Config {
+                            version: *version,
+                            remote_prefix,
+                            profile,
+                            generation: *generation,
+                        },
+                        binding,
+                    },
+                )
+            })
+            .collect();
 
         RedactedConfig {
             daemon: RedactedDaemonConfig {
@@ -460,6 +527,7 @@ impl TcfsConfig {
                 reconcile_interval_secs: *reconcile_interval_secs,
                 orphan_chunk_cleanup_grace_secs: *orphan_chunk_cleanup_grace_secs,
                 roots: redacted_roots,
+                root_registry: redacted_root_registry,
                 root_state_dir,
             },
             fuse: RedactedFuseConfig {
@@ -807,6 +875,14 @@ pub struct SyncConfig {
     /// route and from every registered peer.
     #[serde(default)]
     pub roots: BTreeMap<String, RegisteredRootConfig>,
+    /// Versioned read-only root inventory.
+    ///
+    /// This registry is deliberately separate from `roots`, the unversioned
+    /// PR #551 conflict-only routing seam. Entries here do not inherit legacy
+    /// conflict resolution or any lifecycle mutation authority. TIN-2863
+    /// exposes only authorized list/status over these descriptors.
+    #[serde(default)]
+    pub root_registry: BTreeMap<String, RegisteredRootV1Config>,
     /// Trusted parent directory for registered-root state caches.
     ///
     /// When unset, tcfsd uses `<daemon socket parent>/reconcile`, matching the
@@ -857,6 +933,242 @@ pub enum RegisteredRootPolicy {
     InspectOnly,
     /// An authenticated operator may explicitly execute repo-group keep-both.
     Resolve,
+}
+
+impl RegisteredRootPolicy {
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            Self::InspectOnly => "inspect-only",
+            Self::Resolve => "resolve",
+        }
+    }
+}
+
+/// One strict, versioned root descriptor for read-only inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisteredRootV1Config {
+    pub spec: RootSpecV1Config,
+    #[serde(default)]
+    pub binding: Option<RootBindingV1Config>,
+}
+
+/// Fleet-stable portion of a versioned root identity.
+///
+/// The containing `sync.root_registry` map key is the authoritative `root_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootSpecV1Config {
+    pub version: u32,
+    pub remote_prefix: String,
+    pub profile: RootProfileV1,
+    pub generation: NonZeroU64,
+}
+
+/// Host-local binding for one versioned root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootBindingV1Config {
+    pub version: u32,
+    pub local_root: PathBuf,
+    pub state_path: PathBuf,
+    pub lifecycle_policy: RootLifecyclePolicyV1,
+    pub resolution_policy: RegisteredRootPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RootProfileV1 {
+    GitRawV1,
+    AgentStaticV1,
+}
+
+impl RootProfileV1 {
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            Self::GitRawV1 => "git-raw-v1",
+            Self::AgentStaticV1 => "agent-static-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RootLifecyclePolicyV1 {
+    InspectOnly,
+    Reconcile,
+}
+
+impl RootLifecyclePolicyV1 {
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            Self::InspectOnly => "inspect-only",
+            Self::Reconcile => "reconcile",
+        }
+    }
+}
+
+pub fn validate_registered_root_id(root_id: &str) -> Result<(), String> {
+    let valid = !root_id.is_empty()
+        && root_id.len() <= 64
+        && !root_id.eq_ignore_ascii_case("primary")
+        && root_id
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+        && root_id.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_' | '.')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid registered root id '{root_id}': use 1-64 lowercase ASCII letters, digits, '.', '_' or '-' (reserved: primary)"
+        ))
+    }
+}
+
+pub fn validate_registered_remote_prefix(prefix: &str) -> Result<(), String> {
+    let valid = !prefix.is_empty()
+        && !prefix.starts_with('/')
+        && !prefix.ends_with('/')
+        && !prefix.contains('\\')
+        && prefix
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid registered root remote_prefix '{prefix}': expected a non-empty relative object-key prefix without '.', '..', empty, or backslash segments"
+        ))
+    }
+}
+
+impl RegisteredRootV1Config {
+    /// Validate the versioned descriptor without probing host filesystem state.
+    pub fn validate_shape(&self, root_id: &str) -> Result<(), String> {
+        validate_registered_root_id(root_id)?;
+        if self.spec.version != RootSpecV1Config::VERSION {
+            return Err(format!(
+                "registered root '{root_id}' spec.version must be {}, got {}",
+                RootSpecV1Config::VERSION,
+                self.spec.version
+            ));
+        }
+        validate_registered_remote_prefix(&self.spec.remote_prefix)?;
+
+        if let Some(binding) = &self.binding {
+            if binding.version != RootBindingV1Config::VERSION {
+                return Err(format!(
+                    "registered root '{root_id}' binding.version must be {}, got {}",
+                    RootBindingV1Config::VERSION,
+                    binding.version
+                ));
+            }
+            for (field, path) in [
+                ("local_root", &binding.local_root),
+                ("state_path", &binding.state_path),
+            ] {
+                let path = expand_tilde(path);
+                if !path.is_absolute()
+                    || path
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+                {
+                    return Err(format!(
+                        "registered root '{root_id}' binding.{field} must be absolute without '..': {}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn update_root_fingerprint_field(hasher: &mut blake3::Hasher, tag: &str, value: &[u8]) {
+    hasher.update(&(tag.len() as u32).to_be_bytes());
+    hasher.update(tag.as_bytes());
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn finish_root_fingerprint(hasher: blake3::Hasher) -> String {
+    format!("b3v1:{}", hasher.finalize().to_hex())
+}
+
+impl RootSpecV1Config {
+    pub const VERSION: u32 = 1;
+
+    /// Stable identity over the exact validated fleet fields.
+    pub fn identity_fingerprint(&self, root_id: &str) -> String {
+        let mut hasher = blake3::Hasher::new_derive_key("tinyland.tcfs.root-spec.b3v1");
+        update_root_fingerprint_field(&mut hasher, "version", &self.version.to_be_bytes());
+        update_root_fingerprint_field(&mut hasher, "root_id", root_id.as_bytes());
+        update_root_fingerprint_field(&mut hasher, "remote_prefix", self.remote_prefix.as_bytes());
+        update_root_fingerprint_field(
+            &mut hasher,
+            "profile",
+            self.profile.canonical_name().as_bytes(),
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "generation",
+            &self.generation.get().to_be_bytes(),
+        );
+        finish_root_fingerprint(hasher)
+    }
+}
+
+impl RootBindingV1Config {
+    pub const VERSION: u32 = 1;
+
+    /// Host-specific identity over runtime-canonical binding paths and policy.
+    pub fn binding_fingerprint(
+        &self,
+        canonical_local_root: &Path,
+        canonical_state_path: &Path,
+    ) -> Result<String, String> {
+        let canonical_local_root = canonical_local_root.to_str().ok_or_else(|| {
+            format!(
+                "canonical local_root is not valid UTF-8: {}",
+                canonical_local_root.display()
+            )
+        })?;
+        let canonical_state_path = canonical_state_path.to_str().ok_or_else(|| {
+            format!(
+                "canonical state_path is not valid UTF-8: {}",
+                canonical_state_path.display()
+            )
+        })?;
+
+        let mut hasher = blake3::Hasher::new_derive_key("tinyland.tcfs.root-binding.b3v1");
+        update_root_fingerprint_field(&mut hasher, "version", &self.version.to_be_bytes());
+        update_root_fingerprint_field(
+            &mut hasher,
+            "canonical_local_root",
+            canonical_local_root.as_bytes(),
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "canonical_state_path",
+            canonical_state_path.as_bytes(),
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "lifecycle_policy",
+            self.lifecycle_policy.canonical_name().as_bytes(),
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "resolution_policy",
+            self.resolution_policy.canonical_name().as_bytes(),
+        );
+        Ok(finish_root_fingerprint(hasher))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1126,6 +1438,7 @@ impl Default for SyncConfig {
             reconcile_interval_secs: 300,         // 5 minutes
             orphan_chunk_cleanup_grace_secs: 24 * 3600,
             roots: BTreeMap::new(),
+            root_registry: BTreeMap::new(),
             root_state_dir: None,
         }
     }
@@ -1330,6 +1643,18 @@ pub fn validate_master_key_outside_sync_roots(
             ));
         }
     }
+    for (root_id, root) in &config.sync.root_registry {
+        let Some(binding) = root.binding.as_ref() else {
+            continue;
+        };
+        if path_is_within(master_key_path, &binding.local_root)? {
+            return Err(format!(
+                "master key path {} is inside versioned registered root '{root_id}' local_root {}",
+                expand_tilde(master_key_path).display(),
+                expand_tilde(&binding.local_root).display()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1504,6 +1829,174 @@ state_path = "/run/tcfsd/reconcile/docs.json"
             config.sync.roots["docs"].policy,
             RegisteredRootPolicy::InspectOnly
         );
+        assert!(
+            config.sync.root_registry.is_empty(),
+            "legacy roots must not be reinterpreted as versioned inventory"
+        );
+    }
+
+    #[test]
+    fn versioned_root_registry_parses_strict_spec_and_optional_binding() {
+        let config: TcfsConfig = toml::from_str(
+            r#"
+[sync.root_registry.work.spec]
+version = 1
+remote_prefix = "roots/work"
+profile = "git-raw-v1"
+generation = 7
+
+[sync.root_registry.work.binding]
+version = 1
+local_root = "/srv/work"
+state_path = "/var/lib/tcfs/reconcile/work.json"
+lifecycle_policy = "inspect-only"
+resolution_policy = "inspect-only"
+
+[sync.root_registry.unbound.spec]
+version = 1
+remote_prefix = "roots/unbound"
+profile = "agent-static-v1"
+generation = 1
+"#,
+        )
+        .unwrap();
+
+        let work = &config.sync.root_registry["work"];
+        work.validate_shape("work").unwrap();
+        assert_eq!(work.spec.profile, RootProfileV1::GitRawV1);
+        assert_eq!(work.spec.generation.get(), 7);
+        assert_eq!(
+            work.binding.as_ref().unwrap().lifecycle_policy,
+            RootLifecyclePolicyV1::InspectOnly
+        );
+        assert!(config.sync.root_registry["unbound"].binding.is_none());
+        assert!(
+            config.sync.roots.is_empty(),
+            "versioned inventory must not gain legacy conflict authority"
+        );
+    }
+
+    #[test]
+    fn versioned_root_registry_rejects_invalid_generation_profile_version_and_fields() {
+        for invalid in [
+            r#"
+[sync.root_registry.work.spec]
+version = 1
+remote_prefix = "roots/work"
+profile = "git-raw-v1"
+generation = 0
+"#,
+            r#"
+[sync.root_registry.work.spec]
+version = 1
+remote_prefix = "roots/work"
+profile = "unknown-v1"
+generation = 1
+"#,
+            r#"
+[sync.root_registry.work.spec]
+version = 1
+remote_prefix = "roots/work"
+profile = "git-raw-v1"
+generation = 1
+unexpected = "rejected"
+"#,
+        ] {
+            assert!(
+                toml::from_str::<TcfsConfig>(invalid).is_err(),
+                "invalid V1 descriptor unexpectedly parsed: {invalid}"
+            );
+        }
+
+        let wrong_version: TcfsConfig = toml::from_str(
+            r#"
+[sync.root_registry.work.spec]
+version = 2
+remote_prefix = "roots/work"
+profile = "git-raw-v1"
+generation = 1
+"#,
+        )
+        .unwrap();
+        assert!(wrong_version.sync.root_registry["work"]
+            .validate_shape("work")
+            .unwrap_err()
+            .contains("spec.version must be 1"));
+
+        let wrong_binding_version: TcfsConfig = toml::from_str(
+            r#"
+[sync.root_registry.work.spec]
+version = 1
+remote_prefix = "roots/work"
+profile = "git-raw-v1"
+generation = 1
+
+[sync.root_registry.work.binding]
+version = 2
+local_root = "/srv/work"
+state_path = "/var/lib/tcfs/reconcile/work.json"
+lifecycle_policy = "inspect-only"
+resolution_policy = "inspect-only"
+"#,
+        )
+        .unwrap();
+        assert!(wrong_binding_version.sync.root_registry["work"]
+            .validate_shape("work")
+            .unwrap_err()
+            .contains("binding.version must be 1"));
+    }
+
+    #[test]
+    fn versioned_root_fingerprints_separate_fleet_spec_from_host_binding() {
+        let spec = RootSpecV1Config {
+            version: 1,
+            remote_prefix: "roots/work".into(),
+            profile: RootProfileV1::GitRawV1,
+            generation: NonZeroU64::new(3).unwrap(),
+        };
+        let identity = spec.identity_fingerprint("work");
+        assert!(identity.starts_with("b3v1:"));
+        assert_eq!(identity.len(), "b3v1:".len() + 64);
+        assert_eq!(identity, spec.identity_fingerprint("work"));
+
+        let binding = RootBindingV1Config {
+            version: 1,
+            local_root: PathBuf::from("/unused/configured/path"),
+            state_path: PathBuf::from("/unused/configured/state.json"),
+            lifecycle_policy: RootLifecyclePolicyV1::InspectOnly,
+            resolution_policy: RegisteredRootPolicy::InspectOnly,
+        };
+        let neo = binding
+            .binding_fingerprint(
+                Path::new("/Users/jess/git/work"),
+                Path::new("/Users/jess/.local/state/tcfsd/reconcile/work.json"),
+            )
+            .unwrap();
+        let sting = binding
+            .binding_fingerprint(
+                Path::new("/srv/fast-local/jess/git/work"),
+                Path::new("/srv/fast-local/jess/state/tcfsd/reconcile/work.json"),
+            )
+            .unwrap();
+        let local_path_only = binding
+            .binding_fingerprint(
+                Path::new("/srv/fast-local/jess/git/work"),
+                Path::new("/Users/jess/.local/state/tcfsd/reconcile/work.json"),
+            )
+            .unwrap();
+        let state_path_only = binding
+            .binding_fingerprint(
+                Path::new("/Users/jess/git/work"),
+                Path::new("/srv/fast-local/jess/state/tcfsd/reconcile/work.json"),
+            )
+            .unwrap();
+
+        assert_ne!(neo, sting);
+        assert_ne!(neo, local_path_only);
+        assert_ne!(neo, state_path_only);
+        assert_ne!(local_path_only, state_path_only);
+        assert_eq!(identity, spec.identity_fingerprint("work"));
+        assert_ne!(identity, spec.identity_fingerprint("other-work"));
     }
 
     #[test]
@@ -1554,6 +2047,24 @@ state_path = "/run/tcfsd/reconcile/docs.json"
                 policy: RegisteredRootPolicy::Resolve,
             },
         );
+        config.sync.root_registry.insert(
+            "agent-root".into(),
+            RegisteredRootV1Config {
+                spec: RootSpecV1Config {
+                    version: 1,
+                    remote_prefix: "roots/agent".into(),
+                    profile: RootProfileV1::AgentStaticV1,
+                    generation: NonZeroU64::new(2).unwrap(),
+                },
+                binding: Some(RootBindingV1Config {
+                    version: 1,
+                    local_root: PathBuf::from("/srv/agent"),
+                    state_path: PathBuf::from("/var/lib/tcfs/reconcile/agent-root.json"),
+                    lifecycle_policy: RootLifecyclePolicyV1::InspectOnly,
+                    resolution_policy: RegisteredRootPolicy::InspectOnly,
+                }),
+            },
+        );
 
         let toml_rendered = toml::to_string(&config.redacted()).unwrap();
         let toml_value: toml::Value = toml::from_str(&toml_rendered).unwrap();
@@ -1568,6 +2079,20 @@ state_path = "/run/tcfsd/reconcile/docs.json"
         assert_eq!(
             toml_value["sync"]["root_state_dir"].as_str(),
             Some("/var/lib/tcfs/reconcile")
+        );
+        let versioned = &toml_value["sync"]["root_registry"]["agent-root"];
+        assert_eq!(
+            versioned["spec"]["remote_prefix"].as_str(),
+            Some("roots/agent")
+        );
+        assert_eq!(
+            versioned["spec"]["profile"].as_str(),
+            Some("agent-static-v1")
+        );
+        assert_eq!(versioned["spec"]["generation"].as_integer(), Some(2));
+        assert_eq!(
+            versioned["binding"]["lifecycle_policy"].as_str(),
+            Some("inspect-only")
         );
 
         let json_value = serde_json::to_value(config.redacted()).unwrap();
@@ -1586,6 +2111,10 @@ state_path = "/run/tcfsd/reconcile/docs.json"
         assert_eq!(
             json_value["sync"]["roots"]["work-root"]["policy"].as_str(),
             Some("resolve")
+        );
+        assert_eq!(
+            json_value["sync"]["root_registry"]["agent-root"]["binding"]["state_path"].as_str(),
+            Some("/var/lib/tcfs/reconcile/agent-root.json")
         );
         assert_eq!(
             json_value["sync"]["root_state_dir"].as_str(),
@@ -1919,6 +2448,32 @@ require_session = false
         let error = validate_master_key_outside_sync_roots(&config, &named_key)
             .expect_err("custom key inside named root must be rejected");
         assert!(error.contains("registered root 'named'"), "{error}");
+
+        config.sync.roots.clear();
+        config.sync.root_registry.insert(
+            "versioned".into(),
+            RegisteredRootV1Config {
+                spec: RootSpecV1Config {
+                    version: 1,
+                    remote_prefix: "roots/versioned".into(),
+                    profile: RootProfileV1::AgentStaticV1,
+                    generation: NonZeroU64::new(1).unwrap(),
+                },
+                binding: Some(RootBindingV1Config {
+                    version: 1,
+                    local_root: named.clone(),
+                    state_path: temp.path().join("reconcile/versioned.json"),
+                    lifecycle_policy: RootLifecyclePolicyV1::InspectOnly,
+                    resolution_policy: RegisteredRootPolicy::InspectOnly,
+                }),
+            },
+        );
+        let error = validate_master_key_outside_sync_roots(&config, &named_key)
+            .expect_err("custom key inside a bound V1 root must be rejected");
+        assert!(
+            error.contains("versioned registered root 'versioned'"),
+            "{error}"
+        );
     }
 
     #[test]

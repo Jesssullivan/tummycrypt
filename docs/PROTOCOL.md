@@ -26,7 +26,8 @@ See the [Protocol PDF](https://github.com/Jesssullivan/tummycrypt/actions/workfl
 - Hydration flow
 - The distinction between physical stubs, mounted clean-name entries, and platform placeholders
 - State tracking schema
-- gRPC wire protocol, including root-scoped `ListConflicts`, the dedicated
+- gRPC wire protocol, including authorized V1 `ListRegisteredRoots` /
+  `GetRegisteredRootStatus`, root-scoped `ListConflicts`, the dedicated
   repo-group `ResolveRegisteredRoot`, and legacy primary `ResolveConflict`
 - NATS `StateEvent` types: `FileSynced`, `FileDeleted`, `FileRenamed`, `DeviceOnline`, `DeviceOffline`, `ConflictResolved`
 - NATS subject hierarchy: `STATE.{device_id}.{event_type}`

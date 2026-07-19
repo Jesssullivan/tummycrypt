@@ -1,12 +1,14 @@
 # ADR: Daemon-trusted stable root routing
 
 - Date: 2026-07-14
-- Status: Implemented in source; the live Git keep-both mechanism ran before
-  the TIN-2856 incident freeze, while source hardening and residual conflicts
-  remain open
+- Status: Landed in PR #551 on 2026-07-18; the live Git keep-both mechanism
+  ran before the TIN-2856 incident freeze, while residual conflicts and all
+  further live work remain open
 - Scope: Strategy A conflict inspection and repo-group keep-both only
 - Tracks: TIN-2853 (child of TIN-2658); related to TIN-1556 and TIN-2657;
   intentionally does not complete the broad root ownership/adoption program
+- Successor:
+  [TIN-2863/B0a versioned registry and immutable status](versioned-root-registry-status-b0a-2026-07-19.md)
 
 ## Context
 
@@ -279,6 +281,30 @@ Publishing the primary event shape could cause another host to apply the path
 under its primary root. Root-scoped NATS subjects/events belong to the broader
 root lifecycle work.
 
+## B0a successor boundary
+
+TIN-2863 does not widen the registry in this ADR. It introduces a separate
+strict `[sync.root_registry.<root_id>]` V1 inventory alongside the unversioned
+`[sync.roots.<root_id>]` conflict route documented here.
+
+The B0a surface:
+
+- lists and inspects only explicit V1 descriptors;
+- separates the fleet-stable spec fingerprint from the canonical host-binding
+  fingerprint;
+- supports only `git-raw-v1` and `agent-static-v1`;
+- reads persisted status without creating a lock, repairing state, or falling
+  back to a backup;
+- reports reconcile support as `NONE`; and
+- adds no conflict resolution, reconcile, mutation, MCP, or live fleet
+  authority.
+
+Legacy roots are never reinterpreted as V1. A duplicate ID across the two
+registries is invalid configuration rather than an implicit migration. This
+document remains the authority for the PR #551 conflict-only route; the
+[B0a ADR](versioned-root-registry-status-b0a-2026-07-19.md) owns the versioned
+read contract.
+
 ## Compatibility and migration
 
 - Legacy `ResolveConflict` has no root selector and remains the primary-cache
@@ -322,9 +348,10 @@ root lifecycle work.
   restorable generation.
 - A configured `.db` spelling normalizes to its `.json` sibling for consistency
   with the primary state-cache convention.
-- Enrollment is configuration-only in this slice. There is no adopt, remove,
-  cross-machine path alias, root status, watcher, hydration, or worktree
-  reconstruction lifecycle here.
+- Enrollment is configuration-only in this PR #551 slice. It has no adopt,
+  remove, cross-machine path alias, watcher, hydration, or worktree
+  reconstruction lifecycle. B0a adds status only through its separate V1
+  registry; it does not widen these legacy entries.
 - This slice does not add `tcfs reconcile --root` or named-root ordinary-file
   resolution. Existing scheduled units continue to pass their trusted
   path/prefix/state tuple directly; the shared lock only serializes that

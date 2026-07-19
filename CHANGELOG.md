@@ -21,9 +21,20 @@ intent rather than the current supported/proven surface.
   head remains source-only, and that earlier run is not evidence for it. The
   entire named-root precursor, including read-only `conflicts --root`, is
   Linux/macOS-only and fails closed on every other platform.
+- A separate strict V1 root registry now exposes authenticated, read-only
+  `tcfs roots list` and `tcfs roots status` inventory. Fleet-stable specs and
+  host-local bindings have independent BLAKE3 fingerprints; availability and
+  persisted state counts are source-only B0a status, with reconcile support
+  fixed to `none`.
 
 ### Security
 
+- V1 inventory never reinterprets the legacy conflict-only root registry,
+  creates a state-lock inode, repairs or recovers a cache, exposes an MCP tool,
+  or grants reconcile/mutation authority. It filters unauthorized prefixes
+  before host-path probes, makes unknown and unauthorized IDs
+  indistinguishable, and validates every cache route before publishing
+  deterministic counts.
 - Registered-root authorization now hides known-but-unauthorized IDs behind
   the same not-found response as unknown IDs, before path-bearing validation.
 - Registered-root RPCs now require real session enforcement and fail closed

@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+blake3 = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }

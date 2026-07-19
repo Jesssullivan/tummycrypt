@@ -1,19 +1,28 @@
 # ADR: Roots are named identities (interim registry = the reconcile-state dir)
 
 - **Date:** 2026-07-14
-- **Status:** Superseded by TIN-2853 / PR #551
+- **Status:** Superseded; retained as the rejected CLI-local design
 - **Refs:** TIN-2658 (per-root reconcile conflicts unresolvable), TIN-1556 (root
   scale-out + `root_id`), TIN-2853 (daemon-trusted stable-root routing),
-  PR #551, per-root state isolation (`docs/ops`, git-divergent keep-both design)
+  PR #551, TIN-2863 (versioned read-only registry), per-root state isolation
+  (`docs/ops`, git-divergent keep-both design)
 
 ## Supersession
 
-This ADR records the rejected CLI-local interim design. TIN-2853 / PR #551
-replaces it with daemon-selected registered-root descriptors: mutating resolve
-accepts a bounded root identity and never a client-supplied state path or remote
-prefix. The operator ratified the fail-closed retirement of unrooted
-`keep_local`, `keep_remote`, and `keep_both` mutation paths, plus removal of the
-unrooted MCP `resolve_conflict` tool, on 2026-07-16.
+This ADR records the rejected CLI-local interim design. The accepted successor
+chain is:
+
+1. [TIN-2853 / PR #551](stable-root-routing-2026-07-14.md) replaces it with a
+   daemon-selected, conflict-only registered-root route. Mutating resolve
+   accepts a bounded root identity and never a client-supplied state path or
+   remote prefix.
+2. [TIN-2863/B0a](versioned-root-registry-status-b0a-2026-07-19.md) adds a
+   separate strict V1 registry for authorized immutable list/status. It does
+   not reinterpret the PR #551 entries or add mutation, reconcile, or MCP.
+
+The operator ratified the fail-closed retirement of unrooted `keep_local`,
+`keep_remote`, and `keep_both` mutation paths, plus removal of the unrooted MCP
+`resolve_conflict` tool, on 2026-07-16.
 
 `tcfs conflicts --state` remains a legacy read-only diagnostic surface. It does
 not authorize mutation. The historical decision below is retained only to

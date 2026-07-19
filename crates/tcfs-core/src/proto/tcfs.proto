@@ -18,6 +18,11 @@ service TcfsDaemon {
   rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
   rpc Watch(WatchRequest) returns (stream WatchEvent);
   rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
+  // Authorized, read-only inventory of explicit V1 root descriptors. These
+  // RPCs never enumerate the legacy PR #551 conflict-only registry and never
+  // fall back to client-selected paths or state.
+  rpc ListRegisteredRoots(ListRegisteredRootsRequest) returns (ListRegisteredRootsResponse);
+  rpc GetRegisteredRootStatus(GetRegisteredRootStatusRequest) returns (GetRegisteredRootStatusResponse);
   // Read conflicts from the daemon-selected cache for a stable root identity.
   rpc ListConflicts(ListConflictsRequest) returns (ListConflictsResponse);
   // Resolve the narrow registered-root repo-group seam. This is a distinct RPC
@@ -197,6 +202,97 @@ message CredentialStatusResponse {
   string source = 2;
   int64 loaded_at = 3;
   bool needs_reload = 4;
+}
+
+enum RootProfileV1 {
+  ROOT_PROFILE_V1_UNSPECIFIED = 0;
+  ROOT_PROFILE_V1_GIT_RAW_V1 = 1;
+  ROOT_PROFILE_V1_AGENT_STATIC_V1 = 2;
+}
+
+enum RootLifecyclePolicyV1 {
+  ROOT_LIFECYCLE_POLICY_V1_UNSPECIFIED = 0;
+  ROOT_LIFECYCLE_POLICY_V1_INSPECT_ONLY = 1;
+  ROOT_LIFECYCLE_POLICY_V1_RECONCILE = 2;
+}
+
+enum RootResolutionPolicy {
+  ROOT_RESOLUTION_POLICY_UNSPECIFIED = 0;
+  ROOT_RESOLUTION_POLICY_INSPECT_ONLY = 1;
+  ROOT_RESOLUTION_POLICY_RESOLVE = 2;
+}
+
+enum RootAvailability {
+  ROOT_AVAILABILITY_UNSPECIFIED = 0;
+  ROOT_AVAILABILITY_UNBOUND = 1;
+  ROOT_AVAILABILITY_UNSUPPORTED_PLATFORM = 2;
+  ROOT_AVAILABILITY_LOCAL_ROOT_MISSING = 3;
+  ROOT_AVAILABILITY_STATE_MISSING = 4;
+  ROOT_AVAILABILITY_INVALID_BINDING = 5;
+  ROOT_AVAILABILITY_BUSY = 6;
+  ROOT_AVAILABILITY_READY = 7;
+}
+
+enum ReconcileSupport {
+  RECONCILE_SUPPORT_UNSPECIFIED = 0;
+  // B0a emits NONE for every row. Later stages must earn plan/execute support.
+  RECONCILE_SUPPORT_NONE = 1;
+  RECONCILE_SUPPORT_PLAN_ONLY = 2;
+  RECONCILE_SUPPORT_PLAN_AND_EXECUTE = 3;
+}
+
+message RootSpecV1 {
+  uint32 version = 1;
+  string root_id = 2;
+  string remote_prefix = 3;
+  RootProfileV1 profile = 4;
+  uint64 generation = 5;
+  string identity_fingerprint = 6;
+}
+
+message RootBindingV1 {
+  uint32 version = 1;
+  string canonical_local_root = 2;
+  string canonical_state_path = 3;
+  RootLifecyclePolicyV1 lifecycle_policy = 4;
+  RootResolutionPolicy resolution_policy = 5;
+  string binding_fingerprint = 6;
+}
+
+message RegisteredRootStateCounts {
+  // These are exclusive persisted snapshot states, not live task telemetry.
+  uint64 total = 1;
+  uint64 not_synced = 2;
+  uint64 synced = 3;
+  uint64 active = 4;
+  uint64 locked = 5;
+  uint64 conflict = 6;
+}
+
+message RegisteredRootStatus {
+  RootSpecV1 spec = 1;
+  // Absent when this host has no binding, the current platform is unsupported,
+  // or the configured binding cannot be normalized safely enough to fingerprint.
+  RootBindingV1 binding = 2;
+  RootAvailability availability = 3;
+  ReconcileSupport reconcile_support = 4;
+  // Present only for READY immutable primary-cache snapshots.
+  RegisteredRootStateCounts counts = 5;
+}
+
+message ListRegisteredRootsRequest {}
+
+message ListRegisteredRootsResponse {
+  // ASCII root_id order, after component-bounded authorization filtering.
+  repeated RegisteredRootStatus roots = 1;
+}
+
+message GetRegisteredRootStatusRequest {
+  string root_id = 1;
+}
+
+message GetRegisteredRootStatusResponse {
+  RegisteredRootStatus root = 1;
 }
 
 message ListConflictsRequest {

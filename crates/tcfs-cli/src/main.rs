@@ -98,6 +98,12 @@ enum Commands {
     /// Show daemon and storage status
     Status,
 
+    /// Inspect daemon-enrolled stable roots (read-only)
+    Roots {
+        #[command(subcommand)]
+        action: RootsAction,
+    },
+
     /// Configuration management
     Config {
         #[command(subcommand)]
@@ -410,6 +416,30 @@ enum Commands {
         #[arg(long)]
         writers_quiesced: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum RootsAction {
+    /// List every stable root visible to the authenticated session
+    List {
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one stable root's daemon-selected status
+    Status {
+        /// Stable root identity
+        #[arg(value_parser = parse_registered_root_id)]
+        root_id: String,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn parse_registered_root_id(value: &str) -> std::result::Result<String, String> {
+    tcfs_core::config::validate_registered_root_id(value)?;
+    Ok(value.to_string())
 }
 
 #[derive(Subcommand, Debug)]
@@ -744,6 +774,17 @@ async fn main() -> Result<()> {
         #[cfg(not(unix))]
         Commands::Status => {
             anyhow::bail!("status command requires Unix daemon socket (not available on Windows)")
+        }
+        #[cfg(unix)]
+        Commands::Roots { action } => match action {
+            RootsAction::List { json } => cmd_roots_list(&config, json).await,
+            RootsAction::Status { root_id, json } => {
+                cmd_roots_status(&config, &root_id, json).await
+            }
+        },
+        #[cfg(not(unix))]
+        Commands::Roots { action: _ } => {
+            anyhow::bail!("roots commands require the daemon (not available on this platform)")
         }
         Commands::Config {
             action: ConfigAction::Show,
@@ -1083,11 +1124,14 @@ fn resolve_state_path(
     db.with_extension("json")
 }
 
-/// Serialize explicit state-cache mutations with daemon-side registered-root
-/// operations. Default-primary commands retain their existing daemon/process
-/// coordination; only an operator-selected state path can alias a registered
-/// root cache.
-fn lock_explicit_state_for_mutation(
+/// Serialize every repair-capable open of an explicit state cache with
+/// daemon-side registered-root operations.
+///
+/// `StateCache::open` may recover a missing or corrupt primary from backup and
+/// flush that recovery on drop, even for a nominally read-only command.
+/// Default-primary commands retain their existing daemon/process coordination;
+/// only an operator-selected state path can alias a registered-root cache.
+fn lock_explicit_state_cache(
     state_path: &Path,
     state_override: Option<&Path>,
 ) -> Result<Option<tcfs_sync::state::StateFileLock>> {
@@ -1297,6 +1341,7 @@ fn build_sync_status_report(
     state_override: Option<&Path>,
 ) -> Result<SyncStatusReport> {
     let state_path = resolve_state_path(config, state_override);
+    let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
     let state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
 
@@ -1650,7 +1695,7 @@ async fn cmd_push(
     // the command preflight.
     validate_push_selection(config, local)?;
     let state_path = resolve_state_path(config, state_override);
-    let _state_lock = lock_explicit_state_for_mutation(&state_path, state_override)?;
+    let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
     let op = build_operator(config).await?;
     let device_id = load_device_id(config);
     cmd_push_with_operator(config, &op, local, prefix, &state_path, &device_id).await
@@ -1881,7 +1926,7 @@ async fn cmd_pull(
     // or storage construction. The operator-backed seam repeats this check.
     validate_pull_preflight(config, manifest_path, local)?;
     let state_path = resolve_state_path(config, state_override);
-    let _state_lock = lock_explicit_state_for_mutation(&state_path, state_override)?;
+    let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
     let op = build_operator(config).await?;
     let device_id = load_device_id(config);
     cmd_pull_with_operator(
@@ -3250,7 +3295,7 @@ async fn cmd_rm(
     state_override: Option<&Path>,
 ) -> Result<()> {
     let state_path = resolve_state_path(config, state_override);
-    let _state_lock = lock_explicit_state_for_mutation(&state_path, state_override)?;
+    let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
     let op = build_operator(config).await?;
     let mut state = tcfs_sync::state::StateCache::open(&state_path)
         .with_context(|| format!("opening state cache: {}", state_path.display()))?;
@@ -3284,6 +3329,441 @@ async fn cmd_rm(
     println!("  Removed remote index + manifest");
     println!("Done.");
 
+    Ok(())
+}
+
+// ── `tcfs roots` ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RegisteredRootSpecView {
+    version: u32,
+    root_id: String,
+    remote_prefix: String,
+    profile: String,
+    generation: u64,
+    identity_fingerprint: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RegisteredRootBindingView {
+    version: u32,
+    canonical_local_root: String,
+    canonical_state_path: String,
+    lifecycle_policy: String,
+    resolution_policy: String,
+    binding_fingerprint: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RegisteredRootStateCountsView {
+    total: u64,
+    not_synced: u64,
+    synced: u64,
+    active: u64,
+    locked: u64,
+    conflict: u64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RegisteredRootStatusView {
+    spec: RegisteredRootSpecView,
+    // Keep absent host state explicit in JSON; do not skip either nullable
+    // field and accidentally make UNBOUND/STATE_MISSING look like READY.
+    binding: Option<RegisteredRootBindingView>,
+    availability: String,
+    reconcile_support: String,
+    counts: Option<RegisteredRootStateCountsView>,
+}
+
+#[derive(Debug, Serialize)]
+struct RegisteredRootsListView<'a> {
+    roots: &'a [RegisteredRootStatusView],
+}
+
+fn root_profile_name(value: i32) -> Result<&'static str> {
+    let profile = tcfs_core::proto::RootProfileV1::try_from(value)
+        .map_err(|_| anyhow::anyhow!("daemon returned unknown root profile value {value}"))?;
+    match profile.as_str_name() {
+        "ROOT_PROFILE_V1_GIT_RAW_V1" => Ok("git-raw-v1"),
+        "ROOT_PROFILE_V1_AGENT_STATIC_V1" => Ok("agent-static-v1"),
+        other => anyhow::bail!("daemon returned invalid root profile {other}"),
+    }
+}
+
+fn root_lifecycle_policy_name(value: i32) -> Result<&'static str> {
+    let policy = tcfs_core::proto::RootLifecyclePolicyV1::try_from(value).map_err(|_| {
+        anyhow::anyhow!("daemon returned unknown root lifecycle policy value {value}")
+    })?;
+    match policy.as_str_name() {
+        "ROOT_LIFECYCLE_POLICY_V1_INSPECT_ONLY" => Ok("inspect-only"),
+        "ROOT_LIFECYCLE_POLICY_V1_RECONCILE" => Ok("reconcile"),
+        other => anyhow::bail!("daemon returned invalid root lifecycle policy {other}"),
+    }
+}
+
+fn root_resolution_policy_name(value: i32) -> Result<&'static str> {
+    let policy = tcfs_core::proto::RootResolutionPolicy::try_from(value).map_err(|_| {
+        anyhow::anyhow!("daemon returned unknown root resolution policy value {value}")
+    })?;
+    match policy.as_str_name() {
+        "ROOT_RESOLUTION_POLICY_INSPECT_ONLY" => Ok("inspect-only"),
+        "ROOT_RESOLUTION_POLICY_RESOLVE" => Ok("resolve"),
+        other => anyhow::bail!("daemon returned invalid root resolution policy {other}"),
+    }
+}
+
+fn root_availability_name(value: i32) -> Result<&'static str> {
+    let availability = tcfs_core::proto::RootAvailability::try_from(value)
+        .map_err(|_| anyhow::anyhow!("daemon returned unknown root availability value {value}"))?;
+    match availability.as_str_name() {
+        "ROOT_AVAILABILITY_UNBOUND" => Ok("unbound"),
+        "ROOT_AVAILABILITY_UNSUPPORTED_PLATFORM" => Ok("unsupported-platform"),
+        "ROOT_AVAILABILITY_LOCAL_ROOT_MISSING" => Ok("local-root-missing"),
+        "ROOT_AVAILABILITY_STATE_MISSING" => Ok("state-missing"),
+        "ROOT_AVAILABILITY_INVALID_BINDING" => Ok("invalid-binding"),
+        "ROOT_AVAILABILITY_BUSY" => Ok("busy"),
+        "ROOT_AVAILABILITY_READY" => Ok("ready"),
+        other => anyhow::bail!("daemon returned invalid root availability {other}"),
+    }
+}
+
+fn reconcile_support_name(value: i32) -> Result<&'static str> {
+    let support = tcfs_core::proto::ReconcileSupport::try_from(value)
+        .map_err(|_| anyhow::anyhow!("daemon returned unknown reconcile support value {value}"))?;
+    match support.as_str_name() {
+        "RECONCILE_SUPPORT_NONE" => Ok("none"),
+        "RECONCILE_SUPPORT_PLAN_ONLY" => Ok("plan-only"),
+        "RECONCILE_SUPPORT_PLAN_AND_EXECUTE" => Ok("plan-and-execute"),
+        other => anyhow::bail!("daemon returned invalid reconcile support {other}"),
+    }
+}
+
+fn validate_b3v1_fingerprint(value: &str, description: &str) -> Result<()> {
+    let Some(digest) = value.strip_prefix("b3v1:") else {
+        anyhow::bail!("daemon returned {description} without the b3v1 prefix");
+    };
+    anyhow::ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+        "daemon returned malformed {description}"
+    );
+    Ok(())
+}
+
+fn registered_root_status_view(
+    root: tcfs_core::proto::RegisteredRootStatus,
+) -> Result<RegisteredRootStatusView> {
+    let spec = root
+        .spec
+        .context("daemon returned a registered root without its V1 spec")?;
+    anyhow::ensure!(
+        spec.version == 1,
+        "daemon returned root spec version {}",
+        spec.version
+    );
+    tcfs_core::config::validate_registered_root_id(&spec.root_id)
+        .map_err(anyhow::Error::msg)
+        .context("daemon returned an invalid root identity")?;
+    tcfs_core::config::validate_registered_remote_prefix(&spec.remote_prefix)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| {
+            format!(
+                "daemon returned root '{}' with an invalid remote prefix",
+                spec.root_id
+            )
+        })?;
+    anyhow::ensure!(
+        spec.generation > 0,
+        "daemon returned root '{}' with generation zero",
+        spec.root_id
+    );
+    anyhow::ensure!(
+        !spec.identity_fingerprint.is_empty(),
+        "daemon returned root '{}' without an identity fingerprint",
+        spec.root_id
+    );
+    validate_b3v1_fingerprint(&spec.identity_fingerprint, "root identity fingerprint")?;
+
+    let availability = root_availability_name(root.availability)?.to_string();
+    let reconcile_support = reconcile_support_name(root.reconcile_support)?.to_string();
+    anyhow::ensure!(
+        reconcile_support == "none",
+        "daemon returned unsupported B0a reconcile capability '{reconcile_support}' for root '{}'",
+        spec.root_id
+    );
+    let binding = root
+        .binding
+        .map(|binding| {
+            anyhow::ensure!(
+                binding.version == 1,
+                "daemon returned root '{}' binding version {}",
+                spec.root_id,
+                binding.version
+            );
+            anyhow::ensure!(
+                !binding.canonical_local_root.is_empty(),
+                "daemon returned root '{}' with an empty canonical local root",
+                spec.root_id
+            );
+            anyhow::ensure!(
+                !binding.canonical_state_path.is_empty(),
+                "daemon returned root '{}' with an empty canonical state path",
+                spec.root_id
+            );
+            anyhow::ensure!(
+                !binding.binding_fingerprint.is_empty(),
+                "daemon returned root '{}' without a binding fingerprint",
+                spec.root_id
+            );
+            validate_b3v1_fingerprint(&binding.binding_fingerprint, "root binding fingerprint")?;
+            Ok(RegisteredRootBindingView {
+                version: binding.version,
+                canonical_local_root: binding.canonical_local_root,
+                canonical_state_path: binding.canonical_state_path,
+                lifecycle_policy: root_lifecycle_policy_name(binding.lifecycle_policy)?.to_string(),
+                resolution_policy: root_resolution_policy_name(binding.resolution_policy)?
+                    .to_string(),
+                binding_fingerprint: binding.binding_fingerprint,
+            })
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        availability != "unbound" || binding.is_none(),
+        "daemon returned unbound root '{}' with a host binding",
+        spec.root_id
+    );
+    anyhow::ensure!(
+        availability != "ready" || binding.is_some(),
+        "daemon returned ready root '{}' without a host binding",
+        spec.root_id
+    );
+
+    let counts = root
+        .counts
+        .map(|counts| {
+            let subtotal = counts
+                .not_synced
+                .checked_add(counts.synced)
+                .and_then(|value| value.checked_add(counts.active))
+                .and_then(|value| value.checked_add(counts.locked))
+                .and_then(|value| value.checked_add(counts.conflict))
+                .context("daemon returned overflowing registered-root state counts")?;
+            anyhow::ensure!(
+                subtotal == counts.total,
+                "daemon returned inconsistent state counts for root '{}': total={} sum={}",
+                spec.root_id,
+                counts.total,
+                subtotal
+            );
+            Ok(RegisteredRootStateCountsView {
+                total: counts.total,
+                not_synced: counts.not_synced,
+                synced: counts.synced,
+                active: counts.active,
+                locked: counts.locked,
+                conflict: counts.conflict,
+            })
+        })
+        .transpose()?;
+    anyhow::ensure!(
+        (availability == "ready") == counts.is_some(),
+        "daemon returned root '{}' availability '{}' with {} state counts",
+        spec.root_id,
+        availability,
+        if counts.is_some() {
+            "unexpected"
+        } else {
+            "missing"
+        }
+    );
+
+    Ok(RegisteredRootStatusView {
+        spec: RegisteredRootSpecView {
+            version: spec.version,
+            root_id: spec.root_id,
+            remote_prefix: spec.remote_prefix,
+            profile: root_profile_name(spec.profile)?.to_string(),
+            generation: spec.generation,
+            identity_fingerprint: spec.identity_fingerprint,
+        },
+        binding,
+        availability,
+        reconcile_support,
+        counts,
+    })
+}
+
+fn registered_root_status_views(
+    roots: Vec<tcfs_core::proto::RegisteredRootStatus>,
+) -> Result<Vec<RegisteredRootStatusView>> {
+    let mut roots = roots
+        .into_iter()
+        .map(registered_root_status_view)
+        .collect::<Result<Vec<_>>>()?;
+    roots.sort_by(|left, right| left.spec.root_id.cmp(&right.spec.root_id));
+    for pair in roots.windows(2) {
+        anyhow::ensure!(
+            pair[0].spec.root_id != pair[1].spec.root_id,
+            "daemon returned duplicate root identity '{}'",
+            pair[0].spec.root_id
+        );
+    }
+    Ok(roots)
+}
+
+fn escape_human_field(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_control() {
+            escaped.extend(ch.escape_default());
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped
+}
+
+fn render_registered_roots_human(roots: &[RegisteredRootStatusView]) -> String {
+    if roots.is_empty() {
+        return "No registered roots.\n".to_string();
+    }
+
+    let mut output =
+        "ROOT ID\tPROFILE\tGENERATION\tAVAILABILITY\tRECONCILE\tREMOTE PREFIX\tLOCAL ROOT\n"
+            .to_string();
+    for root in roots {
+        let local_root = root
+            .binding
+            .as_ref()
+            .map(|binding| binding.canonical_local_root.as_str())
+            .unwrap_or("-");
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            escape_human_field(&root.spec.root_id),
+            root.spec.profile,
+            root.spec.generation,
+            root.availability,
+            root.reconcile_support,
+            escape_human_field(&root.spec.remote_prefix),
+            escape_human_field(local_root),
+        ));
+    }
+    output
+}
+
+fn render_registered_root_human(root: &RegisteredRootStatusView) -> String {
+    let mut output = format!(
+        "Root: {}\nSpec version: {}\nProfile: {}\nGeneration: {}\nRemote prefix: {}\nIdentity fingerprint: {}\nAvailability: {}\nReconcile support: {}\n",
+        escape_human_field(&root.spec.root_id),
+        root.spec.version,
+        root.spec.profile,
+        root.spec.generation,
+        escape_human_field(&root.spec.remote_prefix),
+        escape_human_field(&root.spec.identity_fingerprint),
+        root.availability,
+        root.reconcile_support,
+    );
+
+    match &root.binding {
+        Some(binding) => {
+            output.push_str(&format!(
+                "Binding version: {}\nLocal root: {}\nState path: {}\nLifecycle policy: {}\nResolution policy: {}\nBinding fingerprint: {}\n",
+                binding.version,
+                escape_human_field(&binding.canonical_local_root),
+                escape_human_field(&binding.canonical_state_path),
+                binding.lifecycle_policy,
+                binding.resolution_policy,
+                escape_human_field(&binding.binding_fingerprint),
+            ));
+        }
+        None => output.push_str("Binding: <none>\n"),
+    }
+
+    match &root.counts {
+        Some(counts) => {
+            output.push_str(&format!(
+                "State counts: total={} not-synced={} synced={} active={} locked={} conflict={}\n",
+                counts.total,
+                counts.not_synced,
+                counts.synced,
+                counts.active,
+                counts.locked,
+                counts.conflict,
+            ));
+        }
+        None => output.push_str("State counts: <unavailable>\n"),
+    }
+    output
+}
+
+#[cfg(unix)]
+async fn cmd_roots_list(config: &tcfs_core::config::TcfsConfig, json: bool) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let response = tokio::time::timeout(
+        DAEMON_RPC_TIMEOUT,
+        client.list_registered_roots(tonic::Request::new(
+            tcfs_core::proto::ListRegisteredRootsRequest {},
+        )),
+    )
+    .await
+    .context("list_registered_roots RPC timed out")?
+    .context("list_registered_roots RPC failed")?
+    .into_inner();
+    let roots = registered_root_status_views(response.roots)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&RegisteredRootsListView { roots: &roots })
+                .context("serializing registered roots")?
+        );
+    } else {
+        print!("{}", render_registered_roots_human(&roots));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn cmd_roots_status(
+    config: &tcfs_core::config::TcfsConfig,
+    root_id: &str,
+    json: bool,
+) -> Result<()> {
+    let mut client = connect_daemon(&config.daemon.socket).await?;
+    let response = tokio::time::timeout(
+        DAEMON_RPC_TIMEOUT,
+        client.get_registered_root_status(tonic::Request::new(
+            tcfs_core::proto::GetRegisteredRootStatusRequest {
+                root_id: root_id.to_string(),
+            },
+        )),
+    )
+    .await
+    .context("get_registered_root_status RPC timed out")?
+    .with_context(|| format!("get_registered_root_status RPC failed for root '{root_id}'"))?
+    .into_inner();
+    let root = registered_root_status_view(
+        response
+            .root
+            .context("daemon returned an empty registered-root status response")?,
+    )?;
+    anyhow::ensure!(
+        root.spec.root_id == root_id,
+        "daemon returned root '{}' while '{}' was requested; refusing inspection",
+        root.spec.root_id,
+        root_id
+    );
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&root).context("serializing registered root status")?
+        );
+    } else {
+        print!("{}", render_registered_root_human(&root));
+    }
     Ok(())
 }
 
@@ -7697,10 +8177,11 @@ async fn cmd_reconcile(
     validate_sync_selection_excludes_master_key(config, &local_root)?;
 
     let state_path = resolve_state_path(config, state_override);
-    let _state_lock = execute
-        .then(|| lock_explicit_state_for_mutation(&state_path, state_override))
-        .transpose()?
-        .flatten();
+    // StateCache::open can recover a missing or corrupt primary from backup
+    // and flush that recovery on drop. Serialize explicit-state dry-runs too,
+    // before any repair-capable open, so read-only inventory can trust the
+    // same sidecar used by execute paths.
+    let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
     let op = build_operator(config).await?;
     let device_id = load_device_id(config);
 
@@ -8295,6 +8776,7 @@ async fn cmd_conflicts(
             )
         } else {
             let state_path = resolve_state_path(config, state_override);
+            let _state_lock = lock_explicit_state_cache(&state_path, state_override)?;
             let state = tcfs_sync::state::StateCache::open(&state_path)
                 .with_context(|| format!("opening state cache: {}", state_path.display()))?;
             let items: Vec<(String, tcfs_sync::conflict::ConflictInfo)> = state
@@ -8466,6 +8948,273 @@ mod tests {
     use super::*;
     use opendal::services::Memory;
     use opendal::Operator;
+
+    fn registered_root_wire(
+        root_id: &str,
+        availability: i32,
+        binding: Option<tcfs_core::proto::RootBindingV1>,
+        counts: Option<tcfs_core::proto::RegisteredRootStateCounts>,
+    ) -> tcfs_core::proto::RegisteredRootStatus {
+        tcfs_core::proto::RegisteredRootStatus {
+            spec: Some(tcfs_core::proto::RootSpecV1 {
+                version: 1,
+                root_id: root_id.to_string(),
+                remote_prefix: format!("roots/{root_id}"),
+                profile: 1,
+                generation: 3,
+                identity_fingerprint: format!("b3v1:{}", "a".repeat(64)),
+            }),
+            binding,
+            availability,
+            reconcile_support: 1,
+            counts,
+        }
+    }
+
+    fn registered_root_binding_wire(root_id: &str) -> tcfs_core::proto::RootBindingV1 {
+        tcfs_core::proto::RootBindingV1 {
+            version: 1,
+            canonical_local_root: format!("/srv/tcfs/{root_id}"),
+            canonical_state_path: format!("/var/lib/tcfs/roots/{root_id}.json"),
+            lifecycle_policy: 1,
+            resolution_policy: 1,
+            binding_fingerprint: format!("b3v1:{}", "b".repeat(64)),
+        }
+    }
+
+    fn registered_root_counts_wire() -> tcfs_core::proto::RegisteredRootStateCounts {
+        tcfs_core::proto::RegisteredRootStateCounts {
+            total: 15,
+            not_synced: 1,
+            synced: 2,
+            active: 3,
+            locked: 4,
+            conflict: 5,
+        }
+    }
+
+    #[test]
+    fn cli_parses_read_only_roots_commands() {
+        let list = Cli::try_parse_from(["tcfs", "roots", "list", "--json"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Commands::Roots {
+                action: RootsAction::List { json: true }
+            }
+        ));
+
+        let status = Cli::try_parse_from(["tcfs", "roots", "status", "work", "--json"]).unwrap();
+        assert!(matches!(
+            status.command,
+            Commands::Roots {
+                action: RootsAction::Status {
+                    root_id,
+                    json: true
+                }
+            } if root_id == "work"
+        ));
+    }
+
+    #[test]
+    fn cli_rejects_incomplete_or_mutating_roots_arguments() {
+        for args in [
+            vec!["tcfs", "roots", "status"],
+            vec!["tcfs", "roots", "status", "work", "extra"],
+            vec!["tcfs", "roots", "status", "primary"],
+            vec!["tcfs", "roots", "status", "Bad-ID"],
+            vec!["tcfs", "roots", "list", "--execute"],
+            vec!["tcfs", "roots", "list", "--state", "/tmp/state.json"],
+            vec!["tcfs", "roots", "add", "work"],
+            vec!["tcfs", "roots", "remove", "work"],
+            vec!["tcfs", "roots", "reconcile", "work"],
+        ] {
+            assert!(
+                Cli::try_parse_from(args.clone()).is_err(),
+                "forbidden or incomplete roots arguments unexpectedly parsed: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_root_json_keeps_unavailable_binding_and_counts_null() {
+        let view = registered_root_status_view(registered_root_wire("agents", 1, None, None))
+            .expect("valid unbound root");
+        let json = serde_json::to_value(&view).unwrap();
+
+        assert_eq!(json["spec"]["root_id"], "agents");
+        assert_eq!(json["spec"]["profile"], "git-raw-v1");
+        assert_eq!(json["availability"], "unbound");
+        assert_eq!(json["reconcile_support"], "none");
+        assert!(json["binding"].is_null());
+        assert!(json["counts"].is_null());
+    }
+
+    #[test]
+    fn registered_root_list_is_sorted_and_renders_persisted_counts() {
+        let roots = registered_root_status_views(vec![
+            registered_root_wire(
+                "work",
+                7,
+                Some(registered_root_binding_wire("work")),
+                Some(registered_root_counts_wire()),
+            ),
+            registered_root_wire("agents", 1, None, None),
+        ])
+        .expect("valid roots");
+
+        assert_eq!(roots[0].spec.root_id, "agents");
+        assert_eq!(roots[1].spec.root_id, "work");
+        assert_eq!(
+            render_registered_roots_human(&roots),
+            "ROOT ID\tPROFILE\tGENERATION\tAVAILABILITY\tRECONCILE\tREMOTE PREFIX\tLOCAL ROOT\n\
+             agents\tgit-raw-v1\t3\tunbound\tnone\troots/agents\t-\n\
+             work\tgit-raw-v1\t3\tready\tnone\troots/work\t/srv/tcfs/work\n"
+        );
+        assert!(render_registered_root_human(&roots[1]).contains(
+            "State counts: total=15 not-synced=1 synced=2 active=3 locked=4 conflict=5\n"
+        ));
+    }
+
+    #[test]
+    fn registered_root_ready_json_and_list_envelope_are_exact() {
+        let roots = registered_root_status_views(vec![registered_root_wire(
+            "work",
+            7,
+            Some(registered_root_binding_wire("work")),
+            Some(registered_root_counts_wire()),
+        )])
+        .unwrap();
+        let expected = serde_json::json!({
+            "spec": {
+                "version": 1,
+                "root_id": "work",
+                "remote_prefix": "roots/work",
+                "profile": "git-raw-v1",
+                "generation": 3,
+                "identity_fingerprint": format!("b3v1:{}", "a".repeat(64)),
+            },
+            "binding": {
+                "version": 1,
+                "canonical_local_root": "/srv/tcfs/work",
+                "canonical_state_path": "/var/lib/tcfs/roots/work.json",
+                "lifecycle_policy": "inspect-only",
+                "resolution_policy": "inspect-only",
+                "binding_fingerprint": format!("b3v1:{}", "b".repeat(64)),
+            },
+            "availability": "ready",
+            "reconcile_support": "none",
+            "counts": {
+                "total": 15,
+                "not_synced": 1,
+                "synced": 2,
+                "active": 3,
+                "locked": 4,
+                "conflict": 5,
+            },
+        });
+
+        assert_eq!(serde_json::to_value(&roots[0]).unwrap(), expected);
+        assert_eq!(
+            serde_json::to_value(RegisteredRootsListView { roots: &roots }).unwrap(),
+            serde_json::json!({ "roots": [expected] })
+        );
+    }
+
+    #[test]
+    fn registered_root_view_rejects_inconsistent_persisted_counts() {
+        let mut counts = registered_root_counts_wire();
+        counts.total += 1;
+        let error = registered_root_status_view(registered_root_wire(
+            "work",
+            7,
+            Some(registered_root_binding_wire("work")),
+            Some(counts),
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("inconsistent state counts"));
+    }
+
+    #[test]
+    fn registered_root_view_fails_closed_on_fingerprint_and_future_authority() {
+        let mut future = registered_root_wire("work", 1, None, None);
+        future.reconcile_support = 2;
+        let error = registered_root_status_view(future).unwrap_err();
+        assert!(error.to_string().contains("unsupported B0a reconcile"));
+
+        let mut malformed = registered_root_wire("work", 1, None, None);
+        malformed.spec.as_mut().unwrap().identity_fingerprint = "b3v1:not-a-digest".into();
+        let error = registered_root_status_view(malformed).unwrap_err();
+        assert!(error.to_string().contains("malformed root identity"));
+
+        let mut invalid_id = registered_root_wire("work", 1, None, None);
+        invalid_id.spec.as_mut().unwrap().root_id = "primary".into();
+        let error = registered_root_status_view(invalid_id).unwrap_err();
+        assert!(error.to_string().contains("invalid root identity"));
+
+        let mut invalid_prefix = registered_root_wire("work", 1, None, None);
+        invalid_prefix.spec.as_mut().unwrap().remote_prefix = "roots/../work".into();
+        let error = registered_root_status_view(invalid_prefix).unwrap_err();
+        assert!(error.to_string().contains("invalid remote prefix"));
+
+        let mut future_binding = registered_root_wire(
+            "work",
+            7,
+            Some(registered_root_binding_wire("work")),
+            Some(registered_root_counts_wire()),
+        );
+        future_binding.binding.as_mut().unwrap().version = 2;
+        let error = registered_root_status_view(future_binding).unwrap_err();
+        assert!(error.to_string().contains("binding version 2"));
+    }
+
+    #[tokio::test]
+    async fn explicit_reads_and_reconcile_dry_run_lock_repairable_state_before_open() {
+        let valid_backup = br#"{"last_nats_seq":0,"device_id":"test-device","entries":{}}"#;
+
+        for primary in [Some(b"{corrupt".as_slice()), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let sync_root = dir.path().join("tree");
+            std::fs::create_dir(&sync_root).unwrap();
+            let mut config = test_config(&sync_root);
+            config.storage.endpoint = "https://should-never-be-contacted.invalid".into();
+            let state_override = dir.path().join("registered-root.json");
+            let state_path = resolve_state_path(&config, Some(&state_override));
+            let backup_path = state_path.with_extension("json.bak");
+            if let Some(bytes) = primary {
+                std::fs::write(&state_path, bytes).unwrap();
+            }
+            std::fs::write(&backup_path, valid_backup).unwrap();
+            let primary_before = std::fs::read(&state_path).ok();
+            let backup_before = std::fs::read(&backup_path).unwrap();
+
+            let _writer = tcfs_sync::state::StateFileLock::acquire(&state_path).unwrap();
+            let sync_status_error = build_sync_status_report(&config, None, Some(&state_override))
+                .expect_err("explicit sync-status must honor the writer sidecar");
+            let conflicts_error = cmd_conflicts(&config, false, None, Some(&state_override))
+                .await
+                .expect_err("explicit offline conflicts must honor the writer sidecar");
+            let reconcile_error = cmd_reconcile(
+                &config,
+                Some(&sync_root),
+                None,
+                false,
+                Some(&state_override),
+            )
+            .await
+            .expect_err("explicit-state dry-run must honor the writer sidecar");
+
+            for error in [sync_status_error, conflicts_error, reconcile_error] {
+                let chain = format!("{error:#}");
+                assert!(
+                    chain.contains("locking explicit state cache")
+                        && chain.contains("is locked by another process"),
+                    "{chain}"
+                );
+            }
+            assert_eq!(std::fs::read(&state_path).ok(), primary_before);
+            assert_eq!(std::fs::read(&backup_path).unwrap(), backup_before);
+        }
+    }
 
     fn memory_op() -> Operator {
         let op = Operator::new(Memory::default()).unwrap().finish();
@@ -12399,13 +13148,16 @@ enabled = false
 
         // The armed program doubles as a fake signer (SIG_CREATED status plus
         // a signature block, the shape `git commit -S` expects) so the fixture
-        // commit carries a signature for `git log` to verify.
+        // commit carries a signature for `git log` to verify. It must drain
+        // the signing payload before exiting so Git never loses a race while
+        // writing the commit bytes to the signer.
         let gpg = dir.path().join("evil-gpg");
         let sentinel = dir.path().join("evil-gpg.ran");
         std::fs::write(
             &gpg,
             format!(
                 "#!/bin/sh\n\
+                 cat >/dev/null\n\
                  printf ran > \"{}\"\n\
                  printf '[GNUPG:] SIG_CREATED \\n' >&2\n\
                  printf -- '-----BEGIN PGP SIGNATURE-----\\nfake\\n-----END PGP SIGNATURE-----\\n'\n",
