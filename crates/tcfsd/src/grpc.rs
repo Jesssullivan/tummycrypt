@@ -601,6 +601,9 @@ fn validate_versioned_root_definition(
 /// Startup-time validation for every configured mapping and the master-key
 /// isolation boundary. Runtime root selection repeats the mapping checks and
 /// adds stricter ownership/existence validation.
+///
+/// This may inspect configured filesystem paths and include them in errors.
+/// Request handlers must authorize a root before any equivalent host probe.
 pub(crate) fn validate_registered_roots_config(config: &TcfsConfig) -> anyhow::Result<()> {
     if let Some(master_key_path) = config.crypto.master_key_file.as_deref() {
         tcfs_core::config::validate_master_key_outside_sync_roots(config, master_key_path)
@@ -877,6 +880,7 @@ fn validate_registered_state_inode_isolation(
     root_id: &str,
     state_path: &Path,
     metadata: &std::fs::Metadata,
+    check_peer_inodes: bool,
 ) -> std::result::Result<(), String> {
     use std::os::unix::fs::MetadataExt;
 
@@ -886,6 +890,9 @@ fn validate_registered_state_inode_isolation(
             metadata.nlink(),
             state_path.display()
         ));
+    }
+    if !check_peer_inodes {
+        return Ok(());
     }
 
     let primary_state =
@@ -943,10 +950,58 @@ fn validate_registered_state_inode_isolation(
     Ok(())
 }
 
-fn canonical_registered_root(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegisteredRootValidationScope {
+    /// Mutation routes must re-probe every configured trust boundary.
+    Mutation,
+    /// B0a may inspect only the already-authorized root's own binding.
+    ReadOnlyInventory,
+}
+
+impl RegisteredRootValidationScope {
+    fn checks_peer_isolation(self) -> bool {
+        matches!(self, Self::Mutation)
+    }
+}
+
+fn validate_selected_root_master_key_isolation(
+    config: &TcfsConfig,
+    root_id: &str,
+    local_root: &Path,
+) -> std::result::Result<(), String> {
+    let Some(master_key_path) = config.crypto.master_key_file.as_deref() else {
+        return Ok(());
+    };
+    if tcfs_core::config::path_is_within(master_key_path, local_root)? {
+        return Err(format!(
+            "crypto.master_key_file is inside registered root '{root_id}' local_root after canonicalization"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_selected_root_state_dir_isolation(
+    config: &TcfsConfig,
+    root_id: &str,
+    local_root: &Path,
+) -> std::result::Result<(), String> {
+    let local_root = canonicalize_with_missing_tail(local_root)?;
+    let state_dir = canonicalize_with_missing_tail(&registered_root_state_dir(config)?)?;
+    if local_roots_overlap(&state_dir, &local_root) {
+        return Err(format!(
+            "registered-root state directory {} overlaps registered root '{root_id}' local_root after canonicalization ({})",
+            state_dir.display(),
+            local_root.display()
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_registered_root_with_scope(
     config: &TcfsConfig,
     root_id: &str,
     root: &RegisteredRootConfig,
+    scope: RegisteredRootValidationScope,
 ) -> std::result::Result<RegisteredRootRoute, String> {
     let (local_root, state_path) = validate_registered_root_definition(config, root_id, root)?;
     tcfs_sync::conflict_git::validate_trusted_configured_path(&local_root).map_err(|error| {
@@ -997,7 +1052,10 @@ fn canonical_registered_root(
     tcfs_sync::conflict_git::validate_trusted_ancestor_chain(&local_root).map_err(|error| {
         format!("registered root '{root_id}' local_root has an untrusted ancestor chain: {error:#}")
     })?;
-    validate_canonical_local_root_isolation(config, root_id, &local_root)?;
+    validate_selected_root_master_key_isolation(config, root_id, &local_root)?;
+    if scope.checks_peer_isolation() {
+        validate_canonical_local_root_isolation(config, root_id, &local_root)?;
+    }
 
     let metadata = std::fs::symlink_metadata(&state_path).map_err(|error| {
         format!(
@@ -1018,7 +1076,13 @@ fn canonical_registered_root(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        validate_registered_state_inode_isolation(config, root_id, &state_path, &metadata)?;
+        validate_registered_state_inode_isolation(
+            config,
+            root_id,
+            &state_path,
+            &metadata,
+            scope.checks_peer_isolation(),
+        )?;
         if metadata.permissions().mode() & 0o077 != 0 {
             return Err(format!(
                 "registered root '{root_id}' state cache must not be group/world accessible (mode 0600 or stricter): {}",
@@ -1046,7 +1110,16 @@ fn canonical_registered_root(
             )
         },
     )?;
-    validate_canonical_state_dir_isolation(config, &canonical_state_dir)?;
+    if local_roots_overlap(&canonical_state_dir, &local_root) {
+        return Err(format!(
+            "registered-root state directory {} overlaps registered root '{root_id}' local_root after canonicalization ({})",
+            canonical_state_dir.display(),
+            local_root.display()
+        ));
+    }
+    if scope.checks_peer_isolation() {
+        validate_canonical_state_dir_isolation(config, &canonical_state_dir)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1101,6 +1174,32 @@ fn canonical_registered_root(
         state_path,
         policy: root.policy,
     })
+}
+
+fn canonical_registered_root(
+    config: &TcfsConfig,
+    root_id: &str,
+    root: &RegisteredRootConfig,
+) -> std::result::Result<RegisteredRootRoute, String> {
+    canonical_registered_root_with_scope(
+        config,
+        root_id,
+        root,
+        RegisteredRootValidationScope::Mutation,
+    )
+}
+
+fn canonical_registered_root_for_inventory(
+    config: &TcfsConfig,
+    root_id: &str,
+    root: &RegisteredRootConfig,
+) -> std::result::Result<RegisteredRootRoute, String> {
+    canonical_registered_root_with_scope(
+        config,
+        root_id,
+        root,
+        RegisteredRootValidationScope::ReadOnlyInventory,
+    )
 }
 
 fn object_key_is_within_prefix(key: &str, prefix: &str) -> bool {
@@ -1325,6 +1424,7 @@ fn normalized_versioned_root_binding_message(
     versioned_root_binding_message(binding, &local_root, &state_path).ok()
 }
 
+#[cfg(test)]
 fn canonical_versioned_root(
     config: &TcfsConfig,
     root_id: &str,
@@ -1335,6 +1435,27 @@ fn canonical_versioned_root(
     };
     validate_versioned_root_definition(config, root_id, root)?;
     canonical_registered_root(
+        config,
+        root_id,
+        &RegisteredRootConfig {
+            local_root: binding.local_root.clone(),
+            remote_prefix: root.spec.remote_prefix.clone(),
+            state_path: binding.state_path.clone(),
+            policy: binding.resolution_policy,
+        },
+    )
+}
+
+fn canonical_versioned_root_for_inventory(
+    config: &TcfsConfig,
+    root_id: &str,
+    root: &RegisteredRootV1Config,
+) -> std::result::Result<RegisteredRootRoute, String> {
+    let Some(binding) = root.binding.as_ref() else {
+        return Err(format!("versioned registered root '{root_id}' is unbound"));
+    };
+    validate_versioned_root_definition(config, root_id, root)?;
+    canonical_registered_root_for_inventory(
         config,
         root_id,
         &RegisteredRootConfig {
@@ -1966,6 +2087,32 @@ impl TcfsDaemonImpl {
                 }
             }
 
+            if let Err(error) = validate_selected_root_master_key_isolation(
+                &self.config,
+                root_id,
+                &configured_local_root,
+            ) {
+                tracing::warn!(
+                    root_id,
+                    %error,
+                    "versioned root inventory rejected master-key overlap"
+                );
+                return status(RootAvailability::InvalidBinding, normalized_binding(), None);
+            }
+
+            if let Err(error) = validate_selected_root_state_dir_isolation(
+                &self.config,
+                root_id,
+                &configured_local_root,
+            ) {
+                tracing::warn!(
+                    root_id,
+                    %error,
+                    "versioned root inventory rejected state-directory overlap"
+                );
+                return status(RootAvailability::InvalidBinding, normalized_binding(), None);
+            }
+
             let configured_state_path = tcfs_core::config::expand_tilde(&binding.state_path);
             // Stabilize the primary snapshot against an existing or
             // concurrently-created writer sidecar before classifying the
@@ -1989,7 +2136,7 @@ impl TcfsDaemonImpl {
                 ImmutableRootSnapshot::Ready(snapshot) => snapshot,
             };
 
-            let route = match canonical_versioned_root(&self.config, root_id, root) {
+            let route = match canonical_versioned_root_for_inventory(&self.config, root_id, root) {
                 Ok(route) => route,
                 Err(error) => {
                     tracing::warn!(
@@ -3887,8 +4034,6 @@ impl TcfsDaemon for TcfsDaemonImpl {
         self.require_registered_root_auth_posture()?;
         let session = self.require_session(&request).await?;
         Self::check_permission(&session, "pull")?;
-        validate_registered_roots_config(&self.config)
-            .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
 
         // Authorization filtering precedes every host-path probe. The
         // BTreeMap iteration order is the API's deterministic ASCII root_id
@@ -3917,8 +4062,6 @@ impl TcfsDaemon for TcfsDaemonImpl {
         Self::check_permission(&session, "pull")?;
         let root_id = request.into_inner().root_id;
         validate_root_id(&root_id).map_err(tonic::Status::invalid_argument)?;
-        validate_registered_roots_config(&self.config)
-            .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
 
         let not_found = || tonic::Status::not_found("registered root was not found");
         let Some(root) = self.config.sync.root_registry.get(&root_id) else {
@@ -5390,6 +5533,23 @@ mod tests {
 
     fn test_daemon() -> TcfsDaemonImpl {
         test_daemon_with_operator(None)
+    }
+
+    fn test_daemon_with_config(temp: &tempfile::TempDir, config: TcfsConfig) -> TcfsDaemonImpl {
+        TcfsDaemonImpl::new(
+            crate::cred_store::new_shared(),
+            Arc::new(config),
+            false,
+            "memory://".into(),
+            Arc::new(TokioMutex::new(
+                tcfs_sync::state::StateCache::open(&temp.path().join("primary.json")).unwrap(),
+            )),
+            Arc::new(TokioMutex::new(None)),
+            tcfs_sync::state::PathLocks::new(),
+            "test-device".into(),
+            "test-device".into(),
+            None,
+        )
     }
 
     fn test_daemon_with_registered_root_session_requirement(
@@ -7857,6 +8017,335 @@ mod tests {
         assert_eq!(response.reconcile_support, ReconcileSupport::None as i32);
         assert!(response.binding.is_none());
         assert!(response.counts.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn versioned_root_inventory_never_probes_unauthorized_peer_bindings() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let visible_root = temp.path().join("visible");
+        std::fs::create_dir(&visible_root).unwrap();
+        let hidden_alias = temp.path().join("hidden-alias");
+        let reconcile_dir = temp.path().join("reconcile");
+        std::fs::create_dir(&reconcile_dir).unwrap();
+        let visible_state_path = reconcile_dir.join("visible.json");
+        let mut visible_state = tcfs_sync::state::StateCache::open(&visible_state_path).unwrap();
+        visible_state.set_device_id("test-device".into());
+        visible_state.flush().unwrap();
+        drop(visible_state);
+
+        let mut config = TcfsConfig::default();
+        config.auth.require_session = true;
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.storage.remote_prefix = Some("roots/primary".into());
+        config.sync.state_db = temp.path().join("primary.db");
+        config.sync.root_state_dir = Some(reconcile_dir.clone());
+        config.sync.root_registry.insert(
+            "visible".into(),
+            RegisteredRootV1Config {
+                spec: tcfs_core::config::RootSpecV1Config {
+                    version: 1,
+                    remote_prefix: "roots/visible".into(),
+                    profile: tcfs_core::config::RootProfileV1::GitRawV1,
+                    generation: std::num::NonZeroU64::new(1).unwrap(),
+                },
+                binding: Some(RootBindingV1Config {
+                    version: 1,
+                    local_root: visible_root.clone(),
+                    state_path: visible_state_path,
+                    lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
+                    resolution_policy: RegisteredRootPolicy::InspectOnly,
+                }),
+            },
+        );
+        config.sync.root_registry.insert(
+            "hidden".into(),
+            RegisteredRootV1Config {
+                spec: tcfs_core::config::RootSpecV1Config {
+                    version: 1,
+                    remote_prefix: "roots/hidden".into(),
+                    profile: tcfs_core::config::RootProfileV1::GitRawV1,
+                    generation: std::num::NonZeroU64::new(1).unwrap(),
+                },
+                binding: Some(RootBindingV1Config {
+                    version: 1,
+                    local_root: hidden_alias.clone(),
+                    state_path: reconcile_dir.join("hidden.json"),
+                    lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
+                    resolution_policy: RegisteredRootPolicy::InspectOnly,
+                }),
+            },
+        );
+        validate_registered_roots_config(&config)
+            .expect("configuration must be valid before the hidden peer appears");
+
+        let daemon = test_daemon_with_config(&temp, config);
+        symlink(&visible_root, &hidden_alias).unwrap();
+        let visible = daemon.config.sync.root_registry.get("visible").unwrap();
+        let drift = canonical_versioned_root(&daemon.config, "visible", visible)
+            .expect_err("full mutation validation must detect the new hidden peer alias");
+        assert!(drift.contains("hidden"));
+        assert!(drift.contains(temp.path().to_string_lossy().as_ref()));
+
+        let token = insert_test_session(
+            &daemon,
+            "visible-root-reader",
+            tcfs_auth::DevicePermissions {
+                can_pull: true,
+                allowed_prefixes: vec!["roots/visible".into()],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let listed = daemon
+            .list_registered_roots(request_with_bearer(ListRegisteredRootsRequest {}, &token))
+            .await
+            .expect("an unauthorized drifting root must not become a list oracle")
+            .into_inner();
+        assert_eq!(listed.roots.len(), 1);
+        assert_eq!(listed.roots[0].spec.as_ref().unwrap().root_id, "visible");
+        assert_eq!(listed.roots[0].availability, RootAvailability::Ready as i32);
+        assert_eq!(listed.roots[0].counts.as_ref().unwrap().total, 0);
+
+        let unauthorized = daemon
+            .get_registered_root_status(request_with_bearer(
+                GetRegisteredRootStatusRequest {
+                    root_id: "hidden".into(),
+                },
+                &token,
+            ))
+            .await
+            .expect_err("unauthorized root must remain hidden");
+        let unknown = daemon
+            .get_registered_root_status(request_with_bearer(
+                GetRegisteredRootStatusRequest {
+                    root_id: "missing".into(),
+                },
+                &token,
+            ))
+            .await
+            .expect_err("unknown root must remain hidden");
+        assert_eq!(
+            (unauthorized.code(), unauthorized.message()),
+            (unknown.code(), unknown.message())
+        );
+        assert_eq!(unknown.code(), tonic::Code::NotFound);
+        assert!(!unauthorized
+            .message()
+            .contains(temp.path().to_string_lossy().as_ref()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn versioned_root_inventory_rechecks_authorized_master_key_isolation() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_root = temp.path().join("real-root");
+        std::fs::create_dir(&real_root).unwrap();
+        let master_key = real_root.join("custom-master-key.bin");
+        std::fs::write(&master_key, b"test-key-material").unwrap();
+        let root_alias = temp.path().join("work-alias");
+        let reconcile_dir = temp.path().join("reconcile");
+        std::fs::create_dir(&reconcile_dir).unwrap();
+        let state_path = reconcile_dir.join("work.json");
+
+        let mut config = TcfsConfig::default();
+        config.auth.require_session = true;
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.storage.remote_prefix = Some("roots/primary".into());
+        config.sync.state_db = temp.path().join("primary.db");
+        config.sync.root_state_dir = Some(reconcile_dir);
+        config.crypto.master_key_file = Some(master_key);
+        config.sync.root_registry.insert(
+            "work".into(),
+            RegisteredRootV1Config {
+                spec: tcfs_core::config::RootSpecV1Config {
+                    version: 1,
+                    remote_prefix: "roots/work".into(),
+                    profile: tcfs_core::config::RootProfileV1::GitRawV1,
+                    generation: std::num::NonZeroU64::new(1).unwrap(),
+                },
+                binding: Some(RootBindingV1Config {
+                    version: 1,
+                    local_root: root_alias.clone(),
+                    state_path: state_path.clone(),
+                    lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
+                    resolution_policy: RegisteredRootPolicy::InspectOnly,
+                }),
+            },
+        );
+        validate_registered_roots_config(&config)
+            .expect("configuration must be valid before the root alias appears");
+
+        let daemon = test_daemon_with_config(&temp, config);
+        symlink(&real_root, &root_alias).unwrap();
+
+        let token = insert_test_session(
+            &daemon,
+            "work-reader",
+            tcfs_auth::DevicePermissions {
+                can_pull: true,
+                allowed_prefixes: vec!["roots/work".into()],
+                ..Default::default()
+            },
+        )
+        .await;
+        let request = || {
+            request_with_bearer(
+                GetRegisteredRootStatusRequest {
+                    root_id: "work".into(),
+                },
+                &token,
+            )
+        };
+
+        let missing = daemon
+            .get_registered_root_status(request())
+            .await
+            .expect("master-key drift must take precedence over missing state")
+            .into_inner()
+            .root
+            .unwrap();
+        assert_eq!(
+            missing.availability,
+            RootAvailability::InvalidBinding as i32
+        );
+        assert!(missing.counts.is_none());
+
+        let writer = tcfs_sync::state::StateFileLock::acquire(&state_path).unwrap();
+        let busy = daemon
+            .get_registered_root_status(request())
+            .await
+            .expect("master-key drift must take precedence over a busy state cache")
+            .into_inner()
+            .root
+            .unwrap();
+        assert_eq!(busy.availability, RootAvailability::InvalidBinding as i32);
+        assert!(busy.counts.is_none());
+        drop(writer);
+
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        state.set_device_id("test-device".into());
+        state.flush().unwrap();
+        drop(state);
+        let ready = daemon
+            .get_registered_root_status(request())
+            .await
+            .expect("master-key drift must take precedence over ready state")
+            .into_inner()
+            .root
+            .unwrap();
+        assert_eq!(ready.availability, RootAvailability::InvalidBinding as i32);
+        assert!(ready.counts.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn versioned_root_inventory_rechecks_authorized_state_dir_isolation() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root_alias = temp.path().join("work-alias");
+        let reconcile_dir = temp.path().join("reconcile");
+        let nested_root = reconcile_dir.join("nested-root");
+        std::fs::create_dir_all(&nested_root).unwrap();
+        let state_path = reconcile_dir.join("work.json");
+
+        let mut config = TcfsConfig::default();
+        config.auth.require_session = true;
+        config.daemon.socket = temp.path().join("tcfsd.sock");
+        config.storage.remote_prefix = Some("roots/primary".into());
+        config.sync.state_db = temp.path().join("primary.db");
+        config.sync.root_state_dir = Some(reconcile_dir);
+        config.sync.root_registry.insert(
+            "work".into(),
+            RegisteredRootV1Config {
+                spec: tcfs_core::config::RootSpecV1Config {
+                    version: 1,
+                    remote_prefix: "roots/work".into(),
+                    profile: tcfs_core::config::RootProfileV1::GitRawV1,
+                    generation: std::num::NonZeroU64::new(1).unwrap(),
+                },
+                binding: Some(RootBindingV1Config {
+                    version: 1,
+                    local_root: root_alias.clone(),
+                    state_path: state_path.clone(),
+                    lifecycle_policy: tcfs_core::config::RootLifecyclePolicyV1::InspectOnly,
+                    resolution_policy: RegisteredRootPolicy::InspectOnly,
+                }),
+            },
+        );
+        validate_registered_roots_config(&config)
+            .expect("configuration must be valid before the root alias appears");
+
+        let daemon = test_daemon_with_config(&temp, config);
+        symlink(&nested_root, &root_alias).unwrap();
+
+        let token = insert_test_session(
+            &daemon,
+            "work-reader",
+            tcfs_auth::DevicePermissions {
+                can_pull: true,
+                allowed_prefixes: vec!["roots/work".into()],
+                ..Default::default()
+            },
+        )
+        .await;
+        let request = || {
+            request_with_bearer(
+                GetRegisteredRootStatusRequest {
+                    root_id: "work".into(),
+                },
+                &token,
+            )
+        };
+
+        let missing = daemon
+            .get_registered_root_status(request())
+            .await
+            .expect("state-directory overlap must take precedence over missing state")
+            .into_inner()
+            .root
+            .unwrap();
+        assert_eq!(
+            missing.availability,
+            RootAvailability::InvalidBinding as i32
+        );
+        assert!(missing.counts.is_none());
+
+        let writer = tcfs_sync::state::StateFileLock::acquire(&state_path).unwrap();
+        let busy = daemon
+            .get_registered_root_status(request())
+            .await
+            .expect("state-directory overlap must take precedence over a busy state cache")
+            .into_inner()
+            .root
+            .unwrap();
+        assert_eq!(busy.availability, RootAvailability::InvalidBinding as i32);
+        assert!(busy.counts.is_none());
+        drop(writer);
+
+        let mut state = tcfs_sync::state::StateCache::open(&state_path).unwrap();
+        state.set_device_id("test-device".into());
+        state.flush().unwrap();
+        drop(state);
+        let root = daemon.config.sync.root_registry.get("work").unwrap();
+        let selected = canonical_versioned_root_for_inventory(&daemon.config, "work", root)
+            .expect_err("authorized root must not overlap its daemon state directory");
+        assert!(selected.contains("state directory"));
+        let ready = daemon
+            .get_registered_root_status(request())
+            .await
+            .expect("state-directory overlap must take precedence over ready state")
+            .into_inner()
+            .root
+            .unwrap();
+        assert_eq!(ready.availability, RootAvailability::InvalidBinding as i32);
+        assert!(ready.counts.is_none());
     }
 
     #[tokio::test]
