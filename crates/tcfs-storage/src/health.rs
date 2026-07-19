@@ -45,12 +45,11 @@ pub struct HealthCheckReport {
 
 /// Typed storage health probe failure.
 #[derive(Debug, thiserror::Error)]
-#[error("storage health check {kind} at {path} after {elapsed_ms} ms: {message}")]
+#[error("storage health check {kind} at {path} after {elapsed_ms} ms")]
 pub struct HealthCheckError {
     kind: HealthCheckFailureKind,
     path: String,
     elapsed_ms: u128,
-    message: String,
     backend_kind: Option<String>,
 }
 
@@ -71,12 +70,11 @@ impl HealthCheckError {
         self.backend_kind.as_deref()
     }
 
-    fn timeout(path: &str, timeout: Duration, elapsed: Duration) -> Self {
+    fn timeout(path: &str, _timeout: Duration, elapsed: Duration) -> Self {
         Self {
             kind: HealthCheckFailureKind::Timeout,
             path: path.to_string(),
             elapsed_ms: elapsed.as_millis(),
-            message: format!("timed out after {timeout:?}"),
             backend_kind: None,
         }
     }
@@ -94,7 +92,6 @@ impl HealthCheckError {
             kind,
             path: path.to_string(),
             elapsed_ms: elapsed.as_millis(),
-            message: err.to_string(),
             backend_kind: Some(backend_kind),
         }
     }
@@ -275,6 +272,33 @@ mod tests {
 
         assert_eq!(err.kind(), HealthCheckFailureKind::RateLimited);
         assert_eq!(err.backend_kind(), Some("RateLimited"));
+    }
+
+    #[test]
+    fn backend_error_display_never_echoes_backend_message() {
+        let err = HealthCheckError::from_opendal(
+            "tenant-a/",
+            Duration::from_millis(9),
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                "https://user:HEALTH-secret@storage.example.test/HEALTH-path?token=HEALTH-query",
+            ),
+        );
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("backend_error"));
+        for forbidden in [
+            "user",
+            "HEALTH-secret",
+            "storage.example.test",
+            "HEALTH-path",
+            "HEALTH-query",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "health error leaked {forbidden}: {rendered}"
+            );
+        }
     }
 
     #[test]

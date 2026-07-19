@@ -10,6 +10,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 
+use tcfs_core::config::sanitize_http_endpoint_for_display;
 use tcfs_core::proto::{
     tcfs_daemon_client::TcfsDaemonClient, Empty, PullRequest, StatusRequest, SyncStatusRequest,
 };
@@ -99,7 +100,9 @@ impl TcfsMcp {
                     let s = resp.into_inner();
                     serde_json::json!({
                         "version": s.version,
-                        "storage_endpoint": s.storage_endpoint,
+                        "storage_endpoint": sanitize_http_endpoint_for_display(
+                            &s.storage_endpoint
+                        ),
                         "storage_ok": s.storage_ok,
                         "nats_ok": s.nats_ok,
                         "active_mounts": s.active_mounts,
@@ -136,7 +139,7 @@ impl TcfsMcp {
         }
     }
 
-    #[tool(description = "Show tcfs configuration (daemon, storage, sync, fuse, crypto sections)")]
+    #[tool(description = "Show a redacted tcfs diagnostic configuration view")]
     async fn config_show(&self) -> String {
         let path = self
             .config_path
@@ -146,15 +149,25 @@ impl TcfsMcp {
 
         match std::fs::read_to_string(&path) {
             Ok(contents) => match toml::from_str::<tcfs_core::config::TcfsConfig>(&contents) {
-                Ok(config) => match serde_json::to_string_pretty(&config) {
+                Ok(config) => match serde_json::to_string_pretty(&config.redacted()) {
                     Ok(json) => json,
-                    Err(e) => format!("{{\"error\": \"serialize config: {e}\"}}"),
+                    Err(_) => serde_json::json!({
+                        "error": "serializing redacted config failed",
+                    })
+                    .to_string(),
                 },
-                Err(e) => {
-                    format!("{{\"error\": \"parse config at {}: {e}\"}}", path.display())
-                }
+                Err(_) => serde_json::json!({
+                    "error": format!(
+                        "parse config at {} failed; check TOML syntax and field types",
+                        path.display()
+                    ),
+                })
+                .to_string(),
             },
-            Err(e) => format!("{{\"error\": \"read config at {}: {e}\"}}", path.display()),
+            Err(e) => serde_json::json!({
+                "error": format!("read config at {} failed: {e}", path.display()),
+            })
+            .to_string(),
         }
     }
 
@@ -442,7 +455,9 @@ mod tests {
             self.calls.lock().await.status_calls += 1;
             Ok(Response::new(StatusResponse {
                 version: "0.12.0-test".into(),
-                storage_endpoint: "http://seaweedfs:8333".into(),
+                storage_endpoint:
+                    "https://status-user:STATUS-secret@storage.example.test:8333/STATUS-path?signature=STATUS-query#STATUS-fragment"
+                        .into(),
                 storage_ok: true,
                 nats_ok: false,
                 active_mounts: 2,
@@ -698,6 +713,25 @@ mod tests {
         assert_eq!(value["version"], "0.12.0-test");
         assert_eq!(value["device_id"], "device-123");
         assert_eq!(value["active_mounts"], 2);
+        assert_eq!(
+            value["storage_endpoint"],
+            "https://storage.example.test:8333"
+        );
+        for forbidden in [
+            "status-user",
+            "STATUS-secret",
+            "STATUS-path",
+            "STATUS-query",
+            "STATUS-fragment",
+        ] {
+            assert!(
+                !value["storage_endpoint"]
+                    .as_str()
+                    .unwrap()
+                    .contains(forbidden),
+                "MCP daemon status leaked {forbidden}: {value}"
+            );
+        }
         assert_eq!(harness.calls.lock().await.status_calls, 1);
 
         harness.shutdown().await;
@@ -735,9 +769,110 @@ mod tests {
 
         assert_eq!(value["storage"]["bucket"], "bucket-a");
         assert_eq!(value["sync"]["conflict_mode"], "keep_local");
+        assert_eq!(value["sync"]["nats_token_configured"], false);
+        assert!(value["sync"].get("nats_token").is_none());
         assert!(value.get("daemon").is_some());
         assert!(value.get("fuse").is_some());
         assert!(value.get("crypto").is_some());
+    }
+
+    #[test]
+    fn config_show_never_serializes_nats_token_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut config = tcfs_core::config::TcfsConfig::default();
+        let token = "TIN2860-left-sentinel.middle-sentinel.right-sentinel";
+        config.sync.nats_token = Some(token.into());
+        config.storage.endpoint =
+            "https://s3-user:S3-secret@storage.example.test:8333/S3-path-secret?signature=S3-query#S3-fragment"
+                .into();
+        config.sync.nats_url =
+            "nats://nats-user:NATS-secret@nats.example.test:4222/NATS-path-secret?token=NATS-query#NATS-fragment"
+                .into();
+        config.daemon.fileprovider_endpoint = Some(
+            "https://fp-user:FP-secret@fp.example.test/FP-path-secret?token=FP-query#FP-fragment"
+                .into(),
+        );
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+
+        let mcp = TcfsMcp::new(PathBuf::from("/tmp/unused.sock"), Some(config_path));
+        let output = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(mcp.config_show());
+
+        for forbidden in [
+            token,
+            "TIN2860-left-sentinel",
+            "middle-sentinel",
+            "right-sentinel",
+            "s3-user",
+            "S3-secret",
+            "S3-path-secret",
+            "S3-query",
+            "S3-fragment",
+            "nats-user",
+            "NATS-secret",
+            "NATS-path-secret",
+            "NATS-query",
+            "NATS-fragment",
+            "fp-user",
+            "FP-secret",
+            "FP-path-secret",
+            "FP-query",
+            "FP-fragment",
+        ] {
+            assert!(
+                !output.contains(forbidden),
+                "MCP config output leaked token material: {output}"
+            );
+        }
+
+        let value: serde_json::Value =
+            serde_json::from_str(&output).expect("MCP config output must remain valid JSON");
+        assert_eq!(value["sync"]["nats_token_configured"], true);
+        assert!(value["sync"].get("nats_token").is_none());
+        assert_eq!(
+            value["storage"]["endpoint"],
+            "https://storage.example.test:8333"
+        );
+        assert_eq!(value["sync"]["nats_url"], "nats://nats.example.test:4222");
+        assert_eq!(
+            value["daemon"]["fileprovider_endpoint"],
+            "https://fp.example.test"
+        );
+    }
+
+    #[test]
+    fn config_show_parse_error_never_echoes_offending_source_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let malformed = r#"
+[sync]
+nats_token = ["TIN2860-malformed-left", "malformed-middle", "malformed-right"]
+"#;
+        std::fs::write(&config_path, malformed).unwrap();
+
+        let mcp = TcfsMcp::new(PathBuf::from("/tmp/unused.sock"), Some(config_path.clone()));
+        let output = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(mcp.config_show());
+
+        for forbidden in [
+            "TIN2860-malformed-left",
+            "malformed-middle",
+            "malformed-right",
+        ] {
+            assert!(
+                !output.contains(forbidden),
+                "MCP parse error leaked config source material: {output}"
+            );
+        }
+
+        let value: serde_json::Value =
+            serde_json::from_str(&output).expect("MCP parse failure must remain valid JSON");
+        let error = value["error"].as_str().expect("error string");
+        assert!(error.contains(&config_path.display().to_string()));
+        assert!(error.contains("check TOML syntax and field types"));
     }
 
     #[tokio::test]
