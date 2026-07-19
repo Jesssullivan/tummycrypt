@@ -29,11 +29,11 @@ use crate::index_entry::{
     admit_portable_namespace_entry, manifest_key, manifest_object_id,
     read_index_entry_record_from_store, require_absent_index_entry_for_update,
     resolve_visible_index_entry, resolve_visible_index_entry_for_update,
-    validate_canonical_rel_path, validate_relative_storage_key, validate_remote_entry,
-    write_committed_index_entry_conditionally, write_directory_marker_conditionally,
-    write_immutable_manifest_object_if_absent, write_preparing_index_entry_conditionally,
-    PendingIndexEntry, PortableNamespaceRole, RemoteEntryKind, RemoteIndexEntry,
-    ResolvedIndexEntryForUpdate,
+    validate_canonical_rel_path, validate_namespace_logical_path, validate_relative_storage_key,
+    validate_remote_entry, write_committed_index_entry_conditionally,
+    write_directory_marker_conditionally, write_immutable_manifest_object_if_absent,
+    write_preparing_index_entry_conditionally, PendingIndexEntry, PortableNamespaceRole,
+    RemoteEntryKind, RemoteIndexEntry, ResolvedIndexEntryForUpdate,
 };
 use crate::manifest::{SymlinkManifest, SyncManifest};
 use crate::state::{make_sync_state_full, FileSyncStatus, StateCache, SyncState};
@@ -4182,10 +4182,14 @@ enum SymlinkRejection {
     Empty,
     /// Target contains a control character that could inject logs or metadata.
     ControlCharacter,
+    /// Target uses a backslash, whose path meaning differs across platforms.
+    NonPortableSeparator,
+    /// Target contains a normal component that has no single portable spelling.
+    NonPortableComponent,
     /// Target is an absolute path (`/etc/passwd`, `C:\...`, UNC).
     Absolute,
-    /// Target uses `..` to escape above the link's own directory (and therefore
-    /// the sync root, since the link is always created inside the root).
+    /// Target uses `..` to cross the admitted logical-root boundary (or the
+    /// link-parent boundary when an absolute caller cannot identify that root).
     Traversal,
     /// Resolved target lands on the fail-closed security deny-set
     /// (`.ssh`, `.gnupg`, dotenv, credential files, live DBs, ...).
@@ -4199,91 +4203,136 @@ impl std::fmt::Display for SymlinkRejection {
         match self {
             SymlinkRejection::Empty => write!(f, "empty target"),
             SymlinkRejection::ControlCharacter => write!(f, "control character in target"),
+            SymlinkRejection::NonPortableSeparator => {
+                write!(f, "non-portable backslash separator in target")
+            }
+            SymlinkRejection::NonPortableComponent => {
+                write!(f, "non-portable path component in target")
+            }
             SymlinkRejection::Absolute => write!(f, "absolute target"),
-            SymlinkRejection::Traversal => write!(f, "`..` escapes sync root"),
+            SymlinkRejection::Traversal => write!(f, "`..` crosses admitted root boundary"),
             SymlinkRejection::DenySet(reason) => write!(f, "deny-set: {reason}"),
             SymlinkRejection::ReservedGit => write!(f, "reserved Git metadata path"),
         }
     }
 }
 
-/// Lexically normalize `rel` (a relative path) joined onto `base`, collapsing
-/// `.` and `..` components *without touching the filesystem* (no `canonicalize`,
-/// which would follow existing links and could itself be attacker-influenced).
+/// Whether `target` begins with a Windows path prefix.
 ///
-/// Returns the number of leading `..` components that remain after collapsing —
-/// i.e. how many directory levels the path climbs *above* `base`. Zero means the
-/// resolved path stays at or below `base`. Also returns the normalized path so
-/// callers can re-run the deny-set check across every resolved component.
-fn lexical_resolve(base: &Path, rel: &Path) -> (usize, PathBuf) {
+/// This is deliberately textual rather than `Path`-based: a Linux build must
+/// reject the same drive, rooted-current-drive, UNC, and device spellings that
+/// a Windows build would reject.
+fn has_windows_path_prefix(target: &str) -> bool {
+    let bytes = target.as_bytes();
+    target.starts_with('\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+#[derive(Clone, Copy)]
+enum SymlinkLinkPathKind {
+    Physical,
+    IndexedLogical,
+}
+
+/// Lexically resolve a portable `/`-separated symlink body without touching the
+/// filesystem.
+///
+/// A root-relative logical link path (the form used by indexed plans) supplies
+/// its parent depth, so `../sibling` is accepted only when it remains under that
+/// logical root. An absolute filesystem link path does not identify its sync
+/// root; those legacy restore/upload callers therefore get a zero ascent budget
+/// and retain the stricter "do not leave the link's own parent" behavior.
+fn lexical_resolve_portable_target(
+    local_path: &Path,
+    target: &str,
+    link_path_kind: SymlinkLinkPathKind,
+) -> std::result::Result<PathBuf, SymlinkRejection> {
     use std::path::Component;
 
-    // `depth` counts directory levels we currently sit *below* `base`. Pushing a
-    // normal component descends (+1); a `..` ascends. While `depth > 0` a `..`
-    // just pops the last descent; at `depth == 0` a `..` climbs above `base` and
-    // is an escape. `escapes` is the max depth above base that we ever reach.
-    let mut components: Vec<std::ffi::OsString> = Vec::new();
-    let mut depth: usize = 0;
-    let mut escapes: usize = 0;
+    let base = local_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut resolved = base.to_path_buf();
 
-    for comp in rel.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if depth > 0 {
-                    depth -= 1;
-                    components.pop();
+    let root_relative_parent_depth = match link_path_kind {
+        SymlinkLinkPathKind::Physical => None,
+        SymlinkLinkPathKind::IndexedLogical => {
+            let mut depth = 0usize;
+            let mut is_root_relative = true;
+            for component in base.components() {
+                match component {
+                    Component::CurDir => {}
+                    Component::Normal(_) => depth += 1,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                        is_root_relative = false;
+                        break;
+                    }
+                }
+            }
+            is_root_relative.then_some(depth)
+        }
+    };
+
+    let mut parent_ascent_budget = root_relative_parent_depth.unwrap_or(0);
+    let mut target_descent_depth = 0usize;
+    for component in target.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if target_descent_depth > 0 {
+                    target_descent_depth -= 1;
+                    resolved.pop();
+                } else if parent_ascent_budget > 0 {
+                    parent_ascent_budget -= 1;
+                    resolved.pop();
                 } else {
-                    escapes += 1;
+                    return Err(SymlinkRejection::Traversal);
                 }
             }
-            Component::Normal(name) => {
-                // Below base we track descent depth so a later `..` pops a real
-                // directory; once we have escaped above base (`escapes > 0`) the
-                // remaining names are recorded as the residual escape path only.
-                if escapes == 0 {
-                    depth += 1;
-                }
-                components.push(name.to_os_string());
+            name => {
+                target_descent_depth += 1;
+                resolved.push(name);
             }
-            // RootDir / Prefix should not appear here (absolute is rejected
-            // earlier), but if they do, treat conservatively as part of the path.
-            other => components.push(other.as_os_str().to_os_string()),
         }
     }
 
-    // Build the resolved path anchored at `base`, prefixed by any net escape.
-    let mut out = PathBuf::new();
-    if escapes == 0 {
-        out.push(base);
-    } else {
-        for _ in 0..escapes {
-            out.push("..");
-        }
-    }
-    for name in &components {
-        out.push(name);
-    }
-    (escapes, out)
+    Ok(resolved)
 }
 
 /// Fail-closed validation for a restored symlink target (TIN-1737).
 ///
 /// `local_path` is the would-be link location; `target` is the attacker-supplied
-/// link body. Rejects: empty, absolute, `..`-escape above the link's directory,
-/// or any resolved component hitting the security deny-set. Returns `Ok(())` for
-/// a benign in-root relative target.
+/// link body. Rejects: empty, controls, non-portable separators or prefixes,
+/// `..`-escape above the logical root, or any resolved component hitting the
+/// security deny-set. Returns `Ok(())` for a benign in-root relative target.
 ///
 /// NOTE: `create_local_symlink` does not receive the sync root, so the link's
-/// own parent directory is used as the escape boundary. This is *more* strict
-/// than "must stay within the sync root" (the link is always created inside the
-/// root), so it can refuse an otherwise-legitimate `../sibling/file` target that
-/// crosses one directory but stays in-root. That is the conservative, fail-closed
-/// trade-off; loosening it safely requires threading the real sync root down to
-/// every restore caller.
+/// own parent directory is used as the escape boundary for absolute filesystem
+/// paths. This is *more* strict than "must stay within the sync root" (the link
+/// is always created inside the root), so it can refuse an otherwise-legitimate
+/// `../sibling/file` target. Root-relative indexed paths do carry their logical
+/// parent depth and may ascend within that root.
 fn validate_restored_symlink_target(
     local_path: &Path,
     target: &str,
+) -> std::result::Result<(), SymlinkRejection> {
+    validate_symlink_target(local_path, target, SymlinkLinkPathKind::Physical)
+}
+
+pub(crate) fn validate_restored_symlink_target_for_physical_path(
+    local_path: &Path,
+    target: &str,
+) -> Result<()> {
+    validate_restored_symlink_target(local_path, target).map_err(|reason| {
+        anyhow::anyhow!(
+            "refusing symlink target at {}: {reason}",
+            local_path.display()
+        )
+    })
+}
+
+fn validate_symlink_target(
+    local_path: &Path,
+    target: &str,
+    link_path_kind: SymlinkLinkPathKind,
 ) -> std::result::Result<(), SymlinkRejection> {
     if target.is_empty() {
         return Err(SymlinkRejection::Empty);
@@ -4292,33 +4341,32 @@ fn validate_restored_symlink_target(
         return Err(SymlinkRejection::ControlCharacter);
     }
 
+    // Parse the serialized target using one portable grammar. Host-native
+    // `Path::is_absolute` / `Path::components` would interpret `C:\...` and
+    // backslashes differently on Linux, macOS, and Windows.
+    if target.starts_with('/') || has_windows_path_prefix(target) {
+        return Err(SymlinkRejection::Absolute);
+    }
+    if target.contains('\\') {
+        return Err(SymlinkRejection::NonPortableSeparator);
+    }
+    for component in target.split('/') {
+        if component.is_empty() {
+            return Err(SymlinkRejection::NonPortableComponent);
+        }
+        if component != ".git" && component.eq_ignore_ascii_case(".git") {
+            return Err(SymlinkRejection::ReservedGit);
+        }
+        if component != "."
+            && component != ".."
+            && validate_namespace_logical_path(component).is_err()
+        {
+            return Err(SymlinkRejection::NonPortableComponent);
+        }
+    }
+
     let target_path = Path::new(target);
-
-    // (a) Absolute targets are always refused: `is_absolute` is platform-correct
-    // (covers `/etc/...`, Windows drive `C:\`, and UNC `\\server\share`).
-    if target_path.is_absolute() {
-        return Err(SymlinkRejection::Absolute);
-    }
-    // Defense-in-depth: refuse a leading `/` even if a non-unix `is_absolute`
-    // ever disagreed, and refuse a Windows-style drive/UNC prefix explicitly.
-    if target.starts_with('/') || target.starts_with('\\') {
-        return Err(SymlinkRejection::Absolute);
-    }
-    if target_path
-        .components()
-        .next()
-        .is_some_and(|c| matches!(c, std::path::Component::Prefix(_)))
-    {
-        return Err(SymlinkRejection::Absolute);
-    }
-
-    let base = local_path.parent().unwrap_or_else(|| Path::new("."));
-    let (escapes, resolved) = lexical_resolve(base, target_path);
-
-    // (b) `..` escape above the link's directory (and thus the sync root).
-    if escapes > 0 {
-        return Err(SymlinkRejection::Traversal);
-    }
+    let resolved = lexical_resolve_portable_target(local_path, target, link_path_kind)?;
 
     if filesystem_path_has_reserved_git_component(local_path)
         || filesystem_path_has_reserved_git_component(&resolved)
@@ -4347,12 +4395,19 @@ fn validate_restored_symlink_target(
 /// Planning-safe wrapper for the symlink ingress/egress target policy. The
 /// attacker-controlled target is deliberately omitted from the error text.
 pub fn validate_indexed_symlink_target(local_path: &Path, target: &str) -> Result<()> {
-    validate_restored_symlink_target(local_path, target).map_err(|reason| {
-        anyhow::anyhow!(
-            "refusing symlink target at {}: {reason}",
-            local_path.display()
-        )
-    })
+    let logical_path = local_path
+        .to_str()
+        .context("indexed symlink path must be valid UTF-8")?;
+    validate_namespace_logical_path(logical_path)
+        .context("indexed symlink path must be a canonical logical relative path")?;
+    validate_symlink_target(local_path, target, SymlinkLinkPathKind::IndexedLogical).map_err(
+        |reason| {
+            anyhow::anyhow!(
+                "refusing symlink target at {}: {reason}",
+                local_path.display()
+            )
+        },
+    )
 }
 
 /// Create a restored symlink after fail-closed target validation (TIN-1737).
@@ -6981,6 +7036,31 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_upload_rejects_unbound_logical_parent_target() {
+        let op = memory_op();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("target.txt"), b"target").unwrap();
+        let local = nested.join("link");
+        std::os::unix::fs::symlink("../target.txt", &local).unwrap();
+        let mut state = StateCache::open(&tmp.path().join("state.json")).unwrap();
+
+        let error =
+            upload_symlink_with_device(&op, &local, "data", &mut state, "neo", "nested/link")
+                .await
+                .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("crosses admitted root boundary"),
+            "unexpected rejection: {error:#}"
+        );
+        assert!(!op.exists("data/index/nested/link").await.unwrap());
+    }
+
     #[test]
     fn typed_content_identity_never_equates_regular_file_and_symlink() {
         let clock = VectorClock::new();
@@ -7250,7 +7330,6 @@ mod tests {
         assert_eq!(winner_manifest.vclock.get("device-b"), 0);
     }
 
-    #[cfg(unix)]
     #[test]
     fn validate_restored_symlink_target_rules() {
         let link = Path::new("/sync/root/sub/link");
@@ -7288,6 +7367,151 @@ mod tests {
         assert!(validate_restored_symlink_target(link, "sibling.txt").is_ok());
         assert!(validate_restored_symlink_target(link, "./nested/file").is_ok());
         assert!(validate_restored_symlink_target(link, "a/b/c").is_ok());
+        assert!(validate_restored_symlink_target(link, "missing/broken-target").is_ok());
+    }
+
+    #[test]
+    fn validate_restored_symlink_target_uses_portable_prefix_and_separator_rules() {
+        let link = Path::new("/sync/root/sub/link");
+
+        for target in [
+            r"C:\outside",
+            "C:/outside",
+            "C:outside",
+            r"\\server\share",
+            r"\\?\C:\outside",
+            r"\\.\PhysicalDrive0",
+            r"\??\C:\outside",
+            "//server/share",
+            "//?/C:/outside",
+        ] {
+            assert!(
+                matches!(
+                    validate_restored_symlink_target(link, target),
+                    Err(SymlinkRejection::Absolute)
+                ),
+                "Windows absolute/prefix form was accepted: {target:?}"
+            );
+        }
+
+        for target in [r"dir\..\outside", r"nested\file", r"safe/inner\file"] {
+            assert!(
+                matches!(
+                    validate_restored_symlink_target(link, target),
+                    Err(SymlinkRejection::NonPortableSeparator)
+                ),
+                "backslash-bearing target was accepted: {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_restored_symlink_target_rejects_nonportable_components() {
+        let link = Path::new("/sync/root/sub/link");
+
+        for target in [
+            "nested/a:b",
+            "nested/NUL",
+            "nested/COM1.txt",
+            "nested/git~1/config",
+            "nested/.tcfs_dir/entry",
+            "nested/.TCFS_DIR/entry",
+            "nested/trailing.",
+            "nested/trailing ",
+            "nested/question?",
+            "nested/re\u{301}sume\u{301}.txt",
+            "nested//file",
+            "nested/",
+        ] {
+            assert!(
+                matches!(
+                    validate_restored_symlink_target(link, target),
+                    Err(SymlinkRejection::NonPortableComponent)
+                ),
+                "non-portable target component was accepted: {target:?}"
+            );
+        }
+
+        for target in [
+            "nested/file",
+            "nested/Résumé.txt",
+            "./nested/file",
+            "../sibling",
+        ] {
+            assert!(
+                !matches!(
+                    validate_restored_symlink_target(link, target),
+                    Err(SymlinkRejection::NonPortableComponent)
+                ),
+                "portable target component was rejected: {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_restored_symlink_target_rejects_controls_on_every_host() {
+        let link = Path::new("/sync/root/sub/link");
+
+        for target in [
+            "safe\0other",
+            "safe\nother",
+            "safe\u{1f}other",
+            "safe\u{7f}other",
+        ] {
+            assert!(
+                matches!(
+                    validate_restored_symlink_target(link, target),
+                    Err(SymlinkRejection::ControlCharacter)
+                ),
+                "control-bearing target was accepted: {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_indexed_symlink_target_resolves_against_logical_parent_depth() {
+        let nested_link = Path::new("a/b/link");
+
+        assert!(validate_indexed_symlink_target(nested_link, "../../sibling").is_ok());
+        assert!(validate_indexed_symlink_target(nested_link, "../missing/target").is_ok());
+        assert!(matches!(
+            validate_symlink_target(
+                nested_link,
+                "../../../outside",
+                SymlinkLinkPathKind::IndexedLogical
+            ),
+            Err(SymlinkRejection::Traversal)
+        ));
+        assert!(matches!(
+            validate_symlink_target(
+                nested_link,
+                "../../.git/config",
+                SymlinkLinkPathKind::IndexedLogical
+            ),
+            Err(SymlinkRejection::ReservedGit)
+        ));
+
+        // Physical destination paths do not disclose the logical sync root, so
+        // their conservative boundary remains the link's own parent.
+        assert!(matches!(
+            validate_restored_symlink_target(Path::new("/sync/root/a/b/link"), "../sibling"),
+            Err(SymlinkRejection::Traversal)
+        ));
+        assert!(matches!(
+            validate_restored_symlink_target(Path::new("sandbox/link"), "../outside"),
+            Err(SymlinkRejection::Traversal)
+        ));
+        assert!(
+            validate_indexed_symlink_target(Path::new("/sync/root/a/b/link"), "nested/file")
+                .is_err()
+        );
+        for reserved_link_path in [".tcfs_dir", "nested/.TCFS_DIR/link"] {
+            assert!(
+                validate_indexed_symlink_target(Path::new(reserved_link_path), "nested/file")
+                    .is_err(),
+                "reserved indexed link path was accepted: {reserved_link_path:?}"
+            );
+        }
     }
 
     // ── normalize_rel_path ───────────────────────────────────────────────

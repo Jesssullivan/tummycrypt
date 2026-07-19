@@ -12,6 +12,10 @@ pub mod nats;
 pub mod path_acl;
 pub mod policy;
 pub mod reconcile;
+// Internal acquisition artifact until a held root anchor revalidates inventory C
+// across state/remote reads and is the only path that can mint a complete plan.
+#[allow(dead_code)]
+pub(crate) mod registered_local_snapshot;
 pub mod registered_reconcile;
 pub mod scheduler;
 pub mod state;
