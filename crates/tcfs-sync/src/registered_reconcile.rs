@@ -1069,7 +1069,7 @@ impl BoundRemoteObjectSnapshotV1 {
     }
 }
 
-fn bind_remote_object_v1(snapshot: RawObjectSnapshotV1) -> BoundRemoteObjectSnapshotV1 {
+pub(crate) fn bind_remote_object_v1(snapshot: RawObjectSnapshotV1) -> BoundRemoteObjectSnapshotV1 {
     let binding = if let Some(version) = snapshot.binding().version() {
         RegisteredRootRemoteObjectBindingV1::Version {
             version: version.to_owned(),

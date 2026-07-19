@@ -2039,16 +2039,33 @@ pub(crate) async fn write_immutable_manifest_object_if_absent(
     .await
 }
 
-/// Read one exact storage object without invoking compatibility recovery or
-/// any write-capability probe.
-///
-/// Version-bound reads are preferred, followed by ETag-bound reads. A backend
-/// without either identity is represented explicitly as `Unbound`; callers
-/// must not silently promote that observation into a complete plan.
-pub(crate) async fn read_raw_object_snapshot_v1(
+#[derive(Clone, Copy)]
+enum RawObjectSnapshotReadModeV1 {
+    PreferVersion,
+    CurrentEtag,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("object changed after read-only snapshot stat: {object_key}")]
+pub(crate) struct RawObjectChangedDuringReadV1 {
+    object_key: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "read-only object snapshot exceeds {max_bytes} bytes ({observed_bytes} observed): {object_key}"
+)]
+pub(crate) struct RawObjectSnapshotTooLargeV1 {
+    object_key: String,
+    observed_bytes: u64,
+    max_bytes: u64,
+}
+
+async fn read_raw_object_snapshot_with_mode_v1(
     op: &Operator,
     object_key: &str,
     max_bytes: u64,
+    mode: RawObjectSnapshotReadModeV1,
 ) -> Result<Option<RawObjectReadV1>> {
     let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
     anyhow::ensure!(
@@ -2076,10 +2093,14 @@ pub(crate) async fn read_raw_object_snapshot_v1(
         metadata.content_length() > 0,
         "read-only object snapshot is empty: {object_key}"
     );
-    anyhow::ensure!(
-        metadata.content_length() <= max_bytes,
-        "read-only object snapshot exceeds {max_bytes} bytes: {object_key}"
-    );
+    if metadata.content_length() > max_bytes {
+        return Err(RawObjectSnapshotTooLargeV1 {
+            object_key: object_key.to_owned(),
+            observed_bytes: metadata.content_length(),
+            max_bytes,
+        }
+        .into());
+    }
 
     let checked_binding_token = |value: Option<&str>,
                                  description: &str|
@@ -2096,7 +2117,8 @@ pub(crate) async fn read_raw_object_snapshot_v1(
     };
     let etag = checked_binding_token(metadata.etag(), "object ETag")?;
     let version = checked_binding_token(metadata.version(), "object version")?
-        .filter(|version| version != "null");
+        .filter(|version| version != "null")
+        .filter(|_| matches!(mode, RawObjectSnapshotReadModeV1::PreferVersion));
     let capability = op.info().full_capability();
     let version = version.filter(|_| capability.read_with_version);
     let etag_for_read = etag
@@ -2141,7 +2163,10 @@ pub(crate) async fn read_raw_object_snapshot_v1(
                 ErrorKind::NotFound | ErrorKind::ConditionNotMatch
             ) =>
         {
-            bail!("object changed after read-only snapshot stat: {object_key}");
+            return Err(RawObjectChangedDuringReadV1 {
+                object_key: object_key.to_owned(),
+            }
+            .into());
         }
         Err(error) => {
             return Err(anyhow::anyhow!(error))
@@ -2161,7 +2186,10 @@ pub(crate) async fn read_raw_object_snapshot_v1(
                 ErrorKind::NotFound | ErrorKind::ConditionNotMatch
             ) =>
         {
-            bail!("object changed after read-only snapshot stat: {object_key}");
+            return Err(RawObjectChangedDuringReadV1 {
+                object_key: object_key.to_owned(),
+            }
+            .into());
         }
         Err(error) => {
             return Err(anyhow::anyhow!(error))
@@ -2188,7 +2216,10 @@ pub(crate) async fn read_raw_object_snapshot_v1(
                     ErrorKind::NotFound | ErrorKind::ConditionNotMatch
                 ) =>
             {
-                bail!("object changed after read-only snapshot stat: {object_key}");
+                return Err(RawObjectChangedDuringReadV1 {
+                    object_key: object_key.to_owned(),
+                }
+                .into());
             }
             Err(error) => {
                 return Err(anyhow::anyhow!(error))
@@ -2200,23 +2231,68 @@ pub(crate) async fn read_raw_object_snapshot_v1(
             let remaining = max_plus_one_usize.saturating_sub(retained);
             let copy_len = remaining.min(chunk.len());
             raw_bytes.extend_from_slice(&chunk[..copy_len]);
-            anyhow::ensure!(
-                raw_bytes.len() <= max_bytes_usize && copy_len == chunk.len(),
-                "object exceeded read-only snapshot bound while reading: {object_key}"
-            );
+            if raw_bytes.len() > max_bytes_usize || copy_len != chunk.len() {
+                return Err(RawObjectChangedDuringReadV1 {
+                    object_key: object_key.to_owned(),
+                }
+                .into());
+            }
         }
     }
-    anyhow::ensure!(
-        u64::try_from(raw_bytes.len()).context("read-only object length does not fit u64")?
-            == metadata.content_length(),
-        "object length changed during read-only snapshot: {object_key}"
-    );
+    if u64::try_from(raw_bytes.len()).context("read-only object length does not fit u64")?
+        != metadata.content_length()
+    {
+        return Err(RawObjectChangedDuringReadV1 {
+            object_key: object_key.to_owned(),
+        }
+        .into());
+    }
     let raw_blake3 = blake3::hash(&raw_bytes);
     Ok(Some(RawObjectReadV1::Bound(RawObjectSnapshotV1 {
         raw_bytes,
         raw_blake3,
         binding,
     })))
+}
+
+/// Read one exact storage object without invoking compatibility recovery or
+/// any write-capability probe.
+///
+/// Version-bound reads are preferred, followed by ETag-bound reads. A backend
+/// without either identity is represented explicitly as `Unbound`; callers
+/// must not silently promote that observation into a complete plan.
+pub(crate) async fn read_raw_object_snapshot_v1(
+    op: &Operator,
+    object_key: &str,
+    max_bytes: u64,
+) -> Result<Option<RawObjectReadV1>> {
+    read_raw_object_snapshot_with_mode_v1(
+        op,
+        object_key,
+        max_bytes,
+        RawObjectSnapshotReadModeV1::PreferVersion,
+    )
+    .await
+}
+
+/// Read the current value of one mutable object by ETag.
+///
+/// Unlike [`read_raw_object_snapshot_v1`], this never selects a historical
+/// version after the initial stat. Catalog HEAD acquisition must prove that the
+/// bytes were current at the conditional read, then compare a second current
+/// read after the immutable closure is drained.
+pub(crate) async fn read_current_raw_object_snapshot_v1(
+    op: &Operator,
+    object_key: &str,
+    max_bytes: u64,
+) -> Result<Option<RawObjectReadV1>> {
+    read_raw_object_snapshot_with_mode_v1(
+        op,
+        object_key,
+        max_bytes,
+        RawObjectSnapshotReadModeV1::CurrentEtag,
+    )
+    .await
 }
 
 async fn read_raw_index_snapshot_from_store(
@@ -3179,6 +3255,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_raw_object_snapshot_uses_current_etag_not_historical_version() {
+        let (op, backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"current".to_vec(),
+                etag: Some("etag-1".to_owned()),
+                version: Some("version-1".to_owned()),
+            },
+            None,
+            true,
+            true,
+        );
+
+        let snapshot = match super::read_current_raw_object_snapshot_v1(&op, "head", 32)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            super::RawObjectReadV1::Bound(snapshot) => snapshot,
+            super::RawObjectReadV1::Unbound => panic!("expected current ETag-bound snapshot"),
+        };
+        assert_eq!(snapshot.raw_bytes(), b"current");
+        assert_eq!(
+            snapshot.binding(),
+            &super::RawObjectReadBindingV1::Etag {
+                etag: "etag-1".to_owned()
+            }
+        );
+        assert_eq!(
+            backend.reads(),
+            vec![SnapshotTestRead {
+                offset: 0,
+                size: None,
+                if_match: Some("etag-1".to_owned()),
+                version: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn current_raw_object_snapshot_types_current_head_movement() {
+        let (op, _) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"head-a".to_vec(),
+                etag: Some("etag-a".to_owned()),
+                version: Some("version-a".to_owned()),
+            },
+            Some(SnapshotTestObject {
+                bytes: b"head-b".to_vec(),
+                etag: Some("etag-b".to_owned()),
+                version: Some("version-b".to_owned()),
+            }),
+            true,
+            true,
+        );
+        let error = super::read_current_raw_object_snapshot_v1(&op, "head", 32)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<super::RawObjectChangedDuringReadV1>()
+                .is_some(),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn read_only_raw_object_snapshot_uses_etag_and_rejects_stat_read_mutation() {
         let stable = SnapshotTestObject {
             bytes: b"same".to_vec(),
@@ -3232,10 +3374,14 @@ mod tests {
             false,
             true,
         );
+        let error = super::read_raw_object_snapshot_v1(&oversized_op, "object", 4)
+            .await
+            .unwrap_err();
         assert!(
-            super::read_raw_object_snapshot_v1(&oversized_op, "object", 4)
-                .await
-                .is_err()
+            error
+                .downcast_ref::<super::RawObjectSnapshotTooLargeV1>()
+                .is_some(),
+            "{error:#}"
         );
         assert!(oversized_backend.reads().is_empty());
 
@@ -3281,7 +3427,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains("exceeded read-only snapshot bound"),
+            error
+                .downcast_ref::<super::RawObjectChangedDuringReadV1>()
+                .is_some(),
             "{error:#}"
         );
         assert_eq!(

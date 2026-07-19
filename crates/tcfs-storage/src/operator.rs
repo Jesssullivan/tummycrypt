@@ -419,6 +419,40 @@ pub async fn verify_conditional_write_semantics(op: &Operator, prefix: &str) -> 
 
 type WeakAccessor = Weak<dyn opendal::raw::AccessDyn>;
 
+/// Opaque evidence that one exact OpenDAL accessor and canonical prefix passed
+/// the live conditional read/write semantics probe.
+///
+/// Capability flags alone are not sufficient for catalog HEAD authority: an
+/// S3-compatible endpoint may accept conditional request headers without
+/// enforcing them atomically. The receipt is deliberately non-cloneable and
+/// cannot authorize another accessor or prefix.
+pub struct ConditionalWriteSemanticsReceipt {
+    accessor: WeakAccessor,
+    prefix: String,
+}
+
+impl std::fmt::Debug for ConditionalWriteSemanticsReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConditionalWriteSemanticsReceipt")
+            .field("prefix", &self.prefix)
+            .field("accessor_alive", &self.accessor.upgrade().is_some())
+            .finish()
+    }
+}
+
+impl ConditionalWriteSemanticsReceipt {
+    /// Return whether this receipt belongs to the exact live accessor and
+    /// canonical prefix supplied by the caller.
+    pub fn authorizes(&self, op: &Operator, prefix: &str) -> Result<bool> {
+        let prefix = normalize_probe_prefix(prefix)?;
+        let accessor = Arc::downgrade(op.inner());
+        Ok(self.prefix == prefix
+            && self.accessor.upgrade().is_some()
+            && Weak::ptr_eq(&self.accessor, &accessor))
+    }
+}
+
 struct ConditionalWriteProbeRoute {
     application: WeakAccessor,
     /// Separate unthrottled accessor for the live concurrent conformance race.
@@ -569,6 +603,24 @@ pub async fn ensure_conditional_write_semantics(op: &Operator, prefix: &str) -> 
         .get_or_try_init(|| verify_conditional_write_semantics(op, &prefix))
         .await?;
     Ok(())
+}
+
+/// Verify and retain the conditional semantics required by a mutable catalog
+/// HEAD for one exact accessor and prefix.
+///
+/// The returned receipt is the only admission input accepted by the strict
+/// catalog reader. Acquiring it may perform the bounded live conformance probe;
+/// callers must therefore do so before entering a read-only planning window.
+pub async fn acquire_conditional_write_semantics_receipt(
+    op: &Operator,
+    prefix: &str,
+) -> Result<ConditionalWriteSemanticsReceipt> {
+    let prefix = normalize_probe_prefix(prefix)?;
+    ensure_conditional_write_semantics(op, &prefix).await?;
+    Ok(ConditionalWriteSemanticsReceipt {
+        accessor: Arc::downgrade(op.inner()),
+        prefix,
+    })
 }
 
 fn validate_endpoint_transport(cfg: &StorageConfig) -> Result<()> {
@@ -1079,6 +1131,28 @@ mod tests {
             error.to_string().contains("safe relative"),
             "registration must not bypass prefix validation: {error:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn conditional_semantics_receipt_is_exact_accessor_and_prefix_scoped() {
+        let registered = Operator::new(opendal::services::Memory::default())
+            .unwrap()
+            .finish();
+        let unrelated = Operator::new(opendal::services::Memory::default())
+            .unwrap()
+            .finish();
+        register_memory_conditional_write_emulation_for_tests(&registered).unwrap();
+
+        let receipt = acquire_conditional_write_semantics_receipt(&registered, "/tenant/nested/")
+            .await
+            .unwrap();
+        assert!(receipt.authorizes(&registered, "tenant/nested").unwrap());
+        assert!(receipt
+            .authorizes(&registered.clone(), "/tenant/nested/")
+            .unwrap());
+        assert!(!receipt.authorizes(&registered, "tenant/other").unwrap());
+        assert!(!receipt.authorizes(&unrelated, "tenant/nested").unwrap());
+        assert!(receipt.authorizes(&registered, "tenant/../other").is_err());
     }
 
     #[test]

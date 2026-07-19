@@ -1407,6 +1407,34 @@ impl RootRemoteObservationModelV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootRemoteCompletenessAuthorityV1 {
+    /// One conditionally updated current HEAD selects an immutable,
+    /// content-addressed catalog root whose ordered pages enumerate the exact
+    /// registered-root reconcile metadata corpus: every index, every namespace
+    /// reservation, and exactly the manifests referenced by that metadata.
+    /// Chunks, staging objects, probes, and the catalog's own objects are
+    /// outside this corpus. Generic object-store listings are diagnostic only
+    /// and cannot contribute completeness authority.
+    ///
+    /// This contract is not satisfied merely by publishing catalog objects.
+    /// Every namespace writer must be fenced behind the HEAD CAS protocol, and
+    /// the initial catalog must be bootstrapped from externally established
+    /// complete truth rather than from an ordinary LIST. The selected HEAD
+    /// proves closure only at that exact revision; current-namespace authority
+    /// also requires linearizable current-HEAD reads or an externally trusted
+    /// monotonic high-water mark that rejects replay and rollback.
+    ImmutableCatalogHeadClosureV1,
+}
+
+impl RootRemoteCompletenessAuthorityV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::ImmutableCatalogHeadClosureV1 => "immutable-catalog-head-closure-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootRemoteContractV1 {
     RawCommittedManifestBoundV1,
 }
@@ -1427,6 +1455,18 @@ impl RootRemoteContractV1 {
         match self {
             Self::RawCommittedManifestBoundV1 => {
                 RootRemoteObservationModelV1::TwoListedUniverseBoundPassesNonAtomicV1
+            }
+        }
+    }
+
+    /// The only remote source permitted to satisfy complete-or-no-digest.
+    ///
+    /// The repeated LIST model above remains useful drift evidence, but it
+    /// cannot be promoted into this authority even when both passes match.
+    pub const fn completeness_authority(self) -> RootRemoteCompletenessAuthorityV1 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => {
+                RootRemoteCompletenessAuthorityV1::ImmutableCatalogHeadClosureV1
             }
         }
     }
@@ -1623,6 +1663,71 @@ impl RootRemoteContractV1 {
     pub const fn max_remote_vector_clock_entries(self) -> u64 {
         match self {
             Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum canonical bytes in the mutable catalog HEAD.
+    pub const fn max_catalog_head_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 16 * 1024,
+        }
+    }
+
+    /// Maximum canonical bytes in one immutable catalog root.
+    pub const fn max_catalog_root_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum canonical bytes in one immutable catalog page.
+    pub const fn max_catalog_page_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 16 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum immutable pages referenced by one catalog root.
+    pub const fn max_catalog_pages(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum physical namespace objects named by one catalog page.
+    pub const fn max_catalog_entries_per_page(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum physical namespace objects named by the complete catalog.
+    pub const fn max_catalog_entries(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 3_000_000,
+        }
+    }
+
+    /// Maximum combined storage-key bytes retained from all catalog entries.
+    pub const fn max_catalog_entry_key_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 512 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum combined version and ETag bytes retained from catalog object
+    /// bindings, including root, pages, and named namespace objects.
+    pub const fn max_catalog_binding_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 512 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum aggregate canonical bytes read for the immutable catalog root
+    /// and all pages. The mutable HEAD is charged separately.
+    pub const fn max_catalog_closure_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -2014,7 +2119,7 @@ fn fingerprint_root_profile_settings_v1(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RegisteredRootPlanContractFingerprintFieldsV1 {
-    canonical_names: [(&'static str, &'static str); 10],
+    canonical_names: [(&'static str, &'static str); 11],
     local_snapshot_max_depth: u32,
     local_snapshot_max_entries: u64,
     local_snapshot_max_retained_path_bytes: u64,
@@ -2050,6 +2155,15 @@ struct RegisteredRootPlanContractFingerprintFieldsV1 {
     remote_max_manifest_chunk_entries: u64,
     remote_max_manifest_wrapped_key_entries: u64,
     remote_max_remote_vector_clock_entries: u64,
+    remote_max_catalog_head_object_bytes: u64,
+    remote_max_catalog_root_object_bytes: u64,
+    remote_max_catalog_page_object_bytes: u64,
+    remote_max_catalog_pages: u64,
+    remote_max_catalog_entries_per_page: u64,
+    remote_max_catalog_entries: u64,
+    remote_max_catalog_entry_key_bytes: u64,
+    remote_max_catalog_binding_bytes: u64,
+    remote_max_catalog_closure_object_bytes: u64,
 }
 
 fn registered_root_plan_contract_fingerprint_fields_v1(
@@ -2074,6 +2188,10 @@ fn registered_root_plan_contract_fingerprint_fields_v1(
             (
                 "remote_observation_model",
                 contract.remote.observation_model().canonical_name(),
+            ),
+            (
+                "remote_completeness_authority",
+                contract.remote.completeness_authority().canonical_name(),
             ),
             ("causality_policy", contract.causality.canonical_name()),
             ("action_policy", contract.actions.canonical_name()),
@@ -2134,6 +2252,15 @@ fn registered_root_plan_contract_fingerprint_fields_v1(
         remote_max_manifest_chunk_entries: contract.remote.max_manifest_chunk_entries(),
         remote_max_manifest_wrapped_key_entries: contract.remote.max_manifest_wrapped_key_entries(),
         remote_max_remote_vector_clock_entries: contract.remote.max_remote_vector_clock_entries(),
+        remote_max_catalog_head_object_bytes: contract.remote.max_catalog_head_object_bytes(),
+        remote_max_catalog_root_object_bytes: contract.remote.max_catalog_root_object_bytes(),
+        remote_max_catalog_page_object_bytes: contract.remote.max_catalog_page_object_bytes(),
+        remote_max_catalog_pages: contract.remote.max_catalog_pages(),
+        remote_max_catalog_entries_per_page: contract.remote.max_catalog_entries_per_page(),
+        remote_max_catalog_entries: contract.remote.max_catalog_entries(),
+        remote_max_catalog_entry_key_bytes: contract.remote.max_catalog_entry_key_bytes(),
+        remote_max_catalog_binding_bytes: contract.remote.max_catalog_binding_bytes(),
+        remote_max_catalog_closure_object_bytes: contract.remote.max_catalog_closure_object_bytes(),
     }
 }
 
@@ -2142,7 +2269,7 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
 ) -> RegisteredRootPlanContractFingerprintV1 {
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.registered-root-plan-contract.b3v1",
-        fields.canonical_names.len() + 35,
+        fields.canonical_names.len() + 44,
     );
     for (tag, value) in fields.canonical_names {
         encoder.field(tag, value.as_bytes());
@@ -2306,6 +2433,44 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
             encoder.field(
                 "remote_max_remote_vector_clock_entries",
                 &fields.remote_max_remote_vector_clock_entries.to_be_bytes(),
+            );
+        }
+        if tag == "remote_completeness_authority" {
+            encoder.field(
+                "remote_max_catalog_head_object_bytes",
+                &fields.remote_max_catalog_head_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_root_object_bytes",
+                &fields.remote_max_catalog_root_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_page_object_bytes",
+                &fields.remote_max_catalog_page_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_pages",
+                &fields.remote_max_catalog_pages.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_entries_per_page",
+                &fields.remote_max_catalog_entries_per_page.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_entries",
+                &fields.remote_max_catalog_entries.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_entry_key_bytes",
+                &fields.remote_max_catalog_entry_key_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_binding_bytes",
+                &fields.remote_max_catalog_binding_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_catalog_closure_object_bytes",
+                &fields.remote_max_catalog_closure_object_bytes.to_be_bytes(),
             );
         }
     }
@@ -3403,6 +3568,10 @@ resolution_policy = "inspect-only"
             remote.observation_model(),
             RootRemoteObservationModelV1::TwoListedUniverseBoundPassesNonAtomicV1
         );
+        assert_eq!(
+            remote.completeness_authority(),
+            RootRemoteCompletenessAuthorityV1::ImmutableCatalogHeadClosureV1
+        );
         assert_eq!(remote.observation_model().pass_count(), 2);
         assert_eq!(remote.listing_page_request_limit(), 1000);
         assert_eq!(remote.max_concurrent_bound_reads(), 8);
@@ -3450,6 +3619,18 @@ resolution_policy = "inspect-only"
         assert_eq!(remote.max_manifest_chunk_entries(), 262_144);
         assert_eq!(remote.max_manifest_wrapped_key_entries(), 4096);
         assert_eq!(remote.max_remote_vector_clock_entries(), 4096);
+        assert_eq!(remote.max_catalog_head_object_bytes(), 16 * 1024);
+        assert_eq!(remote.max_catalog_root_object_bytes(), 4 * 1024 * 1024);
+        assert_eq!(remote.max_catalog_page_object_bytes(), 16 * 1024 * 1024);
+        assert_eq!(remote.max_catalog_pages(), 4096);
+        assert_eq!(remote.max_catalog_entries_per_page(), 4096);
+        assert_eq!(remote.max_catalog_entries(), 3_000_000);
+        assert_eq!(remote.max_catalog_entry_key_bytes(), 512 * 1024 * 1024);
+        assert_eq!(remote.max_catalog_binding_bytes(), 512 * 1024 * 1024);
+        assert_eq!(
+            remote.max_catalog_closure_object_bytes(),
+            4 * 1024 * 1024 * 1024
+        );
         assert_eq!(
             contract.causality_contract(),
             RootCausalityContractV1::TypedVectorClockV1
@@ -3475,7 +3656,7 @@ resolution_policy = "inspect-only"
         );
         assert_eq!(
             fingerprint.to_string(),
-            "b3v1:aabbbd421e6d9d487b59e244faa8d8a1ebf75311ec7cfa2dd7954b5a960850c4"
+            "b3v1:8767d0b8866f8c319f16e816a1996e2a7b638fe01ba972ed28dd2075345f9b6f"
         );
     }
 
@@ -3500,6 +3681,10 @@ resolution_policy = "inspect-only"
                 (
                     "remote_observation_model",
                     "two-listed-universe-bound-passes-non-atomic-v1",
+                ),
+                (
+                    "remote_completeness_authority",
+                    "immutable-catalog-head-closure-v1",
                 ),
                 ("causality_policy", "typed-vector-clock-v1"),
                 ("action_policy", "plan-only-no-delete-v1"),
@@ -3568,6 +3753,21 @@ resolution_policy = "inspect-only"
         assert_eq!(
             fields.remote_max_retained_unique_claim_bytes_per_pass,
             512 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_catalog_head_object_bytes, 16 * 1024);
+        assert_eq!(fields.remote_max_catalog_root_object_bytes, 4 * 1024 * 1024);
+        assert_eq!(
+            fields.remote_max_catalog_page_object_bytes,
+            16 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_catalog_pages, 4096);
+        assert_eq!(fields.remote_max_catalog_entries_per_page, 4096);
+        assert_eq!(fields.remote_max_catalog_entries, 3_000_000);
+        assert_eq!(fields.remote_max_catalog_entry_key_bytes, 512 * 1024 * 1024);
+        assert_eq!(fields.remote_max_catalog_binding_bytes, 512 * 1024 * 1024);
+        assert_eq!(
+            fields.remote_max_catalog_closure_object_bytes,
+            4 * 1024 * 1024 * 1024
         );
         assert_eq!(
             fields.remote_max_bound_object_bytes_per_pass,
@@ -3654,6 +3854,13 @@ resolution_policy = "inspect-only"
             fingerprint_registered_root_plan_contract_fields_v1(observation_model_mutation)
         );
 
+        let mut completeness_authority_mutation = fields;
+        completeness_authority_mutation.canonical_names[6].1 = "listing-equality-authority-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(completeness_authority_mutation)
+        );
+
         macro_rules! assert_state_resource_is_bound {
             ($field:ident) => {{
                 let mut mutation = fields;
@@ -3709,6 +3916,15 @@ resolution_policy = "inspect-only"
         assert_remote_resource_is_bound!(remote_max_manifest_chunk_entries);
         assert_remote_resource_is_bound!(remote_max_manifest_wrapped_key_entries);
         assert_remote_resource_is_bound!(remote_max_remote_vector_clock_entries);
+        assert_remote_resource_is_bound!(remote_max_catalog_head_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_root_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_page_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_pages);
+        assert_remote_resource_is_bound!(remote_max_catalog_entries_per_page);
+        assert_remote_resource_is_bound!(remote_max_catalog_entries);
+        assert_remote_resource_is_bound!(remote_max_catalog_entry_key_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_binding_bytes);
+        assert_remote_resource_is_bound!(remote_max_catalog_closure_object_bytes);
     }
 
     #[test]

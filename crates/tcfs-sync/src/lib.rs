@@ -22,6 +22,11 @@ pub mod registered_reconcile;
 // list+bind work in each non-atomic source-only evidence pass.
 #[allow(dead_code)]
 pub(crate) mod registered_remote_observation;
+// Immutable catalog-head closure. This validates only the catalog inventory;
+// writer fencing, bootstrap truth, and every named object remain mandatory
+// before the artifact can satisfy complete-or-no-digest.
+#[allow(dead_code)]
+pub(crate) mod registered_remote_catalog;
 // Held-window composition of selected-root observation evidence. This remains
 // namespace-safety history only: it has no plan digest, action conversion, or
 // serialization surface.

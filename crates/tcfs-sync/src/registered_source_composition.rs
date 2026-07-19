@@ -137,11 +137,92 @@ pub(crate) enum StrictRegisteredRootSourcesReadV1 {
 /// eventual daemon integration must move or expose construction behind the
 /// selector that owns authorization, overlap, ownership, ACL, and state-fence
 /// checks; raw config plus path arguments are not an authority capability.
-struct ValidatedSelectedRegisteredRootRouteV1 {
+pub(crate) struct ValidatedSelectedRegisteredRootRouteV1 {
     root_id: String,
     selected: RegisteredRootV1Config,
     canonical_local_root: PathBuf,
     canonical_state_path: PathBuf,
+}
+
+/// Opaque remote identity projected from the daemon-authenticated selected
+/// root route.
+///
+/// Catalog bytes may describe themselves, but they are never authority to
+/// choose which registered root the daemon selected. Production construction
+/// therefore remains private to this module and requires the selector-owned
+/// route capability above.
+pub(crate) struct ValidatedSelectedRegisteredRootRemoteContextV1 {
+    root_id: String,
+    spec: RootSpecV1Config,
+    spec_identity_fingerprint: String,
+    profile_settings_fingerprint: RootProfileSettingsFingerprintV1,
+    plan_contract_fingerprint: RegisteredRootPlanContractFingerprintV1,
+}
+
+impl ValidatedSelectedRegisteredRootRemoteContextV1 {
+    fn from_selected_route(selected_route: &ValidatedSelectedRegisteredRootRouteV1) -> Self {
+        let root_id = selected_route.root_id.clone();
+        let spec = selected_route.selected.spec.clone();
+        Self {
+            spec_identity_fingerprint: spec.identity_fingerprint(&root_id),
+            profile_settings_fingerprint: spec.profile.policy().settings_fingerprint(),
+            plan_contract_fingerprint: RegisteredRootPlanContractV1::strict_v1().fingerprint(),
+            root_id,
+            spec,
+        }
+    }
+
+    pub(crate) fn root_id(&self) -> &str {
+        &self.root_id
+    }
+
+    pub(crate) const fn spec(&self) -> &RootSpecV1Config {
+        &self.spec
+    }
+
+    pub(crate) fn spec_identity_fingerprint(&self) -> &str {
+        &self.spec_identity_fingerprint
+    }
+
+    pub(crate) const fn profile_settings_fingerprint(&self) -> RootProfileSettingsFingerprintV1 {
+        self.profile_settings_fingerprint
+    }
+
+    pub(crate) const fn plan_contract_fingerprint(
+        &self,
+    ) -> RegisteredRootPlanContractFingerprintV1 {
+        self.plan_contract_fingerprint
+    }
+}
+
+impl ValidatedSelectedRegisteredRootRouteV1 {
+    fn remote_context(&self) -> ValidatedSelectedRegisteredRootRemoteContextV1 {
+        ValidatedSelectedRegisteredRootRemoteContextV1::from_selected_route(self)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn validated_selected_registered_root_remote_context_for_test_v1(
+    root_id: &str,
+    spec: &RootSpecV1Config,
+) -> std::result::Result<
+    ValidatedSelectedRegisteredRootRemoteContextV1,
+    StrictRegisteredRootSourcesIncompleteV1,
+> {
+    let selected = RegisteredRootV1Config {
+        spec: spec.clone(),
+        binding: None,
+    };
+    if selected.validate_shape(root_id).is_err() {
+        return Err(StrictRegisteredRootSourcesIncompleteV1::InvalidSelectedRoot);
+    }
+    Ok(ValidatedSelectedRegisteredRootRemoteContextV1 {
+        root_id: root_id.to_owned(),
+        spec: spec.clone(),
+        spec_identity_fingerprint: spec.identity_fingerprint(root_id),
+        profile_settings_fingerprint: spec.profile.policy().settings_fingerprint(),
+        plan_contract_fingerprint: RegisteredRootPlanContractV1::strict_v1().fingerprint(),
+    })
 }
 
 /// Opaque, non-authoritative observation of one AgentStatic selected root.
