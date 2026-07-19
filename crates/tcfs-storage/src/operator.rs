@@ -6,6 +6,7 @@ use opendal::{ErrorKind, Operator};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
+use tcfs_core::config::sanitize_http_endpoint_for_display;
 
 /// Minimal config needed to build an operator
 /// (full config lives in tcfs-core's StorageConfig)
@@ -571,11 +572,12 @@ pub async fn ensure_conditional_write_semantics(op: &Operator, prefix: &str) -> 
 }
 
 fn validate_endpoint_transport(cfg: &StorageConfig) -> Result<()> {
+    let endpoint_display = sanitize_http_endpoint_for_display(&cfg.endpoint);
     let endpoint = reqwest::Url::parse(&cfg.endpoint)
-        .with_context(|| format!("parsing S3 endpoint URL {}", cfg.endpoint))?;
+        .with_context(|| format!("parsing S3 endpoint URL {endpoint_display}"))?;
 
     if let Some(warning) = insecure_transport_warning(endpoint.scheme(), cfg.allow_insecure_http) {
-        tracing::warn!(endpoint = %cfg.endpoint, "{warning}");
+        tracing::warn!(endpoint = %endpoint_display, "{warning}");
     }
 
     match endpoint.scheme() {
@@ -583,11 +585,11 @@ fn validate_endpoint_transport(cfg: &StorageConfig) -> Result<()> {
         "http" if cfg.allow_insecure_http => Ok(()),
         "http" => anyhow::bail!(
             "S3 endpoint uses plaintext HTTP ({}). Use an HTTPS endpoint. For isolated development or tests only, explicitly set storage.enforce_tls = false (tcfs config) or allow_insecure_http = true (low-level client).",
-            cfg.endpoint
+            endpoint_display
         ),
-        scheme => anyhow::bail!(
-            "unsupported S3 endpoint scheme {scheme:?} in {}; HTTPS is required",
-            cfg.endpoint
+        _ => anyhow::bail!(
+            "unsupported S3 endpoint scheme in {}; HTTPS is required",
+            endpoint_display
         ),
     }
 }
@@ -1381,6 +1383,50 @@ mod tests {
 
         let err = build_operator(&cfg).unwrap_err();
         assert!(err.to_string().contains("plaintext HTTP"), "{err:#}");
+    }
+
+    #[test]
+    fn endpoint_transport_errors_never_echo_credential_bearing_input() {
+        for endpoint in [
+            "not-a-url-with-MALFORMED-secret?token=MALFORMED-query",
+            "http://plain-user:PLAIN-secret@plain.example.test:8333/PLAIN-path?token=PLAIN-query#PLAIN-fragment",
+            "ftp://ftp-user:FTP-secret@ftp.example.test/FTP-path?token=FTP-query#FTP-fragment",
+            "custom-secret://custom-user:CUSTOM-secret@custom.example.test/CUSTOM-path?token=CUSTOM-query#CUSTOM-fragment",
+        ] {
+            let cfg = StorageConfig {
+                endpoint: endpoint.into(),
+                access_key_id: "test-key".into(),
+                secret_access_key: "test-secret".into(),
+                ..Default::default()
+            };
+
+            let rendered = format!("{:#}", validate_endpoint_transport(&cfg).unwrap_err());
+            for forbidden in [
+                "MALFORMED-secret",
+                "MALFORMED-query",
+                "plain-user",
+                "PLAIN-secret",
+                "PLAIN-path",
+                "PLAIN-query",
+                "PLAIN-fragment",
+                "ftp-user",
+                "FTP-secret",
+                "FTP-path",
+                "FTP-query",
+                "FTP-fragment",
+                "custom-secret",
+                "custom-user",
+                "CUSTOM-secret",
+                "CUSTOM-path",
+                "CUSTOM-query",
+                "CUSTOM-fragment",
+            ] {
+                assert!(
+                    !rendered.contains(forbidden),
+                    "transport error leaked {forbidden}: {rendered}"
+                );
+            }
+        }
     }
 
     #[test]

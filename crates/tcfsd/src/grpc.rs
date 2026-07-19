@@ -17,7 +17,9 @@ use crate::cred_store::SharedCredStore;
 
 use base64::Engine;
 use secrecy::ExposeSecret;
-use tcfs_core::config::{RegisteredRootConfig, RegisteredRootPolicy, TcfsConfig};
+use tcfs_core::config::{
+    sanitize_http_endpoint_for_display, RegisteredRootConfig, RegisteredRootPolicy, TcfsConfig,
+};
 use tcfs_core::proto::{
     tcfs_daemon_server::{TcfsDaemon, TcfsDaemonServer},
     *,
@@ -2043,7 +2045,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
         Ok(tonic::Response::new(StatusResponse {
             version: env!("CARGO_PKG_VERSION").into(),
-            storage_endpoint: self.storage_endpoint.clone(),
+            storage_endpoint: sanitize_http_endpoint_for_display(&self.storage_endpoint),
             storage_ok,
             nats_ok: self.nats_ok.load(std::sync::atomic::Ordering::Relaxed),
             active_mounts: mount_count,
@@ -2110,16 +2112,6 @@ impl TcfsDaemon for TcfsDaemonImpl {
             })?;
         }
 
-        let use_nfs = req.options.iter().any(|o| o == "nfs");
-        let backend = if use_nfs { "NFS loopback" } else { "FUSE" };
-
-        info!(
-            mountpoint = %req.mountpoint,
-            remote = %req.remote,
-            backend = %backend,
-            "spawning mount"
-        );
-
         // Get the storage operator from daemon state
         let op = {
             let guard = self.operator.lock().await;
@@ -2129,8 +2121,18 @@ impl TcfsDaemon for TcfsDaemonImpl {
         };
 
         // Parse prefix from remote spec
-        let (_endpoint, _bucket, prefix) = tcfs_storage::parse_remote_spec(&req.remote)
+        let (endpoint, _bucket, prefix) = tcfs_storage::parse_remote_spec(&req.remote)
             .map_err(|e| tonic::Status::invalid_argument(format!("bad remote spec: {e}")))?;
+        let endpoint_display = sanitize_http_endpoint_for_display(&endpoint);
+        let use_nfs = req.options.iter().any(|o| o == "nfs");
+        let backend = if use_nfs { "NFS loopback" } else { "FUSE" };
+
+        info!(
+            mountpoint = %req.mountpoint,
+            endpoint = %endpoint_display,
+            backend = %backend,
+            "spawning mount"
+        );
 
         let mp = mountpoint.clone();
         let cache_dir = self.config.fuse.cache_dir.clone();
@@ -2142,7 +2144,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
         if use_nfs {
             // NFS loopback (fallback — use --nfs flag or "nfs" option)
             let mount_handle = tokio::spawn(async move {
-                tracing::info!("NFS mount task starting (prefix={prefix})");
+                tracing::info!("NFS mount task starting");
                 match tcfs_nfs::serve_and_mount(tcfs_nfs::NfsMountConfig {
                     op,
                     prefix,
@@ -2225,7 +2227,7 @@ impl TcfsDaemon for TcfsDaemonImpl {
 
             let vfs_sender = self.vfs_tx.clone();
             let mount_handle = tokio::spawn(async move {
-                tracing::info!("FUSE mount task starting (prefix={prefix})");
+                tracing::info!("FUSE mount task starting");
                 match tcfs_fuse::mount(
                     tcfs_fuse::MountConfig {
                         op,
@@ -5802,7 +5804,10 @@ mod tests {
 
     #[tokio::test]
     async fn status_returns_version() {
-        let daemon = test_daemon();
+        let mut daemon = test_daemon();
+        daemon.storage_endpoint =
+            "https://status-user:STATUS-secret@storage.example.test:8333/STATUS-path?signature=STATUS-query#STATUS-fragment"
+                .into();
         let resp = daemon
             .status(tonic::Request::new(StatusRequest {}))
             .await
@@ -5812,6 +5817,20 @@ mod tests {
         assert_eq!(resp.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(resp.device_id, "test-device-id");
         assert_eq!(resp.device_name, "test-device");
+        assert_eq!(resp.storage_endpoint, "https://storage.example.test:8333");
+        for forbidden in [
+            "status-user",
+            "STATUS-secret",
+            "STATUS-path",
+            "STATUS-query",
+            "STATUS-fragment",
+        ] {
+            assert!(
+                !resp.storage_endpoint.contains(forbidden),
+                "status endpoint leaked {forbidden}: {}",
+                resp.storage_endpoint
+            );
+        }
         assert!(!resp.storage_ok);
         assert!(!resp.nats_ok);
         assert_eq!(resp.active_mounts, 0);
