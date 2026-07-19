@@ -297,7 +297,7 @@ pub enum PortableNamespaceRole {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PortableNamespaceReservationV1 {
+pub(crate) struct PortableNamespaceReservationV1 {
     version: u8,
     exact_path: String,
     folded_path: String,
@@ -316,7 +316,7 @@ impl PortableNamespaceReservationV1 {
         })
     }
 
-    fn from_json_bytes(bytes: &[u8]) -> Result<Self> {
+    pub(crate) fn from_json_bytes(bytes: &[u8]) -> Result<Self> {
         let reservation: Self =
             serde_json::from_slice(bytes).context("parsing portable namespace reservation v1")?;
         anyhow::ensure!(
@@ -334,8 +334,23 @@ impl PortableNamespaceReservationV1 {
         Ok(reservation)
     }
 
-    fn to_json_bytes(&self) -> Result<Vec<u8>> {
+    pub(crate) fn to_json_bytes(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).context("serializing portable namespace reservation v1")
+    }
+
+    #[allow(dead_code)] // Consumed by the next full list-and-bind pass.
+    pub(crate) fn exact_path(&self) -> &str {
+        &self.exact_path
+    }
+
+    #[allow(dead_code)] // Consumed by the next full list-and-bind pass.
+    pub(crate) fn folded_path(&self) -> &str {
+        &self.folded_path
+    }
+
+    #[allow(dead_code)] // Consumed by the next full list-and-bind pass.
+    pub(crate) const fn role(&self) -> PortableNamespaceRole {
+        self.role
     }
 }
 
@@ -386,7 +401,7 @@ pub(crate) fn namespace_logical_entry_from_index_path(
     Ok((rel_path.to_owned(), PortableNamespaceRole::File))
 }
 
-fn namespace_reservation_object_id(folded_path: &str) -> String {
+pub(crate) fn namespace_reservation_object_id(folded_path: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"tcfs-portable-namespace-reservation-v1\0");
     hasher.update(folded_path.as_bytes());
@@ -673,28 +688,7 @@ impl DeletionEvidence {
         safety_copy_key: &str,
         safety_copy_bytes: &[u8],
     ) -> Result<Self> {
-        let prefix = validate_canonical_namespace_remote_prefix(remote_prefix)?;
-        validate_canonical_rel_path(rel_path)?;
-        let trash_prefix = if prefix.is_empty() {
-            ".tcfs-trash/".to_string()
-        } else {
-            format!("{prefix}/.tcfs-trash/")
-        };
-        let remainder = safety_copy_key
-            .strip_prefix(&trash_prefix)
-            .with_context(|| {
-                format!(
-                    "trash safety-copy key is outside canonical prefix {trash_prefix:?}: {safety_copy_key:?}"
-                )
-            })?;
-        let (generation, evidence_rel_path) = remainder
-            .split_once('/')
-            .context("trash safety-copy key is missing its generation/path separator")?;
-        validate_storage_key_component(generation, "trash safety-copy generation")?;
-        anyhow::ensure!(
-            evidence_rel_path == rel_path,
-            "trash safety-copy path does not match deletion path: expected {rel_path:?}, got {evidence_rel_path:?}"
-        );
+        validate_trash_safety_copy_route(remote_prefix, rel_path, safety_copy_key)?;
 
         Ok(Self {
             safety_copy_key: safety_copy_key.to_string(),
@@ -717,6 +711,62 @@ impl DeletionEvidence {
                 safety_copy_bytes,
             )?)
     }
+}
+
+pub(crate) fn validate_trash_safety_copy_route(
+    remote_prefix: &str,
+    rel_path: &str,
+    safety_copy_key: &str,
+) -> Result<()> {
+    let prefix = validate_canonical_namespace_remote_prefix(remote_prefix)?;
+    validate_canonical_rel_path(rel_path)?;
+    let trash_prefix = if prefix.is_empty() {
+        ".tcfs-trash/".to_string()
+    } else {
+        format!("{prefix}/.tcfs-trash/")
+    };
+    let remainder = safety_copy_key
+        .strip_prefix(&trash_prefix)
+        .with_context(|| {
+            format!(
+                "trash safety-copy key is outside canonical prefix {trash_prefix:?}: {safety_copy_key:?}"
+            )
+        })?;
+    let (generation, evidence_rel_path) = remainder
+        .split_once('/')
+        .context("trash safety-copy key is missing its generation/path separator")?;
+    validate_canonical_trash_generation(generation)?;
+    anyhow::ensure!(
+        evidence_rel_path == rel_path,
+        "trash safety-copy path does not match deletion path: expected {rel_path:?}, got {evidence_rel_path:?}"
+    );
+    Ok(())
+}
+
+fn validate_canonical_trash_generation(generation: &str) -> Result<()> {
+    let (timestamp_text, uuid_text) = generation
+        .split_once('-')
+        .context("trash safety-copy generation requires timestamp and UUID")?;
+    anyhow::ensure!(
+        !timestamp_text.is_empty() && timestamp_text.bytes().all(|byte| byte.is_ascii_digit()),
+        "trash safety-copy generation timestamp must be decimal"
+    );
+    let timestamp = timestamp_text
+        .parse::<u64>()
+        .context("trash safety-copy generation timestamp does not fit u64")?;
+    anyhow::ensure!(
+        timestamp.to_string() == timestamp_text,
+        "trash safety-copy generation timestamp is not canonical"
+    );
+    let uuid =
+        uuid::Uuid::parse_str(uuid_text).context("trash safety-copy generation UUID is invalid")?;
+    anyhow::ensure!(
+        uuid.hyphenated().to_string() == uuid_text
+            && uuid.get_variant() == uuid::Variant::RFC4122
+            && uuid.get_version_num() == 4,
+        "trash safety-copy generation UUID must be canonical lowercase RFC4122 v4"
+    );
+    Ok(())
 }
 
 fn validate_deletion_evidence(evidence: &DeletionEvidence) -> Result<()> {
@@ -3684,6 +3734,27 @@ mod tests {
         let mut tampered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         tampered["deletion_evidence"]["safety_copy_blake3"] = serde_json::json!("NOT-A-DIGEST");
         assert!(parse_index_entry_record(&serde_json::to_vec(&tampered).unwrap()).is_err());
+    }
+
+    #[test]
+    fn deletion_evidence_requires_the_canonical_v4_generation_route() {
+        let bytes = b"exact safety copy";
+        for key in [
+            "data/.tcfs-trash/123/doc.txt",
+            "data/.tcfs-trash/0123-00000000-0000-4000-8000-000000000000/doc.txt",
+            "data/.tcfs-trash/18446744073709551616-00000000-0000-4000-8000-000000000000/doc.txt",
+            "data/.tcfs-trash/123-00000000-0000-3000-8000-000000000000/doc.txt",
+            "data/.tcfs-trash/123-00000000-0000-4000-7000-000000000000/doc.txt",
+            "data/.tcfs-trash/123-00000000-0000-4000-8000-00000000000A/doc.txt",
+            "other/.tcfs-trash/123-00000000-0000-4000-8000-000000000000/doc.txt",
+            "data/.tcfs-trash/123-00000000-0000-4000-8000-000000000000/other.txt",
+        ] {
+            assert!(
+                super::DeletionEvidence::for_trash_generation("data", "doc.txt", key, bytes)
+                    .is_err(),
+                "accepted noncanonical evidence route {key:?}"
+            );
+        }
     }
 
     #[tokio::test]

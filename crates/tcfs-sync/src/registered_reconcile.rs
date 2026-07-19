@@ -20,10 +20,12 @@ use crate::blacklist::Blacklist;
 use crate::conflict::{ConflictInfo, VectorClock};
 use crate::index_entry::portable_casefold_path;
 use crate::index_entry::{
-    manifest_object_id, read_raw_object_snapshot_v1, validate_canonical_namespace_remote_prefix,
+    manifest_object_id, namespace_reservation_object_id, namespace_reservation_prefix,
+    read_raw_object_snapshot_v1, validate_canonical_namespace_remote_prefix,
     validate_namespace_logical_path, validate_relative_storage_key, validate_storage_key_component,
-    DeletionEvidence, IndexEntryState, PortableNamespaceRole, RawObjectReadV1, RawObjectSnapshotV1,
-    RemoteEntryKind,
+    validate_trash_safety_copy_route, DeletionEvidence, IndexEntryState,
+    PortableNamespaceReservationV1, PortableNamespaceRole, RawObjectReadV1, RawObjectSnapshotV1,
+    RemoteEntryKind, DIRECTORY_MARKER_BYTES,
 };
 use crate::registered_local_snapshot::PendingStrictLocalSnapshotV1;
 use crate::state::{
@@ -1120,8 +1122,9 @@ fn validate_index_format_matches_entries_v1(
     Ok(())
 }
 
-fn validate_strict_index_path_semantics_v1(
+fn validate_strict_index_route_semantics_v1(
     parsed: &ParsedStrictIndexRecordV1,
+    remote_prefix: &str,
     rel_path: &str,
 ) -> Result<()> {
     let validate_entry = |entry: &StrictRemoteIndexEntryV1| -> Result<()> {
@@ -1131,7 +1134,15 @@ fn validate_strict_index_path_semantics_v1(
         Ok(())
     };
     match parsed {
-        ParsedStrictIndexRecordV1::Deleted { .. } => {}
+        ParsedStrictIndexRecordV1::Deleted { deletion_evidence } => {
+            if let Some(evidence) = deletion_evidence {
+                validate_trash_safety_copy_route(
+                    remote_prefix,
+                    rel_path,
+                    &evidence.safety_copy_key,
+                )?;
+            }
+        }
         ParsedStrictIndexRecordV1::Preparing {
             current, pending, ..
         } => {
@@ -1151,6 +1162,15 @@ pub async fn read_exact_raw_index_entry_v1(
     remote_prefix: &str,
     rel_path: &str,
 ) -> Result<ExactRawIndexEntryReadV1> {
+    let suffix_bytes = "index/"
+        .len()
+        .checked_add(rel_path.len())
+        .context("strict index key length overflow")?;
+    validate_registered_remote_derived_key_length_v1(
+        remote_prefix,
+        suffix_bytes,
+        "strict index key",
+    )?;
     let prefix = validate_canonical_namespace_remote_prefix(remote_prefix)?;
     validate_registered_remote_logical_path_bounds_v1(rel_path)?;
     let index_key = if prefix.is_empty() {
@@ -1173,7 +1193,11 @@ pub async fn read_exact_raw_index_entry_v1(
         }
     };
     let parsed = match parse_strict_index_record_v1(raw_snapshot.raw_bytes()) {
-        Ok(parsed) if validate_strict_index_path_semantics_v1(&parsed, rel_path).is_ok() => parsed,
+        Ok(parsed)
+            if validate_strict_index_route_semantics_v1(&parsed, prefix, rel_path).is_ok() =>
+        {
+            parsed
+        }
         Err(_) => {
             return Ok(ExactRawIndexEntryReadV1::Incomplete(
                 StrictRemoteIndexIncompleteV1::InvalidIndexRecord,
@@ -1217,6 +1241,323 @@ pub async fn read_exact_raw_index_entry_v1(
             })
         }
     })
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RegisteredRootRemoteDirectoryMarkerRouteV1 {
+    marker_key: String,
+    remote_prefix_len: usize,
+    marker_rel_offset: usize,
+    logical_rel_len: usize,
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+impl RegisteredRootRemoteDirectoryMarkerRouteV1 {
+    pub(crate) fn remote_prefix(&self) -> &str {
+        self.marker_key
+            .get(..self.remote_prefix_len)
+            .expect("bound marker prefix offset is an internal invariant")
+    }
+
+    pub(crate) fn logical_dir(&self) -> &str {
+        let end = self
+            .marker_rel_offset
+            .checked_add(self.logical_rel_len)
+            .expect("bound marker logical-path length is an internal invariant");
+        self.marker_key
+            .get(self.marker_rel_offset..end)
+            .expect("bound marker logical-path offsets are an internal invariant")
+    }
+
+    pub(crate) fn marker_rel_path(&self) -> &str {
+        self.marker_key
+            .get(self.marker_rel_offset..)
+            .expect("bound marker relative-path offset is an internal invariant")
+    }
+
+    pub(crate) fn marker_key(&self) -> &str {
+        &self.marker_key
+    }
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RawLiveDirectoryMarkerV1 {
+    object: BoundRemoteObjectSnapshotV1,
+    route: RegisteredRootRemoteDirectoryMarkerRouteV1,
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+impl RawLiveDirectoryMarkerV1 {
+    pub(crate) const fn object(&self) -> &BoundRemoteObjectSnapshotV1 {
+        &self.object
+    }
+
+    pub(crate) const fn route(&self) -> &RegisteredRootRemoteDirectoryMarkerRouteV1 {
+        &self.route
+    }
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RawDeletedDirectoryMarkerV1 {
+    object: BoundRemoteObjectSnapshotV1,
+    deletion_evidence: Option<DeletionEvidence>,
+    route: RegisteredRootRemoteDirectoryMarkerRouteV1,
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+impl RawDeletedDirectoryMarkerV1 {
+    pub(crate) const fn object(&self) -> &BoundRemoteObjectSnapshotV1 {
+        &self.object
+    }
+
+    pub(crate) const fn deletion_evidence(&self) -> Option<&DeletionEvidence> {
+        self.deletion_evidence.as_ref()
+    }
+
+    pub(crate) const fn route(&self) -> &RegisteredRootRemoteDirectoryMarkerRouteV1 {
+        &self.route
+    }
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrictRemoteDirectoryMarkerIncompleteV1 {
+    UnboundObject,
+    InvalidMarkerRecord,
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExactRawDirectoryMarkerReadV1 {
+    Missing,
+    Incomplete(StrictRemoteDirectoryMarkerIncompleteV1),
+    Live(RawLiveDirectoryMarkerV1),
+    Deleted(RawDeletedDirectoryMarkerV1),
+}
+
+/// Read one listed directory-marker candidate by storage identity.
+///
+/// The only accepted live body is [`DIRECTORY_MARKER_BYTES`]. The only
+/// accepted structured body is a strict v4 Deleted index record. Compatibility
+/// marker readers are intentionally excluded from registered-root planning.
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+pub(crate) async fn read_exact_raw_directory_marker_v1(
+    op: &Operator,
+    remote_prefix: &str,
+    logical_dir: &str,
+) -> Result<ExactRawDirectoryMarkerReadV1> {
+    let marker_rel_path_bytes = logical_dir
+        .len()
+        .checked_add("/.tcfs_dir".len())
+        .context("strict directory-marker relative-path length overflow")?;
+    let suffix_bytes = "index/"
+        .len()
+        .checked_add(marker_rel_path_bytes)
+        .context("strict directory-marker key length overflow")?;
+    validate_registered_remote_derived_key_length_v1(
+        remote_prefix,
+        suffix_bytes,
+        "strict directory-marker key",
+    )?;
+    let prefix = validate_canonical_namespace_remote_prefix(remote_prefix)?;
+    validate_registered_remote_logical_path_bounds_v1(logical_dir)?;
+    let marker_rel_path = format!("{logical_dir}/.tcfs_dir");
+    let index_key = if prefix.is_empty() {
+        format!("index/{marker_rel_path}")
+    } else {
+        format!("{prefix}/index/{marker_rel_path}")
+    };
+    validate_registered_remote_storage_key_bounds_v1(&index_key, "strict directory-marker key")?;
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_index_object_bytes();
+    let Some(raw_read) = read_raw_object_snapshot_v1(op, &index_key, max_bytes).await? else {
+        return Ok(ExactRawDirectoryMarkerReadV1::Missing);
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(ExactRawDirectoryMarkerReadV1::Incomplete(
+                StrictRemoteDirectoryMarkerIncompleteV1::UnboundObject,
+            ));
+        }
+    };
+    let marker_rel_offset = index_key
+        .len()
+        .checked_sub(marker_rel_path.len())
+        .expect("validated marker key must end with its relative path");
+    let route = RegisteredRootRemoteDirectoryMarkerRouteV1 {
+        marker_key: index_key,
+        remote_prefix_len: prefix.len(),
+        marker_rel_offset,
+        logical_rel_len: logical_dir.len(),
+    };
+    if raw_snapshot.raw_bytes() == DIRECTORY_MARKER_BYTES {
+        return Ok(ExactRawDirectoryMarkerReadV1::Live(
+            RawLiveDirectoryMarkerV1 {
+                object: bind_remote_object_v1(raw_snapshot),
+                route,
+            },
+        ));
+    }
+    let deletion_evidence = match parse_strict_index_record_v1(raw_snapshot.raw_bytes()) {
+        Ok(parsed @ ParsedStrictIndexRecordV1::Deleted { .. })
+            if validate_strict_index_route_semantics_v1(
+                &parsed,
+                route.remote_prefix(),
+                route.marker_rel_path(),
+            )
+            .is_ok() =>
+        {
+            match parsed {
+                ParsedStrictIndexRecordV1::Deleted { deletion_evidence } => deletion_evidence,
+                _ => unreachable!("guard only accepts a strict deleted marker"),
+            }
+        }
+        _ => {
+            return Ok(ExactRawDirectoryMarkerReadV1::Incomplete(
+                StrictRemoteDirectoryMarkerIncompleteV1::InvalidMarkerRecord,
+            ));
+        }
+    };
+    Ok(ExactRawDirectoryMarkerReadV1::Deleted(
+        RawDeletedDirectoryMarkerV1 {
+            object: bind_remote_object_v1(raw_snapshot),
+            deletion_evidence,
+            route,
+        },
+    ))
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BoundNamespaceReservationV1 {
+    object: BoundRemoteObjectSnapshotV1,
+    object_key: String,
+    object_id_offset: usize,
+    reservation: PortableNamespaceReservationV1,
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+impl BoundNamespaceReservationV1 {
+    pub(crate) const fn object(&self) -> &BoundRemoteObjectSnapshotV1 {
+        &self.object
+    }
+
+    pub(crate) fn object_key(&self) -> &str {
+        &self.object_key
+    }
+
+    pub(crate) fn object_id(&self) -> &str {
+        self.object_key
+            .get(self.object_id_offset..)
+            .expect("bound reservation-key offset is an internal invariant")
+    }
+
+    pub(crate) fn exact_path(&self) -> &str {
+        self.reservation.exact_path()
+    }
+
+    pub(crate) fn folded_path(&self) -> &str {
+        self.reservation.folded_path()
+    }
+
+    pub(crate) const fn role(&self) -> PortableNamespaceRole {
+        self.reservation.role()
+    }
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrictNamespaceReservationIncompleteV1 {
+    UnboundObject,
+    InvalidReservation,
+    AddressMismatch,
+}
+
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExactNamespaceReservationReadV1 {
+    Missing,
+    Incomplete(StrictNamespaceReservationIncompleteV1),
+    Bound(BoundNamespaceReservationV1),
+}
+
+/// Read one listed portable-namespace reservation by storage identity.
+///
+/// V1 planning accepts only the canonical serialized reservation body whose
+/// folded path hashes to the listed 64-hex object ID.
+#[allow(dead_code)] // Composed by the next full list-and-bind pass.
+pub(crate) async fn read_exact_namespace_reservation_v1(
+    op: &Operator,
+    remote_prefix: &str,
+    object_id: &str,
+) -> Result<ExactNamespaceReservationReadV1> {
+    let suffix_bytes = ".tcfs-namespace/v1/"
+        .len()
+        .checked_add(object_id.len())
+        .context("strict namespace-reservation key length overflow")?;
+    validate_registered_remote_derived_key_length_v1(
+        remote_prefix,
+        suffix_bytes,
+        "strict namespace-reservation key",
+    )?;
+    let prefix = validate_canonical_namespace_remote_prefix(remote_prefix)?;
+    validate_lower_hex_64(object_id, "strict namespace-reservation object id")?;
+    let reservation_prefix = namespace_reservation_prefix(prefix);
+    let object_key = format!("{reservation_prefix}{object_id}");
+    validate_registered_remote_storage_key_bounds_v1(
+        &object_key,
+        "strict namespace-reservation key",
+    )?;
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_reservation_object_bytes();
+    let Some(raw_read) = read_raw_object_snapshot_v1(op, &object_key, max_bytes).await? else {
+        return Ok(ExactNamespaceReservationReadV1::Missing);
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(ExactNamespaceReservationReadV1::Incomplete(
+                StrictNamespaceReservationIncompleteV1::UnboundObject,
+            ));
+        }
+    };
+    let reservation =
+        match PortableNamespaceReservationV1::from_json_bytes(raw_snapshot.raw_bytes()) {
+            Ok(reservation)
+                if validate_registered_remote_logical_path_bounds_v1(reservation.exact_path())
+                    .is_ok()
+                    && reservation
+                        .to_json_bytes()
+                        .is_ok_and(|canonical| canonical == raw_snapshot.raw_bytes()) =>
+            {
+                reservation
+            }
+            _ => {
+                return Ok(ExactNamespaceReservationReadV1::Incomplete(
+                    StrictNamespaceReservationIncompleteV1::InvalidReservation,
+                ));
+            }
+        };
+    if namespace_reservation_object_id(reservation.folded_path()) != object_id {
+        return Ok(ExactNamespaceReservationReadV1::Incomplete(
+            StrictNamespaceReservationIncompleteV1::AddressMismatch,
+        ));
+    }
+    let object_id_offset = reservation_prefix.len();
+    Ok(ExactNamespaceReservationReadV1::Bound(
+        BoundNamespaceReservationV1 {
+            object: bind_remote_object_v1(raw_snapshot),
+            object_key,
+            object_id_offset,
+            reservation,
+        },
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1339,6 +1680,27 @@ fn validate_registered_remote_storage_key_bounds_v1(key: &str, description: &str
     validate_relative_storage_key(key, description)?;
     anyhow::ensure!(
         u64::try_from(key.len()).context("strict remote storage-key length does not fit u64")?
+            <= RegisteredRootPlanContractV1::strict_v1()
+                .remote_contract()
+                .max_storage_key_bytes(),
+        "{description} exceeds the registered-root storage-key byte bound"
+    );
+    Ok(())
+}
+
+fn validate_registered_remote_derived_key_length_v1(
+    remote_prefix: &str,
+    suffix_bytes: usize,
+    description: &str,
+) -> Result<()> {
+    let length = remote_prefix
+        .len()
+        .checked_add(usize::from(!remote_prefix.is_empty()))
+        .and_then(|length| length.checked_add(suffix_bytes))
+        .context("strict remote derived storage-key length overflow")?;
+    anyhow::ensure!(
+        u64::try_from(length)
+            .context("strict remote derived storage-key length does not fit u64")?
             <= RegisteredRootPlanContractV1::strict_v1()
                 .remote_contract()
                 .max_storage_key_bytes(),
@@ -1730,6 +2092,7 @@ mod tests {
     use opendal::raw::{Access, AccessorInfo, OpRead, OpStat, RpRead, RpStat};
     use opendal::services::Memory;
     use opendal::{Buffer, Capability, EntryMode, ErrorKind, Metadata, OperatorBuilder};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     fn directory_inventory(
@@ -1785,6 +2148,7 @@ mod tests {
     struct BoundObjectTestBackend {
         objects: Arc<BTreeMap<String, Vec<u8>>>,
         info: Arc<AccessorInfo>,
+        stat_calls: Arc<AtomicUsize>,
     }
 
     impl Access for BoundObjectTestBackend {
@@ -1798,6 +2162,7 @@ mod tests {
         }
 
         async fn stat(&self, path: &str, _: OpStat) -> opendal::Result<RpStat> {
+            self.stat_calls.fetch_add(1, Ordering::SeqCst);
             let bytes = self.objects.get(path).ok_or_else(|| {
                 opendal::Error::new(ErrorKind::NotFound, "bound test object is missing")
             })?;
@@ -1840,6 +2205,12 @@ mod tests {
     }
 
     fn bound_object_test_operator(objects: BTreeMap<String, Vec<u8>>) -> Operator {
+        bound_object_test_operator_with_stat_counter(objects).0
+    }
+
+    fn bound_object_test_operator_with_stat_counter(
+        objects: BTreeMap<String, Vec<u8>>,
+    ) -> (Operator, Arc<AtomicUsize>) {
         let info = AccessorInfo::default();
         info.set_scheme("registered-root-bound-test")
             .set_root("/")
@@ -1850,11 +2221,14 @@ mod tests {
                 read_with_if_match: true,
                 ..Default::default()
             });
-        OperatorBuilder::new(BoundObjectTestBackend {
+        let stat_calls = Arc::new(AtomicUsize::new(0));
+        let op = OperatorBuilder::new(BoundObjectTestBackend {
             objects: Arc::new(objects),
             info: Arc::new(info),
+            stat_calls: stat_calls.clone(),
         })
-        .finish()
+        .finish();
+        (op, stat_calls)
     }
 
     fn valid_state_json(local_root: &Path, status: &str) -> Vec<u8> {
@@ -2224,6 +2598,19 @@ mod tests {
             chunk_hash = "e".repeat(64),
         )
         .into_bytes()
+    }
+
+    fn strict_deleted_index_json(safety_copy_key: Option<&str>) -> Vec<u8> {
+        match safety_copy_key {
+            Some(safety_copy_key) => format!(
+                r#"{{"version":4,"state":"deleted","current":null,"pending":null,"deletion_evidence":{{"safety_copy_key":"{safety_copy_key}","safety_copy_blake3":"{digest}"}}}}"#,
+                digest = "a".repeat(64),
+            )
+            .into_bytes(),
+            None => {
+                br#"{"version":4,"state":"deleted","current":null,"pending":null}"#.to_vec()
+            }
+        }
     }
 
     fn committed_index_for_test(index: StrictRemoteIndexEntryV1) -> RawCommittedIndexEntryV1 {
@@ -2607,6 +2994,385 @@ mod tests {
                 .unwrap(),
             ExactRawIndexEntryReadV1::Incomplete(StrictRemoteIndexIncompleteV1::PreparingObserved)
         );
+    }
+
+    #[tokio::test]
+    async fn strict_bound_index_read_requires_route_canonical_deletion_evidence() {
+        let generation = "123-00000000-0000-4000-8000-000000000000";
+        let valid =
+            strict_deleted_index_json(Some(&format!("roots/.tcfs-trash/{generation}/dir/file")));
+        let op = bound_object_test_operator(BTreeMap::from([(
+            "roots/index/dir/file".to_owned(),
+            valid,
+        )]));
+        let deleted = match read_exact_raw_index_entry_v1(&op, "roots", "dir/file")
+            .await
+            .unwrap()
+        {
+            ExactRawIndexEntryReadV1::Deleted(deleted) => deleted,
+            other => panic!("expected route-bound deleted index, got {other:?}"),
+        };
+        assert_eq!(
+            deleted.deletion_evidence().unwrap().safety_copy_key,
+            format!("roots/.tcfs-trash/{generation}/dir/file")
+        );
+        let evidence_free_op = bound_object_test_operator(BTreeMap::from([(
+            "roots/index/dir/file".to_owned(),
+            strict_deleted_index_json(None),
+        )]));
+        assert!(matches!(
+            read_exact_raw_index_entry_v1(&evidence_free_op, "roots", "dir/file")
+                .await
+                .unwrap(),
+            ExactRawIndexEntryReadV1::Deleted(ref deleted)
+                if deleted.deletion_evidence().is_none()
+        ));
+
+        for safety_copy_key in [
+            "other/.tcfs-trash/123-00000000-0000-4000-8000-000000000000/dir/file",
+            "roots/.tcfs-trash/123-00000000-0000-4000-8000-000000000000/other",
+            "roots/.tcfs-trash//dir/file",
+            "roots/.tcfs-trash/123/dir/file",
+            "roots/.tcfs-trash/0123-00000000-0000-4000-8000-000000000000/dir/file",
+            "roots/.tcfs-trash/18446744073709551616-00000000-0000-4000-8000-000000000000/dir/file",
+            "roots/.tcfs-trash/123-00000000-0000-3000-8000-000000000000/dir/file",
+            "roots/.tcfs-trash/123-00000000-0000-4000-7000-000000000000/dir/file",
+            "roots/.tcfs-trash/123-00000000-0000-4000-8000-00000000000A/dir/file",
+        ] {
+            let op = bound_object_test_operator(BTreeMap::from([(
+                "roots/index/dir/file".to_owned(),
+                strict_deleted_index_json(Some(safety_copy_key)),
+            )]));
+            assert_eq!(
+                read_exact_raw_index_entry_v1(&op, "roots", "dir/file")
+                    .await
+                    .unwrap(),
+                ExactRawIndexEntryReadV1::Incomplete(
+                    StrictRemoteIndexIncompleteV1::InvalidIndexRecord
+                ),
+                "accepted noncanonical deletion evidence {safety_copy_key:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_directory_marker_read_binds_live_and_deleted_bodies() {
+        let marker_key = "roots/index/dir/.tcfs_dir";
+        let live_op = bound_object_test_operator(BTreeMap::from([(
+            marker_key.to_owned(),
+            DIRECTORY_MARKER_BYTES.to_vec(),
+        )]));
+        let live = match read_exact_raw_directory_marker_v1(&live_op, "roots", "dir")
+            .await
+            .unwrap()
+        {
+            ExactRawDirectoryMarkerReadV1::Live(live) => live,
+            other => panic!("expected bound live marker, got {other:?}"),
+        };
+        assert_eq!(live.route().remote_prefix(), "roots");
+        assert_eq!(live.route().logical_dir(), "dir");
+        assert_eq!(live.route().marker_rel_path(), "dir/.tcfs_dir");
+        assert_eq!(live.route().marker_key(), marker_key);
+        assert_eq!(
+            live.object().raw_bytes_len(),
+            u64::try_from(DIRECTORY_MARKER_BYTES.len()).unwrap()
+        );
+        assert_eq!(
+            live.object().raw_blake3(),
+            blake3::hash(DIRECTORY_MARKER_BYTES).as_bytes()
+        );
+
+        let deleted_op = bound_object_test_operator(BTreeMap::from([(
+            marker_key.to_owned(),
+            strict_deleted_index_json(Some(
+                "roots/.tcfs-trash/123-00000000-0000-4000-8000-000000000000/dir/.tcfs_dir",
+            )),
+        )]));
+        let deleted = match read_exact_raw_directory_marker_v1(&deleted_op, "roots", "dir")
+            .await
+            .unwrap()
+        {
+            ExactRawDirectoryMarkerReadV1::Deleted(deleted) => deleted,
+            other => panic!("expected bound deleted marker, got {other:?}"),
+        };
+        assert_eq!(deleted.route().logical_dir(), "dir");
+        assert_eq!(deleted.route().marker_rel_path(), "dir/.tcfs_dir");
+        assert_eq!(deleted.route().marker_key(), marker_key);
+        assert_eq!(
+            deleted.object().raw_bytes_len(),
+            u64::try_from(
+                strict_deleted_index_json(Some(
+                    "roots/.tcfs-trash/123-00000000-0000-4000-8000-000000000000/dir/.tcfs_dir"
+                ))
+                .len()
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            deleted.deletion_evidence().unwrap().safety_copy_key,
+            "roots/.tcfs-trash/123-00000000-0000-4000-8000-000000000000/dir/.tcfs_dir"
+        );
+        let evidence_free_op = bound_object_test_operator(BTreeMap::from([(
+            marker_key.to_owned(),
+            strict_deleted_index_json(None),
+        )]));
+        assert!(matches!(
+            read_exact_raw_directory_marker_v1(&evidence_free_op, "roots", "dir")
+                .await
+                .unwrap(),
+            ExactRawDirectoryMarkerReadV1::Deleted(ref deleted)
+                if deleted.deletion_evidence().is_none()
+        ));
+    }
+
+    #[tokio::test]
+    async fn strict_directory_marker_read_rejects_compatibility_and_wrong_route_bodies() {
+        let marker_key = "roots/index/dir/.tcfs_dir";
+        let committed = format!(
+            r#"{{"version":2,"state":"committed","current":{{"manifest_hash":"{}","size":0,"chunks":0}},"pending":null}}"#,
+            "b".repeat(64)
+        )
+        .into_bytes();
+        let preparing = format!(
+            r#"{{"version":2,"state":"preparing","current":null,"pending":{{"manifest_hash":"{}","size":0,"chunks":0,"staged_manifest_key":"roots/staging/object"}}}}"#,
+            "b".repeat(64)
+        )
+        .into_bytes();
+        for body in [
+            b"type=directory\r\n".to_vec(),
+            b"type=directory\n\n".to_vec(),
+            committed,
+            preparing,
+            strict_deleted_index_json(Some(
+                "roots/.tcfs-trash/123-00000000-0000-4000-8000-000000000000/other/.tcfs_dir",
+            )),
+        ] {
+            let op = bound_object_test_operator(BTreeMap::from([(marker_key.to_owned(), body)]));
+            assert_eq!(
+                read_exact_raw_directory_marker_v1(&op, "roots", "dir")
+                    .await
+                    .unwrap(),
+                ExactRawDirectoryMarkerReadV1::Incomplete(
+                    StrictRemoteDirectoryMarkerIncompleteV1::InvalidMarkerRecord
+                )
+            );
+        }
+
+        let missing = bound_object_test_operator(BTreeMap::new());
+        assert_eq!(
+            read_exact_raw_directory_marker_v1(&missing, "roots", "dir")
+                .await
+                .unwrap(),
+            ExactRawDirectoryMarkerReadV1::Missing
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_namespace_reservation_read_requires_canonical_bound_body_and_address() {
+        let canonical =
+            br#"{"version":1,"exact_path":"doc.txt","folded_path":"doc.txt","role":"file"}"#
+                .to_vec();
+        let object_id = namespace_reservation_object_id("doc.txt");
+        let object_key = format!("roots/.tcfs-namespace/v1/{object_id}");
+        let op =
+            bound_object_test_operator(BTreeMap::from([(object_key.clone(), canonical.clone())]));
+        let bound = match read_exact_namespace_reservation_v1(&op, "roots", &object_id)
+            .await
+            .unwrap()
+        {
+            ExactNamespaceReservationReadV1::Bound(bound) => bound,
+            other => panic!("expected bound namespace reservation, got {other:?}"),
+        };
+        assert_eq!(bound.object_key(), object_key);
+        assert_eq!(bound.object_id(), object_id);
+        assert_eq!(bound.exact_path(), "doc.txt");
+        assert_eq!(bound.folded_path(), "doc.txt");
+        assert_eq!(bound.role(), PortableNamespaceRole::File);
+        assert_eq!(
+            bound.object().raw_bytes_len(),
+            u64::try_from(canonical.len()).unwrap()
+        );
+
+        let noncanonical = br#"{
+  "version": 1,
+  "exact_path": "doc.txt",
+  "folded_path": "doc.txt",
+  "role": "file"
+}"#
+        .to_vec();
+        let op = bound_object_test_operator(BTreeMap::from([(object_key.clone(), noncanonical)]));
+        assert_eq!(
+            read_exact_namespace_reservation_v1(&op, "roots", &object_id)
+                .await
+                .unwrap(),
+            ExactNamespaceReservationReadV1::Incomplete(
+                StrictNamespaceReservationIncompleteV1::InvalidReservation
+            )
+        );
+
+        let wrong_id = namespace_reservation_object_id("other.txt");
+        assert_ne!(wrong_id, object_id);
+        let wrong_key = format!("roots/.tcfs-namespace/v1/{wrong_id}");
+        let op = bound_object_test_operator(BTreeMap::from([(wrong_key, canonical)]));
+        assert_eq!(
+            read_exact_namespace_reservation_v1(&op, "roots", &wrong_id)
+                .await
+                .unwrap(),
+            ExactNamespaceReservationReadV1::Incomplete(
+                StrictNamespaceReservationIncompleteV1::AddressMismatch
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_namespace_reservation_read_rejects_invalid_semantics_and_bounds() {
+        let object_id = namespace_reservation_object_id("doc.txt");
+        let object_key = format!("roots/.tcfs-namespace/v1/{object_id}");
+        let overlong = "a".repeat(
+            usize::try_from(
+                RegisteredRootPlanContractV1::strict_v1()
+                    .remote_contract()
+                    .max_logical_component_bytes()
+                    + 1,
+            )
+            .unwrap(),
+        );
+        for body in [
+            br#"{"version":1,"exact_path":"doc.txt","folded_path":"DOC.TXT","role":"file"}"#
+                .to_vec(),
+            br#"{"version":2,"exact_path":"doc.txt","folded_path":"doc.txt","role":"file"}"#
+                .to_vec(),
+            br#"{"version":1,"exact_path":"doc.txt","folded_path":"doc.txt","role":"file","extra":true}"#
+                .to_vec(),
+            format!(
+                r#"{{"version":1,"exact_path":"{overlong}","folded_path":"{overlong}","role":"file"}}"#
+            )
+            .into_bytes(),
+        ] {
+            let op = bound_object_test_operator(BTreeMap::from([(
+                object_key.clone(),
+                body,
+            )]));
+            assert_eq!(
+                read_exact_namespace_reservation_v1(&op, "roots", &object_id)
+                    .await
+                    .unwrap(),
+                ExactNamespaceReservationReadV1::Incomplete(
+                    StrictNamespaceReservationIncompleteV1::InvalidReservation
+                )
+            );
+        }
+
+        let missing = bound_object_test_operator(BTreeMap::new());
+        assert_eq!(
+            read_exact_namespace_reservation_v1(&missing, "roots", &object_id)
+                .await
+                .unwrap(),
+            ExactNamespaceReservationReadV1::Missing
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_marker_and_reservation_reads_refuse_unbound_objects() {
+        let op = Operator::new(Memory::default()).unwrap().finish();
+        op.write("roots/index/dir/.tcfs_dir", DIRECTORY_MARKER_BYTES.to_vec())
+            .await
+            .unwrap();
+        let reservation =
+            br#"{"version":1,"exact_path":"doc.txt","folded_path":"doc.txt","role":"file"}"#;
+        let object_id = namespace_reservation_object_id("doc.txt");
+        op.write(
+            &format!("roots/.tcfs-namespace/v1/{object_id}"),
+            reservation.to_vec(),
+        )
+        .await
+        .unwrap();
+        let before = object_inventory(&op).await;
+
+        assert_eq!(
+            read_exact_raw_directory_marker_v1(&op, "roots", "dir")
+                .await
+                .unwrap(),
+            ExactRawDirectoryMarkerReadV1::Incomplete(
+                StrictRemoteDirectoryMarkerIncompleteV1::UnboundObject
+            )
+        );
+        assert_eq!(
+            read_exact_namespace_reservation_v1(&op, "roots", &object_id)
+                .await
+                .unwrap(),
+            ExactNamespaceReservationReadV1::Incomplete(
+                StrictNamespaceReservationIncompleteV1::UnboundObject
+            )
+        );
+        assert_eq!(object_inventory(&op).await, before);
+    }
+
+    #[tokio::test]
+    async fn strict_remote_body_readers_reject_oversized_prefix_before_backend_io() {
+        let (op, stat_calls) = bound_object_test_operator_with_stat_counter(BTreeMap::new());
+        let oversized_prefix = "p".repeat(
+            usize::try_from(
+                RegisteredRootPlanContractV1::strict_v1()
+                    .remote_contract()
+                    .max_storage_key_bytes()
+                    + 1,
+            )
+            .unwrap(),
+        );
+        let object_id = namespace_reservation_object_id("doc.txt");
+
+        assert!(
+            read_exact_raw_index_entry_v1(&op, &oversized_prefix, "doc.txt")
+                .await
+                .is_err()
+        );
+        assert!(
+            read_exact_raw_directory_marker_v1(&op, &oversized_prefix, "dir")
+                .await
+                .is_err()
+        );
+        assert!(
+            read_exact_namespace_reservation_v1(&op, &oversized_prefix, &object_id)
+                .await
+                .is_err()
+        );
+        assert_eq!(stat_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn strict_namespace_reservation_read_accepts_the_exact_path_ceiling() {
+        let exact_path = format!(
+            "{}/{}/{}/{}/e",
+            "a".repeat(255),
+            "b".repeat(255),
+            "c".repeat(255),
+            "d".repeat(254),
+        );
+        assert_eq!(
+            u64::try_from(exact_path.len()).unwrap(),
+            RegisteredRootPlanContractV1::strict_v1()
+                .remote_contract()
+                .max_logical_path_bytes()
+        );
+        let body = format!(
+            r#"{{"version":1,"exact_path":"{exact_path}","folded_path":"{exact_path}","role":"directory"}}"#
+        )
+        .into_bytes();
+        let object_id = namespace_reservation_object_id(&exact_path);
+        let object_key = format!("roots/.tcfs-namespace/v1/{object_id}");
+        let op = bound_object_test_operator(BTreeMap::from([(object_key, body)]));
+
+        let bound = match read_exact_namespace_reservation_v1(&op, "roots", &object_id)
+            .await
+            .unwrap()
+        {
+            ExactNamespaceReservationReadV1::Bound(bound) => bound,
+            other => panic!("expected ceiling-sized reservation, got {other:?}"),
+        };
+        assert_eq!(bound.exact_path(), exact_path);
+        assert_eq!(bound.folded_path(), exact_path);
+        assert_eq!(bound.role(), PortableNamespaceRole::Directory);
     }
 
     #[tokio::test]
