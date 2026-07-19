@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use url::{Host, Url};
@@ -990,6 +991,349 @@ impl RootProfileV1 {
             Self::AgentStaticV1 => "agent-static-v1",
         }
     }
+
+    /// Immutable planning policy carried by this profile version.
+    ///
+    /// Registered-root planning must not inherit mutable primary-root
+    /// collection or deletion settings. A profile name therefore expands to
+    /// one closed bundle whose settings and fingerprint cannot be paired with
+    /// a different profile.
+    pub fn policy(self) -> RootProfilePolicyV1 {
+        let settings = self.settings();
+        RootProfilePolicyV1 {
+            profile: self,
+            settings,
+            settings_fingerprint: fingerprint_root_profile_settings_v1(self, settings),
+        }
+    }
+
+    fn settings(self) -> RootProfileSettingsV1 {
+        RootProfileSettingsV1 {
+            hidden_paths: RootHiddenPathPolicyV1::IncludeV1,
+            exclusions: RootExclusionPolicyV1::FixedIngressPathComponentsV1,
+            git: match self {
+                Self::GitRawV1 => RootGitPolicyV1::StandaloneRawWithFastForwardProofV1,
+                Self::AgentStaticV1 => RootGitPolicyV1::ExcludedV1,
+            },
+            symlinks: RootSymlinkPolicyV1::PreserveExactTargetV1,
+            empty_directories: RootEmptyDirectoryPolicyV1::IgnoreV1,
+            metadata: RootMetadataPolicyV1::RegularFileManifestModeAndMtimeV1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootHiddenPathPolicyV1 {
+    IncludeV1,
+}
+
+impl RootHiddenPathPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::IncludeV1 => "include-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootExclusionPolicyV1 {
+    /// Exactly the config-independent checks implemented by
+    /// `Blacklist::check_fixed_ingress_path_components`.
+    ///
+    /// Changing that function's membership or semantics requires a new
+    /// profile/policy version and canonical name.
+    FixedIngressPathComponentsV1,
+}
+
+impl RootExclusionPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::FixedIngressPathComponentsV1 => "fixed-ingress-path-components-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootGitPolicyV1 {
+    ExcludedV1,
+    StandaloneRawWithFastForwardProofV1,
+}
+
+impl RootGitPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::ExcludedV1 => "excluded-v1",
+            Self::StandaloneRawWithFastForwardProofV1 => {
+                "standalone-raw-with-fast-forward-proof-v1"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSymlinkPolicyV1 {
+    PreserveExactTargetV1,
+}
+
+impl RootSymlinkPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::PreserveExactTargetV1 => "preserve-exact-target-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootEmptyDirectoryPolicyV1 {
+    IgnoreV1,
+}
+
+impl RootEmptyDirectoryPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::IgnoreV1 => "ignore-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootMetadataPolicyV1 {
+    /// Bind regular-file mode and mtime from its manifest.
+    ///
+    /// Symlink target semantics are governed separately by
+    /// `RootSymlinkPolicyV1`; V1 does not claim symlink metadata fidelity.
+    RegularFileManifestModeAndMtimeV1,
+}
+
+impl RootMetadataPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RegularFileManifestModeAndMtimeV1 => "regular-file-manifest-mode-and-mtime-v1",
+        }
+    }
+}
+
+/// Closed operational settings for one registered-root profile generation.
+///
+/// These are deliberately not deserialized from host configuration. Changing
+/// any value requires a new profile version so a plan digest cannot retain the
+/// same policy identity while silently changing collection or deletion
+/// semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootProfileSettingsV1 {
+    hidden_paths: RootHiddenPathPolicyV1,
+    exclusions: RootExclusionPolicyV1,
+    git: RootGitPolicyV1,
+    symlinks: RootSymlinkPolicyV1,
+    empty_directories: RootEmptyDirectoryPolicyV1,
+    metadata: RootMetadataPolicyV1,
+}
+
+impl RootProfileSettingsV1 {
+    pub const fn hidden_path_policy(self) -> RootHiddenPathPolicyV1 {
+        self.hidden_paths
+    }
+
+    pub const fn exclusion_policy(self) -> RootExclusionPolicyV1 {
+        self.exclusions
+    }
+
+    pub const fn git_policy(self) -> RootGitPolicyV1 {
+        self.git
+    }
+
+    pub const fn symlink_policy(self) -> RootSymlinkPolicyV1 {
+        self.symlinks
+    }
+
+    pub const fn empty_directory_policy(self) -> RootEmptyDirectoryPolicyV1 {
+        self.empty_directories
+    }
+
+    pub const fn metadata_policy(self) -> RootMetadataPolicyV1 {
+        self.metadata
+    }
+}
+
+/// Closed profile/settings/fingerprint bundle for registered-root planning.
+///
+/// The fields are private so a caller cannot pair one profile's settings with
+/// another profile's fingerprint. Planners accept `RootProfileV1` and derive
+/// this bundle rather than accepting its components independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootProfilePolicyV1 {
+    profile: RootProfileV1,
+    settings: RootProfileSettingsV1,
+    settings_fingerprint: RootProfileSettingsFingerprintV1,
+}
+
+impl RootProfilePolicyV1 {
+    pub const fn profile(self) -> RootProfileV1 {
+        self.profile
+    }
+
+    pub const fn settings(self) -> RootProfileSettingsV1 {
+        self.settings
+    }
+
+    pub const fn settings_fingerprint(self) -> RootProfileSettingsFingerprintV1 {
+        self.settings_fingerprint
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootPathContractV1 {
+    PortableNfcCaseFoldV1,
+}
+
+impl RootPathContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::PortableNfcCaseFoldV1 => "portable-nfc-case-fold-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootStateContractV1 {
+    ImmutablePrimarySemanticExactV1,
+}
+
+impl RootStateContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::ImmutablePrimarySemanticExactV1 => "immutable-primary-semantic-exact-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootRemoteContractV1 {
+    RawCommittedManifestBoundV1,
+}
+
+impl RootRemoteContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RawCommittedManifestBoundV1 => "raw-committed-manifest-bound-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootCausalityContractV1 {
+    TypedVectorClockV1,
+}
+
+impl RootCausalityContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::TypedVectorClockV1 => "typed-vector-clock-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootActionContractV1 {
+    PlanOnlyNoDeleteV1,
+}
+
+impl RootActionContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::PlanOnlyNoDeleteV1 => "plan-only-no-delete-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootOrderingContractV1 {
+    /// Sort by canonical relative-path bytes, then entry-kind discriminant,
+    /// then proof bytes. V1 planners must reject paths that do not have one
+    /// unambiguous portable canonical form before applying this ordering.
+    RelativePathKindProofV1,
+}
+
+impl RootOrderingContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RelativePathKindProofV1 => "relative-path-kind-proof-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootCompletenessContractV1 {
+    CompleteOrNoDigestV1,
+}
+
+impl RootCompletenessContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::CompleteOrNoDigestV1 => "complete-or-no-digest-v1",
+        }
+    }
+}
+
+/// Fixed semantic contract for the first registered-root planner.
+///
+/// The fields are private so callers cannot weaken an individual dimension or
+/// manufacture an unreviewed contract while retaining the V1 type name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisteredRootPlanContractV1 {
+    path: RootPathContractV1,
+    state: RootStateContractV1,
+    remote: RootRemoteContractV1,
+    causality: RootCausalityContractV1,
+    actions: RootActionContractV1,
+    ordering: RootOrderingContractV1,
+    completeness: RootCompletenessContractV1,
+}
+
+impl RegisteredRootPlanContractV1 {
+    pub const fn strict_v1() -> Self {
+        Self {
+            path: RootPathContractV1::PortableNfcCaseFoldV1,
+            state: RootStateContractV1::ImmutablePrimarySemanticExactV1,
+            remote: RootRemoteContractV1::RawCommittedManifestBoundV1,
+            causality: RootCausalityContractV1::TypedVectorClockV1,
+            actions: RootActionContractV1::PlanOnlyNoDeleteV1,
+            ordering: RootOrderingContractV1::RelativePathKindProofV1,
+            completeness: RootCompletenessContractV1::CompleteOrNoDigestV1,
+        }
+    }
+
+    pub const fn path_contract(self) -> RootPathContractV1 {
+        self.path
+    }
+
+    pub const fn state_contract(self) -> RootStateContractV1 {
+        self.state
+    }
+
+    pub const fn remote_contract(self) -> RootRemoteContractV1 {
+        self.remote
+    }
+
+    pub const fn causality_contract(self) -> RootCausalityContractV1 {
+        self.causality
+    }
+
+    pub const fn action_contract(self) -> RootActionContractV1 {
+        self.actions
+    }
+
+    pub const fn ordering_contract(self) -> RootOrderingContractV1 {
+        self.ordering
+    }
+
+    pub const fn completeness_contract(self) -> RootCompletenessContractV1 {
+        self.completeness
+    }
+
+    pub fn fingerprint(self) -> RegisteredRootPlanContractFingerprintV1 {
+        fingerprint_registered_root_plan_contract_v1(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1098,6 +1442,164 @@ fn update_root_fingerprint_field(hasher: &mut blake3::Hasher, tag: &str, value: 
 
 fn finish_root_fingerprint(hasher: blake3::Hasher) -> String {
     format!("b3v1:{}", hasher.finalize().to_hex())
+}
+
+const CANONICAL_ROOT_FINGERPRINT_SCHEMA_V1: u32 = 1;
+
+struct CanonicalRootFingerprintEncoderV1 {
+    hasher: blake3::Hasher,
+    expected_fields: u32,
+    encoded_fields: u32,
+}
+
+impl CanonicalRootFingerprintEncoderV1 {
+    fn new(domain: &'static str, expected_fields: usize) -> Self {
+        let expected_fields = u32::try_from(expected_fields)
+            .expect("canonical root fingerprint field count must fit u32");
+        let mut hasher = blake3::Hasher::new_derive_key(domain);
+        hasher.update(&CANONICAL_ROOT_FINGERPRINT_SCHEMA_V1.to_be_bytes());
+        hasher.update(&expected_fields.to_be_bytes());
+        Self {
+            hasher,
+            expected_fields,
+            encoded_fields: 0,
+        }
+    }
+
+    fn field(&mut self, tag: &'static str, value: &[u8]) {
+        let tag_len =
+            u32::try_from(tag.len()).expect("canonical root fingerprint tag length must fit u32");
+        let value_len = u64::try_from(value.len())
+            .expect("canonical root fingerprint value length must fit u64");
+        self.hasher.update(&tag_len.to_be_bytes());
+        self.hasher.update(tag.as_bytes());
+        self.hasher.update(&value_len.to_be_bytes());
+        self.hasher.update(value);
+        self.encoded_fields = self
+            .encoded_fields
+            .checked_add(1)
+            .expect("canonical root fingerprint field count overflow");
+    }
+
+    fn finish(self) -> [u8; 32] {
+        assert_eq!(
+            self.encoded_fields, self.expected_fields,
+            "canonical root fingerprint field count does not match its schema"
+        );
+        *self.hasher.finalize().as_bytes()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RootProfileSettingsFingerprintV1([u8; 32]);
+
+impl RootProfileSettingsFingerprintV1 {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Display for RootProfileSettingsFingerprintV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("b3v1:")?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for RootProfileSettingsFingerprintV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RootProfileSettingsFingerprintV1({self})")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RegisteredRootPlanContractFingerprintV1([u8; 32]);
+
+impl RegisteredRootPlanContractFingerprintV1 {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Display for RegisteredRootPlanContractFingerprintV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("b3v1:")?;
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for RegisteredRootPlanContractFingerprintV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RegisteredRootPlanContractFingerprintV1({self})")
+    }
+}
+
+fn root_profile_settings_fingerprint_fields_v1(
+    profile: RootProfileV1,
+    settings: RootProfileSettingsV1,
+) -> [(&'static str, &'static str); 7] {
+    [
+        ("profile", profile.canonical_name()),
+        ("hidden_path_policy", settings.hidden_paths.canonical_name()),
+        ("exclusion_policy", settings.exclusions.canonical_name()),
+        ("git_policy", settings.git.canonical_name()),
+        ("symlink_policy", settings.symlinks.canonical_name()),
+        (
+            "empty_directory_policy",
+            settings.empty_directories.canonical_name(),
+        ),
+        ("metadata_policy", settings.metadata.canonical_name()),
+    ]
+}
+
+fn fingerprint_root_profile_settings_v1(
+    profile: RootProfileV1,
+    settings: RootProfileSettingsV1,
+) -> RootProfileSettingsFingerprintV1 {
+    let fields = root_profile_settings_fingerprint_fields_v1(profile, settings);
+    let mut encoder = CanonicalRootFingerprintEncoderV1::new(
+        "tinyland.tcfs.root-profile-settings.b3v1",
+        fields.len(),
+    );
+    for (tag, value) in fields {
+        encoder.field(tag, value.as_bytes());
+    }
+    RootProfileSettingsFingerprintV1(encoder.finish())
+}
+
+fn fingerprint_registered_root_plan_contract_v1(
+    contract: RegisteredRootPlanContractV1,
+) -> RegisteredRootPlanContractFingerprintV1 {
+    let mut encoder = CanonicalRootFingerprintEncoderV1::new(
+        "tinyland.tcfs.registered-root-plan-contract.b3v1",
+        7,
+    );
+    encoder.field("path_policy", contract.path.canonical_name().as_bytes());
+    encoder.field("state_policy", contract.state.canonical_name().as_bytes());
+    encoder.field("remote_policy", contract.remote.canonical_name().as_bytes());
+    encoder.field(
+        "causality_policy",
+        contract.causality.canonical_name().as_bytes(),
+    );
+    encoder.field(
+        "action_policy",
+        contract.actions.canonical_name().as_bytes(),
+    );
+    encoder.field(
+        "ordering_policy",
+        contract.ordering.canonical_name().as_bytes(),
+    );
+    encoder.field(
+        "completeness_policy",
+        contract.completeness.canonical_name().as_bytes(),
+    );
+    RegisteredRootPlanContractFingerprintV1(encoder.finish())
 }
 
 impl RootSpecV1Config {
@@ -1997,6 +2499,191 @@ resolution_policy = "inspect-only"
         assert_ne!(local_path_only, state_path_only);
         assert_eq!(identity, spec.identity_fingerprint("work"));
         assert_ne!(identity, spec.identity_fingerprint("other-work"));
+    }
+
+    #[test]
+    fn versioned_root_profile_settings_are_closed_and_typed() {
+        let git_policy = RootProfileV1::GitRawV1.policy();
+        let agent_policy = RootProfileV1::AgentStaticV1.policy();
+        let git = git_policy.settings();
+        let agent = agent_policy.settings();
+
+        assert_eq!(git_policy.profile(), RootProfileV1::GitRawV1);
+        assert_eq!(agent_policy.profile(), RootProfileV1::AgentStaticV1);
+
+        for settings in [git, agent] {
+            assert_eq!(
+                settings.hidden_path_policy(),
+                RootHiddenPathPolicyV1::IncludeV1
+            );
+            assert_eq!(
+                settings.exclusion_policy(),
+                RootExclusionPolicyV1::FixedIngressPathComponentsV1
+            );
+            assert_eq!(
+                settings.symlink_policy(),
+                RootSymlinkPolicyV1::PreserveExactTargetV1
+            );
+            assert_eq!(
+                settings.empty_directory_policy(),
+                RootEmptyDirectoryPolicyV1::IgnoreV1
+            );
+            assert_eq!(
+                settings.metadata_policy(),
+                RootMetadataPolicyV1::RegularFileManifestModeAndMtimeV1
+            );
+        }
+        assert_eq!(
+            git.git_policy(),
+            RootGitPolicyV1::StandaloneRawWithFastForwardProofV1
+        );
+        assert_eq!(agent.git_policy(), RootGitPolicyV1::ExcludedV1);
+
+        let git_fingerprint = git_policy.settings_fingerprint();
+        let agent_fingerprint = agent_policy.settings_fingerprint();
+        assert_eq!(git_fingerprint.as_bytes().len(), 32);
+        assert_eq!(agent_fingerprint.as_bytes().len(), 32);
+        assert_eq!(
+            git_fingerprint,
+            RootProfileV1::GitRawV1.policy().settings_fingerprint()
+        );
+        assert_ne!(git_fingerprint, agent_fingerprint);
+        assert_eq!(
+            git_fingerprint.to_string(),
+            "b3v1:ceedf3bc0437f2dce0ae5228efd0b5949dafaf47bbd23f99a27eb9183c8ee794"
+        );
+        assert_eq!(
+            agent_fingerprint.to_string(),
+            "b3v1:86c7ae197c9b320a8cf93bd7559d6352ee4b9dceded70f9249dc9deba4918294"
+        );
+    }
+
+    #[test]
+    fn root_profile_fingerprint_schema_binds_every_policy_field() {
+        let git = RootProfileV1::GitRawV1.policy();
+        assert_eq!(
+            root_profile_settings_fingerprint_fields_v1(git.profile(), git.settings(),),
+            [
+                ("profile", "git-raw-v1"),
+                ("hidden_path_policy", "include-v1"),
+                ("exclusion_policy", "fixed-ingress-path-components-v1"),
+                ("git_policy", "standalone-raw-with-fast-forward-proof-v1",),
+                ("symlink_policy", "preserve-exact-target-v1"),
+                ("empty_directory_policy", "ignore-v1"),
+                ("metadata_policy", "regular-file-manifest-mode-and-mtime-v1",),
+            ]
+        );
+
+        let agent = RootProfileV1::AgentStaticV1.policy();
+        assert_eq!(
+            root_profile_settings_fingerprint_fields_v1(agent.profile(), agent.settings(),),
+            [
+                ("profile", "agent-static-v1"),
+                ("hidden_path_policy", "include-v1"),
+                ("exclusion_policy", "fixed-ingress-path-components-v1"),
+                ("git_policy", "excluded-v1"),
+                ("symlink_policy", "preserve-exact-target-v1"),
+                ("empty_directory_policy", "ignore-v1"),
+                ("metadata_policy", "regular-file-manifest-mode-and-mtime-v1",),
+            ]
+        );
+    }
+
+    #[test]
+    fn registered_root_plan_contract_is_fixed_and_digest_bound() {
+        let contract = RegisteredRootPlanContractV1::strict_v1();
+        assert_eq!(
+            contract.path_contract(),
+            RootPathContractV1::PortableNfcCaseFoldV1
+        );
+        assert_eq!(
+            contract.state_contract(),
+            RootStateContractV1::ImmutablePrimarySemanticExactV1
+        );
+        assert_eq!(
+            contract.remote_contract(),
+            RootRemoteContractV1::RawCommittedManifestBoundV1
+        );
+        assert_eq!(
+            contract.causality_contract(),
+            RootCausalityContractV1::TypedVectorClockV1
+        );
+        assert_eq!(
+            contract.action_contract(),
+            RootActionContractV1::PlanOnlyNoDeleteV1
+        );
+        assert_eq!(
+            contract.ordering_contract(),
+            RootOrderingContractV1::RelativePathKindProofV1
+        );
+        assert_eq!(
+            contract.completeness_contract(),
+            RootCompletenessContractV1::CompleteOrNoDigestV1
+        );
+
+        let fingerprint = contract.fingerprint();
+        assert_eq!(fingerprint.as_bytes().len(), 32);
+        assert_eq!(
+            fingerprint,
+            RegisteredRootPlanContractV1::strict_v1().fingerprint()
+        );
+        assert_eq!(
+            fingerprint.to_string(),
+            "b3v1:6d2d9204424755f56559ba85b5e8596f1b1ab74e357989be4907f4976b9c2d50"
+        );
+    }
+
+    #[test]
+    fn canonical_root_fingerprint_framing_separates_fields_and_domains() {
+        fn encode(domain: &'static str, fields: &[(&'static str, &[u8])]) -> [u8; 32] {
+            let mut encoder = CanonicalRootFingerprintEncoderV1::new(domain, fields.len());
+            for (tag, value) in fields {
+                encoder.field(tag, value);
+            }
+            encoder.finish()
+        }
+
+        let left = encode("tinyland.tcfs.test-framing.b3v1", &[("a", b"bc")]);
+        let right = encode("tinyland.tcfs.test-framing.b3v1", &[("ab", b"c")]);
+        let other_domain = encode("tinyland.tcfs.test-domain.b3v1", &[("a", b"bc")]);
+        let ordered = encode(
+            "tinyland.tcfs.test-ordering.b3v1",
+            &[("first", b"one"), ("second", b"two")],
+        );
+        let permuted = encode(
+            "tinyland.tcfs.test-ordering.b3v1",
+            &[("second", b"two"), ("first", b"one")],
+        );
+        let mutated = encode(
+            "tinyland.tcfs.test-ordering.b3v1",
+            &[("first", b"one"), ("second", b"too")],
+        );
+
+        assert_eq!(
+            blake3::Hash::from_bytes(left).to_hex().to_string(),
+            "dee4f6c7d62fc770a28b56121139daa070b3f8a42cd89a65d916dbbb9ecbcc00"
+        );
+        assert_eq!(
+            blake3::Hash::from_bytes(right).to_hex().to_string(),
+            "155a944066efbd250f2d5dc9d88a2f7d023c4fc792fc34c62e2012e7243e06eb"
+        );
+        assert_eq!(
+            blake3::Hash::from_bytes(other_domain).to_hex().to_string(),
+            "419c248d4d7f18324fad3a54a9f1af1b6defec6e0336d94b21034c0907b586a2"
+        );
+        assert_ne!(left, right);
+        assert_ne!(left, other_domain);
+        assert_ne!(ordered, permuted);
+        assert_ne!(ordered, mutated);
+    }
+
+    #[test]
+    #[should_panic(expected = "canonical root fingerprint field count does not match its schema")]
+    fn canonical_root_fingerprint_rejects_declared_field_count_mismatch() {
+        let mut encoder =
+            CanonicalRootFingerprintEncoderV1::new("tinyland.tcfs.test-count.b3v1", 2);
+        encoder.field("only", b"one");
+        let _ = encoder.finish();
     }
 
     #[test]
