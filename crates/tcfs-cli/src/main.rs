@@ -13148,13 +13148,16 @@ enabled = false
 
         // The armed program doubles as a fake signer (SIG_CREATED status plus
         // a signature block, the shape `git commit -S` expects) so the fixture
-        // commit carries a signature for `git log` to verify.
+        // commit carries a signature for `git log` to verify. It must drain
+        // the signing payload before exiting so Git never loses a race while
+        // writing the commit bytes to the signer.
         let gpg = dir.path().join("evil-gpg");
         let sentinel = dir.path().join("evil-gpg.ran");
         std::fs::write(
             &gpg,
             format!(
                 "#!/bin/sh\n\
+                 cat >/dev/null\n\
                  printf ran > \"{}\"\n\
                  printf '[GNUPG:] SIG_CREATED \\n' >&2\n\
                  printf -- '-----BEGIN PGP SIGNATURE-----\\nfake\\n-----END PGP SIGNATURE-----\\n'\n",
