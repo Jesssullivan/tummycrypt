@@ -1,0 +1,26 @@
+# Tests skipped in the LINUX Nix-sandbox checkPhase only (TIN-2853).
+# Same two sandbox environment properties as linux-sandbox-skip-tcfsd.txt
+# (seccomp ENOTSUP on the xattr family; single-uid userns making all
+# ancestors overflowuid 65534). Every test below passes natively; ordinary
+# Linux Cargo CI remains authoritative for them.
+#
+# Regenerate: empty this file, `nix build .#tcfs-cli` on a Linux builder,
+# and copy the FAILED test names from the check-phase log.
+tests::cli_directory_push_and_status_detect_modified_file
+tests::cli_directory_push_preserves_symlink_when_configured
+tests::cli_pull_after_peer_delete_recreate_over_unsynced_stub_uses_recreated_remote
+tests::cli_pull_after_unsync_hydrates_latest_remote_and_removes_stub
+tests::cli_pull_by_file_path_without_dest_writes_to_file_path
+tests::cli_push_status_pull_workflow_round_trips_file
+tests::cli_sync_status_reports_explicit_sync_state
+tests::cli_unsync_directory_converts_clean_tracked_descendants
+tests::cli_unsync_directory_force_converts_dirty_with_tracked_metadata
+tests::cli_unsync_directory_refuses_dirty_descendants_without_force
+tests::cli_unsync_force_rejects_untracked_file
+tests::cli_unsync_force_uses_tracked_remote_metadata
+tests::cli_unsync_marks_not_synced_and_reports_via_real_and_stub_paths
+tests::cli_write_via_db_override_visible_to_daemon_json_read
+tests::daemon_write_json_visible_to_cli_db_override_read
+tests::direct_manifest_fixed_rel_path_is_rejected_before_destination_or_cache_mutation
+tests::explicit_state_writers_fail_before_operator_work_when_locked
+unsync_flips_status_before_destructive_ops

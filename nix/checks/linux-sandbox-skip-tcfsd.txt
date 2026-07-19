@@ -1,0 +1,131 @@
+# Tests skipped in the LINUX Nix-sandbox checkPhase only (TIN-2853).
+#
+# These tests exercise tcfs's fail-closed trusted-path/ACL validators,
+# which cannot pass inside the Linux Nix build sandbox for two environment
+# reasons (verified at syscall level on sting, kernel 6.19/XFS):
+#   1. Nix's sandbox seccomp filter fails the whole xattr syscall family
+#      with ENOTSUP ("Prevent builders from using EAs or ACLs", upstream
+#      src/libstore/linux/build/linux-derivation-builder.cc), so the POSIX
+#      ACL probe (tcfs-sync path_acl.rs) can never reach the filesystem and
+#      correctly fails closed.
+#   2. The sandbox user namespace maps a single uid, so every ancestor above
+#      /build (/, /nix/store, /tmp) appears as overflowuid 65534 and is
+#      rejected by the euid-or-root ancestor-ownership validator
+#      (conflict_git.rs validate_trusted_configured_path).
+# Natively (outside the sandbox) every test below passes; ordinary Linux
+# Cargo CI remains authoritative for them.
+#
+# Regenerate: empty this file, `nix build .#tcfsd` on a Linux builder, and
+# copy the FAILED test names from the check-phase log.
+# Entries are passed as `--skip <name>` (substring match on the full test
+# path), one per line; '#' comments and blank lines are ignored.
+daemon::invite_redemption_startup_tests::first_start_allows_missing_invite_redemption_store
+daemon::invite_redemption_startup_tests::restart_fails_closed_on_corrupt_invite_redemption_store
+daemon::invite_redemption_startup_tests::restart_fails_closed_on_unsafe_invite_redemption_store
+daemon::keep_both_pr1_tests::auto_download_failure_withholds_ack_signal
+daemon::keep_both_pr1_tests::auto_download_flush_failure_rolls_back_in_memory_state
+daemon::keep_both_pr1_tests::auto_download_uses_current_index_when_event_metadata_is_stale
+daemon::keep_both_pr1_tests::auto_pull_acknowledges_read_only_up_to_date_git_internal_path
+daemon::keep_both_pr1_tests::auto_pull_classifies_the_current_snapshot_not_a_delayed_event
+daemon::keep_both_pr1_tests::auto_pull_defers_new_git_internal_path_without_hydration_or_cache_advance
+daemon::keep_both_pr1_tests::auto_pull_defers_remote_newer_git_internal_path_without_mutation
+daemon::keep_both_pr1_tests::auto_pull_persists_git_conflict_and_withholds_ack_for_grouped_reconcile
+daemon::keep_both_pr1_tests::auto_pull_preserves_an_existing_untracked_local_file
+daemon::keep_both_pr1_tests::auto_pull_preserves_unsynced_local_bytes_and_records_conflict
+daemon::keep_both_pr1_tests::auto_pull_tie_break_uses_the_current_manifest_writer
+daemon::keep_both_pr1_tests::conflict_resolved_flush_failure_rolls_back_and_withholds_ack
+daemon::keep_both_pr1_tests::conflict_resolved_uses_indexed_clock_not_notification_metadata
+daemon::keep_both_pr1_tests::crash_after_staging_rename_replays_original_bytes
+daemon::keep_both_pr1_tests::daemon_lifetime_lock_rejects_second_instance_and_releases_on_drop
+daemon::keep_both_pr1_tests::git_conflict_flush_failure_withholds_ack_signal
+daemon::keep_both_pr1_tests::on_demand_threshold_uses_the_current_manifest_size
+daemon::keep_both_pr1_tests::pending_delete_replay_never_overwrites_recreated_original
+daemon::keep_both_pr1_tests::private_daemon_data_dir_is_owner_only_and_rejects_unsafe_existing_mode
+daemon::keep_both_pr1_tests::remote_delete_acks_git_internal_path_after_grouped_reconcile_converges
+daemon::keep_both_pr1_tests::remote_delete_acks_when_local_and_cache_are_already_absent
+daemon::keep_both_pr1_tests::remote_delete_commits_matching_tracked_file_and_cache_together
+daemon::keep_both_pr1_tests::remote_delete_defers_git_internal_path_without_per_file_mutation
+daemon::keep_both_pr1_tests::remote_delete_flush_failure_restores_file_and_in_memory_cache
+daemon::keep_both_pr1_tests::remote_delete_never_policy_acknowledges_without_mutation
+daemon::keep_both_pr1_tests::remote_delete_preserves_edit_without_persisting_forged_event_clock
+daemon::keep_both_pr1_tests::remote_delete_preserves_untracked_local_file_as_conflict
+daemon::keep_both_pr1_tests::remote_delete_treats_missing_tracked_file_as_conflict
+daemon::keep_both_pr1_tests::remote_delete_without_tombstone_never_removes_matching_tracked_file
+daemon::keep_both_pr1_tests::watcher_only_file_deleted_cannot_erase_live_remote_index_or_local_peer
+daemon::state_migration_tests::absorb_expands_tilde_in_configured_state_db
+daemon::state_migration_tests::absorb_ignores_unrelated_stale_legacy_temp
+daemon::state_migration_tests::absorb_leaves_existing_json_untouched_when_both_exist
+daemon::state_migration_tests::absorb_neither_present_starts_fresh
+daemon::state_migration_tests::absorb_repairs_valid_backup_before_promoting_legacy_authority
+daemon::state_migration_tests::absorb_seeds_json_from_db_only_host
+daemon::state_migration_tests::absorb_treats_dangling_canonical_symlink_as_present_and_fail_closed
+grpc::tests::auth_complete_enroll_allows_self_or_admin_session
+grpc::tests::auth_enroll_allows_self_or_admin_session
+grpc::tests::auth_revoke_requires_admin_session
+grpc::tests::auth_status_locked_by_default
+grpc::tests::auth_unlock_then_lock_roundtrip
+grpc::tests::auth_unlock_wrong_key_size_fails
+grpc::tests::credential_status_empty
+grpc::tests::device_enroll_rejects_invalid_public_key_before_claiming_invite
+grpc::tests::device_enroll_rejects_reused_invite
+grpc::tests::device_enroll_wraps_bootstrap_to_joining_device_key
+grpc::tests::diagnostics_empty_state
+grpc::tests::file_provider_pull_exact_miss_never_uses_same_filename_elsewhere
+grpc::tests::file_provider_pull_exact_rejects_stale_before_manifest_corruption
+grpc::tests::file_provider_pull_exact_requires_version_and_marks_empty_content
+grpc::tests::hydrate_exact_index_miss_never_uses_same_filename_elsewhere
+grpc::tests::hydrate_rejects_custom_master_key_through_symlinked_directory_alias
+grpc::tests::hydrate_rejects_fixed_targets_before_storage_or_cache_access
+grpc::tests::hydrate_rejects_stub_origin_for_a_different_local_path
+grpc::tests::hydrate_stale_stub_uses_current_exact_index
+grpc::tests::list_files_uses_live_remote_namespace_and_cache_only_for_bound_metadata
+grpc::tests::mount_missing_required_fields_returns_error_response
+grpc::tests::mount_rejects_duplicate_active_mountpoint
+grpc::tests::mount_requires_initialized_operator
+grpc::tests::primary_resolution_permissions_match_strategy_before_state_lookup
+grpc::tests::primary_uds_serves_when_fileprovider_socket_bind_fails
+grpc::tests::pull_only_primary_keep_remote_is_retired_without_mutation
+grpc::tests::pull_rejects_fixed_logical_paths_before_storage_or_cache_access
+grpc::tests::pull_rejects_fixed_rel_discovered_during_resolution_before_cache_or_write
+grpc::tests::pull_rejects_outside_root_and_custom_master_key_alias_without_mutation
+grpc::tests::push_then_pull_streams_complete_successfully_over_uds
+grpc::tests::registered_root_auth_bypass_fails_before_route_lookup
+grpc::tests::registered_root_cache_and_git_metadata_fences_fail_closed
+grpc::tests::registered_root_execute_obeys_inspect_only_policy
+grpc::tests::registered_root_inspect_and_execute_share_isolated_cache
+grpc::tests::registered_root_peer_canonicalization_errors_fail_closed
+grpc::tests::registered_root_rejects_local_root_alias_below_writable_parent
+grpc::tests::registered_root_rejects_state_directory_alias_below_writable_parent
+grpc::tests::registered_root_rejects_writable_state_ancestor
+grpc::tests::registered_root_resolution_permissions_match_mode_before_route_lookup
+grpc::tests::registered_root_retires_unrooted_primary_per_file_mutation
+grpc::tests::registered_root_rootless_repo_rejects_route_and_retired_files_are_uniform
+grpc::tests::registered_root_rootless_resolve_rejects_symlink_alias_and_missing_child
+grpc::tests::registered_root_rootless_restricted_session_cannot_probe_enrollment
+grpc::tests::registered_root_state_cache_rejects_hardlinks_and_primary_inode_alias
+grpc::tests::registered_root_state_directory_rejects_canonical_named_alias
+grpc::tests::registered_root_unauthorized_id_is_indistinguishable_from_unknown
+grpc::tests::registered_root_unknown_id_does_not_enumerate_enrollment
+grpc::tests::resolve_conflict_defer_allowed_on_git_internal_path
+grpc::tests::resolve_conflict_invalid_resolution
+grpc::tests::resolve_conflict_repo_git_keep_both_requires_operator_cli
+grpc::tests::resolve_conflict_retires_git_internal_path_before_classification
+grpc::tests::resolve_conflict_retires_normal_per_file_mutations
+grpc::tests::resolve_conflict_retires_symlink_alias_without_classification
+grpc::tests::resolve_conflict_retires_without_consulting_stored_git_path
+grpc::tests::status_rechecks_live_storage_health
+grpc::tests::status_returns_version
+grpc::tests::sync_status_reports_explicit_conflict_state
+grpc::tests::sync_status_reports_pending_for_modified_tracked_file
+grpc::tests::sync_status_surfaces_needs_sync_error_instead_of_synced
+grpc::tests::sync_status_unknown_path
+grpc::tests::unmount_requires_mountpoint
+grpc::tests::unsync_waits_for_active_path_lock
+grpc::tests::watch_rejects_partial_cache_catch_up_without_advancing_anchor
+mark_conflict_inserts_entry_when_missing
+mark_conflict_preserves_existing_entry_fields
+needs_sync_errors_on_missing_path
+sync_status_does_not_report_synced_when_needs_sync_errs
+sync_status_reports_pending_on_ok_some
+sync_status_reports_synced_on_ok_none
+sync_status_returns_entry_status_when_not_synced
