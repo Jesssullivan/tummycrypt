@@ -1017,6 +1017,8 @@ impl RootProfileV1 {
                 Self::AgentStaticV1 => RootGitPolicyV1::ExcludedV1,
             },
             symlinks: RootSymlinkPolicyV1::PreserveExactTargetV1,
+            hardlinks: RootHardlinkPolicyV1::RejectV1,
+            special_files: RootSpecialFilePolicyV1::RejectV1,
             empty_directories: RootEmptyDirectoryPolicyV1::IgnoreV1,
             metadata: RootMetadataPolicyV1::RegularFileManifestModeAndMtimeV1,
         }
@@ -1086,6 +1088,34 @@ impl RootSymlinkPolicyV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootHardlinkPolicyV1 {
+    /// Reject multiply linked regular files rather than collapsing identity.
+    RejectV1,
+}
+
+impl RootHardlinkPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RejectV1 => "reject-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSpecialFilePolicyV1 {
+    /// Reject sockets, devices, FIFOs, and other non-file entry kinds.
+    RejectV1,
+}
+
+impl RootSpecialFilePolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::RejectV1 => "reject-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootEmptyDirectoryPolicyV1 {
     IgnoreV1,
 }
@@ -1127,6 +1157,8 @@ pub struct RootProfileSettingsV1 {
     exclusions: RootExclusionPolicyV1,
     git: RootGitPolicyV1,
     symlinks: RootSymlinkPolicyV1,
+    hardlinks: RootHardlinkPolicyV1,
+    special_files: RootSpecialFilePolicyV1,
     empty_directories: RootEmptyDirectoryPolicyV1,
     metadata: RootMetadataPolicyV1,
 }
@@ -1146,6 +1178,14 @@ impl RootProfileSettingsV1 {
 
     pub const fn symlink_policy(self) -> RootSymlinkPolicyV1 {
         self.symlinks
+    }
+
+    pub const fn hardlink_policy(self) -> RootHardlinkPolicyV1 {
+        self.hardlinks
+    }
+
+    pub const fn special_file_policy(self) -> RootSpecialFilePolicyV1 {
+        self.special_files
     }
 
     pub const fn empty_directory_policy(self) -> RootEmptyDirectoryPolicyV1 {
@@ -1192,6 +1232,82 @@ impl RootPathContractV1 {
     pub const fn canonical_name(self) -> &'static str {
         match self {
             Self::PortableNfcCaseFoldV1 => "portable-nfc-case-fold-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootMountBoundaryPolicyV1 {
+    /// Reject every descendant mount boundary, including same-filesystem bind
+    /// mounts. Device-ID equality alone does not satisfy this policy.
+    SameMountNoCrossingV1,
+}
+
+impl RootMountBoundaryPolicyV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::SameMountNoCrossingV1 => "same-mount-no-crossing-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootLocalSnapshotContractV1 {
+    /// Walk and read through no-follow descriptors, then prove both entry
+    /// identity and content identity remained stable.
+    DescriptorRelativeIdentityContentIdentityV1,
+}
+
+impl RootLocalSnapshotContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => {
+                "descriptor-relative-identity-content-identity-v1"
+            }
+        }
+    }
+
+    /// Mount containment required while walking the enrolled root.
+    pub const fn mount_boundary_policy(self) -> RootMountBoundaryPolicyV1 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => {
+                RootMountBoundaryPolicyV1::SameMountNoCrossingV1
+            }
+        }
+    }
+
+    /// Maximum number of path components beneath the enrolled root.
+    pub const fn max_depth(self) -> u32 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 256,
+        }
+    }
+
+    /// Maximum retained entry count for one complete snapshot.
+    pub const fn max_entries(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 1_000_000,
+        }
+    }
+
+    /// Maximum combined byte length of all retained canonical paths.
+    pub const fn max_retained_path_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 256 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one preserved symlink target.
+    pub const fn max_symlink_target_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 1023,
+        }
+    }
+
+    /// Fixed regular-file hashing buffer size.
+    pub const fn hash_buffer_bytes(self) -> u64 {
+        match self {
+            Self::DescriptorRelativeIdentityContentIdentityV1 => 64 * 1024,
         }
     }
 }
@@ -1284,6 +1400,7 @@ impl RootCompletenessContractV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisteredRootPlanContractV1 {
     path: RootPathContractV1,
+    local_snapshot: RootLocalSnapshotContractV1,
     state: RootStateContractV1,
     remote: RootRemoteContractV1,
     causality: RootCausalityContractV1,
@@ -1296,6 +1413,8 @@ impl RegisteredRootPlanContractV1 {
     pub const fn strict_v1() -> Self {
         Self {
             path: RootPathContractV1::PortableNfcCaseFoldV1,
+            local_snapshot:
+                RootLocalSnapshotContractV1::DescriptorRelativeIdentityContentIdentityV1,
             state: RootStateContractV1::ImmutablePrimarySemanticExactV1,
             remote: RootRemoteContractV1::RawCommittedManifestBoundV1,
             causality: RootCausalityContractV1::TypedVectorClockV1,
@@ -1307,6 +1426,10 @@ impl RegisteredRootPlanContractV1 {
 
     pub const fn path_contract(self) -> RootPathContractV1 {
         self.path
+    }
+
+    pub const fn local_snapshot_contract(self) -> RootLocalSnapshotContractV1 {
+        self.local_snapshot
     }
 
     pub const fn state_contract(self) -> RootStateContractV1 {
@@ -1544,7 +1667,7 @@ impl fmt::Debug for RegisteredRootPlanContractFingerprintV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RootProfileSettingsFingerprintFieldsV1 {
-    canonical_names: [(&'static str, &'static str); 7],
+    canonical_names: [(&'static str, &'static str); 9],
     fixed_ingress_schema: FixedIngressPolicySchemaFingerprintV1,
 }
 
@@ -1559,6 +1682,11 @@ fn root_profile_settings_fingerprint_fields_v1(
             ("exclusion_policy", settings.exclusions.canonical_name()),
             ("git_policy", settings.git.canonical_name()),
             ("symlink_policy", settings.symlinks.canonical_name()),
+            ("hardlink_policy", settings.hardlinks.canonical_name()),
+            (
+                "special_file_policy",
+                settings.special_files.canonical_name(),
+            ),
             (
                 "empty_directory_policy",
                 settings.empty_directories.canonical_name(),
@@ -1569,11 +1697,9 @@ fn root_profile_settings_fingerprint_fields_v1(
     }
 }
 
-fn fingerprint_root_profile_settings_v1(
-    profile: RootProfileV1,
-    settings: RootProfileSettingsV1,
+fn fingerprint_root_profile_settings_fields_v1(
+    fields: RootProfileSettingsFingerprintFieldsV1,
 ) -> RootProfileSettingsFingerprintV1 {
-    let fields = root_profile_settings_fingerprint_fields_v1(profile, settings);
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.root-profile-settings.b3v1",
         fields.canonical_names.len() + 1,
@@ -1588,33 +1714,101 @@ fn fingerprint_root_profile_settings_v1(
     RootProfileSettingsFingerprintV1(encoder.finish())
 }
 
-fn fingerprint_registered_root_plan_contract_v1(
+fn fingerprint_root_profile_settings_v1(
+    profile: RootProfileV1,
+    settings: RootProfileSettingsV1,
+) -> RootProfileSettingsFingerprintV1 {
+    fingerprint_root_profile_settings_fields_v1(root_profile_settings_fingerprint_fields_v1(
+        profile, settings,
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegisteredRootPlanContractFingerprintFieldsV1 {
+    canonical_names: [(&'static str, &'static str); 9],
+    local_snapshot_max_depth: u32,
+    local_snapshot_max_entries: u64,
+    local_snapshot_max_retained_path_bytes: u64,
+    local_snapshot_max_symlink_target_bytes: u64,
+    local_snapshot_hash_buffer_bytes: u64,
+}
+
+fn registered_root_plan_contract_fingerprint_fields_v1(
     contract: RegisteredRootPlanContractV1,
+) -> RegisteredRootPlanContractFingerprintFieldsV1 {
+    RegisteredRootPlanContractFingerprintFieldsV1 {
+        canonical_names: [
+            ("path_policy", contract.path.canonical_name()),
+            (
+                "local_snapshot_policy",
+                contract.local_snapshot.canonical_name(),
+            ),
+            (
+                "local_snapshot_mount_boundary_policy",
+                contract
+                    .local_snapshot
+                    .mount_boundary_policy()
+                    .canonical_name(),
+            ),
+            ("state_policy", contract.state.canonical_name()),
+            ("remote_policy", contract.remote.canonical_name()),
+            ("causality_policy", contract.causality.canonical_name()),
+            ("action_policy", contract.actions.canonical_name()),
+            ("ordering_policy", contract.ordering.canonical_name()),
+            (
+                "completeness_policy",
+                contract.completeness.canonical_name(),
+            ),
+        ],
+        local_snapshot_max_depth: contract.local_snapshot.max_depth(),
+        local_snapshot_max_entries: contract.local_snapshot.max_entries(),
+        local_snapshot_max_retained_path_bytes: contract.local_snapshot.max_retained_path_bytes(),
+        local_snapshot_max_symlink_target_bytes: contract.local_snapshot.max_symlink_target_bytes(),
+        local_snapshot_hash_buffer_bytes: contract.local_snapshot.hash_buffer_bytes(),
+    }
+}
+
+fn fingerprint_registered_root_plan_contract_fields_v1(
+    fields: RegisteredRootPlanContractFingerprintFieldsV1,
 ) -> RegisteredRootPlanContractFingerprintV1 {
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.registered-root-plan-contract.b3v1",
-        7,
+        fields.canonical_names.len() + 5,
     );
-    encoder.field("path_policy", contract.path.canonical_name().as_bytes());
-    encoder.field("state_policy", contract.state.canonical_name().as_bytes());
-    encoder.field("remote_policy", contract.remote.canonical_name().as_bytes());
-    encoder.field(
-        "causality_policy",
-        contract.causality.canonical_name().as_bytes(),
-    );
-    encoder.field(
-        "action_policy",
-        contract.actions.canonical_name().as_bytes(),
-    );
-    encoder.field(
-        "ordering_policy",
-        contract.ordering.canonical_name().as_bytes(),
-    );
-    encoder.field(
-        "completeness_policy",
-        contract.completeness.canonical_name().as_bytes(),
-    );
+    for (tag, value) in fields.canonical_names {
+        encoder.field(tag, value.as_bytes());
+        if tag == "local_snapshot_policy" {
+            encoder.field(
+                "local_snapshot_max_depth",
+                &fields.local_snapshot_max_depth.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_entries",
+                &fields.local_snapshot_max_entries.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_retained_path_bytes",
+                &fields.local_snapshot_max_retained_path_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_max_symlink_target_bytes",
+                &fields.local_snapshot_max_symlink_target_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "local_snapshot_hash_buffer_bytes",
+                &fields.local_snapshot_hash_buffer_bytes.to_be_bytes(),
+            );
+        }
+    }
     RegisteredRootPlanContractFingerprintV1(encoder.finish())
+}
+
+fn fingerprint_registered_root_plan_contract_v1(
+    contract: RegisteredRootPlanContractV1,
+) -> RegisteredRootPlanContractFingerprintV1 {
+    fingerprint_registered_root_plan_contract_fields_v1(
+        registered_root_plan_contract_fingerprint_fields_v1(contract),
+    )
 }
 
 impl RootSpecV1Config {
@@ -2539,6 +2733,11 @@ resolution_policy = "inspect-only"
                 settings.symlink_policy(),
                 RootSymlinkPolicyV1::PreserveExactTargetV1
             );
+            assert_eq!(settings.hardlink_policy(), RootHardlinkPolicyV1::RejectV1);
+            assert_eq!(
+                settings.special_file_policy(),
+                RootSpecialFilePolicyV1::RejectV1
+            );
             assert_eq!(
                 settings.empty_directory_policy(),
                 RootEmptyDirectoryPolicyV1::IgnoreV1
@@ -2565,11 +2764,11 @@ resolution_policy = "inspect-only"
         assert_ne!(git_fingerprint, agent_fingerprint);
         assert_eq!(
             git_fingerprint.to_string(),
-            "b3v1:9aa6b15f0ef417e3d05ce69509a73f122aa0dc82c2b5f67da35168609f2145b2"
+            "b3v1:3f7b636df0abf0081df3dee914c678444f880d6de7e66717e5f6acdcb6a6f447"
         );
         assert_eq!(
             agent_fingerprint.to_string(),
-            "b3v1:cd9e9cc1c9bd0359d273861d84f3145347df6a61defbe229664ff27e450b6351"
+            "b3v1:d71f461619660b8e88a2bcbc299e0bb88c91ba2112a75621b9c58e148d08d0e4"
         );
     }
 
@@ -2585,6 +2784,8 @@ resolution_policy = "inspect-only"
                 ("exclusion_policy", "fixed-ingress-path-components-v1"),
                 ("git_policy", "standalone-raw-with-fast-forward-proof-v1",),
                 ("symlink_policy", "preserve-exact-target-v1"),
+                ("hardlink_policy", "reject-v1"),
+                ("special_file_policy", "reject-v1"),
                 ("empty_directory_policy", "ignore-v1"),
                 ("metadata_policy", "regular-file-manifest-mode-and-mtime-v1",),
             ]
@@ -2609,6 +2810,8 @@ resolution_policy = "inspect-only"
                 ("exclusion_policy", "fixed-ingress-path-components-v1"),
                 ("git_policy", "excluded-v1"),
                 ("symlink_policy", "preserve-exact-target-v1"),
+                ("hardlink_policy", "reject-v1"),
+                ("special_file_policy", "reject-v1"),
                 ("empty_directory_policy", "ignore-v1"),
                 ("metadata_policy", "regular-file-manifest-mode-and-mtime-v1",),
             ]
@@ -2624,12 +2827,46 @@ resolution_policy = "inspect-only"
     }
 
     #[test]
+    fn root_profile_fingerprint_binds_hardlink_and_special_file_policies() {
+        let policy = RootProfileV1::GitRawV1.policy();
+        let fields =
+            root_profile_settings_fingerprint_fields_v1(policy.profile(), policy.settings());
+        let baseline = fingerprint_root_profile_settings_fields_v1(fields);
+
+        for (index, mutation) in [
+            (5, "allow-hardlinks-test-v0"),
+            (6, "allow-special-files-test-v0"),
+        ] {
+            let mut mutated = fields;
+            mutated.canonical_names[index].1 = mutation;
+            assert_ne!(
+                baseline,
+                fingerprint_root_profile_settings_fields_v1(mutated)
+            );
+        }
+    }
+
+    #[test]
     fn registered_root_plan_contract_is_fixed_and_digest_bound() {
         let contract = RegisteredRootPlanContractV1::strict_v1();
         assert_eq!(
             contract.path_contract(),
             RootPathContractV1::PortableNfcCaseFoldV1
         );
+        let local_snapshot = contract.local_snapshot_contract();
+        assert_eq!(
+            local_snapshot,
+            RootLocalSnapshotContractV1::DescriptorRelativeIdentityContentIdentityV1
+        );
+        assert_eq!(
+            local_snapshot.mount_boundary_policy(),
+            RootMountBoundaryPolicyV1::SameMountNoCrossingV1
+        );
+        assert_eq!(local_snapshot.max_depth(), 256);
+        assert_eq!(local_snapshot.max_entries(), 1_000_000);
+        assert_eq!(local_snapshot.max_retained_path_bytes(), 256 * 1024 * 1024);
+        assert_eq!(local_snapshot.max_symlink_target_bytes(), 1023);
+        assert_eq!(local_snapshot.hash_buffer_bytes(), 64 * 1024);
         assert_eq!(
             contract.state_contract(),
             RootStateContractV1::ImmutablePrimarySemanticExactV1
@@ -2663,7 +2900,92 @@ resolution_policy = "inspect-only"
         );
         assert_eq!(
             fingerprint.to_string(),
-            "b3v1:6d2d9204424755f56559ba85b5e8596f1b1ab74e357989be4907f4976b9c2d50"
+            "b3v1:af0bce82d5ebee4249f45ad7824e9e12a7628ffb4ec764c1865d079b1fac4d6a"
+        );
+    }
+
+    #[test]
+    fn registered_root_plan_fingerprint_schema_binds_local_snapshot_resources() {
+        let contract = RegisteredRootPlanContractV1::strict_v1();
+        let fields = registered_root_plan_contract_fingerprint_fields_v1(contract);
+        assert_eq!(
+            fields.canonical_names,
+            [
+                ("path_policy", "portable-nfc-case-fold-v1"),
+                (
+                    "local_snapshot_policy",
+                    "descriptor-relative-identity-content-identity-v1",
+                ),
+                (
+                    "local_snapshot_mount_boundary_policy",
+                    "same-mount-no-crossing-v1",
+                ),
+                ("state_policy", "immutable-primary-semantic-exact-v1"),
+                ("remote_policy", "raw-committed-manifest-bound-v1"),
+                ("causality_policy", "typed-vector-clock-v1"),
+                ("action_policy", "plan-only-no-delete-v1"),
+                ("ordering_policy", "relative-path-kind-proof-v1"),
+                ("completeness_policy", "complete-or-no-digest-v1"),
+            ]
+        );
+        assert_eq!(fields.local_snapshot_max_depth, 256);
+        assert_eq!(fields.local_snapshot_max_entries, 1_000_000);
+        assert_eq!(
+            fields.local_snapshot_max_retained_path_bytes,
+            256 * 1024 * 1024
+        );
+        assert_eq!(fields.local_snapshot_max_symlink_target_bytes, 1023);
+        assert_eq!(fields.local_snapshot_hash_buffer_bytes, 64 * 1024);
+
+        let baseline = fingerprint_registered_root_plan_contract_fields_v1(fields);
+
+        let mut policy_mutation = fields;
+        policy_mutation.canonical_names[1].1 = "path-open-content-only-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(policy_mutation)
+        );
+
+        let mut mount_policy_mutation = fields;
+        mount_policy_mutation.canonical_names[2].1 = "device-id-only-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(mount_policy_mutation)
+        );
+
+        let mut depth_mutation = fields;
+        depth_mutation.local_snapshot_max_depth += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(depth_mutation)
+        );
+
+        let mut entries_mutation = fields;
+        entries_mutation.local_snapshot_max_entries += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(entries_mutation)
+        );
+
+        let mut path_bytes_mutation = fields;
+        path_bytes_mutation.local_snapshot_max_retained_path_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(path_bytes_mutation)
+        );
+
+        let mut target_bytes_mutation = fields;
+        target_bytes_mutation.local_snapshot_max_symlink_target_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(target_bytes_mutation)
+        );
+
+        let mut buffer_bytes_mutation = fields;
+        buffer_bytes_mutation.local_snapshot_hash_buffer_bytes += 1;
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(buffer_bytes_mutation)
         );
     }
 
