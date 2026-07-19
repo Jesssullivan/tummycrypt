@@ -4,18 +4,21 @@
 //! an object. The strict registered-root ceremony therefore requires a
 //! conditionally updated current HEAD whose exact bytes select an immutable,
 //! content-addressed catalog root and ordered immutable pages. This module
-//! validates only that catalog closure:
+//! first validates that catalog closure:
 //!
 //! `current HEAD A -> catalog root -> every catalog page -> current HEAD B`
 //!
-//! It deliberately stops before binding every namespace object named by the
-//! pages. It also cannot prove that legacy/direct writers have been fenced or
-//! that the first catalog was bootstrapped from externally complete truth.
+//! A separate opaque semantic reader then exact-fetches the catalog-declared
+//! version of every named object, validates strict namespace semantics and the
+//! exact manifest-reference set, and finally rechecks current HEAD C. That
+//! artifact is still only one internally closed observed revision. It cannot
+//! prove that legacy/direct writers have been fenced or that the first catalog
+//! was bootstrapped from externally complete truth.
 //! The inventory is the registered-root reconcile metadata corpus (indices,
 //! namespace reservations, and manifests), not chunks, staging objects,
-//! probes, or catalog objects. A later semantic gate must still prove that
-//! every index and reservation is present and the manifest entries are exactly
-//! the referenced manifest set.
+//! probes, or catalog objects. The semantic gate below proves that every named
+//! index and reservation is present and that manifest entries are exactly the
+//! referenced manifest set for this revision.
 //! Without linearizable current-HEAD reads or a trusted monotonic high-water
 //! mark, it also proves closure only at the observed revision, not that the
 //! revision is the latest published namespace.
@@ -26,6 +29,7 @@ use anyhow::Result;
 use opendal::Operator;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
+use std::path::Path;
 #[cfg(test)]
 use tcfs_core::config::RootSpecV1Config;
 use tcfs_core::config::{
@@ -34,14 +38,32 @@ use tcfs_core::config::{
 };
 use tcfs_storage::ConditionalWriteSemanticsReceipt;
 
+use crate::blacklist::Blacklist;
 use crate::index_entry::{
     namespace_index_prefix, namespace_logical_entry_from_index_path, namespace_reservation_prefix,
-    read_current_raw_object_snapshot_v1, read_raw_object_snapshot_v1,
-    validate_canonical_namespace_remote_prefix, RawObjectChangedDuringReadV1,
-    RawObjectReadBindingV1, RawObjectReadV1, RawObjectSnapshotTooLargeV1, RawObjectSnapshotV1,
+    read_current_raw_object_snapshot_v1, read_expected_raw_object_snapshot_v1,
+    validate_canonical_namespace_remote_prefix, PortableNamespaceRole,
+    RawObjectChangedDuringReadV1, RawObjectReadBindingV1, RawObjectReadV1,
+    RawObjectSnapshotInvalidMetadataV1, RawObjectSnapshotTooLargeV1, RawObjectSnapshotV1,
 };
 use crate::registered_reconcile::{
-    bind_remote_object_v1, BoundRemoteObjectSnapshotV1, RegisteredRootRemoteObjectBindingV1,
+    bind_remote_object_v1, expected_raw_object_binding_v1,
+    read_expected_observed_namespace_reservation_v1,
+    read_expected_observed_raw_directory_marker_v1, read_expected_observed_raw_index_entry_v1,
+    read_expected_observed_strict_remote_manifest_for_references_v1,
+    validate_registered_remote_logical_path_bounds_v1,
+    validate_registered_remote_storage_key_bounds_v1, BoundNamespaceReservationV1,
+    BoundRemoteObjectSnapshotV1, ExactObservedNamespaceReservationReadV1,
+    ExactObservedRawDirectoryMarkerReadV1, ExactObservedRawIndexEntryReadV1,
+    RawCommittedIndexEntryV1, RawDeletedDirectoryMarkerV1, RawDeletedIndexEntryV1,
+    RawLiveDirectoryMarkerV1, RegisteredRootRemoteObjectBindingV1,
+    StrictNamespaceReservationIncompleteV1, StrictObservedRemoteManifestReadV1,
+    StrictRemoteDirectoryMarkerIncompleteV1, StrictRemoteIndexIncompleteV1,
+    StrictRemoteManifestIncompleteV1, StrictRemoteManifestV1,
+};
+use crate::registered_remote_observation::{
+    RemoteNamespaceClaimAccumulatorErrorV1, RemoteNamespaceClaimAccumulatorV1,
+    RemoteNamespaceClaimOriginsV1, RetainedRemoteNamespaceClaimV1,
 };
 use crate::registered_source_composition::ValidatedSelectedRegisteredRootRemoteContextV1;
 
@@ -122,6 +144,62 @@ pub(crate) enum StrictRemoteCatalogIncompleteV1 {
 pub(crate) enum StrictRemoteCatalogClosureReadV1 {
     Verified(Box<VerifiedRemoteCatalogClosureV1>),
     Incomplete(StrictRemoteCatalogIncompleteV1),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteCatalogNamedObjectKindV1 {
+    OrdinaryIndex,
+    DirectoryMarker,
+    NamespaceReservation,
+    Manifest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteCatalogManifestSetMismatchV1 {
+    MissingReferencedManifest,
+    UnreferencedManifest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SemanticRemoteCatalogResourceV1 {
+    AdvertisedObjectBytes,
+    BoundObjectBytes,
+    RetainedBindingBytes,
+    IndexObjects,
+    ReservationObjects,
+    ManifestObjects,
+    ManifestReferenceOrdinals,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StrictSemanticallyBoundRemoteCatalogIncompleteV1 {
+    Catalog(StrictRemoteCatalogIncompleteV1),
+    NamedObjectMissing {
+        kind: RemoteCatalogNamedObjectKindV1,
+    },
+    NamedObjectChanged {
+        kind: RemoteCatalogNamedObjectKindV1,
+    },
+    NamedObjectUnbound {
+        kind: RemoteCatalogNamedObjectKindV1,
+    },
+    NamedObjectIdentity {
+        kind: RemoteCatalogNamedObjectKindV1,
+    },
+    Index(StrictRemoteIndexIncompleteV1),
+    Marker(StrictRemoteDirectoryMarkerIncompleteV1),
+    LiveMarkerExcluded,
+    Reservation(StrictNamespaceReservationIncompleteV1),
+    Manifest(StrictRemoteManifestIncompleteV1),
+    ManifestSet(RemoteCatalogManifestSetMismatchV1),
+    NamespaceClaim(RemoteNamespaceClaimAccumulatorErrorV1),
+    ResourceLimit(SemanticRemoteCatalogResourceV1),
+    HeadChanged,
+}
+
+pub(crate) enum StrictSemanticallyBoundRemoteCatalogReadV1 {
+    Verified(Box<SemanticallyBoundRemoteCatalogCorpusV1>),
+    Incomplete(StrictSemanticallyBoundRemoteCatalogIncompleteV1),
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -323,6 +401,131 @@ impl VerifiedRemoteCatalogClosureV1 {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum SemanticallyBoundCatalogIndexObjectV1 {
+    Committed(Box<RawCommittedIndexEntryV1>),
+    Deleted(Box<RawDeletedIndexEntryV1>),
+    LiveMarker(Box<RawLiveDirectoryMarkerV1>),
+    DeletedMarker(Box<RawDeletedDirectoryMarkerV1>),
+}
+
+impl SemanticallyBoundCatalogIndexObjectV1 {
+    const fn object(&self) -> &BoundRemoteObjectSnapshotV1 {
+        match self {
+            Self::Committed(index) => index.object(),
+            Self::Deleted(index) => index.object(),
+            Self::LiveMarker(marker) => marker.object(),
+            Self::DeletedMarker(marker) => marker.object(),
+        }
+    }
+
+    fn logical_path(&self) -> &str {
+        match self {
+            Self::Committed(index) => index.rel_path(),
+            Self::Deleted(index) => index.route().rel_path(),
+            Self::LiveMarker(marker) => marker.route().logical_dir(),
+            Self::DeletedMarker(marker) => marker.route().logical_dir(),
+        }
+    }
+
+    fn physical_key(&self) -> &str {
+        match self {
+            Self::Committed(index) => index.index_key(),
+            Self::Deleted(index) => index.route().index_key(),
+            Self::LiveMarker(marker) => marker.route().marker_key(),
+            Self::DeletedMarker(marker) => marker.route().marker_key(),
+        }
+    }
+
+    const fn role(&self) -> PortableNamespaceRole {
+        match self {
+            Self::Committed(_) | Self::Deleted(_) => PortableNamespaceRole::File,
+            Self::LiveMarker(_) | Self::DeletedMarker(_) => PortableNamespaceRole::Directory,
+        }
+    }
+
+    const fn claim_origin(&self) -> RemoteNamespaceClaimOriginsV1 {
+        match self {
+            Self::Committed(_) | Self::LiveMarker(_) => RemoteNamespaceClaimOriginsV1::CURRENT,
+            Self::Deleted(_) | Self::DeletedMarker(_) => RemoteNamespaceClaimOriginsV1::HISTORICAL,
+        }
+    }
+
+    const fn committed(&self) -> Option<&RawCommittedIndexEntryV1> {
+        match self {
+            Self::Committed(index) => Some(index),
+            Self::Deleted(_) | Self::LiveMarker(_) | Self::DeletedMarker(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SemanticallyBoundCatalogManifestV1 {
+    source_index_ordinal: usize,
+    manifest: Box<StrictRemoteManifestV1>,
+}
+
+/// Strict semantic closure of every namespace object named by one unchanged
+/// catalog revision.
+///
+/// This is deliberately opaque, non-cloneable, and non-serializable. It is
+/// not remote-completeness authority: external writer fencing, externally
+/// complete bootstrap, and monotonic replay/high-water proof are still absent.
+pub(crate) struct SemanticallyBoundRemoteCatalogCorpusV1 {
+    // The named entry vector is drained during construction so the retained
+    // semantic corpus does not duplicate every potentially long storage key.
+    closure: VerifiedRemoteCatalogClosureV1,
+    index_objects: Vec<SemanticallyBoundCatalogIndexObjectV1>,
+    reservations: Vec<BoundNamespaceReservationV1>,
+    manifests: Vec<SemanticallyBoundCatalogManifestV1>,
+    claims: Vec<RetainedRemoteNamespaceClaimV1>,
+}
+
+impl std::fmt::Debug for SemanticallyBoundRemoteCatalogCorpusV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SemanticallyBoundRemoteCatalogCorpusV1")
+            .field("remote_prefix", &self.closure.remote_prefix)
+            .field("root_id", &self.closure.root_id)
+            .field("catalog_sequence", &self.closure.catalog_sequence)
+            .field("index_object_count", &self.index_objects.len())
+            .field("reservation_count", &self.reservations.len())
+            .field("manifest_count", &self.manifests.len())
+            .field("claim_count", &self.claims.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SemanticallyBoundRemoteCatalogCorpusV1 {
+    pub(crate) fn remote_prefix(&self) -> &str {
+        self.closure.remote_prefix()
+    }
+
+    pub(crate) fn root_id(&self) -> &str {
+        self.closure.root_id()
+    }
+
+    pub(crate) const fn catalog_sequence(&self) -> NonZeroU64 {
+        self.closure.catalog_sequence()
+    }
+
+    pub(crate) fn index_object_count(&self) -> usize {
+        self.index_objects.len()
+    }
+
+    pub(crate) fn reservation_count(&self) -> usize {
+        self.reservations.len()
+    }
+
+    pub(crate) fn manifest_count(&self) -> usize {
+        self.manifests.len()
+    }
+
+    pub(crate) fn claim_count(&self) -> usize {
+        self.claims.len()
+    }
+}
+
 fn join_remote_key_v1(remote_prefix: &str, suffix: &str) -> String {
     format!("{remote_prefix}/{suffix}")
 }
@@ -398,20 +601,7 @@ fn invalid(
 }
 
 fn validate_storage_key_bound_v1(key: &str) -> bool {
-    !key.is_empty()
-        && !key.starts_with('/')
-        && !key.ends_with('/')
-        && !key.contains('\\')
-        && !key.chars().any(char::is_control)
-        && !key
-            .split('/')
-            .any(|component| component.is_empty() || component == "." || component == "..")
-        && u64::try_from(key.len()).is_ok_and(|length| {
-            length
-                <= RegisteredRootPlanContractV1::strict_v1()
-                    .remote_contract()
-                    .max_storage_key_bytes()
-        })
+    validate_registered_remote_storage_key_bounds_v1(key, "remote catalog storage key").is_ok()
 }
 
 fn validate_catalog_context_v1(
@@ -548,7 +738,10 @@ fn validate_catalog_entry_route_v1(remote_prefix: &str, entry: &RemoteCatalogEnt
             .object_key
             .strip_prefix(&namespace_index_prefix(remote_prefix))
             .filter(|relative| !relative.is_empty())
-            .is_some_and(|relative| namespace_logical_entry_from_index_path(relative).is_ok()),
+            .and_then(|relative| namespace_logical_entry_from_index_path(relative).ok())
+            .is_some_and(|(logical_path, _)| {
+                validate_registered_remote_logical_path_bounds_v1(&logical_path).is_ok()
+            }),
         RemoteCatalogObjectKindV1::Reservation => entry
             .object_key
             .strip_prefix(&namespace_reservation_prefix(remote_prefix))
@@ -707,6 +900,87 @@ impl RemoteCatalogBudgetV1 {
     }
 }
 
+#[derive(Default)]
+struct SemanticRemoteCatalogBudgetV1 {
+    advertised_object_bytes: u64,
+    bound_object_bytes: u64,
+    retained_binding_bytes: u64,
+}
+
+impl SemanticRemoteCatalogBudgetV1 {
+    fn checked_add(
+        value: &mut u64,
+        increment: u64,
+        maximum: u64,
+        resource: SemanticRemoteCatalogResourceV1,
+    ) -> std::result::Result<(), StrictSemanticallyBoundRemoteCatalogIncompleteV1> {
+        *value = value
+            .checked_add(increment)
+            .ok_or(StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(resource))?;
+        if *value > maximum {
+            return Err(StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(resource));
+        }
+        Ok(())
+    }
+
+    fn observe_advertised(
+        &mut self,
+        entry: &VerifiedRemoteCatalogEntryV1,
+    ) -> std::result::Result<(), StrictSemanticallyBoundRemoteCatalogIncompleteV1> {
+        let maximum = RegisteredRootPlanContractV1::strict_v1()
+            .remote_contract()
+            .max_bound_object_bytes_per_pass();
+        Self::checked_add(
+            &mut self.advertised_object_bytes,
+            entry.raw_bytes_len(),
+            maximum,
+            SemanticRemoteCatalogResourceV1::AdvertisedObjectBytes,
+        )
+    }
+
+    fn observe_bound(
+        &mut self,
+        object: &BoundRemoteObjectSnapshotV1,
+    ) -> std::result::Result<(), StrictSemanticallyBoundRemoteCatalogIncompleteV1> {
+        let contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+        Self::checked_add(
+            &mut self.bound_object_bytes,
+            object.raw_bytes_len(),
+            contract.max_bound_object_bytes_per_pass(),
+            SemanticRemoteCatalogResourceV1::BoundObjectBytes,
+        )?;
+        let binding_bytes = match object.binding() {
+            RegisteredRootRemoteObjectBindingV1::Version { version, etag } => version
+                .len()
+                .checked_add(etag.as_ref().map_or(0, String::len)),
+            RegisteredRootRemoteObjectBindingV1::Etag { etag } => Some(etag.len()),
+        }
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                SemanticRemoteCatalogResourceV1::RetainedBindingBytes,
+            ),
+        )?;
+        Self::checked_add(
+            &mut self.retained_binding_bytes,
+            binding_bytes,
+            contract.max_retained_binding_bytes_per_pass(),
+            SemanticRemoteCatalogResourceV1::RetainedBindingBytes,
+        )
+    }
+}
+
+fn catalog_entry_matches_object_v1(
+    entry: &VerifiedRemoteCatalogEntryV1,
+    physical_key: &str,
+    object: &BoundRemoteObjectSnapshotV1,
+) -> bool {
+    entry.object_key() == physical_key
+        && entry.raw_bytes_len() == object.raw_bytes_len()
+        && entry.raw_blake3() == object.raw_blake3()
+        && entry.binding() == object.binding()
+}
+
 fn read_changed(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RawObjectChangedDuringReadV1>()
@@ -716,6 +990,12 @@ fn read_changed(error: &anyhow::Error) -> bool {
 fn read_too_large(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RawObjectSnapshotTooLargeV1>()
+        .is_some()
+}
+
+fn read_invalid_metadata(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RawObjectSnapshotInvalidMetadataV1>()
         .is_some()
 }
 
@@ -736,6 +1016,12 @@ async fn read_current_head_v1(
                 RemoteCatalogResourceV1::HeadBytes,
             )));
         }
+        Err(error) if read_invalid_metadata(&error) => {
+            return Ok(Err(invalid(
+                RemoteCatalogClosureObjectKindV1::Head,
+                InvalidRemoteCatalogReasonV1::ObjectIdentity,
+            )));
+        }
         Err(error) => return Err(error),
     };
     Ok(match read {
@@ -752,8 +1038,22 @@ async fn read_immutable_closure_object_v1(
     key: &str,
     maximum: u64,
     kind: RemoteCatalogClosureObjectKindV1,
+    expected_binding: &RemoteCatalogObjectBindingWireV1,
 ) -> Result<std::result::Result<RawObjectSnapshotV1, StrictRemoteCatalogIncompleteV1>> {
-    let read = match read_raw_object_snapshot_v1(op, key, maximum).await {
+    let Some(expected_binding) = validate_binding_wire_v1(expected_binding) else {
+        return Ok(Err(invalid(
+            kind,
+            InvalidRemoteCatalogReasonV1::ObjectBinding,
+        )));
+    };
+    let read = match read_expected_raw_object_snapshot_v1(
+        op,
+        key,
+        maximum,
+        expected_raw_object_binding_v1(&expected_binding),
+    )
+    .await
+    {
         Ok(read) => read,
         Err(error) if read_changed(&error) => {
             return Ok(Err(StrictRemoteCatalogIncompleteV1::ClosureObjectChanged {
@@ -768,6 +1068,12 @@ async fn read_immutable_closure_object_v1(
             };
             return Ok(Err(StrictRemoteCatalogIncompleteV1::ResourceLimit(
                 resource,
+            )));
+        }
+        Err(error) if read_invalid_metadata(&error) => {
+            return Ok(Err(invalid(
+                kind,
+                InvalidRemoteCatalogReasonV1::ObjectIdentity,
             )));
         }
         Err(error) => return Err(error),
@@ -974,6 +1280,7 @@ pub(crate) async fn read_verified_remote_catalog_closure_v1(
         &root_key,
         remote_contract.max_catalog_root_object_bytes(),
         RemoteCatalogClosureObjectKindV1::Root,
+        &head.catalog_root.binding,
     )
     .await?
     {
@@ -1046,6 +1353,7 @@ pub(crate) async fn read_verified_remote_catalog_closure_v1(
             &page_key,
             remote_contract.max_catalog_page_object_bytes(),
             RemoteCatalogClosureObjectKindV1::Page,
+            &reference.binding,
         )
         .await?
         {
@@ -1173,6 +1481,588 @@ pub(crate) async fn read_verified_remote_catalog_closure_v1(
     )))
 }
 
+fn semantic_named_read_error_v1(
+    error: &anyhow::Error,
+    kind: RemoteCatalogNamedObjectKindV1,
+) -> Option<StrictSemanticallyBoundRemoteCatalogIncompleteV1> {
+    if read_changed(error) {
+        Some(StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectChanged { kind })
+    } else if read_invalid_metadata(error) {
+        Some(StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectIdentity { kind })
+    } else if read_too_large(error) {
+        Some(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                SemanticRemoteCatalogResourceV1::BoundObjectBytes,
+            ),
+        )
+    } else {
+        None
+    }
+}
+
+/// Bind and strictly validate every namespace object named by one unchanged
+/// immutable catalog closure.
+///
+/// This issues no LIST operations and performs no retry, digest, planning, or
+/// action construction. The returned artifact proves only the internal
+/// semantic closure of the observed revision. It remains non-authoritative
+/// until external writer fencing, complete bootstrap, and monotonic
+/// replay/high-water requirements are independently satisfied.
+pub(crate) async fn read_semantically_bound_remote_catalog_corpus_v1(
+    op: &Operator,
+    selected: &ValidatedSelectedRegisteredRootRemoteContextV1,
+    receipt: &ConditionalWriteSemanticsReceipt,
+) -> Result<StrictSemanticallyBoundRemoteCatalogReadV1> {
+    let closure = match read_verified_remote_catalog_closure_v1(op, selected, receipt).await? {
+        StrictRemoteCatalogClosureReadV1::Verified(closure) => closure,
+        StrictRemoteCatalogClosureReadV1::Incomplete(incomplete) => {
+            return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::Catalog(incomplete),
+            ));
+        }
+    };
+    let mut closure = *closure;
+    let mut budget = SemanticRemoteCatalogBudgetV1::default();
+    for entry in &closure.entries {
+        if let Err(incomplete) = budget.observe_advertised(entry) {
+            return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                incomplete,
+            ));
+        }
+    }
+
+    let index_count = closure
+        .entries
+        .iter()
+        .filter(|entry| entry.kind() == RemoteCatalogObjectKindV1::Index)
+        .count();
+    let reservation_count = closure
+        .entries
+        .iter()
+        .filter(|entry| entry.kind() == RemoteCatalogObjectKindV1::Reservation)
+        .count();
+    let manifest_count = closure
+        .entries
+        .iter()
+        .filter(|entry| entry.kind() == RemoteCatalogObjectKindV1::Manifest)
+        .count();
+    let mut index_objects = Vec::new();
+    if index_objects.try_reserve(index_count).is_err() {
+        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                SemanticRemoteCatalogResourceV1::IndexObjects,
+            ),
+        ));
+    }
+    let mut reservations = Vec::new();
+    if reservations.try_reserve(reservation_count).is_err() {
+        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                SemanticRemoteCatalogResourceV1::ReservationObjects,
+            ),
+        ));
+    }
+    let mut catalog_manifests = Vec::new();
+    if catalog_manifests.try_reserve(manifest_count).is_err() {
+        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                SemanticRemoteCatalogResourceV1::ManifestObjects,
+            ),
+        ));
+    }
+    let contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+    let mut claims = RemoteNamespaceClaimAccumulatorV1::new(contract);
+    let remote_prefix = closure.remote_prefix.clone();
+    let index_prefix = namespace_index_prefix(&remote_prefix);
+    let reservation_prefix = namespace_reservation_prefix(&remote_prefix);
+
+    // Move every catalog entry exactly once. The semantic output retains the
+    // parsed objects and their bound identities rather than a second copy of
+    // every catalog storage key.
+    for entry in std::mem::take(&mut closure.entries) {
+        match entry.kind() {
+            RemoteCatalogObjectKindV1::Index => {
+                let index_rel_path = entry
+                    .object_key()
+                    .strip_prefix(&index_prefix)
+                    .expect("verified catalog index entry must remain under its prefix");
+                let (logical_path, role) = namespace_logical_entry_from_index_path(index_rel_path)
+                    .expect("verified catalog index route must remain canonical");
+                let (kind, observed) = match role {
+                    PortableNamespaceRole::File => {
+                        let read = match read_expected_observed_raw_index_entry_v1(
+                            op,
+                            &remote_prefix,
+                            &logical_path,
+                            entry.binding(),
+                        )
+                        .await
+                        {
+                            Ok(read) => read,
+                            Err(error) => {
+                                if let Some(incomplete) = semantic_named_read_error_v1(
+                                    &error,
+                                    RemoteCatalogNamedObjectKindV1::OrdinaryIndex,
+                                ) {
+                                    return Ok(
+                                        StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                            incomplete,
+                                        ),
+                                    );
+                                }
+                                return Err(error);
+                            }
+                        };
+                        let observed = match read {
+                            ExactObservedRawIndexEntryReadV1::Missing => {
+                                return Ok(
+                                    StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                        StrictSemanticallyBoundRemoteCatalogIncompleteV1::
+                                            NamedObjectMissing {
+                                                kind: RemoteCatalogNamedObjectKindV1::
+                                                    OrdinaryIndex,
+                                            },
+                                    ),
+                                );
+                            }
+                            ExactObservedRawIndexEntryReadV1::Incomplete {
+                                reason: StrictRemoteIndexIncompleteV1::UnboundObject,
+                                ..
+                            } => {
+                                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::
+                                        NamedObjectUnbound {
+                                            kind: RemoteCatalogNamedObjectKindV1::OrdinaryIndex,
+                                        },
+                                ));
+                            }
+                            ExactObservedRawIndexEntryReadV1::Incomplete { reason, .. } => {
+                                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::Index(reason),
+                                ));
+                            }
+                            ExactObservedRawIndexEntryReadV1::Deleted(index) => {
+                                SemanticallyBoundCatalogIndexObjectV1::Deleted(Box::new(index))
+                            }
+                            ExactObservedRawIndexEntryReadV1::Committed(index) => {
+                                SemanticallyBoundCatalogIndexObjectV1::Committed(Box::new(index))
+                            }
+                        };
+                        (RemoteCatalogNamedObjectKindV1::OrdinaryIndex, observed)
+                    }
+                    PortableNamespaceRole::Directory => {
+                        let read = match read_expected_observed_raw_directory_marker_v1(
+                            op,
+                            &remote_prefix,
+                            &logical_path,
+                            entry.binding(),
+                        )
+                        .await
+                        {
+                            Ok(read) => read,
+                            Err(error) => {
+                                if let Some(incomplete) = semantic_named_read_error_v1(
+                                    &error,
+                                    RemoteCatalogNamedObjectKindV1::DirectoryMarker,
+                                ) {
+                                    return Ok(
+                                        StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                            incomplete,
+                                        ),
+                                    );
+                                }
+                                return Err(error);
+                            }
+                        };
+                        let observed = match read {
+                            ExactObservedRawDirectoryMarkerReadV1::Missing => {
+                                return Ok(
+                                    StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                        StrictSemanticallyBoundRemoteCatalogIncompleteV1::
+                                            NamedObjectMissing {
+                                                kind: RemoteCatalogNamedObjectKindV1::
+                                                    DirectoryMarker,
+                                            },
+                                    ),
+                                );
+                            }
+                            ExactObservedRawDirectoryMarkerReadV1::Incomplete {
+                                reason: StrictRemoteDirectoryMarkerIncompleteV1::UnboundObject,
+                                ..
+                            } => {
+                                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::
+                                        NamedObjectUnbound {
+                                            kind: RemoteCatalogNamedObjectKindV1::DirectoryMarker,
+                                        },
+                                ));
+                            }
+                            ExactObservedRawDirectoryMarkerReadV1::Incomplete {
+                                reason, ..
+                            } => {
+                                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::Marker(
+                                        reason,
+                                    ),
+                                ));
+                            }
+                            ExactObservedRawDirectoryMarkerReadV1::Live(marker) => {
+                                SemanticallyBoundCatalogIndexObjectV1::LiveMarker(Box::new(marker))
+                            }
+                            ExactObservedRawDirectoryMarkerReadV1::Deleted(marker) => {
+                                SemanticallyBoundCatalogIndexObjectV1::DeletedMarker(Box::new(
+                                    marker,
+                                ))
+                            }
+                        };
+                        (RemoteCatalogNamedObjectKindV1::DirectoryMarker, observed)
+                    }
+                };
+                if !catalog_entry_matches_object_v1(
+                    &entry,
+                    observed.physical_key(),
+                    observed.object(),
+                ) {
+                    return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                        StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectIdentity {
+                            kind,
+                        },
+                    ));
+                }
+                if let Err(incomplete) = budget.observe_bound(observed.object()) {
+                    return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                        incomplete,
+                    ));
+                }
+                if matches!(
+                    &observed,
+                    SemanticallyBoundCatalogIndexObjectV1::LiveMarker(_)
+                ) && Blacklist::default()
+                    .check_fixed_ingress_path_components(Path::new(observed.logical_path()))
+                    .is_some()
+                {
+                    return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                        StrictSemanticallyBoundRemoteCatalogIncompleteV1::LiveMarkerExcluded,
+                    ));
+                }
+                if let Err(incomplete) = claims.observe_path(
+                    observed.logical_path(),
+                    observed.role(),
+                    observed.claim_origin(),
+                ) {
+                    return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                        StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamespaceClaim(
+                            incomplete,
+                        ),
+                    ));
+                }
+                index_objects.push(observed);
+            }
+            RemoteCatalogObjectKindV1::Reservation => {
+                let object_id = entry
+                    .object_key()
+                    .strip_prefix(&reservation_prefix)
+                    .expect("verified catalog reservation must remain under its prefix");
+                let read = match read_expected_observed_namespace_reservation_v1(
+                    op,
+                    &remote_prefix,
+                    object_id,
+                    entry.binding(),
+                )
+                .await
+                {
+                    Ok(read) => read,
+                    Err(error) => {
+                        if let Some(incomplete) = semantic_named_read_error_v1(
+                            &error,
+                            RemoteCatalogNamedObjectKindV1::NamespaceReservation,
+                        ) {
+                            return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                                incomplete,
+                            ));
+                        }
+                        return Err(error);
+                    }
+                };
+                let reservation = match read {
+                    ExactObservedNamespaceReservationReadV1::Missing => {
+                        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectMissing {
+                                kind: RemoteCatalogNamedObjectKindV1::NamespaceReservation,
+                            },
+                        ));
+                    }
+                    ExactObservedNamespaceReservationReadV1::Incomplete {
+                        reason: StrictNamespaceReservationIncompleteV1::UnboundObject,
+                        ..
+                    } => {
+                        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectUnbound {
+                                kind: RemoteCatalogNamedObjectKindV1::NamespaceReservation,
+                            },
+                        ));
+                    }
+                    ExactObservedNamespaceReservationReadV1::Incomplete { reason, .. } => {
+                        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                            StrictSemanticallyBoundRemoteCatalogIncompleteV1::Reservation(reason),
+                        ));
+                    }
+                    ExactObservedNamespaceReservationReadV1::Bound(reservation) => reservation,
+                };
+                if !catalog_entry_matches_object_v1(
+                    &entry,
+                    reservation.object_key(),
+                    reservation.object(),
+                ) {
+                    return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                        StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectIdentity {
+                            kind: RemoteCatalogNamedObjectKindV1::NamespaceReservation,
+                        },
+                    ));
+                }
+                if let Err(incomplete) = budget.observe_bound(reservation.object()) {
+                    return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                        incomplete,
+                    ));
+                }
+                if let Err(incomplete) = claims.observe_path(
+                    reservation.exact_path(),
+                    reservation.role(),
+                    RemoteNamespaceClaimOriginsV1::RESERVATION,
+                ) {
+                    return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                        StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamespaceClaim(
+                            incomplete,
+                        ),
+                    ));
+                }
+                reservations.push(reservation);
+            }
+            RemoteCatalogObjectKindV1::Manifest => catalog_manifests.push(entry),
+        }
+    }
+
+    // Sort only source ordinals; manifest IDs and physical keys remain borrowed
+    // from the now-immobile canonical index vector.
+    let committed_count = index_objects
+        .iter()
+        .filter(|observed| observed.committed().is_some())
+        .count();
+    let mut manifest_reference_ordinals = Vec::new();
+    if manifest_reference_ordinals
+        .try_reserve(committed_count)
+        .is_err()
+    {
+        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                SemanticRemoteCatalogResourceV1::ManifestReferenceOrdinals,
+            ),
+        ));
+    }
+    manifest_reference_ordinals.extend(
+        index_objects
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, observed)| observed.committed().map(|_| ordinal)),
+    );
+    manifest_reference_ordinals.sort_unstable_by(|left, right| {
+        let left = index_objects[*left]
+            .committed()
+            .expect("manifest source ordinal must name a committed index");
+        let right = index_objects[*right]
+            .committed()
+            .expect("manifest source ordinal must name a committed index");
+        left.current()
+            .manifest_hash()
+            .cmp(right.current().manifest_hash())
+            .then_with(|| left.index_key().cmp(right.index_key()))
+    });
+
+    let manifest_prefix = format!("{remote_prefix}/manifests/");
+    let mut manifests = Vec::new();
+    if manifests.try_reserve(catalog_manifests.len()).is_err() {
+        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                SemanticRemoteCatalogResourceV1::ManifestObjects,
+            ),
+        ));
+    }
+    let mut reference_cursor = 0;
+    let mut catalog_cursor = 0;
+    while reference_cursor < manifest_reference_ordinals.len() {
+        let source_index_ordinal = manifest_reference_ordinals[reference_cursor];
+        let manifest_id = index_objects[source_index_ordinal]
+            .committed()
+            .expect("manifest source ordinal must name a committed index")
+            .current()
+            .manifest_hash();
+        let Some(catalog_entry) = catalog_manifests.get(catalog_cursor) else {
+            return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::ManifestSet(
+                    RemoteCatalogManifestSetMismatchV1::MissingReferencedManifest,
+                ),
+            ));
+        };
+        let catalog_manifest_id = catalog_entry
+            .object_key()
+            .strip_prefix(&manifest_prefix)
+            .expect("verified catalog manifest must remain under its prefix");
+        match catalog_manifest_id.cmp(manifest_id) {
+            std::cmp::Ordering::Less => {
+                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::ManifestSet(
+                        RemoteCatalogManifestSetMismatchV1::UnreferencedManifest,
+                    ),
+                ));
+            }
+            std::cmp::Ordering::Greater => {
+                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::ManifestSet(
+                        RemoteCatalogManifestSetMismatchV1::MissingReferencedManifest,
+                    ),
+                ));
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+
+        let mut group_end = reference_cursor + 1;
+        while group_end < manifest_reference_ordinals.len()
+            && index_objects[manifest_reference_ordinals[group_end]]
+                .committed()
+                .expect("manifest source ordinal must name a committed index")
+                .current()
+                .manifest_hash()
+                == manifest_id
+        {
+            group_end += 1;
+        }
+        let mut references = Vec::new();
+        if references
+            .try_reserve(group_end - reference_cursor)
+            .is_err()
+        {
+            return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                    SemanticRemoteCatalogResourceV1::ManifestReferenceOrdinals,
+                ),
+            ));
+        }
+        references.extend(
+            manifest_reference_ordinals[reference_cursor..group_end]
+                .iter()
+                .map(|ordinal| {
+                    index_objects[*ordinal]
+                        .committed()
+                        .expect("manifest source ordinal must name a committed index")
+                }),
+        );
+        let read = match read_expected_observed_strict_remote_manifest_for_references_v1(
+            op,
+            &references,
+            catalog_entry.binding(),
+        )
+        .await
+        {
+            Ok(read) => read,
+            Err(error) => {
+                if let Some(incomplete) =
+                    semantic_named_read_error_v1(&error, RemoteCatalogNamedObjectKindV1::Manifest)
+                {
+                    return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                        incomplete,
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let manifest = match read {
+            StrictObservedRemoteManifestReadV1::Complete(manifest) => manifest,
+            StrictObservedRemoteManifestReadV1::Incomplete {
+                reason: StrictRemoteManifestIncompleteV1::MissingObject,
+                ..
+            } => {
+                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectMissing {
+                        kind: RemoteCatalogNamedObjectKindV1::Manifest,
+                    },
+                ));
+            }
+            StrictObservedRemoteManifestReadV1::Incomplete {
+                reason: StrictRemoteManifestIncompleteV1::UnboundObject,
+                ..
+            } => {
+                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectUnbound {
+                        kind: RemoteCatalogNamedObjectKindV1::Manifest,
+                    },
+                ));
+            }
+            StrictObservedRemoteManifestReadV1::Incomplete { reason, .. } => {
+                return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                    StrictSemanticallyBoundRemoteCatalogIncompleteV1::Manifest(reason),
+                ));
+            }
+        };
+        if !catalog_entry_matches_object_v1(
+            catalog_entry,
+            catalog_entry.object_key(),
+            manifest.object(),
+        ) {
+            return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectIdentity {
+                    kind: RemoteCatalogNamedObjectKindV1::Manifest,
+                },
+            ));
+        }
+        if let Err(incomplete) = budget.observe_bound(manifest.object()) {
+            return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                incomplete,
+            ));
+        }
+        manifests.push(SemanticallyBoundCatalogManifestV1 {
+            source_index_ordinal,
+            manifest,
+        });
+        reference_cursor = group_end;
+        catalog_cursor += 1;
+    }
+    if catalog_cursor != catalog_manifests.len() {
+        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ManifestSet(
+                RemoteCatalogManifestSetMismatchV1::UnreferencedManifest,
+            ),
+        ));
+    }
+
+    let head_key = catalog_head_key_v1(&remote_prefix);
+    let head_c_raw = match read_current_head_v1(op, &head_key).await? {
+        Ok(raw) => raw,
+        Err(_) => {
+            return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::HeadChanged,
+            ));
+        }
+    };
+    let head_c_revision = catalog_head_revision_v1(head_c_raw.raw_bytes());
+    let head_c_object = bind_remote_object_v1(head_c_raw);
+    if head_c_revision != closure.head_revision || head_c_object != closure.head_object {
+        return Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::HeadChanged,
+        ));
+    }
+
+    let claims = claims.into_retained_claims();
+    Ok(StrictSemanticallyBoundRemoteCatalogReadV1::Verified(
+        Box::new(SemanticallyBoundRemoteCatalogCorpusV1 {
+            closure,
+            index_objects,
+            reservations,
+            manifests,
+            claims,
+        }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,6 +2077,14 @@ mod tests {
 
     static_assertions::assert_not_impl_any!(
         VerifiedRemoteCatalogClosureV1: Clone,
+        serde::Serialize,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>,
+        Into<crate::registered_local_snapshot::StrictLocalSnapshotDigestV1>,
+        Into<crate::registered_reconcile::StrictPrimaryStateBytesDigestV1>
+    );
+    static_assertions::assert_not_impl_any!(
+        SemanticallyBoundRemoteCatalogCorpusV1: Clone,
         serde::Serialize,
         Into<crate::reconcile::ReconcilePlan>,
         Into<Vec<crate::reconcile::ReconcileAction>>,
@@ -1210,6 +2108,7 @@ mod tests {
         BeforeFirst,
         AfterFirst,
         BeforeSecond,
+        BeforeThird,
     }
 
     #[derive(Clone, Debug)]
@@ -1229,6 +2128,7 @@ mod tests {
     struct ScriptedCatalogBackend {
         info: Arc<AccessorInfo>,
         objects: Arc<Mutex<BTreeMap<String, ScriptedObject>>>,
+        versions: Arc<Mutex<BTreeMap<(String, String), ScriptedObject>>>,
         reads: Arc<Mutex<Vec<ObservedRead>>>,
         stats: Arc<Mutex<Vec<String>>>,
         head_key: String,
@@ -1240,7 +2140,14 @@ mod tests {
 
     impl ScriptedCatalogBackend {
         fn insert(&self, key: impl Into<String>, object: ScriptedObject) {
-            self.objects.lock().unwrap().insert(key.into(), object);
+            let key = key.into();
+            if let Some(version) = object.version.as_ref() {
+                self.versions
+                    .lock()
+                    .unwrap()
+                    .insert((key.clone(), version.clone()), object.clone());
+            }
+            self.objects.lock().unwrap().insert(key, object);
         }
 
         fn remove(&self, key: &str) {
@@ -1264,6 +2171,20 @@ mod tests {
                 .unwrap()
                 .insert(key.into(), replacement);
         }
+
+        fn disable_version_reads(&self) {
+            self.info.set_native_capability(Capability {
+                stat: true,
+                read: true,
+                read_with_if_match: true,
+                write: true,
+                write_can_empty: true,
+                write_with_if_match: true,
+                write_with_if_not_exists: true,
+                delete: true,
+                ..Default::default()
+            });
+        }
     }
 
     impl Access for ScriptedCatalogBackend {
@@ -1276,15 +2197,22 @@ mod tests {
             self.info.clone()
         }
 
-        async fn stat(&self, path: &str, _: OpStat) -> opendal::Result<RpStat> {
+        async fn stat(&self, path: &str, args: OpStat) -> opendal::Result<RpStat> {
             self.stats.lock().unwrap().push(path.to_owned());
-            let object = self
-                .objects
-                .lock()
-                .unwrap()
-                .get(path)
-                .cloned()
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "scripted object missing"))?;
+            let current = self.objects.lock().unwrap().get(path).cloned();
+            let object = match args.version() {
+                Some(version) => self
+                    .versions
+                    .lock()
+                    .unwrap()
+                    .get(&(path.to_owned(), version.to_owned()))
+                    .cloned()
+                    .or_else(|| {
+                        current.filter(|object| object.version.as_deref() == Some(version))
+                    }),
+                None => current,
+            }
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, "scripted object missing"))?;
             let mut metadata = Metadata::new(EntryMode::FILE)
                 .with_content_length(u64::try_from(object.bytes.len()).unwrap());
             if let Some(etag) = object.etag {
@@ -1309,6 +2237,7 @@ mod tests {
                     (*timing, head_read_index),
                     (HeadMutationTiming::BeforeFirst, Some(0))
                         | (HeadMutationTiming::BeforeSecond, Some(1))
+                        | (HeadMutationTiming::BeforeThird, Some(2))
                 );
                 if applies {
                     self.objects
@@ -1324,13 +2253,20 @@ mod tests {
                     .insert(path.to_owned(), replacement);
             }
 
-            let object = self
-                .objects
-                .lock()
-                .unwrap()
-                .get(path)
-                .cloned()
-                .ok_or_else(|| Error::new(ErrorKind::NotFound, "scripted object missing"))?;
+            let current = self.objects.lock().unwrap().get(path).cloned();
+            let object = match args.version() {
+                Some(version) => self
+                    .versions
+                    .lock()
+                    .unwrap()
+                    .get(&(path.to_owned(), version.to_owned()))
+                    .cloned()
+                    .or_else(|| {
+                        current.filter(|object| object.version.as_deref() == Some(version))
+                    }),
+                None => current,
+            }
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, "scripted object missing"))?;
             self.reads.lock().unwrap().push(ObservedRead {
                 path: path.to_owned(),
                 if_match: args.if_match().map(str::to_owned),
@@ -1468,6 +2404,7 @@ mod tests {
             .set_name("registered-catalog-test")
             .set_native_capability(Capability {
                 stat: true,
+                stat_with_version: true,
                 read: true,
                 read_with_if_match: true,
                 read_with_version: true,
@@ -1481,6 +2418,7 @@ mod tests {
         let backend = ScriptedCatalogBackend {
             info: Arc::new(info),
             objects: Arc::new(Mutex::new(BTreeMap::new())),
+            versions: Arc::new(Mutex::new(BTreeMap::new())),
             reads: Arc::new(Mutex::new(Vec::new())),
             stats: Arc::new(Mutex::new(Vec::new())),
             head_key: catalog_head_key_v1(prefix),
@@ -1551,6 +2489,49 @@ mod tests {
         }
     }
 
+    fn regular_manifest_json(rel_path: &str) -> Vec<u8> {
+        format!(
+            r#"{{
+  "version": 2,
+  "file_hash": "{file_hash}",
+  "file_size": 4,
+  "chunks": ["{chunk_hash}"],
+  "vclock": {{ "clocks": {{ "sting": 1 }} }},
+  "written_by": "sting",
+  "written_at": 7,
+  "rel_path": "{rel_path}",
+  "mode": 420,
+  "mtime": [8, 9]
+}}"#,
+            file_hash = "d".repeat(64),
+            chunk_hash = "e".repeat(64),
+        )
+        .into_bytes()
+    }
+
+    fn committed_index_json(manifest_hash: &str) -> Vec<u8> {
+        format!(
+            r#"{{"version":2,"state":"committed","current":{{"manifest_hash":"{manifest_hash}","size":4,"chunks":1}},"pending":null}}"#
+        )
+        .into_bytes()
+    }
+
+    fn deleted_index_json() -> Vec<u8> {
+        br#"{"version":4,"state":"deleted","current":null,"pending":null}"#.to_vec()
+    }
+
+    fn canonical_reservation_json(exact_path: &str, folded_path: &str, role: &str) -> Vec<u8> {
+        format!(
+            r#"{{"version":1,"exact_path":"{exact_path}","folded_path":"{folded_path}","role":"{role}"}}"#
+        )
+        .into_bytes()
+    }
+
+    fn sorted_entries(mut entries: Vec<RemoteCatalogEntryWireV1>) -> Vec<RemoteCatalogEntryWireV1> {
+        entries.sort_by(|left, right| left.object_key.cmp(&right.object_key));
+        entries
+    }
+
     struct CatalogFixture {
         op: Operator,
         backend: ScriptedCatalogBackend,
@@ -1579,6 +2560,18 @@ mod tests {
             receipt: &ConditionalWriteSemanticsReceipt,
         ) -> Result<StrictRemoteCatalogClosureReadV1> {
             read_verified_remote_catalog_closure_v1(&self.op, &self.selected, receipt).await
+        }
+
+        async fn read_semantic(
+            &self,
+            receipt: &ConditionalWriteSemanticsReceipt,
+        ) -> Result<StrictSemanticallyBoundRemoteCatalogReadV1> {
+            read_semantically_bound_remote_catalog_corpus_v1(&self.op, &self.selected, receipt)
+                .await
+        }
+
+        fn insert_named(&self, key: impl Into<String>, bytes: Vec<u8>, etag: &str) {
+            self.backend.insert(key, scripted_object(bytes, etag));
         }
 
         fn rewrite_root(&mut self, root: &RemoteCatalogRootWireV1) {
@@ -1648,6 +2641,68 @@ mod tests {
                 },
             );
             self.head_bytes = head_bytes;
+        }
+
+        fn make_immutable_objects_version_only_bound(&mut self) {
+            let mut root =
+                serde_json::from_slice::<RemoteCatalogRootWireV1>(&self.root_bytes).unwrap();
+            {
+                let mut objects = self.backend.objects.lock().unwrap();
+                for (ordinal, reference) in root.pages.iter_mut().enumerate() {
+                    let version = format!("page-version-{ordinal}");
+                    reference.binding = RemoteCatalogObjectBindingWireV1 {
+                        version: Some(version.clone()),
+                        etag: None,
+                    };
+                    objects.get_mut(&self.page_keys[ordinal]).unwrap().version = Some(version);
+                }
+            }
+            self.rewrite_root(&root);
+
+            let root_version = "root-version";
+            self.backend
+                .objects
+                .lock()
+                .unwrap()
+                .get_mut(&self.root_key)
+                .unwrap()
+                .version = Some(root_version.to_owned());
+            let mut head =
+                serde_json::from_slice::<RemoteCatalogHeadWireV1>(&self.head_bytes).unwrap();
+            head.catalog_root.binding = RemoteCatalogObjectBindingWireV1 {
+                version: Some(root_version.to_owned()),
+                etag: None,
+            };
+            let head_bytes = serde_json::to_vec(&head).unwrap();
+            self.backend.insert(
+                self.head_key.clone(),
+                ScriptedObject {
+                    bytes: head_bytes.clone(),
+                    etag: Some("head-etag-a".to_owned()),
+                    version: Some("historical-head-version".to_owned()),
+                },
+            );
+            self.head_bytes = head_bytes;
+        }
+
+        fn make_immutable_objects_etag_bound_with_versions(&mut self) {
+            {
+                let mut objects = self.backend.objects.lock().unwrap();
+                for (ordinal, page_key) in self.page_keys.iter().enumerate() {
+                    objects.get_mut(page_key).unwrap().version =
+                        Some(format!("page-current-version-{ordinal}"));
+                }
+            }
+
+            let root = serde_json::from_slice::<RemoteCatalogRootWireV1>(&self.root_bytes).unwrap();
+            self.rewrite_root(&root);
+            self.backend
+                .objects
+                .lock()
+                .unwrap()
+                .get_mut(&self.root_key)
+                .unwrap()
+                .version = Some("root-current-version".to_owned());
         }
     }
 
@@ -1772,6 +2827,17 @@ mod tests {
         }
     }
 
+    fn semantic_incomplete(
+        read: StrictSemanticallyBoundRemoteCatalogReadV1,
+    ) -> StrictSemanticallyBoundRemoteCatalogIncompleteV1 {
+        match read {
+            StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => incomplete,
+            StrictSemanticallyBoundRemoteCatalogReadV1::Verified(_) => {
+                panic!("expected incomplete semantic catalog")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn explicit_empty_catalog_is_verified_without_any_listing() {
         let fixture = fixture("roots", Vec::new());
@@ -1816,6 +2882,572 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn semantic_empty_catalog_rechecks_head_c_without_listing_or_retry() {
+        let fixture = fixture("roots", Vec::new());
+        let receipt = fixture.receipt("roots").await;
+        let verified = match fixture.read_semantic(&receipt).await.unwrap() {
+            StrictSemanticallyBoundRemoteCatalogReadV1::Verified(verified) => verified,
+            StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => {
+                panic!("expected semantic empty catalog, got {incomplete:?}")
+            }
+        };
+        assert_eq!(verified.remote_prefix(), "roots");
+        assert_eq!(verified.root_id(), "fixture-root");
+        assert_eq!(verified.catalog_sequence().get(), 1);
+        assert_eq!(verified.index_object_count(), 0);
+        assert_eq!(verified.reservation_count(), 0);
+        assert_eq!(verified.manifest_count(), 0);
+        assert_eq!(verified.claim_count(), 0);
+        assert_eq!(fixture.backend.head_reads.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            fixture
+                .backend
+                .reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|read| read.path == fixture.head_key)
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_catalog_binds_indices_markers_reservation_and_exact_manifest_set() {
+        let manifest_bytes = regular_manifest_json("doc.txt");
+        let manifest_id = crate::index_entry::manifest_object_id(&manifest_bytes);
+        let committed_bytes = committed_index_json(&manifest_id);
+        let deleted_bytes = deleted_index_json();
+        let marker_bytes = crate::index_entry::DIRECTORY_MARKER_BYTES.to_vec();
+        let reservation_exact = "reserved/path";
+        let reservation_folded =
+            crate::index_entry::portable_casefold_path(reservation_exact).unwrap();
+        let reservation_id =
+            crate::index_entry::namespace_reservation_object_id(&reservation_folded);
+        let reservation_bytes =
+            canonical_reservation_json(reservation_exact, &reservation_folded, "file");
+
+        let committed_key = "roots/index/doc.txt";
+        let deleted_key = "roots/index/old.txt";
+        let marker_key = "roots/index/dir/.tcfs_dir";
+        let reservation_key = format!("roots/.tcfs-namespace/v1/{reservation_id}");
+        let manifest_key = format!("roots/manifests/{manifest_id}");
+        let entries = sorted_entries(vec![
+            fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                committed_key,
+                &committed_bytes,
+                "committed-etag",
+            ),
+            fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                deleted_key,
+                &deleted_bytes,
+                "deleted-etag",
+            ),
+            fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                marker_key,
+                &marker_bytes,
+                "marker-etag",
+            ),
+            fixture_entry(
+                RemoteCatalogObjectKindV1::Reservation,
+                &reservation_key,
+                &reservation_bytes,
+                "reservation-etag",
+            ),
+            fixture_entry(
+                RemoteCatalogObjectKindV1::Manifest,
+                &manifest_key,
+                &manifest_bytes,
+                "manifest-etag",
+            ),
+        ]);
+        let fixture = fixture("roots", vec![entries]);
+        fixture.insert_named(committed_key, committed_bytes, "committed-etag");
+        fixture.insert_named(deleted_key, deleted_bytes, "deleted-etag");
+        fixture.insert_named(marker_key, marker_bytes, "marker-etag");
+        fixture.insert_named(
+            reservation_key.clone(),
+            reservation_bytes,
+            "reservation-etag",
+        );
+        fixture.insert_named(manifest_key.clone(), manifest_bytes, "manifest-etag");
+        let receipt = fixture.receipt("roots").await;
+        let verified = match fixture.read_semantic(&receipt).await.unwrap() {
+            StrictSemanticallyBoundRemoteCatalogReadV1::Verified(verified) => verified,
+            StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => {
+                panic!("expected semantic catalog, got {incomplete:?}")
+            }
+        };
+        assert_eq!(verified.index_object_count(), 3);
+        assert_eq!(verified.reservation_count(), 1);
+        assert_eq!(verified.manifest_count(), 1);
+        assert_eq!(verified.claim_count(), 5);
+        assert_eq!(
+            fixture
+                .backend
+                .reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|read| read.path == manifest_key)
+                .count(),
+            1,
+            "one unique manifest must be fetched exactly once"
+        );
+        assert_eq!(fixture.backend.head_reads.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn semantic_catalog_reads_declared_historical_version_not_newer_current_object() {
+        let key = "roots/index/doc.txt";
+        let historical = deleted_index_json();
+        let mut entry = fixture_entry(
+            RemoteCatalogObjectKindV1::Index,
+            key,
+            &historical,
+            "historical-etag",
+        );
+        entry.binding = version_binding("version-1", "historical-etag");
+        let fixture = fixture("roots", vec![vec![entry]]);
+        fixture.backend.insert(
+            key,
+            ScriptedObject {
+                bytes: historical,
+                etag: Some("historical-etag".to_owned()),
+                version: Some("version-1".to_owned()),
+            },
+        );
+        fixture.backend.insert(
+            key,
+            ScriptedObject {
+                bytes: b"newer-current-body".to_vec(),
+                etag: Some("current-etag".to_owned()),
+                version: Some("version-2".to_owned()),
+            },
+        );
+        let receipt = fixture.receipt("roots").await;
+        let verified = match fixture.read_semantic(&receipt).await.unwrap() {
+            StrictSemanticallyBoundRemoteCatalogReadV1::Verified(verified) => verified,
+            StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => {
+                panic!("expected historical version to bind, got {incomplete:?}")
+            }
+        };
+        assert_eq!(verified.index_object_count(), 1);
+        assert!(fixture.backend.reads.lock().unwrap().iter().any(|read| {
+            read.path == key
+                && read.version.as_deref() == Some("version-1")
+                && read.if_match.as_deref() == Some("historical-etag")
+        }));
+    }
+
+    #[tokio::test]
+    async fn semantic_catalog_requires_exact_manifest_set_before_fetching_extras() {
+        let manifest_bytes = regular_manifest_json("doc.txt");
+        let manifest_id = crate::index_entry::manifest_object_id(&manifest_bytes);
+        let committed_bytes = committed_index_json(&manifest_id);
+        let committed_key = "roots/index/doc.txt";
+        let missing = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                committed_key,
+                &committed_bytes,
+                "index-etag",
+            )]],
+        );
+        missing.insert_named(committed_key, committed_bytes, "index-etag");
+        let receipt = missing.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(missing.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ManifestSet(
+                RemoteCatalogManifestSetMismatchV1::MissingReferencedManifest
+            )
+        );
+
+        let extra_id = "a".repeat(64);
+        let extra_key = format!("roots/manifests/{extra_id}");
+        let extra = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Manifest,
+                &extra_key,
+                b"not-read",
+                "extra-etag",
+            )]],
+        );
+        let receipt = extra.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(extra.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::ManifestSet(
+                RemoteCatalogManifestSetMismatchV1::UnreferencedManifest
+            )
+        );
+        assert!(!extra
+            .backend
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|read| read.path == extra_key));
+    }
+
+    #[tokio::test]
+    async fn semantic_catalog_fetches_shared_manifest_once_and_checks_every_reference() {
+        let manifest_bytes = regular_manifest_json("a.txt");
+        let manifest_id = crate::index_entry::manifest_object_id(&manifest_bytes);
+        let index_bytes = committed_index_json(&manifest_id);
+        let manifest_key = format!("roots/manifests/{manifest_id}");
+        let entries = sorted_entries(vec![
+            fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                "roots/index/a.txt",
+                &index_bytes,
+                "a-etag",
+            ),
+            fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                "roots/index/b.txt",
+                &index_bytes,
+                "b-etag",
+            ),
+            fixture_entry(
+                RemoteCatalogObjectKindV1::Manifest,
+                &manifest_key,
+                &manifest_bytes,
+                "manifest-etag",
+            ),
+        ]);
+        let fixture = fixture("roots", vec![entries]);
+        fixture.insert_named("roots/index/a.txt", index_bytes.clone(), "a-etag");
+        fixture.insert_named("roots/index/b.txt", index_bytes, "b-etag");
+        fixture.insert_named(manifest_key.clone(), manifest_bytes, "manifest-etag");
+        let receipt = fixture.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(fixture.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::Manifest(
+                StrictRemoteManifestIncompleteV1::InvalidManifest
+            )
+        );
+        assert_eq!(
+            fixture
+                .backend
+                .reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|read| read.path == manifest_key)
+                .count(),
+            1,
+            "shared manifest must be fetched once before every reference is checked"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_catalog_preserves_deleted_markers_and_rejects_live_fixed_ingress_markers() {
+        let marker_key = "roots/index/home/.SSH/.tcfs_dir";
+        let deleted_bytes = deleted_index_json();
+        let deleted = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                marker_key,
+                &deleted_bytes,
+                "deleted-marker-etag",
+            )]],
+        );
+        deleted.insert_named(marker_key, deleted_bytes, "deleted-marker-etag");
+        let receipt = deleted.receipt("roots").await;
+        let verified = match deleted.read_semantic(&receipt).await.unwrap() {
+            StrictSemanticallyBoundRemoteCatalogReadV1::Verified(verified) => verified,
+            StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => {
+                panic!("expected historical marker evidence, got {incomplete:?}")
+            }
+        };
+        assert_eq!(verified.index_object_count(), 1);
+        assert_eq!(verified.manifest_count(), 0);
+        assert_eq!(verified.claim_count(), 2);
+
+        let live_bytes = crate::index_entry::DIRECTORY_MARKER_BYTES.to_vec();
+        let live = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                marker_key,
+                &live_bytes,
+                "live-marker-etag",
+            )]],
+        );
+        live.insert_named(marker_key, live_bytes, "live-marker-etag");
+        let receipt = live.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(live.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::LiveMarkerExcluded
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_catalog_rejects_invalid_reservations_and_cross_kind_role_conflicts() {
+        let invalid_exact = "invalid";
+        let invalid_id = crate::index_entry::namespace_reservation_object_id(invalid_exact);
+        let invalid_key = format!("roots/.tcfs-namespace/v1/{invalid_id}");
+        let invalid_bytes = br#"{"version":1,"exact_path":"invalid","folded_path":"invalid","role":"file","unexpected":true}"#
+            .to_vec();
+        let invalid = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Reservation,
+                &invalid_key,
+                &invalid_bytes,
+                "invalid-reservation-etag",
+            )]],
+        );
+        invalid.insert_named(invalid_key, invalid_bytes, "invalid-reservation-etag");
+        let receipt = invalid.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(invalid.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::Reservation(
+                StrictNamespaceReservationIncompleteV1::InvalidReservation
+            )
+        );
+
+        let exact_path = "reserved";
+        let folded_path = crate::index_entry::portable_casefold_path(exact_path).unwrap();
+        let reservation_id = crate::index_entry::namespace_reservation_object_id(&folded_path);
+        let reservation_key = format!("roots/.tcfs-namespace/v1/{reservation_id}");
+        let reservation_bytes = canonical_reservation_json(exact_path, &folded_path, "directory");
+        let index_key = "roots/index/reserved";
+        let index_bytes = deleted_index_json();
+        let conflict = fixture(
+            "roots",
+            vec![sorted_entries(vec![
+                fixture_entry(
+                    RemoteCatalogObjectKindV1::Reservation,
+                    &reservation_key,
+                    &reservation_bytes,
+                    "reservation-etag",
+                ),
+                fixture_entry(
+                    RemoteCatalogObjectKindV1::Index,
+                    index_key,
+                    &index_bytes,
+                    "index-etag",
+                ),
+            ])],
+        );
+        conflict.insert_named(reservation_key, reservation_bytes, "reservation-etag");
+        conflict.insert_named(index_key, index_bytes, "index-etag");
+        let receipt = conflict.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(conflict.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamespaceClaim(
+                RemoteNamespaceClaimAccumulatorErrorV1::Conflict(
+                    crate::registered_remote_observation::RemoteNamespaceClaimConflictV1::
+                        FileDirectoryRole
+                )
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_named_object_failures_are_typed_across_all_kinds() {
+        let missing_bytes = deleted_index_json();
+        let missing_key = "roots/index/missing.txt";
+        let missing = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                missing_key,
+                &missing_bytes,
+                "missing-etag",
+            )]],
+        );
+        let receipt = missing.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(missing.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectMissing {
+                kind: RemoteCatalogNamedObjectKindV1::OrdinaryIndex
+            }
+        );
+
+        let empty_key = "roots/index/empty.txt";
+        let empty_expected = deleted_index_json();
+        let empty = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                empty_key,
+                &empty_expected,
+                "empty-etag",
+            )]],
+        );
+        empty.insert_named(empty_key, Vec::new(), "empty-etag");
+        let receipt = empty.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(empty.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectIdentity {
+                kind: RemoteCatalogNamedObjectKindV1::OrdinaryIndex
+            }
+        );
+
+        let marker_key = "roots/index/changed/.tcfs_dir";
+        let marker_bytes = crate::index_entry::DIRECTORY_MARKER_BYTES.to_vec();
+        let changed = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                marker_key,
+                &marker_bytes,
+                "marker-etag",
+            )]],
+        );
+        changed.insert_named(marker_key, marker_bytes.clone(), "marker-etag");
+        let receipt = changed.receipt("roots").await;
+        changed.backend.replace_object_on_next_read(
+            marker_key,
+            scripted_object(marker_bytes, "marker-etag-changed"),
+        );
+        assert_eq!(
+            semantic_incomplete(changed.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectChanged {
+                kind: RemoteCatalogNamedObjectKindV1::DirectoryMarker
+            }
+        );
+
+        let reservation_exact = "identity";
+        let reservation_folded =
+            crate::index_entry::portable_casefold_path(reservation_exact).unwrap();
+        let reservation_id =
+            crate::index_entry::namespace_reservation_object_id(&reservation_folded);
+        let reservation_key = format!("roots/.tcfs-namespace/v1/{reservation_id}");
+        let reservation_bytes =
+            canonical_reservation_json(reservation_exact, &reservation_folded, "file");
+        let mut reservation_entry = fixture_entry(
+            RemoteCatalogObjectKindV1::Reservation,
+            &reservation_key,
+            &reservation_bytes,
+            "reservation-etag",
+        );
+        reservation_entry.raw_blake3 = "0".repeat(64);
+        let identity = fixture("roots", vec![vec![reservation_entry]]);
+        identity.insert_named(reservation_key, reservation_bytes, "reservation-etag");
+        let receipt = identity.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(identity.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectIdentity {
+                kind: RemoteCatalogNamedObjectKindV1::NamespaceReservation
+            }
+        );
+
+        let manifest_bytes = regular_manifest_json("unbound.txt");
+        let manifest_id = crate::index_entry::manifest_object_id(&manifest_bytes);
+        let index_bytes = committed_index_json(&manifest_id);
+        let index_key = "roots/index/unbound.txt";
+        let manifest_key = format!("roots/manifests/{manifest_id}");
+        let mut manifest_entry = fixture_entry(
+            RemoteCatalogObjectKindV1::Manifest,
+            &manifest_key,
+            &manifest_bytes,
+            "manifest-etag",
+        );
+        manifest_entry.binding = version_binding("manifest-version", "manifest-etag");
+        let unbound = fixture(
+            "roots",
+            vec![sorted_entries(vec![
+                fixture_entry(
+                    RemoteCatalogObjectKindV1::Index,
+                    index_key,
+                    &index_bytes,
+                    "index-etag",
+                ),
+                manifest_entry,
+            ])],
+        );
+        unbound.insert_named(index_key, index_bytes, "index-etag");
+        unbound.backend.insert(
+            manifest_key,
+            ScriptedObject {
+                bytes: manifest_bytes,
+                etag: Some("manifest-etag".to_owned()),
+                version: Some("manifest-version".to_owned()),
+            },
+        );
+        let receipt = unbound.receipt("roots").await;
+        unbound.backend.disable_version_reads();
+        assert_eq!(
+            semantic_incomplete(unbound.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectUnbound {
+                kind: RemoteCatalogNamedObjectKindV1::Manifest
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_catalog_rejects_identity_namespace_and_head_c_drift() {
+        let deleted_bytes = deleted_index_json();
+        let mut wrong_identity_entry = fixture_entry(
+            RemoteCatalogObjectKindV1::Index,
+            "roots/index/doc.txt",
+            &deleted_bytes,
+            "index-etag",
+        );
+        wrong_identity_entry.raw_blake3 = "0".repeat(64);
+        let wrong_identity = fixture("roots", vec![vec![wrong_identity_entry]]);
+        wrong_identity.insert_named("roots/index/doc.txt", deleted_bytes.clone(), "index-etag");
+        let receipt = wrong_identity.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(wrong_identity.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamedObjectIdentity {
+                kind: RemoteCatalogNamedObjectKindV1::OrdinaryIndex
+            }
+        );
+
+        let aliases = fixture(
+            "roots",
+            vec![sorted_entries(vec![
+                fixture_entry(
+                    RemoteCatalogObjectKindV1::Index,
+                    "roots/index/Doc.txt",
+                    &deleted_bytes,
+                    "upper-etag",
+                ),
+                fixture_entry(
+                    RemoteCatalogObjectKindV1::Index,
+                    "roots/index/doc.txt",
+                    &deleted_bytes,
+                    "lower-etag",
+                ),
+            ])],
+        );
+        aliases.insert_named("roots/index/Doc.txt", deleted_bytes.clone(), "upper-etag");
+        aliases.insert_named("roots/index/doc.txt", deleted_bytes, "lower-etag");
+        let receipt = aliases.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(aliases.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::NamespaceClaim(
+                RemoteNamespaceClaimAccumulatorErrorV1::Conflict(
+                    crate::registered_remote_observation::RemoteNamespaceClaimConflictV1::
+                        FoldedSpellingAlias
+                )
+            )
+        );
+
+        let head_drift = fixture("roots", Vec::new());
+        head_drift.backend.replace_head_on_first_read(
+            HeadMutationTiming::BeforeThird,
+            scripted_object(head_drift.head_bytes.clone(), "head-etag-c"),
+        );
+        let receipt = head_drift.receipt("roots").await;
+        assert_eq!(
+            semantic_incomplete(head_drift.read_semantic(&receipt).await.unwrap()),
+            StrictSemanticallyBoundRemoteCatalogIncompleteV1::HeadChanged
+        );
+        assert_eq!(head_drift.backend.head_reads.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -1889,6 +3521,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn immutable_root_and_pages_accept_version_only_catalog_bindings_with_observed_etags() {
+        let entry = fixture_entry(RemoteCatalogObjectKindV1::Index, "roots/index/a", b"a", "a");
+        let mut fixture = fixture("roots", vec![vec![entry]]);
+        fixture.make_immutable_objects_version_only_bound();
+        let receipt = fixture.receipt("roots").await;
+        assert!(matches!(
+            fixture.read(&receipt).await.unwrap(),
+            StrictRemoteCatalogClosureReadV1::Verified(_)
+        ));
+
+        let reads = fixture.backend.reads.lock().unwrap();
+        assert!(reads.iter().any(|read| {
+            read.path == fixture.root_key
+                && read.version.as_deref() == Some("root-version")
+                && read.if_match.is_none()
+        }));
+        assert!(reads.iter().any(|read| {
+            read.path == fixture.page_keys[0]
+                && read.version.as_deref() == Some("page-version-0")
+                && read.if_match.is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn immutable_root_and_pages_honor_etag_only_bindings_on_versioned_objects() {
+        let entry = fixture_entry(RemoteCatalogObjectKindV1::Index, "roots/index/a", b"a", "a");
+        let mut fixture = fixture("roots", vec![vec![entry]]);
+        fixture.make_immutable_objects_etag_bound_with_versions();
+        let receipt = fixture.receipt("roots").await;
+        assert!(matches!(
+            fixture.read(&receipt).await.unwrap(),
+            StrictRemoteCatalogClosureReadV1::Verified(_)
+        ));
+
+        let reads = fixture.backend.reads.lock().unwrap();
+        assert!(reads.iter().any(|read| {
+            read.path == fixture.root_key
+                && read.version.is_none()
+                && read.if_match.as_deref() == Some("root-etag-rewritten")
+        }));
+        assert!(reads.iter().any(|read| {
+            read.path == fixture.page_keys[0]
+                && read.version.is_none()
+                && read.if_match.as_deref() == Some("page-etag-0")
+        }));
+    }
+
+    #[tokio::test]
     async fn missing_head_or_page_is_typed_and_never_recovered_by_listing() {
         let no_head = fixture("roots", Vec::new());
         no_head.backend.remove(&no_head.head_key);
@@ -1954,7 +3634,7 @@ mod tests {
         let receipt = root.receipt("roots").await;
         assert_eq!(
             incomplete(root.read(&receipt).await.unwrap()),
-            StrictRemoteCatalogIncompleteV1::ClosureObjectUnbound {
+            StrictRemoteCatalogIncompleteV1::ClosureObjectChanged {
                 kind: RemoteCatalogClosureObjectKindV1::Root
             }
         );
@@ -1982,7 +3662,7 @@ mod tests {
         let receipt = page.receipt("roots").await;
         assert_eq!(
             incomplete(page.read(&receipt).await.unwrap()),
-            StrictRemoteCatalogIncompleteV1::ClosureObjectUnbound {
+            StrictRemoteCatalogIncompleteV1::ClosureObjectChanged {
                 kind: RemoteCatalogClosureObjectKindV1::Page
             }
         );
@@ -2088,6 +3768,44 @@ mod tests {
                 reason: InvalidRemoteCatalogReasonV1::EntryRoute
             }
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_route_admission_rejects_logical_shape_aliases() {
+        let remote = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+        let overlong_component =
+            "a".repeat(usize::try_from(remote.max_logical_component_bytes() + 1).unwrap());
+        let over_depth = std::iter::repeat_n(
+            "a",
+            usize::try_from(remote.max_logical_path_depth() + 1).unwrap(),
+        )
+        .collect::<Vec<_>>()
+        .join("/");
+
+        for object_key in [
+            format!("roots/index/{overlong_component}"),
+            format!("roots/index/{over_depth}"),
+            "roots/index/dir/ .tcfs_dir".to_owned(),
+        ] {
+            let fixture = fixture(
+                "roots",
+                vec![vec![fixture_entry(
+                    RemoteCatalogObjectKindV1::Index,
+                    &object_key,
+                    b"index",
+                    "index-etag",
+                )]],
+            );
+            let receipt = fixture.receipt("roots").await;
+            assert_eq!(
+                incomplete(fixture.read(&receipt).await.unwrap()),
+                StrictRemoteCatalogIncompleteV1::Invalid {
+                    kind: RemoteCatalogClosureObjectKindV1::Page,
+                    reason: InvalidRemoteCatalogReasonV1::EntryRoute
+                },
+                "route admission accepted {object_key:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2223,9 +3941,22 @@ mod tests {
         let receipt = page_binding.receipt("roots").await;
         assert_eq!(
             incomplete(page_binding.read(&receipt).await.unwrap()),
+            StrictRemoteCatalogIncompleteV1::ClosureObjectChanged {
+                kind: RemoteCatalogClosureObjectKindV1::Page
+            }
+        );
+
+        let empty_root = fixture("roots", Vec::new());
+        empty_root.backend.insert(
+            empty_root.root_key.clone(),
+            scripted_object(Vec::new(), "root-etag"),
+        );
+        let receipt = empty_root.receipt("roots").await;
+        assert_eq!(
+            incomplete(empty_root.read(&receipt).await.unwrap()),
             StrictRemoteCatalogIncompleteV1::Invalid {
-                kind: RemoteCatalogClosureObjectKindV1::Page,
-                reason: InvalidRemoteCatalogReasonV1::ObjectBinding
+                kind: RemoteCatalogClosureObjectKindV1::Root,
+                reason: InvalidRemoteCatalogReasonV1::ObjectIdentity
             }
         );
 
@@ -2562,6 +4293,130 @@ mod tests {
             Err(StrictRemoteCatalogIncompleteV1::ResourceLimit(
                 RemoteCatalogResourceV1::ClosureBytes
             ))
+        );
+    }
+
+    #[test]
+    fn semantic_catalog_resource_accounting_accepts_exact_limits_and_rejects_next_value() {
+        let maximum = RegisteredRootPlanContractV1::strict_v1()
+            .remote_contract()
+            .max_bound_object_bytes_per_pass();
+        let entry = VerifiedRemoteCatalogEntryV1 {
+            kind: RemoteCatalogObjectKindV1::Index,
+            object_key: "roots/index/a".to_owned(),
+            raw_bytes_len: 1,
+            raw_blake3: *blake3::hash(b"a").as_bytes(),
+            binding: RegisteredRootRemoteObjectBindingV1::Etag {
+                etag: "etag".to_owned(),
+            },
+        };
+        let mut advertised = SemanticRemoteCatalogBudgetV1 {
+            advertised_object_bytes: maximum - 1,
+            ..Default::default()
+        };
+        advertised.observe_advertised(&entry).unwrap();
+        assert_eq!(advertised.advertised_object_bytes, maximum);
+        assert_eq!(
+            advertised.observe_advertised(&entry),
+            Err(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                    SemanticRemoteCatalogResourceV1::AdvertisedObjectBytes
+                )
+            )
+        );
+
+        let mut overflow = u64::MAX;
+        assert_eq!(
+            SemanticRemoteCatalogBudgetV1::checked_add(
+                &mut overflow,
+                1,
+                u64::MAX,
+                SemanticRemoteCatalogResourceV1::BoundObjectBytes,
+            ),
+            Err(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                    SemanticRemoteCatalogResourceV1::BoundObjectBytes
+                )
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_bound_resource_accounting_accepts_exact_limits_and_rejects_next_value() {
+        let index_key = "roots/index/budget.txt";
+        let index_bytes = deleted_index_json();
+        let fixture = fixture(
+            "roots",
+            vec![vec![fixture_entry(
+                RemoteCatalogObjectKindV1::Index,
+                index_key,
+                &index_bytes,
+                "index-etag",
+            )]],
+        );
+        fixture.insert_named(index_key, index_bytes, "index-etag");
+        let receipt = fixture.receipt("roots").await;
+        let verified = match fixture.read_semantic(&receipt).await.unwrap() {
+            StrictSemanticallyBoundRemoteCatalogReadV1::Verified(verified) => verified,
+            StrictSemanticallyBoundRemoteCatalogReadV1::Incomplete(incomplete) => {
+                panic!("expected semantic catalog, got {incomplete:?}")
+            }
+        };
+        let object = verified.index_objects[0].object();
+        let body_bytes = object.raw_bytes_len();
+        let binding_bytes = match object.binding() {
+            RegisteredRootRemoteObjectBindingV1::Version { version, etag } => {
+                u64::try_from(version.len() + etag.as_ref().map_or(0, String::len)).unwrap()
+            }
+            RegisteredRootRemoteObjectBindingV1::Etag { etag } => {
+                u64::try_from(etag.len()).unwrap()
+            }
+        };
+        let contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+
+        let mut exact_body = SemanticRemoteCatalogBudgetV1 {
+            bound_object_bytes: contract.max_bound_object_bytes_per_pass() - body_bytes,
+            ..Default::default()
+        };
+        assert_eq!(exact_body.observe_bound(object), Ok(()));
+        assert_eq!(
+            exact_body.bound_object_bytes,
+            contract.max_bound_object_bytes_per_pass()
+        );
+        let mut over_body = SemanticRemoteCatalogBudgetV1 {
+            bound_object_bytes: contract.max_bound_object_bytes_per_pass() - body_bytes + 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            over_body.observe_bound(object),
+            Err(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                    SemanticRemoteCatalogResourceV1::BoundObjectBytes
+                )
+            )
+        );
+
+        let mut exact_binding = SemanticRemoteCatalogBudgetV1 {
+            retained_binding_bytes: contract.max_retained_binding_bytes_per_pass() - binding_bytes,
+            ..Default::default()
+        };
+        assert_eq!(exact_binding.observe_bound(object), Ok(()));
+        assert_eq!(
+            exact_binding.retained_binding_bytes,
+            contract.max_retained_binding_bytes_per_pass()
+        );
+        let mut over_binding = SemanticRemoteCatalogBudgetV1 {
+            retained_binding_bytes: contract.max_retained_binding_bytes_per_pass() - binding_bytes
+                + 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            over_binding.observe_bound(object),
+            Err(
+                StrictSemanticallyBoundRemoteCatalogIncompleteV1::ResourceLimit(
+                    SemanticRemoteCatalogResourceV1::RetainedBindingBytes
+                )
+            )
         );
     }
 }

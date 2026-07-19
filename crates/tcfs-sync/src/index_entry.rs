@@ -1424,6 +1424,23 @@ impl RawObjectReadBindingV1 {
     }
 }
 
+/// Storage-native identity declared by a trusted caller for one exact
+/// observational raw-object read.
+///
+/// Unlike [`RawObjectReadBindingV1`], this borrows the caller's tokens so the
+/// read path cannot silently substitute identity discovered from current
+/// storage metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExpectedRawObjectBindingV1<'a> {
+    Version {
+        version: &'a str,
+        etag: Option<&'a str>,
+    },
+    Etag {
+        etag: &'a str,
+    },
+}
+
 /// Result of proving whether one exact storage object can be read by identity.
 ///
 /// `Unbound` deliberately carries no bytes: a backend without version- or
@@ -2045,6 +2062,12 @@ enum RawObjectSnapshotReadModeV1 {
     CurrentEtag,
 }
 
+#[derive(Clone, Copy)]
+enum RawObjectSnapshotSelectionV1<'a> {
+    Discover(RawObjectSnapshotReadModeV1),
+    Expected(ExpectedRawObjectBindingV1<'a>),
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("object changed after read-only snapshot stat: {object_key}")]
 pub(crate) struct RawObjectChangedDuringReadV1 {
@@ -2061,11 +2084,25 @@ pub(crate) struct RawObjectSnapshotTooLargeV1 {
     max_bytes: u64,
 }
 
-async fn read_raw_object_snapshot_with_mode_v1(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RawObjectSnapshotInvalidMetadataReasonV1 {
+    NonFile,
+    Empty,
+    BindingToken,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("read-only object snapshot has invalid metadata ({reason:?}): {object_key}")]
+pub(crate) struct RawObjectSnapshotInvalidMetadataV1 {
+    object_key: String,
+    reason: RawObjectSnapshotInvalidMetadataReasonV1,
+}
+
+async fn read_raw_object_snapshot_with_selection_v1(
     op: &Operator,
     object_key: &str,
     max_bytes: u64,
-    mode: RawObjectSnapshotReadModeV1,
+    selection: RawObjectSnapshotSelectionV1<'_>,
 ) -> Result<Option<RawObjectReadV1>> {
     let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
     anyhow::ensure!(
@@ -2077,7 +2114,50 @@ async fn read_raw_object_snapshot_with_mode_v1(
             <= remote_contract.max_storage_key_bytes(),
         "read-only object snapshot key exceeds the registered-root storage-key bound: {object_key:?}"
     );
-    let metadata = match op.stat(object_key).await {
+    let checked_expected_binding_token = |value: &str, description: &str| -> Result<()> {
+        anyhow::ensure!(
+            !value.is_empty() && value != "null",
+            "{description} is not a valid registered-root binding token: {object_key}"
+        );
+        anyhow::ensure!(
+            u64::try_from(value.len())
+                .context("expected object binding token length does not fit u64")?
+                <= remote_contract.max_binding_token_bytes(),
+            "{description} exceeds the registered-root binding-token bound: {object_key}"
+        );
+        Ok(())
+    };
+    let capability = op.info().full_capability();
+    match selection {
+        RawObjectSnapshotSelectionV1::Expected(ExpectedRawObjectBindingV1::Version {
+            version,
+            etag,
+        }) => {
+            checked_expected_binding_token(version, "expected object version")?;
+            if let Some(etag) = etag {
+                checked_expected_binding_token(etag, "expected object ETag")?;
+            }
+            if !capability.stat_with_version || !capability.read_with_version {
+                return Ok(Some(RawObjectReadV1::Unbound));
+            }
+        }
+        RawObjectSnapshotSelectionV1::Expected(ExpectedRawObjectBindingV1::Etag { etag }) => {
+            checked_expected_binding_token(etag, "expected object ETag")?;
+            if !capability.read_with_if_match {
+                return Ok(Some(RawObjectReadV1::Unbound));
+            }
+        }
+        RawObjectSnapshotSelectionV1::Discover(_) => {}
+    }
+    let metadata_result = match selection {
+        RawObjectSnapshotSelectionV1::Expected(ExpectedRawObjectBindingV1::Version {
+            version,
+            ..
+        }) => op.stat_with(object_key).version(version).await,
+        RawObjectSnapshotSelectionV1::Expected(ExpectedRawObjectBindingV1::Etag { .. })
+        | RawObjectSnapshotSelectionV1::Discover(_) => op.stat(object_key).await,
+    };
+    let metadata = match metadata_result {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -2085,14 +2165,20 @@ async fn read_raw_object_snapshot_with_mode_v1(
                 .with_context(|| format!("statting read-only object snapshot: {object_key}"));
         }
     };
-    anyhow::ensure!(
-        metadata.is_file(),
-        "read-only object snapshot is not a file: {object_key}"
-    );
-    anyhow::ensure!(
-        metadata.content_length() > 0,
-        "read-only object snapshot is empty: {object_key}"
-    );
+    if !metadata.is_file() {
+        return Err(RawObjectSnapshotInvalidMetadataV1 {
+            object_key: object_key.to_owned(),
+            reason: RawObjectSnapshotInvalidMetadataReasonV1::NonFile,
+        }
+        .into());
+    }
+    if metadata.content_length() == 0 {
+        return Err(RawObjectSnapshotInvalidMetadataV1 {
+            object_key: object_key.to_owned(),
+            reason: RawObjectSnapshotInvalidMetadataReasonV1::Empty,
+        }
+        .into());
+    }
     if metadata.content_length() > max_bytes {
         return Err(RawObjectSnapshotTooLargeV1 {
             object_key: object_key.to_owned(),
@@ -2102,57 +2188,122 @@ async fn read_raw_object_snapshot_with_mode_v1(
         .into());
     }
 
-    let checked_binding_token = |value: Option<&str>,
-                                 description: &str|
-     -> Result<Option<String>> {
-        let Some(value) = value.filter(|value| !value.is_empty()) else {
-            return Ok(None);
+    let checked_binding_token =
+        |value: Option<&str>, description: &str| -> Result<Option<String>> {
+            let Some(value) = value.filter(|value| !value.is_empty() && *value != "null") else {
+                return Ok(None);
+            };
+            if u64::try_from(value.len()).context("object binding token length does not fit u64")?
+                > remote_contract.max_binding_token_bytes()
+            {
+                let error: anyhow::Error = RawObjectSnapshotInvalidMetadataV1 {
+                    object_key: object_key.to_owned(),
+                    reason: RawObjectSnapshotInvalidMetadataReasonV1::BindingToken,
+                }
+                .into();
+                return Err(error).with_context(|| {
+                    format!("{description} exceeds the registered-root binding-token bound")
+                });
+            }
+            Ok(Some(value.to_owned()))
         };
-        anyhow::ensure!(
-            u64::try_from(value.len()).context("object binding token length does not fit u64")?
-                <= remote_contract.max_binding_token_bytes(),
-            "{description} exceeds the registered-root binding-token bound: {object_key}"
-        );
-        Ok(Some(value.to_owned()))
-    };
     let etag = checked_binding_token(metadata.etag(), "object ETag")?;
-    let version = checked_binding_token(metadata.version(), "object version")?
-        .filter(|version| version != "null")
-        .filter(|_| matches!(mode, RawObjectSnapshotReadModeV1::PreferVersion));
-    let capability = op.info().full_capability();
-    let version = version.filter(|_| capability.read_with_version);
+    let version = checked_binding_token(metadata.version(), "object version")?;
+    let discovered_version = version
+        .as_deref()
+        .filter(|_| {
+            matches!(
+                selection,
+                RawObjectSnapshotSelectionV1::Discover(RawObjectSnapshotReadModeV1::PreferVersion)
+            )
+        })
+        .filter(|_| capability.read_with_version)
+        .map(str::to_owned);
     let etag_for_read = etag
         .as_deref()
         .filter(|_| capability.read_with_if_match)
         .map(str::to_owned);
-    if version.is_none() && etag_for_read.is_none() {
+    if matches!(selection, RawObjectSnapshotSelectionV1::Discover(_))
+        && discovered_version.is_none()
+        && etag_for_read.is_none()
+    {
         return Ok(Some(RawObjectReadV1::Unbound));
     }
-    let (reader_result, binding) = if let Some(version) = version.as_deref() {
-        let reader = if let Some(etag) = etag_for_read.as_deref() {
-            op.reader_with(object_key)
-                .version(version)
-                .if_match(etag)
-                .await
-        } else {
-            op.reader_with(object_key).version(version).await
-        };
-        (
-            reader,
-            RawObjectReadBindingV1::Version {
-                version: version.to_owned(),
-                etag: etag.clone(),
-            },
-        )
-    } else if let Some(etag) = etag_for_read.as_deref() {
-        (
-            op.reader_with(object_key).if_match(etag).await,
-            RawObjectReadBindingV1::Etag {
-                etag: etag.to_owned(),
-            },
-        )
-    } else {
-        unreachable!("unbound storage reads return before fetching object bytes")
+    let changed_during_read = || -> anyhow::Error {
+        RawObjectChangedDuringReadV1 {
+            object_key: object_key.to_owned(),
+        }
+        .into()
+    };
+    let (reader_result, binding) = match selection {
+        RawObjectSnapshotSelectionV1::Discover(_) => {
+            if let Some(version) = discovered_version.as_deref() {
+                let reader = if let Some(etag) = etag_for_read.as_deref() {
+                    op.reader_with(object_key)
+                        .version(version)
+                        .if_match(etag)
+                        .await
+                } else {
+                    op.reader_with(object_key).version(version).await
+                };
+                (
+                    reader,
+                    RawObjectReadBindingV1::Version {
+                        version: version.to_owned(),
+                        etag: etag.clone(),
+                    },
+                )
+            } else if let Some(etag) = etag_for_read.as_deref() {
+                (
+                    op.reader_with(object_key).if_match(etag).await,
+                    RawObjectReadBindingV1::Etag {
+                        etag: etag.to_owned(),
+                    },
+                )
+            } else {
+                unreachable!("unbound storage reads return before fetching object bytes")
+            }
+        }
+        RawObjectSnapshotSelectionV1::Expected(ExpectedRawObjectBindingV1::Version {
+            version: expected_version,
+            etag: expected_etag,
+        }) => {
+            if version.as_deref() != Some(expected_version)
+                || expected_etag.is_some_and(|expected| etag.as_deref() != Some(expected))
+            {
+                return Err(changed_during_read());
+            }
+            let reader = if let Some(expected_etag) =
+                expected_etag.filter(|_| capability.read_with_if_match)
+            {
+                op.reader_with(object_key)
+                    .version(expected_version)
+                    .if_match(expected_etag)
+                    .await
+            } else {
+                op.reader_with(object_key).version(expected_version).await
+            };
+            (
+                reader,
+                RawObjectReadBindingV1::Version {
+                    version: expected_version.to_owned(),
+                    etag: expected_etag.map(str::to_owned),
+                },
+            )
+        }
+        RawObjectSnapshotSelectionV1::Expected(ExpectedRawObjectBindingV1::Etag {
+            etag: expected_etag,
+        }) => {
+            if etag.as_deref() != Some(expected_etag) {
+                return Err(changed_during_read());
+            }
+            (
+                op.reader_with(object_key).if_match(expected_etag).await,
+                RawObjectReadBindingV1::Etag {
+                    etag: expected_etag.to_owned(),
+                },
+            )
+        }
     };
 
     let reader = match reader_result {
@@ -2266,11 +2417,11 @@ pub(crate) async fn read_raw_object_snapshot_v1(
     object_key: &str,
     max_bytes: u64,
 ) -> Result<Option<RawObjectReadV1>> {
-    read_raw_object_snapshot_with_mode_v1(
+    read_raw_object_snapshot_with_selection_v1(
         op,
         object_key,
         max_bytes,
-        RawObjectSnapshotReadModeV1::PreferVersion,
+        RawObjectSnapshotSelectionV1::Discover(RawObjectSnapshotReadModeV1::PreferVersion),
     )
     .await
 }
@@ -2286,11 +2437,32 @@ pub(crate) async fn read_current_raw_object_snapshot_v1(
     object_key: &str,
     max_bytes: u64,
 ) -> Result<Option<RawObjectReadV1>> {
-    read_raw_object_snapshot_with_mode_v1(
+    read_raw_object_snapshot_with_selection_v1(
         op,
         object_key,
         max_bytes,
-        RawObjectSnapshotReadModeV1::CurrentEtag,
+        RawObjectSnapshotSelectionV1::Discover(RawObjectSnapshotReadModeV1::CurrentEtag),
+    )
+    .await
+}
+
+/// Read the exact storage identity declared by a trusted caller.
+///
+/// Version-bound declarations stat and read the named historical version.
+/// ETag-only declarations remain current-value observations and use a
+/// conditional read. Unsupported identity semantics produce `Unbound`;
+/// absence of the exact version produces `None`.
+pub(crate) async fn read_expected_raw_object_snapshot_v1(
+    op: &Operator,
+    object_key: &str,
+    max_bytes: u64,
+    expected_binding: ExpectedRawObjectBindingV1<'_>,
+) -> Result<Option<RawObjectReadV1>> {
+    read_raw_object_snapshot_with_selection_v1(
+        op,
+        object_key,
+        max_bytes,
+        RawObjectSnapshotSelectionV1::Expected(expected_binding),
     )
     .await
 }
@@ -2975,11 +3147,17 @@ mod tests {
         version: Option<String>,
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct SnapshotTestStat {
+        version: Option<String>,
+    }
+
     #[derive(Debug)]
     struct SnapshotTestState {
         current: SnapshotTestObject,
         versions: BTreeMap<String, SnapshotTestObject>,
         replace_after_next_stat: Option<SnapshotTestObject>,
+        stats: Vec<SnapshotTestStat>,
         reads: Vec<SnapshotTestRead>,
     }
 
@@ -2990,6 +3168,18 @@ mod tests {
     }
 
     impl SnapshotTestBackend {
+        fn insert_version(&self, version: impl Into<String>, object: SnapshotTestObject) {
+            self.state
+                .lock()
+                .unwrap()
+                .versions
+                .insert(version.into(), object);
+        }
+
+        fn stats(&self) -> Vec<SnapshotTestStat> {
+            self.state.lock().unwrap().stats.clone()
+        }
+
         fn reads(&self) -> Vec<SnapshotTestRead> {
             self.state.lock().unwrap().reads.clone()
         }
@@ -3005,9 +3195,18 @@ mod tests {
             self.info.clone()
         }
 
-        async fn stat(&self, _path: &str, _: OpStat) -> opendal::Result<RpStat> {
+        async fn stat(&self, _path: &str, args: OpStat) -> opendal::Result<RpStat> {
             let mut state = self.state.lock().unwrap();
-            let observed = state.current.clone();
+            state.stats.push(SnapshotTestStat {
+                version: args.version().map(str::to_owned),
+            });
+            let observed = match args.version() {
+                Some(version) => state.versions.get(version).cloned(),
+                None => Some(state.current.clone()),
+            }
+            .ok_or_else(|| {
+                opendal::Error::new(ErrorKind::NotFound, "snapshot-test version is missing")
+            })?;
             if let Some(replacement) = state.replace_after_next_stat.take() {
                 state.current = replacement;
             }
@@ -3084,6 +3283,7 @@ mod tests {
             .set_name("snapshot-test")
             .set_native_capability(Capability {
                 stat: true,
+                stat_with_version: advertise_version,
                 read: true,
                 read_with_if_match: advertise_etag,
                 read_with_version: advertise_version,
@@ -3094,6 +3294,7 @@ mod tests {
                 current,
                 versions,
                 replace_after_next_stat: replacement,
+                stats: Vec::new(),
                 reads: Vec::new(),
             })),
             info: Arc::new(info),
@@ -3204,10 +3405,59 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
+            error
+                .downcast_ref::<super::RawObjectSnapshotInvalidMetadataV1>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert!(
             format!("{error:#}").contains("binding-token bound"),
             "{error:#}"
         );
         assert!(backend.reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn raw_object_snapshot_types_empty_metadata_and_rejects_null_etag_sentinel() {
+        let (empty_op, empty_backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: Vec::new(),
+                etag: Some("etag".to_owned()),
+                version: None,
+            },
+            None,
+            false,
+            true,
+        );
+        let error = super::read_raw_object_snapshot_v1(&empty_op, "object", 16)
+            .await
+            .unwrap_err();
+        let invalid = error
+            .downcast_ref::<super::RawObjectSnapshotInvalidMetadataV1>()
+            .expect("empty metadata must retain its typed error");
+        assert_eq!(
+            invalid.reason,
+            super::RawObjectSnapshotInvalidMetadataReasonV1::Empty
+        );
+        assert!(empty_backend.reads().is_empty());
+
+        let (null_etag_op, null_etag_backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"body".to_vec(),
+                etag: Some("null".to_owned()),
+                version: None,
+            },
+            None,
+            false,
+            true,
+        );
+        assert_eq!(
+            super::read_current_raw_object_snapshot_v1(&null_etag_op, "head", 16)
+                .await
+                .unwrap(),
+            Some(super::RawObjectReadV1::Unbound)
+        );
+        assert!(null_etag_backend.reads().is_empty());
     }
 
     #[tokio::test]
@@ -3252,6 +3502,260 @@ mod tests {
                 version: Some("version-1".to_owned()),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn expected_raw_object_snapshot_reads_declared_historical_version() {
+        let (op, backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"current-v2".to_vec(),
+                etag: Some("etag-v2".to_owned()),
+                version: Some("version-v2".to_owned()),
+            },
+            None,
+            true,
+            true,
+        );
+        backend.insert_version(
+            "version-v1",
+            SnapshotTestObject {
+                bytes: b"historical-v1".to_vec(),
+                etag: Some("etag-v1".to_owned()),
+                version: Some("version-v1".to_owned()),
+            },
+        );
+
+        let snapshot = match super::read_expected_raw_object_snapshot_v1(
+            &op,
+            "object",
+            32,
+            super::ExpectedRawObjectBindingV1::Version {
+                version: "version-v1",
+                etag: Some("etag-v1"),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            super::RawObjectReadV1::Bound(snapshot) => snapshot,
+            super::RawObjectReadV1::Unbound => panic!("expected exact version-bound snapshot"),
+        };
+        assert_eq!(snapshot.raw_bytes(), b"historical-v1");
+        assert_eq!(
+            snapshot.binding(),
+            &super::RawObjectReadBindingV1::Version {
+                version: "version-v1".to_owned(),
+                etag: Some("etag-v1".to_owned()),
+            }
+        );
+        assert_eq!(
+            backend.stats(),
+            vec![SnapshotTestStat {
+                version: Some("version-v1".to_owned()),
+            }]
+        );
+        assert_eq!(
+            backend.reads(),
+            vec![SnapshotTestRead {
+                offset: 0,
+                size: None,
+                if_match: Some("etag-v1".to_owned()),
+                version: Some("version-v1".to_owned()),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn expected_raw_object_snapshot_uses_declared_current_etag() {
+        let (op, backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"current".to_vec(),
+                etag: Some("declared-etag".to_owned()),
+                version: Some("ignored-version".to_owned()),
+            },
+            None,
+            true,
+            true,
+        );
+
+        let snapshot = match super::read_expected_raw_object_snapshot_v1(
+            &op,
+            "object",
+            32,
+            super::ExpectedRawObjectBindingV1::Etag {
+                etag: "declared-etag",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            super::RawObjectReadV1::Bound(snapshot) => snapshot,
+            super::RawObjectReadV1::Unbound => panic!("expected exact ETag-bound snapshot"),
+        };
+        assert_eq!(snapshot.raw_bytes(), b"current");
+        assert_eq!(
+            snapshot.binding(),
+            &super::RawObjectReadBindingV1::Etag {
+                etag: "declared-etag".to_owned(),
+            }
+        );
+        assert_eq!(backend.stats(), vec![SnapshotTestStat { version: None }]);
+        assert_eq!(
+            backend.reads(),
+            vec![SnapshotTestRead {
+                offset: 0,
+                size: None,
+                if_match: Some("declared-etag".to_owned()),
+                version: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn expected_raw_object_snapshot_types_missing_exact_version_as_absent() {
+        let (op, backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"current-v2".to_vec(),
+                etag: Some("etag-v2".to_owned()),
+                version: Some("version-v2".to_owned()),
+            },
+            None,
+            true,
+            true,
+        );
+
+        assert!(super::read_expected_raw_object_snapshot_v1(
+            &op,
+            "object",
+            32,
+            super::ExpectedRawObjectBindingV1::Version {
+                version: "missing-v1",
+                etag: Some("etag-v1"),
+            },
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            backend.stats(),
+            vec![SnapshotTestStat {
+                version: Some("missing-v1".to_owned()),
+            }]
+        );
+        assert!(backend.reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn expected_raw_object_snapshot_types_declared_binding_mismatch() {
+        let (version_op, version_backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"current".to_vec(),
+                etag: Some("etag-current".to_owned()),
+                version: Some("current-version".to_owned()),
+            },
+            None,
+            true,
+            true,
+        );
+        version_backend.insert_version(
+            "declared-version",
+            SnapshotTestObject {
+                bytes: b"wrong-version".to_vec(),
+                etag: Some("declared-etag".to_owned()),
+                version: Some("different-version".to_owned()),
+            },
+        );
+        let error = super::read_expected_raw_object_snapshot_v1(
+            &version_op,
+            "object",
+            32,
+            super::ExpectedRawObjectBindingV1::Version {
+                version: "declared-version",
+                etag: Some("declared-etag"),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<super::RawObjectChangedDuringReadV1>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert!(version_backend.reads().is_empty());
+
+        let (etag_op, etag_backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"current".to_vec(),
+                etag: Some("actual-etag".to_owned()),
+                version: Some("declared-version".to_owned()),
+            },
+            None,
+            true,
+            true,
+        );
+        let error = super::read_expected_raw_object_snapshot_v1(
+            &etag_op,
+            "object",
+            32,
+            super::ExpectedRawObjectBindingV1::Version {
+                version: "declared-version",
+                etag: Some("expected-etag"),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<super::RawObjectChangedDuringReadV1>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert!(etag_backend.reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn expected_raw_object_snapshot_returns_unbound_without_required_semantics() {
+        let object = SnapshotTestObject {
+            bytes: b"current".to_vec(),
+            etag: Some("etag".to_owned()),
+            version: Some("version".to_owned()),
+        };
+        let (version_op, version_backend) =
+            snapshot_test_operator(object.clone(), None, false, true);
+        assert_eq!(
+            super::read_expected_raw_object_snapshot_v1(
+                &version_op,
+                "object",
+                32,
+                super::ExpectedRawObjectBindingV1::Version {
+                    version: "version",
+                    etag: Some("etag"),
+                },
+            )
+            .await
+            .unwrap(),
+            Some(super::RawObjectReadV1::Unbound)
+        );
+        assert!(version_backend.stats().is_empty());
+        assert!(version_backend.reads().is_empty());
+
+        let (etag_op, etag_backend) = snapshot_test_operator(object, None, true, false);
+        assert_eq!(
+            super::read_expected_raw_object_snapshot_v1(
+                &etag_op,
+                "object",
+                32,
+                super::ExpectedRawObjectBindingV1::Etag { etag: "etag" },
+            )
+            .await
+            .unwrap(),
+            Some(super::RawObjectReadV1::Unbound)
+        );
+        assert!(etag_backend.stats().is_empty());
+        assert!(etag_backend.reads().is_empty());
     }
 
     #[tokio::test]

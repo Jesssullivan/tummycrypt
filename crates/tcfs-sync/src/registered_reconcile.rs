@@ -21,11 +21,12 @@ use crate::conflict::{ConflictInfo, VectorClock};
 use crate::index_entry::portable_casefold_path;
 use crate::index_entry::{
     manifest_object_id, namespace_reservation_object_id, namespace_reservation_prefix,
-    read_raw_object_snapshot_v1, validate_canonical_namespace_remote_prefix,
-    validate_namespace_logical_path, validate_relative_storage_key, validate_storage_key_component,
-    validate_trash_safety_copy_route, DeletionEvidence, IndexEntryState,
-    PortableNamespaceReservationV1, PortableNamespaceRole, RawObjectReadV1, RawObjectSnapshotV1,
-    RemoteEntryKind, DIRECTORY_MARKER_BYTES,
+    read_expected_raw_object_snapshot_v1, read_raw_object_snapshot_v1,
+    validate_canonical_namespace_remote_prefix, validate_namespace_logical_path,
+    validate_relative_storage_key, validate_storage_key_component,
+    validate_trash_safety_copy_route, DeletionEvidence, ExpectedRawObjectBindingV1,
+    IndexEntryState, PortableNamespaceReservationV1, PortableNamespaceRole, RawObjectReadV1,
+    RawObjectSnapshotV1, RemoteEntryKind, DIRECTORY_MARKER_BYTES,
 };
 use crate::registered_local_snapshot::PendingStrictLocalSnapshotV1;
 use crate::state::{
@@ -1037,6 +1038,22 @@ pub enum RegisteredRootRemoteObjectBindingV1 {
     },
 }
 
+pub(crate) fn expected_raw_object_binding_v1(
+    binding: &RegisteredRootRemoteObjectBindingV1,
+) -> ExpectedRawObjectBindingV1<'_> {
+    match binding {
+        RegisteredRootRemoteObjectBindingV1::Version { version, etag } => {
+            ExpectedRawObjectBindingV1::Version {
+                version,
+                etag: etag.as_deref(),
+            }
+        }
+        RegisteredRootRemoteObjectBindingV1::Etag { etag } => {
+            ExpectedRawObjectBindingV1::Etag { etag }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct BoundRemoteObjectSnapshotV1 {
     raw_bytes_len: u64,
@@ -1375,6 +1392,59 @@ pub(crate) async fn read_exact_observed_raw_index_entry_v1(
     remote_prefix: &str,
     rel_path: &str,
 ) -> Result<ExactObservedRawIndexEntryReadV1> {
+    let route = strict_remote_index_route_v1(remote_prefix, rel_path)?;
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_index_object_bytes();
+    let Some(raw_read) = read_raw_object_snapshot_v1(op, route.index_key(), max_bytes).await?
+    else {
+        return Ok(ExactObservedRawIndexEntryReadV1::Missing);
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(ExactObservedRawIndexEntryReadV1::Incomplete {
+                reason: StrictRemoteIndexIncompleteV1::UnboundObject,
+                observed_object: None,
+            });
+        }
+    };
+    Ok(classify_observed_raw_index_entry_v1(raw_snapshot, route))
+}
+
+#[allow(dead_code)] // Composed by the catalog-authoritative remote-universe pass.
+pub(crate) async fn read_expected_observed_raw_index_entry_v1(
+    op: &Operator,
+    remote_prefix: &str,
+    rel_path: &str,
+    expected_binding: &RegisteredRootRemoteObjectBindingV1,
+) -> Result<ExactObservedRawIndexEntryReadV1> {
+    let route = strict_remote_index_route_v1(remote_prefix, rel_path)?;
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_index_object_bytes();
+    let expected = expected_raw_object_binding_v1(expected_binding);
+    let Some(raw_read) =
+        read_expected_raw_object_snapshot_v1(op, route.index_key(), max_bytes, expected).await?
+    else {
+        return Ok(ExactObservedRawIndexEntryReadV1::Missing);
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(ExactObservedRawIndexEntryReadV1::Incomplete {
+                reason: StrictRemoteIndexIncompleteV1::UnboundObject,
+                observed_object: None,
+            });
+        }
+    };
+    Ok(classify_observed_raw_index_entry_v1(raw_snapshot, route))
+}
+
+fn strict_remote_index_route_v1(
+    remote_prefix: &str,
+    rel_path: &str,
+) -> Result<RegisteredRootRemoteIndexRouteV1> {
     let suffix_bytes = "index/"
         .len()
         .checked_add(rel_path.len())
@@ -1391,58 +1461,48 @@ pub(crate) async fn read_exact_observed_raw_index_entry_v1(
     } else {
         format!("{prefix}/index/{rel_path}")
     };
-    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
-        .remote_contract()
-        .max_index_object_bytes();
-    let Some(raw_read) = read_raw_object_snapshot_v1(op, &index_key, max_bytes).await? else {
-        return Ok(ExactObservedRawIndexEntryReadV1::Missing);
-    };
-    let raw_snapshot = match raw_read {
-        RawObjectReadV1::Bound(snapshot) => snapshot,
-        RawObjectReadV1::Unbound => {
-            return Ok(ExactObservedRawIndexEntryReadV1::Incomplete {
-                reason: StrictRemoteIndexIncompleteV1::UnboundObject,
-                observed_object: None,
-            });
-        }
-    };
-    let parsed = match parse_strict_index_record_v1(raw_snapshot.raw_bytes()) {
-        Ok(parsed)
-            if validate_strict_index_route_semantics_v1(&parsed, prefix, rel_path).is_ok() =>
-        {
-            parsed
-        }
-        Err(_) => {
-            return Ok(ExactObservedRawIndexEntryReadV1::Incomplete {
-                reason: StrictRemoteIndexIncompleteV1::InvalidIndexRecord,
-                observed_object: Some(bind_remote_object_v1(raw_snapshot)),
-            });
-        }
-        Ok(_) => {
-            return Ok(ExactObservedRawIndexEntryReadV1::Incomplete {
-                reason: StrictRemoteIndexIncompleteV1::InvalidIndexRecord,
-                observed_object: Some(bind_remote_object_v1(raw_snapshot)),
-            });
-        }
-    };
-    if matches!(&parsed, ParsedStrictIndexRecordV1::Preparing { .. }) {
-        return Ok(ExactObservedRawIndexEntryReadV1::Incomplete {
-            reason: StrictRemoteIndexIncompleteV1::PreparingObserved,
-            observed_object: Some(bind_remote_object_v1(raw_snapshot)),
-        });
-    }
-    let object = bind_remote_object_v1(raw_snapshot);
     let index_rel_offset = index_key
         .len()
         .checked_sub(rel_path.len())
         .expect("validated index key must end with its relative path");
-    let route = RegisteredRootRemoteIndexRouteV1 {
+    Ok(RegisteredRootRemoteIndexRouteV1 {
         index_key,
         remote_prefix_len: prefix.len(),
         index_rel_offset,
-    };
+    })
+}
 
-    Ok(match parsed {
+fn classify_observed_raw_index_entry_v1(
+    raw_snapshot: RawObjectSnapshotV1,
+    route: RegisteredRootRemoteIndexRouteV1,
+) -> ExactObservedRawIndexEntryReadV1 {
+    let parsed = match parse_strict_index_record_v1(raw_snapshot.raw_bytes()) {
+        Ok(parsed)
+            if validate_strict_index_route_semantics_v1(
+                &parsed,
+                route.remote_prefix(),
+                route.rel_path(),
+            )
+            .is_ok() =>
+        {
+            parsed
+        }
+        _ => {
+            return ExactObservedRawIndexEntryReadV1::Incomplete {
+                reason: StrictRemoteIndexIncompleteV1::InvalidIndexRecord,
+                observed_object: Some(bind_remote_object_v1(raw_snapshot)),
+            };
+        }
+    };
+    if matches!(&parsed, ParsedStrictIndexRecordV1::Preparing { .. }) {
+        return ExactObservedRawIndexEntryReadV1::Incomplete {
+            reason: StrictRemoteIndexIncompleteV1::PreparingObserved,
+            observed_object: Some(bind_remote_object_v1(raw_snapshot)),
+        };
+    }
+    let object = bind_remote_object_v1(raw_snapshot);
+
+    match parsed {
         ParsedStrictIndexRecordV1::Deleted { deletion_evidence } => {
             ExactObservedRawIndexEntryReadV1::Deleted(RawDeletedIndexEntryV1 {
                 object,
@@ -1461,7 +1521,7 @@ pub(crate) async fn read_exact_observed_raw_index_entry_v1(
                 route,
             })
         }
-    })
+    }
 }
 
 #[allow(dead_code)] // Composed by the next full list-and-bind pass.
@@ -1604,6 +1664,65 @@ pub(crate) async fn read_exact_observed_raw_directory_marker_v1(
     remote_prefix: &str,
     logical_dir: &str,
 ) -> Result<ExactObservedRawDirectoryMarkerReadV1> {
+    let route = strict_remote_directory_marker_route_v1(remote_prefix, logical_dir)?;
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_index_object_bytes();
+    let Some(raw_read) = read_raw_object_snapshot_v1(op, route.marker_key(), max_bytes).await?
+    else {
+        return Ok(ExactObservedRawDirectoryMarkerReadV1::Missing);
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(ExactObservedRawDirectoryMarkerReadV1::Incomplete {
+                reason: StrictRemoteDirectoryMarkerIncompleteV1::UnboundObject,
+                observed_object: None,
+            });
+        }
+    };
+    Ok(classify_observed_raw_directory_marker_v1(
+        raw_snapshot,
+        route,
+    ))
+}
+
+#[allow(dead_code)] // Composed by the catalog-authoritative remote-universe pass.
+pub(crate) async fn read_expected_observed_raw_directory_marker_v1(
+    op: &Operator,
+    remote_prefix: &str,
+    logical_dir: &str,
+    expected_binding: &RegisteredRootRemoteObjectBindingV1,
+) -> Result<ExactObservedRawDirectoryMarkerReadV1> {
+    let route = strict_remote_directory_marker_route_v1(remote_prefix, logical_dir)?;
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_index_object_bytes();
+    let expected = expected_raw_object_binding_v1(expected_binding);
+    let Some(raw_read) =
+        read_expected_raw_object_snapshot_v1(op, route.marker_key(), max_bytes, expected).await?
+    else {
+        return Ok(ExactObservedRawDirectoryMarkerReadV1::Missing);
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(ExactObservedRawDirectoryMarkerReadV1::Incomplete {
+                reason: StrictRemoteDirectoryMarkerIncompleteV1::UnboundObject,
+                observed_object: None,
+            });
+        }
+    };
+    Ok(classify_observed_raw_directory_marker_v1(
+        raw_snapshot,
+        route,
+    ))
+}
+
+fn strict_remote_directory_marker_route_v1(
+    remote_prefix: &str,
+    logical_dir: &str,
+) -> Result<RegisteredRootRemoteDirectoryMarkerRouteV1> {
     let marker_rel_path_bytes = logical_dir
         .len()
         .checked_add("/.tcfs_dir".len())
@@ -1626,38 +1745,27 @@ pub(crate) async fn read_exact_observed_raw_directory_marker_v1(
         format!("{prefix}/index/{marker_rel_path}")
     };
     validate_registered_remote_storage_key_bounds_v1(&index_key, "strict directory-marker key")?;
-    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
-        .remote_contract()
-        .max_index_object_bytes();
-    let Some(raw_read) = read_raw_object_snapshot_v1(op, &index_key, max_bytes).await? else {
-        return Ok(ExactObservedRawDirectoryMarkerReadV1::Missing);
-    };
-    let raw_snapshot = match raw_read {
-        RawObjectReadV1::Bound(snapshot) => snapshot,
-        RawObjectReadV1::Unbound => {
-            return Ok(ExactObservedRawDirectoryMarkerReadV1::Incomplete {
-                reason: StrictRemoteDirectoryMarkerIncompleteV1::UnboundObject,
-                observed_object: None,
-            });
-        }
-    };
     let marker_rel_offset = index_key
         .len()
         .checked_sub(marker_rel_path.len())
         .expect("validated marker key must end with its relative path");
-    let route = RegisteredRootRemoteDirectoryMarkerRouteV1 {
+    Ok(RegisteredRootRemoteDirectoryMarkerRouteV1 {
         marker_key: index_key,
         remote_prefix_len: prefix.len(),
         marker_rel_offset,
         logical_rel_len: logical_dir.len(),
-    };
+    })
+}
+
+fn classify_observed_raw_directory_marker_v1(
+    raw_snapshot: RawObjectSnapshotV1,
+    route: RegisteredRootRemoteDirectoryMarkerRouteV1,
+) -> ExactObservedRawDirectoryMarkerReadV1 {
     if raw_snapshot.raw_bytes() == DIRECTORY_MARKER_BYTES {
-        return Ok(ExactObservedRawDirectoryMarkerReadV1::Live(
-            RawLiveDirectoryMarkerV1 {
-                object: bind_remote_object_v1(raw_snapshot),
-                route,
-            },
-        ));
+        return ExactObservedRawDirectoryMarkerReadV1::Live(RawLiveDirectoryMarkerV1 {
+            object: bind_remote_object_v1(raw_snapshot),
+            route,
+        });
     }
     let deletion_evidence = match parse_strict_index_record_v1(raw_snapshot.raw_bytes()) {
         Ok(parsed @ ParsedStrictIndexRecordV1::Deleted { .. })
@@ -1674,19 +1782,17 @@ pub(crate) async fn read_exact_observed_raw_directory_marker_v1(
             }
         }
         _ => {
-            return Ok(ExactObservedRawDirectoryMarkerReadV1::Incomplete {
+            return ExactObservedRawDirectoryMarkerReadV1::Incomplete {
                 reason: StrictRemoteDirectoryMarkerIncompleteV1::InvalidMarkerRecord,
                 observed_object: Some(bind_remote_object_v1(raw_snapshot)),
-            });
+            };
         }
     };
-    Ok(ExactObservedRawDirectoryMarkerReadV1::Deleted(
-        RawDeletedDirectoryMarkerV1 {
-            object: bind_remote_object_v1(raw_snapshot),
-            deletion_evidence,
-            route,
-        },
-    ))
+    ExactObservedRawDirectoryMarkerReadV1::Deleted(RawDeletedDirectoryMarkerV1 {
+        object: bind_remote_object_v1(raw_snapshot),
+        deletion_evidence,
+        route,
+    })
 }
 
 #[allow(dead_code)] // Composed by the next full list-and-bind pass.
@@ -1753,6 +1859,23 @@ pub(crate) enum ExactObservedNamespaceReservationReadV1 {
     Bound(BoundNamespaceReservationV1),
 }
 
+struct StrictNamespaceReservationRouteV1 {
+    object_key: String,
+    object_id_offset: usize,
+}
+
+impl StrictNamespaceReservationRouteV1 {
+    fn object_key(&self) -> &str {
+        &self.object_key
+    }
+
+    fn object_id(&self) -> &str {
+        self.object_key
+            .get(self.object_id_offset..)
+            .expect("strict reservation-key offset is an internal invariant")
+    }
+}
+
 /// Read one listed portable-namespace reservation by storage identity.
 ///
 /// V1 planning accepts only the canonical serialized reservation body whose
@@ -1783,6 +1906,65 @@ pub(crate) async fn read_exact_observed_namespace_reservation_v1(
     remote_prefix: &str,
     object_id: &str,
 ) -> Result<ExactObservedNamespaceReservationReadV1> {
+    let route = strict_namespace_reservation_route_v1(remote_prefix, object_id)?;
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_reservation_object_bytes();
+    let Some(raw_read) = read_raw_object_snapshot_v1(op, route.object_key(), max_bytes).await?
+    else {
+        return Ok(ExactObservedNamespaceReservationReadV1::Missing);
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(ExactObservedNamespaceReservationReadV1::Incomplete {
+                reason: StrictNamespaceReservationIncompleteV1::UnboundObject,
+                observed_object: None,
+            });
+        }
+    };
+    Ok(classify_observed_namespace_reservation_v1(
+        raw_snapshot,
+        route,
+    ))
+}
+
+#[allow(dead_code)] // Composed by the catalog-authoritative remote-universe pass.
+pub(crate) async fn read_expected_observed_namespace_reservation_v1(
+    op: &Operator,
+    remote_prefix: &str,
+    object_id: &str,
+    expected_binding: &RegisteredRootRemoteObjectBindingV1,
+) -> Result<ExactObservedNamespaceReservationReadV1> {
+    let route = strict_namespace_reservation_route_v1(remote_prefix, object_id)?;
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_reservation_object_bytes();
+    let expected = expected_raw_object_binding_v1(expected_binding);
+    let Some(raw_read) =
+        read_expected_raw_object_snapshot_v1(op, route.object_key(), max_bytes, expected).await?
+    else {
+        return Ok(ExactObservedNamespaceReservationReadV1::Missing);
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(ExactObservedNamespaceReservationReadV1::Incomplete {
+                reason: StrictNamespaceReservationIncompleteV1::UnboundObject,
+                observed_object: None,
+            });
+        }
+    };
+    Ok(classify_observed_namespace_reservation_v1(
+        raw_snapshot,
+        route,
+    ))
+}
+
+fn strict_namespace_reservation_route_v1(
+    remote_prefix: &str,
+    object_id: &str,
+) -> Result<StrictNamespaceReservationRouteV1> {
     let suffix_bytes = ".tcfs-namespace/v1/"
         .len()
         .checked_add(object_id.len())
@@ -1800,21 +1982,16 @@ pub(crate) async fn read_exact_observed_namespace_reservation_v1(
         &object_key,
         "strict namespace-reservation key",
     )?;
-    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
-        .remote_contract()
-        .max_reservation_object_bytes();
-    let Some(raw_read) = read_raw_object_snapshot_v1(op, &object_key, max_bytes).await? else {
-        return Ok(ExactObservedNamespaceReservationReadV1::Missing);
-    };
-    let raw_snapshot = match raw_read {
-        RawObjectReadV1::Bound(snapshot) => snapshot,
-        RawObjectReadV1::Unbound => {
-            return Ok(ExactObservedNamespaceReservationReadV1::Incomplete {
-                reason: StrictNamespaceReservationIncompleteV1::UnboundObject,
-                observed_object: None,
-            });
-        }
-    };
+    Ok(StrictNamespaceReservationRouteV1 {
+        object_key,
+        object_id_offset: reservation_prefix.len(),
+    })
+}
+
+fn classify_observed_namespace_reservation_v1(
+    raw_snapshot: RawObjectSnapshotV1,
+    route: StrictNamespaceReservationRouteV1,
+) -> ExactObservedNamespaceReservationReadV1 {
     let reservation =
         match PortableNamespaceReservationV1::from_json_bytes(raw_snapshot.raw_bytes()) {
             Ok(reservation)
@@ -1827,27 +2004,24 @@ pub(crate) async fn read_exact_observed_namespace_reservation_v1(
                 reservation
             }
             _ => {
-                return Ok(ExactObservedNamespaceReservationReadV1::Incomplete {
+                return ExactObservedNamespaceReservationReadV1::Incomplete {
                     reason: StrictNamespaceReservationIncompleteV1::InvalidReservation,
                     observed_object: Some(bind_remote_object_v1(raw_snapshot)),
-                });
+                };
             }
         };
-    if namespace_reservation_object_id(reservation.folded_path()) != object_id {
-        return Ok(ExactObservedNamespaceReservationReadV1::Incomplete {
+    if namespace_reservation_object_id(reservation.folded_path()) != route.object_id() {
+        return ExactObservedNamespaceReservationReadV1::Incomplete {
             reason: StrictNamespaceReservationIncompleteV1::AddressMismatch,
             observed_object: Some(bind_remote_object_v1(raw_snapshot)),
-        });
+        };
     }
-    let object_id_offset = reservation_prefix.len();
-    Ok(ExactObservedNamespaceReservationReadV1::Bound(
-        BoundNamespaceReservationV1 {
-            object: bind_remote_object_v1(raw_snapshot),
-            object_key,
-            object_id_offset,
-            reservation,
-        },
-    ))
+    ExactObservedNamespaceReservationReadV1::Bound(BoundNamespaceReservationV1 {
+        object: bind_remote_object_v1(raw_snapshot),
+        object_key: route.object_key,
+        object_id_offset: route.object_id_offset,
+        reservation,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1966,7 +2140,10 @@ pub(crate) fn validate_registered_remote_logical_path_bounds_v1(rel_path: &str) 
     Ok(())
 }
 
-fn validate_registered_remote_storage_key_bounds_v1(key: &str, description: &str) -> Result<()> {
+pub(crate) fn validate_registered_remote_storage_key_bounds_v1(
+    key: &str,
+    description: &str,
+) -> Result<()> {
     validate_relative_storage_key(key, description)?;
     anyhow::ensure!(
         u64::try_from(key.len()).context("strict remote storage-key length does not fit u64")?
@@ -2116,37 +2293,12 @@ pub(crate) async fn read_observed_strict_remote_manifest_for_references_v1(
     op: &Operator,
     committed_indexes: &[&RawCommittedIndexEntryV1],
 ) -> Result<StrictObservedRemoteManifestReadV1> {
-    let Some(committed_index) = committed_indexes.first().copied() else {
-        anyhow::bail!("strict remote manifest reference group must be non-empty");
-    };
-    let index_entry = committed_index.current();
-    let prefix = committed_index.remote_prefix();
-    let rel_path = committed_index.rel_path();
-    for reference in committed_indexes {
-        if reference.remote_prefix() != prefix
-            || reference.current().manifest_hash() != index_entry.manifest_hash()
-        {
-            anyhow::bail!("strict remote manifest reference group mixed roots or object addresses");
-        }
-        if Blacklist::default()
-            .check_fixed_ingress_path_components(Path::new(reference.rel_path()))
-            .is_some()
-        {
-            return Ok(StrictObservedRemoteManifestReadV1::Incomplete {
-                reason: StrictRemoteManifestIncompleteV1::ExcludedPath,
-                observed_object: None,
-            });
-        }
-    }
-    let suffix_bytes = "manifests/"
-        .len()
-        .checked_add(index_entry.manifest_hash().len())
-        .context("strict manifest key length overflow")?;
-    validate_registered_remote_derived_key_length_v1(prefix, suffix_bytes, "strict manifest key")?;
-    let manifest_key = if prefix.is_empty() {
-        format!("manifests/{}", index_entry.manifest_hash())
-    } else {
-        format!("{prefix}/manifests/{}", index_entry.manifest_hash())
+    let Some(manifest_key) = strict_remote_manifest_key_for_references_v1(committed_indexes)?
+    else {
+        return Ok(StrictObservedRemoteManifestReadV1::Incomplete {
+            reason: StrictRemoteManifestIncompleteV1::ExcludedPath,
+            observed_object: None,
+        });
     };
     let max_bytes = RegisteredRootPlanContractV1::strict_v1()
         .remote_contract()
@@ -2166,20 +2318,110 @@ pub(crate) async fn read_observed_strict_remote_manifest_for_references_v1(
             });
         }
     };
+    Ok(classify_observed_strict_remote_manifest_for_references_v1(
+        raw_snapshot,
+        committed_indexes,
+    ))
+}
+
+#[allow(dead_code)] // Composed by the catalog-authoritative remote-universe pass.
+pub(crate) async fn read_expected_observed_strict_remote_manifest_for_references_v1(
+    op: &Operator,
+    committed_indexes: &[&RawCommittedIndexEntryV1],
+    expected_binding: &RegisteredRootRemoteObjectBindingV1,
+) -> Result<StrictObservedRemoteManifestReadV1> {
+    let Some(manifest_key) = strict_remote_manifest_key_for_references_v1(committed_indexes)?
+    else {
+        return Ok(StrictObservedRemoteManifestReadV1::Incomplete {
+            reason: StrictRemoteManifestIncompleteV1::ExcludedPath,
+            observed_object: None,
+        });
+    };
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_manifest_object_bytes();
+    let expected = expected_raw_object_binding_v1(expected_binding);
+    let Some(raw_read) =
+        read_expected_raw_object_snapshot_v1(op, &manifest_key, max_bytes, expected).await?
+    else {
+        return Ok(StrictObservedRemoteManifestReadV1::Incomplete {
+            reason: StrictRemoteManifestIncompleteV1::MissingObject,
+            observed_object: None,
+        });
+    };
+    let raw_snapshot = match raw_read {
+        RawObjectReadV1::Bound(snapshot) => snapshot,
+        RawObjectReadV1::Unbound => {
+            return Ok(StrictObservedRemoteManifestReadV1::Incomplete {
+                reason: StrictRemoteManifestIncompleteV1::UnboundObject,
+                observed_object: None,
+            });
+        }
+    };
+    Ok(classify_observed_strict_remote_manifest_for_references_v1(
+        raw_snapshot,
+        committed_indexes,
+    ))
+}
+
+fn strict_remote_manifest_key_for_references_v1(
+    committed_indexes: &[&RawCommittedIndexEntryV1],
+) -> Result<Option<String>> {
+    let Some(committed_index) = committed_indexes.first().copied() else {
+        anyhow::bail!("strict remote manifest reference group must be non-empty");
+    };
+    let index_entry = committed_index.current();
+    let prefix = committed_index.remote_prefix();
+    for reference in committed_indexes {
+        if reference.remote_prefix() != prefix
+            || reference.current().manifest_hash() != index_entry.manifest_hash()
+        {
+            anyhow::bail!("strict remote manifest reference group mixed roots or object addresses");
+        }
+        if Blacklist::default()
+            .check_fixed_ingress_path_components(Path::new(reference.rel_path()))
+            .is_some()
+        {
+            return Ok(None);
+        }
+    }
+    let suffix_bytes = "manifests/"
+        .len()
+        .checked_add(index_entry.manifest_hash().len())
+        .context("strict manifest key length overflow")?;
+    validate_registered_remote_derived_key_length_v1(prefix, suffix_bytes, "strict manifest key")?;
+    let manifest_key = if prefix.is_empty() {
+        format!("manifests/{}", index_entry.manifest_hash())
+    } else {
+        format!("{prefix}/manifests/{}", index_entry.manifest_hash())
+    };
+    Ok(Some(manifest_key))
+}
+
+fn classify_observed_strict_remote_manifest_for_references_v1(
+    raw_snapshot: RawObjectSnapshotV1,
+    committed_indexes: &[&RawCommittedIndexEntryV1],
+) -> StrictObservedRemoteManifestReadV1 {
+    let committed_index = committed_indexes
+        .first()
+        .copied()
+        .expect("validated strict remote manifest reference group must be non-empty");
+    let index_entry = committed_index.current();
+    let rel_path = committed_index.rel_path();
     if manifest_object_id(raw_snapshot.raw_bytes()) != index_entry.manifest_hash() {
-        return Ok(observed_manifest_incomplete_after_bound_v1(
+        return observed_manifest_incomplete_after_bound_v1(
             StrictRemoteManifestIncompleteV1::AddressMismatch,
             raw_snapshot,
-        ));
+        );
     }
     if committed_indexes
         .iter()
         .any(|reference| reference.current().kind() != index_entry.kind())
     {
-        return Ok(observed_manifest_incomplete_after_bound_v1(
+        return observed_manifest_incomplete_after_bound_v1(
             StrictRemoteManifestIncompleteV1::InvalidManifest,
             raw_snapshot,
-        ));
+        );
     }
 
     let parsed = match index_entry.kind() {
@@ -2188,19 +2430,19 @@ pub(crate) async fn read_observed_strict_remote_manifest_for_references_v1(
                 match serde_json::from_slice(raw_snapshot.raw_bytes()) {
                     Ok(wire) => wire,
                     Err(_) => {
-                        return Ok(observed_manifest_incomplete_after_bound_v1(
+                        return observed_manifest_incomplete_after_bound_v1(
                             StrictRemoteManifestIncompleteV1::InvalidManifest,
                             raw_snapshot,
-                        ));
+                        );
                     }
                 };
             match strict_regular_manifest_v1(wire, rel_path, index_entry) {
                 Ok(manifest) => ParsedStrictManifestV1::Regular(manifest),
                 Err(_) => {
-                    return Ok(observed_manifest_incomplete_after_bound_v1(
+                    return observed_manifest_incomplete_after_bound_v1(
                         StrictRemoteManifestIncompleteV1::InvalidManifest,
                         raw_snapshot,
-                    ));
+                    );
                 }
             }
         }
@@ -2209,19 +2451,19 @@ pub(crate) async fn read_observed_strict_remote_manifest_for_references_v1(
                 match serde_json::from_slice(raw_snapshot.raw_bytes()) {
                     Ok(wire) => wire,
                     Err(_) => {
-                        return Ok(observed_manifest_incomplete_after_bound_v1(
+                        return observed_manifest_incomplete_after_bound_v1(
                             StrictRemoteManifestIncompleteV1::InvalidManifest,
                             raw_snapshot,
-                        ));
+                        );
                     }
                 };
             match strict_symlink_manifest_v1(wire, rel_path, index_entry) {
                 Ok(manifest) => ParsedStrictManifestV1::Symlink(manifest),
                 Err(_) => {
-                    return Ok(observed_manifest_incomplete_after_bound_v1(
+                    return observed_manifest_incomplete_after_bound_v1(
                         StrictRemoteManifestIncompleteV1::InvalidManifest,
                         raw_snapshot,
-                    ));
+                    );
                 }
             }
         }
@@ -2230,22 +2472,20 @@ pub(crate) async fn read_observed_strict_remote_manifest_for_references_v1(
         .iter()
         .any(|reference| validate_parsed_strict_manifest_reference_v1(&parsed, reference).is_err())
     {
-        return Ok(observed_manifest_incomplete_after_bound_v1(
+        return observed_manifest_incomplete_after_bound_v1(
             StrictRemoteManifestIncompleteV1::InvalidManifest,
             raw_snapshot,
-        ));
+        );
     }
     let object = bind_remote_object_v1(raw_snapshot);
-    Ok(StrictObservedRemoteManifestReadV1::Complete(Box::new(
-        match parsed {
-            ParsedStrictManifestV1::Regular(manifest) => {
-                StrictRemoteManifestV1::Regular { object, manifest }
-            }
-            ParsedStrictManifestV1::Symlink(manifest) => {
-                StrictRemoteManifestV1::Symlink { object, manifest }
-            }
-        },
-    )))
+    StrictObservedRemoteManifestReadV1::Complete(Box::new(match parsed {
+        ParsedStrictManifestV1::Regular(manifest) => {
+            StrictRemoteManifestV1::Regular { object, manifest }
+        }
+        ParsedStrictManifestV1::Symlink(manifest) => {
+            StrictRemoteManifestV1::Symlink { object, manifest }
+        }
+    }))
 }
 
 fn observed_manifest_incomplete_after_bound_v1(

@@ -258,12 +258,35 @@ struct BoundRemoteManifestObservationV1 {
     manifest: Box<StrictRemoteManifestV1>,
 }
 
+/// One unique, compatible remote namespace claim retained in canonical
+/// folded-path order by [`RemoteNamespaceClaimAccumulatorV1`].
+///
+/// Fields remain private so callers cannot manufacture claim evidence without
+/// passing through the bounded conflict checks below.
 #[derive(Debug, PartialEq, Eq)]
-struct RetainedRemoteNamespaceClaimV1 {
+pub(crate) struct RetainedRemoteNamespaceClaimV1 {
     folded_path: String,
     exact_path: String,
     role: PortableNamespaceRole,
     origins: RemoteNamespaceClaimOriginsV1,
+}
+
+impl RetainedRemoteNamespaceClaimV1 {
+    pub(crate) fn folded_path(&self) -> &str {
+        &self.folded_path
+    }
+
+    pub(crate) fn exact_path(&self) -> &str {
+        &self.exact_path
+    }
+
+    pub(crate) const fn role(&self) -> PortableNamespaceRole {
+        self.role
+    }
+
+    pub(crate) const fn origins(&self) -> RemoteNamespaceClaimOriginsV1 {
+        self.origins
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,17 +297,17 @@ pub(crate) struct RemoteNamespaceClaimOriginsV1 {
 }
 
 impl RemoteNamespaceClaimOriginsV1 {
-    const CURRENT: Self = Self {
+    pub(crate) const CURRENT: Self = Self {
         current: true,
         historical: false,
         reservation: false,
     };
-    const HISTORICAL: Self = Self {
+    pub(crate) const HISTORICAL: Self = Self {
         current: false,
         historical: true,
         reservation: false,
     };
-    const RESERVATION: Self = Self {
+    pub(crate) const RESERVATION: Self = Self {
         current: false,
         historical: false,
         reservation: true,
@@ -372,10 +395,10 @@ impl MatchingTwoPassBoundRemoteEvidenceV1 {
     > {
         self.evidence.claims.iter().map(|claim| {
             (
-                claim.folded_path.as_str(),
-                claim.exact_path.as_str(),
-                claim.role,
-                claim.origins,
+                claim.folded_path(),
+                claim.exact_path(),
+                claim.role(),
+                claim.origins(),
             )
         })
     }
@@ -403,6 +426,20 @@ pub(crate) enum RemoteNamespaceClaimConflictV1 {
     InvalidPath,
     FoldedSpellingAlias,
     FileDirectoryRole,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteNamespaceClaimResourceV1 {
+    GeneratedClaims,
+    GeneratedClaimBytes,
+    RetainedClaims,
+    RetainedClaimBytes,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteNamespaceClaimAccumulatorErrorV1 {
+    Conflict(RemoteNamespaceClaimConflictV1),
+    ResourceLimit(RemoteNamespaceClaimResourceV1),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -601,10 +638,6 @@ impl RemoteListingBudgetV1 {
 struct BoundRemotePassBudgetV1 {
     bound_object_bytes: u64,
     retained_binding_bytes: u64,
-    generated_claims: u64,
-    generated_claim_bytes: u64,
-    retained_claims: u64,
-    retained_claim_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -612,6 +645,163 @@ struct RetainedRemoteNamespaceClaimValueV1 {
     exact_path: String,
     role: PortableNamespaceRole,
     origins: RemoteNamespaceClaimOriginsV1,
+}
+
+/// Neutral, bounded accumulator for semantic namespace claims.
+///
+/// It deliberately carries no LIST-pass label. Catalog and other exact
+/// inventory readers can feed semantic paths directly, while the repeated-LIST
+/// observer maps neutral failures back onto its pass-specific error surface.
+/// Successful output is unique and ordered by folded path.
+#[derive(Debug)]
+pub(crate) struct RemoteNamespaceClaimAccumulatorV1 {
+    contract: RootRemoteContractV1,
+    generated_claims: u64,
+    generated_claim_bytes: u64,
+    retained_claims: u64,
+    retained_claim_bytes: u64,
+    claims: BTreeMap<String, RetainedRemoteNamespaceClaimValueV1>,
+}
+
+impl RemoteNamespaceClaimAccumulatorV1 {
+    pub(crate) fn new(contract: RootRemoteContractV1) -> Self {
+        Self {
+            contract,
+            generated_claims: 0,
+            generated_claim_bytes: 0,
+            retained_claims: 0,
+            retained_claim_bytes: 0,
+            claims: BTreeMap::new(),
+        }
+    }
+
+    /// Observe every prefix claim implied by one exact logical path and leaf
+    /// role. Each generated claim consumes count and byte budget before
+    /// compatibility deduplication, matching the existing LIST-pass contract.
+    pub(crate) fn observe_path(
+        &mut self,
+        rel_path: &str,
+        role: PortableNamespaceRole,
+        origin: RemoteNamespaceClaimOriginsV1,
+    ) -> Result<(), RemoteNamespaceClaimAccumulatorErrorV1> {
+        let generated = namespace_claims_for_path(rel_path, role).map_err(|_| {
+            RemoteNamespaceClaimAccumulatorErrorV1::Conflict(
+                RemoteNamespaceClaimConflictV1::InvalidPath,
+            )
+        })?;
+        for claim in &generated {
+            self.observe_claim(claim, origin)?;
+        }
+        Ok(())
+    }
+
+    /// Finish the accumulator without cloning claim evidence.
+    ///
+    /// `BTreeMap::into_iter()` is the sole projection, so the returned vector is
+    /// deterministically ordered by folded path.
+    pub(crate) fn into_retained_claims(self) -> Vec<RetainedRemoteNamespaceClaimV1> {
+        self.claims
+            .into_iter()
+            .map(
+                |(
+                    folded_path,
+                    RetainedRemoteNamespaceClaimValueV1 {
+                        exact_path,
+                        role,
+                        origins,
+                    },
+                )| {
+                    RetainedRemoteNamespaceClaimV1 {
+                        folded_path,
+                        exact_path,
+                        role,
+                        origins,
+                    }
+                },
+            )
+            .collect()
+    }
+
+    fn checked_increment(
+        value: &mut u64,
+        increment: u64,
+        maximum: u64,
+        resource: RemoteNamespaceClaimResourceV1,
+    ) -> Result<(), RemoteNamespaceClaimAccumulatorErrorV1> {
+        *value = value.checked_add(increment).ok_or(
+            RemoteNamespaceClaimAccumulatorErrorV1::ResourceLimit(resource),
+        )?;
+        if *value > maximum {
+            return Err(RemoteNamespaceClaimAccumulatorErrorV1::ResourceLimit(
+                resource,
+            ));
+        }
+        Ok(())
+    }
+
+    fn observe_claim(
+        &mut self,
+        claim: &PortableNamespaceReservationV1,
+        origin: RemoteNamespaceClaimOriginsV1,
+    ) -> Result<(), RemoteNamespaceClaimAccumulatorErrorV1> {
+        let claim_bytes = claim
+            .exact_path()
+            .len()
+            .checked_add(claim.folded_path().len())
+            .and_then(|length| u64::try_from(length).ok())
+            .ok_or(RemoteNamespaceClaimAccumulatorErrorV1::ResourceLimit(
+                RemoteNamespaceClaimResourceV1::GeneratedClaimBytes,
+            ))?;
+        Self::checked_increment(
+            &mut self.generated_claims,
+            1,
+            self.contract.max_generated_claim_observations_per_pass(),
+            RemoteNamespaceClaimResourceV1::GeneratedClaims,
+        )?;
+        Self::checked_increment(
+            &mut self.generated_claim_bytes,
+            claim_bytes,
+            self.contract.max_generated_claim_bytes_per_pass(),
+            RemoteNamespaceClaimResourceV1::GeneratedClaimBytes,
+        )?;
+
+        if let Some(existing) = self.claims.get_mut(claim.folded_path()) {
+            if existing.exact_path != claim.exact_path() {
+                return Err(RemoteNamespaceClaimAccumulatorErrorV1::Conflict(
+                    RemoteNamespaceClaimConflictV1::FoldedSpellingAlias,
+                ));
+            }
+            if existing.role != claim.role() {
+                return Err(RemoteNamespaceClaimAccumulatorErrorV1::Conflict(
+                    RemoteNamespaceClaimConflictV1::FileDirectoryRole,
+                ));
+            }
+            existing.origins.merge(origin);
+            return Ok(());
+        }
+
+        Self::checked_increment(
+            &mut self.retained_claims,
+            1,
+            self.contract.max_retained_unique_claims_per_pass(),
+            RemoteNamespaceClaimResourceV1::RetainedClaims,
+        )?;
+        Self::checked_increment(
+            &mut self.retained_claim_bytes,
+            claim_bytes,
+            self.contract.max_retained_unique_claim_bytes_per_pass(),
+            RemoteNamespaceClaimResourceV1::RetainedClaimBytes,
+        )?;
+        self.claims.insert(
+            claim.folded_path().to_owned(),
+            RetainedRemoteNamespaceClaimValueV1 {
+                exact_path: claim.exact_path().to_owned(),
+                role: claim.role(),
+                origins: origin,
+            },
+        );
+        Ok(())
+    }
 }
 
 fn bound_pass_resource_limit(
@@ -692,100 +882,34 @@ impl BoundRemotePassBudgetV1 {
             contract,
         )
     }
-
-    fn observe_claim(
-        &mut self,
-        pass: RemoteNamespaceListingPassV1,
-        claim: &PortableNamespaceReservationV1,
-        origin: RemoteNamespaceClaimOriginsV1,
-        claims: &mut BTreeMap<String, RetainedRemoteNamespaceClaimValueV1>,
-        contract: RootRemoteContractV1,
-    ) -> Result<(), StrictBoundRemoteObservationIncompleteV1> {
-        let claim_bytes = claim
-            .exact_path()
-            .len()
-            .checked_add(claim.folded_path().len())
-            .and_then(|length| u64::try_from(length).ok())
-            .ok_or_else(|| {
-                bound_pass_resource_limit(pass, BoundRemotePassResourceV1::GeneratedClaimBytes)
-            })?;
-        checked_bound_pass_increment_v1(
-            &mut self.generated_claims,
-            1,
-            contract.max_generated_claim_observations_per_pass(),
-            pass,
-            BoundRemotePassResourceV1::GeneratedClaims,
-        )?;
-        checked_bound_pass_increment_v1(
-            &mut self.generated_claim_bytes,
-            claim_bytes,
-            contract.max_generated_claim_bytes_per_pass(),
-            pass,
-            BoundRemotePassResourceV1::GeneratedClaimBytes,
-        )?;
-
-        if let Some(existing) = claims.get_mut(claim.folded_path()) {
-            if existing.exact_path != claim.exact_path() {
-                return Err(StrictBoundRemoteObservationIncompleteV1::Claim {
-                    pass,
-                    reason: RemoteNamespaceClaimConflictV1::FoldedSpellingAlias,
-                });
-            }
-            if existing.role != claim.role() {
-                return Err(StrictBoundRemoteObservationIncompleteV1::Claim {
-                    pass,
-                    reason: RemoteNamespaceClaimConflictV1::FileDirectoryRole,
-                });
-            }
-            existing.origins.merge(origin);
-            return Ok(());
-        }
-
-        checked_bound_pass_increment_v1(
-            &mut self.retained_claims,
-            1,
-            contract.max_retained_unique_claims_per_pass(),
-            pass,
-            BoundRemotePassResourceV1::RetainedClaims,
-        )?;
-        checked_bound_pass_increment_v1(
-            &mut self.retained_claim_bytes,
-            claim_bytes,
-            contract.max_retained_unique_claim_bytes_per_pass(),
-            pass,
-            BoundRemotePassResourceV1::RetainedClaimBytes,
-        )?;
-        claims.insert(
-            claim.folded_path().to_owned(),
-            RetainedRemoteNamespaceClaimValueV1 {
-                exact_path: claim.exact_path().to_owned(),
-                role: claim.role(),
-                origins: origin,
-            },
-        );
-        Ok(())
-    }
 }
 
-fn observe_claim_chain_v1(
-    budget: &mut BoundRemotePassBudgetV1,
+fn map_claim_accumulator_error_v1(
     pass: RemoteNamespaceListingPassV1,
-    claims: &mut BTreeMap<String, RetainedRemoteNamespaceClaimValueV1>,
-    rel_path: &str,
-    role: PortableNamespaceRole,
-    origin: RemoteNamespaceClaimOriginsV1,
-    contract: RootRemoteContractV1,
-) -> Result<(), StrictBoundRemoteObservationIncompleteV1> {
-    let generated = namespace_claims_for_path(rel_path, role).map_err(|_| {
-        StrictBoundRemoteObservationIncompleteV1::Claim {
-            pass,
-            reason: RemoteNamespaceClaimConflictV1::InvalidPath,
+    error: RemoteNamespaceClaimAccumulatorErrorV1,
+) -> StrictBoundRemoteObservationIncompleteV1 {
+    match error {
+        RemoteNamespaceClaimAccumulatorErrorV1::Conflict(reason) => {
+            StrictBoundRemoteObservationIncompleteV1::Claim { pass, reason }
         }
-    })?;
-    for claim in &generated {
-        budget.observe_claim(pass, claim, origin, claims, contract)?;
+        RemoteNamespaceClaimAccumulatorErrorV1::ResourceLimit(resource) => {
+            let resource = match resource {
+                RemoteNamespaceClaimResourceV1::GeneratedClaims => {
+                    BoundRemotePassResourceV1::GeneratedClaims
+                }
+                RemoteNamespaceClaimResourceV1::GeneratedClaimBytes => {
+                    BoundRemotePassResourceV1::GeneratedClaimBytes
+                }
+                RemoteNamespaceClaimResourceV1::RetainedClaims => {
+                    BoundRemotePassResourceV1::RetainedClaims
+                }
+                RemoteNamespaceClaimResourceV1::RetainedClaimBytes => {
+                    BoundRemotePassResourceV1::RetainedClaimBytes
+                }
+            };
+            StrictBoundRemoteObservationIncompleteV1::ResourceLimit { pass, resource }
+        }
     }
-    Ok(())
 }
 
 fn is_lower_hex_64(value: &str) -> bool {
@@ -1159,7 +1283,7 @@ async fn read_fully_drained_bound_remote_pass_v1(
     } = listed;
 
     let mut budget = BoundRemotePassBudgetV1::default();
-    let mut claims = BTreeMap::<String, RetainedRemoteNamespaceClaimValueV1>::new();
+    let mut claim_accumulator = RemoteNamespaceClaimAccumulatorV1::new(contract);
     let mut index_objects = Vec::with_capacity(listed_index_objects.len());
 
     for listed in listed_index_objects {
@@ -1267,16 +1391,12 @@ async fn read_fully_drained_bound_remote_pass_v1(
                 StrictBoundRemoteObservationIncompleteV1::LiveMarkerExcluded { pass: listing_pass },
             ));
         }
-        if let Err(incomplete) = observe_claim_chain_v1(
-            &mut budget,
-            listing_pass,
-            &mut claims,
+        if let Err(error) = claim_accumulator.observe_path(
             observed.logical_path(),
             observed.role(),
             observed.claim_origin(),
-            contract,
         ) {
-            return Ok(Err(incomplete));
+            return Ok(Err(map_claim_accumulator_error_v1(listing_pass, error)));
         }
         index_objects.push(observed);
     }
@@ -1327,16 +1447,12 @@ async fn read_fully_drained_bound_remote_pass_v1(
         {
             return Ok(Err(incomplete));
         }
-        if let Err(incomplete) = observe_claim_chain_v1(
-            &mut budget,
-            listing_pass,
-            &mut claims,
+        if let Err(error) = claim_accumulator.observe_path(
             reservation.exact_path(),
             reservation.role(),
             RemoteNamespaceClaimOriginsV1::RESERVATION,
-            contract,
         ) {
-            return Ok(Err(incomplete));
+            return Ok(Err(map_claim_accumulator_error_v1(listing_pass, error)));
         }
         reservations.push(reservation);
     }
@@ -1395,26 +1511,7 @@ async fn read_fully_drained_bound_remote_pass_v1(
         });
     }
 
-    let claims = claims
-        .into_iter()
-        .map(
-            |(
-                folded_path,
-                RetainedRemoteNamespaceClaimValueV1 {
-                    exact_path,
-                    role,
-                    origins,
-                },
-            )| {
-                RetainedRemoteNamespaceClaimV1 {
-                    folded_path,
-                    exact_path,
-                    role,
-                    origins,
-                }
-            },
-        )
-        .collect();
+    let claims = claim_accumulator.into_retained_claims();
     Ok(Ok(FullyDrainedBoundRemotePassV1 {
         index_objects,
         reservations,
@@ -1580,6 +1677,15 @@ pub(crate) mod tests {
     use opendal::{Buffer, Capability, Error, ErrorKind, Metadata, OperatorBuilder};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+
+    static_assertions::assert_not_impl_any!(
+        RemoteNamespaceClaimAccumulatorV1: Clone,
+        serde::Serialize
+    );
+    static_assertions::assert_not_impl_any!(
+        RetainedRemoteNamespaceClaimV1: Clone,
+        serde::Serialize
+    );
 
     #[derive(Debug)]
     enum ScriptedListRow {
@@ -2868,7 +2974,6 @@ pub(crate) mod tests {
         let mut exact = BoundRemotePassBudgetV1 {
             bound_object_bytes: contract.max_bound_object_bytes_per_pass() - body_bytes,
             retained_binding_bytes: contract.max_retained_binding_bytes_per_pass() - binding_bytes,
-            ..BoundRemotePassBudgetV1::default()
         };
         assert_eq!(
             exact.observe_object(pass, deleted.object(), contract),
@@ -3147,22 +3252,16 @@ pub(crate) mod tests {
         let claim_bytes = u64::try_from(claim.exact_path().len() + claim.folded_path().len())
             .expect("test claim length fits u64");
 
-        let mut exact = BoundRemotePassBudgetV1 {
+        let mut exact = RemoteNamespaceClaimAccumulatorV1 {
+            contract,
             generated_claims: contract.max_generated_claim_observations_per_pass() - 1,
             generated_claim_bytes: contract.max_generated_claim_bytes_per_pass() - claim_bytes,
             retained_claims: contract.max_retained_unique_claims_per_pass() - 1,
             retained_claim_bytes: contract.max_retained_unique_claim_bytes_per_pass() - claim_bytes,
-            ..BoundRemotePassBudgetV1::default()
+            claims: BTreeMap::new(),
         };
-        let mut exact_claims = BTreeMap::new();
         assert_eq!(
-            exact.observe_claim(
-                pass,
-                &claim,
-                RemoteNamespaceClaimOriginsV1::CURRENT,
-                &mut exact_claims,
-                contract,
-            ),
+            exact.observe_claim(&claim, RemoteNamespaceClaimOriginsV1::CURRENT),
             Ok(())
         );
         assert_eq!(
@@ -3183,104 +3282,145 @@ pub(crate) mod tests {
         );
 
         let retained_before = exact.retained_claims;
+        let error = exact
+            .observe_claim(&claim, RemoteNamespaceClaimOriginsV1::CURRENT)
+            .unwrap_err();
         assert_eq!(
-            exact.observe_claim(
-                pass,
-                &claim,
-                RemoteNamespaceClaimOriginsV1::CURRENT,
-                &mut exact_claims,
-                contract,
-            ),
-            Err(StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
+            error,
+            RemoteNamespaceClaimAccumulatorErrorV1::ResourceLimit(
+                RemoteNamespaceClaimResourceV1::GeneratedClaims
+            )
+        );
+        assert_eq!(
+            map_claim_accumulator_error_v1(pass, error),
+            StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
                 pass,
                 resource: BoundRemotePassResourceV1::GeneratedClaims,
-            })
+            }
         );
         assert_eq!(exact.retained_claims, retained_before);
 
-        let mut generated_bytes_over = BoundRemotePassBudgetV1 {
+        let mut generated_bytes_over = RemoteNamespaceClaimAccumulatorV1 {
+            contract,
+            generated_claims: 0,
             generated_claim_bytes: contract.max_generated_claim_bytes_per_pass(),
-            ..BoundRemotePassBudgetV1::default()
+            retained_claims: 0,
+            retained_claim_bytes: 0,
+            claims: BTreeMap::new(),
         };
         assert_eq!(
-            generated_bytes_over.observe_claim(
-                pass,
-                &claim,
-                RemoteNamespaceClaimOriginsV1::CURRENT,
-                &mut BTreeMap::new(),
-                contract,
-            ),
-            Err(StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
-                pass,
-                resource: BoundRemotePassResourceV1::GeneratedClaimBytes,
-            })
+            generated_bytes_over.observe_claim(&claim, RemoteNamespaceClaimOriginsV1::CURRENT),
+            Err(RemoteNamespaceClaimAccumulatorErrorV1::ResourceLimit(
+                RemoteNamespaceClaimResourceV1::GeneratedClaimBytes
+            ))
         );
 
-        let mut retained_count_over = BoundRemotePassBudgetV1 {
+        let mut retained_count_over = RemoteNamespaceClaimAccumulatorV1 {
+            contract,
+            generated_claims: 0,
+            generated_claim_bytes: 0,
             retained_claims: contract.max_retained_unique_claims_per_pass(),
-            ..BoundRemotePassBudgetV1::default()
+            retained_claim_bytes: 0,
+            claims: BTreeMap::new(),
         };
         assert_eq!(
-            retained_count_over.observe_claim(
-                pass,
-                &claim,
-                RemoteNamespaceClaimOriginsV1::CURRENT,
-                &mut BTreeMap::new(),
-                contract,
-            ),
-            Err(StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
-                pass,
-                resource: BoundRemotePassResourceV1::RetainedClaims,
-            })
+            retained_count_over.observe_claim(&claim, RemoteNamespaceClaimOriginsV1::CURRENT),
+            Err(RemoteNamespaceClaimAccumulatorErrorV1::ResourceLimit(
+                RemoteNamespaceClaimResourceV1::RetainedClaims
+            ))
         );
 
-        let mut retained_bytes_over = BoundRemotePassBudgetV1 {
+        let mut retained_bytes_over = RemoteNamespaceClaimAccumulatorV1 {
+            contract,
+            generated_claims: 0,
+            generated_claim_bytes: 0,
+            retained_claims: 0,
             retained_claim_bytes: contract.max_retained_unique_claim_bytes_per_pass(),
-            ..BoundRemotePassBudgetV1::default()
+            claims: BTreeMap::new(),
         };
         assert_eq!(
-            retained_bytes_over.observe_claim(
-                pass,
-                &claim,
-                RemoteNamespaceClaimOriginsV1::CURRENT,
-                &mut BTreeMap::new(),
-                contract,
-            ),
-            Err(StrictBoundRemoteObservationIncompleteV1::ResourceLimit {
-                pass,
-                resource: BoundRemotePassResourceV1::RetainedClaimBytes,
-            })
+            retained_bytes_over.observe_claim(&claim, RemoteNamespaceClaimOriginsV1::CURRENT),
+            Err(RemoteNamespaceClaimAccumulatorErrorV1::ResourceLimit(
+                RemoteNamespaceClaimResourceV1::RetainedClaimBytes
+            ))
         );
 
-        let mut duplicate_budget = BoundRemotePassBudgetV1::default();
-        let mut duplicate_claims = BTreeMap::new();
-        duplicate_budget
-            .observe_claim(
-                pass,
-                &claim,
-                RemoteNamespaceClaimOriginsV1::CURRENT,
-                &mut duplicate_claims,
-                contract,
-            )
+        let mut duplicate_accumulator = RemoteNamespaceClaimAccumulatorV1::new(contract);
+        duplicate_accumulator
+            .observe_claim(&claim, RemoteNamespaceClaimOriginsV1::CURRENT)
             .unwrap();
-        duplicate_budget
-            .observe_claim(
-                pass,
-                &claim,
-                RemoteNamespaceClaimOriginsV1::HISTORICAL,
-                &mut duplicate_claims,
-                contract,
-            )
+        duplicate_accumulator
+            .observe_claim(&claim, RemoteNamespaceClaimOriginsV1::HISTORICAL)
             .unwrap();
-        assert_eq!(duplicate_budget.generated_claims, 2);
-        assert_eq!(duplicate_budget.generated_claim_bytes, claim_bytes * 2);
-        assert_eq!(duplicate_budget.retained_claims, 1);
-        assert_eq!(duplicate_budget.retained_claim_bytes, claim_bytes);
-        assert_eq!(duplicate_claims.len(), 1);
-        let origins = duplicate_claims.get("path").unwrap().origins;
+        assert_eq!(duplicate_accumulator.generated_claims, 2);
+        assert_eq!(duplicate_accumulator.generated_claim_bytes, claim_bytes * 2);
+        assert_eq!(duplicate_accumulator.retained_claims, 1);
+        assert_eq!(duplicate_accumulator.retained_claim_bytes, claim_bytes);
+        assert_eq!(duplicate_accumulator.claims.len(), 1);
+        let origins = duplicate_accumulator.claims.get("path").unwrap().origins;
         assert!(origins.current());
         assert!(origins.historical());
         assert!(!origins.reservation());
+    }
+
+    #[test]
+    fn neutral_claim_accumulator_orders_output_and_reports_unlabeled_conflicts() {
+        let contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+        let mut accumulator = RemoteNamespaceClaimAccumulatorV1::new(contract);
+        accumulator
+            .observe_path(
+                "zeta/leaf",
+                PortableNamespaceRole::File,
+                RemoteNamespaceClaimOriginsV1::CURRENT,
+            )
+            .unwrap();
+        accumulator
+            .observe_path(
+                "alpha",
+                PortableNamespaceRole::Directory,
+                RemoteNamespaceClaimOriginsV1::RESERVATION,
+            )
+            .unwrap();
+        let claims = accumulator.into_retained_claims();
+        assert_eq!(
+            claims
+                .iter()
+                .map(RetainedRemoteNamespaceClaimV1::folded_path)
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zeta", "zeta/leaf"]
+        );
+        assert_eq!(claims[0].exact_path(), "alpha");
+        assert_eq!(claims[0].role(), PortableNamespaceRole::Directory);
+        assert!(claims[0].origins().reservation());
+
+        let mut alias = RemoteNamespaceClaimAccumulatorV1::new(contract);
+        alias
+            .observe_path(
+                "Alias",
+                PortableNamespaceRole::File,
+                RemoteNamespaceClaimOriginsV1::CURRENT,
+            )
+            .unwrap();
+        let error = alias
+            .observe_path(
+                "alias",
+                PortableNamespaceRole::File,
+                RemoteNamespaceClaimOriginsV1::HISTORICAL,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            RemoteNamespaceClaimAccumulatorErrorV1::Conflict(
+                RemoteNamespaceClaimConflictV1::FoldedSpellingAlias
+            )
+        );
+        assert_eq!(
+            map_claim_accumulator_error_v1(RemoteNamespaceListingPassV1::First, error),
+            StrictBoundRemoteObservationIncompleteV1::Claim {
+                pass: RemoteNamespaceListingPassV1::First,
+                reason: RemoteNamespaceClaimConflictV1::FoldedSpellingAlias,
+            }
+        );
     }
 
     #[tokio::test]
