@@ -118,6 +118,20 @@ mod linux {
         Present,
     }
 
+    /// Only ENODATA proves the ACL is absent; every other errno fails closed.
+    ///
+    /// ENOTSUP/EOPNOTSUPP in particular must NOT be treated as "no ACL". It
+    /// means the POSIX ACL surface could not be inspected here, not that no
+    /// write-granting ACL exists:
+    ///   - network filesystems (NFS/CIFS) report EOPNOTSUPP for
+    ///     `system.posix_acl_*` while still enforcing server-side NFSv4/rich
+    ///     ACLs that can grant writes, and
+    ///   - the Nix Linux build sandbox installs a seccomp filter that fails
+    ///     the entire xattr syscall family with ENOTSUP (so an ACL applied
+    ///     from outside the sandbox would be invisible to this probe).
+    /// On local ACL-supporting filesystems (verified: XFS, kernel 6.19) the
+    /// probes genuinely return ENODATA when no ACL is set, so fail-closed
+    /// here does not reject ordinary trusted paths (TIN-2853).
     fn classify_probe_result(
         result: libc::ssize_t,
         errno: Option<i32>,
@@ -264,6 +278,10 @@ mod linux {
                 Ok(ProbeOutcome::Absent)
             );
             assert!(classify_probe_result(-1, Some(libc::EACCES)).is_err());
+            // ENOTSUP is an undetermined ACL surface (seccomp-filtered xattr
+            // in the Nix sandbox, NFS/CIFS with non-POSIX ACLs), never proof
+            // of absence. It must stay fail-closed (TIN-2853).
+            assert!(classify_probe_result(-1, Some(libc::EOPNOTSUPP)).is_err());
         }
     }
 }

@@ -77,19 +77,43 @@
         # Pre-build workspace deps (shared across all crate builds for caching)
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+        # The Linux Nix build sandbox cannot faithfully run tests that
+        # exercise tcfs's fail-closed trusted-path/ACL validators, for two
+        # environment reasons verified at syscall level (TIN-2853):
+        #   1. Nix's sandbox seccomp filter fails the entire xattr syscall
+        #      family with ENOTSUP (upstream linux-derivation-builder.cc:
+        #      "Prevent builders from using EAs or ACLs"), so the POSIX ACL
+        #      probe in tcfs-sync's path_acl can never reach the filesystem
+        #      and correctly fails closed.
+        #   2. The sandbox user namespace maps a single uid, so every
+        #      ancestor above /build (/, /nix/store, /tmp) appears as
+        #      overflowuid 65534 and is rejected by the euid-or-root
+        #      ancestor-ownership validator.
+        # Rather than disabling whole checkPhases, skip exactly the affected
+        # tests; the checked-in lists under nix/checks/ document each one.
+        # Darwin runs the full suites (empty flags).
+        linuxSandboxSkipFlags = skipFile:
+          pkgs.lib.optionalString pkgs.stdenv.isLinux (
+            let
+              names = builtins.filter
+                (line: line != "" && !pkgs.lib.hasPrefix "#" line)
+                (pkgs.lib.splitString "\n" (builtins.readFile skipFile));
+            in
+            "-- " + pkgs.lib.concatMapStringsSep " " (name: "--skip ${name}") names
+          );
+
         # Build individual crates as separate derivations
         tcfsd = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tcfsd";
           # Registered-root safety tests create real fixture repositories.
-          nativeCheckInputs = [ pkgs.git ];
-          # Linux Nix user namespaces expose sandbox-owned ancestors as uid
-          # 65534 and report ENOTSUP for POSIX ACL probes. Those semantics are
-          # intentionally rejected by tcfsd's production path validator, so a
-          # sandbox check cannot faithfully exercise the state-cache tests.
-          # Keep the fail-closed validator unchanged; Linux unit tests run in
-          # the ordinary Cargo CI lane, while Darwin retains this checkPhase.
-          doCheck = !pkgs.stdenv.isLinux;
+          # gitMinimal (not pkgs.git) keeps the docbook/full-git doc chain out
+          # of the check closure, matching tcfs-cli below.
+          nativeCheckInputs = [ pkgs.gitMinimal ];
+          # Skip only the trusted-path/ACL validator tests that the Linux
+          # sandbox cannot faithfully run (see linuxSandboxSkipFlags above and
+          # the list's header for the full analysis, TIN-2853).
+          cargoTestExtraArgs = linuxSandboxSkipFlags ./nix/checks/linux-sandbox-skip-tcfsd.txt;
           # Vendor OpenSSL on macOS to avoid dyld Team ID mismatch
           # when launchd loads the binary (Nix store openssl has different
           # code signature than the daemon binary).
@@ -105,12 +129,10 @@
           # keep-both CLI tests (TIN-2658) run real `git` repos in checkPhase;
           # the build sandbox has no ambient git.
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.gitMinimal ];
-          # Stable-root CLI tests exercise the same fail-closed ancestry and
-          # ACL checks as tcfsd. Linux Nix user namespaces expose sandbox
-          # ancestors as uid 65534 and cannot faithfully run those checks;
-          # ordinary Linux Cargo CI remains authoritative, while Darwin keeps
-          # the derivation checkPhase.
-          doCheck = !pkgs.stdenv.isLinux;
+          # Skip only the trusted-path/ACL validator tests that the Linux
+          # sandbox cannot faithfully run (see linuxSandboxSkipFlags above and
+          # the list's header for the full analysis, TIN-2853).
+          cargoTestExtraArgs = linuxSandboxSkipFlags ./nix/checks/linux-sandbox-skip-tcfs-cli.txt;
           meta.mainProgram = "tcfs";
         });
 
