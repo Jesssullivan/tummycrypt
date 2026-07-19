@@ -410,6 +410,45 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn tool_inventory_excludes_registered_root_inventory_and_mutations() {
+        let mcp = TcfsMcp::new(PathBuf::from("/tmp/unused.sock"), None);
+        let tool_names: Vec<String> = mcp
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        let expected = [
+            "config_show",
+            "credential_status",
+            "daemon_status",
+            "device_status",
+            "pull",
+            "push",
+            "sync_status",
+        ]
+        .map(str::to_owned);
+
+        assert_eq!(tool_names.as_slice(), expected.as_slice());
+
+        for forbidden in [
+            "list_registered_roots",
+            "get_registered_root_status",
+            "registered_root_status",
+            "reconcile_registered_root",
+            "resolve_registered_root",
+            "roots_list",
+            "roots_status",
+            "roots_reconcile",
+        ] {
+            assert!(
+                !mcp.tool_router.has_route(forbidden),
+                "TIN-2863 must not expose MCP tool {forbidden}"
+            );
+        }
+    }
+
     async fn spawn_mcp_harness() -> McpHarness {
         let socket_dir = tempfile::tempdir().unwrap();
         let socket_path = socket_dir.path().join("tcfsd.sock");
@@ -568,6 +607,20 @@ mod tests {
             _request: Request<ListConflictsRequest>,
         ) -> Result<Response<ListConflictsResponse>, Status> {
             Err(Status::unimplemented("list_conflicts"))
+        }
+
+        async fn list_registered_roots(
+            &self,
+            _request: Request<ListRegisteredRootsRequest>,
+        ) -> Result<Response<ListRegisteredRootsResponse>, Status> {
+            Err(Status::unimplemented("list_registered_roots"))
+        }
+
+        async fn get_registered_root_status(
+            &self,
+            _request: Request<GetRegisteredRootStatusRequest>,
+        ) -> Result<Response<GetRegisteredRootStatusResponse>, Status> {
+            Err(Status::unimplemented("get_registered_root_status"))
         }
 
         async fn resolve_registered_root(
