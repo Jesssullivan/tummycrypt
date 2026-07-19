@@ -163,6 +163,10 @@ service TcfsDaemon {
   rpc SyncStatus(SyncStatusRequest) returns (SyncStatusResponse);
   rpc Watch(WatchRequest) returns (stream WatchEvent);
   rpc CredentialStatus(Empty) returns (CredentialStatusResponse);
+  rpc ListRegisteredRoots(ListRegisteredRootsRequest)
+      returns (ListRegisteredRootsResponse);
+  rpc GetRegisteredRootStatus(GetRegisteredRootStatusRequest)
+      returns (GetRegisteredRootStatusResponse);
   rpc ListConflicts(ListConflictsRequest)
       returns (ListConflictsResponse);
   rpc ResolveRegisteredRoot(ResolveRegisteredRootRequest)
@@ -180,6 +184,43 @@ from trusted configuration and returns the selected route identity in the same
 response. This scope does not provide named ordinary-file resolution or
 \code{reconcile --root}. Legacy \code{ResolveConflict} has no root selector;
 when named roots are enrolled, tcfsd fences rootless paths that enter them.
+
+\subsection{Versioned Root Inventory (B0a)}
+
+B0a adds a separate strict \code{sync.root\_registry} rather than changing the
+meaning of the unversioned PR~\#551 conflict registry. Only explicit V1
+descriptors appear in \code{ListRegisteredRoots} and
+\code{GetRegisteredRootStatus}; legacy \code{sync.roots} entries are never
+inferred, upgraded, or enumerated through these methods.
+
+The fleet-stable \code{RootSpecV1} contains the version, root ID, remote prefix,
+profile, generation, and a domain-separated BLAKE3 identity fingerprint. The
+only V1 profiles are \code{git-raw-v1} and \code{agent-static-v1}. An optional
+host-local \code{RootBindingV1} contains canonical local-root and state-cache
+paths, lifecycle and resolution policy, and a separately domain-separated
+binding fingerprint. This separation permits one fleet identity to bind to
+unlike paths on different operating systems without making a host path part of
+the fleet identity.
+
+Both methods require a real authenticated daemon session with pull permission.
+Rows are filtered by component-bounded registered-prefix authorization before
+host filesystem inspection. A syntactically valid unknown ID and an
+unauthorized ID produce the same generic not-found response.
+
+Each row reports one availability state: unbound, unsupported platform,
+missing local root, missing state, invalid binding, busy, or ready. A ready row
+may include exclusive counts for the persisted states
+\code{not\_synced}, \code{synced}, \code{active}, \code{locked}, and
+\code{conflict}. These counts are an immutable snapshot of the registered
+root's primary state-cache file, not live task telemetry. Inventory never
+creates or modifies the sibling lock, repairs the primary state-cache file, or
+recovers from its backup.
+
+Every B0a response reports reconcile support as \code{NONE}. The methods do not
+plan or execute reconcile, resolve conflicts, hydrate, unsync, enroll, or
+mutate registry entries. No B0a method is exposed through MCP. The complete
+source contract is recorded in
+\filepath{docs/design/versioned-root-registry-status-b0a-2026-07-19.md}.
 
 See \filepath{crates/tcfs-core/src/proto/tcfs.proto} for the full service
 definition including all message types.

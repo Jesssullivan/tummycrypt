@@ -1,8 +1,9 @@
 # Current TCFS workstream
 
-Last verified: **2026-07-14** against tummycrypt `origin/main`
-`21f8df303596d1b9f6f90cc7953eb8f65f353ac3`, live GitHub and Linear state,
-and read-only `neo`/`honey`/`sting` fleet inspection.
+Source boundary last verified: **2026-07-19** against tummycrypt `origin/main`
+`febd285f3ab34c4f93756aefde8ebf7071f88bdf`. The live
+`neo`/`honey`/`sting` rows retain their 2026-07-14 verification boundary; this
+source refresh does not claim a new deployment or ceremony.
 
 This is the living blocker list. Dated plans and evidence packets remain useful
 history, but they do not override this page.
@@ -14,7 +15,7 @@ product threshold.
 
 | Surface | Proven now | Still open |
 | --- | --- | --- |
-| Git roam | One complete forward repo roam; automatic divergent keep-both without committed-work loss; pre-freeze root-targeted keep-both mechanism run cleared the production `.git` loop | PR #551 source landing, residual production-root closure, and the two-repo stop rule |
+| Git roam | One complete forward repo roam; automatic divergent keep-both without committed-work loss; PR #551 daemon-trusted conflict routing landed after the pre-freeze root-targeted run cleared the production `.git` loop | Residual production-root closure and the two-repo stop rule |
 | Agent state | One bounded Claude project subtree on neo/honey | Arbitrary sessions, Codex state, prompts, and cross-OS cwd mapping |
 | Hydration | Linux FUSE lifecycle; bounded signed macOS FileProvider lifecycle | Plain-root parity, polished Finder first run, NFS/Windows/iOS parity |
 | Home state | A few explicitly managed paths | Selective product enrollment for home/dotdir classes |
@@ -31,6 +32,10 @@ product threshold.
 - TIN-2657 is fixed by
   [PR #545](https://github.com/Jesssullivan/tummycrypt/pull/545): the primary
   CLI and daemon state-cache path now converges on the canonical JSON file.
+- TIN-2853's source seam landed through
+  [PR #551](https://github.com/Jesssullivan/tummycrypt/pull/551) on 2026-07-18
+  (merge commit `929bbf1`). This accepts the daemon-trusted conflict-only
+  route; it is not evidence of a post-freeze live resolver or deployment.
 - Honey currently runs `v0.12.17`. Neo has the managed `v0.12.17` build,
   but its effective interactive PATH still selects `v0.12.12`; version
   coherence is therefore not closed.
@@ -53,8 +58,8 @@ Current evidence:
   loop.
 - Deliberate user-content conflicts for `README.md` and `AGENTS.md` remain, as
   does the stale `roam-canary-wip` ref pair.
-- PR #551/TIN-2853 must still land through exact-head review and CI before the
-  hardened source seam is accepted.
+- PR #551/TIN-2853 has landed; no post-freeze live action was used to make that
+  source claim.
 - TIN-2856 freezes every further live resolver, enrollment/TOTP, deploy, and
   crypto ceremony. Source review, tests, and landing may continue without a
   new fleet claim.
@@ -62,8 +67,7 @@ Current evidence:
 The residual closeout is:
 
 ```text
-land reviewed PR #551 source
-  → wait for TIN-2856 live-work clearance
+wait for TIN-2856 live-work clearance
   → adjudicate README.md and AGENTS.md
   → handle the stale roam-canary-wip ref pair
   → git/content/state evidence
@@ -89,8 +93,10 @@ The full evidence boundary and root invariants are in
 4. **TLS.** Move the credential-bearing SeaweedFS/S3 path from the current
    internal plaintext HTTP endpoint to an authenticated TLS hostname and enable
    `storage.enforce_tls`.
-5. **Stable root routing.** Land the reviewed PR #551 source seam and its
-   daemon-owned authenticated resolver selection described in PRODUCT.
+5. **Stable root identity.** Keep landed PR #551's conflict-only route
+   unchanged while TIN-2863/B0a adds the separate authorized V1
+   `roots list/status` source seam. B0a reports immutable persisted state and
+   reconcile support `NONE`; it adds no MCP, mutation, or live deployment.
 6. **TIN-2658 residual closure.** After TIN-2856 clears live work, adjudicate
    the two user-content conflicts and stale ref pair, then capture final
    Git/content/state convergence evidence. Do not repeat the already completed

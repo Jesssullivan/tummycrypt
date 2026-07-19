@@ -4,6 +4,8 @@ Status: **accepted 2026-07-14**. Strategy **A → B → C** is the product order
 This record was grounded against tummycrypt `origin/main` at
 `21f8df303596d1b9f6f90cc7953eb8f65f353ac3`, the live Linear/GitHub lanes,
 and the named fleet evidence in [`ops/current.md`](ops/current.md).
+The stable-root source boundary was refreshed on 2026-07-19 after PR #551
+landed; this does not refresh or widen the live fleet evidence.
 
 ## Decision
 
@@ -48,20 +50,35 @@ prefix, path, or policy.
 The target B0 design is a versioned set of trusted, daemon-owned root
 descriptors rendered through configuration. Ordinary reconcile and file
 resolution clients may eventually select an ID; they may not create or rewrite
-its tuple. PR #551 is deliberately narrower: it adds an unversioned,
+its tuple. Landed PR #551 is deliberately narrower: it adds an unversioned,
 conflict-only precursor for named inspection and Git keep-both resolution.
+TIN-2863/B0a adds a separate strict V1 inventory; it does not reinterpret the
+PR #551 registry or grant its entries new authority.
 
 ```text
 stable root_id
-    ├── local path       (host-specific, absolute)
-    ├── remote prefix   (shared convergence identity)
-    ├── state cache     (daemon-owned location)
-    └── policy/profile  (raw Git, hidden paths, deny-set)
+    ├── fleet spec
+    │   ├── remote prefix
+    │   ├── profile
+    │   └── generation
+    └── optional host binding
+        ├── local path       (host-specific, absolute)
+        ├── state cache     (daemon-owned location)
+        └── lifecycle and resolution policy
 ```
 
 The same `root_id` may map to different local paths on macOS and Linux. Its
 remote prefix is the fleet-wide convergence identity. The descriptor is local,
 contains no credentials, and is loaded from the daemon's trusted configuration.
+The V1 fleet spec and host binding have separate domain-separated BLAKE3
+fingerprints so a host-path change cannot silently change the fleet identity.
+
+B0a is an immutable, authorized read surface only. It supports
+`git-raw-v1` and `agent-static-v1`, reports descriptor/binding availability and
+persisted state counts, and always reports reconcile support as `NONE`. It adds
+no mutation, MCP tool, enrollment, or live deployment. The precise contract is
+recorded in
+[the B0a root-registry ADR](design/versioned-root-registry-status-b0a-2026-07-19.md).
 
 Required invariants for the complete B0 lifecycle (not claims that every item
 is implemented by PR #551):
@@ -132,23 +149,31 @@ candidate. It bypasses daemon session authentication, cannot make `--root`
 select the correct prefix by itself, and only handles the Git group while
 ordinary file conflicts remain.
 
-### Minimal A surface
+### Minimal A and B0a surfaces
 
-Status on 2026-07-14: PR #551 implements named conflict inspection and the
-bounded Git keep-both resolve path. It does **not** implement
+Status on 2026-07-19: PR #551 is landed and implements named conflict
+inspection and the bounded Git keep-both resolve path. TIN-2863 adds the
+source-only, immutable V1 inventory/status seam. Neither surface implements
 `reconcile --root`, named-root ordinary-file resolution, or Lab
-enrollment/rendering. Those lifecycle surfaces remain staged under TIN-2859
-and its B0a/B0b/B0c children.
+enrollment/rendering. Reconcile planning and execution remain staged behind
+the later B0 gates.
 
 ```bash
-# Source-proven by PR #551
+# Landed source from PR #551 (legacy conflict-only registry)
 tcfs conflicts --root git-roam-tool-daemon
 tcfs resolve --root git-roam-tool-daemon \
   . --strategy keep-both
 tcfs resolve --root git-roam-tool-daemon \
   . --strategy keep-both --execute
 
-# Staged B0b surface; not implemented yet
+# TIN-2863/B0a source contract (separate V1 registry, immutable reads)
+tcfs roots list
+tcfs roots status git-roam-tool-daemon
+
+# Staged B0b plan surface; not implemented yet
+tcfs reconcile --root git-roam-tool-daemon
+
+# Later execution gate; not B0a or B0b
 tcfs reconcile --root git-roam-tool-daemon --execute
 ```
 
@@ -158,13 +183,14 @@ and a root with `policy = "resolve"`; `policy = "inspect-only"` never permits
 execute. These are source-tested semantics, not evidence that a new live auth
 or resolver ceremony occurred during the TIN-2856 freeze.
 
-Lab must eventually render the existing `extraReconcileRoots` tuple into
-daemon config. Today `resolve --root` selects the daemon-trusted tuple and
-`conflicts --root` is read-only; `reconcile --root` remains staged. A future
-privileged root-add/update surface belongs to B. `conflicts --state` remains a
-diagnostic command. Legacy `push`, `pull`, `rm`, and executing `reconcile` with
-an explicit `--state` are still mutation routes; PR #551 serializes them with
-the same state lock, but they are not named-root authorization surfaces.
+Lab must eventually render an accepted versioned descriptor and host binding
+into daemon config. Today `resolve --root` selects the legacy
+daemon-trusted tuple, `conflicts --root` is read-only, and V1 `roots
+list/status` cannot reconcile or resolve anything. A future privileged
+root-add/update surface belongs to B. `conflicts --state` remains a diagnostic
+command. Legacy `push`, `pull`, `rm`, and executing `reconcile` with an
+explicit `--state` are still mutation routes; PR #551 serializes them with the
+same state lock, but they are not V1 root-registry authorization surfaces.
 
 ## TIN-2658 live evidence and residual closure
 
@@ -177,8 +203,8 @@ incident freeze:
    `.git` conflicts, breaking the 909+ cycle loop.
 4. Two deliberate user-content conflicts (`README.md`, `AGENTS.md`) and one
    stale `roam-canary-wip` ref pair remain.
-5. PR #551/TIN-2853 must still land through exact-head review and CI before the
-   source seam is accepted.
+5. PR #551/TIN-2853 landed on 2026-07-18 as merge commit `929bbf1`; that
+   accepts the source seam but does not clear the remaining live-work freeze.
 
 TIN-2658 therefore remains In Review rather than Done. TIN-2856 blocks any
 further live resolver, enrollment/TOTP, deploy, or crypto ceremony. When that
@@ -193,7 +219,8 @@ Once A is green, make root registration a product surface:
 - enrollment and removal with explicit policy classes;
 - fleet subscriptions and host allowlists;
 - stable aliases for unlike local paths;
-- root discovery and status in CLI, TUI, and safe MCP reads;
+- immutable authorized root discovery and status in CLI first; TUI and safe
+  MCP reads require separate disclosure and authorization review;
 - cross-OS cwd mapping for SSH/IDE routing;
 - generation-aware migrations and recovery;
 - the linked-worktree reconstruction design and migration contract rather than
