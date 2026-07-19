@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::Path;
+use tcfs_core::config::RegisteredRootPlanContractV1;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::blacklist::Blacklist;
@@ -29,8 +30,6 @@ use crate::state::{
     read_primary_state_bytes_read_only_v1, FileSyncStatus, ReadOnlyPrimaryStateBytesV1,
 };
 
-const REGISTERED_ROOT_INDEX_MAX_BYTES_V1: u64 = 1024 * 1024;
-const REGISTERED_ROOT_MANIFEST_MAX_BYTES_V1: u64 = 16 * 1024 * 1024;
 const REGISTERED_ROOT_IDENTITY_MAX_BYTES_V1: usize = 512;
 const REGISTERED_ROOT_RECIPIENT_MAX_BYTES_V1: usize = 1024;
 const REGISTERED_ROOT_ALGORITHM_MAX_BYTES_V1: usize = 128;
@@ -108,7 +107,17 @@ struct StrictVectorClockWireV1 {
 
 impl StrictVectorClockWireV1 {
     fn try_into_vector_clock(self) -> Result<VectorClock> {
+        self.try_into_vector_clock_bounded(u64::MAX)
+    }
+
+    fn try_into_vector_clock_bounded(self, max_entries: u64) -> Result<VectorClock> {
         let clocks = self.clocks.into_inner();
+        anyhow::ensure!(
+            u64::try_from(clocks.len())
+                .context("strict vector-clock entry count does not fit u64")?
+                <= max_entries,
+            "strict vector clock exceeds its entry bound"
+        );
         for (device_id, counter) in &clocks {
             validate_strict_identity_v1(device_id, "strict vector-clock device id")?;
             anyhow::ensure!(*counter > 0, "strict vector-clock counters must be nonzero");
@@ -262,7 +271,10 @@ impl StrictSyncStateV1 {
 impl StrictSyncStateWireV1 {
     fn into_state(self) -> Result<StrictSyncStateV1> {
         validate_lower_hex_64(&self.blake3, "strict state content digest")?;
-        validate_relative_storage_key(&self.remote_path, "strict state remote path")?;
+        validate_registered_remote_storage_key_bounds_v1(
+            &self.remote_path,
+            "strict state remote path",
+        )?;
         validate_strict_identity_v1(&self.device_id, "strict state device id")?;
         let vclock = self.vclock.try_into_vector_clock()?;
         anyhow::ensure!(
@@ -270,7 +282,7 @@ impl StrictSyncStateWireV1 {
             "strict state conflict status and payload must be present together"
         );
         if let Some(conflict) = self.conflict.as_ref() {
-            validate_namespace_logical_path(&conflict.rel_path)?;
+            validate_registered_remote_logical_path_bounds_v1(&conflict.rel_path)?;
             validate_lower_hex_64(&conflict.local_blake3, "strict conflict local digest")?;
             validate_lower_hex_64(&conflict.remote_blake3, "strict conflict remote digest")?;
             validate_strict_identity_v1(&conflict.local_device, "strict conflict local device id")?;
@@ -279,7 +291,10 @@ impl StrictSyncStateWireV1 {
                 "strict conflict remote device id",
             )?;
             if let Some(key) = conflict.remote_manifest_key.0.as_deref() {
-                validate_relative_storage_key(key, "strict conflict remote manifest key")?;
+                validate_registered_remote_storage_key_bounds_v1(
+                    key,
+                    "strict conflict remote manifest key",
+                )?;
             }
         }
         Ok(StrictSyncStateV1 {
@@ -540,6 +555,7 @@ fn bind_strict_state_entries_v1(
         !prefix.is_empty(),
         "strict state root binding requires a non-empty remote prefix"
     );
+    validate_registered_remote_storage_key_bounds_v1(prefix, "strict state remote prefix")?;
 
     let mut namespace_claims: BTreeMap<String, (String, PortableNamespaceRole)> = BTreeMap::new();
     let mut entries = BTreeMap::new();
@@ -567,6 +583,7 @@ fn bind_strict_state_entries_v1(
 
         reserve_state_namespace_claims_v1(&rel_path, &mut namespace_claims)?;
         let index_key = format!("{prefix}/index/{rel_path}");
+        validate_registered_remote_storage_key_bounds_v1(&index_key, "strict state index key")?;
         let entry = BoundStrictSyncStateV1 {
             rel_path: rel_path.clone(),
             index_key,
@@ -606,7 +623,7 @@ fn bind_strict_cache_key_v1(
         .to_str()
         .context("strict state relative path is not valid UTF-8")?
         .to_owned();
-    validate_namespace_logical_path(&rel_path)?;
+    validate_registered_remote_logical_path_bounds_v1(&rel_path)?;
     anyhow::ensure!(
         canonical_local_root.join(&rel_path) == cache_path,
         "strict state cache key does not round-trip through its selected root"
@@ -626,6 +643,7 @@ fn bind_strict_cache_key_v1(
 }
 
 fn validate_exact_manifest_key_v1<'a>(remote_prefix: &str, key: &'a str) -> Result<&'a str> {
+    validate_registered_remote_storage_key_bounds_v1(key, "strict state manifest key")?;
     let manifest_prefix = format!("{remote_prefix}/manifests/");
     let object_id = key
         .strip_prefix(&manifest_prefix)
@@ -769,7 +787,7 @@ impl StrictPendingIndexEntryV1 {
 
 impl StrictPendingIndexEntryWireV1 {
     fn into_entry(self) -> Result<StrictPendingIndexEntryV1> {
-        validate_relative_storage_key(
+        validate_registered_remote_storage_key_bounds_v1(
             &self.staged_manifest_key,
             "strict pending staged manifest key",
         )?;
@@ -806,6 +824,7 @@ fn strict_remote_entry_v1(
             let target = symlink_target
                 .as_deref()
                 .context("strict symlink index entry requires target")?;
+            validate_registered_symlink_target_bound_v1(target)?;
             anyhow::ensure!(
                 !target.is_empty() && !target.chars().any(char::is_control),
                 "strict symlink index target must be non-empty and control-free"
@@ -1027,7 +1046,7 @@ fn parse_strict_index_record_v1(bytes: &[u8]) -> Result<ParsedStrictIndexRecordV
     let deletion_evidence = wire
         .deletion_evidence
         .map(|evidence| -> Result<DeletionEvidence> {
-            validate_relative_storage_key(
+            validate_registered_remote_storage_key_bounds_v1(
                 &evidence.safety_copy_key,
                 "strict deletion safety-copy key",
             )?;
@@ -1133,15 +1152,16 @@ pub async fn read_exact_raw_index_entry_v1(
     rel_path: &str,
 ) -> Result<ExactRawIndexEntryReadV1> {
     let prefix = validate_canonical_namespace_remote_prefix(remote_prefix)?;
-    validate_namespace_logical_path(rel_path)?;
+    validate_registered_remote_logical_path_bounds_v1(rel_path)?;
     let index_key = if prefix.is_empty() {
         format!("index/{rel_path}")
     } else {
         format!("{prefix}/index/{rel_path}")
     };
-    let Some(raw_read) =
-        read_raw_object_snapshot_v1(op, &index_key, REGISTERED_ROOT_INDEX_MAX_BYTES_V1).await?
-    else {
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_index_object_bytes();
+    let Some(raw_read) = read_raw_object_snapshot_v1(op, &index_key, max_bytes).await? else {
         return Ok(ExactRawIndexEntryReadV1::Missing);
     };
     let raw_snapshot = match raw_read {
@@ -1290,6 +1310,54 @@ impl StrictRegularManifestV1 {
     }
 }
 
+fn validate_registered_remote_logical_path_bounds_v1(rel_path: &str) -> Result<()> {
+    validate_namespace_logical_path(rel_path)?;
+    let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+    anyhow::ensure!(
+        u64::try_from(rel_path.len())
+            .context("strict remote logical-path length does not fit u64")?
+            <= remote_contract.max_logical_path_bytes(),
+        "strict remote logical path exceeds the registered-root byte bound: {rel_path:?}"
+    );
+    anyhow::ensure!(
+        u32::try_from(rel_path.split('/').count())
+            .context("strict remote logical-path depth does not fit u32")?
+            <= remote_contract.max_logical_path_depth(),
+        "strict remote logical path exceeds the registered-root depth bound: {rel_path:?}"
+    );
+    anyhow::ensure!(
+        rel_path.split('/').all(|component| {
+            u64::try_from(component.len())
+                .is_ok_and(|length| length <= remote_contract.max_logical_component_bytes())
+        }),
+        "strict remote logical path exceeds the portable component-byte bound: {rel_path:?}"
+    );
+    Ok(())
+}
+
+fn validate_registered_remote_storage_key_bounds_v1(key: &str, description: &str) -> Result<()> {
+    validate_relative_storage_key(key, description)?;
+    anyhow::ensure!(
+        u64::try_from(key.len()).context("strict remote storage-key length does not fit u64")?
+            <= RegisteredRootPlanContractV1::strict_v1()
+                .remote_contract()
+                .max_storage_key_bytes(),
+        "{description} exceeds the registered-root storage-key byte bound"
+    );
+    Ok(())
+}
+
+fn validate_registered_symlink_target_bound_v1(target: &str) -> Result<()> {
+    anyhow::ensure!(
+        u64::try_from(target.len()).context("strict symlink target length does not fit u64")?
+            <= RegisteredRootPlanContractV1::strict_v1()
+                .local_snapshot_contract()
+                .max_symlink_target_bytes(),
+        "strict remote symlink target exceeds the local snapshot byte bound"
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrictSymlinkManifestV1 {
     symlink_target: String,
@@ -1380,10 +1448,10 @@ pub async fn read_strict_remote_manifest_v1(
     } else {
         format!("{prefix}/manifests/{}", index_entry.manifest_hash())
     };
-    let Some(raw_read) =
-        read_raw_object_snapshot_v1(op, &manifest_key, REGISTERED_ROOT_MANIFEST_MAX_BYTES_V1)
-            .await?
-    else {
+    let max_bytes = RegisteredRootPlanContractV1::strict_v1()
+        .remote_contract()
+        .max_manifest_object_bytes();
+    let Some(raw_read) = read_raw_object_snapshot_v1(op, &manifest_key, max_bytes).await? else {
         return Ok(StrictRemoteManifestReadV1::Incomplete(
             StrictRemoteManifestIncompleteV1::MissingObject,
         ));
@@ -1468,16 +1536,29 @@ fn strict_regular_manifest_v1(
     const POSIX_FILE_TYPE_MASK: u32 = 0o170000;
     const POSIX_REGULAR_FILE: u32 = 0o100000;
     const PORTABLE_PERMISSION_MASK: u32 = 0o777;
+    let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
 
     anyhow::ensure!(
         matches!(wire.version, 2 | 3),
         "strict regular manifest requires version 2 or 3"
     );
+    anyhow::ensure!(
+        u64::try_from(wire.chunks.len())
+            .context("strict regular manifest chunk count does not fit u64")?
+            <= remote_contract.max_manifest_chunk_entries(),
+        "strict regular manifest exceeds the chunk-entry bound"
+    );
+    anyhow::ensure!(
+        u64::try_from(wire.wrapped_file_keys.len())
+            .context("strict regular manifest wrapped-key count does not fit u64")?
+            <= remote_contract.max_manifest_wrapped_key_entries(),
+        "strict regular manifest exceeds the wrapped-key entry bound"
+    );
     validate_lower_hex_64(&wire.file_hash, "strict regular manifest file digest")?;
     for chunk in &wire.chunks {
         validate_lower_hex_64(chunk, "strict regular manifest chunk digest")?;
     }
-    validate_namespace_logical_path(&wire.rel_path)?;
+    validate_registered_remote_logical_path_bounds_v1(&wire.rel_path)?;
     anyhow::ensure!(
         wire.rel_path == rel_path,
         "strict regular manifest path does not match index path"
@@ -1558,7 +1639,9 @@ fn strict_regular_manifest_v1(
         }
         _ => unreachable!("manifest version was checked above"),
     }
-    let vclock = wire.vclock.try_into_vector_clock()?;
+    let vclock = wire
+        .vclock
+        .try_into_vector_clock_bounded(remote_contract.max_remote_vector_clock_entries())?;
     Ok(StrictRegularManifestV1 {
         file_hash: wire.file_hash,
         file_size: wire.file_size,
@@ -1577,6 +1660,7 @@ fn strict_symlink_manifest_v1(
     rel_path: &str,
     index_entry: &StrictRemoteIndexEntryV1,
 ) -> Result<StrictSymlinkManifestV1> {
+    let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
     anyhow::ensure!(
         wire.version == 3 && wire.kind == RemoteEntryKind::Symlink,
         "strict symlink manifest requires version 3 symlink kind"
@@ -1587,14 +1671,17 @@ fn strict_symlink_manifest_v1(
             && index_entry.symlink_target() == Some(wire.symlink_target.as_str()),
         "strict symlink manifest target does not match index entry"
     );
+    validate_registered_symlink_target_bound_v1(&wire.symlink_target)?;
     crate::engine::validate_indexed_symlink_target(Path::new(rel_path), &wire.symlink_target)?;
-    validate_namespace_logical_path(&wire.rel_path)?;
+    validate_registered_remote_logical_path_bounds_v1(&wire.rel_path)?;
     anyhow::ensure!(
         wire.rel_path == rel_path,
         "strict symlink manifest path does not match index path"
     );
     validate_strict_identity_v1(&wire.written_by, "strict symlink manifest writer")?;
-    let vclock = wire.vclock.try_into_vector_clock()?;
+    let vclock = wire
+        .vclock
+        .try_into_vector_clock_bounded(remote_contract.max_remote_vector_clock_entries())?;
     Ok(StrictSymlinkManifestV1 {
         symlink_target: wire.symlink_target,
         vclock,
@@ -2085,6 +2172,34 @@ mod tests {
             parse_strict_index_record_v1(preparing.as_bytes()).unwrap(),
             ParsedStrictIndexRecordV1::Preparing { .. }
         ));
+        let overlong_key = "k".repeat(
+            usize::try_from(
+                RegisteredRootPlanContractV1::strict_v1()
+                    .remote_contract()
+                    .max_storage_key_bytes()
+                    + 1,
+            )
+            .unwrap(),
+        );
+        assert!(parse_strict_index_record_v1(
+            preparing
+                .replace("roots/staging/object", &overlong_key)
+                .as_bytes()
+        )
+        .is_err());
+        let deleted_with_overlong_evidence = format!(
+            r#"{{
+  "version": 4,
+  "state": "deleted",
+  "current": null,
+  "pending": null,
+  "deletion_evidence": {{
+    "safety_copy_key": "{overlong_key}",
+    "safety_copy_blake3": "{manifest_hash}"
+  }}
+}}"#
+        );
+        assert!(parse_strict_index_record_v1(deleted_with_overlong_evidence.as_bytes()).is_err());
 
         let unknown = committed.replacen("\"version\": 2,", "\"version\": 2, \"extra\": 1,", 1);
         assert!(parse_strict_index_record_v1(unknown.as_bytes()).is_err());
@@ -2329,6 +2444,122 @@ mod tests {
         }))
         .unwrap();
         assert!(strict_symlink_manifest_v1(escaping, "dir/link", &escaping_index).is_err());
+    }
+
+    #[test]
+    fn strict_remote_routes_enforce_path_depth_and_storage_key_bounds() {
+        let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+        let exact_path = [
+            "a".repeat(255),
+            "b".repeat(255),
+            "c".repeat(255),
+            "d".repeat(254),
+            "e".to_owned(),
+        ]
+        .join("/");
+        assert_eq!(
+            u64::try_from(exact_path.len()).unwrap(),
+            remote_contract.max_logical_path_bytes()
+        );
+        assert!(validate_registered_remote_logical_path_bounds_v1(&exact_path).is_ok());
+        assert!(
+            validate_registered_remote_logical_path_bounds_v1(&format!("{exact_path}a")).is_err()
+        );
+        let overlong_component =
+            "a".repeat(usize::try_from(remote_contract.max_logical_component_bytes() + 1).unwrap());
+        assert!(validate_registered_remote_logical_path_bounds_v1(&overlong_component).is_err());
+
+        let over_depth = std::iter::repeat_n(
+            "a",
+            usize::try_from(remote_contract.max_logical_path_depth() + 1).unwrap(),
+        )
+        .collect::<Vec<_>>()
+        .join("/");
+        assert!(validate_registered_remote_logical_path_bounds_v1(&over_depth).is_err());
+
+        let exact_key =
+            "k".repeat(usize::try_from(remote_contract.max_storage_key_bytes()).unwrap());
+        assert!(
+            validate_registered_remote_storage_key_bounds_v1(&exact_key, "test storage key")
+                .is_ok()
+        );
+        assert!(validate_registered_remote_storage_key_bounds_v1(
+            &format!("{exact_key}k"),
+            "test storage key"
+        )
+        .is_err());
+
+        let overlong_target = "t".repeat(
+            usize::try_from(
+                RegisteredRootPlanContractV1::strict_v1()
+                    .local_snapshot_contract()
+                    .max_symlink_target_bytes()
+                    + 1,
+            )
+            .unwrap(),
+        );
+        assert!(strict_remote_entry_v1(
+            "f".repeat(64),
+            u64::try_from(overlong_target.len()).unwrap(),
+            0,
+            Some(RemoteEntryKind::Symlink),
+            Some(overlong_target),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn strict_remote_manifest_enforces_decoded_collection_bounds() {
+        let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
+        let wrapped_file_keys = (0..=remote_contract.max_manifest_wrapped_key_entries())
+            .map(|index| StrictWrappedFileKeyWireV1 {
+                recipient_device_id: format!("device-{index}"),
+                recipient: "age1test".to_owned(),
+                algorithm: "age-x25519-v1".to_owned(),
+                wrapped_key: "wrapped".to_owned(),
+            })
+            .collect();
+        let wire = StrictRegularManifestWireV1 {
+            version: 2,
+            file_hash: "f".repeat(64),
+            file_size: 0,
+            chunks: Vec::new(),
+            vclock: StrictVectorClockWireV1 {
+                clocks: UniqueBTreeMap(BTreeMap::from([("sting".to_owned(), 1)])),
+            },
+            written_by: "sting".to_owned(),
+            written_at: 1,
+            rel_path: "file".to_owned(),
+            mode: 0o644,
+            mtime: (1, 0),
+            encrypted_file_key: Some("master".to_owned()),
+            wrapped_file_keys,
+        };
+        let index = StrictRemoteIndexEntryV1 {
+            manifest_hash: "m".repeat(64),
+            size: 0,
+            chunks: 0,
+            kind: RemoteEntryKind::RegularFile,
+            symlink_target: None,
+        };
+        let error = strict_regular_manifest_v1(wire, "file", &index).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("wrapped-key entry bound"),
+            "{error:#}"
+        );
+
+        let clocks = (0..=remote_contract.max_remote_vector_clock_entries())
+            .map(|index| (format!("device-{index}"), 1))
+            .collect();
+        let error = StrictVectorClockWireV1 {
+            clocks: UniqueBTreeMap(clocks),
+        }
+        .try_into_vector_clock_bounded(remote_contract.max_remote_vector_clock_entries())
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("vector clock exceeds"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use futures::TryStreamExt;
 use opendal::{ErrorKind, Operator};
 use serde::{Deserialize, Serialize};
+use tcfs_core::config::RegisteredRootPlanContractV1;
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
@@ -1999,9 +2000,15 @@ pub(crate) async fn read_raw_object_snapshot_v1(
     object_key: &str,
     max_bytes: u64,
 ) -> Result<Option<RawObjectReadV1>> {
+    let remote_contract = RegisteredRootPlanContractV1::strict_v1().remote_contract();
     anyhow::ensure!(
         max_bytes > 0,
         "read-only object snapshot bound must be nonzero: {object_key}"
+    );
+    anyhow::ensure!(
+        u64::try_from(object_key.len()).context("storage key length does not fit u64")?
+            <= remote_contract.max_storage_key_bytes(),
+        "read-only object snapshot key exceeds the registered-root storage-key bound: {object_key:?}"
     );
     let metadata = match op.stat(object_key).await {
         Ok(metadata) => metadata,
@@ -2024,14 +2031,22 @@ pub(crate) async fn read_raw_object_snapshot_v1(
         "read-only object snapshot exceeds {max_bytes} bytes: {object_key}"
     );
 
-    let etag = metadata
-        .etag()
-        .filter(|etag| !etag.is_empty())
-        .map(str::to_owned);
-    let version = metadata
-        .version()
-        .filter(|version| !version.is_empty() && *version != "null")
-        .map(str::to_owned);
+    let checked_binding_token = |value: Option<&str>,
+                                 description: &str|
+     -> Result<Option<String>> {
+        let Some(value) = value.filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            u64::try_from(value.len()).context("object binding token length does not fit u64")?
+                <= remote_contract.max_binding_token_bytes(),
+            "{description} exceeds the registered-root binding-token bound: {object_key}"
+        );
+        Ok(Some(value.to_owned()))
+    };
+    let etag = checked_binding_token(metadata.etag(), "object ETag")?;
+    let version = checked_binding_token(metadata.version(), "object version")?
+        .filter(|version| version != "null");
     let capability = op.info().full_capability();
     let version = version.filter(|_| capability.read_with_version);
     let etag_for_read = etag
@@ -3031,6 +3046,42 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("exceeds 3 bytes"));
+    }
+
+    #[tokio::test]
+    async fn read_only_raw_object_snapshot_enforces_key_and_binding_token_bounds() {
+        let remote_contract =
+            tcfs_core::config::RegisteredRootPlanContractV1::strict_v1().remote_contract();
+        let overlong_key =
+            "k".repeat(usize::try_from(remote_contract.max_storage_key_bytes() + 1).unwrap());
+        let error = super::read_raw_object_snapshot_v1(&memory_op(), &overlong_key, 16)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("storage-key bound"),
+            "{error:#}"
+        );
+
+        let oversized_etag =
+            "e".repeat(usize::try_from(remote_contract.max_binding_token_bytes() + 1).unwrap());
+        let (op, backend) = snapshot_test_operator(
+            SnapshotTestObject {
+                bytes: b"body".to_vec(),
+                etag: Some(oversized_etag),
+                version: None,
+            },
+            None,
+            false,
+            true,
+        );
+        let error = super::read_raw_object_snapshot_v1(&op, "object", 16)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("binding-token bound"),
+            "{error:#}"
+        );
+        assert!(backend.reads().is_empty());
     }
 
     #[tokio::test]

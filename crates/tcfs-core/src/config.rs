@@ -1340,6 +1340,38 @@ impl RootStateContractV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootRemoteObservationModelV1 {
+    /// Exactly two exhaustive passes over each listed key universe independently
+    /// identity-bind every index, marker, reservation, and referenced manifest
+    /// object. The passes must have identical keys, bindings, bytes, and strict
+    /// semantics. A mismatch proves observed drift; equality still does not
+    /// provide transaction or globally atomic namespace snapshot isolation.
+    ///
+    /// Each sequential, non-overlapping pass lists index then reservation keys,
+    /// validates and sorts both keysets, binds every index and reservation
+    /// object, derives and deduplicates committed manifest keys, then binds
+    /// those manifests. Errors fail the observation; V1 never retries until a
+    /// stable result appears.
+    TwoListedUniverseBoundPassesNonAtomicV1,
+}
+
+impl RootRemoteObservationModelV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::TwoListedUniverseBoundPassesNonAtomicV1 => {
+                "two-listed-universe-bound-passes-non-atomic-v1"
+            }
+        }
+    }
+
+    pub const fn pass_count(self) -> u8 {
+        match self {
+            Self::TwoListedUniverseBoundPassesNonAtomicV1 => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootRemoteContractV1 {
     RawCommittedManifestBoundV1,
 }
@@ -1348,6 +1380,214 @@ impl RootRemoteContractV1 {
     pub const fn canonical_name(self) -> &'static str {
         match self {
             Self::RawCommittedManifestBoundV1 => "raw-committed-manifest-bound-v1",
+        }
+    }
+
+    /// Observation mechanics available from generic S3-compatible backends.
+    ///
+    /// This model is intentionally weaker than the registered-root plan's
+    /// `CompleteOrNoDigestV1` completeness contract. A stable observation is
+    /// evidence, not authority to mint a plan digest.
+    pub const fn observation_model(self) -> RootRemoteObservationModelV1 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => {
+                RootRemoteObservationModelV1::TwoListedUniverseBoundPassesNonAtomicV1
+            }
+        }
+    }
+
+    /// Requested backend page limit for each streaming namespace listing.
+    ///
+    /// OpenDAL exposes this as a backend hint, never as a safety boundary. The
+    /// independent total-row and total-key-byte ceilings remain authoritative.
+    pub const fn listing_page_request_limit(self) -> u32 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1000,
+        }
+    }
+
+    /// Maximum concurrent identity-bound object reads.
+    ///
+    /// This and [`Self::listing_page_request_limit`] are acquisition-only
+    /// tuning. They cannot change canonical output, incompleteness rules, or
+    /// any acceptance ceiling and therefore are not fingerprint fields.
+    pub const fn max_concurrent_bound_reads(self) -> u32 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 8,
+        }
+    }
+
+    /// Maximum rows emitted by both backend listers in one pass.
+    ///
+    /// Every row counts before mode/path validation, filtering, or duplicate
+    /// detection, including synthetic directories and malformed rows.
+    pub const fn max_listing_rows_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4_000_000,
+        }
+    }
+
+    /// Maximum raw key bytes emitted by both backend listers in one pass.
+    ///
+    /// As with rows, bytes count before any validation or filtering.
+    pub const fn max_listing_key_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of every emitted or constructed storage key.
+    ///
+    /// This also bounds the remote prefix because it is a strict key prefix.
+    pub const fn max_storage_key_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024,
+        }
+    }
+
+    /// Maximum physical non-directory index objects observed in one pass.
+    pub const fn max_index_observations_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1_000_000,
+        }
+    }
+
+    /// Maximum combined byte length of retained physical index keys per pass.
+    pub const fn max_retained_index_key_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 256 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum physical namespace-reservation objects observed in one pass.
+    pub const fn max_reservation_observations_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 2_000_000,
+        }
+    }
+
+    /// Maximum combined byte length of retained reservation keys per pass.
+    pub const fn max_retained_reservation_key_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 256 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one exact raw index object.
+    pub const fn max_index_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one exact committed manifest object.
+    pub const fn max_manifest_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 16 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one exact namespace-reservation object.
+    pub const fn max_reservation_object_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 16 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one strict logical namespace path.
+    pub const fn max_logical_path_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024,
+        }
+    }
+
+    /// Maximum UTF-8 byte length of one portable logical path component.
+    pub const fn max_logical_component_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 255,
+        }
+    }
+
+    /// Maximum component depth of one strict logical namespace path.
+    pub const fn max_logical_path_depth(self) -> u32 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 256,
+        }
+    }
+
+    /// Maximum generated namespace-claim observations in one pass.
+    ///
+    /// Every derived claim counts before alias/role compatibility
+    /// deduplication.
+    pub const fn max_generated_claim_observations_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4_000_000,
+        }
+    }
+
+    /// Maximum exact-plus-folded bytes across generated claims in one pass.
+    ///
+    /// Every derived claim counts before alias/role compatibility deduplication.
+    pub const fn max_generated_claim_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum unique compatible claims retained in one pass.
+    pub const fn max_retained_unique_claims_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 2_000_000,
+        }
+    }
+
+    /// Maximum exact-plus-folded bytes retained for unique claims in one pass.
+    pub const fn max_retained_unique_claim_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 512 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum aggregate bytes from all identity-bound object reads in one
+    /// pass. Every actual body read counts before retention.
+    pub const fn max_bound_object_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 8 * 1024 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum byte length of one retained version or ETag identity token.
+    pub const fn max_binding_token_bytes(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum combined retained version and ETag bytes in one pass.
+    pub const fn max_retained_binding_bytes_per_pass(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 512 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum chunk-address entries decoded from one strict manifest.
+    pub const fn max_manifest_chunk_entries(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 262_144,
+        }
+    }
+
+    /// Maximum per-device wrapped-key entries decoded from one manifest.
+    pub const fn max_manifest_wrapped_key_entries(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
+        }
+    }
+
+    /// Maximum vector-clock entries decoded from one remote object.
+    pub const fn max_remote_vector_clock_entries(self) -> u64 {
+        match self {
+            Self::RawCommittedManifestBoundV1 => 4096,
         }
     }
 }
@@ -1739,7 +1979,7 @@ fn fingerprint_root_profile_settings_v1(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RegisteredRootPlanContractFingerprintFieldsV1 {
-    canonical_names: [(&'static str, &'static str); 9],
+    canonical_names: [(&'static str, &'static str); 10],
     local_snapshot_max_depth: u32,
     local_snapshot_max_entries: u64,
     local_snapshot_max_retained_path_bytes: u64,
@@ -1747,6 +1987,29 @@ struct RegisteredRootPlanContractFingerprintFieldsV1 {
     local_snapshot_max_regular_file_bytes: u64,
     local_snapshot_max_total_hashed_bytes: u64,
     local_snapshot_hash_buffer_bytes: u64,
+    remote_max_listing_rows_per_pass: u64,
+    remote_max_listing_key_bytes_per_pass: u64,
+    remote_max_storage_key_bytes: u64,
+    remote_max_index_observations_per_pass: u64,
+    remote_max_retained_index_key_bytes_per_pass: u64,
+    remote_max_reservation_observations_per_pass: u64,
+    remote_max_retained_reservation_key_bytes_per_pass: u64,
+    remote_max_index_object_bytes: u64,
+    remote_max_manifest_object_bytes: u64,
+    remote_max_reservation_object_bytes: u64,
+    remote_max_logical_path_bytes: u64,
+    remote_max_logical_component_bytes: u64,
+    remote_max_logical_path_depth: u32,
+    remote_max_generated_claim_observations_per_pass: u64,
+    remote_max_generated_claim_bytes_per_pass: u64,
+    remote_max_retained_unique_claims_per_pass: u64,
+    remote_max_retained_unique_claim_bytes_per_pass: u64,
+    remote_max_bound_object_bytes_per_pass: u64,
+    remote_max_binding_token_bytes: u64,
+    remote_max_retained_binding_bytes_per_pass: u64,
+    remote_max_manifest_chunk_entries: u64,
+    remote_max_manifest_wrapped_key_entries: u64,
+    remote_max_remote_vector_clock_entries: u64,
 }
 
 fn registered_root_plan_contract_fingerprint_fields_v1(
@@ -1768,6 +2031,10 @@ fn registered_root_plan_contract_fingerprint_fields_v1(
             ),
             ("state_policy", contract.state.canonical_name()),
             ("remote_policy", contract.remote.canonical_name()),
+            (
+                "remote_observation_model",
+                contract.remote.observation_model().canonical_name(),
+            ),
             ("causality_policy", contract.causality.canonical_name()),
             ("action_policy", contract.actions.canonical_name()),
             ("ordering_policy", contract.ordering.canonical_name()),
@@ -1783,6 +2050,45 @@ fn registered_root_plan_contract_fingerprint_fields_v1(
         local_snapshot_max_regular_file_bytes: contract.local_snapshot.max_regular_file_bytes(),
         local_snapshot_max_total_hashed_bytes: contract.local_snapshot.max_total_hashed_bytes(),
         local_snapshot_hash_buffer_bytes: contract.local_snapshot.hash_buffer_bytes(),
+        remote_max_listing_rows_per_pass: contract.remote.max_listing_rows_per_pass(),
+        remote_max_listing_key_bytes_per_pass: contract.remote.max_listing_key_bytes_per_pass(),
+        remote_max_storage_key_bytes: contract.remote.max_storage_key_bytes(),
+        remote_max_index_observations_per_pass: contract.remote.max_index_observations_per_pass(),
+        remote_max_retained_index_key_bytes_per_pass: contract
+            .remote
+            .max_retained_index_key_bytes_per_pass(),
+        remote_max_reservation_observations_per_pass: contract
+            .remote
+            .max_reservation_observations_per_pass(),
+        remote_max_retained_reservation_key_bytes_per_pass: contract
+            .remote
+            .max_retained_reservation_key_bytes_per_pass(),
+        remote_max_index_object_bytes: contract.remote.max_index_object_bytes(),
+        remote_max_manifest_object_bytes: contract.remote.max_manifest_object_bytes(),
+        remote_max_reservation_object_bytes: contract.remote.max_reservation_object_bytes(),
+        remote_max_logical_path_bytes: contract.remote.max_logical_path_bytes(),
+        remote_max_logical_component_bytes: contract.remote.max_logical_component_bytes(),
+        remote_max_logical_path_depth: contract.remote.max_logical_path_depth(),
+        remote_max_generated_claim_observations_per_pass: contract
+            .remote
+            .max_generated_claim_observations_per_pass(),
+        remote_max_generated_claim_bytes_per_pass: contract
+            .remote
+            .max_generated_claim_bytes_per_pass(),
+        remote_max_retained_unique_claims_per_pass: contract
+            .remote
+            .max_retained_unique_claims_per_pass(),
+        remote_max_retained_unique_claim_bytes_per_pass: contract
+            .remote
+            .max_retained_unique_claim_bytes_per_pass(),
+        remote_max_bound_object_bytes_per_pass: contract.remote.max_bound_object_bytes_per_pass(),
+        remote_max_binding_token_bytes: contract.remote.max_binding_token_bytes(),
+        remote_max_retained_binding_bytes_per_pass: contract
+            .remote
+            .max_retained_binding_bytes_per_pass(),
+        remote_max_manifest_chunk_entries: contract.remote.max_manifest_chunk_entries(),
+        remote_max_manifest_wrapped_key_entries: contract.remote.max_manifest_wrapped_key_entries(),
+        remote_max_remote_vector_clock_entries: contract.remote.max_remote_vector_clock_entries(),
     }
 }
 
@@ -1791,7 +2097,7 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
 ) -> RegisteredRootPlanContractFingerprintV1 {
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.registered-root-plan-contract.b3v1",
-        fields.canonical_names.len() + 7,
+        fields.canonical_names.len() + 30,
     );
     for (tag, value) in fields.canonical_names {
         encoder.field(tag, value.as_bytes());
@@ -1823,6 +2129,116 @@ fn fingerprint_registered_root_plan_contract_fields_v1(
             encoder.field(
                 "local_snapshot_hash_buffer_bytes",
                 &fields.local_snapshot_hash_buffer_bytes.to_be_bytes(),
+            );
+        }
+        if tag == "remote_observation_model" {
+            encoder.field(
+                "remote_max_listing_rows_per_pass",
+                &fields.remote_max_listing_rows_per_pass.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_listing_key_bytes_per_pass",
+                &fields.remote_max_listing_key_bytes_per_pass.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_storage_key_bytes",
+                &fields.remote_max_storage_key_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_index_observations_per_pass",
+                &fields.remote_max_index_observations_per_pass.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_index_key_bytes_per_pass",
+                &fields
+                    .remote_max_retained_index_key_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_reservation_observations_per_pass",
+                &fields
+                    .remote_max_reservation_observations_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_reservation_key_bytes_per_pass",
+                &fields
+                    .remote_max_retained_reservation_key_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_index_object_bytes",
+                &fields.remote_max_index_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_manifest_object_bytes",
+                &fields.remote_max_manifest_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_reservation_object_bytes",
+                &fields.remote_max_reservation_object_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_logical_path_bytes",
+                &fields.remote_max_logical_path_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_logical_component_bytes",
+                &fields.remote_max_logical_component_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_logical_path_depth",
+                &fields.remote_max_logical_path_depth.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_generated_claim_observations_per_pass",
+                &fields
+                    .remote_max_generated_claim_observations_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_generated_claim_bytes_per_pass",
+                &fields
+                    .remote_max_generated_claim_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_unique_claims_per_pass",
+                &fields
+                    .remote_max_retained_unique_claims_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_unique_claim_bytes_per_pass",
+                &fields
+                    .remote_max_retained_unique_claim_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_bound_object_bytes_per_pass",
+                &fields.remote_max_bound_object_bytes_per_pass.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_binding_token_bytes",
+                &fields.remote_max_binding_token_bytes.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_retained_binding_bytes_per_pass",
+                &fields
+                    .remote_max_retained_binding_bytes_per_pass
+                    .to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_manifest_chunk_entries",
+                &fields.remote_max_manifest_chunk_entries.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_manifest_wrapped_key_entries",
+                &fields.remote_max_manifest_wrapped_key_entries.to_be_bytes(),
+            );
+            encoder.field(
+                "remote_max_remote_vector_clock_entries",
+                &fields.remote_max_remote_vector_clock_entries.to_be_bytes(),
             );
         }
     }
@@ -2909,6 +3325,58 @@ resolution_policy = "inspect-only"
             contract.remote_contract(),
             RootRemoteContractV1::RawCommittedManifestBoundV1
         );
+        let remote = contract.remote_contract();
+        assert_eq!(
+            remote.observation_model(),
+            RootRemoteObservationModelV1::TwoListedUniverseBoundPassesNonAtomicV1
+        );
+        assert_eq!(remote.observation_model().pass_count(), 2);
+        assert_eq!(remote.listing_page_request_limit(), 1000);
+        assert_eq!(remote.max_concurrent_bound_reads(), 8);
+        assert_eq!(remote.max_listing_rows_per_pass(), 4_000_000);
+        assert_eq!(remote.max_listing_key_bytes_per_pass(), 1024 * 1024 * 1024);
+        assert_eq!(remote.max_storage_key_bytes(), 1024);
+        assert_eq!(remote.max_index_observations_per_pass(), 1_000_000);
+        assert_eq!(
+            remote.max_retained_index_key_bytes_per_pass(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(remote.max_reservation_observations_per_pass(), 2_000_000);
+        assert_eq!(
+            remote.max_retained_reservation_key_bytes_per_pass(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(remote.max_index_object_bytes(), 1024 * 1024);
+        assert_eq!(remote.max_manifest_object_bytes(), 16 * 1024 * 1024);
+        assert_eq!(remote.max_reservation_object_bytes(), 16 * 1024);
+        assert_eq!(remote.max_logical_path_bytes(), 1024);
+        assert_eq!(remote.max_logical_component_bytes(), 255);
+        assert_eq!(remote.max_logical_path_depth(), 256);
+        assert_eq!(
+            remote.max_generated_claim_observations_per_pass(),
+            4_000_000
+        );
+        assert_eq!(
+            remote.max_generated_claim_bytes_per_pass(),
+            1024 * 1024 * 1024
+        );
+        assert_eq!(remote.max_retained_unique_claims_per_pass(), 2_000_000);
+        assert_eq!(
+            remote.max_retained_unique_claim_bytes_per_pass(),
+            512 * 1024 * 1024
+        );
+        assert_eq!(
+            remote.max_bound_object_bytes_per_pass(),
+            8 * 1024 * 1024 * 1024
+        );
+        assert_eq!(remote.max_binding_token_bytes(), 4096);
+        assert_eq!(
+            remote.max_retained_binding_bytes_per_pass(),
+            512 * 1024 * 1024
+        );
+        assert_eq!(remote.max_manifest_chunk_entries(), 262_144);
+        assert_eq!(remote.max_manifest_wrapped_key_entries(), 4096);
+        assert_eq!(remote.max_remote_vector_clock_entries(), 4096);
         assert_eq!(
             contract.causality_contract(),
             RootCausalityContractV1::TypedVectorClockV1
@@ -2934,12 +3402,12 @@ resolution_policy = "inspect-only"
         );
         assert_eq!(
             fingerprint.to_string(),
-            "b3v1:db9a3d9899a427c952789afdd850d6ffafca84770b99d6f02d3efcca6b3a0327"
+            "b3v1:0a3dbb43186967c1978104b72a5dbc750ba913842b1c491267def62f8db05d1f"
         );
     }
 
     #[test]
-    fn registered_root_plan_fingerprint_schema_binds_local_snapshot_resources() {
+    fn registered_root_plan_fingerprint_schema_binds_acceptance_resources() {
         let contract = RegisteredRootPlanContractV1::strict_v1();
         let fields = registered_root_plan_contract_fingerprint_fields_v1(contract);
         assert_eq!(
@@ -2956,6 +3424,10 @@ resolution_policy = "inspect-only"
                 ),
                 ("state_policy", "immutable-primary-semantic-exact-v1"),
                 ("remote_policy", "raw-committed-manifest-bound-v1"),
+                (
+                    "remote_observation_model",
+                    "two-listed-universe-bound-passes-non-atomic-v1",
+                ),
                 ("causality_policy", "typed-vector-clock-v1"),
                 ("action_policy", "plan-only-no-delete-v1"),
                 ("ordering_policy", "relative-path-kind-proof-v1"),
@@ -2978,6 +3450,56 @@ resolution_policy = "inspect-only"
             8 * 1024 * 1024 * 1024 * 1024
         );
         assert_eq!(fields.local_snapshot_hash_buffer_bytes, 64 * 1024);
+        assert_eq!(fields.remote_max_listing_rows_per_pass, 4_000_000);
+        assert_eq!(
+            fields.remote_max_listing_key_bytes_per_pass,
+            1024 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_storage_key_bytes, 1024);
+        assert_eq!(fields.remote_max_index_observations_per_pass, 1_000_000);
+        assert_eq!(
+            fields.remote_max_retained_index_key_bytes_per_pass,
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            fields.remote_max_reservation_observations_per_pass,
+            2_000_000
+        );
+        assert_eq!(
+            fields.remote_max_retained_reservation_key_bytes_per_pass,
+            256 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_index_object_bytes, 1024 * 1024);
+        assert_eq!(fields.remote_max_manifest_object_bytes, 16 * 1024 * 1024);
+        assert_eq!(fields.remote_max_reservation_object_bytes, 16 * 1024);
+        assert_eq!(fields.remote_max_logical_path_bytes, 1024);
+        assert_eq!(fields.remote_max_logical_component_bytes, 255);
+        assert_eq!(fields.remote_max_logical_path_depth, 256);
+        assert_eq!(
+            fields.remote_max_generated_claim_observations_per_pass,
+            4_000_000
+        );
+        assert_eq!(
+            fields.remote_max_generated_claim_bytes_per_pass,
+            1024 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_retained_unique_claims_per_pass, 2_000_000);
+        assert_eq!(
+            fields.remote_max_retained_unique_claim_bytes_per_pass,
+            512 * 1024 * 1024
+        );
+        assert_eq!(
+            fields.remote_max_bound_object_bytes_per_pass,
+            8 * 1024 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_binding_token_bytes, 4096);
+        assert_eq!(
+            fields.remote_max_retained_binding_bytes_per_pass,
+            512 * 1024 * 1024
+        );
+        assert_eq!(fields.remote_max_manifest_chunk_entries, 262_144);
+        assert_eq!(fields.remote_max_manifest_wrapped_key_entries, 4096);
+        assert_eq!(fields.remote_max_remote_vector_clock_entries, 4096);
 
         let baseline = fingerprint_registered_root_plan_contract_fields_v1(fields);
 
@@ -3043,6 +3565,50 @@ resolution_policy = "inspect-only"
             baseline,
             fingerprint_registered_root_plan_contract_fields_v1(buffer_bytes_mutation)
         );
+
+        let mut observation_model_mutation = fields;
+        observation_model_mutation.canonical_names[5].1 = "atomic-namespace-snapshot-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_registered_root_plan_contract_fields_v1(observation_model_mutation)
+        );
+
+        macro_rules! assert_remote_resource_is_bound {
+            ($field:ident) => {{
+                let mut mutation = fields;
+                mutation.$field += 1;
+                assert_ne!(
+                    baseline,
+                    fingerprint_registered_root_plan_contract_fields_v1(mutation),
+                    "remote contract fingerprint omitted {}",
+                    stringify!($field)
+                );
+            }};
+        }
+
+        assert_remote_resource_is_bound!(remote_max_listing_rows_per_pass);
+        assert_remote_resource_is_bound!(remote_max_listing_key_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_storage_key_bytes);
+        assert_remote_resource_is_bound!(remote_max_index_observations_per_pass);
+        assert_remote_resource_is_bound!(remote_max_retained_index_key_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_reservation_observations_per_pass);
+        assert_remote_resource_is_bound!(remote_max_retained_reservation_key_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_index_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_manifest_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_reservation_object_bytes);
+        assert_remote_resource_is_bound!(remote_max_logical_path_bytes);
+        assert_remote_resource_is_bound!(remote_max_logical_component_bytes);
+        assert_remote_resource_is_bound!(remote_max_logical_path_depth);
+        assert_remote_resource_is_bound!(remote_max_generated_claim_observations_per_pass);
+        assert_remote_resource_is_bound!(remote_max_generated_claim_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_retained_unique_claims_per_pass);
+        assert_remote_resource_is_bound!(remote_max_retained_unique_claim_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_bound_object_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_binding_token_bytes);
+        assert_remote_resource_is_bound!(remote_max_retained_binding_bytes_per_pass);
+        assert_remote_resource_is_bound!(remote_max_manifest_chunk_entries);
+        assert_remote_resource_is_bound!(remote_max_manifest_wrapped_key_entries);
+        assert_remote_resource_is_bound!(remote_max_remote_vector_clock_entries);
     }
 
     #[test]
