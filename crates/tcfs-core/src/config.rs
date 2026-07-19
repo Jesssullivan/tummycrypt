@@ -990,6 +990,55 @@ impl RootProfileV1 {
             Self::AgentStaticV1 => "agent-static-v1",
         }
     }
+
+    /// Immutable planning policy carried by this profile version.
+    ///
+    /// Registered-root planning must not inherit mutable primary-root
+    /// collection or deletion settings. A profile name therefore expands to
+    /// one closed set of settings whose fingerprint is bound into every plan.
+    pub fn settings(self) -> RootProfileSettingsV1 {
+        match self {
+            Self::GitRawV1 => RootProfileSettingsV1 {
+                sync_hidden_dirs: true,
+                sync_git_dirs: true,
+                git_sync_mode: "raw",
+                preserve_symlinks: true,
+                sync_empty_directories: true,
+                delete_local_orphans: false,
+                delete_remote_orphans: false,
+            },
+            Self::AgentStaticV1 => RootProfileSettingsV1 {
+                sync_hidden_dirs: true,
+                sync_git_dirs: false,
+                git_sync_mode: "none",
+                preserve_symlinks: true,
+                sync_empty_directories: true,
+                delete_local_orphans: false,
+                delete_remote_orphans: false,
+            },
+        }
+    }
+
+    pub fn settings_fingerprint(self) -> String {
+        self.settings().fingerprint(self)
+    }
+}
+
+/// Closed operational settings for one registered-root profile generation.
+///
+/// These are deliberately not deserialized from host configuration. Changing
+/// any value requires a new profile version so a plan digest cannot retain the
+/// same policy identity while silently changing collection or deletion
+/// semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootProfileSettingsV1 {
+    pub sync_hidden_dirs: bool,
+    pub sync_git_dirs: bool,
+    pub git_sync_mode: &'static str,
+    pub preserve_symlinks: bool,
+    pub sync_empty_directories: bool,
+    pub delete_local_orphans: bool,
+    pub delete_remote_orphans: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1098,6 +1147,54 @@ fn update_root_fingerprint_field(hasher: &mut blake3::Hasher, tag: &str, value: 
 
 fn finish_root_fingerprint(hasher: blake3::Hasher) -> String {
     format!("b3v1:{}", hasher.finalize().to_hex())
+}
+
+impl RootProfileSettingsV1 {
+    fn fingerprint(self, profile: RootProfileV1) -> String {
+        let mut hasher =
+            blake3::Hasher::new_derive_key("tinyland.tcfs.root-profile-settings.b3v1");
+        update_root_fingerprint_field(
+            &mut hasher,
+            "profile",
+            profile.canonical_name().as_bytes(),
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "sync_hidden_dirs",
+            &[u8::from(self.sync_hidden_dirs)],
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "sync_git_dirs",
+            &[u8::from(self.sync_git_dirs)],
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "git_sync_mode",
+            self.git_sync_mode.as_bytes(),
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "preserve_symlinks",
+            &[u8::from(self.preserve_symlinks)],
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "sync_empty_directories",
+            &[u8::from(self.sync_empty_directories)],
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "delete_local_orphans",
+            &[u8::from(self.delete_local_orphans)],
+        );
+        update_root_fingerprint_field(
+            &mut hasher,
+            "delete_remote_orphans",
+            &[u8::from(self.delete_remote_orphans)],
+        );
+        finish_root_fingerprint(hasher)
+    }
 }
 
 impl RootSpecV1Config {
@@ -1997,6 +2094,83 @@ resolution_policy = "inspect-only"
         assert_ne!(local_path_only, state_path_only);
         assert_eq!(identity, spec.identity_fingerprint("work"));
         assert_ne!(identity, spec.identity_fingerprint("other-work"));
+    }
+
+    #[test]
+    fn versioned_root_profile_settings_are_closed_and_digest_sensitive() {
+        let git = RootProfileV1::GitRawV1.settings();
+        let agent = RootProfileV1::AgentStaticV1.settings();
+
+        assert!(git.sync_hidden_dirs);
+        assert!(git.sync_git_dirs);
+        assert_eq!(git.git_sync_mode, "raw");
+        assert!(git.preserve_symlinks);
+        assert!(git.sync_empty_directories);
+        assert!(!git.delete_local_orphans);
+        assert!(!git.delete_remote_orphans);
+
+        assert!(agent.sync_hidden_dirs);
+        assert!(!agent.sync_git_dirs);
+        assert_eq!(agent.git_sync_mode, "none");
+        assert!(agent.preserve_symlinks);
+        assert!(agent.sync_empty_directories);
+        assert!(!agent.delete_local_orphans);
+        assert!(!agent.delete_remote_orphans);
+
+        let fingerprint = RootProfileV1::GitRawV1.settings_fingerprint();
+        assert!(fingerprint.starts_with("b3v1:"));
+        assert_eq!(fingerprint.len(), "b3v1:".len() + 64);
+        assert_eq!(
+            fingerprint,
+            RootProfileV1::GitRawV1.settings_fingerprint()
+        );
+        assert_ne!(
+            fingerprint,
+            RootProfileV1::AgentStaticV1.settings_fingerprint()
+        );
+
+        let mut changed = git;
+        changed.sync_hidden_dirs = false;
+        assert_ne!(
+            fingerprint,
+            changed.fingerprint(RootProfileV1::GitRawV1)
+        );
+        let mut changed = git;
+        changed.sync_git_dirs = false;
+        assert_ne!(
+            fingerprint,
+            changed.fingerprint(RootProfileV1::GitRawV1)
+        );
+        let mut changed = git;
+        changed.git_sync_mode = "bundle";
+        assert_ne!(
+            fingerprint,
+            changed.fingerprint(RootProfileV1::GitRawV1)
+        );
+        let mut changed = git;
+        changed.preserve_symlinks = false;
+        assert_ne!(
+            fingerprint,
+            changed.fingerprint(RootProfileV1::GitRawV1)
+        );
+        let mut changed = git;
+        changed.sync_empty_directories = false;
+        assert_ne!(
+            fingerprint,
+            changed.fingerprint(RootProfileV1::GitRawV1)
+        );
+        let mut changed = git;
+        changed.delete_local_orphans = true;
+        assert_ne!(
+            fingerprint,
+            changed.fingerprint(RootProfileV1::GitRawV1)
+        );
+        let mut changed = git;
+        changed.delete_remote_orphans = true;
+        assert_ne!(
+            fingerprint,
+            changed.fingerprint(RootProfileV1::GitRawV1)
+        );
     }
 
     #[test]
