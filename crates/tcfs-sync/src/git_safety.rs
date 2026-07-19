@@ -67,6 +67,19 @@ pub(crate) fn sanitized_git_command() -> std::process::Command {
         .arg("core.logAllRefUpdates=false")
         .arg("-c")
         .arg("core.sharedRepository=0");
+    // `git log`/`git show` honor repository-local `log.showSignature`, which
+    // executes the repository-configured `gpg.program` to verify signatures.
+    // A roamed repository must never choose an executable for us: disable
+    // signature display outright and point both signature programs at the
+    // null device so any residual verification path fails closed instead of
+    // running attacker-controlled code.
+    command
+        .arg("-c")
+        .arg("log.showSignature=false")
+        .arg("-c")
+        .arg(format!("gpg.program={null_device}"))
+        .arg("-c")
+        .arg(format!("gpg.ssh.program={null_device}"));
     // Git creates loose refs and lock files using the process umask. tcfsd
     // must not let an inherited permissive service umask turn a sanitized
     // `update-ref` into group/world-writable repository metadata. Apply this
@@ -86,6 +99,17 @@ pub(crate) fn sanitized_git_command() -> std::process::Command {
         }
     }
     command
+}
+
+/// Build a sanitized Git command for read-only inspection of an
+/// operator-supplied repository (e.g. `tcfs conflicts` summarizing a repo's
+/// HEAD). Same boundary as the internal sanitized builder: repository-routing
+/// environment is stripped and repository-configured executables (hooks,
+/// fsmonitor, `gpg.program`) can never run. Callers must keep the spawned
+/// subcommand read-only; mutation paths stay inside this crate behind the
+/// lock- and CAS-guarded helpers.
+pub fn sanitized_git_readonly_command() -> std::process::Command {
+    sanitized_git_command()
 }
 
 /// Relative path (under the repo working root) where the TCFS git bundle is
@@ -732,6 +756,9 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "tag.gpgSign=false"));
         assert!(args.iter().any(|arg| arg == "core.logAllRefUpdates=false"));
         assert!(args.iter().any(|arg| arg == "core.sharedRepository=0"));
+        assert!(args.iter().any(|arg| arg == "log.showSignature=false"));
+        assert!(args.iter().any(|arg| arg.starts_with("gpg.program=")));
+        assert!(args.iter().any(|arg| arg.starts_with("gpg.ssh.program=")));
     }
 
     #[cfg(unix)]
