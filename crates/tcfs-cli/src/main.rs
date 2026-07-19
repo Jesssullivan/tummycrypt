@@ -8157,8 +8157,12 @@ fn group_conflicts(items: &[(String, tcfs_sync::conflict::ConflictInfo)]) -> Vec
 
 /// Resolve a repo's current HEAD to `<shortsha> <summary>` via
 /// `git log --oneline -1`, or `None` when the repo/HEAD cannot be read.
+///
+/// Spawned through the tcfs-sync sanitizer so repository-local configuration
+/// (hooks, `log.showSignature` + `gpg.program`) synced from another device can
+/// never execute code on the machine listing conflicts (TIN-2853).
 fn git_head_oneline(repo_root: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
+    let out = tcfs_sync::git_safety::sanitized_git_readonly_command()
         .args(["-C", &repo_root.to_string_lossy(), "log", "--oneline", "-1"])
         .output()
         .ok()?;
@@ -12088,6 +12092,91 @@ enabled = false
         assert!(
             summary.contains("WARNING: NO per-device forward secrecy"),
             "empty-recipient PerDevice must warn rather than reassure: {summary}"
+        );
+    }
+
+    /// TIN-2853: `tcfs conflicts` summarizes repo HEADs with `git log`. A
+    /// roamed repository can arm `log.showSignature=true` plus
+    /// `gpg.program=<attacker binary>` in its synced `.git/config`, which an
+    /// unsanitized `git log` executes. The sanitized spawn must return the
+    /// same benign summary while never running the repository-configured
+    /// program.
+    #[cfg(unix)]
+    #[test]
+    fn git_head_oneline_does_not_execute_repository_gpg_program() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn run_git(repo: &Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet", "--initial-branch=main"]);
+        run_git(&repo, &["config", "user.email", "tcfs@example.invalid"]);
+        run_git(&repo, &["config", "user.name", "TCFS Test"]);
+
+        // The armed program doubles as a fake signer (SIG_CREATED status plus
+        // a signature block, the shape `git commit -S` expects) so the fixture
+        // commit carries a signature for `git log` to verify.
+        let gpg = dir.path().join("evil-gpg");
+        let sentinel = dir.path().join("evil-gpg.ran");
+        std::fs::write(
+            &gpg,
+            format!(
+                "#!/bin/sh\n\
+                 printf ran > \"{}\"\n\
+                 printf '[GNUPG:] SIG_CREATED \\n' >&2\n\
+                 printf -- '-----BEGIN PGP SIGNATURE-----\\nfake\\n-----END PGP SIGNATURE-----\\n'\n",
+                sentinel.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gpg, std::fs::Permissions::from_mode(0o700)).unwrap();
+        run_git(&repo, &["config", "gpg.program", gpg.to_str().unwrap()]);
+        run_git(&repo, &["config", "log.showSignature", "true"]);
+
+        std::fs::write(repo.join("file.txt"), b"base\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "--quiet", "-S", "-m", "base"]);
+        assert!(
+            sentinel.exists(),
+            "signing through the armed gpg.program did not run it"
+        );
+        std::fs::remove_file(&sentinel).unwrap();
+
+        // Prove the fixture is armed: an ordinary `git log` executes the
+        // repository-configured gpg.program via log.showSignature.
+        let control = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["log", "--oneline", "-1"])
+            .output()
+            .unwrap();
+        assert!(
+            control.status.success(),
+            "ordinary git log failed: {}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        assert!(sentinel.exists(), "the armed control did not run");
+        std::fs::remove_file(&sentinel).unwrap();
+
+        let head = git_head_oneline(&repo).expect("sanitized HEAD read must succeed");
+        assert!(head.contains("base"), "unexpected oneline output: {head}");
+        assert!(
+            !sentinel.exists(),
+            "git_head_oneline must not execute the repository-configured gpg.program"
         );
     }
 }
