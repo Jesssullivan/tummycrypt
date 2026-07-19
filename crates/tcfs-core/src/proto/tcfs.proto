@@ -46,6 +46,7 @@ message Empty {}
 message StatusRequest {}
 message StatusResponse {
   string version = 1;
+  // Diagnostic origin only: userinfo, path, query, and fragment are stripped.
   string storage_endpoint = 2;
   bool storage_ok = 3;
   bool nats_ok = 4;

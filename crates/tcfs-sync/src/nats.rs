@@ -25,6 +25,7 @@ mod inner {
     use tracing::{debug, error, info, warn};
 
     use crate::conflict::VectorClock;
+    use tcfs_core::config::sanitize_nats_endpoint_for_display;
 
     // ── Stream / consumer names ───────────────────────────────────────────────
 
@@ -206,16 +207,19 @@ mod inner {
     pub fn resolve_nats_url(url: &str, require_tls: bool) -> String {
         if require_tls && url.starts_with("nats://") {
             let upgraded = url.replacen("nats://", "tls://", 1);
+            let original_display = sanitize_nats_endpoint_for_display(url);
+            let upgraded_display = sanitize_nats_endpoint_for_display(&upgraded);
             warn!(
-                original = url,
-                upgraded = %upgraded,
+                original = %original_display,
+                upgraded = %upgraded_display,
                 "NATS: upgrading to TLS (nats_tls=true)"
             );
             upgraded
         } else {
             if !require_tls && !url.starts_with("tls://") {
+                let url_display = sanitize_nats_endpoint_for_display(url);
                 warn!(
-                    url,
+                    url = %url_display,
                     "NATS: connecting without TLS — credentials transmitted in plaintext"
                 );
             }
@@ -229,20 +233,29 @@ mod inner {
         /// If `require_tls` is true and the URL uses `nats://`, it is upgraded to `tls://`.
         pub async fn connect(url: &str, require_tls: bool, token: Option<&str>) -> Result<Self> {
             let effective_url = resolve_nats_url(url, require_tls);
+            let effective_url_display = sanitize_nats_endpoint_for_display(&effective_url);
 
             let client = if let Some(tok) = token {
                 info!("NATS: connecting with token auth");
                 async_nats::ConnectOptions::with_token(tok.to_string())
                     .connect(&effective_url)
                     .await
-                    .map_err(|e| anyhow::anyhow!("connecting to NATS at {effective_url}: {e}"))?
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "connecting to NATS at {effective_url_display} failed; check endpoint, TLS, and credentials"
+                        )
+                    })?
             } else {
                 async_nats::connect(&effective_url)
                     .await
-                    .map_err(|e| anyhow::anyhow!("connecting to NATS at {effective_url}: {e}"))?
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "connecting to NATS at {effective_url_display} failed; check endpoint, TLS, and credentials"
+                        )
+                    })?
             };
 
-            info!("NATS: connected to {effective_url}");
+            info!("NATS: connected to {effective_url_display}");
             let js = jetstream::new(client);
             Ok(NatsClient { js })
         }
@@ -836,6 +849,25 @@ mod inner {
         fn tls_url_preserved_when_tls_not_required() {
             let url = resolve_nats_url("tls://nats.example.com:4222", false);
             assert_eq!(url, "tls://nats.example.com:4222");
+        }
+
+        #[test]
+        fn nats_display_url_omits_credentials_and_routing_components() {
+            let raw = "nats://nats-user:NATS-secret@nats.example.test:4222/NATS-path?token=NATS-query#NATS-fragment";
+            let display = sanitize_nats_endpoint_for_display(raw);
+            assert_eq!(display, "nats://nats.example.test:4222");
+            for forbidden in [
+                "nats-user",
+                "NATS-secret",
+                "NATS-path",
+                "NATS-query",
+                "NATS-fragment",
+            ] {
+                assert!(
+                    !display.contains(forbidden),
+                    "leaked {forbidden}: {display}"
+                );
+            }
         }
 
         #[tokio::test]

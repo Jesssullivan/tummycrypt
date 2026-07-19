@@ -5,7 +5,9 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tcfs_core::config::TcfsConfig;
+use tcfs_core::config::{
+    sanitize_http_endpoint_for_display, sanitize_nats_endpoint_for_display, TcfsConfig,
+};
 use tcfs_sync::conflict::ConflictResolver;
 use tracing::{debug, error, info, warn};
 
@@ -550,6 +552,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
 
     // Build storage operator and verify connectivity
     let mut operator: Option<opendal::Operator> = None;
+    let storage_endpoint_display = sanitize_http_endpoint_for_display(&config.storage.endpoint);
     let storage_ok = if let Some(s3) = cred_store.read().await.as_ref().and_then(|c| c.s3.as_ref())
     {
         let op = tcfs_storage::operator::build_from_core_config(
@@ -561,7 +564,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         match tcfs_storage::check_health_for_prefix_detailed(&op, storage_prefix).await {
             Ok(report) => {
                 info!(
-                    endpoint = %config.storage.endpoint,
+                    endpoint = %storage_endpoint_display,
                     prefix = %storage_prefix,
                     health_path = %report.path,
                     elapsed_ms = report.elapsed_ms,
@@ -573,7 +576,7 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
             }
             Err(e) => {
                 warn!(
-                    endpoint = %config.storage.endpoint,
+                    endpoint = %storage_endpoint_display,
                     prefix = %storage_prefix,
                     health_kind = %e.kind(),
                     health_path = %e.path(),
@@ -1231,9 +1234,11 @@ pub async fn run(config: TcfsConfig) -> Result<()> {
         } else {
             if let Ok(ref env_url) = std::env::var("TCFS_NATS_URL") {
                 if env_url != nats_url {
+                    let config_url_display = sanitize_nats_endpoint_for_display(nats_url);
+                    let env_url_display = sanitize_nats_endpoint_for_display(env_url);
                     warn!(
-                        config_url = %nats_url,
-                        env_url = %env_url,
+                        config_url = %config_url_display,
+                        env_url = %env_url_display,
                         "TCFS_NATS_URL env var differs from config — using config value"
                     );
                 }
