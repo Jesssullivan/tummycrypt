@@ -1761,6 +1761,8 @@ pub(crate) mod tests {
         }
     }
 
+    type FirstListWriteV1 = Option<(std::path::PathBuf, Vec<u8>)>;
+
     #[derive(Clone, Debug)]
     struct ScriptedListBackend {
         info: Arc<AccessorInfo>,
@@ -1768,6 +1770,7 @@ pub(crate) mod tests {
         observed: Arc<Mutex<Vec<ObservedListCall>>>,
         objects: Arc<Mutex<BTreeMap<String, ScriptedBoundObject>>>,
         events: Arc<Mutex<Vec<ObservationEvent>>>,
+        first_list_write: Arc<Mutex<FirstListWriteV1>>,
     }
 
     impl Access for ScriptedListBackend {
@@ -1781,6 +1784,15 @@ pub(crate) mod tests {
         }
 
         async fn list(&self, path: &str, args: OpList) -> opendal::Result<(RpList, Self::Lister)> {
+            if let Some((target, bytes)) = self.first_list_write.lock().unwrap().take() {
+                std::fs::write(&target, bytes).map_err(|error| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        "scripted first-list local write failed",
+                    )
+                    .set_source(error)
+                })?;
+            }
             self.events
                 .lock()
                 .unwrap()
@@ -1920,6 +1932,7 @@ pub(crate) mod tests {
             observed: Arc::new(Mutex::new(Vec::new())),
             objects: Arc::new(Mutex::new(BTreeMap::new())),
             events: Arc::new(Mutex::new(Vec::new())),
+            first_list_write: Arc::new(Mutex::new(None)),
         };
         (OperatorBuilder::new(backend.clone()).finish(), backend)
     }
@@ -2045,6 +2058,24 @@ pub(crate) mod tests {
     pub(crate) fn matching_remote_fixture_operator_v1(
         rows: &[RemoteNamespaceFixtureRowV1],
     ) -> Operator {
+        matching_remote_fixture_operator_with_optional_first_list_write_v1(rows, None)
+    }
+
+    pub(crate) fn matching_remote_fixture_operator_with_first_list_write_v1(
+        rows: &[RemoteNamespaceFixtureRowV1],
+        target: std::path::PathBuf,
+        bytes: Vec<u8>,
+    ) -> Operator {
+        matching_remote_fixture_operator_with_optional_first_list_write_v1(
+            rows,
+            Some((target, bytes)),
+        )
+    }
+
+    fn matching_remote_fixture_operator_with_optional_first_list_write_v1(
+        rows: &[RemoteNamespaceFixtureRowV1],
+        first_list_write: FirstListWriteV1,
+    ) -> Operator {
         let mut index_keys = Vec::new();
         let mut reservation_keys = Vec::new();
         let mut objects = Vec::new();
@@ -2105,6 +2136,7 @@ pub(crate) mod tests {
         }
         let (op, backend) =
             scripted_list_operator(two_bound_pass_list_calls(&index_keys, &reservation_keys));
+        *backend.first_list_write.lock().unwrap() = first_list_write;
         for (key, object) in objects {
             install_bound_object(&backend, key, object);
         }

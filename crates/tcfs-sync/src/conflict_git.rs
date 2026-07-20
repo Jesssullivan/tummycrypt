@@ -5,8 +5,9 @@
 //! the recorded conflicts, park the remote branch heads under a TCFS namespace,
 //! verify the repository before/after, then clear the group atomically.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use opendal::Operator;
@@ -45,6 +46,31 @@ fn repo_git_command(
         command.current_dir(repo_root);
         Ok(command)
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn descriptor_rooted_sanitized_git_command(
+    directory: &std::fs::File,
+) -> Result<std::process::Command> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let directory = directory
+        .try_clone()
+        .context("cloning descriptor-rooted Git cwd")?;
+    let mut command = git_safety::sanitized_git_command();
+    // SAFETY: `fchdir(2)` is async-signal-safe. The callback owns the cloned
+    // descriptor, so delayed spawn cannot observe a closed/reused fd number.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(directory.as_raw_fd()) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    Ok(command)
 }
 
 fn git_output_at(
@@ -683,6 +709,58 @@ pub struct GitRepoAnchor {
     after_conflict_state_flush: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
+/// Closed set of read-only Git probes available outside this mutation module.
+///
+/// Keeping arguments closed prevents a caller from turning a held repository
+/// capability into an unguarded `update-ref` or another mutation command.
+pub(crate) enum HeldGitReadQueryV1 {
+    EffectiveConfigNames,
+    SharedRepositoryValues,
+    BareRepositoryValues,
+    ObjectFormat,
+    ForEachRef { count: u64 },
+    SymbolicHeadNoRecurse,
+    ResolvedHeadCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldGitReadErrorV1 {
+    Failed,
+    OutputLimit,
+}
+
+pub(crate) struct HeldGitReadOutputV1 {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+}
+
+impl HeldGitReadOutputV1 {
+    pub(crate) fn into_parts(self) -> (ExitStatus, Vec<u8>) {
+        (self.status, self.stdout)
+    }
+}
+
+fn drain_git_stderr_presence_v1(mut stderr: std::process::ChildStderr) -> std::io::Result<bool> {
+    let mut saw_bytes = false;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = stderr.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(saw_bytes);
+        }
+        saw_bytes = true;
+    }
+}
+
+fn terminate_held_git_read_v1(
+    child: &mut std::process::Child,
+    stderr_reader: std::thread::JoinHandle<std::io::Result<bool>>,
+) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = stderr_reader.join();
+}
+
 impl std::fmt::Debug for GitRepoAnchor {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -719,9 +797,47 @@ impl GitRepoAnchor {
                     canonical_root.display()
                 )
             })?;
+            Self::capture_from_authorized_root(&canonical_root, directory)
+        }
+    }
+
+    /// Build an anchor from a root descriptor that an earlier authority check
+    /// already opened and retained.
+    ///
+    /// The supplied descriptor, not a reopened pathname, becomes the worktree
+    /// capability. `.git` is opened relative to it with `O_NOFOLLOW`; the
+    /// canonical spelling is retained for identity revalidation and operator
+    /// diagnostics only.
+    pub(crate) fn capture_from_authorized_root(
+        canonical_root: &Path,
+        directory: std::fs::File,
+    ) -> Result<Self> {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (canonical_root, directory);
+            bail!(
+                "registered-root Git resolution requires descriptor-anchored commands on Linux or macOS"
+            );
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let metadata = directory
+                .metadata()
+                .context("inspecting authorized repo root descriptor")?;
+            if !metadata.is_dir() {
+                bail!("authorized repo root descriptor is not a directory");
+            }
+            if !canonical_root.is_absolute() {
+                bail!(
+                    "authorized repo root spelling is not absolute: {}",
+                    canonical_root.display()
+                );
+            }
+
             let git_directory = git_safety::open_git_directory_at(&directory)?;
             let anchor = Self {
-                canonical_root,
+                canonical_root: canonical_root.to_owned(),
                 directory,
                 git_directory,
                 #[cfg(test)]
@@ -734,7 +850,11 @@ impl GitRepoAnchor {
         }
     }
 
-    fn revalidate(&self) -> Result<()> {
+    pub(crate) fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             bail!(
@@ -804,9 +924,9 @@ impl GitRepoAnchor {
         }
     }
 
-    /// Git command rooted in the captured worktree. This variant is for
-    /// read-only worktree/topology inspection only; mutations use
-    /// [`Self::metadata_git_command`].
+    /// Git command rooted in the captured worktree. Legacy clean-worktree
+    /// inspection uses this capability; held topology queries bind the
+    /// metadata descriptor separately.
     fn root_git_command(&self) -> Result<std::process::Command> {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -815,26 +935,143 @@ impl GitRepoAnchor {
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use std::os::fd::AsRawFd;
-            use std::os::unix::process::CommandExt;
-
-            let directory_fd = self.directory.as_raw_fd();
-            let mut command = git_safety::sanitized_git_command();
-            // SAFETY: `fchdir` is async-signal-safe and the descriptor remains
-            // alive for the full child spawn. Git discovery after the cwd
-            // change is read-only on this command path; root and `.git`
-            // identity are both revalidated immediately before mutation.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::fchdir(directory_fd) == 0 {
-                        Ok(())
-                    } else {
-                        Err(std::io::Error::last_os_error())
-                    }
-                });
-            }
-            Ok(command)
+            descriptor_rooted_sanitized_git_command(&self.directory)
         }
+    }
+
+    pub(crate) fn run_held_read_query(
+        &self,
+        query: HeldGitReadQueryV1,
+        stdout_limit: u64,
+    ) -> std::result::Result<HeldGitReadOutputV1, HeldGitReadErrorV1> {
+        let stdout_limit =
+            usize::try_from(stdout_limit).map_err(|_| HeldGitReadErrorV1::OutputLimit)?;
+        self.revalidate().map_err(|_| HeldGitReadErrorV1::Failed)?;
+        let mut command = self
+            .metadata_git_command()
+            .map_err(|_| HeldGitReadErrorV1::Failed)?;
+        match query {
+            HeldGitReadQueryV1::EffectiveConfigNames => {
+                command.args(["config", "--no-includes", "--null", "--name-only", "--list"]);
+            }
+            HeldGitReadQueryV1::SharedRepositoryValues => {
+                command.args([
+                    "config",
+                    "--no-includes",
+                    "--null",
+                    "--type=bool",
+                    "--get-all",
+                    "core.sharedRepository",
+                ]);
+            }
+            HeldGitReadQueryV1::BareRepositoryValues => {
+                command.args([
+                    "config",
+                    "--no-includes",
+                    "--null",
+                    "--type=bool",
+                    "--get-all",
+                    "core.bare",
+                ]);
+            }
+            HeldGitReadQueryV1::ObjectFormat => {
+                command.args(["rev-parse", "--show-object-format=storage"]);
+            }
+            HeldGitReadQueryV1::ForEachRef { count } => {
+                command.args([
+                    "for-each-ref",
+                    "--sort=refname",
+                    &format!("--count={count}"),
+                    "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(symref)",
+                ]);
+            }
+            HeldGitReadQueryV1::SymbolicHeadNoRecurse => {
+                command.args(["symbolic-ref", "--quiet", "--no-recurse", "HEAD"]);
+            }
+            HeldGitReadQueryV1::ResolvedHeadCommit => {
+                command.args(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+            }
+        }
+        #[cfg(windows)]
+        let null_config = "NUL";
+        #[cfg(not(windows))]
+        let null_config = "/dev/null";
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", null_config)
+            .env("GIT_CONFIG_GLOBAL", null_config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|_| HeldGitReadErrorV1::Failed)?;
+        let mut stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HeldGitReadErrorV1::Failed);
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HeldGitReadErrorV1::Failed);
+            }
+        };
+        let stderr_reader = match std::thread::Builder::new()
+            .name("tcfs-held-git-stderr".to_owned())
+            .spawn(move || drain_git_stderr_presence_v1(stderr))
+        {
+            Ok(reader) => reader,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HeldGitReadErrorV1::Failed);
+            }
+        };
+        let mut retained = Vec::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = match stdout.read(&mut buffer) {
+                Ok(read) => read,
+                Err(_) => {
+                    terminate_held_git_read_v1(&mut child, stderr_reader);
+                    return Err(HeldGitReadErrorV1::Failed);
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            let Some(next_len) = retained.len().checked_add(read) else {
+                terminate_held_git_read_v1(&mut child, stderr_reader);
+                return Err(HeldGitReadErrorV1::OutputLimit);
+            };
+            if next_len > stdout_limit || retained.try_reserve_exact(read).is_err() {
+                terminate_held_git_read_v1(&mut child, stderr_reader);
+                return Err(HeldGitReadErrorV1::OutputLimit);
+            }
+            retained.extend_from_slice(&buffer[..read]);
+        }
+        let status = match child.wait() {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr_reader.join();
+                return Err(HeldGitReadErrorV1::Failed);
+            }
+        };
+        match stderr_reader.join() {
+            Ok(Ok(false)) => {}
+            Ok(Ok(true)) | Ok(Err(_)) | Err(_) => return Err(HeldGitReadErrorV1::Failed),
+        }
+        self.revalidate().map_err(|_| HeldGitReadErrorV1::Failed)?;
+        Ok(HeldGitReadOutputV1 {
+            status,
+            stdout: retained,
+        })
     }
 
     fn local_ref_sha(&self, ref_name: &str) -> Option<String> {
@@ -877,29 +1114,12 @@ impl GitRepoAnchor {
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use std::os::fd::AsRawFd;
-            use std::os::unix::process::CommandExt;
-
-            let git_directory_fd = self.git_directory.as_raw_fd();
-            let mut command = git_safety::sanitized_git_command();
+            let mut command = descriptor_rooted_sanitized_git_command(&self.git_directory)?;
             command
                 .arg("-c")
                 .arg("core.fsync=reference")
                 .env("GIT_DIR", ".")
                 .env("GIT_COMMON_DIR", ".");
-            // SAFETY: only async-signal-safe `fchdir` runs in this callback.
-            // The common sanitized builder already installs the private child
-            // umask. This metadata command set does not need a worktree and
-            // resolves all Git state from the captured `.git` cwd.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::fchdir(git_directory_fd) == 0 {
-                        Ok(())
-                    } else {
-                        Err(std::io::Error::last_os_error())
-                    }
-                });
-            }
             Ok(command)
         }
     }
@@ -2282,6 +2502,102 @@ mod tests {
                 .expect_err("redirected/shared Git topology must fail closed");
             assert!(error.to_string().contains(expected), "{error:#}");
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn authorized_descriptor_anchor_drives_read_only_git_observation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repo = temporary.path().join("repo");
+        init_repo(&repo);
+        let head = commit(&repo, "tracked.txt", "base\n", "base");
+        let canonical_root = repo.canonicalize().unwrap();
+        let directory = std::fs::File::open(&canonical_root).unwrap();
+
+        let anchor =
+            GitRepoAnchor::capture_from_authorized_root(&canonical_root, directory).unwrap();
+        assert_eq!(anchor.canonical_root(), canonical_root);
+        validate_standalone_repo_topology(&canonical_root).unwrap();
+
+        let output = anchor
+            .run_held_read_query(HeldGitReadQueryV1::ResolvedHeadCommit, 128)
+            .unwrap();
+        let (status, stdout) = output.into_parts();
+        assert!(status.success());
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), head);
+        anchor.revalidate().unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn held_read_query_enforces_output_ceiling_and_stderr_policy() {
+        let committed = tempfile::tempdir().unwrap();
+        let committed_repo = committed.path().join("repo");
+        init_repo(&committed_repo);
+        let head = commit(&committed_repo, "tracked.txt", "base\n", "base");
+        let committed_root = committed_repo.canonicalize().unwrap();
+        let committed_anchor = GitRepoAnchor::capture_from_authorized_root(
+            &committed_root,
+            std::fs::File::open(&committed_root).unwrap(),
+        )
+        .unwrap();
+        let exact_limit = u64::try_from(head.len() + 1).unwrap();
+        let exact = committed_anchor
+            .run_held_read_query(HeldGitReadQueryV1::ResolvedHeadCommit, exact_limit)
+            .unwrap();
+        let (status, stdout) = exact.into_parts();
+        assert!(status.success());
+        assert_eq!(stdout, format!("{head}\n").as_bytes());
+        assert!(matches!(
+            committed_anchor
+                .run_held_read_query(HeldGitReadQueryV1::ResolvedHeadCommit, exact_limit - 1),
+            Err(HeldGitReadErrorV1::OutputLimit)
+        ));
+
+        let unborn = tempfile::tempdir().unwrap();
+        let unborn_repo = unborn.path().join("repo");
+        init_repo(&unborn_repo);
+        let unborn_root = unborn_repo.canonicalize().unwrap();
+        let unborn_anchor = GitRepoAnchor::capture_from_authorized_root(
+            &unborn_root,
+            std::fs::File::open(&unborn_root).unwrap(),
+        )
+        .unwrap();
+        let unresolved = unborn_anchor
+            .run_held_read_query(HeldGitReadQueryV1::ResolvedHeadCommit, 128)
+            .unwrap();
+        let (status, stdout) = unresolved.into_parts();
+        assert_eq!(status.code(), Some(1));
+        assert!(stdout.is_empty());
+
+        std::fs::write(committed_root.join(".git/config"), b"[broken\n").unwrap();
+        assert!(matches!(
+            committed_anchor.run_held_read_query(HeldGitReadQueryV1::EffectiveConfigNames, 1024),
+            Err(HeldGitReadErrorV1::Failed)
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn authorized_descriptor_anchor_rejects_a_different_canonical_route() {
+        let temporary = tempfile::tempdir().unwrap();
+        let authorized = temporary.path().join("authorized");
+        let different = temporary.path().join("different");
+        init_repo(&authorized);
+        init_repo(&different);
+
+        let authorized_descriptor = std::fs::File::open(&authorized).unwrap();
+        let error = GitRepoAnchor::capture_from_authorized_root(
+            &different.canonicalize().unwrap(),
+            authorized_descriptor,
+        )
+        .expect_err("the held descriptor, not the supplied route, is authoritative");
+        assert!(
+            error
+                .to_string()
+                .contains("repo root was replaced after authorization"),
+            "{error:#}"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

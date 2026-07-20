@@ -18,6 +18,10 @@ use tcfs_core::config::{
 };
 
 use crate::index_entry::PortableNamespaceRole;
+use crate::registered_git_topology::{
+    begin_strict_git_raw_topology_v1, HeldStrictGitRawTopologyV1, StrictGitRawTopologyBeginV1,
+    StrictGitRawTopologyFinishV1, StrictGitRawTopologyIncompleteV1,
+};
 use crate::registered_local_snapshot::{
     begin_strict_local_snapshot_v1, RevalidatedStrictLocalSnapshotV1, StrictLocalNamespaceRoleV1,
     StrictLocalSnapshotFinishV1, StrictLocalSnapshotHoldReadV1, StrictLocalSnapshotIncompleteV1,
@@ -122,11 +126,12 @@ pub(crate) enum StrictRegisteredRootSourcesIncompleteV1 {
     NamespaceSafetyConflict(NamespaceSafetyClaimConflictV1),
     NamespaceSafetyResourceLimit,
     RemoteClaimWithoutOrigin,
-    GitTopologyRequired,
+    GitTopology(StrictGitRawTopologyIncompleteV1),
 }
 
 pub(crate) enum StrictRegisteredRootSourcesReadV1 {
     Observed(Box<AgentStaticNamespaceSafetyObservationV1>),
+    GitRawLocalTopologyObserved(Box<GitRawLocalTopologyObservationV1>),
     Incomplete(StrictRegisteredRootSourcesIncompleteV1),
 }
 
@@ -293,6 +298,81 @@ impl fmt::Debug for AgentStaticNamespaceSafetyObservationV1 {
             .field("canonical_state_path", &self.canonical_state_path)
             .field("state_entry_count", &self.state.entries().len())
             .field("remote_prefix", &self.remote.remote_prefix())
+            .field(
+                "namespace_safety_claim_count",
+                &self.namespace_safety_summary.unique_claims,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Opaque, non-authoritative observation of one GitRaw selected root.
+///
+/// The local Git topology and sorted refs were descriptor-anchored and equal
+/// across two bounded passes, but remote Git semantics, catalog authority,
+/// bootstrap, high-water, and writer fencing are still absent. This type must
+/// not gain a plan digest or action projection.
+pub(crate) struct GitRawLocalTopologyObservationV1 {
+    root_id: String,
+    spec: RootSpecV1Config,
+    binding: RootBindingV1Config,
+    spec_identity_fingerprint: String,
+    binding_identity_fingerprint: String,
+    profile_policy: RootProfilePolicyV1,
+    plan_contract: RegisteredRootPlanContractV1,
+    canonical_state_path: PathBuf,
+    local: RevalidatedStrictLocalSnapshotV1,
+    state: StrictPrimaryStateSnapshotV1,
+    remote: MatchingTwoPassBoundRemoteEvidenceV1,
+    git_topology: HeldStrictGitRawTopologyV1,
+    namespace_safety_summary: NamespaceSafetySummaryV1,
+}
+
+impl GitRawLocalTopologyObservationV1 {
+    pub(crate) fn root_id(&self) -> &str {
+        &self.root_id
+    }
+
+    pub(crate) fn canonical_local_root(&self) -> &Path {
+        self.local.canonical_local_root()
+    }
+
+    pub(crate) fn canonical_state_path(&self) -> &Path {
+        &self.canonical_state_path
+    }
+
+    pub(crate) fn remote_prefix(&self) -> &str {
+        &self.spec.remote_prefix
+    }
+
+    pub(crate) const fn namespace_safety_claim_count(&self) -> u64 {
+        self.namespace_safety_summary.unique_claims
+    }
+
+    pub(crate) fn git_topology(&self) -> &HeldStrictGitRawTopologyV1 {
+        &self.git_topology
+    }
+}
+
+impl fmt::Debug for GitRawLocalTopologyObservationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GitRawLocalTopologyObservationV1")
+            .field("root_id", &self.root_id)
+            .field("spec", &self.spec)
+            .field("binding", &self.binding)
+            .field("spec_identity_fingerprint", &self.spec_identity_fingerprint)
+            .field(
+                "binding_identity_fingerprint",
+                &self.binding_identity_fingerprint,
+            )
+            .field("profile_policy", &self.profile_policy)
+            .field("plan_contract", &self.plan_contract)
+            .field("canonical_local_root", &self.local.canonical_local_root())
+            .field("canonical_state_path", &self.canonical_state_path)
+            .field("state_entry_count", &self.state.entries().len())
+            .field("remote_prefix", &self.remote.remote_prefix())
+            .field("git_topology", &self.git_topology)
             .field(
                 "namespace_safety_claim_count",
                 &self.namespace_safety_summary.unique_claims,
@@ -670,6 +750,18 @@ async fn observe_validated_registered_root_sources_v1(
                 ));
             }
         };
+    let pending_git = if selected.spec.profile == RootProfileV1::GitRawV1 {
+        match begin_strict_git_raw_topology_v1(&pending) {
+            StrictGitRawTopologyBeginV1::Pending(git) => Some(*git),
+            StrictGitRawTopologyBeginV1::Incomplete(incomplete) => {
+                return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let state = match read_and_bind_strict_primary_state_for_pending_root_v1(
         &canonical_state_path,
         &pending,
@@ -691,6 +783,17 @@ async fn observe_validated_registered_root_sources_v1(
                 ));
             }
         };
+    let git_topology = match pending_git {
+        Some(git) => match git.revalidate_after_external_reads() {
+            StrictGitRawTopologyFinishV1::Held(git) => Some(git),
+            StrictGitRawTopologyFinishV1::Incomplete(incomplete) => {
+                return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+                ));
+            }
+        },
+        None => None,
+    };
     let local = match pending.revalidate_inventory_c()? {
         StrictLocalSnapshotFinishV1::Complete(local) => local,
         StrictLocalSnapshotFinishV1::Incomplete(incomplete) => {
@@ -699,6 +802,13 @@ async fn observe_validated_registered_root_sources_v1(
             ));
         }
     };
+    if let Some(git) = &git_topology {
+        if let Err(incomplete) = git.revalidate_capabilities() {
+            return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
+                StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+            ));
+        }
+    }
 
     let expected_route = ExpectedRegisteredSourceRouteV1 {
         canonical_local_root: &canonical_local_root,
@@ -724,50 +834,70 @@ async fn observe_validated_registered_root_sources_v1(
         ));
     }
 
-    let namespace_safety_summary = match selected.spec.profile {
-        RootProfileV1::GitRawV1 => {
-            return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
-                StrictRegisteredRootSourcesIncompleteV1::GitTopologyRequired,
-            ));
-        }
-        RootProfileV1::AgentStaticV1 => {
-            match compose_namespace_safety_summary_v1(&local, &state, &remote) {
-                Ok(summary) => summary,
-                Err(ComposeNamespaceSafetyErrorV1::Conflict(conflict)) => {
-                    return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
-                        StrictRegisteredRootSourcesIncompleteV1::NamespaceSafetyConflict(conflict),
-                    ));
-                }
-                Err(ComposeNamespaceSafetyErrorV1::ResourceLimit) => {
-                    return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
-                        StrictRegisteredRootSourcesIncompleteV1::NamespaceSafetyResourceLimit,
-                    ));
-                }
-                Err(ComposeNamespaceSafetyErrorV1::RemoteClaimWithoutOrigin) => {
-                    return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
-                        StrictRegisteredRootSourcesIncompleteV1::RemoteClaimWithoutOrigin,
-                    ));
-                }
+    let namespace_safety_summary =
+        match compose_namespace_safety_summary_v1(&local, &state, &remote) {
+            Ok(summary) => summary,
+            Err(ComposeNamespaceSafetyErrorV1::Conflict(conflict)) => {
+                return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::NamespaceSafetyConflict(conflict),
+                ));
             }
-        }
-    };
+            Err(ComposeNamespaceSafetyErrorV1::ResourceLimit) => {
+                return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::NamespaceSafetyResourceLimit,
+                ));
+            }
+            Err(ComposeNamespaceSafetyErrorV1::RemoteClaimWithoutOrigin) => {
+                return Ok(StrictRegisteredRootSourcesReadV1::Incomplete(
+                    StrictRegisteredRootSourcesIncompleteV1::RemoteClaimWithoutOrigin,
+                ));
+            }
+        };
 
-    Ok(StrictRegisteredRootSourcesReadV1::Observed(Box::new(
-        AgentStaticNamespaceSafetyObservationV1 {
-            root_id,
-            spec: selected.spec.clone(),
-            binding: binding.clone(),
-            spec_identity_fingerprint,
-            binding_identity_fingerprint,
-            profile_policy,
-            plan_contract,
-            canonical_state_path,
-            local,
-            state,
-            remote,
-            namespace_safety_summary,
-        },
-    )))
+    match selected.spec.profile {
+        RootProfileV1::AgentStaticV1 => {
+            debug_assert!(git_topology.is_none());
+            Ok(StrictRegisteredRootSourcesReadV1::Observed(Box::new(
+                AgentStaticNamespaceSafetyObservationV1 {
+                    root_id,
+                    spec: selected.spec.clone(),
+                    binding: binding.clone(),
+                    spec_identity_fingerprint,
+                    binding_identity_fingerprint,
+                    profile_policy,
+                    plan_contract,
+                    canonical_state_path,
+                    local,
+                    state,
+                    remote,
+                    namespace_safety_summary,
+                },
+            )))
+        }
+        RootProfileV1::GitRawV1 => {
+            let git_topology =
+                git_topology.expect("GitRaw acquisition retains exact topology evidence");
+            Ok(
+                StrictRegisteredRootSourcesReadV1::GitRawLocalTopologyObserved(Box::new(
+                    GitRawLocalTopologyObservationV1 {
+                        root_id,
+                        spec: selected.spec.clone(),
+                        binding: binding.clone(),
+                        spec_identity_fingerprint,
+                        binding_identity_fingerprint,
+                        profile_policy,
+                        plan_contract,
+                        canonical_state_path,
+                        local,
+                        state,
+                        remote,
+                        git_topology,
+                        namespace_safety_summary,
+                    },
+                )),
+            )
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -775,18 +905,25 @@ mod tests {
     use super::*;
     use crate::registered_local_snapshot::StrictLocalSnapshotIncompleteKindV1;
     use crate::registered_remote_observation::tests::{
-        matching_remote_fixture_operator_v1, missing_remote_index_fixture_operator_v1,
-        RemoteNamespaceFixtureRowV1,
+        matching_remote_fixture_operator_v1,
+        matching_remote_fixture_operator_with_first_list_write_v1,
+        missing_remote_index_fixture_operator_v1, RemoteNamespaceFixtureRowV1,
     };
     use std::fs;
     use std::num::NonZeroU64;
     use std::os::unix::fs::PermissionsExt;
-    use tcfs_core::config::{
-        RegisteredRootPolicy, RootBindingV1Config, RootLifecyclePolicyV1, RootSpecV1Config,
-    };
+    use tcfs_core::config::{RegisteredRootPolicy, RootLifecyclePolicyV1};
 
     static_assertions::assert_not_impl_any!(
         AgentStaticNamespaceSafetyObservationV1: Clone,
+        serde::Serialize,
+        Into<crate::reconcile::ReconcilePlan>,
+        Into<Vec<crate::reconcile::ReconcileAction>>,
+        Into<crate::registered_local_snapshot::StrictLocalSnapshotDigestV1>,
+        Into<crate::registered_reconcile::StrictPrimaryStateBytesDigestV1>
+    );
+    static_assertions::assert_not_impl_any!(
+        GitRawLocalTopologyObservationV1: Clone,
         serde::Serialize,
         Into<crate::reconcile::ReconcilePlan>,
         Into<Vec<crate::reconcile::ReconcileAction>>,
@@ -894,6 +1031,9 @@ mod tests {
     ) -> Box<AgentStaticNamespaceSafetyObservationV1> {
         match read {
             StrictRegisteredRootSourcesReadV1::Observed(observed) => observed,
+            StrictRegisteredRootSourcesReadV1::GitRawLocalTopologyObserved(observed) => {
+                panic!("expected AgentStatic sources, got GitRaw sources: {observed:?}")
+            }
             StrictRegisteredRootSourcesReadV1::Incomplete(incomplete) => {
                 panic!("expected observed sources, got {incomplete:?}")
             }
@@ -907,6 +1047,9 @@ mod tests {
             ) => conflict,
             StrictRegisteredRootSourcesReadV1::Observed(_) => {
                 panic!("expected a namespace-safety conflict, got observed sources")
+            }
+            StrictRegisteredRootSourcesReadV1::GitRawLocalTopologyObserved(_) => {
+                panic!("expected a namespace-safety conflict, got GitRaw sources")
             }
             StrictRegisteredRootSourcesReadV1::Incomplete(other) => {
                 panic!("expected a namespace-safety conflict, got {other:?}")
@@ -936,6 +1079,9 @@ mod tests {
         .unwrap()
         {
             StrictRegisteredRootSourcesReadV1::Observed(observed) => observed,
+            StrictRegisteredRootSourcesReadV1::GitRawLocalTopologyObserved(observed) => {
+                panic!("expected AgentStatic sources, got GitRaw sources: {observed:?}")
+            }
             StrictRegisteredRootSourcesReadV1::Incomplete(incomplete) => {
                 panic!("expected observed sources, got {incomplete:?}")
             }
@@ -953,31 +1099,105 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_raw_without_held_topology_is_typed_incomplete_without_plan() {
+    async fn git_raw_retains_held_local_topology_without_plan() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("root");
-        fs::create_dir_all(root.join(".git")).unwrap();
-        fs::write(root.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::create_dir(&root).unwrap();
+        let status = std::process::Command::new("git")
+            .args([
+                "-C",
+                root.to_str().unwrap(),
+                "init",
+                "--quiet",
+                "--initial-branch=main",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
         let root = fs::canonicalize(root).unwrap();
         let state_path = dir.path().join("state.json");
         write_private(&state_path, empty_state_json());
         let state_path = fs::canonicalize(state_path).unwrap();
         let selected = selected_root(&root, &state_path, RootProfileV1::GitRawV1);
 
-        assert!(matches!(
-            observe_selected_registered_root_sources_for_test_v1(
-                "work",
-                &selected,
-                &root,
-                &state_path,
-                &matching_remote_fixture_operator_v1(&[]),
-            )
-            .await
-            .unwrap(),
+        let observed = match observe_selected_registered_root_sources_for_test_v1(
+            "work",
+            &selected,
+            &root,
+            &state_path,
+            &matching_remote_fixture_operator_v1(&[]),
+        )
+        .await
+        .unwrap()
+        {
+            StrictRegisteredRootSourcesReadV1::GitRawLocalTopologyObserved(observed) => observed,
+            StrictRegisteredRootSourcesReadV1::Observed(_) => {
+                panic!("expected GitRaw local topology, got AgentStatic sources")
+            }
+            StrictRegisteredRootSourcesReadV1::Incomplete(incomplete) => {
+                panic!("expected GitRaw local topology, got {incomplete:?}")
+            }
+        };
+        assert_eq!(observed.root_id(), "work");
+        assert_eq!(observed.canonical_local_root(), root);
+        assert_eq!(observed.canonical_state_path(), state_path);
+        assert_eq!(observed.remote_prefix(), "roots");
+        assert_eq!(
+            observed.git_topology().head().symbolic_target(),
+            Some("refs/heads/main")
+        );
+        assert_eq!(observed.git_topology().refs().len(), 0);
+        assert!(observed.namespace_safety_claim_count() > 0);
+    }
+
+    #[tokio::test]
+    async fn git_topology_brackets_remote_reads_before_local_inventory_c() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let status = std::process::Command::new("git")
+            .args([
+                "-C",
+                root.to_str().unwrap(),
+                "init",
+                "--quiet",
+                "--initial-branch=main",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let root = fs::canonicalize(root).unwrap();
+        let state_path = dir.path().join("state.json");
+        write_private(&state_path, empty_state_json());
+        let state_path = fs::canonicalize(state_path).unwrap();
+        let selected = selected_root(&root, &state_path, RootProfileV1::GitRawV1);
+        let remote = matching_remote_fixture_operator_with_first_list_write_v1(
+            &[],
+            root.join(".git/HEAD"),
+            b"ref: refs/heads/other\n".to_vec(),
+        );
+
+        match observe_selected_registered_root_sources_for_test_v1(
+            "work",
+            &selected,
+            &root,
+            &state_path,
+            &remote,
+        )
+        .await
+        .unwrap()
+        {
             StrictRegisteredRootSourcesReadV1::Incomplete(
-                StrictRegisteredRootSourcesIncompleteV1::GitTopologyRequired
-            )
-        ));
+                StrictRegisteredRootSourcesIncompleteV1::GitTopology(incomplete),
+            ) if incomplete.kind()
+                == crate::registered_git_topology::StrictGitRawTopologyIncompleteKindV1::ReferenceSetChanged =>
+            {
+            }
+            other => {
+                let _ = other;
+                panic!("remote-window Git mutation must fail at topology B");
+            }
+        }
     }
 
     #[tokio::test]

@@ -1009,13 +1009,15 @@ impl RootProfileV1 {
     }
 
     fn settings(self) -> RootProfileSettingsV1 {
+        let git = match self {
+            Self::GitRawV1 => RootGitPolicyV1::StandaloneRawWithFastForwardProofV1,
+            Self::AgentStaticV1 => RootGitPolicyV1::ExcludedV1,
+        };
         RootProfileSettingsV1 {
             hidden_paths: RootHiddenPathPolicyV1::IncludeV1,
             exclusions: RootExclusionPolicyV1::FixedIngressPathComponentsV1,
-            git: match self {
-                Self::GitRawV1 => RootGitPolicyV1::StandaloneRawWithFastForwardProofV1,
-                Self::AgentStaticV1 => RootGitPolicyV1::ExcludedV1,
-            },
+            git,
+            git_observation: git.observation_contract(),
             symlinks: RootSymlinkPolicyV1::PreserveExactTargetV1,
             hardlinks: RootHardlinkPolicyV1::RejectV1,
             special_files: RootSpecialFilePolicyV1::RejectV1,
@@ -1070,6 +1072,130 @@ impl RootGitPolicyV1 {
             Self::StandaloneRawWithFastForwardProofV1 => {
                 "standalone-raw-with-fast-forward-proof-v1"
             }
+        }
+    }
+
+    pub const fn observation_contract(self) -> RootGitObservationContractV1 {
+        match self {
+            Self::ExcludedV1 => RootGitObservationContractV1::ExcludedV1,
+            Self::StandaloneRawWithFastForwardProofV1 => {
+                RootGitObservationContractV1::TwoPassRefsAndSymrefsV1
+            }
+        }
+    }
+}
+
+/// Closed resource and stability contract for observing Git ref topology.
+///
+/// The operational variant describes one bounded `for-each-ref`-style
+/// observation. Both passes must produce identical canonical ref/symref
+/// records; V1 never retries until a stable result appears. The bounds apply
+/// to inventory-A inputs and retained command output; writer fencing and
+/// same-principal swap/restore during a child process are outside this
+/// source-only contract. OID lengths are the byte lengths of their hexadecimal
+/// command-output representations.
+///
+/// `ExcludedV1` is a distinct, fingerprinted policy. Its numeric accessors
+/// return zero to represent non-applicability, not an executable zero-budget
+/// observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootGitObservationContractV1 {
+    ExcludedV1,
+    TwoPassRefsAndSymrefsV1,
+}
+
+impl RootGitObservationContractV1 {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::ExcludedV1 => "excluded-v1",
+            Self::TwoPassRefsAndSymrefsV1 => "two-pass-refs-and-symrefs-v1",
+        }
+    }
+
+    pub const fn is_applicable(self) -> bool {
+        match self {
+            Self::ExcludedV1 => false,
+            Self::TwoPassRefsAndSymrefsV1 => true,
+        }
+    }
+
+    /// Maximum refs retained by one complete observation pass.
+    pub const fn max_refs(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 1_000_000,
+        }
+    }
+
+    /// Maximum bytes in one ref name or symbolic-ref target.
+    pub const fn max_ref_or_symref_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 1023,
+        }
+    }
+
+    /// Maximum aggregate bytes retained for canonical ref/symref records.
+    pub const fn max_retained_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 256 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum stdout accepted from one Git observation command.
+    pub const fn max_command_stdout_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 320 * 1024 * 1024,
+        }
+    }
+
+    /// Maximum repository-local Git config bytes accepted by inventory A.
+    pub const fn max_config_file_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 1024 * 1024,
+        }
+    }
+
+    /// Maximum `.git/HEAD` bytes accepted by inventory A, including syntax and
+    /// newline.
+    pub const fn max_head_file_bytes(self) -> u64 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 1029,
+        }
+    }
+
+    /// Exact number of complete observation passes.
+    pub const fn pass_count(self) -> u8 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 2,
+        }
+    }
+
+    /// Number of retries allowed after either pass or equality proof fails.
+    pub const fn retry_count(self) -> u8 {
+        match self {
+            Self::ExcludedV1 | Self::TwoPassRefsAndSymrefsV1 => 0,
+        }
+    }
+
+    /// SHA-1 object ID length in hexadecimal command-output bytes.
+    pub const fn sha1_oid_hex_bytes(self) -> u8 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 40,
+        }
+    }
+
+    /// SHA-256 object ID length in hexadecimal command-output bytes.
+    pub const fn sha256_oid_hex_bytes(self) -> u8 {
+        match self {
+            Self::ExcludedV1 => 0,
+            Self::TwoPassRefsAndSymrefsV1 => 64,
         }
     }
 }
@@ -1156,6 +1282,7 @@ pub struct RootProfileSettingsV1 {
     hidden_paths: RootHiddenPathPolicyV1,
     exclusions: RootExclusionPolicyV1,
     git: RootGitPolicyV1,
+    git_observation: RootGitObservationContractV1,
     symlinks: RootSymlinkPolicyV1,
     hardlinks: RootHardlinkPolicyV1,
     special_files: RootSpecialFilePolicyV1,
@@ -1174,6 +1301,10 @@ impl RootProfileSettingsV1 {
 
     pub const fn git_policy(self) -> RootGitPolicyV1 {
         self.git
+    }
+
+    pub const fn git_observation_contract(self) -> RootGitObservationContractV1 {
+        self.git_observation
     }
 
     pub const fn symlink_policy(self) -> RootSymlinkPolicyV1 {
@@ -2061,8 +2192,18 @@ impl fmt::Debug for RegisteredRootPlanContractFingerprintV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RootProfileSettingsFingerprintFieldsV1 {
-    canonical_names: [(&'static str, &'static str); 9],
+    canonical_names: [(&'static str, &'static str); 10],
     fixed_ingress_schema: FixedIngressPolicySchemaFingerprintV1,
+    git_observation_max_refs: u64,
+    git_observation_max_ref_or_symref_bytes: u64,
+    git_observation_max_retained_bytes: u64,
+    git_observation_max_command_stdout_bytes: u64,
+    git_observation_max_config_file_bytes: u64,
+    git_observation_max_head_file_bytes: u64,
+    git_observation_pass_count: u8,
+    git_observation_retry_count: u8,
+    git_observation_sha1_oid_hex_bytes: u8,
+    git_observation_sha256_oid_hex_bytes: u8,
 }
 
 fn root_profile_settings_fingerprint_fields_v1(
@@ -2075,6 +2216,10 @@ fn root_profile_settings_fingerprint_fields_v1(
             ("hidden_path_policy", settings.hidden_paths.canonical_name()),
             ("exclusion_policy", settings.exclusions.canonical_name()),
             ("git_policy", settings.git.canonical_name()),
+            (
+                "git_observation_contract",
+                settings.git_observation.canonical_name(),
+            ),
             ("symlink_policy", settings.symlinks.canonical_name()),
             ("hardlink_policy", settings.hardlinks.canonical_name()),
             (
@@ -2088,6 +2233,18 @@ fn root_profile_settings_fingerprint_fields_v1(
             ("metadata_policy", settings.metadata.canonical_name()),
         ],
         fixed_ingress_schema: FixedIngressPolicyV1::strict_v1().schema_fingerprint(),
+        git_observation_max_refs: settings.git_observation.max_refs(),
+        git_observation_max_ref_or_symref_bytes: settings.git_observation.max_ref_or_symref_bytes(),
+        git_observation_max_retained_bytes: settings.git_observation.max_retained_bytes(),
+        git_observation_max_command_stdout_bytes: settings
+            .git_observation
+            .max_command_stdout_bytes(),
+        git_observation_max_config_file_bytes: settings.git_observation.max_config_file_bytes(),
+        git_observation_max_head_file_bytes: settings.git_observation.max_head_file_bytes(),
+        git_observation_pass_count: settings.git_observation.pass_count(),
+        git_observation_retry_count: settings.git_observation.retry_count(),
+        git_observation_sha1_oid_hex_bytes: settings.git_observation.sha1_oid_hex_bytes(),
+        git_observation_sha256_oid_hex_bytes: settings.git_observation.sha256_oid_hex_bytes(),
     }
 }
 
@@ -2096,7 +2253,7 @@ fn fingerprint_root_profile_settings_fields_v1(
 ) -> RootProfileSettingsFingerprintV1 {
     let mut encoder = CanonicalRootFingerprintEncoderV1::new(
         "tinyland.tcfs.root-profile-settings.b3v1",
-        fields.canonical_names.len() + 1,
+        fields.canonical_names.len() + 11,
     );
     for (tag, value) in fields.canonical_names {
         encoder.field(tag, value.as_bytes());
@@ -2104,6 +2261,48 @@ fn fingerprint_root_profile_settings_fields_v1(
     encoder.field(
         "fixed_ingress_policy_schema",
         fields.fixed_ingress_schema.as_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_refs",
+        &fields.git_observation_max_refs.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_ref_or_symref_bytes",
+        &fields.git_observation_max_ref_or_symref_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_retained_bytes",
+        &fields.git_observation_max_retained_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_command_stdout_bytes",
+        &fields
+            .git_observation_max_command_stdout_bytes
+            .to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_config_file_bytes",
+        &fields.git_observation_max_config_file_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_max_head_file_bytes",
+        &fields.git_observation_max_head_file_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_pass_count",
+        &fields.git_observation_pass_count.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_retry_count",
+        &fields.git_observation_retry_count.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_sha1_oid_hex_bytes",
+        &fields.git_observation_sha1_oid_hex_bytes.to_be_bytes(),
+    );
+    encoder.field(
+        "git_observation_sha256_oid_hex_bytes",
+        &fields.git_observation_sha256_oid_hex_bytes.to_be_bytes(),
     );
     RootProfileSettingsFingerprintV1(encoder.finish())
 }
@@ -3426,6 +3625,47 @@ resolution_policy = "inspect-only"
             RootGitPolicyV1::StandaloneRawWithFastForwardProofV1
         );
         assert_eq!(agent.git_policy(), RootGitPolicyV1::ExcludedV1);
+        let git_observation = git.git_observation_contract();
+        assert_eq!(
+            git_observation,
+            RootGitObservationContractV1::TwoPassRefsAndSymrefsV1
+        );
+        assert_eq!(git.git_policy().observation_contract(), git_observation);
+        assert!(git_observation.is_applicable());
+        assert_eq!(git_observation.max_refs(), 1_000_000);
+        assert_eq!(git_observation.max_ref_or_symref_bytes(), 1023);
+        assert_eq!(git_observation.max_retained_bytes(), 256 * 1024 * 1024);
+        assert_eq!(
+            git_observation.max_command_stdout_bytes(),
+            320 * 1024 * 1024
+        );
+        assert_eq!(git_observation.max_config_file_bytes(), 1024 * 1024);
+        assert_eq!(git_observation.max_head_file_bytes(), 1029);
+        assert_eq!(git_observation.pass_count(), 2);
+        assert_eq!(git_observation.retry_count(), 0);
+        assert_eq!(git_observation.sha1_oid_hex_bytes(), 40);
+        assert_eq!(git_observation.sha256_oid_hex_bytes(), 64);
+
+        let excluded_observation = agent.git_observation_contract();
+        assert_eq!(
+            excluded_observation,
+            RootGitObservationContractV1::ExcludedV1
+        );
+        assert_eq!(
+            agent.git_policy().observation_contract(),
+            excluded_observation
+        );
+        assert!(!excluded_observation.is_applicable());
+        assert_eq!(excluded_observation.max_refs(), 0);
+        assert_eq!(excluded_observation.max_ref_or_symref_bytes(), 0);
+        assert_eq!(excluded_observation.max_retained_bytes(), 0);
+        assert_eq!(excluded_observation.max_command_stdout_bytes(), 0);
+        assert_eq!(excluded_observation.max_config_file_bytes(), 0);
+        assert_eq!(excluded_observation.max_head_file_bytes(), 0);
+        assert_eq!(excluded_observation.pass_count(), 0);
+        assert_eq!(excluded_observation.retry_count(), 0);
+        assert_eq!(excluded_observation.sha1_oid_hex_bytes(), 0);
+        assert_eq!(excluded_observation.sha256_oid_hex_bytes(), 0);
 
         let git_fingerprint = git_policy.settings_fingerprint();
         let agent_fingerprint = agent_policy.settings_fingerprint();
@@ -3438,11 +3678,11 @@ resolution_policy = "inspect-only"
         assert_ne!(git_fingerprint, agent_fingerprint);
         assert_eq!(
             git_fingerprint.to_string(),
-            "b3v1:3f7b636df0abf0081df3dee914c678444f880d6de7e66717e5f6acdcb6a6f447"
+            "b3v1:97275abb42108c673d31e1358c55ec7c83ce665fc367c5cf9a3c685c5301e043"
         );
         assert_eq!(
             agent_fingerprint.to_string(),
-            "b3v1:d71f461619660b8e88a2bcbc299e0bb88c91ba2112a75621b9c58e148d08d0e4"
+            "b3v1:92f2569ed6fc3379b2710c0abc11d28da9b7ed1e970a971a06d4675b519c619d"
         );
     }
 
@@ -3457,6 +3697,7 @@ resolution_policy = "inspect-only"
                 ("hidden_path_policy", "include-v1"),
                 ("exclusion_policy", "fixed-ingress-path-components-v1"),
                 ("git_policy", "standalone-raw-with-fast-forward-proof-v1",),
+                ("git_observation_contract", "two-pass-refs-and-symrefs-v1",),
                 ("symlink_policy", "preserve-exact-target-v1"),
                 ("hardlink_policy", "reject-v1"),
                 ("special_file_policy", "reject-v1"),
@@ -3468,6 +3709,25 @@ resolution_policy = "inspect-only"
             git_fields.fixed_ingress_schema,
             FixedIngressPolicyV1::strict_v1().schema_fingerprint()
         );
+        assert_eq!(git_fields.git_observation_max_refs, 1_000_000);
+        assert_eq!(git_fields.git_observation_max_ref_or_symref_bytes, 1023);
+        assert_eq!(
+            git_fields.git_observation_max_retained_bytes,
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            git_fields.git_observation_max_command_stdout_bytes,
+            320 * 1024 * 1024
+        );
+        assert_eq!(
+            git_fields.git_observation_max_config_file_bytes,
+            1024 * 1024
+        );
+        assert_eq!(git_fields.git_observation_max_head_file_bytes, 1029);
+        assert_eq!(git_fields.git_observation_pass_count, 2);
+        assert_eq!(git_fields.git_observation_retry_count, 0);
+        assert_eq!(git_fields.git_observation_sha1_oid_hex_bytes, 40);
+        assert_eq!(git_fields.git_observation_sha256_oid_hex_bytes, 64);
         assert_eq!(
             git.settings().exclusion_policy().canonical_name(),
             FixedIngressPolicyV1::strict_v1().canonical_name()
@@ -3483,6 +3743,7 @@ resolution_policy = "inspect-only"
                 ("hidden_path_policy", "include-v1"),
                 ("exclusion_policy", "fixed-ingress-path-components-v1"),
                 ("git_policy", "excluded-v1"),
+                ("git_observation_contract", "excluded-v1"),
                 ("symlink_policy", "preserve-exact-target-v1"),
                 ("hardlink_policy", "reject-v1"),
                 ("special_file_policy", "reject-v1"),
@@ -3494,6 +3755,16 @@ resolution_policy = "inspect-only"
             agent_fields.fixed_ingress_schema,
             FixedIngressPolicyV1::strict_v1().schema_fingerprint()
         );
+        assert_eq!(agent_fields.git_observation_max_refs, 0);
+        assert_eq!(agent_fields.git_observation_max_ref_or_symref_bytes, 0);
+        assert_eq!(agent_fields.git_observation_max_retained_bytes, 0);
+        assert_eq!(agent_fields.git_observation_max_command_stdout_bytes, 0);
+        assert_eq!(agent_fields.git_observation_max_config_file_bytes, 0);
+        assert_eq!(agent_fields.git_observation_max_head_file_bytes, 0);
+        assert_eq!(agent_fields.git_observation_pass_count, 0);
+        assert_eq!(agent_fields.git_observation_retry_count, 0);
+        assert_eq!(agent_fields.git_observation_sha1_oid_hex_bytes, 0);
+        assert_eq!(agent_fields.git_observation_sha256_oid_hex_bytes, 0);
         assert_eq!(
             git_fields.fixed_ingress_schema,
             agent_fields.fixed_ingress_schema
@@ -3508,14 +3779,89 @@ resolution_policy = "inspect-only"
         let baseline = fingerprint_root_profile_settings_fields_v1(fields);
 
         for (index, mutation) in [
-            (5, "allow-hardlinks-test-v0"),
-            (6, "allow-special-files-test-v0"),
+            (6, "allow-hardlinks-test-v0"),
+            (7, "allow-special-files-test-v0"),
         ] {
             let mut mutated = fields;
             mutated.canonical_names[index].1 = mutation;
             assert_ne!(
                 baseline,
                 fingerprint_root_profile_settings_fields_v1(mutated)
+            );
+        }
+    }
+
+    #[test]
+    fn root_profile_fingerprint_binds_git_observation_contract_and_bounds() {
+        let policy = RootProfileV1::GitRawV1.policy();
+        let fields =
+            root_profile_settings_fingerprint_fields_v1(policy.profile(), policy.settings());
+        let baseline = fingerprint_root_profile_settings_fields_v1(fields);
+
+        let mut contract_mutation = fields;
+        contract_mutation.canonical_names[4].1 = "one-pass-refs-test-v0";
+        assert_ne!(
+            baseline,
+            fingerprint_root_profile_settings_fields_v1(contract_mutation)
+        );
+
+        let mutations = [
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_refs += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_ref_or_symref_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_retained_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_command_stdout_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_config_file_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_max_head_file_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_pass_count += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_retry_count += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_sha1_oid_hex_bytes += 1;
+                mutation
+            },
+            {
+                let mut mutation = fields;
+                mutation.git_observation_sha256_oid_hex_bytes += 1;
+                mutation
+            },
+        ];
+
+        for mutation in mutations {
+            assert_ne!(
+                baseline,
+                fingerprint_root_profile_settings_fields_v1(mutation)
             );
         }
     }

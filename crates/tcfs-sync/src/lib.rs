@@ -12,6 +12,11 @@ pub mod nats;
 pub mod path_acl;
 pub mod policy;
 pub mod reconcile;
+// Descriptor-held, two-pass GitRaw topology/ref evidence. This is a bounded
+// local prerequisite only and has no digest, plan, action, or serialization
+// surface.
+#[allow(dead_code)]
+pub(crate) mod registered_git_topology;
 // Internal acquisition artifact until a held root anchor revalidates inventory C
 // across state/remote reads and is the only path that can mint a complete plan.
 #[allow(dead_code)]

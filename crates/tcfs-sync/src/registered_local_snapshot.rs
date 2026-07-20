@@ -444,12 +444,120 @@ pub(crate) struct PendingStrictLocalSnapshotV1 {
     unsupported: std::convert::Infallible,
 }
 
+/// Descriptor-bracketed identity metadata from the provisional inventory.
+///
+/// This intentionally carries neither file contents nor a snapshot digest. It
+/// lets another held-input prerequisite validate a narrow metadata namespace
+/// without performing a second unbounded pathname walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StrictInitialLocalEntryKindV1 {
+    Directory,
+    Regular,
+    Symlink,
+    Special,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StrictInitialLocalInventoryEntryV1<'a> {
+    rel_path: &'a [u8],
+    kind: StrictInitialLocalEntryKindV1,
+    mode: u32,
+    uid: u32,
+    size: i64,
+}
+
+impl<'a> StrictInitialLocalInventoryEntryV1<'a> {
+    pub(crate) const fn rel_path(self) -> &'a [u8] {
+        self.rel_path
+    }
+
+    pub(crate) const fn kind(self) -> StrictInitialLocalEntryKindV1 {
+        self.kind
+    }
+
+    pub(crate) const fn mode(self) -> u32 {
+        self.mode
+    }
+
+    pub(crate) const fn uid(self) -> u32 {
+        self.uid
+    }
+
+    pub(crate) const fn size(self) -> i64 {
+        self.size
+    }
+}
+
 impl PendingStrictLocalSnapshotV1 {
+    pub(crate) fn profile(&self) -> RootProfileV1 {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.profile()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
     /// Exact canonical spelling whose descriptor is held by this acquisition.
     pub(crate) fn canonical_local_root(&self) -> &Path {
         #[cfg(target_os = "linux")]
         {
             self.inner.canonical_local_root()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
+    /// Clone the already-authorized configured-root descriptor.
+    ///
+    /// This does not reopen the configured pathname. The clone is intended for
+    /// read-only, descriptor-relative observations that must occur while this
+    /// pending snapshot keeps the original capability alive.
+    pub(crate) fn try_clone_root_descriptor(&self) -> std::io::Result<std::fs::File> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.try_clone_root_descriptor()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
+    /// Iterate the already-bounded provisional identity inventory.
+    ///
+    /// Inventory C still has to match this inventory before any composed
+    /// evidence can survive. Exposing identities here does not expose a digest
+    /// or make the provisional snapshot complete.
+    pub(crate) fn initial_inventory_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = StrictInitialLocalInventoryEntryV1<'_>> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.initial_inventory_entries()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        match self.unsupported {}
+    }
+
+    /// Re-read one inventory-A regular file through the held root descriptor.
+    ///
+    /// The implementation rechecks the exact inventory identity before and
+    /// after the read. The typed incomplete result preserves whether the held
+    /// read exceeded its resource bound, failed at the filesystem, or raced
+    /// the provisional inventory.
+    pub(crate) fn read_initial_regular_file_bounded(
+        &self,
+        rel_path: &[u8],
+        max_bytes: u64,
+    ) -> std::result::Result<Vec<u8>, StrictLocalSnapshotIncompleteV1> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner
+                .read_initial_regular_file_bounded(rel_path, max_bytes)
+                .map_err(CaptureFailure::into_public)
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -919,8 +1027,141 @@ mod supported {
     }
 
     impl PendingSupportedSnapshotV1 {
+        pub(super) const fn profile(&self) -> RootProfileV1 {
+            self.profile
+        }
+
         pub(super) fn canonical_local_root(&self) -> &Path {
             &self.canonical_local_root
+        }
+
+        pub(super) fn try_clone_root_descriptor(&self) -> std::io::Result<File> {
+            self.root.try_clone()
+        }
+
+        pub(super) fn initial_inventory_entries(
+            &self,
+        ) -> impl ExactSizeIterator<Item = StrictInitialLocalInventoryEntryV1<'_>> {
+            self.inventory_a.entries.iter().map(|(rel_path, record)| {
+                let kind = match record.identity.object_kind() {
+                    ObjectKind::Directory => StrictInitialLocalEntryKindV1::Directory,
+                    ObjectKind::Regular => StrictInitialLocalEntryKindV1::Regular,
+                    ObjectKind::Symlink => StrictInitialLocalEntryKindV1::Symlink,
+                    ObjectKind::Special => StrictInitialLocalEntryKindV1::Special,
+                };
+                StrictInitialLocalInventoryEntryV1 {
+                    rel_path,
+                    kind,
+                    mode: record.identity.mode,
+                    uid: record.identity.uid,
+                    size: record.identity.size,
+                }
+            })
+        }
+
+        pub(super) fn read_initial_regular_file_bounded(
+            &self,
+            rel_path: &[u8],
+            max_bytes: u64,
+        ) -> std::result::Result<Vec<u8>, CaptureFailure> {
+            let record = self
+                .inventory_a
+                .entries
+                .get(rel_path)
+                .ok_or_else(|| changed(rel_path, "lookup-held-regular-file-in-inventory"))?;
+            let expected = record.identity;
+            if expected.object_kind() != ObjectKind::Regular || expected.size < 0 {
+                return Err(changed(rel_path, "require-held-regular-file"));
+            }
+            let expected_size = u64::try_from(expected.size)
+                .map_err(|_| changed(rel_path, "convert-held-regular-file-size"))?;
+            if expected_size > max_bytes {
+                return Err(CaptureFailure::path(
+                    StrictLocalSnapshotIncompleteKindV1::AcquisitionLimitExceeded,
+                    display_rel_bytes(rel_path),
+                    "held-regular-file-caller-limit",
+                ));
+            }
+
+            let (parent, leaf_name, expected_parent) =
+                open_inventory_parent(&self.root, &self.inventory_a, rel_path)?;
+            let before_parent =
+                fstat_identity(parent.as_raw_fd(), Some(rel_path), "stat-held-file-parent")?;
+            if before_parent != expected_parent {
+                return Err(changed(rel_path, "compare-held-file-parent-before"));
+            }
+            let c_name = c_string_name(&leaf_name, rel_path)?;
+            let mut file = openat_descendant_file(
+                parent.as_raw_fd(),
+                &c_name,
+                false,
+                Some(rel_path),
+                "open-held-regular-file",
+            )?;
+            let before = fstat_identity(
+                file.as_raw_fd(),
+                Some(rel_path),
+                "stat-held-regular-file-before",
+            )?;
+            if before != expected || before.object_kind() != ObjectKind::Regular {
+                return Err(changed(rel_path, "compare-held-regular-file-before"));
+            }
+
+            let capacity = usize::try_from(expected_size).map_err(|_| {
+                CaptureFailure::path(
+                    StrictLocalSnapshotIncompleteKindV1::AcquisitionLimitExceeded,
+                    display_rel_bytes(rel_path),
+                    "held-regular-file-size-does-not-fit-memory",
+                )
+            })?;
+            let sentinel_capacity = expected_size
+                .checked_add(1)
+                .and_then(|size| usize::try_from(size).ok())
+                .ok_or_else(|| {
+                    CaptureFailure::path(
+                        StrictLocalSnapshotIncompleteKindV1::AcquisitionLimitExceeded,
+                        display_rel_bytes(rel_path),
+                        "held-regular-file-sentinel-size-does-not-fit-memory",
+                    )
+                })?;
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(sentinel_capacity).map_err(|_| {
+                CaptureFailure::path(
+                    StrictLocalSnapshotIncompleteKindV1::AcquisitionLimitExceeded,
+                    display_rel_bytes(rel_path),
+                    "allocate-held-regular-file",
+                )
+            })?;
+            (&mut file)
+                .take(expected_size.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|_| {
+                    CaptureFailure::path(
+                        StrictLocalSnapshotIncompleteKindV1::FilesystemReadFailed,
+                        display_rel_bytes(rel_path),
+                        "read-held-regular-file",
+                    )
+                })?;
+            if bytes.len() != capacity {
+                return Err(changed(rel_path, "compare-held-regular-file-size"));
+            }
+            let after = fstat_identity(
+                file.as_raw_fd(),
+                Some(rel_path),
+                "stat-held-regular-file-after",
+            )?;
+            if after != expected {
+                return Err(changed(rel_path, "compare-held-regular-file-after"));
+            }
+            let after_parent = fstat_identity(
+                parent.as_raw_fd(),
+                Some(rel_path),
+                "restat-held-file-parent",
+            )?;
+            if after_parent != expected_parent {
+                return Err(changed(rel_path, "compare-held-file-parent-after"));
+            }
+            Ok(bytes)
         }
     }
 
@@ -2581,7 +2822,7 @@ mod tests {
         ));
         assert_eq!(
             snapshot.digest().to_string(),
-            "b3v1:59aa9308444225642cb34a9cfff19ac45e4bc53f17b95fb522e39e3a83d61511"
+            "b3v1:3132baf74f192cb3221791c7f16192ff770ba508326ed9372a027bcc4a26b470"
         );
     }
 
@@ -2857,6 +3098,61 @@ mod tests {
         fs::write(&payload, b"after!").unwrap();
         assert_eq!(
             finish_incomplete(pending).kind(),
+            StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead
+        );
+    }
+
+    #[test]
+    fn pending_snapshot_clones_the_held_root_descriptor_without_reopening() {
+        let (_temporary, root) = canonical_root();
+        fs::write(root.join("payload"), b"stable").unwrap();
+        let pending = pending(&root, RootProfileV1::AgentStaticV1);
+
+        let cloned_root = pending
+            .try_clone_root_descriptor()
+            .expect("clone held configured-root descriptor");
+        let cloned_metadata = cloned_root.metadata().unwrap();
+        let configured_metadata = fs::metadata(&root).unwrap();
+        assert_eq!(cloned_metadata.dev(), configured_metadata.dev());
+        assert_eq!(cloned_metadata.ino(), configured_metadata.ino());
+
+        match pending.revalidate_inventory_c().unwrap() {
+            StrictLocalSnapshotFinishV1::Complete(_) => {}
+            StrictLocalSnapshotFinishV1::Incomplete(incomplete) => {
+                panic!("descriptor cloning must not disturb the snapshot: {incomplete:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn held_regular_file_read_enforces_bound_and_inventory_identity() {
+        let (_temporary, root) = canonical_root();
+        let payload = root.join("payload");
+        fs::write(&payload, b"stable").unwrap();
+        let pending = pending(&root, RootProfileV1::AgentStaticV1);
+
+        assert_eq!(
+            pending
+                .read_initial_regular_file_bounded(b"payload", 6)
+                .unwrap(),
+            b"stable"
+        );
+        assert_eq!(
+            pending
+                .read_initial_regular_file_bounded(b"payload", 5)
+                .unwrap_err()
+                .kind(),
+            StrictLocalSnapshotIncompleteKindV1::AcquisitionLimitExceeded
+        );
+
+        let replacement = root.join("replacement");
+        fs::write(&replacement, b"change").unwrap();
+        fs::rename(&replacement, &payload).unwrap();
+        assert_eq!(
+            pending
+                .read_initial_regular_file_bounded(b"payload", 6)
+                .unwrap_err()
+                .kind(),
             StrictLocalSnapshotIncompleteKindV1::ChangedDuringRead
         );
     }
